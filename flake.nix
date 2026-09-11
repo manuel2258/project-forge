@@ -29,7 +29,9 @@
           };
 
           # Only the files `mix deps.get` needs, so dependency fetching is not
-          # invalidated by every source edit.
+          # invalidated by every source edit. After any mix.lock change, set the
+          # matching hash below to lib.fakeHash and rebuild to learn the new one: a
+          # fixed-output derivation with an unchanged hash is reused, never refetched.
           depsSrc = subdir: lib.fileset.toSource {
             root = ./.;
             fileset = lib.fileset.unions [
@@ -49,13 +51,13 @@
           workerDeps = mixDeps {
             name = "forge-worker";
             subdir = "worker";
-            hash = "sha256-R5sLhD3VI5A9LWCOiOMY/yij5VVKC0DqJ48k9oyiDDM=";
+            hash = "sha256-6J0MwqGJUIiaiCi/6KQz0j1cXXD0wnPosstWiUCzSIc=";
           };
 
           platformDeps = mixDeps {
             name = "forge";
             subdir = "platform";
-            hash = "sha256-Ns/WZAsijGbPvf9uuZvwx1tHl1LcM2Y7lX3YKfTP6wc=";
+            hash = "sha256-fl6v0PlK9Hu6QUgjJ63V04+J64Tp7INT3KnmK6GxUiU=";
           };
 
           forge-worker = beam.mixRelease {

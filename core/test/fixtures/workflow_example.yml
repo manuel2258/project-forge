@@ -1,0 +1,48 @@
+version: 1
+initial: refined
+
+states:
+  refined:
+    prompt: agents/refine.md
+    env: refine
+    inputs: [ticket]
+    produces: [refinement.md]
+    budget: { turns: 20, cost: 0.50 }
+
+  planned:
+    prompt: agents/plan.md
+    env: implement
+    inputs: [ticket, refinement.md]
+    produces: [plan.md]
+    budget: { turns: 40, cost: 2.00 }
+
+  implemented:
+    prompt: agents/implement.md
+    env: implement
+    inputs: [plan.md]
+    produces: [implementation.md, changeset]
+    outcomes: [done, plan_invalid]
+    budget: { turns: 200, cost: 10.00 }
+
+  verified:
+    prompt: agents/verify.md
+    env: release
+    inputs: [plan.md, implementation.md, changeset]
+    produces: [report.md]
+    outcomes: [done, tests_failed]
+    budget: { turns: 60, cost: 3.00 }
+
+  review_ready: {}
+  merged: {}
+
+transitions:
+  - { from: refined,      to: planned,      approve: [refinement.md] }
+  - { from: planned,      to: implemented }
+  - { from: implemented,  to: verified }
+  - { from: implemented,  to: planned,      when: plan_invalid }
+  - { from: verified,     to: review_ready }
+  - { from: verified,     to: implemented,  when: tests_failed, max: 3 }
+  - { from: review_ready, to: merged,       approve: [changeset] }
+
+limits:
+  ticket_cost: 25.00

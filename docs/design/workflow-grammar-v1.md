@@ -36,14 +36,14 @@ states:
     prompt: agents/implement.md
     env: implement
     inputs: [plan.md]
-    produces: [changeset]
+    produces: [implementation.md, changeset]   # notes on what was done, and the diff
     outcomes: [done, plan_invalid]
     budget: { turns: 200, cost: 10.00 }
 
   verified:
     prompt: agents/verify.md
     env: release
-    inputs: [plan.md, changeset]
+    inputs: [plan.md, implementation.md, changeset]
     produces: [report.md]
     outcomes: [done, tests_failed]
     budget: { turns: 60, cost: 3.00 }
@@ -83,8 +83,9 @@ outcome `error`.
 **Outcomes.** A job ends with exactly one outcome. Engine outcomes always exist and cannot be
 declared: `did_not_converge`, `budget_exhausted`, `error`, `cancelled`. Declared outcomes are
 listed in `outcomes` and default to `[done]`. The agent selects a declared outcome by writing
-it into the front matter of the first document in `produces` (field `outcome`); a missing or
-undeclared value is `error`. An agent may always write `did_not_converge`, whatever the state
+it into the front matter of the first *document* in `produces` (field `outcome`); a missing or
+undeclared value is `error`. A job state whose `produces` holds no document therefore has
+outcomes `[done]` only. An agent may always write `did_not_converge`, whatever the state
 declares. This is how "tests failed" differs from "ran out of budget" and both differ from
 "converged".
 
@@ -104,9 +105,10 @@ each listed artifact. Approval attaches to those exact versions. Rejection keeps
 `from` and the operator chooses what happens next, including editing the artifact (which
 creates a new version) and approving that.
 
-**Budget.** `turns` and `cost` (USD) are per job. Reaching either ends the job with
-`budget_exhausted`. `limits.ticket_cost` caps the sum over all jobs of a ticket; reaching it
-sticks the ticket. Budgets are never modifiable by a job.
+**Budget.** `turns` and `cost` (USD) are per job and required on every job state. Reaching
+either ends the job with `budget_exhausted`. `limits.ticket_cost` is required and caps the sum
+over all jobs of a ticket; reaching it sticks the ticket. Budgets are never modifiable by a
+job.
 
 **Environment.** `env` is a devShell name in the project's `flake.nix`; the job runs inside
 `nix develop .#<env>`. Absent `env` means no toolchain beyond the harness.
@@ -120,8 +122,13 @@ file do not affect that ticket. Re-pinning is a human action and not in v1.
 ## Validation (rejects the file, never partially runs it)
 
 - `version` is `1`; `initial` names a job state; every state name is unique.
+- A job state has `prompt` and `budget`. A human state is `{}`: no `prompt`, `env`, `inputs`,
+  `produces`, `outcomes` or `budget`.
 - Every `inputs` entry is `ticket` or produced by some state; every `produces` entry other
-  than `changeset` is produced by exactly one state.
+  than `changeset` is produced by exactly one state. `ticket` is never produced; `answers.md`
+  is platform-managed and never declared.
+- A state declaring outcomes other than `done` produces at least one document.
+- Every state is reachable from `initial` through transitions.
 - Every transition names existing states; for one `from`, `when` values are distinct.
 - `when` is an engine outcome or a declared outcome of `from`; `max` is a positive integer.
 - `approve` entries are produced by `from` or an earlier state.

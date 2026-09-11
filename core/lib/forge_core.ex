@@ -1,18 +1,6 @@
 defmodule ForgeCore do
   @moduledoc """
-  Documentation for `ForgeCore`.
+  Pure, process-free core of forge: the workflow definition, the document format and the
+  event schema shared by the platform and the worker.
   """
-
-  @doc """
-  Hello world.
-
-  ## Examples
-
-      iex> ForgeCore.hello()
-      :world
-
-  """
-  def hello do
-    :world
-  end
 end

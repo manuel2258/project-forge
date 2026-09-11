@@ -1,0 +1,417 @@
+defmodule Forge.Jobs do
+  @moduledoc """
+  Jobs: creating one from a ticket's state (building the immutable spec), running it
+  through the embedded worker, and recording what it produced. The engine decides what
+  happens to the ticket afterwards; see `Forge.Engine`.
+
+  Execution model in milestone 1: jobs are rows. Anything may create a `pending` job;
+  the running node's `Forge.Jobs.Scheduler` starts them and records their results.
+  """
+
+  import Ecto.Query, only: [from: 2]
+
+  alias Ecto.Multi
+  alias Forge.{Artifacts, Engine, Events, Git, Projects, Repo, Tickets}
+  alias Forge.Jobs.Job
+  alias Forge.Tickets.Ticket
+  alias ForgeCore.Job.Spec
+  alias ForgeCore.Job.Spec.Input
+  alias ForgeCore.{Prompt, Workflow}
+  alias ForgeCore.Workflow.State
+  alias ForgeWorker.Job.{Result, Runner}
+
+  require Logger
+
+  # -- creation -------------------------------------------------------------------------------
+
+  @doc "Adds the creation of a pending job for `state_name` to `multi` under `key`."
+  @spec put_create(Multi.t(), term(), Ticket.t(), Workflow.t(), String.t()) :: Multi.t()
+  def put_create(multi, key, %Ticket{} = ticket, %Workflow{} = workflow, state_name) do
+    multi
+    |> Multi.run(key, fn repo, _ ->
+      with {:ok, spec} <- build_spec(repo, ticket, workflow, state_name) do
+        repo.insert(
+          Job.create_changeset(%Job{id: spec.job_id}, %{
+            ticket_id: ticket.id,
+            state: state_name,
+            attempt: spec.attempt,
+            spec: spec |> Spec.to_json() |> Jason.decode!()
+          })
+        )
+      end
+    end)
+    |> Events.log({key, :event}, "job.created", :system, fn changes ->
+      job = changes[key]
+
+      %{
+        ticket_id: ticket.id,
+        job_id: job.id,
+        payload: %{"state" => state_name, "attempt" => job.attempt}
+      }
+    end)
+  end
+
+  defp build_spec(repo, %Ticket{} = ticket, %Workflow{} = workflow, state_name) do
+    %State{} = state = Workflow.state(workflow, state_name)
+    project = Projects.get!(ticket.project_id)
+    repo_path = Projects.repo_path(project)
+    job_id = Ecto.UUID.generate()
+
+    with {:ok, prompt} <- Git.show(repo_path, ticket.workflow_commit, ".forge/" <> state.prompt),
+         {:ok, inputs} <- inputs(repo, ticket, repo_path, state.inputs) do
+      {:ok,
+       %Spec{
+         job_id: job_id,
+         ticket: %{number: ticket.number, title: ticket.title},
+         state: state_name,
+         attempt: next_attempt(repo, ticket.id, state_name),
+         prompt: prompt,
+         prompt_path: state.prompt,
+         env: state.env,
+         commit: ticket.workflow_commit,
+         branch: ticket.branch,
+         budget: %{turns: state.budget.turns, cost: state.budget.cost},
+         preamble_hash: Prompt.preamble_hash(),
+         inputs: inputs,
+         produces: state.produces,
+         outcomes: state.outcomes,
+         permitted_children: []
+       }}
+    end
+  end
+
+  defp inputs(repo, ticket, repo_path, names) do
+    Enum.reduce_while(names, {:ok, []}, fn name, {:ok, acc} ->
+      case input(repo, ticket, repo_path, name) do
+        {:ok, input} -> {:cont, {:ok, acc ++ [input]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp input(_repo, ticket, repo_path, "changeset") do
+    with {:ok, head} <- Git.resolve(repo_path, "refs/heads/" <> ticket.branch),
+         {:ok, diff} <- Git.diff(repo_path, ticket.base_commit, head) do
+      {:ok, %Input{name: "changeset", version: head, content: diff}}
+    end
+  end
+
+  defp input(repo, ticket, _repo_path, name) do
+    query =
+      from v in Forge.Artifacts.Version,
+        join: a in assoc(v, :artifact),
+        where: a.ticket_id == ^ticket.id and a.name == ^name,
+        order_by: [desc: v.version],
+        limit: 1
+
+    case repo.one(query) do
+      nil -> {:error, {:missing_input, name}}
+      version -> {:ok, %Input{name: name, version: version.version, content: version.content}}
+    end
+  end
+
+  defp next_attempt(repo, ticket_id, state_name) do
+    (repo.one(
+       from j in Job,
+         where: j.ticket_id == ^ticket_id and j.state == ^state_name,
+         select: max(j.attempt)
+     ) || 0) + 1
+  end
+
+  # -- reading --------------------------------------------------------------------------------
+
+  @spec get!(String.t()) :: Job.t()
+  def get!(id), do: Repo.get!(Job, id)
+
+  @spec for_ticket(String.t()) :: [Job.t()]
+  def for_ticket(ticket_id),
+    do: Repo.all(from j in Job, where: j.ticket_id == ^ticket_id, order_by: j.inserted_at)
+
+  @doc "Pending jobs on active tickets, oldest first."
+  @spec pending(pos_integer()) :: [Job.t()]
+  def pending(limit \\ 10) do
+    Repo.all(
+      from j in Job,
+        join: t in assoc(j, :ticket),
+        where: j.status == :pending and t.status == :active,
+        order_by: j.inserted_at,
+        limit: ^limit
+    )
+  end
+
+  @spec running_count() :: non_neg_integer()
+  def running_count, do: Repo.aggregate(from(j in Job, where: j.status == :running), :count)
+
+  @spec spec(Job.t()) :: Spec.t()
+  def spec(%Job{spec: map}), do: Spec.from_map(map)
+
+  # -- execution ------------------------------------------------------------------------------
+
+  @doc """
+  Starts the job's harness process and returns the runner pid. The caller must later pass
+  the awaited result to `complete/2`. Use `run/1` for the synchronous form.
+  """
+  @spec start(Job.t()) :: {:ok, pid()} | {:error, term()}
+  def start(%Job{} = job) do
+    ticket = Tickets.get!(job.ticket_id)
+    project = Projects.get!(ticket.project_id)
+    repo_path = Projects.repo_path(project)
+    worktree = worktree_dir(job)
+
+    with :ok <- ensure_worktree(repo_path, worktree, ticket.branch),
+         {:ok, pid} <- start_runner(job, ticket, worktree),
+         {:ok, _} <- mark_started(job) do
+      {:ok, pid}
+    end
+  end
+
+  defp start_runner(job, ticket, worktree) do
+    spec = runtime_spec(job, ticket)
+    job_id = job.id
+    ticket_id = ticket.id
+
+    harness_opts =
+      config(:harness_opts, [])
+      |> Keyword.merge(
+        if(job.harness_session_id, do: [resume_session: job.harness_session_id], else: [])
+      )
+
+    opts = [
+      spec: spec,
+      root: Path.join(data_dir(), "jobs"),
+      worktree: worktree,
+      sink: fn event -> record_harness_event(ticket_id, job_id, event) end,
+      harness_opts: harness_opts,
+      wall_clock_ms: config(:wall_clock_ms, :timer.hours(1)),
+      nix_env: config(:nix_env, false),
+      extra_env: config(:extra_env, [])
+    ]
+
+    DynamicSupervisor.start_child(ForgeWorker.Job.Supervisor, {Runner, opts})
+  end
+
+  # The stored spec never changes; answers given since are appended at run time.
+  defp runtime_spec(%Job{} = job, %Ticket{id: ticket_id}) do
+    spec = spec(job)
+
+    case Artifacts.latest(ticket_id, Workflow.answers_artifact()) do
+      nil ->
+        spec
+
+      version ->
+        %{
+          spec
+          | inputs:
+              spec.inputs ++
+                [
+                  %Input{
+                    name: Workflow.answers_artifact(),
+                    version: version.version,
+                    content: version.content
+                  }
+                ]
+        }
+    end
+  end
+
+  defp record_harness_event(ticket_id, job_id, %{type: type, payload: payload}) do
+    case Events.append(type, {:job, job_id}, %{
+           ticket_id: ticket_id,
+           job_id: job_id,
+           payload: json_safe(payload)
+         }) do
+      {:ok, _} ->
+        :ok
+
+      {:error, changeset} ->
+        Logger.warning("dropped harness event #{type}: #{inspect(changeset.errors)}")
+    end
+  end
+
+  defp json_safe(term), do: term |> Jason.encode!() |> Jason.decode!()
+
+  defp mark_started(%Job{} = job) do
+    now = DateTime.utc_now(:second)
+
+    Multi.new()
+    |> Multi.update(
+      :job,
+      Job.progress_changeset(job, %{status: :running, started_at: job.started_at || now})
+    )
+    |> Events.log(:event, "job.started", :system, %{
+      ticket_id: job.ticket_id,
+      job_id: job.id,
+      payload: %{"resume" => job.harness_session_id != nil}
+    })
+    |> Repo.transaction()
+  end
+
+  @doc "Runs a job to its end synchronously and records the result. For tests and tasks."
+  @spec run(Job.t()) :: {:ok, Job.t()} | {:error, term()}
+  def run(%Job{} = job) do
+    with {:ok, pid} <- start(job),
+         {:ok, %Result{} = result} <- Runner.await(pid) do
+      complete(job.id, result)
+    end
+  end
+
+  @doc """
+  Records a runner result: documents as artifact versions, the transcript as a blob, the
+  job's status and accounting, then hands a finished job to the engine. A waiting job keeps
+  its worktree; a finished one loses it.
+  """
+  @spec complete(String.t(), Result.t()) :: {:ok, Job.t()} | {:error, term()}
+  def complete(job_id, %Result{} = result) do
+    job = get!(job_id)
+    ticket = Tickets.get!(job.ticket_id)
+
+    Multi.new()
+    |> put_documents(ticket, job, result)
+    |> put_transcript(ticket, job, result)
+    |> Multi.update(:job, Job.progress_changeset(job, progress_attrs(job, result)))
+    |> Tickets.put_progress(:ticket_cost, ticket, %{
+      cost_usd: Decimal.add(ticket.cost_usd, decimal(result.harness[:cost_usd]))
+    })
+    |> Events.log(:event, "job.#{result.status}", {:job, job.id}, %{
+      ticket_id: ticket.id,
+      job_id: job.id,
+      payload: result_payload(result)
+    })
+    |> Multi.merge(fn %{job: job, ticket_cost: ticket} -> after_run(job, ticket, result) end)
+    |> Repo.transaction()
+    |> case do
+      {:ok, %{job: job}} ->
+        if job.status == :finished, do: remove_worktree(ticket, job)
+        {:ok, job}
+
+      {:error, step, reason, _} ->
+        {:error, {step, reason}}
+    end
+  end
+
+  defp put_documents(multi, ticket, job, %Result{documents: documents}) do
+    Enum.reduce(documents, multi, fn {name, document}, multi ->
+      Artifacts.put_version(multi, {:doc, name}, ticket.id, name, :document, {:job, job.id}, %{
+        content: document.raw
+      })
+    end)
+  end
+
+  defp put_transcript(multi, ticket, job, %Result{transcript_path: path}) do
+    name = "transcript-#{job.state}-#{job.attempt}.jsonl"
+
+    Artifacts.put_version(multi, :transcript, ticket.id, name, :blob, {:job, job.id}, %{
+      blob_uri: "file://" <> path
+    })
+  end
+
+  defp progress_attrs(job, %Result{} = result) do
+    base = %{
+      turns: result.harness[:turns] || job.turns,
+      cost_usd: Decimal.add(job.cost_usd, decimal(result.harness[:cost_usd])),
+      harness_session_id: result.harness[:session_id] || job.harness_session_id
+    }
+
+    case result.status do
+      :waiting ->
+        Map.put(base, :status, :waiting)
+
+      :finished ->
+        Map.merge(base, %{
+          status: :finished,
+          outcome: result.outcome,
+          declared_outcome: result.declared_outcome,
+          finished_at: DateTime.utc_now(:second)
+        })
+    end
+  end
+
+  defp result_payload(%Result{} = result) do
+    %{
+      "outcome" => result.outcome,
+      "declared_outcome" => result.declared_outcome,
+      "reason" => result.reason,
+      "killed" => result.killed,
+      "exit_status" => result.exit_status,
+      "questions" => Enum.map(result.questions, & &1.key),
+      "harness" => json_safe(result.harness)
+    }
+  end
+
+  defp after_run(%Job{status: :waiting}, _ticket, _result), do: Multi.new()
+
+  defp after_run(%Job{status: :finished} = job, ticket, %Result{} = result) do
+    outcome =
+      if result.outcome == :converged,
+        do: result.declared_outcome,
+        else: Atom.to_string(result.outcome)
+
+    Engine.put_after_job(Multi.new(), ticket, job, outcome)
+  end
+
+  @doc "Resumes a waiting job once its blocking questions are answered: back to pending."
+  @spec resume(Job.t()) :: {:ok, Job.t()} | {:error, term()}
+  def resume(%Job{status: :waiting} = job) do
+    Multi.new()
+    |> Multi.update(:job, Job.progress_changeset(job, %{status: :pending}))
+    |> Events.log(:event, "job.resumed", :system, %{ticket_id: job.ticket_id, job_id: job.id})
+    |> Repo.transaction()
+    |> case do
+      {:ok, %{job: job}} -> {:ok, job}
+      {:error, _step, reason, _} -> {:error, reason}
+    end
+  end
+
+  @doc "On boot: jobs left `running` by a previous node are re-queued. Their spec still holds."
+  @spec recover() :: non_neg_integer()
+  def recover do
+    jobs = Repo.all(from j in Job, where: j.status == :running)
+
+    Enum.each(jobs, fn job ->
+      {:ok, _} =
+        Multi.new()
+        |> Multi.update(:job, Job.progress_changeset(job, %{status: :pending}))
+        |> Events.log(:event, "job.interrupted", :system, %{
+          ticket_id: job.ticket_id,
+          job_id: job.id
+        })
+        |> Repo.transaction()
+    end)
+
+    length(jobs)
+  end
+
+  # -- filesystem -----------------------------------------------------------------------------
+
+  @spec data_dir() :: String.t()
+  def data_dir, do: Path.expand(config(:data_dir, "tmp/forge"))
+
+  defp worktree_dir(%Job{id: id}), do: Path.join([data_dir(), "worktrees", id])
+
+  defp ensure_worktree(repo_path, worktree, branch) do
+    if File.dir?(worktree), do: :ok, else: Git.worktree_add(repo_path, worktree, branch)
+  end
+
+  defp remove_worktree(ticket, job) do
+    repo_path = ticket |> Tickets.project_of() |> Projects.repo_path()
+    worktree = worktree_dir(job)
+
+    if File.dir?(worktree) do
+      case Git.worktree_remove(repo_path, worktree) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning("could not remove worktree #{worktree}: #{inspect(reason)}")
+      end
+    end
+  end
+
+  defp decimal(nil), do: Decimal.new(0)
+  defp decimal(number) when is_float(number), do: Decimal.from_float(number)
+  defp decimal(number) when is_integer(number), do: Decimal.new(number)
+
+  @doc false
+  def config(key, default),
+    do: Application.get_env(:forge, __MODULE__, []) |> Keyword.get(key, default)
+end

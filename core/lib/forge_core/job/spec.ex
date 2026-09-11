@@ -58,12 +58,19 @@ defmodule ForgeCore.Job.Spec do
         }
 
   defmodule Input do
-    @moduledoc "One pinned input: an artifact name, the version consumed, and its content."
+    @moduledoc """
+    One pinned input: an artifact name, the version consumed, and its content. For the
+    `changeset` input the version is the head commit the diff was taken at.
+    """
 
     @enforce_keys [:name, :version, :content]
     defstruct [:name, :version, :content]
 
-    @type t :: %__MODULE__{name: String.t(), version: pos_integer(), content: String.t()}
+    @type t :: %__MODULE__{
+            name: String.t(),
+            version: pos_integer() | String.t(),
+            content: String.t()
+          }
   end
 
   @doc "The document whose front matter carries the outcome, or nil if none is produced."

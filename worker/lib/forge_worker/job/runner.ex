@@ -18,7 +18,9 @@ defmodule ForgeWorker.Job.Runner do
     * `:extra_env` - additional `{name, value}` pairs for the process environment.
   """
 
-  use GenServer
+  # Temporary: a runner that exits, normally or not, is never restarted. A job that must
+  # run again is a new pending row, not a supervisor restart with stale directories.
+  use GenServer, restart: :temporary
 
   alias ForgeCore.Job.{Outcome, Spec}
   alias ForgeCore.Prompt

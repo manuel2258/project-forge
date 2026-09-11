@@ -39,6 +39,31 @@ if config_env() == :dev do
     ]
 end
 
+# Job execution settings for any environment, from the environment.
+credential =
+  cond do
+    key = System.get_env("ANTHROPIC_API_KEY") -> {:api_key, key}
+    token = System.get_env("CLAUDE_CODE_OAUTH_TOKEN") -> {:oauth, token}
+    true -> nil
+  end
+
+harness_opts =
+  Enum.reject(
+    [
+      credential: credential,
+      executable: System.get_env("FORGE_CLAUDE_EXECUTABLE"),
+      model: System.get_env("FORGE_CLAUDE_MODEL")
+    ],
+    fn {_key, value} -> is_nil(value) end
+  )
+
+if config_env() != :test do
+  config :forge, Forge.Jobs,
+    data_dir: System.get_env("FORGE_DATA_DIR") || "tmp/forge",
+    nix_env: System.get_env("FORGE_NIX_ENV") in ["1", "true"],
+    harness_opts: harness_opts
+end
+
 if config_env() == :prod do
   database_url =
     System.get_env("DATABASE_URL") ||

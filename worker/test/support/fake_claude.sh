@@ -4,6 +4,7 @@
 set -u
 prompt="$(cat)"
 out="$FORGE_JOB/out"
+doc="$out/${FAKE_DOC:-plan.md}"
 emit() { printf '%s\n' "$1"; }
 
 printf 'args: %s\n' "$*" > "$FORGE_JOB/fake-args.txt"
@@ -20,13 +21,13 @@ result_success='{"type":"result","subtype":"success","is_error":false,"num_turns
 
 case "${FAKE_SCENARIO:-success}" in
   success)
-    printf -- '---\noutcome: done\n---\n# Plan\n\nDo the thing.\n' > "$out/plan.md"
+    printf -- '---\noutcome: done\n---\n# Plan\n\nDo the thing.\n' > "$doc"
     emit "$result_success" ;;
   plan_invalid)
-    printf -- '---\noutcome: plan_invalid\n---\n# Plan\n\nThe plan cannot work.\n' > "$out/plan.md"
+    printf -- '---\noutcome: plan_invalid\n---\n# Plan\n\nThe plan cannot work.\n' > "$doc"
     emit "$result_success" ;;
   blocking)
-    printf -- '---\noutcome: done\n---\n# Plan\n\n```question\nkey: backend\ntext: Which backend?\noptions: [a, b]\ndefault: a\nblocking: true\n```\n' > "$out/plan.md"
+    printf -- '---\noutcome: done\n---\n# Plan\n\n```question\nkey: backend\ntext: Which backend?\noptions: [a, b]\ndefault: a\nblocking: true\n```\n' > "$doc"
     emit "$result_success" ;;
   max_turns)
     emit '{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":40,"duration_ms":99,"total_cost_usd":1.5,"session_id":"sess-42"}'
@@ -36,11 +37,11 @@ case "${FAKE_SCENARIO:-success}" in
     emit '{"type":"weird_thing","x":1}'
     exit 1 ;;
   undeclared)
-    printf -- '---\noutcome: done\n---\n# Plan\n' > "$out/plan.md"
+    printf -- '---\noutcome: done\n---\n# Plan\n' > "$doc"
     printf 'scratch' > "$out/notes.md"
     emit "$result_success" ;;
   invalid_document)
-    printf -- '---\noutcome: done\n' > "$out/plan.md"
+    printf -- '---\noutcome: done\n' > "$doc"
     emit "$result_success" ;;
   hang)
     sleep 60 ;;

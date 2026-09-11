@@ -42,3 +42,10 @@ config :forge, Forge.Mailer, adapter: Swoosh.Adapters.Test
 
 # Disable swoosh api client as it is only required for production adapters
 config :swoosh, :api_client, false
+
+# Tests drive jobs explicitly; the scheduler stays off and data lives under tmp/test.
+config :forge, Forge.Jobs,
+  data_dir: "tmp/test",
+  run_jobs: false,
+  poll_ms: 100,
+  harness_opts: [executable: Path.expand("../../worker/test/support/fake_claude.sh", __DIR__)]

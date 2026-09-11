@@ -24,6 +24,17 @@ config :forge,
   ecto_repos: [Forge.Repo],
   generators: [timestamp_type: :utc_datetime, binary_id: true]
 
+# Where the platform keeps bare repositories, worktrees and job directories, and how the
+# embedded local worker runs jobs. Overridden per environment and in runtime.exs.
+config :forge, Forge.Jobs,
+  data_dir: "tmp/forge",
+  run_jobs: true,
+  max_concurrent: 2,
+  poll_ms: 2_000,
+  wall_clock_ms: 3_600_000,
+  nix_env: false,
+  harness_opts: []
+
 # Mailer for account emails (magic links). Local adapter in dev; see runtime.exs for prod.
 config :forge, Forge.Mailer, adapter: Swoosh.Adapters.Local
 

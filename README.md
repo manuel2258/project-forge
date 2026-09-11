@@ -26,3 +26,24 @@ cd platform && mix setup && mix phx.server
 
 Releases build with `nix build .#forge` and `nix build .#forge-worker`.
 
+## Driving a ticket (milestone 1)
+
+Run the node with `mix phx.server`; it starts pending jobs. Everything else is a Mix task
+that writes rows:
+
+```
+mix forge.user.add you@example.com
+mix forge.project.add game /srv/git/game.git      # bare repo; push your project to it
+mix forge.admit game "Persist the high score table" --body-file ticket.md
+mix forge.queue                                   # questions, approvals, stuck, review
+mix forge.show game#1                             # state, jobs, artifacts, events
+mix forge.answer game#1 storage-backend --choice sqlite
+mix forge.approve game#1 [--reject --comment "..."]
+mix forge.transition game#1 implemented           # human states and stuck tickets
+mix forge.edit game#1 plan.md plan.md             # a human edit is a new version
+```
+
+Jobs run Claude Code headless with `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` from the
+node's environment. `FORGE_DATA_DIR` holds worktrees and job directories; `FORGE_NIX_ENV=1`
+wraps each job in the project's `nix develop .#<env>`.
+

@@ -108,7 +108,9 @@ Each milestone ends with a demo. The demo is the acceptance test.
   immutable, approval attached to a version.
 - Append-only event log. Every mutation writes an event.
 - CLI for admitting a ticket, listing the queue, answering a question, approving a version.
-- The worker manager runs on the same machine as the platform for this milestone.
+- The worker manager runs on the same machine as the platform for this milestone: the
+  platform depends on the worker application by path and runs jobs in its own VM. The
+  channel between separate processes arrives with milestone 3.
 
 Demo: a ticket runs refine and plan on the Bevy project, produces two documents, blocks on a
 question, is answered from the CLI, continues, and the job view shows the pinned manifest.

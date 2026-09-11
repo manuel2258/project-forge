@@ -22,10 +22,12 @@
           esbuildPath = "${pkgs.esbuild}/bin/esbuild";
           tailwindPath = "${pkgs.tailwindcss_4}/bin/tailwindcss";
 
-          # Source for one Mix project plus the shared core it depends on by path.
+          # Source for one Mix project plus what it depends on by path: core for both,
+          # and the worker for the platform, which embeds it as the local worker.
+          pathDeps = subdir: if subdir == "platform" then [ ./core ./worker ] else [ ./core ];
           projectSrc = subdir: lib.fileset.toSource {
             root = ./.;
-            fileset = lib.fileset.unions [ ./core (./. + "/${subdir}") ];
+            fileset = lib.fileset.unions ([ (./. + "/${subdir}") ] ++ pathDeps subdir);
           };
 
           # Only the files `mix deps.get` needs, so dependency fetching is not
@@ -34,11 +36,10 @@
           # fixed-output derivation with an unchanged hash is reused, never refetched.
           depsSrc = subdir: lib.fileset.toSource {
             root = ./.;
-            fileset = lib.fileset.unions [
-              ./core/mix.exs
+            fileset = lib.fileset.unions ([
               (./. + "/${subdir}/mix.exs")
               (./. + "/${subdir}/mix.lock")
-            ];
+            ] ++ map (dep: dep + "/mix.exs") (pathDeps subdir));
           };
 
           mixDeps = { name, subdir, hash }: beam.fetchMixDeps {

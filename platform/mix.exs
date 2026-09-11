@@ -43,6 +43,8 @@ defmodule Forge.MixProject do
       {:pbkdf2_elixir, "~> 2.0"},
       {:swoosh, "~> 1.19"},
       {:forge_core, path: "../core"},
+      # Milestone 1 runs jobs inside the platform VM (local worker); the channel comes later.
+      {:forge_worker, path: "../worker"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:phoenix, "~> 1.8.13"},
       {:phoenix_ecto, "~> 4.5"},

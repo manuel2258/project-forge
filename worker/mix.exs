@@ -6,12 +6,16 @@ defmodule ForgeWorker.MixProject do
       app: :forge_worker,
       version: "0.1.0",
       elixir: "~> 1.18",
+      elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       aliases: aliases(),
       releases: [forge_worker: [include_executables_for: [:unix]]]
     ]
   end
+
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_), do: ["lib"]
 
   def cli do
     [preferred_envs: [check: :test]]

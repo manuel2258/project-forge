@@ -82,3 +82,22 @@ These decisions are settled. They are not to be reopened.
 ## Analysis
 
 - An optional, offline, propose-only analysis job may read the event log and propose workflow or environment changes. It runs no experiments, changes nothing, has no elevated permissions, and its proposals go through the normal approval path.
+
+## Technology (decided for the proof of concept)
+
+Settled for the project:
+
+- Elixir throughout.
+- Phoenix with LiveView for the platform.
+- A standalone Elixir release for the worker-side agent manager.
+
+Settled for the PoC, reversible afterwards on evidence from it (see `poc-plan.md`):
+
+- One repository, three Mix projects joined by path dependencies, no umbrella: `forge_core`, `forge`, `forge_worker`.
+- Postgres on the orchestrator. Oban for durable background work.
+- Worker dials out over a Phoenix Channel, authenticated by a per-worker token injected at creation.
+- Git served by the platform over smart HTTP with a per-job short-lived token. SSH for the operator only.
+- API key billing by default; subscription authentication is a comparison experiment.
+- Job isolation by transient systemd units with memory and CPU limits, a Unix user per job, environment via `nix develop`.
+- btrfs for copy-on-write worktrees and build directories.
+- Hetzner behind the provider driver. S3-compatible object storage.

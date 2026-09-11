@@ -40,6 +40,8 @@ defmodule Forge.MixProject do
   # Type `mix help deps` for examples and options.
   defp deps do
     [
+      {:pbkdf2_elixir, "~> 2.0"},
+      {:swoosh, "~> 1.19"},
       {:forge_core, path: "../core"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:phoenix, "~> 1.8.13"},

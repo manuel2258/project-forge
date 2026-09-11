@@ -57,7 +57,7 @@
           platformDeps = mixDeps {
             name = "forge";
             subdir = "platform";
-            hash = "sha256-fl6v0PlK9Hu6QUgjJ63V04+J64Tp7INT3KnmK6GxUiU=";
+            hash = "sha256-22onCzlOK4qUcCo0eqUbujHCHdT3TL62FgVlOtX4EoE=";
           };
 
           forge-worker = beam.mixRelease {

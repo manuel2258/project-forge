@@ -7,9 +7,28 @@
 # General application configuration
 import Config
 
+config :forge, :scopes,
+  user: [
+    default: true,
+    module: Forge.Accounts.Scope,
+    assign_key: :current_scope,
+    access_path: [:user, :id],
+    schema_key: :user_id,
+    schema_type: :binary_id,
+    schema_table: :users,
+    test_data_fixture: Forge.AccountsFixtures,
+    test_setup_helper: :register_and_log_in_user
+  ]
+
 config :forge,
   ecto_repos: [Forge.Repo],
   generators: [timestamp_type: :utc_datetime, binary_id: true]
+
+# Mailer for account emails (magic links). Local adapter in dev; see runtime.exs for prod.
+config :forge, Forge.Mailer, adapter: Swoosh.Adapters.Local
+
+# Swoosh API client is only needed for adapters that talk HTTP.
+config :swoosh, :api_client, false
 
 # Configure the endpoint
 config :forge, ForgeWeb.Endpoint,

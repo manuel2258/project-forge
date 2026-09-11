@@ -1,4 +1,4 @@
-defmodule ForgeCore.Workflow.Error do
+defmodule ForgeCore.Error do
   @moduledoc "A parse or validation error, located by a dotted path into the definition."
 
   @enforce_keys [:path, :message]

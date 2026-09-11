@@ -1,8 +1,9 @@
 defmodule ForgeCore.Workflow.ParserTest do
   use ExUnit.Case, async: true
 
+  alias ForgeCore.Error
   alias ForgeCore.Workflow
-  alias ForgeCore.Workflow.{Budget, Error, Parser, State, Transition}
+  alias ForgeCore.Workflow.{Budget, Parser, State, Transition}
 
   @fixture Path.expand("../../fixtures/workflow_example.yml", __DIR__)
 

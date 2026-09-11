@@ -4,8 +4,9 @@ defmodule ForgeCore.Workflow.Validator do
   `docs/design/workflow-grammar-v1.md`. Returns every violation found.
   """
 
+  alias ForgeCore.Error
   alias ForgeCore.Workflow
-  alias ForgeCore.Workflow.{Error, State, Transition}
+  alias ForgeCore.Workflow.{State, Transition}
 
   @reserved_keys ~w(blocks use can_spawn fanout spawn_depth child_budget experiments)
 

@@ -10,8 +10,9 @@ defmodule ForgeCore.Workflow.Parser do
       state's prompt is checked with it (normally against the pinned commit).
   """
 
+  alias ForgeCore.Error
   alias ForgeCore.Workflow
-  alias ForgeCore.Workflow.{Budget, Error, Limits, State, Transition, Validator}
+  alias ForgeCore.Workflow.{Budget, Limits, State, Transition, Validator}
 
   @top_keys ~w(version initial states transitions limits)
   @state_keys ~w(prompt env inputs produces outcomes budget)

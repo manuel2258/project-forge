@@ -88,6 +88,10 @@ undeclared value is `error`. An agent may always write `did_not_converge`, whate
 declares. This is how "tests failed" differs from "ran out of budget" and both differ from
 "converged".
 
+**Waiting.** If a produced document contains an open blocking question, no outcome is
+evaluated and no transition is taken. The job waits for the answer and then resumes (see
+`job-prompt.md`). Only a job that ends without open blocking questions has an outcome.
+
 **Transitions.** `when` names an outcome and defaults to `done`. On job end the engine takes
 the single transition from the current state whose `when` matches the outcome. If none
 matches, the ticket becomes *stuck* (an engine flag, not a workflow state) and appears in the
@@ -122,6 +126,8 @@ file do not affect that ticket. Re-pinning is a human action and not in v1.
 - `when` is an engine outcome or a declared outcome of `from`; `max` is a positive integer.
 - `approve` entries are produced by `from` or an earlier state.
 - Prompt files exist at the pinned commit.
+- Artifact names are fixed. The prefix form `name/*` is reserved for blob groups and is
+  rejected in v1 with a message saying so.
 - Keys outside this grammar (`blocks`, `use`, `can_spawn`, `fanout`, `spawn_depth`,
   `child_budget`, `experiments`) are errors in v1.
 

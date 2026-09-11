@@ -19,7 +19,8 @@ claude -p \
   --model <configured>
 ```
 
-Working directory is the job's worktree, inside `nix develop .#<env>`. Permissions are
+Working directory is the job's worktree, inside `nix develop .#<env>`, with `FORGE_JOB`
+pointing at the job directory described in `job-prompt.md`. Permissions are
 bypassed because the slice is the sandbox: the job has its own Unix user, worktree, branch and
 credential, and nothing outside them. `--permission-prompt-tool` and the `permission_denials`
 result field are therefore unused in v1; the driver declares `permission_prompting: false`.
@@ -84,6 +85,9 @@ are the harness-side enforcement; the driver additionally enforces a wall-clock 
 after a grace period, emitting `finished` with outcome `cancelled` or `budget_exhausted`.
 
 ## Outcome mapping
+
+Before any outcome: if a collected document holds an open blocking question, the job becomes
+`waiting` and nothing below applies until it resumes and ends again.
 
 Decided in this order, first match wins:
 

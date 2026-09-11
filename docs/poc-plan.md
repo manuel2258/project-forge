@@ -61,8 +61,8 @@ agent editing the flake in its worktree is already part of the changeset.
 
 ## Phase 0: measurements
 
-All five run on the existing machine. Measurement 5 needs no infrastructure and starts
-first. Measurements 1 to 4 gate milestone 3 only.
+All run on the existing machine. Measurements 1 to 4 gate milestone 3 only. Measurement 5 is
+skipped by decision and taken as given; dogfooding in milestone 5 observes it instead.
 
 **M1. Build cache acceptance.** Three variants, each measured as: restore cache into a fresh
 worktree, run `cargo build`, count recompiled crates and wall time against a warm local build.
@@ -86,12 +86,9 @@ snapshot image, cloud-init, worker release connects, Nix store populated from th
 cache, btrfs seed restored from object storage, first incremental build completes. Outcome
 decides whether destroying the worker is viable and sets the default idle period.
 
-**M5. Agent output quality.** Five real tickets. Write the refine and plan prompts with the
-document schema and the question format in them. Run Claude Code headless on each. Score:
-document parses, length within the bound, number of questions, each question has options and
-a sensible default. Iterate prompts three rounds. Pass: four of five tickets produce a
-parseable, bounded document with at most three questions, each answerable in one tap.
-Outcome decides the question representation and whether the whole idea holds.
+**M5. Agent output quality.** Skipped by decision. Taken as given that agents, prompted well,
+produce bounded, well-formed documents with few good questions. Observed during milestone 5
+dogfooding rather than measured up front.
 
 ## Milestones
 
@@ -179,7 +176,7 @@ definition of usable is met.
 | Open question | Where | What the PoC records |
 |---|---|---|
 | Which credential funds execution | Milestone 1 | Same tickets on both credentials: limits hit, cost visibility, failure modes, terms of use for each |
-| Structured question representation | Measurement 5, milestone 2 | Parse failures, answer taps per question, cases the format could not express |
+| Structured question representation | Milestone 2 | Parse failures, answer taps per question, cases the format could not express |
 | Worker idle period | Measurement 4, milestone 3 | Cold start time, idle time distribution across real tickets, cost of idle versus recreate |
 | Branch granularity | Milestone 1 onward | Conflicts and rebases per ticket with one branch per ticket; whether any sequential job needed its own branch |
 | Reproducible build cache | Measurement 1 | Which variant passed, rebuild counts and times |
@@ -187,8 +184,8 @@ definition of usable is met.
 
 ## Risks
 
-- **Agent output sprawls.** The largest risk and the cheapest to test. Measurement 5 runs
-  before anything else and can stop the project.
+- **Agent output sprawls.** The largest risk. Accepted without up-front measurement by
+  decision; first observed in milestone 1 output and formally during dogfooding.
 - **Cache does not transplant.** If every variant in measurement 1 fails, the seed becomes a
   maintained btrfs blob synced to object storage. The design survives; the storage model gets
   heavier.

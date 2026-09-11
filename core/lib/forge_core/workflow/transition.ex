@@ -14,6 +14,13 @@ defmodule ForgeCore.Workflow.Transition do
           approve: [String.t()]
         }
 
+  @typedoc "Identifies a transition within a workflow, for counting how often it fired."
+  @type id :: {String.t(), String.t(), String.t()}
+
+  @doc "The `{from, to, outcome}` triple that identifies this transition."
+  @spec id(t()) :: id()
+  def id(%__MODULE__{from: from, to: to} = transition), do: {from, to, outcome(transition)}
+
   @doc "The outcome this transition matches: `when`, or the default when absent."
   @spec outcome(t()) :: String.t()
   def outcome(%__MODULE__{when: nil}), do: Workflow.default_outcome()

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Quality gate for the whole repository. Runs in every Mix project:
+#   compile --warnings-as-errors, format --check-formatted, credo --strict, test
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+for project in core worker platform; do
+  echo "==> $project"
+  (cd "$project" && mix check)
+done

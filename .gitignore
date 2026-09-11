@@ -8,6 +8,16 @@ Desktop.ini
 # Editor directories and files
 .idea/
 .vscode/
+.elixir_ls/
 *.swp
 *.swo
 *~
+
+# Nix and direnv
+result
+result-*
+.direnv/
+
+# Elixir (per-project .gitignore files cover build output; these catch strays)
+erl_crash.dump
+*.ez

@@ -4,4 +4,25 @@ A self-hosted platform that moves software tickets through a per-repository, sta
 
 The concept is described in full in [docs/vision.md](docs/vision.md). Settled decisions, open questions, required measurements and prior-art findings are recorded alongside it in `docs/`. The proof-of-concept plan is [docs/poc-plan.md](docs/poc-plan.md).
 
-**Status:** nothing is implemented yet. The stack is decided: Elixir, with Phoenix and LiveView for the platform and a standalone Elixir release for the worker. Further PoC-scoped choices are listed in [docs/decisions.md](docs/decisions.md). This repository holds an idea and a plan, not code.
+**Status:** skeleton only. The stack is decided: Elixir, with Phoenix and LiveView for the platform and a standalone Elixir release for the worker. Further PoC-scoped choices are listed in [docs/decisions.md](docs/decisions.md). No feature has been built yet.
+
+## Layout
+
+| Directory | Mix app | Purpose |
+|---|---|---|
+| `core/` | `forge_core` | Workflow parser, event schema, artifact types. Shared by path dependency. |
+| `platform/` | `forge` | Phoenix + LiveView platform: orchestrator, artifact store, queue UI. |
+| `worker/` | `forge_worker` | Standalone release for the worker-side agent manager. |
+
+## Getting started
+
+Requires Nix with flakes. Postgres is included in the devshell; point `platform/config/dev.exs` at whichever instance you run.
+
+```
+nix develop            # or `direnv allow`
+bin/check              # quality gate: compile, format, credo, tests, in every project
+cd platform && mix setup && mix phx.server
+```
+
+Releases build with `nix build .#forge` and `nix build .#forge-worker`.
+

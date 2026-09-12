@@ -5,7 +5,7 @@ actually uses every day. Everything not required for one of those is cut.
 
 The PoC runs entirely on the operator's machine and is independent of any particular real
 project. No deployment, no cloud machine, no phone until it concludes: the platform, its
-Postgres, the worker VMs and the object storage all run locally, and the demo project is a
+Postgres, the worker VMs and the blob store all run locally, and the demo project is a
 small repository kept for the purpose. The real deployment, the cloud driver and the phone
 are one step after the last milestone, so that step is the first time the design meets a
 network it does not control.
@@ -49,12 +49,15 @@ The PoC is done when all of the following hold:
   Unix user per job, environment entered through `nix develop` on the project's flake.
 - btrfs subvolumes and snapshots for copy-on-write worktrees and build directories.
 - A local VM driver (QEMU, booting the NixOS worker image) as the provider behind the
-  driver for the whole PoC. Hetzner arrives in the closing step, as a second driver. MinIO as
-  the object storage; Hetzner Object Storage (S3 API) later, through the same client.
+  driver for the whole PoC. Hetzner arrives in the closing step, as a second driver.
+- A storage behaviour for blobs and worker seeds with one implementation for the PoC: a
+  directory on the platform host, served over HTTP by the platform. No S3 client and no
+  MinIO in the PoC; the S3-compatible implementation (Hetzner Object Storage) is the closing
+  step's, behind the same behaviour.
 
 Deferred to the start of the relevant milestone: workflow grammar subset, question block
 syntax, Claude Code event schema, Claude Code permission mode inside the slice, push
-notification library, object storage client, operator auth details.
+notification library, operator auth details.
 
 ## Quality gate for the PoC's own code
 
@@ -92,7 +95,8 @@ project in the closing step, where its numbers become that deployment's settings
 worktree, run the build command, count what rebuilt and the wall time against a warm local
 build. (a) A build directory produced by a Nix builder from the dependency closure alone,
 copied into the worktree. (b) A remote compilation cache where the toolchain has one
-(sccache-style), cold local disk, populated remote cache, backed by MinIO. (c) Baseline: a
+(sccache-style) pointed at a cache directory on another volume, cold local disk, populated
+cache; what is tested is that a cache made elsewhere transplants. (c) Baseline: a
 warm build directory rsynced from a different checkout path, to expose absolute path and
 mtime sensitivity. Pass: only the project's own sources rebuild and time is within 2x warm.
 Outcome decides the build cache open question and the storage model.
@@ -109,7 +113,8 @@ systemd unit. Outcome sets MemoryMax per slice, agents per worker and machine si
 
 **M4. Worker cold start.** Scripted end to end with a timestamp per phase: create a local VM
 from the worker image, cloud-init, worker release connects, Nix store populated from the
-binary cache, btrfs seed restored from MinIO, first incremental build completes. Outcome
+binary cache, btrfs seed fetched from the platform's store, first incremental build
+completes. Outcome
 decides whether destroying the worker is viable and sets the default idle period. The cloud
 provider's own machine creation time is added in the closing step, not here.
 
@@ -131,8 +136,8 @@ Each milestone ends with a demo. The demo is the acceptance test.
   commit, budgets, permitted children (empty in v1).
 - Claude Code driver: a Port around headless Claude Code with streaming JSON output, events
   normalised into the platform's schema, budget enforcement by turns and cost.
-- Artifact store: documents and answers versioned in Postgres, blobs in object storage,
-  immutable, approval attached to a version.
+- Artifact store: documents and answers versioned in Postgres, blobs behind the storage
+  behaviour, immutable, approval attached to a version.
 - Append-only event log. Every mutation writes an event.
 - CLI for admitting a ticket, listing the queue, answering a question, approving a version.
 - The worker manager runs on the same machine as the platform for this milestone: the
@@ -172,8 +177,8 @@ Probes: question representation under real use, message reliability.
 - Worker connects out over a channel. Platform schedules a job only when its slice fits the
   remaining memory budget.
 - Per-job transient systemd unit, Unix user, MemoryMax and CPUWeight from measurements.
-- Worktree and build directory snapshotted from a warm seed. Seed restored from object storage
-  at cold start, using whichever cache form measurement 1 chose.
+- Worktree and build directory snapshotted from a warm seed. Seed fetched from the platform's
+  store at cold start, using whichever cache form measurement 1 chose.
 - Per-job git token, short-lived, scoped to the ticket branch.
 - Idle destroy after a configurable period, default from measurement 4.
 - Job commits and hibernates on interruption; resume reconstructs from branch and manifest.
@@ -209,6 +214,8 @@ After the PoC has concluded on evidence, and only then:
 - The platform on a host with the NixOS module, TLS in front, secrets outside the store.
 - The Hetzner driver as the second provider implementation; the cloud's own machine creation
   time added to measurement 4.
+- The S3 implementation of the storage behaviour (Hetzner Object Storage) as the durable
+  layer for seeds and blobs, so they survive the platform host.
 - The phone: push subscribed on the real origin, one blocking question answered from the
   lock screen, message state observed on a phone network.
 - The real project moved onto the host; the mirror pointed at its external home.
@@ -233,7 +240,7 @@ Demo: the milestone 4 demo again, from the phone, on the host.
 - **The local VM is not the cloud machine.** Cold start, disk and network differ. Accepted:
   the PoC settles the design, the closing step measures the provider's constants.
 - **Cache does not transplant.** If every variant in measurement 1 fails, the seed becomes a
-  maintained btrfs blob synced to object storage. The design survives; the storage model gets
+  maintained btrfs blob kept in the store. The design survives; the storage model gets
   heavier.
 - **Model fluency in Elixir.** Mitigated by the quality gate above. Expect the first
   milestone to be slower than the estimate while the guardrails settle.

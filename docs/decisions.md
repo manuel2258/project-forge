@@ -30,7 +30,7 @@ These decisions are settled. They are not to be reopened.
 
 - Artifacts live in the platform's own store, not in git. Code is git's job.
 - Artifacts are immutable and versioned. Approval attaches to a specific version. Human edits produce a new version like any other.
-- Three kinds: documents (the contract between steps, approvable), blobs (object storage, referenced by URI), presentations (rich, human-only, never consumed downstream).
+- Three kinds: documents (the contract between steps, approvable), blobs (behind a storage behaviour, referenced by URI), presentations (rich, human-only, never consumed downstream).
 - Blobs are served to the operator through the platform, not via provider-specific signed links.
 - Questions are embedded in the document, next to the passage they concern, with a small set of options and a recommended default.
 - Non-blocking questions state the assumption taken and let work continue. Blocking questions stop the job until answered — no timeout, no automatic fallback.
@@ -47,7 +47,7 @@ These decisions are settled. They are not to be reopened.
 
 ## Execution
 
-- Three tiers: a small always-on orchestrator, one large worker created on demand, and object storage as the durable layer.
+- Three tiers: a small always-on orchestrator, one large worker created on demand, and a durable store for blobs and seeds (object storage once deployed).
 - The orchestrator holds the state machine, event log, artifact store, git, credentials and the web application. It compiles nothing.
 - The worker hosts all agents for a session and is destroyed after a configurable idle period.
 - Each job runs in its own resource-limited slice: hard memory ceiling so an out-of-memory build kills one job rather than the machine, and proportional CPU sharing so agents idle on inference donate capacity to whoever is compiling.
@@ -100,6 +100,7 @@ Settled for the PoC, reversible afterwards on evidence from it (see `poc-plan.md
 - The operator's Claude subscription (OAuth token) funds execution. API key billing remains a configuration choice; the comparison is not run.
 - Job isolation by transient systemd units with memory and CPU limits, a Unix user per job, environment via `nix develop`.
 - btrfs for copy-on-write worktrees and build directories.
-- A local VM driver behind the provider driver for the PoC; Hetzner as the second implementation in the closing step. S3-compatible object storage, MinIO locally.
+- A local VM driver behind the provider driver for the PoC; Hetzner as the second implementation in the closing step.
+- A storage behaviour for blobs and worker seeds, like the provider driver: one implementation in the PoC, a directory on the platform host served over HTTP by the platform; the S3-compatible implementation arrives in the closing step. No S3 client and no MinIO during the PoC.
 - The PoC's goal is a functionally minimal platform the operator then deploys for their own project (a game); nothing in it may depend on that project or its language. The workload is a parameter: environment, build command and build directory come from the project's own workflow and flake.
 - The PoC runs entirely on the operator's machine and is independent of any particular real project. No deployment, no cloud machine, no phone until it concludes; those are one closing step after the last milestone.

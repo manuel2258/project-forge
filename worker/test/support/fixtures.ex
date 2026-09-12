@@ -11,7 +11,7 @@ defmodule ForgeWorker.Fixtures do
   def spec(overrides \\ %{}) do
     Map.merge(
       %Spec{
-        job_id: "job-#{System.unique_integer([:positive])}",
+        job_id: uuid(),
         ticket: %{number: 7, title: "Persist the high score table"},
         state: "planned",
         attempt: 1,
@@ -35,6 +35,15 @@ defmodule ForgeWorker.Fixtures do
       },
       overrides
     )
+  end
+
+  @doc "A random UUID (the worker does not depend on Ecto)."
+  def uuid do
+    <<a::32, b::16, c::16, d::16, e::48>> = :crypto.strong_rand_bytes(16)
+
+    [a, b, c, d, e]
+    |> then(&:io_lib.format("~8.16.0b-~4.16.0b-~4.16.0b-~4.16.0b-~12.16.0b", &1))
+    |> IO.iodata_to_binary()
   end
 
   @doc "A fresh temporary directory, removed when the test process exits."

@@ -20,7 +20,7 @@ defmodule ForgeWorker.Harness.ClaudeCodeTest do
 
       assert env == [
                {"FORGE_JOB", "/jobs/j"},
-               {"ANTHROPIC_API_KEY", "k"},
+               {"ANTHROPIC_API_KEY", {:secret, "k"}},
                {"CLAUDE_CODE_OAUTH_TOKEN", false}
              ]
     end
@@ -34,7 +34,7 @@ defmodule ForgeWorker.Harness.ClaudeCodeTest do
         )
 
       assert Enum.take(args, -4) == ["--model", "opus", "--resume", "sess-1"]
-      assert {"CLAUDE_CODE_OAUTH_TOKEN", "t"} in env
+      assert {"CLAUDE_CODE_OAUTH_TOKEN", {:secret, "t"}} in env
       assert {"ANTHROPIC_API_KEY", false} in env
 
       {_exe, _args, env} = ClaudeCode.command(spec(), "/jobs/j", [])
@@ -93,6 +93,20 @@ defmodule ForgeWorker.Harness.ClaudeCodeTest do
                ClaudeCode.parse_line(
                  ~s({"type":"result","subtype":"success","is_error":false,"num_turns":3,"total_cost_usd":0.04,"session_id":"s"})
                )
+    end
+
+    test "excerpts are cut on character boundaries" do
+      long = String.duplicate("é", 3000)
+
+      line =
+        Jason.encode!(%{
+          type: "user",
+          message: %{content: [%{type: "tool_result", tool_use_id: "t", content: long}]}
+        })
+
+      assert [%{payload: %{excerpt: excerpt, bytes: 6000}}] = ClaudeCode.parse_line(line)
+      assert String.valid?(excerpt)
+      assert byte_size(excerpt) in 4094..4096
     end
 
     test "never drops or raises on unexpected input" do

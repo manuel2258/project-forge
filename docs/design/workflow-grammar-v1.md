@@ -72,7 +72,8 @@ taken by a human or by the engine. `initial` names the state a ticket enters at 
 state with no outgoing transitions is terminal.
 
 **Inputs** are artifact names. `ticket` is reserved and means the ticket body as a document.
-Every other name must be produced by some state. At job start the engine resolves each input
+Every other name must be produced by a state that can run before the consumer (one from
+which the consumer is reachable), so a job never starts with a missing input. At job start the engine resolves each input
 to the latest version of that artifact on the ticket and pins it in the job's manifest.
 
 **Produces** are the artifacts the job must write. `changeset` is reserved and means the diff
@@ -101,7 +102,8 @@ how many times a transition may fire for one ticket; exceeding it also sticks th
 
 **Approval.** `approve` lists artifact names. The transition is not taken automatically; it
 enters the queue as a decision, and the operator approves or rejects the latest version of
-each listed artifact. Approval attaches to those exact versions. Rejection keeps the ticket in
+each listed artifact. A transition a person takes by hand records the same approvals as
+part of the choice. Approval attaches to those exact versions. Rejection keeps the ticket in
 `from` and the operator chooses what happens next, including editing the artifact (which
 creates a new version) and approving that.
 
@@ -124,8 +126,9 @@ file do not affect that ticket. Re-pinning is a human action and not in v1.
 - `version` is `1`; `initial` names a job state; every state name is unique.
 - A job state has `prompt` and `budget`. A human state is `{}`: no `prompt`, `env`, `inputs`,
   `produces`, `outcomes` or `budget`.
-- Every `inputs` entry is `ticket` or produced by some state; every `produces` entry other
-  than `changeset` is produced by exactly one state. `ticket` is never produced; `answers.md`
+- State and artifact names are single path segments: letters, digits, `.`, `_`, `-`.
+- Every `inputs` entry is `ticket` or produced by a state that can run before the consumer;
+  every `produces` entry other than `changeset` is produced by exactly one state. `ticket` is never produced; `answers.md`
   is platform-managed and never declared.
 - A state declaring outcomes other than `done` produces at least one document.
 - Every state is reachable from `initial` through transitions.

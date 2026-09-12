@@ -19,9 +19,13 @@ defmodule ForgeWorker.Job.RunnerTest do
         root: context.root,
         worktree: context.worktree,
         sink: fn event -> send(test_pid, {:event, event}) end,
-        harness_opts: [executable: fake_executable(), credential: {:api_key, "secret-key"}],
+        harness_opts:
+          Keyword.get(extra, :harness_opts,
+            executable: fake_executable(),
+            credential: {:api_key, "secret-key"}
+          ),
         extra_env: [{"FAKE_SCENARIO", scenario}]
-      ] ++ Keyword.drop(extra, [:spec])
+      ] ++ Keyword.drop(extra, [:spec, :harness_opts])
 
     {:ok, pid} = Runner.start_link(opts)
     pid
@@ -82,6 +86,49 @@ defmodule ForgeWorker.Job.RunnerTest do
 
     assert File.read!(Path.join(job_dir, "fake-args.txt")) =~
              "--max-turns 40 --max-budget-usd 2.00"
+  end
+
+  test "the harness sees an allowlisted environment, a private HOME and no worker secrets",
+       context do
+    System.put_env("FORGE_TEST_LEAK", "must-not-leak")
+    on_exit(fn -> System.delete_env("FORGE_TEST_LEAK") end)
+
+    {:ok, result} = context |> run("success") |> Runner.await(5_000)
+    job_dir = Path.dirname(result.transcript_path)
+    env = File.read!(Path.join(job_dir, "fake-env-all.txt"))
+
+    refute env =~ "FORGE_TEST_LEAK"
+    assert env =~ "HOME=#{Path.join(job_dir, "home")}\n"
+    assert env =~ "FORGE_JOB=#{job_dir}\n"
+    assert env =~ "PATH="
+    assert env =~ "ANTHROPIC_API_KEY=secret-key"
+    # Secrets travel through the environment, never through argv.
+    refute File.read!(Path.join(job_dir, "fake-args.txt")) =~ "secret-key"
+  end
+
+  test "a credential given as a function is resolved at spawn time", context do
+    opts = [harness_opts: [executable: fake_executable(), credential: fn -> {:oauth, "tok"} end]]
+    {:ok, result} = context |> run("success", opts) |> Runner.await(5_000)
+    job_dir = Path.dirname(result.transcript_path)
+
+    assert File.read!(Path.join(job_dir, "fake-env.txt")) ==
+             "ANTHROPIC_API_KEY=unset\nCLAUDE_CODE_OAUTH_TOKEN=tok\n"
+  end
+
+  test "a final line without a newline is still parsed", context do
+    {:ok, result} = context |> run("noeol") |> Runner.await(5_000)
+    assert result.outcome == :converged
+    assert result.harness.subtype == "success"
+  end
+
+  test "a resumed run keeps earlier outputs and transcripts", context do
+    spec = spec()
+    {:ok, first} = context |> run("success", spec: spec) |> Runner.await(5_000)
+    {:ok, second} = context |> run("noeol", spec: spec) |> Runner.await(5_000)
+
+    assert Path.basename(first.transcript_path) == "transcript-1.jsonl"
+    assert Path.basename(second.transcript_path) == "transcript-2.jsonl"
+    assert File.exists?(first.transcript_path)
   end
 
   test "a declared outcome other than done is reported as such", context do

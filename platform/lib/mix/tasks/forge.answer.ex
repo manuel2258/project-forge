@@ -39,7 +39,7 @@ defmodule Mix.Tasks.Forge.Answer do
     job_id = question.artifact_version.author["id"]
 
     with %{status: :waiting} = job <- Jobs.get!(job_id),
-         [] <- Artifacts.open_blocking_questions(job.id),
+         [] <- Artifacts.open_blocking_questions(ticket.id, job.id),
          {:ok, _} <- Jobs.resume(job) do
       Mix.shell().info("job #{job.state} ##{job.attempt} on #{CLI.label(ticket)} will resume")
     else

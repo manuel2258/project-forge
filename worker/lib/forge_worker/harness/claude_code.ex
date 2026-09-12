@@ -16,16 +16,8 @@ defmodule ForgeWorker.Harness.ClaudeCode do
     do: %{resume: true, permission_prompting: false, budget_turns: true, budget_usd: true}
 
   @impl true
-  def finished_type, do: "finished"
-
-  @impl true
   def command(%Spec{} = spec, job_dir, opts) do
-    executable =
-      Keyword.get(
-        opts,
-        :executable,
-        Application.get_env(:forge_worker, :claude_executable, "claude")
-      )
+    executable = Keyword.get(opts, :executable, "claude")
 
     args =
       [
@@ -41,7 +33,8 @@ defmodule ForgeWorker.Harness.ClaudeCode do
         "bypassPermissions"
       ] ++ model_args(opts) ++ resume_args(opts)
 
-    {executable, args, [{"FORGE_JOB", job_dir} | credential_env(Keyword.get(opts, :credential))]}
+    credential = resolve(Keyword.get(opts, :credential))
+    {executable, args, [{"FORGE_JOB", job_dir} | credential_env(credential)]}
   end
 
   defp model_args(opts) do
@@ -58,15 +51,18 @@ defmodule ForgeWorker.Harness.ClaudeCode do
     end
   end
 
-  # Exactly one credential reaches the process; the other variable is unset so the worker's
-  # own environment never leaks into a job.
+  # Exactly one credential reaches the process, as a secret the runner forwards through the
+  # environment only; the other variable is explicitly absent.
   defp credential_env({:api_key, value}),
-    do: [{"ANTHROPIC_API_KEY", value}, {"CLAUDE_CODE_OAUTH_TOKEN", false}]
+    do: [{"ANTHROPIC_API_KEY", {:secret, value}}, {"CLAUDE_CODE_OAUTH_TOKEN", false}]
 
   defp credential_env({:oauth, value}),
-    do: [{"CLAUDE_CODE_OAUTH_TOKEN", value}, {"ANTHROPIC_API_KEY", false}]
+    do: [{"CLAUDE_CODE_OAUTH_TOKEN", {:secret, value}}, {"ANTHROPIC_API_KEY", false}]
 
   defp credential_env(nil), do: [{"ANTHROPIC_API_KEY", false}, {"CLAUDE_CODE_OAUTH_TOKEN", false}]
+
+  defp resolve(fun) when is_function(fun, 0), do: fun.()
+  defp resolve(credential), do: credential
 
   defp format_cost(cost) when is_integer(cost), do: Integer.to_string(cost)
   defp format_cost(cost) when is_float(cost), do: :erlang.float_to_binary(cost, decimals: 2)
@@ -143,7 +139,7 @@ defmodule ForgeWorker.Harness.ClaudeCode do
             tool_use_id: block["tool_use_id"],
             is_error: block["is_error"] == true,
             bytes: byte_size(content),
-            excerpt: binary_part(content, 0, min(byte_size(content), @excerpt_bytes)),
+            excerpt: excerpt(content),
             parent_tool_use_id: parent
           })
         ]
@@ -172,6 +168,22 @@ defmodule ForgeWorker.Harness.ClaudeCode do
   end
 
   defp normalise(m), do: [event("unknown", %{type: m["type"], raw: m})]
+
+  # Truncates on a character boundary so the excerpt stays valid UTF-8 for JSON.
+  defp excerpt(content) when byte_size(content) <= @excerpt_bytes, do: content
+
+  defp excerpt(content) do
+    content
+    |> String.graphemes()
+    |> Enum.reduce_while({0, []}, fn g, {size, acc} ->
+      if size + byte_size(g) > @excerpt_bytes,
+        do: {:halt, {size, acc}},
+        else: {:cont, {size + byte_size(g), [g | acc]}}
+    end)
+    |> elem(1)
+    |> Enum.reverse()
+    |> Enum.join()
+  end
 
   defp content_blocks(%{"message" => %{"content" => blocks}}) when is_list(blocks), do: blocks
 

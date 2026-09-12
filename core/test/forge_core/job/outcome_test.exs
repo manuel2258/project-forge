@@ -28,14 +28,25 @@ defmodule ForgeCore.Job.OutcomeTest do
     Document.parse!("---\noutcome: #{outcome}\n---\n# Plan\n#{extra}")
   end
 
-  test "a blocking question wins over everything else" do
+  test "a blocking question wins over the harness result, but not over a kill" do
     doc = plan("done", "```question\nkey: k\ntext: t\nblocking: true\n```\n")
 
     assert {:waiting, [%Question{key: "k"}]} =
-             Outcome.decide(
-               spec(),
-               run(%{documents: %{"plan.md" => doc}, result: nil, killed: :wall_clock})
-             )
+             Outcome.decide(spec(), run(%{documents: %{"plan.md" => doc}, result: nil}))
+
+    assert {:finished, :cancelled, nil, _} =
+             Outcome.decide(spec(), run(%{documents: %{"plan.md" => doc}, killed: :operator}))
+
+    assert {:finished, :budget_exhausted, nil, _} =
+             Outcome.decide(spec(), run(%{documents: %{"plan.md" => doc}, killed: :wall_clock}))
+  end
+
+  test "a blocking question whose key was already answered no longer blocks" do
+    doc = plan("done", "```question\nkey: k\ntext: t\nblocking: true\n```\n")
+    spec = %{spec() | answered_keys: ["k"]}
+
+    assert {:finished, :converged, "done", _} =
+             Outcome.decide(spec, run(%{documents: %{"plan.md" => doc}}))
   end
 
   test "kills are decided before the harness result" do

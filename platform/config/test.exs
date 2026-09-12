@@ -47,5 +47,4 @@ config :swoosh, :api_client, false
 config :forge, Forge.Jobs,
   data_dir: "tmp/test",
   run_jobs: false,
-  poll_ms: 100,
   harness_opts: [executable: Path.expand("../../worker/test/support/fake_claude.sh", __DIR__)]

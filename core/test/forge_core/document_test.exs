@@ -55,6 +55,23 @@ defmodule ForgeCore.DocumentTest do
     end
   end
 
+  describe "fence variants" do
+    test "trailing whitespace, indentation and a BOM are tolerated" do
+      text =
+        "\uFEFF---\noutcome: done\n---\n- item\n  ```question  \n  key: a\n  text: t\n  blocking: true\n  ```\n"
+
+      assert {:ok, %Document{outcome: "done", questions: [%Question{key: "a", blocking: true}]}} =
+               Document.parse(text)
+    end
+
+    test "CRLF line endings parse" do
+      assert {:ok, %Document{outcome: "done", questions: [%Question{key: "a"}]}} =
+               Document.parse(
+                 "---\r\noutcome: done\r\n---\r\n```question\r\nkey: a\r\ntext: t\r\nassumption: x\r\n```\r\n"
+               )
+    end
+  end
+
   describe "documents without front matter or questions" do
     test "are plain bodies" do
       assert {:ok, %Document{front_matter: %{}, outcome: nil, questions: [], body: "just text\n"}} =

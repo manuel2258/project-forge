@@ -54,14 +54,27 @@ defmodule ForgeCore.Engine do
 
   @doc """
   A transition picked by a person: from a human state, or to unstick a ticket. Any declared
-  transition out of `state` may be chosen; `max` does not bind a human decision.
+  transition out of `state` may be chosen; `max` does not bind a human decision. When more
+  than one transition leads to `to`, `outcome` picks between them.
   """
-  @spec choose(Workflow.t(), Workflow.state_name(), Workflow.state_name()) ::
-          {:ok, Transition.t()} | {:error, :no_such_transition}
-  def choose(%Workflow{} = workflow, state_name, to) do
-    case Enum.find(Workflow.transitions_from(workflow, state_name), &(&1.to == to)) do
-      nil -> {:error, :no_such_transition}
-      transition -> {:ok, transition}
+  @spec choose(
+          Workflow.t(),
+          Workflow.state_name(),
+          Workflow.state_name(),
+          Workflow.outcome() | nil
+        ) ::
+          {:ok, Transition.t()}
+          | {:error, :no_such_transition | {:ambiguous, [Workflow.outcome()]}}
+  def choose(%Workflow{} = workflow, state_name, to, outcome \\ nil) do
+    candidates =
+      workflow
+      |> Workflow.transitions_from(state_name)
+      |> Enum.filter(&(&1.to == to and (outcome == nil or Transition.outcome(&1) == outcome)))
+
+    case candidates do
+      [] -> {:error, :no_such_transition}
+      [transition] -> {:ok, transition}
+      many -> {:error, {:ambiguous, Enum.map(many, &Transition.outcome/1)}}
     end
   end
 

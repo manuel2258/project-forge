@@ -7,22 +7,25 @@ use and the worker tier are additions, not rewrites. All ids are UUIDs. Times ar
 
 **project** — `name`, `repo_path` (bare repository on the orchestrator), `default_branch`.
 
-**ticket** — `project_id`, `number` (per project, human-facing), `title`, `body`,
-`base_commit`, `branch` (`ticket/<number>`), `workflow` (parsed definition, JSON),
-`workflow_commit`, `state` (a state name from the pinned workflow), `status`
-(`active | stuck | done | cancelled`), `cost_usd` (denormalised sum over jobs).
+**ticket** — `project_id`, `number` (per project, human-facing, allocated under a lock on
+the project row), `title`, `body`, `base_commit`, `branch` (`ticket/<number>`), `workflow`
+(parsed definition, JSON), `workflow_commit`, `state` (a state name from the pinned
+workflow), `status` (`active | stuck | done | cancelled`), `cost_usd` (denormalised sum
+over jobs), `pending_transition` (set while a transition waits for approval).
 
 **job** — one execution of one job state. `ticket_id`, `state`, `attempt` (per ticket and
-state), `parent_job_id` (null in v1), `spec` (immutable, JSON: prompt path and content hash,
-input manifest as `[{artifact_id, version}]`, `env`, `commit`, budgets, permitted children,
-which is empty in v1), `status` (`pending | running | waiting | hibernated | finished`),
+state), `parent_job_id` (null in v1), `spec` (immutable, JSON: prompt text and path, inputs
+with name, version and content inlined, `env`, `commit`, budgets, permitted children, which
+is empty in v1; `answers.md` and the answered keys are added at run time, not stored), `status` (`pending | running | waiting | hibernated | finished`),
 `outcome` (`converged | did_not_converge | budget_exhausted | error | cancelled`, null until
 finished), `declared_outcome` (the workflow outcome the agent selected, null unless converged),
 `turns`, `cost_usd`, `harness_session_id` (opaque, nullable, an optimisation only),
 `worker_id` (nullable), `started_at`, `finished_at`.
 
 **artifact** — `ticket_id`, `name` (as in the workflow, e.g. `plan.md`), `kind`
-(`document | blob | presentation`). Unique per ticket and name. Holds no content.
+(`document | blob | presentation`). Unique per ticket and name. Holds no content. The
+`changeset` is a blob artifact whose versions record the branch head (`git:<sha>`) when a
+job that produces it finishes, so approval attaches to an exact commit.
 
 **artifact_version** — `artifact_id`, `version` (1, 2, 3 per artifact), `author`
 (`{job, id}` or `{user, id}`), `content` (documents: the text), `blob_uri` (blobs),
@@ -72,8 +75,13 @@ branch and the manifest. Transitions from `waiting` back to `running` start a ne
 - The input manifest references versions, so a job's basis is answerable after later
   versions exist. The job view flags inputs that have newer versions.
 - Approvals, answers and transitions reference specific versions, never "latest".
-- Every mutation writes an event in the same transaction. In production the database role the
-  platform uses has no `UPDATE` or `DELETE` on `event` and `artifact_version`.
+- Every mutation writes an event in the same transaction. `event` and `artifact_version`
+  rows are append-only, enforced by a database trigger.
+- Recording a job's result never depends on what follows it: the result is one transaction,
+  the engine's decision another; a follow-up that fails sticks the ticket with the reason.
+- A job whose ticket moved on while it ran (a person took a transition) is recorded as
+  orphaned and decides nothing. Human transitions are refused while a job for the current
+  state is live.
 - Budgets in `spec` are copied from the pinned workflow at job creation and are never read
   from anywhere else afterwards.
 

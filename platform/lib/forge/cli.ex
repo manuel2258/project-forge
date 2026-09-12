@@ -24,7 +24,10 @@ defmodule Forge.CLI do
         [number] -> {only(Projects.list(), "project", "use project#number"), number}
       end
 
-    Tickets.get_by_number!(project, String.to_integer(number))
+    case Integer.parse(number) do
+      {n, ""} when n > 0 -> Tickets.get_by_number!(project, n)
+      _ -> fail("ticket reference must be project#number, got #{inspect(ref)}")
+    end
   end
 
   @doc "The user for `--user EMAIL`, or the only user when there is exactly one."

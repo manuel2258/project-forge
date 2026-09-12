@@ -4,6 +4,9 @@ defmodule ForgeCore.Job.Spec do
   on the job row, sent to the worker, and never changed. See `docs/design/data-model.md`.
 
   Documents are inlined as `inputs[].content` so the worker needs no further round trip.
+  `answered_keys` lists question keys a person has already answered on this ticket; a
+  blocking question with one of these keys does not stop the job again. It is filled at
+  run time, not stored.
   """
 
   alias ForgeCore.Job.Spec.Input
@@ -36,7 +39,8 @@ defmodule ForgeCore.Job.Spec do
     inputs: [],
     produces: [],
     outcomes: ["done"],
-    permitted_children: []
+    permitted_children: [],
+    answered_keys: []
   ]
 
   @type t :: %__MODULE__{
@@ -54,7 +58,8 @@ defmodule ForgeCore.Job.Spec do
           inputs: [Input.t()],
           produces: [String.t()],
           outcomes: [String.t()],
-          permitted_children: [String.t()]
+          permitted_children: [String.t()],
+          answered_keys: [String.t()]
         }
 
   defmodule Input do
@@ -118,7 +123,8 @@ defmodule ForgeCore.Job.Spec do
       inputs: Enum.map(get.(:inputs) || [], &input_from_map/1),
       produces: get.(:produces) || [],
       outcomes: get.(:outcomes) || ["done"],
-      permitted_children: get.(:permitted_children) || []
+      permitted_children: get.(:permitted_children) || [],
+      answered_keys: get.(:answered_keys) || []
     }
   end
 

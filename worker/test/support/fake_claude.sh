@@ -10,7 +10,12 @@ emit() { printf '%s\n' "$1"; }
 printf 'args: %s\n' "$*" > "$FORGE_JOB/fake-args.txt"
 printf 'ANTHROPIC_API_KEY=%s\nCLAUDE_CODE_OAUTH_TOKEN=%s\n' "${ANTHROPIC_API_KEY-unset}" "${CLAUDE_CODE_OAUTH_TOKEN-unset}" > "$FORGE_JOB/fake-env.txt"
 printf '%s' "$prompt" > "$FORGE_JOB/fake-prompt.txt"
+env | sort > "$FORGE_JOB/fake-env-all.txt"
 echo "some diagnostics on stderr" >&2
+
+case "${FAKE_SCENARIO:-success}" in
+  no_start) exit 1 ;;
+esac
 
 emit '{"type":"system","subtype":"init","session_id":"sess-42","model":"fake-model","tools":["Read","Edit"]}'
 emit '{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Reading the plan."},{"type":"tool_use","id":"t1","name":"Read","input":{"path":"plan.md"}}]}}'
@@ -43,6 +48,9 @@ case "${FAKE_SCENARIO:-success}" in
   invalid_document)
     printf -- '---\noutcome: done\n' > "$doc"
     emit "$result_success" ;;
+  noeol)
+    printf -- '---\noutcome: done\n---\n# Plan\n' > "$doc"
+    printf '%s' "$result_success" ;;
   hang)
     sleep 60 ;;
 esac

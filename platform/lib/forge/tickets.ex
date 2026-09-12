@@ -17,8 +17,10 @@ defmodule Forge.Tickets do
 
   @doc """
   Admits a ticket to `project`. `attrs` needs `:title`; `:body` is optional. Reads and
-  validates `.forge/workflow.yml` at the head of the default branch, allocates the number
-  and branch, and creates the first job as pending. `actor` is `{:user, id}` or `:system`.
+  validates `.forge/workflow.yml` at the head of the default branch, then in one transaction
+  allocates the number under a lock on the project row, records the ticket and its body,
+  creates the first pending job, and last creates the branch, so a failure leaves neither a
+  row nor a branch behind. `actor` is `{:user, id}` or `:system`.
   """
   @spec admit(Project.t(), map(), Events.actor()) :: {:ok, Ticket.t()} | {:error, term()}
   def admit(%Project{} = project, attrs, actor \\ :system) do
@@ -29,49 +31,34 @@ defmodule Forge.Tickets do
          {:ok, workflow} <-
            Parser.parse(yaml, prompt_exists: &Git.exists?(repo, base, ".forge/" <> &1)),
          {:ok, yaml_map} <- YamlElixir.read_from_string(yaml) do
-      number = next_number(project)
-      branch = "ticket/#{number}"
-
-      with :ok <- Git.create_branch(repo, branch, base) do
-        insert(
-          project,
-          workflow,
-          yaml_map,
-          %{number: number, branch: branch, base: base},
-          attrs,
-          actor
-        )
-      end
+      insert(project, repo, workflow, yaml_map, base, attrs, actor)
     end
   end
 
-  defp insert(
-         project,
-         workflow,
-         yaml_map,
-         %{number: number, branch: branch, base: base},
-         attrs,
-         actor
-       ) do
+  defp insert(project, repo, workflow, yaml_map, base, attrs, actor) do
     Multi.new()
-    |> Multi.insert(
-      :ticket,
+    |> Multi.run(:number, fn repo_, _ ->
+      # Serialises admissions per project so two never take the same number.
+      repo_.one!(from p in Project, where: p.id == ^project.id, lock: "FOR UPDATE")
+      {:ok, next_number(repo_, project)}
+    end)
+    |> Multi.insert(:ticket, fn %{number: number} ->
       Ticket.admit_changeset(%Ticket{}, %{
         project_id: project.id,
         number: number,
         title: Map.fetch!(attrs, :title),
         body: Map.get(attrs, :body, ""),
         base_commit: base,
-        branch: branch,
+        branch: "ticket/#{number}",
         workflow: yaml_map,
         workflow_commit: base,
         state: workflow.initial
       })
-    )
+    end)
     |> Events.log(:admitted, "ticket.admitted", actor, fn %{ticket: ticket} ->
       %{
         ticket_id: ticket.id,
-        payload: %{"number" => number, "state" => workflow.initial, "base_commit" => base}
+        payload: %{"number" => ticket.number, "state" => workflow.initial, "base_commit" => base}
       }
     end)
     |> Multi.merge(fn %{ticket: ticket} ->
@@ -79,11 +66,18 @@ defmodule Forge.Tickets do
       name = Workflow.ticket_artifact()
 
       Artifacts.put_version(Multi.new(), :ticket_doc, ticket.id, name, :document, actor, %{
-        content: body
+        content: body,
+        parse: false
       })
     end)
     |> Multi.merge(fn %{ticket: ticket} ->
       Jobs.put_create(Multi.new(), :first_job, ticket, workflow, workflow.initial)
+    end)
+    |> Multi.run(:branch, fn _repo, %{ticket: ticket} ->
+      case Git.create_branch(repo, ticket.branch, base) do
+        :ok -> {:ok, ticket.branch}
+        {:error, reason} -> {:error, reason}
+      end
     end)
     |> Repo.transaction()
     |> case do
@@ -99,8 +93,8 @@ defmodule Forge.Tickets do
     end
   end
 
-  defp next_number(%Project{id: project_id}) do
-    (Repo.one(from t in Ticket, where: t.project_id == ^project_id, select: max(t.number)) || 0) +
+  defp next_number(repo, %Project{id: project_id}) do
+    (repo.one(from t in Ticket, where: t.project_id == ^project_id, select: max(t.number)) || 0) +
       1
   end
 

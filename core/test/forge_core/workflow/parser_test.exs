@@ -286,6 +286,32 @@ defmodule ForgeCore.Workflow.ParserTest do
       assert {:ok, _} = Parser.from_map(map)
     end
 
+    test "inputs must come from a state that runs before the consumer", %{map: map} do
+      map = put_in(map, ["states", "refined", "inputs"], ["ticket", "plan.md"])
+
+      assert [
+               {"states.refined.inputs[1]",
+                "\"plan.md\" is not produced by any state that runs before this one"}
+             ] = messages(map)
+    end
+
+    test "state and artifact names are single path segments", %{map: map} do
+      map =
+        map
+        |> put_in(["states", "verified", "produces"], ["../report.md"])
+        |> put_in(["states", "review_ready"], %{})
+        |> Map.update!("states", &Map.put(&1, "bad/name", %{}))
+        |> Map.update!("transitions", &(&1 ++ [%{"from" => "review_ready", "to" => "bad/name"}]))
+
+      assert {"states.bad/name",
+              "state name must be a single path segment: letters, digits, . _ -"} in messages(map)
+
+      assert {"states.verified",
+              "artifact name \"../report.md\" must be a single path segment: letters, digits, . _ -"} in messages(
+               map
+             )
+    end
+
     test "every state must be reachable from initial", %{map: map} do
       map = put_in(map, ["states", "orphan"], %{})
       assert messages(map) == [{"states.orphan", "is not reachable from initial"}]

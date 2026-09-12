@@ -131,21 +131,31 @@ defmodule Forge.FlowTest do
     assert Tickets.get!(ticket.id).state == "planned"
 
     # answer, resume: the second run resumes the session and sees answers.md
-    [question] = Artifacts.open_blocking_questions(job.id)
+    [question] = Artifacts.open_blocking_questions(ticket.id, job.id)
     {:ok, _answer} = Artifacts.answer(question, user.id, %{choice: "b"})
-    assert Artifacts.open_blocking_questions(job.id) == []
+    assert Artifacts.open_blocking_questions(ticket.id, job.id) == []
     assert %{content: content} = Artifacts.latest(ticket.id, "answers.md")
     assert content =~ "A: b"
+    assert Artifacts.answered_keys(ticket.id) == ["backend"]
+
+    # a human transition is refused while the job is live
+    assert {:error, {:job_live, "planned"}} =
+             Engine.choose(Tickets.get!(ticket.id), user.id, "implemented")
+
     {:ok, job} = Jobs.resume(Jobs.get!(job.id))
     assert job.status == :pending
 
-    scenario("success", "plan.md")
+    # the resumed agent keeps its question block; the answered key no longer blocks it
+    scenario("blocking", "plan.md")
     {:ok, job} = Jobs.run(job)
     assert job.status == :finished
+    assert job.turns == 6
     job_dir = Path.join([Jobs.data_dir(), "jobs", job.id])
     assert File.read!(Path.join(job_dir, "fake-args.txt")) =~ "--resume sess-42"
     assert File.read!(Path.join(job_dir, "fake-prompt.txt")) =~ "answers.md"
+    assert File.read!(Path.join([job_dir, "inputs", "answers.md"])) =~ "A: b"
     assert Artifacts.versions(ticket.id, "plan.md") |> length() == 2
+    assert Queue.items() |> Enum.reject(&(&1.kind == :question)) |> length() == 0
 
     # planned -> implemented automatically; implemented reports plan_invalid -> back to planned
     ticket = Tickets.get!(ticket.id)
@@ -189,11 +199,118 @@ defmodule Forge.FlowTest do
     assert ticket.state == "review_ready"
     assert [%{kind: :review, detail: %{transitions: ["merged"]}}] = Queue.items()
 
-    {:ok, ticket} = Engine.choose(ticket, user.id, "merged")
+    # merging requires approval of the changeset, which the implement job recorded as a version
+    changeset = Artifacts.latest(ticket.id, "changeset")
+    assert %{blob_uri: "git:" <> head} = changeset
+    assert String.length(head) == 40
+    {:ok, ticket} = Engine.choose(ticket, user.id, "merged", comment: "ship it")
+    assert [%{decision: :approved, comment: "ship it"}] = Artifacts.approvals(changeset.id)
     assert ticket.status == :done
     assert Queue.items() == []
     assert "ticket.done" in event_types(ticket)
     assert Jobs.pending() == []
+  end
+
+  test "rejecting keeps the ticket pending; a stale job's result is orphaned", %{
+    project: project,
+    user: user
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    scenario("success", "refinement.md")
+    {:ok, _} = Jobs.run(only_pending(ticket))
+    ticket = Tickets.get!(ticket.id)
+
+    {:ok, rejected} = Engine.decide(ticket, user.id, :rejected, "not yet")
+    assert rejected.state == "refined"
+    assert rejected.pending_transition["to"] == "planned"
+
+    assert [%{decision: :rejected}] =
+             Artifacts.approvals(Artifacts.latest(ticket.id, "refinement.md").id)
+
+    # the operator edits and approves the new version
+    {:ok, v2} =
+      Artifacts.record_version(ticket.id, "refinement.md", :document, {:user, user.id}, %{
+        content: "---\noutcome: done\n---\nBetter.\n"
+      })
+
+    {:ok, ticket} = Engine.decide(rejected, user.id, :approved, nil)
+    assert ticket.state == "planned"
+    assert [%{decision: :approved}] = Artifacts.approvals(v2.id)
+
+    # a job whose ticket moved on decides nothing
+    planned = only_pending(ticket)
+
+    {:ok, moved} =
+      Repo.update(
+        Forge.Tickets.Ticket.progress_changeset(ticket, %{
+          state: "verified",
+          status: :active,
+          cost_usd: ticket.cost_usd
+        })
+      )
+
+    scenario("success", "plan.md")
+    {:ok, _} = Jobs.run(planned)
+    assert Tickets.get!(moved.id).state == "verified"
+    assert "job.orphaned" in event_types(ticket)
+  end
+
+  test "a resume that never reaches the harness is re-queued as a fresh run", %{
+    project: project,
+    user: user
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    job = only_pending(ticket)
+
+    {:ok, job} =
+      Repo.update(
+        Job.progress_changeset(job, %{status: :pending, harness_session_id: "stale-session"})
+      )
+
+    scenario("no_start", "refinement.md")
+    {:ok, job} = Jobs.run(job)
+    assert job.status == :pending
+    assert job.harness_session_id == nil
+    assert "job.resume_failed" in event_types(ticket)
+
+    scenario("success", "refinement.md")
+    {:ok, job} = Jobs.run(job)
+    assert job.outcome == :converged
+  end
+
+  test "the scheduler starts pending jobs and survives a dead runner", %{
+    project: project,
+    user: user
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    scenario("success", "refinement.md")
+    start_supervised!(Forge.Jobs.Scheduler)
+
+    assert Forge.Jobs.Scheduler.tick() == 1
+    wait_until(fn -> Jobs.get!(only_job(ticket).id).status == :finished end)
+    assert Tickets.get!(ticket.id).pending_transition["to"] == "planned"
+
+    # a runner that dies leaves no job running: the scheduler fails it and the engine decides
+    {:ok, ticket2} = Tickets.admit(project, %{title: "y"}, {:user, user.id})
+    job2 = only_pending(ticket2)
+    scenario("hang", "refinement.md")
+    Forge.Jobs.Scheduler.tick()
+    wait_until(fn -> Jobs.get!(job2.id).status == :running end)
+    [{_, runner, _, _}] = DynamicSupervisor.which_children(ForgeWorker.Job.Supervisor)
+    Process.exit(runner, :kill)
+    wait_until(fn -> Jobs.get!(job2.id).status == :finished end)
+    assert Jobs.get!(job2.id).outcome == :error
+    assert Tickets.get!(ticket2.id).status == :stuck
+  end
+
+  defp only_job(ticket), do: hd(Jobs.for_ticket(ticket.id))
+
+  defp wait_until(fun, attempts \\ 100) do
+    cond do
+      fun.() -> :ok
+      attempts == 0 -> flunk("condition not met in time")
+      true -> Process.sleep(50) && wait_until(fun, attempts - 1)
+    end
   end
 
   test "recover/0 re-queues jobs a dead node left running", %{project: project, user: user} do

@@ -1,7 +1,8 @@
 defmodule ForgeCore.Job.Outcome do
   @moduledoc """
-  Decides how a job ended, in the order `docs/design/claude-code-events.md` fixes. Pure:
-  the worker collects what happened and asks; the platform records the answer.
+  Decides how a job ended, in the order `docs/design/claude-code-events.md` fixes: a kill
+  by the platform first, then open blocking questions, then the harness result, then the
+  outputs. Pure: the worker collects what happened and asks; the platform records the answer.
   """
 
   alias ForgeCore.Document
@@ -36,23 +37,29 @@ defmodule ForgeCore.Job.Outcome do
           | {:finished, outcome(), String.t() | nil, String.t()}
 
   @spec decide(Spec.t(), run()) :: decision()
-  def decide(%Spec{} = spec, run) do
-    case blocking_questions(run) do
-      [] -> {:finished, finished(spec, run)}
-      questions -> {:waiting, questions}
-    end
-    |> flatten()
+  def decide(%Spec{} = spec, %{killed: killed} = run) when killed != nil do
+    {outcome, declared, reason} = finished(spec, run)
+    {:finished, outcome, declared, reason}
   end
 
-  defp flatten({:finished, {outcome, declared, reason}}),
-    do: {:finished, outcome, declared, reason}
+  def decide(%Spec{} = spec, run) do
+    case blocking_questions(spec, run) do
+      [] ->
+        {outcome, declared, reason} = finished(spec, run)
+        {:finished, outcome, declared, reason}
 
-  defp flatten(other), do: other
+      questions ->
+        {:waiting, questions}
+    end
+  end
 
-  defp blocking_questions(%{documents: documents}) do
+  # Blocking questions whose key a person already answered are not open: the agent may keep
+  # the block in the document after resuming.
+  defp blocking_questions(%Spec{answered_keys: answered}, %{documents: documents}) do
     documents
     |> Enum.sort()
     |> Enum.flat_map(fn {_name, document} -> Document.blocking_questions(document) end)
+    |> Enum.reject(&(&1.key in answered))
   end
 
   defp finished(_spec, %{killed: :operator}), do: {:cancelled, nil, "cancelled by the operator"}
@@ -86,9 +93,9 @@ defmodule ForgeCore.Job.Outcome do
 
   # Exit status 2 is documented as the cost ceiling (or an authentication failure before the
   # first turn, which yields no result message and is caught earlier).
-  defp budget_stop?(%{subtype: subtype}, exit_status) do
+  defp budget_stop?(%{subtype: subtype, is_error: is_error}, exit_status) do
     subtype == "error_max_turns" or String.starts_with?(subtype || "", "error_max_budget") or
-      exit_status == 2
+      (exit_status == 2 and is_error)
   end
 
   defp declared(%Spec{} = spec, documents) do

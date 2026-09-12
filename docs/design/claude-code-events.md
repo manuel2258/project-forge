@@ -28,10 +28,19 @@ result field are therefore unused in v1; the driver declares `permission_prompti
 Not used: `--bare` (it skips OAuth credentials, which the credential comparison needs),
 `--no-session-persistence` (resume is an optimisation we want to keep available).
 
-## Credentials
+## Environment and credentials
 
-The worker manager injects exactly one of `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`
-into the job's environment and nothing else from its own. Documented precedence puts
+The harness process gets a clean environment built from an allowlist of the worker's own
+variables (PATH, locale, proxies, Nix settings), a private HOME inside the job directory,
+`FORGE_JOB`, and exactly one of `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`. Secrets
+are forwarded through the environment, never placed on a command line, and are resolved by
+the driver at spawn time so they never sit in process state or crash reports.
+
+In milestone 1 the harness still runs as the same Unix user as the platform, in a linked
+worktree of the bare repository. That is not a sandbox: an agent could reach the repository
+or the data directory through the filesystem. The worker tier with a Unix user per job and
+its own machine is what closes this; until then the operator runs their own agents on their
+own machine. Documented precedence puts
 `ANTHROPIC_API_KEY` above the OAuth token, so both are never set. Which one is a per-project
 setting; the credential comparison in milestone 1 runs the same tickets under each. In v1 the
 value is the operator's; short-lived scoped credentials per job come with the worker tier.
@@ -72,8 +81,9 @@ All are `job.harness.*` in the event log, with `job_id`, `ticket_id`, `actor = {
 `notice`, `unknown`, `malformed`, `finished` (subtype, is_error, num_turns, duration_ms,
 total_cost_usd, usage, result, exit_status).
 
-The full raw stdout is also written as a blob artifact `transcript.jsonl` on the job. It is
-never rendered live; it exists for debugging after the fact.
+The full raw stdout of each run is written to `transcript-<run>.jsonl` in the job directory
+and recorded as a blob version with its content hash. It is never rendered live; it exists
+for debugging after the fact.
 
 ## Accounting
 
@@ -86,15 +96,15 @@ after a grace period, emitting `finished` with outcome `cancelled` or `budget_ex
 
 ## Outcome mapping
 
-Before any outcome: if a collected document holds an open blocking question, the job becomes
-`waiting` and nothing below applies until it resumes and ends again.
-
 Decided in this order, first match wins:
 
 1. Process killed by the platform: `cancelled` (operator) or `budget_exhausted` (wall clock).
+   A harness that had already produced its result before the signal is not relabelled.
+1. A collected document holds an open blocking question (one whose key was not answered):
+   the job becomes `waiting`, and nothing below applies until it resumes and ends again.
 2. No `result` message before exit: `error`.
-3. `result.subtype == error_max_turns`, or exit status 2 (documented as the cost ceiling
-   or authentication failure) with a max-budget stop: `budget_exhausted`.
+3. `result.subtype == error_max_turns`, a subtype starting `error_max_budget`, or exit
+   status 2 with an error result (documented as the cost ceiling): `budget_exhausted`.
 4. Any other non-success `result`, or `is_error`: `error`.
 5. Success, but a declared artifact in `produces` is missing or has no parseable front
    matter: `error`.
@@ -109,8 +119,8 @@ Decided in this order, first match wins:
 the driver first tries `claude -p --resume <session_id>` with a continuation prompt naming the
 pinned manifest and the branch state. Documented caveat: session lookup is per project
 directory, so the worktree path must be the same one the session started in; on a different
-worker it will not be found. Any failure to resume, including a non-zero exit before
-`system/init`, falls back to a fresh invocation with the same spec. Resume is never required
+worker it will not be found. A resume that exits without ever emitting `system/init` is
+re-queued as a fresh invocation with the same spec and no session. Resume is never required
 for correctness, and no outcome depends on it.
 
 ## Declared capabilities

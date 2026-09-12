@@ -13,14 +13,16 @@ defmodule Forge.Artifacts do
 
   @answers ForgeCore.Workflow.answers_artifact()
 
-  @type author :: {:job, String.t()} | {:user, String.t()} | :system
+  @type author :: Events.actor()
 
   # -- writing versions ---------------------------------------------------------------------
 
   @doc """
   Adds the steps that record a new version of `name` on the ticket to `multi`, under keys
   `{key, :artifact}`, `{key, :version}`, `{key, :questions}` and `{key, :event}`.
-  Documents must parse; their questions are extracted and stored.
+  Documents must parse and their questions are extracted, unless `attrs.parse` is false
+  (the ticket body and `answers.md` are prose the platform never reads back as structure).
+  `attrs.content_hash` overrides the computed hash, for blobs whose content lives elsewhere.
   """
   @spec put_version(
           Multi.t(),
@@ -37,7 +39,9 @@ defmodule Forge.Artifacts do
     |> Multi.run({key, :artifact}, fn repo, _ ->
       get_or_create_artifact(repo, ticket_id, name, kind)
     end)
-    |> Multi.run({key, :parsed}, fn _repo, _ -> parse_if_document(kind, attrs) end)
+    |> Multi.run({key, :parsed}, fn _repo, _ ->
+      if Map.get(attrs, :parse, true), do: parse_if_document(kind, attrs), else: {:ok, nil}
+    end)
     |> Multi.run({key, :version}, fn repo, changes ->
       artifact = changes[{key, :artifact}]
       document = changes[{key, :parsed}]
@@ -49,8 +53,8 @@ defmodule Forge.Artifacts do
         |> Map.merge(%{
           artifact_id: artifact.id,
           version: next,
-          author: encode_author(author),
-          content_hash: hash(attrs),
+          author: Events.encode_actor(author),
+          content_hash: Map.get(attrs, :content_hash) || hash(attrs),
           meta: (document && document.front_matter) || Map.get(attrs, :meta, %{})
         })
 
@@ -64,7 +68,7 @@ defmodule Forge.Artifacts do
         document -> insert_questions(repo, version.id, document.questions)
       end
     end)
-    |> Events.log({key, :event}, "artifact.version_written", author_actor(author), fn changes ->
+    |> Events.log({key, :event}, "artifact.version_written", author, fn changes ->
       version = changes[{key, :version}]
 
       %{
@@ -167,30 +171,65 @@ defmodule Forge.Artifacts do
 
   # -- questions and answers ----------------------------------------------------------------
 
-  @doc "Blocking questions written by `job_id` that no one has answered."
-  @spec open_blocking_questions(String.t()) :: [Question.t()]
-  def open_blocking_questions(job_id) do
-    Repo.all(
-      from q in Question,
-        join: v in assoc(q, :artifact_version),
-        left_join: ans in assoc(q, :answers),
-        where: q.blocking and fragment("?->>'id' = ?", v.author, ^job_id) and is_nil(ans.id),
-        order_by: q.inserted_at
-    )
-  end
-
-  @doc "Every unanswered question on a ticket, blocking first."
+  @doc """
+  Unanswered questions on a ticket, blocking first. A question is identified by its
+  artifact and key: it counts on the latest version of the artifact only, and it is answered
+  once any version of that artifact received an answer for the key. An agent that keeps a
+  question block after resuming therefore does not re-ask it.
+  """
   @spec open_questions(String.t()) :: [Question.t()]
   def open_questions(ticket_id) do
+    answered = answered_by_artifact(ticket_id)
+
     Repo.all(
       from q in Question,
-        join: v in assoc(q, :artifact_version),
-        join: a in assoc(v, :artifact),
-        left_join: ans in assoc(q, :answers),
-        where: a.ticket_id == ^ticket_id and is_nil(ans.id),
+        where: q.artifact_version_id in subquery(latest_version_ids(ticket_id)),
         order_by: [desc: q.blocking, asc: q.inserted_at],
         preload: [artifact_version: :artifact]
     )
+    |> Enum.reject(fn q ->
+      MapSet.member?(Map.get(answered, q.artifact_version.artifact_id, MapSet.new()), q.key)
+    end)
+  end
+
+  @doc "Open blocking questions written by `job_id` on the ticket."
+  @spec open_blocking_questions(String.t(), String.t()) :: [Question.t()]
+  def open_blocking_questions(ticket_id, job_id) do
+    ticket_id
+    |> open_questions()
+    |> Enum.filter(&(&1.blocking and &1.artifact_version.author["id"] == job_id))
+  end
+
+  @doc "Keys answered anywhere on the ticket, for the worker to treat as no longer blocking."
+  @spec answered_keys(String.t()) :: [String.t()]
+  def answered_keys(ticket_id) do
+    ticket_id
+    |> answered_by_artifact()
+    |> Map.values()
+    |> Enum.flat_map(&MapSet.to_list/1)
+    |> Enum.uniq()
+  end
+
+  defp answered_by_artifact(ticket_id) do
+    from(ans in Answer,
+      join: q in assoc(ans, :question),
+      join: v in assoc(q, :artifact_version),
+      join: a in assoc(v, :artifact),
+      where: a.ticket_id == ^ticket_id,
+      select: {v.artifact_id, q.key}
+    )
+    |> Repo.all()
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+    |> Map.new(fn {artifact_id, keys} -> {artifact_id, MapSet.new(keys)} end)
+  end
+
+  defp latest_version_ids(ticket_id) do
+    from v in Version,
+      join: a in assoc(v, :artifact),
+      where: a.ticket_id == ^ticket_id,
+      distinct: v.artifact_id,
+      order_by: [asc: v.artifact_id, desc: v.version],
+      select: v.id
   end
 
   @spec get_question!(String.t()) :: Question.t()
@@ -216,7 +255,10 @@ defmodule Forge.Artifacts do
     content = render_answers(ticket_id, [{question, choice, text}])
 
     Multi.new()
-    |> put_version(:answers, ticket_id, @answers, :document, {:user, user_id}, %{content: content})
+    |> put_version(:answers, ticket_id, @answers, :document, {:user, user_id}, %{
+      content: content,
+      parse: false
+    })
     |> Multi.insert(:answer, fn changes ->
       Answer.changeset(%Answer{}, %{
         question_id: question.id,
@@ -264,7 +306,19 @@ defmodule Forge.Artifacts do
         "## #{question.key}\n\nQ: #{question.text}\n\nA: #{answer}\n"
       end)
 
-    "---\noutcome: done\n---\n# Answers\n\n" <> entries
+    "# Answers\n\nDecisions a person made on this ticket, oldest first.\n\n" <> entries
+  end
+
+  @doc """
+  Records the branch head as a version of the `changeset` artifact, so approvals can attach
+  to the exact commit that was reviewed.
+  """
+  @spec put_changeset(Multi.t(), term(), String.t(), author(), String.t()) :: Multi.t()
+  def put_changeset(multi, key, ticket_id, author, head_sha) do
+    put_version(multi, key, ticket_id, ForgeCore.Workflow.changeset_artifact(), :blob, author, %{
+      blob_uri: "git:" <> head_sha,
+      content_hash: "git:" <> head_sha
+    })
   end
 
   # -- approvals ------------------------------------------------------------------------------
@@ -303,12 +357,6 @@ defmodule Forge.Artifacts do
       )
 
   # -- helpers --------------------------------------------------------------------------------
-
-  defp encode_author({:job, id}), do: %{"kind" => "job", "id" => id}
-  defp encode_author({:user, id}), do: %{"kind" => "user", "id" => id}
-  defp encode_author(:system), do: %{"kind" => "system", "id" => nil}
-
-  defp author_actor(author), do: author
 
   defp job_id({:job, id}), do: id
   defp job_id(_), do: nil

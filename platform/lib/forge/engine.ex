@@ -15,9 +15,42 @@ defmodule Forge.Engine do
   alias ForgeCore.Workflow
   alias ForgeCore.Workflow.{State, Transition}
 
-  @doc "Adds what follows a finished job to `multi`: a transition, a pending approval, or stuck."
+  @doc "Runs `put_after_job/4` in its own transaction."
+  @spec after_job(Ticket.t(), Job.t(), String.t()) :: {:ok, Ticket.t()} | {:error, term()}
+  def after_job(%Ticket{} = ticket, %Job{} = job, outcome) do
+    Multi.new()
+    |> put_after_job(ticket, job, outcome)
+    |> Repo.transaction()
+    |> case do
+      {:ok, changes} -> {:ok, Map.get(changes, :ticket, ticket)}
+      {:error, step, reason, _} -> {:error, {step, reason}}
+    end
+  end
+
+  @doc "Sticks a ticket with a reason, in its own transaction."
+  @spec stick(Ticket.t(), String.t()) :: {:ok, Ticket.t()} | {:error, term()}
+  def stick(%Ticket{} = ticket, reason) do
+    Multi.new()
+    |> put_stuck(ticket, reason)
+    |> Repo.transaction()
+    |> case do
+      {:ok, %{ticket: ticket}} -> {:ok, ticket}
+      {:error, step, reason, _} -> {:error, {step, reason}}
+    end
+  end
+
+  @doc """
+  Adds what follows a finished job to `multi`: a transition, a pending approval, or stuck.
+  A job whose ticket has moved on since it started (a person took a transition meanwhile)
+  is recorded as orphaned and decides nothing.
+  """
   @spec put_after_job(Multi.t(), Ticket.t(), Job.t(), String.t()) :: Multi.t()
-  def put_after_job(multi, %Ticket{} = ticket, %Job{} = job, outcome) do
+  def put_after_job(
+        multi,
+        %Ticket{state: state, status: :active} = ticket,
+        %Job{state: state} = job,
+        outcome
+      ) do
     workflow = Tickets.workflow(ticket)
 
     if Core.within_ticket_budget?(workflow, Decimal.to_float(ticket.cost_usd)) do
@@ -37,6 +70,14 @@ defmodule Forge.Engine do
     else
       put_stuck(multi, ticket, "ticket cost cap reached")
     end
+  end
+
+  def put_after_job(multi, %Ticket{} = ticket, %Job{} = job, outcome) do
+    Events.log(multi, :orphan_event, "job.orphaned", :system, %{
+      ticket_id: ticket.id,
+      job_id: job.id,
+      payload: %{"job_state" => job.state, "ticket_state" => ticket.state, "outcome" => outcome}
+    })
   end
 
   @doc "Adds taking `transition` to `multi`: ticket state, event, next job or done."
@@ -147,7 +188,7 @@ defmodule Forge.Engine do
   @doc """
   Decides the ticket's pending transition. Approving records an approval on the latest
   version of each listed artifact and takes the transition; rejecting records rejections and
-  leaves the ticket where it is.
+  leaves the ticket where it is, pending, for an edit or a manual transition.
   """
   @spec decide(Ticket.t(), String.t(), :approved | :rejected, String.t() | nil) ::
           {:ok, Ticket.t()} | {:error, term()}
@@ -156,11 +197,40 @@ defmodule Forge.Engine do
 
   def decide(%Ticket{pending_transition: pending} = ticket, user_id, decision, comment) do
     workflow = Tickets.workflow(ticket)
-    {:ok, transition} = Core.choose(workflow, pending["from"], pending["to"])
-    transition_map = %{"from" => pending["from"], "to" => pending["to"]}
+
+    with {:ok, transition} <-
+           Core.choose(workflow, pending["from"], pending["to"], pending["outcome"]) do
+      take(ticket, workflow, transition, pending["outcome"], user_id, decision, comment)
+    end
+  end
+
+  @doc """
+  A person takes a declared transition out of the current state: from a human state, or to
+  unstick a ticket. Refused while a job for the current state is pending, running or
+  waiting. A transition that requires approval records the approvals as part of the choice.
+  Options: `:outcome` picks between parallel edges, `:comment` is stored with approvals.
+  """
+  @spec choose(Ticket.t(), String.t(), String.t(), keyword()) ::
+          {:ok, Ticket.t()} | {:error, term()}
+  def choose(%Ticket{} = ticket, user_id, to, opts \\ []) do
+    workflow = Tickets.workflow(ticket)
+
+    with :ok <- no_live_job(ticket),
+         {:ok, transition} <- Core.choose(workflow, ticket.state, to, Keyword.get(opts, :outcome)) do
+      take(ticket, workflow, transition, nil, user_id, :approved, Keyword.get(opts, :comment))
+    end
+  end
+
+  defp no_live_job(%Ticket{id: id, state: state}) do
+    if Jobs.live?(id, state), do: {:error, {:job_live, state}}, else: :ok
+  end
+
+  # Records approvals (or rejections) for the transition's artifacts, then takes it if approved.
+  defp take(ticket, workflow, %Transition{} = transition, outcome, user_id, decision, comment) do
+    transition_map = %{"from" => transition.from, "to" => transition.to}
 
     multi =
-      Enum.reduce(pending["approve"], Multi.new(), fn name, multi ->
+      Enum.reduce(transition.approve, Multi.new(), fn name, multi ->
         case Artifacts.latest(ticket.id, name) do
           nil ->
             Multi.error(multi, {:approval, name}, {:no_version, name})
@@ -177,22 +247,21 @@ defmodule Forge.Engine do
             )
         end
       end)
-      |> Events.log(:decision_event, "approval.#{decision}", {:user, user_id}, %{
-        ticket_id: ticket.id,
-        payload: Map.put(transition_map, "comment", comment)
-      })
+
+    multi =
+      if transition.approve == [] do
+        multi
+      else
+        Events.log(multi, :decision_event, "approval.#{decision}", {:user, user_id}, %{
+          ticket_id: ticket.id,
+          payload: Map.put(transition_map, "comment", comment)
+        })
+      end
 
     multi =
       case decision do
         :approved ->
-          put_transition(
-            multi,
-            ticket,
-            workflow,
-            transition,
-            pending["outcome"],
-            {:user, user_id}
-          )
+          put_transition(multi, ticket, workflow, transition, outcome, {:user, user_id})
 
         :rejected ->
           multi
@@ -203,22 +272,6 @@ defmodule Forge.Engine do
     |> case do
       {:ok, changes} -> {:ok, Map.get(changes, :ticket, ticket)}
       {:error, _step, reason, _} -> {:error, reason}
-    end
-  end
-
-  @doc "A person takes any declared transition out of the current state; unsticks the ticket."
-  @spec choose(Ticket.t(), String.t(), String.t()) :: {:ok, Ticket.t()} | {:error, term()}
-  def choose(%Ticket{} = ticket, user_id, to) do
-    workflow = Tickets.workflow(ticket)
-
-    with {:ok, transition} <- Core.choose(workflow, ticket.state, to) do
-      Multi.new()
-      |> put_transition(ticket, workflow, transition, nil, {:user, user_id})
-      |> Repo.transaction()
-      |> case do
-        {:ok, %{ticket: ticket}} -> {:ok, ticket}
-        {:error, _step, reason, _} -> {:error, reason}
-      end
     end
   end
 end

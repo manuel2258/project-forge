@@ -41,7 +41,7 @@ defmodule ForgeCore.Prompt do
     - Ticket #{spec.ticket.number}: #{spec.ticket.title}
     - State: `#{spec.state}` (attempt #{spec.attempt})
     - Job directory: `#{job_dir}`
-    - Branch: `#{spec.branch}` at commit `#{spec.commit}`
+    - Branch: `#{spec.branch}` (workflow pinned at commit `#{spec.commit}`)
 
     ## Inputs (read-only)
 
@@ -91,7 +91,4 @@ defmodule ForgeCore.Prompt do
     listed = Enum.map_join(outcomes, ", ", &"`#{&1}`")
     "#{listed}, or `did_not_converge` if the work could not be completed."
   end
-
-  @doc false
-  def engine_outcomes, do: Workflow.engine_outcomes()
 end

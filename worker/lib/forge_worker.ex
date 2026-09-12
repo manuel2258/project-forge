@@ -1,18 +1,3 @@
 defmodule ForgeWorker do
-  @moduledoc """
-  Documentation for `ForgeWorker`.
-  """
-
-  @doc """
-  Hello world.
-
-  ## Examples
-
-      iex> ForgeWorker.hello()
-      :world
-
-  """
-  def hello do
-    :world
-  end
+  @moduledoc "The worker-side agent manager: runs jobs, streams their events, collects outputs."
 end

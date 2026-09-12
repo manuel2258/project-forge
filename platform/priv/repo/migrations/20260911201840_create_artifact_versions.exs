@@ -23,7 +23,7 @@ defmodule Forge.Repo.Migrations.CreateArtifactVersions do
       add :version, :integer, null: false
       add :author, :map, null: false
       add :content, :text
-      add :blob_uri, :string
+      add :blob_uri, :text
       add :content_hash, :string, null: false
       add :meta, :map, null: false, default: %{}
 

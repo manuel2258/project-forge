@@ -8,11 +8,14 @@ defmodule ForgeCore.Workflow.Validator do
   alias ForgeCore.Workflow
   alias ForgeCore.Workflow.{State, Transition}
 
-  @reserved_keys ~w(blocks use can_spawn fanout spawn_depth child_budget experiments)
+  # Artifact and state names are single path segments: they become file and directory
+  # names in the job directory and must never escape it.
+  @name_format ~r/^[A-Za-z0-9][A-Za-z0-9._-]*$/
 
   @spec validate(Workflow.t(), keyword()) :: [Error.t()]
   def validate(%Workflow{} = workflow, opts \\ []) do
     [
+      names(workflow),
       initial(workflow),
       state_shapes(workflow),
       artifact_names(workflow),
@@ -24,10 +27,35 @@ defmodule ForgeCore.Workflow.Validator do
     |> List.flatten()
   end
 
-  @doc "Keys the grammar reserves for later versions; the parser reports them as unknown."
-  def reserved_keys, do: @reserved_keys
-
   # -- rules --------------------------------------------------------------------------------
+
+  defp names(%Workflow{states: states}) do
+    Enum.flat_map(states, fn {name, state} ->
+      path = Error.join("states", name)
+
+      state_errors =
+        if valid_name?(name),
+          do: [],
+          else: [
+            Error.new(path, "state name must be a single path segment: letters, digits, . _ -")
+          ]
+
+      artifact_errors =
+        (state.inputs ++ state.produces)
+        |> Enum.reject(&(valid_name?(&1) or reserved_prefix?(&1)))
+        |> Enum.uniq()
+        |> Enum.map(
+          &Error.new(
+            path,
+            "artifact name #{inspect(&1)} must be a single path segment: letters, digits, . _ -"
+          )
+        )
+
+      state_errors ++ artifact_errors
+    end)
+  end
+
+  defp valid_name?(name), do: Regex.match?(@name_format, name) and name not in [".", ".."]
 
   defp initial(%Workflow{initial: initial} = workflow) do
     case Workflow.state(workflow, initial) do
@@ -67,9 +95,13 @@ defmodule ForgeCore.Workflow.Validator do
   defp artifact_names(%Workflow{states: states} = workflow) do
     Enum.flat_map(states, fn {name, state} ->
       path = Error.join("states", name)
+      producers_before = ancestors(workflow, name)
 
       inputs =
-        Enum.with_index(state.inputs, &input_error(workflow, Error.join(path, "inputs"), &1, &2))
+        Enum.with_index(
+          state.inputs,
+          &input_error(workflow, producers_before, Error.join(path, "inputs"), &1, &2)
+        )
 
       produces =
         Enum.with_index(
@@ -81,7 +113,9 @@ defmodule ForgeCore.Workflow.Validator do
     end)
   end
 
-  defp input_error(workflow, path, name, index) do
+  defp input_error(workflow, producers_before, path, name, index) do
+    producers = Workflow.producers(workflow, name)
+
     cond do
       reserved_prefix?(name) ->
         Error.new(
@@ -95,8 +129,14 @@ defmodule ForgeCore.Workflow.Validator do
       name == Workflow.ticket_artifact() ->
         nil
 
-      Workflow.producers(workflow, name) == [] ->
+      producers == [] ->
         Error.new(Error.join(path, index), "#{inspect(name)} is not produced by any state")
+
+      not Enum.any?(producers, &MapSet.member?(producers_before, &1)) ->
+        Error.new(
+          Error.join(path, index),
+          "#{inspect(name)} is not produced by any state that runs before this one"
+        )
 
       true ->
         nil

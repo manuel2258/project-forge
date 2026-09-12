@@ -6,7 +6,7 @@ defmodule Forge.Repo.Migrations.CreateTickets do
       add :id, :binary_id, primary_key: true
       add :project_id, references(:projects, on_delete: :restrict, type: :binary_id), null: false
       add :number, :integer, null: false
-      add :title, :string, null: false
+      add :title, :text, null: false
       add :body, :text, null: false, default: ""
       add :base_commit, :string, null: false
       add :branch, :string, null: false
@@ -15,6 +15,9 @@ defmodule Forge.Repo.Migrations.CreateTickets do
       add :state, :string, null: false
       add :status, :string, null: false
       add :cost_usd, :decimal, null: false, default: 0
+      # Set when the engine picked a transition that needs human approval:
+      # %{"from" => .., "to" => .., "outcome" => .., "approve" => [..]}. Cleared when decided.
+      add :pending_transition, :map
 
       timestamps(type: :utc_datetime)
     end

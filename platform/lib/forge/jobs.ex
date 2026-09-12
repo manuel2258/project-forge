@@ -139,8 +139,16 @@ defmodule Forge.Jobs do
     )
   end
 
-  @spec running_count() :: non_neg_integer()
-  def running_count, do: Repo.aggregate(from(j in Job, where: j.status == :running), :count)
+  @doc "Whether a job for `state` on the ticket is pending, running or waiting."
+  @spec live?(String.t(), String.t()) :: boolean()
+  def live?(ticket_id, state) do
+    Repo.exists?(
+      from j in Job,
+        where:
+          j.ticket_id == ^ticket_id and j.state == ^state and
+            j.status in [:pending, :running, :waiting]
+    )
+  end
 
   @spec spec(Job.t()) :: Spec.t()
   def spec(%Job{spec: map}), do: Spec.from_map(map)
@@ -170,8 +178,11 @@ defmodule Forge.Jobs do
     job_id = job.id
     ticket_id = ticket.id
 
+    # The credential is resolved by the driver at spawn time, so it never sits in the
+    # runner's start arguments or state, which crash reports would print.
     harness_opts =
       config(:harness_opts, [])
+      |> Keyword.put(:credential, fn -> Keyword.get(config(:harness_opts, []), :credential) end)
       |> Keyword.merge(
         if(job.harness_session_id, do: [resume_session: job.harness_session_id], else: [])
       )
@@ -190,27 +201,23 @@ defmodule Forge.Jobs do
     DynamicSupervisor.start_child(ForgeWorker.Job.Supervisor, {Runner, opts})
   end
 
-  # The stored spec never changes; answers given since are appended at run time.
+  # The stored spec never changes; answers given since are appended at run time, and the
+  # keys already answered are passed so the worker does not wait on them again.
   defp runtime_spec(%Job{} = job, %Ticket{id: ticket_id}) do
-    spec = spec(job)
+    spec = %{spec(job) | answered_keys: Artifacts.answered_keys(ticket_id)}
 
     case Artifacts.latest(ticket_id, Workflow.answers_artifact()) do
       nil ->
         spec
 
       version ->
-        %{
-          spec
-          | inputs:
-              spec.inputs ++
-                [
-                  %Input{
-                    name: Workflow.answers_artifact(),
-                    version: version.version,
-                    content: version.content
-                  }
-                ]
+        answers = %Input{
+          name: Workflow.answers_artifact(),
+          version: version.version,
+          content: version.content
         }
+
+        %{spec | inputs: spec.inputs ++ [answers]}
     end
   end
 
@@ -256,18 +263,64 @@ defmodule Forge.Jobs do
   end
 
   @doc """
-  Records a runner result: documents as artifact versions, the transcript as a blob, the
-  job's status and accounting, then hands a finished job to the engine. A waiting job keeps
-  its worktree; a finished one loses it.
+  Records a runner result, then lets the engine decide what follows. Recording (documents,
+  transcript, changeset head, status, accounting, event) is one transaction that never
+  depends on the follow-up; if creating the next job fails, the ticket is stuck with the
+  reason rather than the result being lost. A waiting job keeps its worktree; a finished
+  one loses it. A resume that never reached the harness is re-queued as a fresh run.
   """
   @spec complete(String.t(), Result.t()) :: {:ok, Job.t()} | {:error, term()}
   def complete(job_id, %Result{} = result) do
     job = get!(job_id)
     ticket = Tickets.get!(job.ticket_id)
 
+    if resume_failed?(job, result),
+      do: requeue_fresh(job, ticket, result),
+      else: record_and_follow_up(job, ticket, result)
+  end
+
+  # A resumed harness that produced no `started` event never got going (session not found,
+  # different host); the design says fall back to a fresh invocation.
+  defp resume_failed?(%Job{harness_session_id: session}, %Result{} = result) do
+    session != nil and result.status == :finished and result.killed == nil and
+      result.harness[:model] == nil and result.outcome == :error
+  end
+
+  defp requeue_fresh(job, ticket, result) do
+    Multi.new()
+    |> put_transcript(ticket, job, result)
+    |> Multi.update(
+      :job,
+      Job.progress_changeset(job, %{status: :pending, harness_session_id: nil})
+    )
+    |> Events.log(:event, "job.resume_failed", {:job, job.id}, %{
+      ticket_id: ticket.id,
+      job_id: job.id,
+      payload: result_payload(result)
+    })
+    |> Repo.transaction()
+    |> case do
+      {:ok, %{job: job}} -> {:ok, job}
+      {:error, step, reason, _} -> {:error, {step, reason}}
+    end
+  end
+
+  defp record_and_follow_up(job, ticket, result) do
+    with {:ok, %{job: job, ticket_cost: ticket}} <- record(job, ticket, result) do
+      if job.status == :finished do
+        remove_worktree(ticket, job)
+        follow_up(ticket, job, result)
+      end
+
+      {:ok, job}
+    end
+  end
+
+  defp record(job, ticket, result) do
     Multi.new()
     |> put_documents(ticket, job, result)
     |> put_transcript(ticket, job, result)
+    |> put_changeset(ticket, job, result)
     |> Multi.update(:job, Job.progress_changeset(job, progress_attrs(job, result)))
     |> Tickets.put_progress(:ticket_cost, ticket, %{
       cost_usd: Decimal.add(ticket.cost_usd, decimal(result.harness[:cost_usd]))
@@ -277,11 +330,47 @@ defmodule Forge.Jobs do
       job_id: job.id,
       payload: result_payload(result)
     })
-    |> Multi.merge(fn %{job: job, ticket_cost: ticket} -> after_run(job, ticket, result) end)
+    |> Repo.transaction()
+    |> case do
+      {:ok, changes} -> {:ok, changes}
+      {:error, step, reason, _} -> {:error, {step, reason}}
+    end
+  end
+
+  defp follow_up(ticket, job, %Result{} = result) do
+    outcome =
+      if result.outcome == :converged,
+        do: result.declared_outcome,
+        else: Atom.to_string(result.outcome)
+
+    case Engine.after_job(ticket, job, outcome) do
+      {:ok, _ticket} ->
+        :ok
+
+      {:error, reason} ->
+        Engine.stick(ticket, "could not continue after #{job.state}: #{inspect(reason)}")
+    end
+  end
+
+  @doc "Marks a job whose runner died as finished with an error, then lets the engine decide."
+  @spec fail(String.t(), term()) :: {:ok, Job.t()} | {:error, term()}
+  def fail(job_id, reason) do
+    job = get!(job_id)
+    ticket = Tickets.get!(job.ticket_id)
+    attrs = %{status: :finished, outcome: :error, finished_at: DateTime.utc_now(:second)}
+
+    Multi.new()
+    |> Multi.update(:job, Job.progress_changeset(job, attrs))
+    |> Events.log(:event, "job.finished", :system, %{
+      ticket_id: ticket.id,
+      job_id: job.id,
+      payload: %{"outcome" => "error", "reason" => inspect(reason)}
+    })
     |> Repo.transaction()
     |> case do
       {:ok, %{job: job}} ->
-        if job.status == :finished, do: remove_worktree(ticket, job)
+        remove_worktree(ticket, job)
+        follow_up(ticket, job, %Result{status: :finished, outcome: :error})
         {:ok, job}
 
       {:error, step, reason, _} ->
@@ -299,15 +388,41 @@ defmodule Forge.Jobs do
 
   defp put_transcript(multi, ticket, job, %Result{transcript_path: path}) do
     name = "transcript-#{job.state}-#{job.attempt}.jsonl"
-
-    Artifacts.put_version(multi, :transcript, ticket.id, name, :blob, {:job, job.id}, %{
-      blob_uri: "file://" <> path
-    })
+    attrs = %{blob_uri: "file://" <> path, content_hash: file_hash(path)}
+    Artifacts.put_version(multi, :transcript, ticket.id, name, :blob, {:job, job.id}, attrs)
   end
+
+  # The transcript sits in the job directory, which the harness could write to; hashing it at
+  # completion pins what was recorded.
+  defp file_hash(path) do
+    case File.read(path) do
+      {:ok, content} -> "sha256:" <> Base.encode16(:crypto.hash(:sha256, content), case: :lower)
+      {:error, _} -> "missing"
+    end
+  end
+
+  # A finished job that produces the changeset gets the branch head recorded as a version,
+  # so an approval of `changeset` attaches to an exact commit.
+  defp put_changeset(multi, ticket, job, %Result{status: :finished}) do
+    spec = spec(job)
+
+    if Workflow.changeset_artifact() in spec.produces do
+      repo_path = ticket |> Tickets.project_of() |> Projects.repo_path()
+
+      case Git.resolve(repo_path, "refs/heads/" <> ticket.branch) do
+        {:ok, head} -> Artifacts.put_changeset(multi, :changeset, ticket.id, {:job, job.id}, head)
+        {:error, reason} -> Multi.error(multi, :changeset, reason)
+      end
+    else
+      multi
+    end
+  end
+
+  defp put_changeset(multi, _ticket, _job, _result), do: multi
 
   defp progress_attrs(job, %Result{} = result) do
     base = %{
-      turns: result.harness[:turns] || job.turns,
+      turns: job.turns + (result.harness[:turns] || 0),
       cost_usd: Decimal.add(job.cost_usd, decimal(result.harness[:cost_usd])),
       harness_session_id: result.harness[:session_id] || job.harness_session_id
     }
@@ -336,17 +451,6 @@ defmodule Forge.Jobs do
       "questions" => Enum.map(result.questions, & &1.key),
       "harness" => json_safe(result.harness)
     }
-  end
-
-  defp after_run(%Job{status: :waiting}, _ticket, _result), do: Multi.new()
-
-  defp after_run(%Job{status: :finished} = job, ticket, %Result{} = result) do
-    outcome =
-      if result.outcome == :converged,
-        do: result.declared_outcome,
-        else: Atom.to_string(result.outcome)
-
-    Engine.put_after_job(Multi.new(), ticket, job, outcome)
   end
 
   @doc "Resumes a waiting job once its blocking questions are answered: back to pending."

@@ -69,6 +69,24 @@ defmodule ForgeCore.EngineTest do
 
       assert {:error, :no_such_transition} = Engine.choose(workflow, "refined", "merged")
     end
+
+    test "disambiguates parallel edges by outcome" do
+      yaml = """
+      version: 1
+      initial: a
+      states:
+        a: {prompt: p.md, produces: [a.md], outcomes: [done, again], budget: {turns: 1, cost: 1}}
+        b: {}
+      transitions:
+        - {from: a, to: b}
+        - {from: a, to: b, when: again}
+      limits: {ticket_cost: 1}
+      """
+
+      workflow = Parser.parse!(yaml)
+      assert {:error, {:ambiguous, ["done", "again"]}} = Engine.choose(workflow, "a", "b")
+      assert {:ok, %Transition{when: "again"}} = Engine.choose(workflow, "a", "b", "again")
+    end
   end
 
   test "record/2 counts firings by transition id", %{workflow: workflow} do

@@ -16,6 +16,11 @@ defmodule ForgeWorker.Job.Runner do
     * `:grace_ms` - time between SIGTERM and SIGKILL. Default 10 seconds.
     * `:nix_env` - when true and the spec has an `env`, wrap in `nix develop .#env`.
     * `:extra_env` - additional `{name, value}` pairs for the process environment.
+
+  The harness process gets a clean environment: an allowlist of the worker's own variables
+  (PATH, locale, proxies, Nix settings), a private HOME inside the job directory, what the
+  driver asks for, and `:extra_env`. Nothing else from the worker leaks in. Values the driver
+  marks `{:secret, value}` reach the process through the environment only, never argv.
   """
 
   # Temporary: a runner that exits, normally or not, is never restarted. A job that must
@@ -52,6 +57,7 @@ defmodule ForgeWorker.Job.Runner do
     harness = Keyword.get(opts, :harness, ForgeWorker.Harness.ClaudeCode)
     job_dir = Dir.prepare(Keyword.fetch!(opts, :root), spec)
     File.write!(Dir.prompt_path(job_dir), Prompt.compose(spec, job_dir))
+    transcript_path = Dir.new_transcript_path(job_dir)
 
     state = %{
       spec: spec,
@@ -61,7 +67,8 @@ defmodule ForgeWorker.Job.Runner do
       grace_ms: Keyword.get(opts, :grace_ms, @default_grace_ms),
       port: nil,
       buffer: "",
-      transcript: File.open!(Dir.transcript_path(job_dir), [:write, :binary]),
+      transcript_path: transcript_path,
+      transcript: File.open!(transcript_path, [:write, :binary]),
       finished_event: nil,
       started_event: nil,
       killed: nil,
@@ -83,22 +90,50 @@ defmodule ForgeWorker.Job.Runner do
   def handle_continue({:spawn, opts}, %{spec: spec, job_dir: job_dir, harness: harness} = state) do
     {executable, args, env} = harness.command(spec, job_dir, Keyword.get(opts, :harness_opts, []))
     {executable, args} = maybe_nix(executable, args, spec, Keyword.get(opts, :nix_env, false))
+    {plain, secrets} = split_env(env ++ Keyword.get(opts, :extra_env, []))
 
-    # sh gives us stdin from the prompt file and a separate stderr file; `exec` makes the
-    # harness the process we can signal directly.
-    wrapper = ~s(exec "$0" "$@" <"$FORGE_JOB_PROMPT" 2>"$FORGE_JOB_STDERR")
+    assignments =
+      Enum.map(inherited_env() ++ [{"HOME", Dir.home_dir(job_dir)}] ++ plain, fn {k, v} ->
+        "#{k}=#{v}"
+      end)
 
     port =
       Port.open({:spawn_executable, "/bin/sh"}, [
         :binary,
         :exit_status,
         {:line, @max_line},
-        {:args, ["-c", wrapper, executable | args]},
+        {:args,
+         ["-c", wrapper(secrets), "forge-job", Dir.prompt_path(job_dir), Dir.stderr_path(job_dir)] ++
+           assignments ++ [executable | args]},
         {:cd, Keyword.fetch!(opts, :worktree)},
-        {:env, port_env(env ++ Keyword.get(opts, :extra_env, []), job_dir)}
+        {:env, Enum.map(secrets, fn {k, v} -> {String.to_charlist(k), String.to_charlist(v)} end)}
       ])
 
     {:noreply, %{state | port: port}}
+  end
+
+  # The shell reads the prompt into stdin, sends stderr to its file, and `exec`s `env -i`
+  # with only the assignments we pass as arguments plus the secrets forwarded by name from
+  # its own environment. `exec` keeps the wrapper the process group leader we signal.
+  defp wrapper(secrets) do
+    forwarded = Enum.map_join(secrets, " ", fn {k, _} -> ~s(${#{k}+"#{k}=$#{k}"}) end)
+
+    ~s(prompt="$1"; stderr="$2"; shift 2; exec /usr/bin/env -i #{forwarded} "$@" <"$prompt" 2>"$stderr")
+  end
+
+  defp split_env(env) do
+    Enum.reduce(env, {[], []}, fn
+      {_key, false}, acc -> acc
+      {key, {:secret, value}}, {plain, secrets} -> {plain, secrets ++ [{key, value}]}
+      {key, value}, {plain, secrets} -> {plain ++ [{key, value}], secrets}
+    end)
+  end
+
+  @inherited ~w(PATH LANG LC_ALL TERM TMPDIR SSL_CERT_FILE NIX_SSL_CERT_FILE NIX_PATH NIX_REMOTE
+                NIX_CONFIG HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy)
+
+  defp inherited_env do
+    for key <- @inherited, value = System.get_env(key), do: {key, value}
   end
 
   defp maybe_nix(executable, args, %Spec{env: env}, true) when is_binary(env) do
@@ -106,18 +141,6 @@ defmodule ForgeWorker.Job.Runner do
   end
 
   defp maybe_nix(executable, args, _spec, _nix), do: {executable, args}
-
-  defp port_env(env, job_dir) do
-    extra = [
-      {"FORGE_JOB_PROMPT", Dir.prompt_path(job_dir)},
-      {"FORGE_JOB_STDERR", Dir.stderr_path(job_dir)}
-    ]
-
-    Enum.map(env ++ extra, fn
-      {key, false} -> {String.to_charlist(key), false}
-      {key, value} -> {String.to_charlist(key), String.to_charlist(value)}
-    end)
-  end
 
   # -- calls --------------------------------------------------------------------------------
 
@@ -138,14 +161,22 @@ defmodule ForgeWorker.Job.Runner do
   end
 
   def handle_info({port, {:data, {:eol, chunk}}}, %{port: port} = state) do
-    line = state.buffer <> chunk
-    IO.binwrite(state.transcript, [line, "\n"])
-    {:noreply, Enum.reduce(state.harness.parse_line(line), %{state | buffer: ""}, &emit/2)}
+    {:noreply, handle_line(state.buffer <> chunk, %{state | buffer: ""})}
   end
 
+  # Port data can still be queued behind the exit status (a final unterminated chunk is
+  # delivered on EOF), so concluding is deferred one hop to let it arrive first.
   def handle_info({port, {:exit_status, status}}, %{port: port} = state) do
+    send(self(), :conclude)
+    {:noreply, %{state | exit_status: status}}
+  end
+
+  def handle_info(:conclude, %{result: nil} = state) do
+    state =
+      if state.buffer == "", do: state, else: handle_line(state.buffer, %{state | buffer: ""})
+
     File.close(state.transcript)
-    result = conclude(%{state | exit_status: status})
+    result = conclude(state)
     Enum.each(state.waiters, &GenServer.reply(&1, {:ok, result}))
     {:stop, :normal, %{state | result: result, waiters: []}}
   end
@@ -160,13 +191,23 @@ defmodule ForgeWorker.Job.Runner do
 
   def handle_info(:force_kill, state), do: {:noreply, state}
 
-  defp emit(%{type: type, payload: payload} = event, state) do
-    state.sink.(%{type: "job.harness." <> type, payload: payload, job_id: state.spec.job_id})
+  defp handle_line(line, state) do
+    IO.binwrite(state.transcript, [line, "\n"])
+    Enum.reduce(state.harness.parse_line(line), state, &emit/2)
+  end
 
-    cond do
-      type == state.harness.finished_type() -> %{state | finished_event: event}
-      type == "started" -> %{state | started_event: event}
-      true -> state
+  # A failing sink must not take the job down with it.
+  defp emit(%{type: type, payload: payload} = event, state) do
+    try do
+      state.sink.(%{type: "job.harness." <> type, payload: payload, job_id: state.spec.job_id})
+    rescue
+      error -> Logger.warning("event sink failed for #{type}: #{Exception.message(error)}")
+    end
+
+    case type do
+      "finished" -> %{state | finished_event: event}
+      "started" -> %{state | started_event: event}
+      _ -> state
     end
   end
 
@@ -175,7 +216,9 @@ defmodule ForgeWorker.Job.Runner do
   defp kill(%{killed: nil, port: port} = state, reason) do
     signal(port, "TERM")
     Process.send_after(self(), :force_kill, state.grace_ms)
-    %{state | killed: reason}
+    # A harness that already produced its result finished on its own; the signal only
+    # hurries the exit and must not relabel the outcome.
+    if state.finished_event, do: state, else: %{state | killed: reason}
   end
 
   defp kill(state, _reason), do: state
@@ -209,7 +252,7 @@ defmodule ForgeWorker.Job.Runner do
       status: :finished,
       killed: state.killed,
       exit_status: state.exit_status,
-      transcript_path: Dir.transcript_path(job_dir),
+      transcript_path: state.transcript_path,
       stderr_path: Dir.stderr_path(job_dir),
       documents: collected.documents,
       invalid: collected.invalid,

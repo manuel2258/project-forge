@@ -23,10 +23,12 @@ defmodule ForgeCore.Document do
 
   @front_matter_delimiter "---"
   @question_info "question"
-  @fence ~r/^(`{3,})(.*)$/
+  # CommonMark: up to three spaces of indentation; the info string is trimmed.
+  @fence ~r/^ {0,3}(`{3,})(.*)$/
 
   @spec parse(String.t()) :: {:ok, t()} | {:error, [Error.t()]}
   def parse(text) when is_binary(text) do
+    text = String.replace_prefix(text, "\uFEFF", "")
     {front_matter, body, offset, front_errors} = split_front_matter(text)
     {outcome, outcome_errors} = outcome(front_matter)
     {questions, question_errors} = questions(body, offset)
@@ -126,11 +128,10 @@ defmodule ForgeCore.Document do
 
   defp scan_line({line, number}, {:outside, blocks, errors}) do
     case Regex.run(@fence, line) do
-      [_, ticks, info] when info == @question_info ->
-        {{:question, String.length(ticks), number, []}, blocks, errors}
-
-      [_, ticks, _info] ->
-        {{:code, String.length(ticks)}, blocks, errors}
+      [_, ticks, info] ->
+        if String.trim(info) == @question_info,
+          do: {{:question, String.length(ticks), number, []}, blocks, errors},
+          else: {{:code, String.length(ticks)}, blocks, errors}
 
       nil ->
         {:outside, blocks, errors}
@@ -153,7 +154,7 @@ defmodule ForgeCore.Document do
   end
 
   defp closing_fence?(line, width) do
-    case Regex.run(~r/^(`{3,})\s*$/, line) do
+    case Regex.run(~r/^ {0,3}(`{3,})\s*$/, line) do
       [_, ticks] -> String.length(ticks) >= width
       nil -> false
     end

@@ -68,13 +68,22 @@ defmodule Forge.Jobs.Scheduler do
     end
   end
 
+  # A runner that dies, or a result that cannot be recorded, must not leave the job
+  # `running` forever: it is failed, which also lets the engine decide what follows.
   defp finish(job_id, runner) do
     {:ok, result} = Runner.await(runner)
 
     case Jobs.complete(job_id, result) do
       {:ok, _job} -> :ok
-      {:error, reason} -> Logger.error("could not record job #{job_id}: #{inspect(reason)}")
+      {:error, reason} -> Jobs.fail(job_id, {:record_failed, reason})
     end
+  catch
+    kind, reason ->
+      Logger.error(
+        "job #{job_id} runner failed: #{Exception.format(kind, reason, __STACKTRACE__)}"
+      )
+
+      Jobs.fail(job_id, {kind, reason})
   end
 
   defp schedule, do: Process.send_after(self(), :tick, Jobs.config(:poll_ms, 2_000))

@@ -14,7 +14,7 @@ defmodule Forge.Repo.Migrations.CreateJobs do
       add :declared_outcome, :string
       add :turns, :integer, null: false, default: 0
       add :cost_usd, :decimal, null: false, default: 0
-      add :harness_session_id, :string
+      add :harness_session_id, :text
       add :worker_id, references(:workers, on_delete: :nilify_all, type: :binary_id)
       add :started_at, :utc_datetime
       add :finished_at, :utc_datetime

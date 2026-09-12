@@ -27,7 +27,12 @@ $FORGE_JOB/inputs/ticket.md         # reserved input: the ticket body
 $FORGE_JOB/inputs/refinement.md     # pinned version, read-only
 $FORGE_JOB/inputs/answers.md        # present after any question was answered
 $FORGE_JOB/out/plan.md              # written by the agent
+$FORGE_JOB/home                     # HOME for the harness process
 ```
+
+On a resume the inputs and spec are refreshed; `out/` and earlier transcripts are kept.
+Artifact and state names are single path segments, checked by the validator, so nothing in
+the workflow can name a path outside these directories.
 
 The path is passed as an environment variable and repeated in the manifest. `changeset` has
 no file: it is the branch.
@@ -73,6 +78,11 @@ so the queue can show the question in context. `options` is a short list; free t
 always allowed as an answer but is not offered as a tap.
 
 ## Blocking questions and `waiting`
+
+A question is identified by its artifact and `key`. It is open while the latest version of
+that artifact carries it and no version has received an answer for the key. An agent that
+keeps the block in the document after resuming therefore does not ask again; the platform
+passes the answered keys to the worker.
 
 When the collected document contains an open question with `blocking: true`, the worker does
 not evaluate outcomes. The job's status becomes `waiting`, its process ends, and the question

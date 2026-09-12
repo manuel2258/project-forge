@@ -15,9 +15,8 @@ defmodule Forge.Projects do
   def register(attrs) do
     changeset = Project.changeset(%Project{}, attrs)
 
-    with {:ok, repo_path} <-
-           Ecto.Changeset.fetch_change(changeset, :repo_path) |> ok_or(:repo_path_required),
-         :ok <- Git.init_bare(Path.expand(repo_path)) do
+    with {:ok, project} <- Ecto.Changeset.apply_action(changeset, :insert),
+         :ok <- Git.init_bare(Path.expand(project.repo_path)) do
       Multi.new()
       |> Multi.insert(:project, changeset)
       |> Events.log(:event, "project.registered", :system, fn %{project: project} ->
@@ -30,9 +29,6 @@ defmodule Forge.Projects do
       end
     end
   end
-
-  defp ok_or({:ok, value}, _reason), do: {:ok, value}
-  defp ok_or(:error, reason), do: {:error, reason}
 
   @spec get!(String.t()) :: Project.t()
   def get!(id), do: Repo.get!(Project, id)

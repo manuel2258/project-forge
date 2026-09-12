@@ -26,6 +26,12 @@ bin/check
 It runs `mix check` in every project: compile with warnings as errors, format check, Credo
 strict, tests. A commit that does not pass the gate is not made.
 
+## Landing
+
+Work lands on `main` directly, as one squashed commit per branch, fast-forward only. Use the
+`land` skill (`.claude/skills/land/SKILL.md`); it rebases, resolves conflicts, squashes and
+pushes. No pull requests, no merge commits.
+
 ## Rules
 
 - Dependency versions are pinned. Do not loosen constraints to get something to compile.

@@ -53,7 +53,7 @@ These decisions are settled. They are not to be reopened.
 - Each job runs in its own resource-limited slice: hard memory ceiling so an out-of-memory build kills one job rather than the machine, and proportional CPU sharing so agents idle on inference donate capacity to whoever is compiling.
 - Each job gets its own worktree and its own build directory, cloned from a warm seed using filesystem-level copy-on-write.
 - No attached block volume, therefore no single-writer constraint.
-- Provider-specific surface is confined to a driver. Hetzner is the primary test target; nothing in the design may assume it.
+- Provider-specific surface is confined to a driver. Hetzner is the first cloud target, after the PoC; nothing in the design may assume it. The PoC's provider is a local VM driver.
 
 ## Git
 
@@ -100,4 +100,5 @@ Settled for the PoC, reversible afterwards on evidence from it (see `poc-plan.md
 - API key billing by default; subscription authentication is a comparison experiment.
 - Job isolation by transient systemd units with memory and CPU limits, a Unix user per job, environment via `nix develop`.
 - btrfs for copy-on-write worktrees and build directories.
-- Hetzner behind the provider driver. S3-compatible object storage.
+- A local VM driver behind the provider driver for the PoC; Hetzner as the second implementation in the closing step. S3-compatible object storage, MinIO locally.
+- The PoC runs entirely on the operator's machine and is independent of any particular real project. No deployment, no cloud machine, no phone until it concludes; those are one closing step after the last milestone.

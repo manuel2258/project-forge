@@ -4,7 +4,7 @@ A self-hosted platform that moves software tickets through a per-repository, sta
 
 The concept is described in full in [docs/vision.md](docs/vision.md). Settled decisions, open questions, required measurements and prior-art findings are recorded alongside it in `docs/`. The proof-of-concept plan is [docs/poc-plan.md](docs/poc-plan.md), and the design notes it calls for are in [docs/design/](docs/design/).
 
-**Status:** milestone 1 of the [PoC plan](docs/poc-plan.md) is complete and milestone 2 is in progress. The stack is Elixir, with Phoenix and LiveView for the platform and a standalone Elixir release for the worker; further PoC-scoped choices are listed in [docs/decisions.md](docs/decisions.md). Nothing has run against a real repository yet.
+**Status:** milestone 1 of the [PoC plan](docs/poc-plan.md) is complete and milestone 2 is in progress. The stack is Elixir, with Phoenix and LiveView for the platform and a standalone Elixir release for the worker; further PoC-scoped choices are listed in [docs/decisions.md](docs/decisions.md). The PoC runs entirely on the operator's machine and independent of any particular project; deployment, cloud workers and the phone are one closing step after the last milestone.
 
 ## Layout
 

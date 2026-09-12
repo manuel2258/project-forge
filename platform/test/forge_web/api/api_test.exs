@@ -115,8 +115,10 @@ defmodule ForgeWeb.ApiTest do
       |> post(~p"/api/v1/projects/#{name}/tickets", %{title: "Nowhere to run"})
       |> json_response(422)
 
+    # The detail names the ref that could not be resolved, rather than assuming which one it
+    # was: `Git.resolve/2` is also called with a ticket's own branch.
     assert %{"error" => %{"reason" => "unknown_ref"}} = response
-    assert response["error"]["detail"] =~ "default branch"
+    assert response["error"]["detail"] =~ "main"
   end
 
   test "identifies the user and lists projects", %{conn: conn, user: user, project: project} do

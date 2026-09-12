@@ -23,11 +23,13 @@ defmodule Forge.Git do
   end
 
   @doc "Resolves a ref to a commit sha."
-  @spec resolve(repo(), String.t()) :: {:ok, sha()} | {:error, :unknown_ref}
+  @spec resolve(repo(), String.t()) :: {:ok, sha()} | {:error, {:unknown_ref, String.t()}}
   def resolve(repo, ref) do
     case run(repo, ["rev-parse", "--verify", "--quiet", ref <> "^{commit}"]) do
       {:ok, sha} -> {:ok, String.trim(sha)}
-      {:error, _} -> {:error, :unknown_ref}
+      # The ref travels with the error: this is called with a project's default branch and
+      # with a ticket's own branch, and a caller reporting the failure cannot tell which.
+      {:error, _} -> {:error, {:unknown_ref, ref}}
     end
   end
 

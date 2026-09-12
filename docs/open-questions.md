@@ -8,3 +8,55 @@ These questions are open. They have not been answered and no recommendation is r
 - Branch granularity: one branch per job, or one per ticket with rebasing on conflict.
 - Whether the build cache can be produced as a reproducible artifact rather than a maintained blob.
 - Whether to adopt an existing self-hostable sandbox platform as the worker tier rather than building it.
+
+## Probe notes
+
+Evidence gathered against a running node, for the probes `poc-plan.md` attaches to a
+milestone. Observations only: nothing here answers a question above or recommends anything.
+
+### Question representation under real use
+
+2026-09-12, first run of the loop outside the test suite: platform and embedded worker on one
+Linux host, a small Python repository in a local bare repo, a two-job workflow, Claude Code
+on a subscription credential.
+
+- **Parse failures: none.** Every document produced by a job parsed, across 18 jobs (2 on
+  Sonnet, 16 on Haiku). The only `invalid_document` and `error` outcomes seen were provoked
+  deliberately by test workflows written to provoke them. No agent produced front matter or a
+  `question` block that the parser rejected.
+- **Taps per question.** One question arose from a real ticket rather than a contrived one:
+  key `path-param`, on whether the persistence path should be an optional constructor
+  argument or hard-coded. It carried two options and a default, so the queue offered two taps
+  plus free text. Answered in one tap.
+- **The blocking path works as designed.** A job that emitted `blocking: true` went to
+  `waiting`, its OS process ended, the question entered the queue, and answering it resumed
+  the same job and attempt with `--resume` on the recorded session. An agent that kept the
+  same question block in the resumed document was not asked again, which is the behaviour
+  `job-prompt.md` specifies.
+- **Non-blocking answers reach the next job.** The answer was written as an `answers.md`
+  version and appeared in the next job's runtime manifest with the answered key, and that
+  job's output referred to it.
+- **Cases the format could not express: no evidence either way.** One real question is not a
+  sample. The format was sufficient for it, which says little; the probe needs tickets whose
+  questions are not a two-way choice with an obvious default. This is the gap to close before
+  the question above can be answered.
+
+### Message reliability
+
+- **Web push: not exercised.** VAPID keys were never configured on this node and no browser
+  subscribed, so neither a blocking-question push nor the daily digest has run. The phone
+  demo milestone 2 calls for is what would produce this evidence.
+- **The queue could be lost whole.** A ticket whose pinned workflow no longer parsed raised
+  from the queue's own read path, so one such row returned 500 for the queue page and the
+  queue API — for every ticket, not just that one. A pinned definition is validated at
+  admission and kept as it was, while the validator's rules move between milestones, so this
+  is reachable without malformed data. Fixed by degrading that ticket's detail instead of the
+  page, but worth recording as the shape of failure this probe is looking for: the operator
+  does not lose a message, they lose the whole queue.
+- **Unknown harness messages degrade rather than drop.** Claude Code emits message types the
+  event mapping does not know, `rate_limit_event` among them; these arrive as
+  `job.harness.unknown` carrying the raw line, as `claude-code-events.md` requires. Nothing
+  was dropped and nothing raised.
+- **Client mistakes were reported as platform faults.** Several ordinary errors answered 500
+  with no detail, which tells an API client nothing it can act on. Mapped to 4xx with a
+  reason and a detail.

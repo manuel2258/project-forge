@@ -22,15 +22,13 @@ defmodule ForgeWeb.Api.FallbackController do
 
   # Reaching git and not finding the ref is the client's next step, not a platform fault: the
   # repository may not be pushed yet, or `default_branch` may name a branch that is not there.
-  # The atom carries no ref, so the message says what to check rather than asserting a cause.
-  def call(conn, {:error, :unknown_ref}),
+  def call(conn, {:error, {:unknown_ref, ref}}),
     do:
       error(
         conn,
         :unprocessable_entity,
         "unknown_ref",
-        "could not resolve the branch: check that the repository is pushed and that the " <>
-          "project's default branch exists in it"
+        "#{ref} does not name a commit in the project's repository"
       )
 
   def call(conn, {:error, {:no_workflow_file, path}}),

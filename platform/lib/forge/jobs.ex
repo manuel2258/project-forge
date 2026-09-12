@@ -311,9 +311,13 @@ defmodule Forge.Jobs do
 
   defp record_and_follow_up(job, ticket, result) do
     with {:ok, %{job: job, ticket_cost: ticket}} <- record(job, ticket, result) do
-      if job.status == :finished do
-        remove_worktree(ticket, job)
-        follow_up(ticket, job, result)
+      case job.status do
+        :finished ->
+          remove_worktree(ticket, job)
+          follow_up(ticket, job, result)
+
+        :waiting ->
+          Enum.each(result.questions, &Forge.Push.blocking_question(ticket, &1))
       end
 
       Events.notify(ticket.id)

@@ -16,7 +16,7 @@ defmodule Forge.Application do
         {Task.Supervisor, name: Forge.TaskSupervisor},
         # Start to serve requests, typically the last entry
         ForgeWeb.Endpoint
-      ] ++ scheduler()
+      ] ++ scheduler() ++ digest()
 
     # See https://elixir.hexdocs.pm/Supervisor.html
     # for other strategies and supported options
@@ -26,6 +26,18 @@ defmodule Forge.Application do
 
   # Tell Phoenix to update the endpoint configuration
   # whenever the application is updated.
+  # The daily digest goes out from the node that runs jobs, and only when push is configured.
+  defp digest do
+    if Forge.Jobs.config(:run_jobs, true) and Forge.Push.enabled?() do
+      [
+        {Forge.Push.Digest,
+         hour_utc: Application.get_env(:forge, Forge.Push, [])[:digest_hour_utc] || 9}
+      ]
+    else
+      []
+    end
+  end
+
   # The scheduler runs jobs on this node; off in tests, which drive jobs explicitly.
   defp scheduler do
     if Forge.Jobs.config(:run_jobs, true), do: [Forge.Jobs.Scheduler], else: []

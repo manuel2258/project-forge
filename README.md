@@ -54,6 +54,11 @@ mix forge.transition game#1 implemented           # human states and stuck ticke
 mix forge.edit game#1 plan.md plan.md             # a human edit is a new version
 ```
 
+Push notifications for blocking questions need VAPID keys once: run
+`mix generate.vapid.keys` and set `FORGE_VAPID_PUBLIC_KEY`, `FORGE_VAPID_PRIVATE_KEY` and
+`FORGE_VAPID_SUBJECT` for the node; then tap "Notify me" on the queue page in each browser.
+Everything that is not a blocking question goes into one daily digest push.
+
 Jobs run Claude Code headless with `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` from the
 node's environment. `FORGE_DATA_DIR` holds worktrees and job directories; `FORGE_NIX_ENV=1`
 wraps each job in the project's `nix develop .#<env>`.

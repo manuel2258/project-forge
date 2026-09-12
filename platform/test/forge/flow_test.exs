@@ -122,10 +122,19 @@ defmodule Forge.FlowTest do
     planned = only_pending(ticket)
     assert Enum.map(Jobs.spec(planned).inputs, & &1.name) == ["ticket", "refinement.md"]
 
-    # planned: blocks on a question
+    # planned: blocks on a question, which is pushed to subscribed browsers
+    Forge.Push.TestSender.watch()
+
+    {:ok, _} =
+      Forge.Push.subscribe(user, %{
+        "endpoint" => "https://push.example/phone",
+        "keys" => %{"p256dh" => "p", "auth" => "a"}
+      })
+
     scenario("blocking", "plan.md")
     {:ok, job} = Jobs.run(planned)
     assert job.status == :waiting
+    assert_receive {:push, "https://push.example/phone", %{"body" => "Which backend?"}}
     assert job.harness_session_id == "sess-42"
     assert [%{kind: :question, question: %{key: "backend"}}] = Queue.items()
     assert Tickets.get!(ticket.id).state == "planned"

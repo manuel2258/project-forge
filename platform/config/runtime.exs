@@ -57,6 +57,14 @@ harness_opts =
     fn {_key, value} -> is_nil(value) end
   )
 
+# Web push needs VAPID keys; generate them once with `mix generate.vapid.keys`.
+if public = System.get_env("FORGE_VAPID_PUBLIC_KEY") do
+  config :web_push_elixir,
+    vapid_public_key: public,
+    vapid_private_key: System.fetch_env!("FORGE_VAPID_PRIVATE_KEY"),
+    vapid_subject: System.get_env("FORGE_VAPID_SUBJECT") || "mailto:operator@localhost"
+end
+
 if config_env() != :test do
   config :forge, Forge.Jobs,
     data_dir: System.get_env("FORGE_DATA_DIR") || "tmp/forge",

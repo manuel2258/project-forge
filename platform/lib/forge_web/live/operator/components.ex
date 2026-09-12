@@ -23,6 +23,7 @@ defmodule ForgeWeb.Operator.Components do
             type="button"
             class={["btn btn-sm", option == @question.default && "btn-primary"]}
             phx-click="answer"
+            phx-disable-with="Saving…"
             phx-value-ticket={@ticket_id}
             phx-value-key={@question.key}
             phx-value-choice={option}
@@ -40,7 +41,7 @@ defmodule ForgeWeb.Operator.Components do
             class="input input-sm join-item w-full"
             required
           />
-          <button type="submit" class="btn btn-sm join-item">Send</button>
+          <button type="submit" class="btn btn-sm join-item" phx-disable-with="Saving…">Send</button>
         </form>
       </div>
     </div>
@@ -102,6 +103,7 @@ defmodule ForgeWeb.Operator.Components do
             type="button"
             class="btn btn-sm"
             phx-click="transition"
+            phx-disable-with="Saving…"
             phx-value-ticket={@ticket.id}
             phx-value-to={to}
           >

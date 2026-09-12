@@ -48,3 +48,11 @@ config :forge, Forge.Jobs,
   data_dir: "tmp/test",
   run_jobs: false,
   harness_opts: [executable: Path.expand("../../worker/test/support/fake_claude.sh", __DIR__)]
+
+# Push goes to a test double; keys are set so the feature counts as enabled.
+config :forge, Forge.Push, sender: Forge.Push.TestSender
+
+config :web_push_elixir,
+  vapid_public_key: "test-public",
+  vapid_private_key: "test-private",
+  vapid_subject: "mailto:test@forge"

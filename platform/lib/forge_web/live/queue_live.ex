@@ -5,13 +5,17 @@ defmodule ForgeWeb.QueueLive do
 
   import ForgeWeb.Operator.Components
 
-  alias Forge.{Events, Projects, Queue}
+  alias Forge.{Events, Projects, Push, Queue}
   alias ForgeWeb.Operator.Actions
 
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket), do: Events.subscribe()
-    {:ok, socket |> assign(:page_title, "Queue") |> load()}
+
+    {:ok,
+     socket
+     |> assign(page_title: "Queue", push_key: Push.enabled?() && Push.public_key())
+     |> load()}
   end
 
   defp load(socket) do
@@ -24,6 +28,26 @@ defmodule ForgeWeb.QueueLive do
   def handle_info({:ticket_changed, _id}, socket), do: {:noreply, load(socket)}
 
   @impl true
+  def handle_event("push:subscribe", %{"endpoint" => _} = subscription, socket) do
+    case Push.subscribe(socket.assigns.current_scope.user, subscription) do
+      {:ok, _} ->
+        {:noreply,
+         put_flash(socket, :info, "This browser will be notified of blocking questions.")}
+
+      {:error, _} ->
+        {:noreply, put_flash(socket, :error, "Could not save the subscription.")}
+    end
+  end
+
+  def handle_event("push:unsubscribe", %{"endpoint" => endpoint}, socket) do
+    Push.unsubscribe(socket.assigns.current_scope.user, endpoint)
+    {:noreply, put_flash(socket, :info, "Notifications off for this browser.")}
+  end
+
+  def handle_event("push:error", %{"reason" => reason}, socket) do
+    {:noreply, put_flash(socket, :error, "Notifications unavailable: #{reason}")}
+  end
+
   def handle_event(event, params, socket) do
     case Actions.handle(event, params, socket) do
       {:handled, socket} -> {:noreply, load(socket)}
@@ -36,7 +60,19 @@ defmodule ForgeWeb.QueueLive do
     ~H"""
     <Layouts.app flash={@flash} current_scope={@current_scope}>
       <div class="mx-auto max-w-2xl flex flex-col gap-4">
-        <h1 class="text-xl font-semibold">Queue</h1>
+        <div class="flex items-center justify-between">
+          <h1 class="text-xl font-semibold">Queue</h1>
+          <button
+            :if={@push_key}
+            id="push-toggle"
+            type="button"
+            class="btn btn-ghost btn-sm"
+            phx-hook="PushSubscribe"
+            data-vapid-key={@push_key}
+          >
+            <.icon name="hero-bell" class="size-4" /> <span data-label>Notify me</span>
+          </button>
+        </div>
         <p :if={@items == []} class="opacity-60" id="queue-empty">Nothing needs you right now.</p>
         <div
           :for={item <- @items}

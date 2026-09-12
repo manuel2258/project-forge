@@ -58,6 +58,15 @@ flow; public registration is disabled, users are created from the command line.
 Pages subscribe to their ticket (or all tickets for the queue and board) and reload when an
 operation completes anywhere, including from the API or a running job.
 
+## Push
+
+Web Push through the browser's push service, with VAPID keys the operator generates once.
+A subscription is stored per browser endpoint for the logged-in user. Blocking questions are
+pushed as they appear, tagged per question so a re-ask replaces rather than stacks. Everything
+else waits for one digest push a day at a configured UTC hour, sent only when the queue is
+not empty. Subscriptions the push service reports gone are deleted. The service worker shows
+the notification and opens the ticket page on tap.
+
 ## Message state
 
 Every action is a LiveView event over the socket; the page shows a confirmation flash on
@@ -71,4 +80,4 @@ wrote them. Question blocks are shown as cards with their options next to the re
 
 ## Not in this slice
 
-Web push (next slice), the merge approval view (milestone 4), presentations.
+The merge approval view (milestone 4), presentations, offline compose.

@@ -83,6 +83,27 @@ defmodule ForgeWeb.OperatorLiveTest do
              Enum.filter(Jobs.for_ticket(ticket.id), &(&1.state == "planned"))
   end
 
+  test "the queue offers notifications and stores a browser subscription", %{
+    conn: conn,
+    user: user
+  } do
+    {:ok, view, html} = live(conn, ~p"/")
+    assert html =~ "Notify me"
+    assert html =~ ~s(data-vapid-key="test-public")
+
+    render_hook(view, "push:subscribe", %{
+      "endpoint" => "https://push.example/x",
+      "keys" => %{"p256dh" => "p", "auth" => "a"}
+    })
+
+    assert render(view) =~ "will be notified"
+    assert [%{user_id: user_id}] = Forge.Push.subscriptions()
+    assert user_id == user.id
+
+    render_hook(view, "push:unsubscribe", %{"endpoint" => "https://push.example/x"})
+    assert Forge.Push.subscriptions() == []
+  end
+
   test "the ticket page shows jobs, artifacts and the timeline, and renders documents", %{
     conn: conn,
     user: user,

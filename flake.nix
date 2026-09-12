@@ -128,7 +128,7 @@
 
       # `services.forge` for a NixOS host; the package defaults to this flake's release.
       nixosModules.forge = { pkgs, ... }: {
-        imports = [ (import ./nix/module.nix { forgePackage = self.packages.${pkgs.system}.forge; }) ];
+        imports = [ (import ./nix/module.nix { forgePackage = self.packages.${pkgs.stdenv.hostPlatform.system}.forge; }) ];
       };
 
       # A minimal host using the module, so `nix eval` and `nix build` can check it.

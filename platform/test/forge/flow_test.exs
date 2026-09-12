@@ -199,7 +199,12 @@ defmodule Forge.FlowTest do
     assert job.outcome == :budget_exhausted
     ticket = Tickets.get!(ticket.id)
     assert ticket.status == :stuck
-    assert [%{kind: :stuck}] = Queue.items()
+
+    # A stuck item lists the transitions out of the state, so the operator can see the
+    # choices without reading the workflow: docs/design/api-and-ui.md.
+    assert [%{kind: :stuck, detail: detail}] = Queue.items()
+    assert detail.state == "verified"
+    assert Enum.sort(detail.transitions) == ["implemented", "review_ready"]
 
     # unstick by choosing the retry edge by hand, then finish
     {:ok, ticket} = Engine.choose(ticket, user.id, "implemented")

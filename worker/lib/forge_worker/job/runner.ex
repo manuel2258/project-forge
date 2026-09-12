@@ -23,8 +23,9 @@ defmodule ForgeWorker.Job.Runner do
   marks `{:secret, value}` reach the process through the environment only, never argv.
   """
 
-  # Temporary: a runner that exits, normally or not, is never restarted. A job that must
-  # run again is a new pending row, not a supervisor restart with stale directories.
+  # Temporary: a runner that exits, normally or not, is never restarted. A job that must run
+  # again is re-queued as a pending row and started afresh by the platform, not restarted in
+  # place; `Dir.prepare/3` clears `out/` for it, so it never inherits a dead run's outputs.
   use GenServer, restart: :temporary
 
   alias ForgeCore.Job.{Outcome, Spec}
@@ -55,7 +56,11 @@ defmodule ForgeWorker.Job.Runner do
   def init(opts) do
     spec = Keyword.fetch!(opts, :spec)
     harness = Keyword.get(opts, :harness, ForgeWorker.Harness.ClaudeCode)
-    job_dir = Dir.prepare(Keyword.fetch!(opts, :root), spec)
+
+    # A session to resume is what makes this a continuation of an earlier attempt rather than
+    # a fresh one, and so what decides whether `out/` is kept or cleared.
+    resume? = Keyword.get(Keyword.get(opts, :harness_opts, []), :resume_session) != nil
+    job_dir = Dir.prepare(Keyword.fetch!(opts, :root), spec, resume: resume?)
     File.write!(Dir.prompt_path(job_dir), Prompt.compose(spec, job_dir))
     transcript_path = Dir.new_transcript_path(job_dir)
 

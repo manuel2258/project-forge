@@ -56,6 +56,34 @@ defmodule ForgeWeb.ApiTest do
            |> json_response(401)
   end
 
+  # `repo_path` is derived from the name for API-created projects and is not a field of the
+  # request, so an error must not name it.
+  test "a project rejected for its name does not report derived fields", %{conn: conn} do
+    response = conn |> post(~p"/api/v1/projects", %{}) |> json_response(422)
+
+    assert %{"error" => %{"reason" => "invalid", "detail" => detail}} = response
+    assert Map.has_key?(detail, "name")
+    refute Map.has_key?(detail, "repo_path")
+  end
+
+  # A project registered but not yet pushed to is a client mistake, not a platform fault:
+  # docs/design/api-and-ui.md lists 400/401/404/409/422 as the error statuses.
+  test "admitting against a repository with no commits is a client error", %{conn: conn} do
+    {:ok, %{name: name}} =
+      Projects.register(%{
+        name: "empty-#{System.unique_integer([:positive])}",
+        repo_path: Path.join(tmp_dir("empty"), "project.git")
+      })
+
+    response =
+      conn
+      |> post(~p"/api/v1/projects/#{name}/tickets", %{title: "Nowhere to run"})
+      |> json_response(422)
+
+    assert %{"error" => %{"reason" => "unknown_ref"}} = response
+    assert response["error"]["detail"] =~ "commit"
+  end
+
   test "identifies the user and lists projects", %{conn: conn, user: user, project: project} do
     assert %{"email" => email} = conn |> get(~p"/api/v1/me") |> json_response(200)
     assert email == user.email

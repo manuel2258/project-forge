@@ -20,6 +20,17 @@ defmodule ForgeWeb.Api.FallbackController do
   def call(conn, {:error, :no_such_transition}),
     do: error(conn, :unprocessable_entity, "no_such_transition", nil)
 
+  # A project registered but never pushed to has no commit to pin a ticket against. That is
+  # the client's next step, not a platform fault.
+  def call(conn, {:error, :unknown_ref}),
+    do:
+      error(
+        conn,
+        :unprocessable_entity,
+        "unknown_ref",
+        "the project's default branch has no commit; push the repository first"
+      )
+
   def call(conn, {:error, {:job_live, state}}),
     do: error(conn, :conflict, "job_live", "a job for #{state} is pending, running or waiting")
 

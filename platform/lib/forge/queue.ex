@@ -55,7 +55,7 @@ defmodule Forge.Queue do
         ticket: ticket,
         since: ticket.updated_at,
         question: nil,
-        detail: %{state: ticket.state}
+        detail: %{state: ticket.state, transitions: transitions_from(ticket)}
       }
     ]
   end
@@ -76,14 +76,20 @@ defmodule Forge.Queue do
           ticket: ticket,
           since: ticket.updated_at,
           question: nil,
-          detail: %{
-            state: ticket.state,
-            transitions: Enum.map(Workflow.transitions_from(workflow, ticket.state), & &1.to)
-          }
+          detail: %{state: ticket.state, transitions: transitions_from(ticket)}
         }
       ]
     else
       []
     end
+  end
+
+  # The states an operator may move the ticket to from where it rests. Both stuck and review
+  # items carry these, so the choices are in the queue and not only in the workflow file.
+  defp transitions_from(%Ticket{} = ticket) do
+    ticket
+    |> Tickets.workflow()
+    |> Workflow.transitions_from(ticket.state)
+    |> Enum.map(& &1.to)
   end
 end

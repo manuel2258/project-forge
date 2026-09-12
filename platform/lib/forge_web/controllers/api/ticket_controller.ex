@@ -18,17 +18,18 @@ defmodule ForgeWeb.Api.TicketController do
     json(conn, %{items: items})
   end
 
-  def index(conn, params) do
-    project = params["project"] && Projects.by_name(params["project"])
+  def index(conn, %{"project" => name}) do
+    case Projects.by_name(name) do
+      nil ->
+        {:error, :not_found}
 
-    tickets =
-      case {params["project"], project} do
-        {nil, _} -> Enum.map(Tickets.list(), &Render.ticket(&1, project_name(&1)))
-        {_, nil} -> []
-        {_, project} -> Enum.map(Tickets.list(project), &Render.ticket(&1, project.name))
-      end
+      project ->
+        json(conn, %{tickets: Enum.map(Tickets.list(project), &Render.ticket(&1, project.name))})
+    end
+  end
 
-    json(conn, %{tickets: tickets})
+  def index(conn, _params) do
+    json(conn, %{tickets: Enum.map(Tickets.list(), &Render.ticket(&1, project_name(&1)))})
   end
 
   def create(conn, %{"project" => name} = params) do
@@ -80,15 +81,28 @@ defmodule ForgeWeb.Api.TicketController do
   def artifact(conn, %{"name" => name} = params) do
     ticket = conn.assigns.ticket
 
-    version =
-      case params["version"] do
-        nil -> Artifacts.latest(ticket.id, name)
-        n -> Enum.find(Artifacts.versions(ticket.id, name), &(Integer.to_string(&1.version) == n))
-      end
+    with {:ok, version} <- requested_version(ticket.id, name, params["version"]) do
+      json(conn, Render.version(version, name))
+    end
+  end
 
-    case version do
+  defp requested_version(ticket_id, name, nil) do
+    case Artifacts.latest(ticket_id, name) do
       nil -> {:error, :not_found}
-      version -> json(conn, Render.version(version, name))
+      version -> {:ok, version}
+    end
+  end
+
+  defp requested_version(ticket_id, name, requested) do
+    case Integer.parse(requested) do
+      {n, ""} when n > 0 ->
+        case Enum.find(Artifacts.versions(ticket_id, name), &(&1.version == n)) do
+          nil -> {:error, :not_found}
+          version -> {:ok, version}
+        end
+
+      _ ->
+        {:error, {:bad_request, "version must be a positive integer"}}
     end
   end
 
@@ -124,12 +138,11 @@ defmodule ForgeWeb.Api.TicketController do
   end
 
   defp load_ticket(%{params: %{"project" => name, "number" => number}} = conn, _opts) do
-    with %{} = project <- Projects.by_name(name),
-         {n, ""} <- Integer.parse(number),
-         %{} = ticket <- Forge.Repo.get_by(Tickets.Ticket, project_id: project.id, number: n) do
-      conn |> assign(:project, project) |> assign(:ticket, ticket)
-    else
-      _ ->
+    case Tickets.fetch(name, number) do
+      {:ok, ticket, project} ->
+        conn |> assign(:project, project) |> assign(:ticket, ticket)
+
+      :error ->
         conn
         |> put_status(:not_found)
         |> json(%{error: %{reason: "not_found", detail: "no ticket #{name}##{number}"}})

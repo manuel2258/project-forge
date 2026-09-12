@@ -75,6 +75,14 @@ defmodule ForgeWeb.OperatorLiveTest do
     assert html =~ "Blocking question"
     assert html =~ "Which backend?"
 
+    # a human edit in between makes the question live on a new version; answering still works
+    plan = Forge.Artifacts.latest(ticket.id, "plan.md")
+
+    {:ok, _} =
+      Forge.Operator.edit(Tickets.get!(ticket.id), user, "plan.md", plan.content <> "\nEdited.\n")
+
+    assert render(view) =~ "Which backend?"
+
     view |> element("button[phx-value-key=backend][phx-value-choice=b]") |> render_click()
     assert render(view) =~ "Answered backend: b"
     assert render(view) =~ "Nothing needs you right now"
@@ -93,7 +101,10 @@ defmodule ForgeWeb.OperatorLiveTest do
 
     render_hook(view, "push:subscribe", %{
       "endpoint" => "https://push.example/x",
-      "keys" => %{"p256dh" => "p", "auth" => "a"}
+      "keys" => %{
+        "p256dh" => Base.url_encode64(:crypto.strong_rand_bytes(65), padding: false),
+        "auth" => Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)
+      }
     })
 
     assert render(view) =~ "will be notified"
@@ -120,7 +131,7 @@ defmodule ForgeWeb.OperatorLiveTest do
     assert html =~ "They vanish."
     assert html =~ "refined #1"
     assert html =~ "refinement.md · v1 · document"
-    assert html =~ "<h1>Plan</h1>" or html =~ "Do the thing."
+    assert html =~ "<h1>Plan</h1>"
     assert html =~ "ticket.admitted"
     assert html =~ "Approval"
 

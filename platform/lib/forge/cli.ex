@@ -18,15 +18,15 @@ defmodule Forge.CLI do
   @doc "Resolves `name#number`, or a bare number when exactly one project exists."
   @spec ticket(String.t()) :: Ticket.t()
   def ticket(ref) do
-    {project, number} =
+    {project_name, number} =
       case String.split(ref, "#", parts: 2) do
-        [name, number] -> {Projects.by_name(name) || fail("unknown project #{name}"), number}
-        [number] -> {only(Projects.list(), "project", "use project#number"), number}
+        [name, number] -> {name, number}
+        [number] -> {only(Projects.list(), "project", "use project#number").name, number}
       end
 
-    case Integer.parse(number) do
-      {n, ""} when n > 0 -> Tickets.get_by_number!(project, n)
-      _ -> fail("ticket reference must be project#number, got #{inspect(ref)}")
+    case Tickets.fetch(project_name, number) do
+      {:ok, ticket, _project} -> ticket
+      :error -> fail("no ticket #{ref}")
     end
   end
 
@@ -68,7 +68,7 @@ defmodule Forge.CLI do
 
     events =
       Enum.map(Events.for_ticket(ticket.id), fn event ->
-        "  #{event.seq}  #{Calendar.strftime(event.inserted_at, "%H:%M:%S")}  #{event.type}  #{event_detail(event)}"
+        "  #{event.seq}  #{Calendar.strftime(event.inserted_at, "%H:%M:%S")}  #{event.type}  #{Events.summary(event)}"
       end)
 
     Enum.join(lines ++ jobs ++ ["", "artifacts:"] ++ artifacts ++ ["", "events:"] ++ events, "\n")
@@ -78,17 +78,6 @@ defmodule Forge.CLI do
 
   defp pending_line(%Ticket{pending_transition: p}),
     do: "pending: #{p["from"]} -> #{p["to"]} needs approval of #{Enum.join(p["approve"], ", ")}"
-
-  defp event_detail(%{type: "job.harness." <> _, payload: payload}) do
-    payload |> Map.drop(["raw", "input", "excerpt", "usage"]) |> compact()
-  end
-
-  defp event_detail(%{payload: payload}), do: compact(Map.drop(payload, ["harness"]))
-
-  defp compact(map) when map_size(map) == 0, do: ""
-
-  defp compact(map),
-    do: map |> Enum.map_join(" ", fn {k, v} -> "#{k}=#{inspect(v)}" end) |> String.slice(0, 120)
 
   @doc "Prints the queue."
   def queue do

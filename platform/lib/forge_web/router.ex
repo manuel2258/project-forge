@@ -9,7 +9,15 @@ defmodule ForgeWeb.Router do
     plug :fetch_live_flash
     plug :put_root_layout, html: {ForgeWeb.Layouts, :root}
     plug :protect_from_forgery
-    plug :put_secure_browser_headers
+    # Documents are agent-written: no remote images or scripts, whatever the sanitizer lets
+    # through. Inline script and style are what the generated layout and LiveView need.
+    plug :put_secure_browser_headers, %{
+      "content-security-policy" =>
+        "default-src 'self'; img-src 'self' data:; script-src 'self' 'unsafe-inline'; " <>
+          "style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; " <>
+          "base-uri 'self'; form-action 'self'"
+    }
+
     plug :fetch_current_scope_for_user
   end
 

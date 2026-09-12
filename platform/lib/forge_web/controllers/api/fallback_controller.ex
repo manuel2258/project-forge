@@ -3,6 +3,8 @@ defmodule ForgeWeb.Api.FallbackController do
 
   use ForgeWeb, :controller
 
+  require Logger
+
   def call(conn, {:error, %Ecto.Changeset{} = changeset}) do
     errors = Ecto.Changeset.traverse_errors(changeset, fn {msg, _} -> msg end)
     error(conn, :unprocessable_entity, "invalid", errors)
@@ -38,8 +40,15 @@ defmodule ForgeWeb.Api.FallbackController do
 
   def call(conn, {:error, :not_found}), do: error(conn, :not_found, "not_found", nil)
 
-  def call(conn, {:error, reason}),
-    do: error(conn, :unprocessable_entity, "error", inspect(reason))
+  def call(conn, {:error, {:bad_request, detail}}),
+    do: error(conn, :bad_request, "bad_request", detail)
+
+  # Anything not mapped above is a platform fault, not a client error: log it, say nothing
+  # about it to the client.
+  def call(conn, {:error, reason}) do
+    Logger.error("api request failed: #{inspect(reason)}")
+    error(conn, :internal_server_error, "internal", nil)
+  end
 
   defp error(conn, status, reason, detail) do
     conn

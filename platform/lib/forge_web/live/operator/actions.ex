@@ -6,6 +6,8 @@ defmodule ForgeWeb.Operator.Actions do
 
   import Phoenix.LiveView, only: [put_flash: 3]
 
+  require Logger
+
   alias Forge.{Operator, Tickets}
 
   @doc "Handles an operator event; returns `{:handled, socket}` or `:unknown`."
@@ -15,6 +17,8 @@ defmodule ForgeWeb.Operator.Actions do
       {:ok, message} -> {:handled, put_flash(socket, :info, message)}
       {:error, reason} -> {:handled, put_flash(socket, :error, "Failed: #{describe(reason)}")}
     end
+  rescue
+    Ecto.NoResultsError -> {:handled, put_flash(socket, :error, "That ticket no longer exists.")}
   end
 
   defp act("answer", %{"ticket" => id, "key" => key, "choice" => choice}, socket) do
@@ -46,7 +50,13 @@ defmodule ForgeWeb.Operator.Actions do
 
   defp act(_event, _params, _socket), do: :unknown
 
-  defp ticket(id), do: Tickets.get!(id)
+  defp ticket(id) do
+    case Ecto.UUID.cast(id) do
+      {:ok, id} -> Tickets.get!(id)
+      :error -> raise Ecto.NoResultsError, queryable: Forge.Tickets.Ticket
+    end
+  end
+
   defp user(socket), do: socket.assigns.current_scope.user
   defp blank_to_nil(""), do: nil
   defp blank_to_nil(value), do: value
@@ -56,5 +66,12 @@ defmodule ForgeWeb.Operator.Actions do
   defp describe({:invalid_document, errors}), do: ForgeCore.Error.format(errors)
   defp describe(:nothing_pending), do: "nothing awaits approval"
   defp describe(:no_such_transition), do: "no such transition"
-  defp describe(other), do: inspect(other)
+
+  defp describe({:ambiguous, outcomes}),
+    do: "ambiguous; pick an outcome: #{Enum.join(outcomes, ", ")}"
+
+  defp describe(other) do
+    Logger.error("operator action failed: #{inspect(other)}")
+    "something went wrong; see the server log"
+  end
 end

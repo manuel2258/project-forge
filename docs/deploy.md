@@ -14,7 +14,10 @@ mode). The flake exports `nixosModules.forge`.
       system = "x86_64-linux";
       modules = [
         forge.nixosModules.forge
-        {
+        ({ lib, ... }: {
+          # Claude Code is unfree in nixpkgs; the host has to allow it.
+          nixpkgs.config.allowUnfreePredicate = pkg: builtins.elem (lib.getName pkg) [ "claude-code" ];
+
           services.forge = {
             enable = true;
             host = "forge.example.org";
@@ -23,7 +26,7 @@ mode). The flake exports `nixosModules.forge`.
             # digestHourUtc = 9;
           };
           # Put a TLS proxy in front, e.g. services.caddy with reverse_proxy :4000.
-        }
+        })
       ];
     };
   };
@@ -37,25 +40,30 @@ Not in the store; readable by root only. Lines of `KEY=VALUE`:
 ```
 SECRET_KEY_BASE=<mix phx.gen.secret>
 ANTHROPIC_API_KEY=<key>             # or CLAUDE_CODE_OAUTH_TOKEN=<claude setup-token>
-FORGE_VAPID_PUBLIC_KEY=...          # from `bin/forge eval Forge.Release.generate_vapid_keys`
+FORGE_VAPID_PUBLIC_KEY=...          # from `forge-admin eval Forge.Release.generate_vapid_keys`
 FORGE_VAPID_PRIVATE_KEY=...
 FORGE_VAPID_SUBJECT=mailto:you@example.org
 ```
 
 ## First run
 
-The service migrates the database on every start. Then, as root:
+The service migrates the database on every start. The module installs `forge-admin`, which
+runs `bin/forge` as the service user with the service's environment and secrets, so one-off
+commands are, as root:
 
 ```
-cd /var/lib/forge
-sudo -u forge /nix/var/nix/profiles/system/sw/bin/forge eval 'Forge.Release.create_operator("you@example.org", "a long password")'
-sudo -u forge forge eval 'Forge.Release.create_token("you@example.org", "laptop")'
-sudo -u forge forge eval 'Forge.Release.register_project("game", "/var/lib/forge/repos/game.git")'
+forge-admin eval 'Forge.Release.create_operator("you@example.org", "a long password")'
+forge-admin eval 'Forge.Release.create_token("you@example.org", "laptop")'
+forge-admin eval 'Forge.Release.register_project("game", "/var/lib/forge/repos/game.git")'
 ```
 
-(`forge` here is `${services.forge.package}/bin/forge`; the systemd unit's `ExecStart` shows
-the store path.) Push your project into the bare repository, with `.forge/workflow.yml` and
-the prompts under `.forge/agents/` on the default branch:
+`Forge.Release` also has `list_tokens(email)`, `revoke_token(email, name)` and
+`generate_vapid_keys()`. Changing a user's password revokes their API tokens along with
+their sessions. Projects registered through the API get their repository under
+`/var/lib/forge/repos/<name>.git`; only the command line may point a project at another path.
+
+Push your project into the bare repository, with `.forge/workflow.yml` and the prompts under
+`.forge/agents/` on the default branch:
 
 ```
 git remote add forge forge@forge.example.org:/var/lib/forge/repos/game.git
@@ -71,8 +79,11 @@ queue. Everything the Mix tasks do in development is available through `/api/v1`
   directories under `data/`.
 - Postgres locally, reached over its Unix socket with peer authentication.
 - `git`, `nix` and Claude Code on the service PATH; `FORGE_CLAUDE_EXECUTABLE` points at the
-  packaged binary.
-- Distribution off, port 4000 on localhost only through `PHX_HOST`; TLS is the proxy's job.
+  packaged binary. `nix` on the PATH is what lets `nixEnv` enter a project's devshell; the
+  service user needs to be allowed to talk to the Nix daemon (it is, by default).
+- Distribution off (a fixed `RELEASE_COOKIE` satisfies the release script; it guards
+  nothing), port 4000 on all interfaces; TLS and access are the proxy's job.
+- `forge-admin` in the system path for one-off release commands.
 
 ## Known limits in this mode
 

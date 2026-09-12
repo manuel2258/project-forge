@@ -81,8 +81,12 @@ defmodule Forge.Tickets do
     end)
     |> Repo.transaction()
     |> case do
-      {:ok, %{ticket: ticket}} -> {:ok, ticket}
-      {:error, step, reason, _} -> {:error, {step, reason}}
+      {:ok, %{ticket: ticket}} ->
+        Events.notify(ticket.id)
+        {:ok, ticket}
+
+      {:error, step, reason, _} ->
+        {:error, {step, reason}}
     end
   end
 
@@ -107,6 +111,30 @@ defmodule Forge.Tickets do
 
   @spec get!(String.t()) :: Ticket.t()
   def get!(id), do: Repo.get!(Ticket, id)
+
+  @doc """
+  Looks a ticket up by project name and number given as strings, as URLs and refs carry
+  them. `{:ok, ticket, project}` or `:error` for anything that is not a ticket.
+  """
+  @spec fetch(String.t(), String.t()) :: {:ok, Ticket.t(), Project.t()} | :error
+  def fetch(project_name, number) when is_binary(project_name) and is_binary(number) do
+    with %Project{} = project <- Projects.by_name(project_name),
+         {n, ""} when n > 0 <- Integer.parse(number),
+         %Ticket{} = ticket <- Repo.get_by(Ticket, project_id: project.id, number: n) do
+      {:ok, ticket, project}
+    else
+      _ -> :error
+    end
+  end
+
+  @doc "Like `fetch/2` but raises `Ecto.NoResultsError`, which the web layer renders as 404."
+  @spec fetch!(String.t(), String.t()) :: {Ticket.t(), Project.t()}
+  def fetch!(project_name, number) do
+    case fetch(project_name, number) do
+      {:ok, ticket, project} -> {ticket, project}
+      :error -> raise Ecto.NoResultsError, queryable: Ticket
+    end
+  end
 
   @spec get_by_number!(Project.t(), pos_integer()) :: Ticket.t()
   def get_by_number!(%Project{id: project_id}, number) do

@@ -169,7 +169,10 @@ defmodule Forge.Accounts do
 
   ## API tokens
 
-  @doc "Creates an API token for the user; returns the encoded token, shown once."
+  @doc """
+  Creates an API token for the user; returns the encoded token, shown once. Like session
+  tokens, API tokens are deleted when the user's password or email changes.
+  """
   def create_api_token(%User{} = user, name) when is_binary(name) do
     {encoded, user_token} = UserToken.build_api_token(user, name)
     Repo.insert!(user_token)
@@ -182,6 +185,27 @@ defmodule Forge.Accounts do
       {:ok, query} -> Repo.one(query)
       :error -> nil
     end
+  end
+
+  @doc "The user's API tokens: id, name and creation time. The token itself is not stored."
+  def list_api_tokens(%User{id: user_id}) do
+    Repo.all(
+      from t in UserToken,
+        where: t.user_id == ^user_id and t.context == "api",
+        order_by: t.inserted_at,
+        select: %{id: t.id, name: t.sent_to, inserted_at: t.inserted_at}
+    )
+  end
+
+  @doc "Deletes the user's API tokens with the given name; returns how many were deleted."
+  def revoke_api_tokens(%User{id: user_id}, name) when is_binary(name) do
+    {count, _} =
+      Repo.delete_all(
+        from t in UserToken,
+          where: t.user_id == ^user_id and t.context == "api" and t.sent_to == ^name
+      )
+
+    count
   end
 
   @doc """

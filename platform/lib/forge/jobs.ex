@@ -304,8 +304,12 @@ defmodule Forge.Jobs do
     })
     |> Repo.transaction()
     |> case do
-      {:ok, %{job: job}} -> {:ok, job}
-      {:error, step, reason, _} -> {:error, {step, reason}}
+      {:ok, %{job: job}} ->
+        Events.notify(ticket.id)
+        {:ok, job}
+
+      {:error, step, reason, _} ->
+        {:error, {step, reason}}
     end
   end
 
@@ -490,6 +494,8 @@ defmodule Forge.Jobs do
           job_id: job.id
         })
         |> Repo.transaction()
+
+      Events.notify(job.ticket_id)
     end)
 
     length(jobs)

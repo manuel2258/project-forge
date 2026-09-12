@@ -1,6 +1,7 @@
 defmodule Forge.PushTest do
   use Forge.DataCase, async: false
 
+  import ExUnit.CaptureLog
   import Forge.AccountsFixtures
   import Forge.ForgeFixtures
 
@@ -12,8 +13,13 @@ defmodule Forge.PushTest do
     %{user: user_fixture()}
   end
 
-  defp browser_subscription(endpoint) do
-    %{"endpoint" => endpoint, "keys" => %{"p256dh" => "p", "auth" => "a"}}
+  defp key(bytes), do: Base.url_encode64(:crypto.strong_rand_bytes(bytes), padding: false)
+
+  defp browser_subscription(endpoint, keys \\ %{}) do
+    %{
+      "endpoint" => endpoint,
+      "keys" => Map.merge(%{"p256dh" => key(65), "auth" => key(16)}, keys)
+    }
   end
 
   test "is enabled in test through the configured keys" do
@@ -22,21 +28,39 @@ defmodule Forge.PushTest do
   end
 
   test "subscribe stores or replaces by endpoint; unsubscribe removes", %{user: user} do
-    assert {:ok, s1} =
-             Push.subscribe(user, browser_subscription("https://push.example/a"), "Firefox")
-
-    assert {:ok, s2} =
-             Push.subscribe(user, browser_subscription("https://push.example/a"), "Firefox 2")
-
+    assert {:ok, s1} = Push.subscribe(user, browser_subscription("https://push.example/a"))
+    assert {:ok, s2} = Push.subscribe(user, browser_subscription("https://push.example/a"))
     assert s1.id == s2.id
-    assert [%{user_agent: "Firefox 2"}] = Push.subscriptions()
-
-    assert {:error, changeset} =
-             Push.subscribe(user, browser_subscription("http://insecure"), nil)
-
-    assert %{endpoint: [_]} = errors_on(changeset)
+    assert [%{p256dh: p256dh}] = Push.subscriptions()
+    assert p256dh == s2.p256dh
+    refute p256dh == s1.p256dh
 
     assert :ok = Push.unsubscribe(user, "https://push.example/a")
+    assert Push.subscriptions() == []
+  end
+
+  test "subscribe rejects what would crash the push encryption", %{user: user} do
+    assert {:error, changeset} = Push.subscribe(user, browser_subscription("http://insecure"))
+    assert %{endpoint: [_]} = errors_on(changeset)
+
+    assert {:error, changeset} =
+             Push.subscribe(
+               user,
+               browser_subscription("https://push.example/a", %{"p256dh" => "p"})
+             )
+
+    assert %{p256dh: [_]} = errors_on(changeset)
+
+    assert {:error, changeset} =
+             Push.subscribe(
+               user,
+               browser_subscription("https://push.example/a", %{"auth" => key(15)})
+             )
+
+    assert %{auth: [_]} = errors_on(changeset)
+
+    assert {:error, :malformed} = Push.subscribe(user, %{"endpoint" => "https://push.example/a"})
+    assert {:error, :malformed} = Push.subscribe(user, %{"nope" => true})
     assert Push.subscriptions() == []
   end
 
@@ -46,29 +70,55 @@ defmodule Forge.PushTest do
     {:ok, _} = Push.subscribe(user, browser_subscription("https://push.example/a"))
     {:ok, _} = Push.subscribe(user, browser_subscription("https://push.example/expired"))
     {:ok, _} = Push.subscribe(user, browser_subscription("https://push.example/broken"))
+    {:ok, _} = Push.subscribe(user, browser_subscription("https://push.example/raises"))
+    {:ok, _} = Push.subscribe(user, browser_subscription("https://push.example/b"))
     ticket = ticket_fixture()
 
-    assert :ok = Push.blocking_question(ticket, %{key: "backend", text: "Which backend?"})
+    log =
+      capture_log(fn ->
+        assert :ok = Push.blocking_question(ticket, %{key: "backend", text: "Which backend?"})
+        Push.flush()
+      end)
+
+    assert log =~ "push.example/broken failed"
+    assert log =~ "push.example/raises raised"
 
     assert_receive {:push, "https://push.example/a",
-                    %{"title" => title, "body" => "Which backend?", "url" => url, "tag" => tag}}
+                    %{"title" => title, "body" => "Which backend?", "url" => url, "tag" => tag},
+                    opts}
 
     assert title =~ "Question on"
     assert url =~ "/tickets/"
     assert tag == "question-#{ticket.id}-backend"
-    refute_receive {:push, "https://push.example/expired", _}
+    assert opts[:ttl] == 86_400
+    assert opts[:urgency] == :high
+    assert String.length(opts[:topic]) == 32
+
+    # the one that raised did not stop the ones after it
+    assert_receive {:push, "https://push.example/b", _, _}
+    refute_receive {:push, "https://push.example/expired", _, _}
 
     endpoints = Push.subscriptions() |> Enum.map(& &1.endpoint) |> Enum.sort()
-    assert endpoints == ["https://push.example/a", "https://push.example/broken"]
 
-    assert [%{last_sent_at: %DateTime{}} | _] =
+    assert endpoints == [
+             "https://push.example/a",
+             "https://push.example/b",
+             "https://push.example/broken",
+             "https://push.example/raises"
+           ]
+
+    assert [%{last_sent_at: %DateTime{}}] =
              Enum.filter(Push.subscriptions(), &(&1.endpoint == "https://push.example/a"))
+
+    assert [%{last_sent_at: nil}] =
+             Enum.filter(Push.subscriptions(), &(&1.endpoint == "https://push.example/broken"))
   end
 
   test "the digest summarises the queue and stays silent when it is empty", %{user: user} do
     {:ok, _} = Push.subscribe(user, browser_subscription("https://push.example/a"))
     assert :empty = Push.digest()
-    refute_receive {:push, _, _}
+    Push.flush()
+    refute_receive {:push, _, _, _}
 
     ticket = ticket_fixture()
 
@@ -82,8 +132,13 @@ defmodule Forge.PushTest do
       )
 
     assert :ok = Push.digest()
+    Push.flush()
 
     assert_receive {:push, "https://push.example/a",
-                    %{"title" => "forge: 1 waiting on you", "body" => "1 stuck", "url" => "/"}}
+                    %{"title" => "forge: 1 waiting on you", "body" => "1 stuck", "url" => "/"},
+                    opts}
+
+    assert opts[:topic] == "digest"
+    assert opts[:ttl] == 43_200
   end
 end

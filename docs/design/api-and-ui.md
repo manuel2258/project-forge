@@ -28,7 +28,7 @@ and audited like any other.
 |---|---|
 | `GET /me` | The token's user |
 | `GET /queue` | The operator queue |
-| `GET /projects`, `POST /projects` | List, register |
+| `GET /projects`, `POST /projects` | List; register `{name, default_branch}` (repository created under the platform's repos directory) |
 | `GET /tickets[?project=name]` | List tickets |
 | `POST /projects/:name/tickets` | Admit `{title, body}` |
 | `GET /tickets/:project/:number` | Ticket with jobs, artifacts, open questions, pending transition |
@@ -76,7 +76,9 @@ banner. Offline compose and retry queues are out of the PoC.
 ## Documents in the browser
 
 Documents are Markdown rendered server-side and sanitised before display, because agents
-wrote them. Question blocks are shown as cards with their options next to the rendered text.
+wrote them; inline code is escaped at the AST level since the renderer leaves it raw, and
+front matter is stripped textually so an unparseable one never reaches the page. Open
+questions are shown as cards above the rendered text, each with its options as buttons.
 
 ## Not in this slice
 

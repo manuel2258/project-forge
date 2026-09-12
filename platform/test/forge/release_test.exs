@@ -34,5 +34,10 @@ defmodule Forge.ReleaseTest do
 
     token = capture_io(fn -> Release.create_token(email, "phone") end) |> String.trim()
     assert Accounts.get_user_by_api_token(token).id == user.id
+
+    assert capture_io(fn -> Release.list_tokens(email) end) =~ "phone\t"
+    assert capture_io(fn -> Release.revoke_token(email, "phone") end) =~ "revoked 1 token"
+    assert Accounts.get_user_by_api_token(token) == nil
+    assert capture_io(fn -> Release.list_tokens(email) end) == ""
   end
 end

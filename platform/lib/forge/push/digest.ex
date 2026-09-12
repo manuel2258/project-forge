@@ -11,14 +11,16 @@ defmodule Forge.Push.Digest do
   def init(opts) do
     hour = Keyword.get(opts, :hour_utc, 9)
     schedule(hour)
-    {:ok, %{hour: hour}}
+    {:ok, %{hour: hour, last_sent_on: nil}}
   end
 
   @impl true
-  def handle_info(:digest, %{hour: hour} = state) do
-    Push.digest()
+  # Once per day, however the clock behaves around the tick.
+  def handle_info(:digest, %{hour: hour, last_sent_on: last} = state) do
+    today = Date.utc_today()
+    if today != last, do: Push.digest()
     schedule(hour)
-    {:noreply, state}
+    {:noreply, %{state | last_sent_on: today}}
   end
 
   # Milliseconds until the next occurrence of `hour`:00 UTC.

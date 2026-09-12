@@ -63,18 +63,63 @@ defmodule ForgeWeb.ApiTest do
     assert project.name in Enum.map(projects, & &1["name"])
   end
 
-  test "registers a project and reports invalid input", %{conn: conn} do
-    repo = seeded_repo()
+  test "accepts the bearer scheme in any case", %{conn: conn, user: user} do
+    token = Accounts.create_api_token(user, "lowercase")
 
-    assert %{"name" => "new-one"} =
+    assert %{"email" => _} =
              conn
-             |> post(~p"/api/v1/projects", %{name: "new-one", repo_path: repo})
+             |> put_req_header("authorization", "bearer " <> token)
+             |> get(~p"/api/v1/me")
+             |> json_response(200)
+  end
+
+  test "registers a project by name under the repos directory; a path is not accepted", %{
+    conn: conn
+  } do
+    name = "new-#{System.unique_integer([:positive])}"
+
+    assert %{"name" => ^name} =
+             conn
+             |> post(~p"/api/v1/projects", %{name: name, repo_path: "/etc"})
              |> json_response(201)
 
+    project = Projects.by_name(name)
+    assert Projects.repo_path(project) == Path.join(Projects.repos_dir(), name <> ".git")
+    assert File.dir?(Projects.repo_path(project))
+
     assert %{"error" => %{"reason" => "invalid", "detail" => %{"name" => _}}} =
+             conn |> post(~p"/api/v1/projects", %{name: "../escape"}) |> json_response(422)
+
+    refute File.exists?(Path.join(Projects.repos_dir(), "../escape.git"))
+
+    assert %{"error" => %{"reason" => "invalid", "detail" => %{"name" => _}}} =
+             conn |> post(~p"/api/v1/projects", %{}) |> json_response(422)
+  end
+
+  test "unknown projects, tickets and bad versions are reported, not guessed", %{
+    conn: conn,
+    project: project
+  } do
+    assert %{"error" => %{"reason" => "not_found"}} =
+             conn |> get(~p"/api/v1/tickets?project=nope") |> json_response(404)
+
+    assert %{"error" => %{"reason" => "not_found"}} =
+             conn |> get(~p"/api/v1/tickets/#{project.name}/1") |> json_response(404)
+
+    assert %{"error" => %{"reason" => "not_found"}} =
+             conn |> get(~p"/api/v1/tickets/#{project.name}/abc") |> json_response(404)
+
+    {:ok, _ticket} = Tickets.admit(project, %{title: "t", body: "b"}, :system)
+
+    assert %{"error" => %{"reason" => "bad_request"}} =
              conn
-             |> post(~p"/api/v1/projects", %{name: "Bad Name", repo_path: repo})
-             |> json_response(422)
+             |> get(~p"/api/v1/tickets/#{project.name}/1/artifacts/ticket?version=abc")
+             |> json_response(400)
+
+    assert %{"error" => %{"reason" => "not_found"}} =
+             conn
+             |> get(~p"/api/v1/tickets/#{project.name}/1/artifacts/ticket?version=9")
+             |> json_response(404)
   end
 
   test "admits, shows, approves, answers, transitions and reads artifacts and events", %{

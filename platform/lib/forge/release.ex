@@ -44,6 +44,28 @@ defmodule Forge.Release do
     end)
   end
 
+  @doc "Lists the user's API tokens by name."
+  def list_tokens(email) do
+    with_app(fn ->
+      case Forge.Accounts.get_user_by_email(email) do
+        nil -> fail("unknown user #{email}")
+        user -> Enum.each(Forge.Accounts.list_api_tokens(user), &print_token/1)
+      end
+    end)
+  end
+
+  defp print_token(token), do: IO.puts("#{token.name}\t#{token.inserted_at}\t#{token.id}")
+
+  @doc "Revokes the user's API tokens with that name."
+  def revoke_token(email, name) do
+    with_app(fn ->
+      case Forge.Accounts.get_user_by_email(email) do
+        nil -> fail("unknown user #{email}")
+        user -> IO.puts("revoked #{Forge.Accounts.revoke_api_tokens(user, name)} token(s)")
+      end
+    end)
+  end
+
   @doc "Registers a project; the bare repository is created if missing."
   def register_project(name, repo_path, default_branch \\ "main") do
     with_app(fn ->

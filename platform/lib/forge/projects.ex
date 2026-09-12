@@ -42,4 +42,27 @@ defmodule Forge.Projects do
   @doc "Absolute path of the project's bare repository."
   @spec repo_path(Project.t()) :: String.t()
   def repo_path(%Project{repo_path: path}), do: Path.expand(path)
+
+  @doc """
+  Where repositories registered by name live: `repos_dir` from the `Forge.Jobs` config, or
+  `repos/` next to the data directory. Only the command line may register a repository
+  anywhere else.
+  """
+  @spec repos_dir() :: String.t()
+  def repos_dir do
+    case Application.get_env(:forge, Forge.Jobs, [])[:repos_dir] do
+      nil -> Path.join(Path.dirname(Forge.Jobs.data_dir()), "repos")
+      dir -> Path.expand(dir)
+    end
+  end
+
+  @doc "Registers a project whose bare repository is `<repos_dir>/<name>.git`."
+  @spec register_named(String.t() | nil, String.t()) ::
+          {:ok, Project.t()} | {:error, Ecto.Changeset.t() | term()}
+  def register_named(name, default_branch) do
+    # The name is validated by the changeset before anything touches the filesystem, so a
+    # path-like name never becomes a path.
+    repo_path = if is_binary(name), do: Path.join(repos_dir(), name <> ".git")
+    register(%{name: name, repo_path: repo_path, default_branch: default_branch})
+  end
 end

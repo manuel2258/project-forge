@@ -66,41 +66,46 @@ if public = System.get_env("FORGE_VAPID_PUBLIC_KEY") do
 end
 
 if hour = System.get_env("FORGE_DIGEST_HOUR_UTC") do
-  config :forge, Forge.Push, digest_hour_utc: String.to_integer(hour)
+  case Integer.parse(hour) do
+    {h, ""} when h in 0..23 -> config :forge, Forge.Push, digest_hour_utc: h
+    _ -> raise "FORGE_DIGEST_HOUR_UTC must be an hour from 0 to 23, got #{inspect(hour)}"
+  end
 end
 
 if config_env() != :test do
   config :forge, Forge.Jobs,
     data_dir: System.get_env("FORGE_DATA_DIR") || "tmp/forge",
+    repos_dir: System.get_env("FORGE_REPOS_DIR"),
     nix_env: System.get_env("FORGE_NIX_ENV") in ["1", "true"],
     harness_opts: harness_opts
 end
 
 if config_env() == :prod do
-  database_url =
-    System.get_env("DATABASE_URL") ||
-      System.get_env("DATABASE_SOCKET_DIR") ||
-      raise """
-      environment variable DATABASE_URL is missing.
-      For example: ecto://USER:PASS@HOST/DATABASE
-      """
-
+  pool_size = String.to_integer(System.get_env("POOL_SIZE") || "10")
   maybe_ipv6 = if System.get_env("ECTO_IPV6") in ~w(true 1), do: [:inet6], else: []
 
   # A local Postgres over its Unix socket (peer authentication) when DATABASE_SOCKET_DIR is
-  # set, as the NixOS module does; otherwise DATABASE_URL.
-  if socket_dir = System.get_env("DATABASE_SOCKET_DIR") do
-    config :forge, Forge.Repo,
-      socket_dir: socket_dir,
-      database: System.get_env("DATABASE_NAME") || "forge",
-      username: System.get_env("DATABASE_USER") || "forge",
-      pool_size: String.to_integer(System.get_env("POOL_SIZE") || "10")
-  else
-    config :forge, Forge.Repo,
-      # ssl: true,
-      url: database_url,
-      pool_size: String.to_integer(System.get_env("POOL_SIZE") || "10"),
-      socket_options: maybe_ipv6
+  # set, as the NixOS module does; otherwise DATABASE_URL. One of the two is required.
+  case {System.get_env("DATABASE_SOCKET_DIR"), System.get_env("DATABASE_URL")} do
+    {socket_dir, _} when is_binary(socket_dir) ->
+      config :forge, Forge.Repo,
+        socket_dir: socket_dir,
+        database: System.get_env("DATABASE_NAME") || "forge",
+        username: System.get_env("DATABASE_USER") || "forge",
+        pool_size: pool_size
+
+    {nil, url} when is_binary(url) ->
+      config :forge, Forge.Repo,
+        # ssl: true,
+        url: url,
+        pool_size: pool_size,
+        socket_options: maybe_ipv6
+
+    {nil, nil} ->
+      raise """
+      set DATABASE_URL (for example ecto://USER:PASS@HOST/DATABASE) or DATABASE_SOCKET_DIR
+      (a local Postgres over its Unix socket)
+      """
   end
 
   # The secret key base is used to sign/encrypt cookies and other secrets.

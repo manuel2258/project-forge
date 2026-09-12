@@ -75,9 +75,6 @@
             src = projectSrc "platform";
             sourceRoot = "source/platform";
             mixFodDeps = platformDeps;
-            # The release runs with distribution off, so the cookie protects nothing and
-            # keeping it lets `bin/forge eval` work without a RELEASE_COOKIE.
-            removeCookie = false;
             env = {
               MIX_ESBUILD_PATH = esbuildPath;
               MIX_TAILWIND_PATH = tailwindPath;
@@ -136,7 +133,10 @@
         system = "x86_64-linux";
         modules = [
           self.nixosModules.forge
-          ({ ... }: {
+          ({ lib, ... }: {
+            # Claude Code is unfree; the host allows exactly that package.
+            nixpkgs.config.allowUnfreePredicate = pkg: builtins.elem (lib.getName pkg) [ "claude-code" ];
+
             services.forge = {
               enable = true;
               host = "forge.example.org";

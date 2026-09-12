@@ -9,14 +9,11 @@ defmodule ForgeWeb.Api.ProjectController do
   def index(conn, _params),
     do: json(conn, %{projects: Enum.map(Projects.list(), &Render.project/1)})
 
+  # The API names the project; the repository is created under the platform's repos
+  # directory. Registering an arbitrary path is a command-line operation.
   def create(conn, params) do
-    attrs = %{
-      name: params["name"],
-      repo_path: params["repo_path"],
-      default_branch: params["default_branch"] || "main"
-    }
-
-    with {:ok, project} <- Projects.register(attrs) do
+    with {:ok, project} <-
+           Projects.register_named(params["name"], params["default_branch"] || "main") do
       conn |> put_status(:created) |> json(Render.project(project))
     end
   end

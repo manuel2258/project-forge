@@ -252,6 +252,29 @@ defmodule Forge.AccountsTest do
     end
   end
 
+  describe "API tokens" do
+    setup do
+      %{user: user_fixture()}
+    end
+
+    test "are listed by name, revoked by name and deleted with the password", %{user: user} do
+      laptop = Accounts.create_api_token(user, "laptop")
+      phone = Accounts.create_api_token(user, "phone")
+      assert Accounts.get_user_by_api_token(laptop).id == user.id
+
+      assert ["laptop", "phone"] = Enum.map(Accounts.list_api_tokens(user), & &1.name)
+      refute Accounts.list_api_tokens(user) |> Enum.any?(&Map.has_key?(&1, :token))
+
+      assert Accounts.revoke_api_tokens(user, "laptop") == 1
+      assert Accounts.revoke_api_tokens(user, "laptop") == 0
+      assert Accounts.get_user_by_api_token(laptop) == nil
+      assert Accounts.get_user_by_api_token(phone).id == user.id
+
+      {:ok, _} = Accounts.update_user_password(user, %{password: "new valid password"})
+      assert Accounts.get_user_by_api_token(phone) == nil
+    end
+  end
+
   describe "generate_user_session_token/1" do
     setup do
       %{user: user_fixture()}

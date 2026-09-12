@@ -75,6 +75,9 @@
             src = projectSrc "platform";
             sourceRoot = "source/platform";
             mixFodDeps = platformDeps;
+            # The release runs with distribution off, so the cookie protects nothing and
+            # keeping it lets `bin/forge eval` work without a RELEASE_COOKIE.
+            removeCookie = false;
             env = {
               MIX_ESBUILD_PATH = esbuildPath;
               MIX_TAILWIND_PATH = tailwindPath;
@@ -122,5 +125,28 @@
       packages = forAllSystems (pkgs: let out = perSystem pkgs; in out.packages);
       devShells = forAllSystems (pkgs: let out = perSystem pkgs; in out.devShells);
       formatter = forAllSystems (pkgs: pkgs.nixpkgs-fmt);
+
+      # `services.forge` for a NixOS host; the package defaults to this flake's release.
+      nixosModules.forge = { pkgs, ... }: {
+        imports = [ (import ./nix/module.nix { forgePackage = self.packages.${pkgs.system}.forge; }) ];
+      };
+
+      # A minimal host using the module, so `nix eval` and `nix build` can check it.
+      nixosConfigurations.example = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = [
+          self.nixosModules.forge
+          ({ ... }: {
+            services.forge = {
+              enable = true;
+              host = "forge.example.org";
+              environmentFile = "/run/secrets/forge.env";
+            };
+            boot.loader.grub.enable = false;
+            fileSystems."/" = { device = "/dev/null"; fsType = "ext4"; };
+            system.stateVersion = "26.05";
+          })
+        ];
+      };
     };
 }

@@ -65,6 +65,10 @@ if public = System.get_env("FORGE_VAPID_PUBLIC_KEY") do
     vapid_subject: System.get_env("FORGE_VAPID_SUBJECT") || "mailto:operator@localhost"
 end
 
+if hour = System.get_env("FORGE_DIGEST_HOUR_UTC") do
+  config :forge, Forge.Push, digest_hour_utc: String.to_integer(hour)
+end
+
 if config_env() != :test do
   config :forge, Forge.Jobs,
     data_dir: System.get_env("FORGE_DATA_DIR") || "tmp/forge",
@@ -75,6 +79,7 @@ end
 if config_env() == :prod do
   database_url =
     System.get_env("DATABASE_URL") ||
+      System.get_env("DATABASE_SOCKET_DIR") ||
       raise """
       environment variable DATABASE_URL is missing.
       For example: ecto://USER:PASS@HOST/DATABASE
@@ -82,13 +87,21 @@ if config_env() == :prod do
 
   maybe_ipv6 = if System.get_env("ECTO_IPV6") in ~w(true 1), do: [:inet6], else: []
 
-  config :forge, Forge.Repo,
-    # ssl: true,
-    url: database_url,
-    pool_size: String.to_integer(System.get_env("POOL_SIZE") || "10"),
-    # For machines with several cores, consider starting multiple pools of `pool_size`
-    # pool_count: 4,
-    socket_options: maybe_ipv6
+  # A local Postgres over its Unix socket (peer authentication) when DATABASE_SOCKET_DIR is
+  # set, as the NixOS module does; otherwise DATABASE_URL.
+  if socket_dir = System.get_env("DATABASE_SOCKET_DIR") do
+    config :forge, Forge.Repo,
+      socket_dir: socket_dir,
+      database: System.get_env("DATABASE_NAME") || "forge",
+      username: System.get_env("DATABASE_USER") || "forge",
+      pool_size: String.to_integer(System.get_env("POOL_SIZE") || "10")
+  else
+    config :forge, Forge.Repo,
+      # ssl: true,
+      url: database_url,
+      pool_size: String.to_integer(System.get_env("POOL_SIZE") || "10"),
+      socket_options: maybe_ipv6
+  end
 
   # The secret key base is used to sign/encrypt cookies and other secrets.
   # A default value is used in config/dev.exs and config/test.exs but you

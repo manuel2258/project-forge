@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # Quality gate for the whole repository. Runs in every Mix project:
 #   compile --warnings-as-errors, format --check-formatted, credo --strict, test
+# and lints the measurement harness, which the gate cannot run (it needs btrfs, systemd
+# and Nix on the operator's machine), so static analysis is all it will ever get.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+echo "==> shell"
+shellcheck -x bin/check bin/measure measure/lib/*.sh measure/workloads/*.sh
+shfmt -d -i 2 -ci -sr bin measure
 
 for project in core worker platform; do
   echo "==> $project"

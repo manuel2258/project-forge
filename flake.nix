@@ -95,21 +95,51 @@
             default = forge;
           };
 
-          devShells.default = pkgs.mkShell {
-            packages = [
-              elixir
-              beam.erlang
-              pkgs.postgresql_16
-              pkgs.esbuild
-              pkgs.tailwindcss_4
-              pkgs.git
-            ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.inotify-tools ];
+          devShells = {
+            default = pkgs.mkShell {
+              packages = [
+                elixir
+                beam.erlang
+                pkgs.postgresql_16
+                pkgs.esbuild
+                pkgs.tailwindcss_4
+                pkgs.git
+                # `bin/check` lints the measurement harness; the harness itself needs the
+                # measure shell below.
+                pkgs.shellcheck
+                pkgs.shfmt
+              ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.inotify-tools ];
 
-            env = {
-              MIX_ESBUILD_PATH = esbuildPath;
-              MIX_TAILWIND_PATH = tailwindPath;
-              LANG = "C.UTF-8";
-              ERL_AFLAGS = "-kernel shell_history enabled";
+              env = {
+                MIX_ESBUILD_PATH = esbuildPath;
+                MIX_TAILWIND_PATH = tailwindPath;
+                LANG = "C.UTF-8";
+                ERL_AFLAGS = "-kernel shell_history enabled";
+              };
+            };
+          }
+          # `bin/measure` (docs/design/measurement-harness.md). Linux only: btrfs-progs does
+          # not exist on darwin, and the measurements are a Linux host's anyway. Deliberately
+          # without pkgs.systemd, whose client must be the host manager's own, and without any
+          # toolchain tool: those come from the workload's own flake via `nix develop .#<env>`.
+          // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+            measure = pkgs.mkShell {
+              packages = [
+                pkgs.bashInteractive
+                pkgs.coreutils
+                pkgs.findutils
+                pkgs.gnugrep
+                pkgs.gnused
+                pkgs.gawk
+                pkgs.util-linux
+                pkgs.e2fsprogs
+                pkgs.btrfs-progs
+                pkgs.rsync
+                pkgs.jq
+                pkgs.git
+              ];
+
+              env.LANG = "C.UTF-8";
             };
           };
 

@@ -1,0 +1,23 @@
+[package]
+name = "forge-sample"
+version = "0.1.0"
+edition = "2021"
+
+# Chosen for a dependency tree and a heavy final link, not for what it does. Nothing here is
+# specific to forge or to the operator's project: swap the list for a heavier or lighter one
+# and the harness does not change. A game-shaped workload (bevy) is the closest analogue to
+# the operator's own project if the measurements need to look more like it.
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+image = "0.25"
+ndarray = "0.16"
+rayon = "1"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+
+[profile.release]
+# The link is the heaviest step M3 isolates, so it has to be a real one.
+lto = "thin"
+codegen-units = 1

@@ -13,6 +13,7 @@ The concept is described in full in [docs/vision.md](docs/vision.md). Settled de
 | `core/` | `forge_core` | Workflow parser, event schema, artifact types. Shared by path dependency. |
 | `platform/` | `forge` | Phoenix + LiveView platform: orchestrator, artifact store, queue UI. |
 | `worker/` | `forge_worker` | Standalone release for the worker-side agent manager. |
+| `measure/` | — | The measurement harness behind `bin/measure`. Bash, not a Mix project. |
 
 ## Getting started
 
@@ -20,11 +21,15 @@ Requires Nix with flakes. Postgres is included in the devshell; point `platform/
 
 ```
 nix develop            # or `direnv allow`
-bin/check              # quality gate: compile, format, credo, tests, in every project
+bin/check              # quality gate: shell lint, then compile, format, credo, tests
 cd platform && mix setup && mix phx.server
 ```
 
 Releases build with `nix build .#forge` and `nix build .#forge-worker`.
+
+`bin/measure` is the measurement harness for the worker tier (`docs/measurements.md`). It
+runs outside the quality gate, in `nix develop .#measure`, because it needs btrfs, systemd
+and root; `bin/measure selftest` exercises it without any of them.
 
 ## Driving a ticket
 

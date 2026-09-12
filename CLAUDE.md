@@ -15,6 +15,7 @@ Three Mix projects joined by path dependencies. Not an umbrella.
 - `platform/` (`forge`): Phoenix + LiveView platform. Depends on core. Read `platform/AGENTS.md`
   for Phoenix and LiveView conventions.
 - `worker/` (`forge_worker`): standalone release for the worker-side agent manager. Depends on core.
+- `measure/` (bash): the measurement harness behind `bin/measure`. Not a Mix project.
 
 `flake.nix` provides the devshell and builds both releases. Enter with `nix develop` or direnv.
 
@@ -26,8 +27,13 @@ Run before every commit, from the repository root:
 bin/check
 ```
 
-It runs `mix check` in every project: compile with warnings as errors, format check, Credo
-strict, tests. A commit that does not pass the gate is not made.
+It lints the shell (shellcheck, shfmt) and runs `mix check` in every project: compile with
+warnings as errors, format check, Credo strict, tests. A commit that does not pass the gate
+is not made.
+
+`measure/` holds the measurement harness (`bin/measure`, `docs/design/measurement-harness.md`).
+The gate lints it but cannot run it: it needs btrfs, systemd and Nix on the operator's
+machine. `bin/measure selftest` is what stands in for a test run.
 
 ## Landing
 

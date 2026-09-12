@@ -21,3 +21,6 @@ result-*
 # Elixir (per-project .gitignore files cover build output; these catch strays)
 erl_crash.dump
 *.ez
+
+# Measurement harness scratch and results (docs/design/measurement-harness.md)
+.measure/

@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+# The measurement harness for M1 to M3 (docs/poc-plan.md § Phase 0), parametrised by a
+# workload: repository, environment command, build command, build directory.
+#   bin/measure <subcommand> [--workload <name>] [--dry-run] [subcommand options]
+# Not part of bin/check: it needs btrfs, systemd and Nix on the operator's machine.
+# See docs/design/measurement-harness.md.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+FORGE_M_ROOT=$PWD
+export FORGE_M_ROOT
+
+# shellcheck source=measure/lib/common.sh
+. measure/lib/common.sh
+# shellcheck source=measure/lib/exec.sh
+. measure/lib/exec.sh
+# shellcheck source=measure/lib/census.sh
+. measure/lib/census.sh
+# shellcheck source=measure/lib/btrfs.sh
+. measure/lib/btrfs.sh
+# shellcheck source=measure/lib/report.sh
+. measure/lib/report.sh
+# shellcheck source=measure/lib/preflight.sh
+. measure/lib/preflight.sh
+# shellcheck source=measure/lib/m1.sh
+. measure/lib/m1.sh
+# shellcheck source=measure/lib/m2.sh
+. measure/lib/m2.sh
+# shellcheck source=measure/lib/m3.sh
+. measure/lib/m3.sh
+# shellcheck source=measure/lib/selftest.sh
+. measure/lib/selftest.sh
+# shellcheck source=measure/lib/sample.sh
+. measure/lib/sample.sh
+
+usage() {
+  cat >&2 << 'USAGE'
+usage: bin/measure <subcommand> [--workload <name>] [--dry-run] [options]
+
+  preflight            check everything the run needs and say what is missing
+  m1 [--only a|b|c]    build cache acceptance
+     [--profile P]
+  m2 [--levels 1,2,4]  copy-on-write divergence
+     [--keep] [--reuse]
+  m3 [--sweep]         peak build memory
+     [--profile P]
+  report [--run DIR]   render the results table for pasting into docs/measurements.md
+     [--measurement M]   the latest run of one measurement (m1, m2, m3) rather than of any
+  selftest             run all three against a fake workload, with no btrfs, Nix or systemd
+  sample-init          materialise measure/sample into a repository with M2's four branches
+  clean [--purge]      tear down mounts and scratch (--purge also removes results)
+
+Workloads live in measure/workloads/. Environment: FORGE_M_BTRFS_MOUNT to use a real btrfs
+mountpoint instead of a loopback image, FORGE_M_USER_UNITS=1 for user units instead of
+system units, FORGE_M_SCRATCH to move the scratch root.
+USAGE
+  exit 64
+}
+
+cmd_clean() {
+  local purge=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --purge)
+        purge=1
+        shift
+        ;;
+      *) die "clean: unknown argument $1" ;;
+    esac
+  done
+  section "clean"
+  if have systemctl; then
+    measure_systemctl reset-failed 'forge-measure-*' > /dev/null 2>&1 || true
+  fi
+  local level index
+  for level in 1 2 4; do
+    for ((index = 0; index < level; index++)); do
+      subvol_delete "$FORGE_M_VOLUME/l$level-b$index"
+    done
+  done
+  subvol_delete "$FORGE_M_VOLUME/seed"
+  vol_down
+  if mountpoint -q "$FORGE_M_CACHE_DIR" 2> /dev/null; then
+    run sudo umount "$FORGE_M_CACHE_DIR" || warn "umount $FORGE_M_CACHE_DIR failed"
+  fi
+  if [ "$purge" = 1 ]; then
+    run rm -rf "${FORGE_M_SCRATCH:?}/results/$workload_name"
+    info "results removed"
+  else
+    info "results kept under $FORGE_M_SCRATCH/results/$workload_name"
+  fi
+}
+
+# --dry-run is for reading the plan on a machine that could not run it, so the preconditions
+# it would fail are not checked.
+preflight_unless_dry_run() {
+  if [ "$FORGE_M_DRY_RUN" = 1 ]; then
+    info "dry run: preconditions not checked"
+  else
+    cmd_preflight
+  fi
+}
+
+main() {
+  [ $# -gt 0 ] || usage
+  local subcommand=$1 workload=""
+  shift
+
+  local -a rest=()
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --workload)
+        workload=$2
+        shift 2
+        ;;
+      --dry-run)
+        FORGE_M_DRY_RUN=1
+        shift
+        ;;
+      -h | --help) usage ;;
+      --reuse)
+        FORGE_M_REUSE=1
+        rest+=("$1")
+        shift
+        ;;
+      *)
+        rest+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  case $subcommand in
+    selftest)
+      cmd_selftest ${rest[@]+"${rest[@]}"}
+      return 0
+      ;;
+    sample-init)
+      cmd_sample_init ${rest[@]+"${rest[@]}"}
+      return 0
+      ;;
+    -h | --help | help) usage ;;
+    *) ;;
+  esac
+
+  [ -n "$workload" ] || die "which workload? --workload <name>, one of: $(workload_list)"
+  workload_load "$workload"
+
+  case $subcommand in
+    preflight) cmd_preflight ${rest[@]+"${rest[@]}"} ;;
+    m1)
+      preflight_unless_dry_run
+      cmd_m1 ${rest[@]+"${rest[@]}"}
+      ;;
+    m2)
+      preflight_unless_dry_run
+      cmd_m2 ${rest[@]+"${rest[@]}"}
+      ;;
+    m3)
+      preflight_unless_dry_run
+      cmd_m3 ${rest[@]+"${rest[@]}"}
+      ;;
+    report) cmd_report ${rest[@]+"${rest[@]}"} ;;
+    clean) cmd_clean ${rest[@]+"${rest[@]}"} ;;
+    *) usage ;;
+  esac
+}
+
+main "$@"

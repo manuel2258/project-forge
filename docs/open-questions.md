@@ -6,7 +6,7 @@ These questions are open. They have not been answered and no recommendation is r
 - How structured questions are represented in a document.
 - The idle period before a worker is destroyed.
 - Branch granularity: one branch per job, or one per ticket with rebasing on conflict.
-- Whether the build cache can be produced as a reproducible artifact rather than a maintained blob.
+- Whether the build cache can be produced as a reproducible artifact rather than a maintained blob. Measured for one toolchain: M1 variant (a) built a cargo `target/` from the dependency closure alone with a Nix builder, and cargo rejected it outright — all 155 dependency crates rebuilt and the build cost what a cold one costs. Variant (c), a warm build directory copied from another checkout path, transplanted at 1.34× a warm local build. So for cargo the maintained blob is the form that works, which is the heavier storage model `poc-plan.md` § Risks names. One toolchain is not an answer, and the measurement closed with variant (b), a compilation cache read cold, unrun; no toolchain but cargo has been tried either. The question stays open, and what would move it is (b) on cargo — a content-keyed cache is the form most likely to transplant, and it would lighten the storage model again — or any second toolchain. See `measurements.md` § M1 and § What these measurements decided.
 - Whether to adopt an existing self-hostable sandbox platform as the worker tier rather than building it.
 
 ## Probe notes

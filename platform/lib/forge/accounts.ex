@@ -167,6 +167,37 @@ defmodule Forge.Accounts do
     |> update_user_and_delete_all_tokens()
   end
 
+  ## API tokens
+
+  @doc "Creates an API token for the user; returns the encoded token, shown once."
+  def create_api_token(%User{} = user, name) when is_binary(name) do
+    {encoded, user_token} = UserToken.build_api_token(user, name)
+    Repo.insert!(user_token)
+    encoded
+  end
+
+  @doc "The user behind an encoded API token, or nil."
+  def get_user_by_api_token(token) when is_binary(token) do
+    case UserToken.verify_api_token_query(token) do
+      {:ok, query} -> Repo.one(query)
+      :error -> nil
+    end
+  end
+
+  @doc """
+  Creates a confirmed operator with a password, for the command line. Registration through
+  the browser is disabled; this is how users come to exist.
+  """
+  def create_operator(email, password) do
+    Repo.transact(fn ->
+      with {:ok, user} <- register_user(%{email: email}),
+           {:ok, user} <- user |> User.confirm_changeset() |> Repo.update(),
+           {:ok, {user, _}} <- update_user_password(user, %{password: password}) do
+        {:ok, user}
+      end
+    end)
+  end
+
   ## Session
 
   @doc """

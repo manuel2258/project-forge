@@ -15,18 +15,38 @@ defmodule ForgeWeb.Router do
 
   pipeline :api do
     plug :accepts, ["json"]
+    plug ForgeWeb.Plugs.ApiAuth
   end
 
   scope "/", ForgeWeb do
-    pipe_through :browser
+    pipe_through [:browser, :require_authenticated_user]
 
-    get "/", PageController, :home
+    live_session :operator, on_mount: [{ForgeWeb.UserAuth, :require_authenticated}] do
+      live "/", QueueLive
+      live "/board", BoardLive
+      live "/tickets/:project/:number", TicketLive
+      live "/tickets/:project/:number/jobs/:job_id", JobLive
+    end
   end
 
-  # Other scopes may use custom stacks.
-  # scope "/api", ForgeWeb do
-  #   pipe_through :api
-  # end
+  scope "/api/v1", ForgeWeb.Api do
+    pipe_through :api
+
+    get "/me", TicketController, :me
+    get "/queue", TicketController, :queue
+    get "/projects", ProjectController, :index
+    post "/projects", ProjectController, :create
+    get "/tickets", TicketController, :index
+    post "/projects/:project/tickets", TicketController, :create
+    get "/tickets/:project/:number", TicketController, :show
+    get "/tickets/:project/:number/events", TicketController, :events
+    get "/tickets/:project/:number/jobs/:job_id", TicketController, :job
+    get "/tickets/:project/:number/artifacts/:name", TicketController, :artifact
+    post "/tickets/:project/:number/artifacts/:name", TicketController, :edit
+    post "/tickets/:project/:number/answers", TicketController, :answer
+    post "/tickets/:project/:number/approve", TicketController, :approve
+    post "/tickets/:project/:number/transition", TicketController, :transition
+  end
 
   # Enable LiveDashboard in development
   if Application.compile_env(:forge, :dev_routes) do
@@ -63,7 +83,6 @@ defmodule ForgeWeb.Router do
 
     live_session :current_user,
       on_mount: [{ForgeWeb.UserAuth, :mount_current_scope}] do
-      live "/users/register", UserLive.Registration, :new
       live "/users/log-in", UserLive.Login, :new
       live "/users/log-in/:token", UserLive.Confirmation, :new
     end

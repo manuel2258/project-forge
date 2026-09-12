@@ -43,6 +43,18 @@ defmodule Forge.Events do
     Repo.all(from e in Event, where: e.job_id == ^job_id, order_by: e.seq)
   end
 
+  @topic "tickets"
+
+  @doc "Tells subscribers that `ticket_id` changed. Pages reload on it."
+  @spec notify(String.t()) :: :ok
+  def notify(ticket_id) do
+    Phoenix.PubSub.broadcast(Forge.PubSub, @topic, {:ticket_changed, ticket_id})
+  end
+
+  @doc "Subscribes the caller to `{:ticket_changed, ticket_id}` messages for every ticket."
+  @spec subscribe() :: :ok | {:error, term()}
+  def subscribe, do: Phoenix.PubSub.subscribe(Forge.PubSub, @topic)
+
   @spec encode_actor(actor()) :: map()
   def encode_actor(:system), do: %{"kind" => "system", "id" => nil}
   def encode_actor({:user, id}), do: %{"kind" => "user", "id" => id}

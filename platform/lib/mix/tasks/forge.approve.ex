@@ -4,7 +4,7 @@ defmodule Mix.Tasks.Forge.Approve do
 
   use Mix.Task
 
-  alias Forge.{CLI, Engine}
+  alias Forge.{CLI, Operator}
 
   @impl true
   def run(args) do
@@ -18,7 +18,7 @@ defmodule Mix.Tasks.Forge.Approve do
         user = CLI.user(opts)
         decision = if opts[:reject], do: :rejected, else: :approved
 
-        case Engine.decide(ticket, user.id, decision, opts[:comment]) do
+        case Operator.decide(ticket, user, decision, opts[:comment]) do
           {:ok, ticket} ->
             Mix.shell().info("#{decision}; #{CLI.label(ticket)} is now in #{ticket.state}")
 

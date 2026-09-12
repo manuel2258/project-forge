@@ -4,7 +4,7 @@ defmodule Mix.Tasks.Forge.Transition do
 
   use Mix.Task
 
-  alias Forge.{CLI, Engine}
+  alias Forge.{CLI, Operator}
 
   @impl true
   def run(args) do
@@ -16,7 +16,7 @@ defmodule Mix.Tasks.Forge.Transition do
         ticket = CLI.ticket(ref)
         user = CLI.user(opts)
 
-        case Engine.choose(ticket, user.id, to) do
+        case Operator.transition(ticket, user, to) do
           {:ok, ticket} ->
             Mix.shell().info("#{CLI.label(ticket)} is now in #{ticket.state} (#{ticket.status})")
 

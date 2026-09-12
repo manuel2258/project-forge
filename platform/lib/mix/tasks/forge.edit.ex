@@ -4,7 +4,7 @@ defmodule Mix.Tasks.Forge.Edit do
 
   use Mix.Task
 
-  alias Forge.{Artifacts, CLI}
+  alias Forge.{CLI, Operator}
 
   @impl true
   def run(args) do
@@ -16,11 +16,9 @@ defmodule Mix.Tasks.Forge.Edit do
         ticket = CLI.ticket(ref)
         user = CLI.user(opts)
 
-        case Artifacts.record_version(ticket.id, name, :document, {:user, user.id}, %{
-               content: File.read!(file)
-             }) do
-          {:ok, version} ->
-            Mix.shell().info("wrote #{name} v#{version.version}")
+        case Operator.edit(ticket, user, name, File.read!(file)) do
+          {:ok, _ticket} ->
+            Mix.shell().info("wrote a new version of #{name}")
 
           {:error, {:invalid_document, errors}} ->
             CLI.fail("document invalid:\n" <> ForgeCore.Error.format(errors))

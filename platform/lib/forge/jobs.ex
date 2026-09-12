@@ -251,6 +251,10 @@ defmodule Forge.Jobs do
       payload: %{"resume" => job.harness_session_id != nil}
     })
     |> Repo.transaction()
+    |> tap(fn
+      {:ok, _} -> Events.notify(job.ticket_id)
+      _ -> :ok
+    end)
   end
 
   @doc "Runs a job to its end synchronously and records the result. For tests and tasks."
@@ -312,6 +316,7 @@ defmodule Forge.Jobs do
         follow_up(ticket, job, result)
       end
 
+      Events.notify(ticket.id)
       {:ok, job}
     end
   end
@@ -371,6 +376,7 @@ defmodule Forge.Jobs do
       {:ok, %{job: job}} ->
         remove_worktree(ticket, job)
         follow_up(ticket, job, %Result{status: :finished, outcome: :error})
+        Events.notify(ticket.id)
         {:ok, job}
 
       {:error, step, reason, _} ->

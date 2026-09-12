@@ -4,7 +4,7 @@ A self-hosted platform that moves software tickets through a per-repository, sta
 
 The concept is described in full in [docs/vision.md](docs/vision.md). Settled decisions, open questions, required measurements and prior-art findings are recorded alongside it in `docs/`. The proof-of-concept plan is [docs/poc-plan.md](docs/poc-plan.md), and the design notes it calls for are in [docs/design/](docs/design/).
 
-**Status:** skeleton only. The stack is decided: Elixir, with Phoenix and LiveView for the platform and a standalone Elixir release for the worker. Further PoC-scoped choices are listed in [docs/decisions.md](docs/decisions.md). No feature has been built yet.
+**Status:** milestone 1 of the [PoC plan](docs/poc-plan.md) is complete and milestone 2 is in progress. The stack is Elixir, with Phoenix and LiveView for the platform and a standalone Elixir release for the worker; further PoC-scoped choices are listed in [docs/decisions.md](docs/decisions.md). Nothing has run against a real repository yet.
 
 ## Layout
 
@@ -26,13 +26,24 @@ cd platform && mix setup && mix phx.server
 
 Releases build with `nix build .#forge` and `nix build .#forge-worker`.
 
-## Driving a ticket (milestone 1)
+## Driving a ticket
 
-Run the node with `mix phx.server`; it starts pending jobs. Everything else is a Mix task
-that writes rows:
+Run the node with `mix phx.server`; it starts pending jobs and serves the pages at
+`http://localhost:4000` (queue at `/`, board at `/board`, tickets at `/tickets/<project>/<n>`).
+Log in with a user created from the command line; browser registration is off.
+
+The same operations are available as a JSON API under `/api/v1` with a bearer token, see
+`docs/design/api-and-ui.md` for the routes:
 
 ```
-mix forge.user.add you@example.com
+mix forge.token you@example.com --name laptop     # prints the token once
+curl -H "Authorization: Bearer $TOKEN" http://localhost:4000/api/v1/queue
+```
+
+And as Mix tasks that write rows:
+
+```
+mix forge.user.add you@example.com 'a long password'
 mix forge.project.add game /srv/git/game.git      # bare repo; push your project to it
 mix forge.admit game "Persist the high score table" --body-file ticket.md
 mix forge.queue                                   # questions, approvals, stuck, review

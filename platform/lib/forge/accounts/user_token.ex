@@ -84,6 +84,32 @@ defmodule Forge.Accounts.UserToken do
     build_hashed_token(user, context, user.email)
   end
 
+  @api_context "api"
+
+  @doc """
+  Builds an API token for the user, labelled by `name`. Returns the encoded token to show
+  once and the row storing its hash. API tokens do not expire; they are revoked by deletion.
+  """
+  def build_api_token(user, name), do: build_hashed_token(user, @api_context, name)
+
+  @doc "Query finding the user behind an encoded API token."
+  def verify_api_token_query(token) do
+    case Base.url_decode64(token, padding: false) do
+      {:ok, decoded_token} ->
+        hashed_token = :crypto.hash(@hash_algorithm, decoded_token)
+
+        query =
+          from token in by_token_and_context_query(hashed_token, @api_context),
+            join: user in assoc(token, :user),
+            select: user
+
+        {:ok, query}
+
+      :error ->
+        :error
+    end
+  end
+
   defp build_hashed_token(user, context, sent_to) do
     token = :crypto.strong_rand_bytes(@rand_size)
     hashed_token = :crypto.hash(@hash_algorithm, token)

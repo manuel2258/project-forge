@@ -70,6 +70,10 @@ in
   };
 
   config = mkIf cfg.enable {
+    # Claude Code is unfree in nixpkgs; allow exactly that package. Hosts that set
+    # `nixpkgs.pkgs` themselves must allow it in their own nixpkgs config instead.
+    nixpkgs.config.allowUnfreePredicate = pkg: builtins.elem (lib.getName pkg) [ "claude-code" ];
+
     users.users.forge = {
       isSystemUser = true;
       group = "forge";

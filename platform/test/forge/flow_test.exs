@@ -338,4 +338,69 @@ defmodule Forge.FlowTest do
     assert Jobs.recover() == 1
     assert Jobs.get!(job.id).status == :pending
   end
+
+  # `harness_session_id` is only ever persisted by the completion path (`Jobs.complete/2`),
+  # so a node killed mid-job always recovers with it nil, no matter how far the dead run got
+  # or what it left in the job's out/. Recovery must therefore hand that run a cold start,
+  # which clears out/ before the harness runs again; otherwise `collect/2` decides this run's
+  # outcome on a document the live run never wrote. See commit b3b7c77.
+  test "a job recovered after its node died runs cold and does not collect the dead run's output",
+       %{project: project, user: user} do
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    job = only_pending(ticket)
+
+    # The run that was in flight when the node died had reached the harness and written
+    # refinement.md, but the node was killed before the job ever completed.
+    job_dir = Path.join([Jobs.data_dir(), "jobs", job.id])
+    File.mkdir_p!(Path.join(job_dir, "out"))
+
+    File.write!(
+      Path.join([job_dir, "out", "refinement.md"]),
+      "---\noutcome: done\n---\nwritten by the run that was killed\n"
+    )
+
+    {:ok, _} = Repo.update(Job.progress_changeset(job, %{status: :running}))
+    assert Jobs.recover() == 1
+    job = Jobs.get!(job.id)
+    assert job.status == :pending
+    assert job.harness_session_id == nil
+
+    # The recovered run starts cold (no session to resume) and hits its turn budget without
+    # writing anything itself. A correct cold start clears out/ first, so the document left
+    # behind by the dead run must not be collected as this run's output.
+    scenario("max_turns", "refinement.md")
+    {:ok, job} = Jobs.run(job)
+
+    assert job.outcome == :budget_exhausted
+    refute Artifacts.latest(ticket.id, "refinement.md")
+  end
+
+  # The other half of the same behaviour: a job that *does* carry a session id is a genuine
+  # resume, and must keep what the earlier attempt already produced in out/.
+  test "a job resumed with a session id keeps the earlier attempt's output", %{
+    project: project,
+    user: user
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    job = only_pending(ticket)
+
+    job_dir = Path.join([Jobs.data_dir(), "jobs", job.id])
+    File.mkdir_p!(Path.join(job_dir, "out"))
+
+    File.write!(
+      Path.join([job_dir, "out", "refinement.md"]),
+      "---\noutcome: done\n---\nfrom the attempt this one resumes\n"
+    )
+
+    {:ok, job} = Repo.update(Job.progress_changeset(job, %{harness_session_id: "sess-42"}))
+
+    # Same lever: max_turns writes nothing itself, so whatever is collected came from out/
+    # as prepare/3 left it.
+    scenario("max_turns", "refinement.md")
+    {:ok, job} = Jobs.run(job)
+
+    assert job.outcome == :budget_exhausted
+    assert %{content: content} = Artifacts.latest(ticket.id, "refinement.md")
+    assert content =~ "from the attempt this one resumes"
+  end
 end

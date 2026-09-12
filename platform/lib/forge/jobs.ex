@@ -166,7 +166,8 @@ defmodule Forge.Jobs do
     repo_path = Projects.repo_path(project)
     worktree = worktree_dir(job)
 
-    with :ok <- ensure_worktree(repo_path, worktree, ticket.branch),
+    with :ok <-
+           ensure_worktree(repo_path, worktree, ticket.branch, job.harness_session_id != nil),
          {:ok, pid} <- start_runner(job, ticket, worktree),
          {:ok, _} <- mark_started(job) do
       {:ok, pid}
@@ -508,8 +509,15 @@ defmodule Forge.Jobs do
 
   defp worktree_dir(%Job{id: id}), do: Path.join([data_dir(), "worktrees", id])
 
-  defp ensure_worktree(repo_path, worktree, branch) do
-    if File.dir?(worktree), do: :ok, else: Git.worktree_add(repo_path, worktree, branch)
+  # The worktree is removed when a job finishes, so one still standing belongs to a run that
+  # did not: a node that died. A resume continues that run and keeps its work in progress; a
+  # cold start does not, and must not inherit it. Commits are on the branch either way.
+  defp ensure_worktree(repo_path, worktree, branch, resume?) do
+    cond do
+      not File.dir?(worktree) -> Git.worktree_add(repo_path, worktree, branch)
+      resume? -> :ok
+      true -> Git.worktree_reset(worktree, branch)
+    end
   end
 
   defp remove_worktree(ticket, job) do

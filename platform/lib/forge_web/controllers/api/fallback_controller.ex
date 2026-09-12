@@ -20,16 +20,34 @@ defmodule ForgeWeb.Api.FallbackController do
   def call(conn, {:error, :no_such_transition}),
     do: error(conn, :unprocessable_entity, "no_such_transition", nil)
 
-  # A project registered but never pushed to has no commit to pin a ticket against. That is
-  # the client's next step, not a platform fault.
+  # Reaching git and not finding the ref is the client's next step, not a platform fault: the
+  # repository may not be pushed yet, or `default_branch` may name a branch that is not there.
+  # The atom carries no ref, so the message says what to check rather than asserting a cause.
   def call(conn, {:error, :unknown_ref}),
     do:
       error(
         conn,
         :unprocessable_entity,
         "unknown_ref",
-        "the project's default branch has no commit; push the repository first"
+        "could not resolve the branch: check that the repository is pushed and that the " <>
+          "project's default branch exists in it"
       )
+
+  def call(conn, {:error, {:no_workflow_file, path}}),
+    do: error(conn, :unprocessable_entity, "no_workflow_file", "#{path} is not in the repository")
+
+  def call(conn, {:error, :document_requires_content}),
+    do:
+      error(
+        conn,
+        :unprocessable_entity,
+        "document_requires_content",
+        "a document artifact needs content, as a string"
+      )
+
+  def call(conn, {:error, {:kind_mismatch, name, kind}}),
+    do:
+      error(conn, :conflict, "kind_mismatch", "#{name} already exists on this ticket as #{kind}")
 
   def call(conn, {:error, {:job_live, state}}),
     do: error(conn, :conflict, "job_live", "a job for #{state} is pending, running or waiting")

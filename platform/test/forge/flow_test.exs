@@ -403,4 +403,117 @@ defmodule Forge.FlowTest do
     assert %{content: content} = Artifacts.latest(ticket.id, "refinement.md")
     assert content =~ "from the attempt this one resumes"
   end
+
+  # The worktree is only removed once a job finishes, so a node that died mid-job leaves it
+  # behind with whatever the harness had not committed. `blocking` leaves the job waiting, so
+  # the worktree is still there to inspect after the run.
+  test "a cold start discards uncommitted work the dead run left in the worktree", %{
+    project: project,
+    user: user,
+    repo: repo
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    job = only_pending(ticket)
+    worktree = Path.join([Jobs.data_dir(), "worktrees", job.id])
+    :ok = Forge.Git.worktree_add(repo, worktree, ticket.branch)
+    File.write!(Path.join(worktree, "half-done.txt"), "from the run that was killed")
+
+    scenario("blocking", "refinement.md")
+    {:ok, job} = Jobs.run(job)
+
+    assert job.status == :waiting
+    assert File.dir?(worktree)
+    refute File.exists?(Path.join(worktree, "half-done.txt"))
+  end
+
+  test "a resume keeps the work in progress in its worktree", %{
+    project: project,
+    user: user,
+    repo: repo
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    job = only_pending(ticket)
+    worktree = Path.join([Jobs.data_dir(), "worktrees", job.id])
+    :ok = Forge.Git.worktree_add(repo, worktree, ticket.branch)
+    File.write!(Path.join(worktree, "half-done.txt"), "from the attempt this one resumes")
+
+    {:ok, job} = Repo.update(Job.progress_changeset(job, %{harness_session_id: "sess-42"}))
+
+    scenario("blocking", "refinement.md")
+    {:ok, job} = Jobs.run(job)
+
+    assert job.status == :waiting
+    assert File.read!(Path.join(worktree, "half-done.txt")) =~ "resumes"
+  end
+
+  # A ticket pins its workflow, and the validator's rules move between milestones, so a
+  # pinned definition can stop parsing long after the row was written. The queue is shared:
+  # one such ticket must not take it away from every other one.
+  test "a stuck ticket whose pinned workflow no longer parses leaves the queue standing", %{
+    project: project,
+    user: user
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "unparseable"}, {:user, user.id})
+
+    {:ok, _} =
+      ticket
+      |> Ecto.Changeset.change(workflow: %{"no longer" => "a workflow"}, status: :stuck)
+      |> Repo.update()
+
+    assert [%{kind: :stuck, detail: detail}] =
+             Enum.filter(Queue.items(), &(&1.ticket.id == ticket.id))
+
+    assert detail.transitions == []
+  end
+
+  test "an active ticket whose pinned workflow no longer parses leaves the queue standing", %{
+    project: project,
+    user: user
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "unparseable"}, {:user, user.id})
+
+    {:ok, _} =
+      ticket
+      |> Ecto.Changeset.change(workflow: %{"no longer" => "a workflow"})
+      |> Repo.update()
+
+    assert Enum.filter(Queue.items(), &(&1.ticket.id == ticket.id)) == []
+  end
+
+  # The grammar requires `when` values to be distinct per `from`, not targets, so two edges
+  # may lead to the same state. The queue names states, so it must name each one once.
+  test "transitions out of a state are listed once per target", %{user: user} do
+    repo =
+      seeded_repo(%{
+        ".forge/workflow.yml" => """
+        version: 1
+        initial: built
+        states:
+          built:
+            prompt: agents/plan.md
+            inputs: [ticket]
+            produces: [plan.md]
+            outcomes: [done, retry]
+            budget: { turns: 1, cost: 0.01 }
+          waiting_room: {}
+        transitions:
+          - { from: built, to: waiting_room }
+          - { from: built, to: waiting_room, when: retry }
+        limits:
+          ticket_cost: 1.00
+        """
+      })
+
+    {:ok, project} =
+      Projects.register(%{name: "dup-#{System.unique_integer([:positive])}", repo_path: repo})
+
+    {:ok, ticket} = Tickets.admit(project, %{title: "two edges, one target"}, {:user, user.id})
+
+    {:ok, _} = ticket |> Ecto.Changeset.change(status: :stuck) |> Repo.update()
+
+    assert [%{kind: :stuck, detail: %{transitions: transitions}}] =
+             Enum.filter(Queue.items(), &(&1.ticket.id == ticket.id))
+
+    assert transitions == ["waiting_room"]
+  end
 end

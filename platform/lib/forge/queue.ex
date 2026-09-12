@@ -7,6 +7,8 @@ defmodule Forge.Queue do
 
   import Ecto.Query, only: [from: 2]
 
+  require Logger
+
   alias Forge.{Artifacts, Repo, Tickets}
   alias Forge.Artifacts.Question
   alias Forge.Tickets.Ticket
@@ -65,7 +67,13 @@ defmodule Forge.Queue do
   end
 
   defp ticket_items(%Ticket{} = ticket) do
-    workflow = Tickets.workflow(ticket)
+    case Tickets.parsed_workflow(ticket) do
+      {:ok, workflow} -> review_item(ticket, workflow)
+      {:error, errors} -> unparseable(ticket, errors, [])
+    end
+  end
+
+  defp review_item(%Ticket{} = ticket, workflow) do
     state = Workflow.state(workflow, ticket.state)
 
     if state && ForgeCore.Workflow.State.human?(state) &&
@@ -86,10 +94,28 @@ defmodule Forge.Queue do
 
   # The states an operator may move the ticket to from where it rests. Both stuck and review
   # items carry these, so the choices are in the queue and not only in the workflow file.
+  # Two edges may share a target - the grammar only requires distinct `when` values per
+  # `from` - and this names states, so each is named once.
   defp transitions_from(%Ticket{} = ticket) do
-    ticket
-    |> Tickets.workflow()
-    |> Workflow.transitions_from(ticket.state)
-    |> Enum.map(& &1.to)
+    case Tickets.parsed_workflow(ticket) do
+      {:ok, workflow} ->
+        workflow
+        |> Workflow.transitions_from(ticket.state)
+        |> Enum.map(& &1.to)
+        |> Enum.uniq()
+
+      {:error, errors} ->
+        unparseable(ticket, errors, [])
+    end
+  end
+
+  # The queue serves every ticket at once, so a definition that no longer validates costs the
+  # operator that ticket's detail, not the whole queue.
+  defp unparseable(%Ticket{} = ticket, errors, fallback) do
+    Logger.warning(
+      "ticket #{ticket.id} pinned a workflow that no longer parses: #{inspect(errors)}"
+    )
+
+    fallback
   end
 end

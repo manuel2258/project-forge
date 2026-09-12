@@ -16,6 +16,9 @@ defmodule Forge.GitFixtures do
   @doc """
   A bare repository whose `main` holds `.forge/workflow.yml` (the grammar example), the four
   prompts it names, and a README. Returns the bare path.
+
+  `files` overrides or adds paths; a path mapped to `nil` is left out of the commit, which is
+  how to seed a repository that is pushed but missing something.
   """
   def seeded_repo(files \\ %{}) do
     bare = Path.join(tmp_dir("bare"), "project.git")
@@ -35,7 +38,9 @@ defmodule Forge.GitFixtures do
         files
       )
 
-    Enum.each(files, fn {path, content} ->
+    files
+    |> Enum.reject(fn {_path, content} -> is_nil(content) end)
+    |> Enum.each(fn {path, content} ->
       full = Path.join(work, path)
       File.mkdir_p!(Path.dirname(full))
       File.write!(full, content)

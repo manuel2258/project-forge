@@ -64,6 +64,18 @@ defmodule Forge.Git do
     end
   end
 
+  @doc """
+  Returns the existing worktree at `dir` to `branch`'s head, discarding everything that was
+  not committed. Ignored files are left alone, so a build directory survives.
+  """
+  @spec worktree_reset(String.t(), String.t()) :: :ok | {:error, term()}
+  def worktree_reset(dir, branch) do
+    with {:ok, _} <- run(dir, ["reset", "--quiet", "--hard", "refs/heads/" <> branch]),
+         {:ok, _} <- run(dir, ["clean", "--quiet", "-fd"]) do
+      :ok
+    end
+  end
+
   @doc "Removes the worktree at `dir`, discarding uncommitted changes."
   @spec worktree_remove(repo(), String.t()) :: :ok | {:error, term()}
   def worktree_remove(repo, dir) do

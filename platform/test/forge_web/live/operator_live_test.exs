@@ -53,13 +53,13 @@ defmodule ForgeWeb.OperatorLiveTest do
   } do
     {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
 
-    {:ok, view, html} = live(conn, ~p"/")
-    assert html =~ "Nothing needs you right now"
+    {:ok, view, _html} = live(conn, ~p"/")
+    assert has_element?(view, "#queue-end")
 
     scenario("success", "refinement.md")
     run_pending(ticket.id)
     # the page refreshes on its own when the job finishes
-    assert render(view) =~ "Approval"
+    assert render(view) =~ "approval"
     assert render(view) =~ "refined"
 
     view
@@ -72,7 +72,7 @@ defmodule ForgeWeb.OperatorLiveTest do
     scenario("blocking", "plan.md")
     run_pending(ticket.id)
     html = render(view)
-    assert html =~ "Blocking question"
+    assert html =~ "blocking question"
     assert html =~ "Which backend?"
 
     # a human edit in between makes the question live on a new version; answering still works
@@ -85,7 +85,7 @@ defmodule ForgeWeb.OperatorLiveTest do
 
     view |> element("button[phx-value-key=backend][phx-value-choice=b]") |> render_click()
     assert render(view) =~ "Answered backend: b"
-    assert render(view) =~ "Nothing needs you right now"
+    refute render(view) =~ "blocking question"
 
     assert [%{status: :pending}] =
              Enum.filter(Jobs.for_ticket(ticket.id), &(&1.state == "planned"))
@@ -129,11 +129,13 @@ defmodule ForgeWeb.OperatorLiveTest do
     {:ok, view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
     assert html =~ "Persist scores"
     assert html =~ "They vanish."
-    assert html =~ "refined #1"
-    assert html =~ "refinement.md · v1 · document"
+    assert html =~ "refined"
+    assert html =~ "#1"
+    assert html =~ "refinement.md"
+    assert html =~ "v1"
     assert html =~ "<h1>Plan</h1>"
-    assert html =~ "ticket.admitted"
-    assert html =~ "Approval"
+    assert html =~ "Last four events"
+    assert has_element?(view, "#hoisted-decision")
 
     view |> form("#approval-#{ticket.id} form") |> render_submit(%{"decision" => "rejected"})
     assert render(view) =~ "rejected; now in refined"
@@ -150,9 +152,13 @@ defmodule ForgeWeb.OperatorLiveTest do
 
     {:ok, _view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/jobs/#{job.id}")
     assert html =~ "Pinned manifest"
-    assert html =~ "ticket · 1"
+    assert html =~ "Inputs, at their exact version"
+    assert html =~ "ticket"
     assert html =~ "refinement.md"
-    assert html =~ "20 turns · $0.5"
+    # Consumption reads as capacity, never money: see docs/design/capacity.md.
+    assert html =~ "20 turns"
+    assert html =~ "windows"
+    refute html =~ "$0.5"
     assert html =~ "Refine the ticket into a crisp problem statement."
     assert html =~ "fake-model · session sess-42"
     assert html =~ "Reading the plan."
@@ -168,8 +174,8 @@ defmodule ForgeWeb.OperatorLiveTest do
 
     {:ok, _view, html} = live(conn, ~p"/board")
     assert html =~ project.name
-    assert html =~ "refined · 2"
-    assert html =~ "merged · 0"
-    assert :binary.match(html, "refined · 2") < :binary.match(html, "merged · 0")
+    assert html =~ "refined"
+    assert html =~ "merged"
+    assert :binary.match(html, "refined") < :binary.match(html, "merged")
   end
 end

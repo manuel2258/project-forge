@@ -54,6 +54,7 @@ Each stdout line is JSON with a top-level `type`. Documented types and what the 
 | `system` | `init` | Record `session_id`, `model`, `tools`. Emit `harness.started`. |
 | `system` | `api_retry` | Emit `harness.retry` with `attempt`, `max_retries`, `error`. |
 | `system` | other | Emit `harness.notice` with the raw message. |
+| `rate_limit_event` | | Emit `harness.rate_limit` with `status`, `resets_at`, `rate_limit_type`, `utilization`, `is_using_overage`. Undocumented; see below. |
 | `assistant` | | For each content block: `text` -> `harness.text`, `tool_use` -> `harness.tool_use` (`id`, `name`, input), `thinking` -> counted, not stored. |
 | `user` | | For each `tool_result` block -> `harness.tool_result` (`tool_use_id`, `is_error`, byte size, first 4 KB). |
 | `stream_event` | | Ignored. Not requested (`--include-partial-messages` is off). |
@@ -78,8 +79,18 @@ All are `job.harness.*` in the event log, with `job_id`, `ticket_id`, `actor = {
 
 `started` (session_id, model, tools), `text` (text), `tool_use` (id, name, input),
 `tool_result` (tool_use_id, is_error, bytes, excerpt), `retry` (attempt, max_retries, error),
+`rate_limit` (status, resets_at, rate_limit_type, utilization, is_using_overage),
 `notice`, `unknown`, `malformed`, `finished` (subtype, is_error, num_turns, duration_ms,
 total_cost_usd, usage, result, exit_status).
+
+## Rate limit events
+
+`rate_limit_event` is not in the documentation but is emitted in practice, carrying a
+`rate_limit_info` object: `status`, `resetsAt` (unix epoch), `rateLimitType`, `isUsingOverage`,
+and — only once `surpassedThreshold` is crossed — `utilization`. It is the provider's own report
+of the five-hour window, and it is what `capacity.md` draws the operator's capacity readout from.
+Before it was mapped it fell through the catch-all into `harness.unknown`, which is the behaviour
+the unknown clause exists for and the reason nothing was lost.
 
 The full raw stdout of each run is written to `transcript-<run>.jsonl` in the job directory
 and recorded as a blob version with its content hash. It is never rendered live; it exists

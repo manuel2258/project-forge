@@ -12,15 +12,14 @@ defmodule ForgeWeb.Layouts do
   embed_templates "layouts/*"
 
   @doc """
-  Renders your app layout.
+  The operator shell: a hairline-ruled top row on a laptop, a fixed bottom bar on a phone.
 
-  This function is typically invoked from every template,
-  and it often contains your application menu, sidebar,
-  or similar.
+  There is no global page padding and no global measure — each route sets its own `measure`,
+  because the queue deliberately does not widen and the board deliberately does not cap.
 
   ## Examples
 
-      <Layouts.app flash={@flash}>
+      <Layouts.app flash={@flash} active={:queue} measure="34rem">
         <h1>Content</h1>
       </Layouts.app>
 
@@ -31,30 +30,97 @@ defmodule ForgeWeb.Layouts do
     default: nil,
     doc: "the current [scope](https://phoenix.hexdocs.pm/scopes.html)"
 
+  attr :measure, :any,
+    default: "34rem",
+    doc: "max width of the content column, or nil for the full viewport. See docs/design/ui.md."
+
+  attr :active, :atom, default: nil, doc: "which nav item is the current page"
+  attr :queue_count, :integer, default: nil, doc: "decisions waiting, shown as the queue badge"
+
   slot :inner_block, required: true
 
   def app(assigns) do
     ~H"""
-    <header class="navbar px-4 sm:px-6 lg:px-8">
-      <div class="flex-1">
-        <.link navigate={~p"/"} class="flex w-fit items-center gap-2 font-semibold">forge</.link>
-      </div>
-      <div class="flex-none">
-        <ul class="flex px-1 space-x-2 items-center">
-          <li><.link navigate={~p"/"} class="btn btn-ghost btn-sm">Queue</.link></li>
-          <li><.link navigate={~p"/board"} class="btn btn-ghost btn-sm">Board</.link></li>
-          <li><.theme_toggle /></li>
-        </ul>
+    <header class="hidden sm:flex items-center gap-6 border-b border-base-300 px-6 lg:px-[30px] h-14">
+      <.link navigate={~p"/"} class="font-semibold -tracking-[.02em]">forge</.link>
+      <nav class="flex items-center gap-5 text-sm">
+        <.nav_link navigate={~p"/"} active={@active == :queue} count={@queue_count}>Queue</.nav_link>
+        <.nav_link navigate={~p"/board"} active={@active == :board}>Board</.nav_link>
+      </nav>
+      <div class="ml-auto flex items-center gap-4">
+        <.theme_toggle />
+        <div :if={@current_scope} class="flex items-center gap-3 text-sm">
+          <.link navigate={~p"/users/settings"} class="link link-hover opacity-70">
+            {@current_scope.user.email}
+          </.link>
+          <.link href={~p"/users/log-out"} method="delete" class="link link-hover opacity-70">
+            Log out
+          </.link>
+        </div>
+        <.link :if={!@current_scope} navigate={~p"/users/log-in"} class="link link-hover text-sm">
+          Log in
+        </.link>
       </div>
     </header>
 
-    <main class="px-4 py-20 sm:px-6 lg:px-8">
-      <div class="mx-auto max-w-2xl space-y-4">
+    <main class={[
+      "px-5 sm:px-6 lg:px-[30px] pt-6 sm:pt-8",
+      "pb-[calc(4rem+56px+env(safe-area-inset-bottom))] sm:pb-16"
+    ]}>
+      <div class={@measure && "mx-auto"} style={@measure && "max-width: #{@measure}"}>
         {render_slot(@inner_block)}
       </div>
     </main>
 
+    <nav class={[
+      "sm:hidden fixed inset-x-0 bottom-0 z-20 grid grid-cols-2",
+      "border-t border-base-300 bg-base-100 pb-[env(safe-area-inset-bottom)]"
+    ]}>
+      <.bar_link navigate={~p"/"} active={@active == :queue} count={@queue_count}>Queue</.bar_link>
+      <.bar_link navigate={~p"/board"} active={@active == :board}>Board</.bar_link>
+    </nav>
+
     <.flash_group flash={@flash} />
+    """
+  end
+
+  attr :navigate, :string, required: true
+  attr :active, :boolean, default: false
+  attr :count, :integer, default: nil
+  slot :inner_block, required: true
+
+  defp nav_link(assigns) do
+    ~H"""
+    <.link
+      navigate={@navigate}
+      class={["flex items-center gap-2", @active || "opacity-60 hover:opacity-100"]}
+      aria-current={@active && "page"}
+    >
+      {render_slot(@inner_block)}
+      <span :if={@count && @count > 0} class="badge badge-accent badge-sm font-mono">{@count}</span>
+    </.link>
+    """
+  end
+
+  # 56px plus the safe-area inset, each item a full-height tap target: answering is a thumb action.
+  attr :navigate, :string, required: true
+  attr :active, :boolean, default: false
+  attr :count, :integer, default: nil
+  slot :inner_block, required: true
+
+  defp bar_link(assigns) do
+    ~H"""
+    <.link
+      navigate={@navigate}
+      class={[
+        "flex h-14 items-center justify-center gap-2 text-sm",
+        @active || "opacity-60"
+      ]}
+      aria-current={@active && "page"}
+    >
+      {render_slot(@inner_block)}
+      <span :if={@count && @count > 0} class="badge badge-accent badge-sm font-mono">{@count}</span>
+    </.link>
     """
   end
 
@@ -114,8 +180,8 @@ defmodule ForgeWeb.Layouts do
   """
   def theme_toggle(assigns) do
     ~H"""
-    <div class="card relative flex flex-row items-center border-2 border-base-300 bg-base-300 rounded-full">
-      <div class="absolute w-1/3 h-full rounded-full border-1 border-base-200 bg-base-100 brightness-200 left-0 [[data-theme=light]_&]:left-1/3 [[data-theme=dark]_&]:left-2/3 [[data-theme-source=system]_&]:!left-0 transition-[left]" />
+    <div class="relative flex flex-row items-center rounded-full border border-base-300">
+      <div class="absolute w-1/3 h-full rounded-full bg-base-200 left-0 [[data-theme=light]_&]:left-1/3 [[data-theme=dark]_&]:left-2/3 [[data-theme-source=system]_&]:!left-0 transition-[left] motion-reduce:transition-none" />
 
       <button
         class="flex p-2 cursor-pointer w-1/3"

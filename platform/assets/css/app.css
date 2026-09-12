@@ -18,41 +18,70 @@
   themes: false;
 }
 
-/* daisyUI theme plugin.
-  We ship with two themes, a light one inspired on Phoenix colors and a dark one inspired
-  on Elixir colors. Build your own at: https://daisyui.com/theme-generator/ */
+/* Self-hosted faces. Instrument Sans for language, JetBrains Mono for identifiers; see
+   docs/design/ui.md. Both are OFL variable fonts, latin subset, served from priv/static/fonts
+   so the product builds and runs without egress. No webfont CDN, ever. */
+@font-face {
+  font-family: "Instrument Sans";
+  src: url("/fonts/instrument-sans-var.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/fonts/jetbrains-mono-var.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@theme {
+  --font-sans: "Instrument Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Themes are hand-authored rather than generated: every value is oklch, hue is constant across
+   both (300 neutrals, 290 primary, 62 accent, 240 info, 150 success, 22 error) and only lightness
+   and chroma move. The accent is deliberately identical in both, so the one loud mark in the
+   product does not shift meaning when the theme does. See docs/design/ui.md. */
 @plugin "daisyui/packages/bundle/daisyui-theme" {
   name: "dark";
   default: false;
   prefersdark: true;
   color-scheme: "dark";
-  --color-base-100: oklch(30.33% 0.016 252.42);
-  --color-base-200: oklch(25.26% 0.014 253.1);
-  --color-base-300: oklch(20.15% 0.012 254.09);
-  --color-base-content: oklch(97.807% 0.029 256.847);
-  --color-primary: oklch(58% 0.233 277.117);
-  --color-primary-content: oklch(96% 0.018 272.314);
-  --color-secondary: oklch(58% 0.233 277.117);
-  --color-secondary-content: oklch(96% 0.018 272.314);
-  --color-accent: oklch(60% 0.25 292.717);
-  --color-accent-content: oklch(96% 0.016 293.756);
-  --color-neutral: oklch(37% 0.044 257.287);
-  --color-neutral-content: oklch(98% 0.003 247.858);
-  --color-info: oklch(58% 0.158 241.966);
-  --color-info-content: oklch(97% 0.013 236.62);
-  --color-success: oklch(60% 0.118 184.704);
-  --color-success-content: oklch(98% 0.014 180.72);
-  --color-warning: oklch(66% 0.179 58.318);
-  --color-warning-content: oklch(98% 0.022 95.277);
-  --color-error: oklch(58% 0.253 17.585);
-  --color-error-content: oklch(96% 0.015 12.422);
-  --radius-selector: 0.25rem;
-  --radius-field: 0.25rem;
+
+  --color-base-100: oklch(15.5% 0.008 300);
+  --color-base-200: oklch(19.5% 0.009 300);
+  --color-base-300: oklch(24.5% 0.008 300);
+  --color-base-content: oklch(94% 0.004 300);
+
+  --color-primary: oklch(72% 0.130 290);
+  --color-primary-content: oklch(16% 0.030 290);
+  --color-secondary: oklch(62% 0.040 290);
+  --color-secondary-content: oklch(15% 0.012 290);
+  --color-accent: oklch(76% 0.130 62);
+  --color-accent-content: oklch(18% 0.040 62);
+  --color-neutral: oklch(30% 0.010 300);
+  --color-neutral-content: oklch(92% 0.006 300);
+
+  --color-info: oklch(72% 0.100 240);
+  --color-info-content: oklch(16% 0.030 240);
+  --color-success: oklch(72% 0.120 150);
+  --color-success-content: oklch(16% 0.030 150);
+  --color-warning: oklch(82% 0.110 62);
+  --color-warning-content: oklch(18% 0.040 62);
+  --color-error: oklch(72% 0.170 22);
+  --color-error-content: oklch(16% 0.040 22);
+
+  --radius-selector: 0.3125rem;
+  --radius-field: 0.375rem;
   --radius-box: 0.5rem;
-  --size-selector: 0.21875rem;
-  --size-field: 0.21875rem;
-  --border: 1.5px;
-  --depth: 1;
+  --size-selector: 0.25rem;
+  --size-field: 0.25rem;
+  --border: 1px;
+  --depth: 0;
   --noise: 0;
 }
 
@@ -61,33 +90,37 @@
   default: true;
   prefersdark: false;
   color-scheme: "light";
-  --color-base-100: oklch(98% 0 0);
-  --color-base-200: oklch(96% 0.001 286.375);
-  --color-base-300: oklch(92% 0.004 286.32);
-  --color-base-content: oklch(21% 0.006 285.885);
-  --color-primary: oklch(70% 0.213 47.604);
-  --color-primary-content: oklch(98% 0.016 73.684);
-  --color-secondary: oklch(55% 0.027 264.364);
-  --color-secondary-content: oklch(98% 0.002 247.839);
-  --color-accent: oklch(0% 0 0);
-  --color-accent-content: oklch(100% 0 0);
-  --color-neutral: oklch(44% 0.017 285.786);
-  --color-neutral-content: oklch(98% 0 0);
-  --color-info: oklch(62% 0.214 259.815);
-  --color-info-content: oklch(97% 0.014 254.604);
-  --color-success: oklch(70% 0.14 182.503);
-  --color-success-content: oklch(98% 0.014 180.72);
-  --color-warning: oklch(66% 0.179 58.318);
-  --color-warning-content: oklch(98% 0.022 95.277);
-  --color-error: oklch(58% 0.253 17.585);
-  --color-error-content: oklch(96% 0.015 12.422);
-  --radius-selector: 0.25rem;
-  --radius-field: 0.25rem;
+
+  --color-base-100: oklch(98.5% 0.003 300);
+  --color-base-200: oklch(96.5% 0.004 300);
+  --color-base-300: oklch(92.5% 0.005 300);
+  --color-base-content: oklch(20% 0.012 300);
+
+  --color-primary: oklch(47% 0.140 290);
+  --color-primary-content: oklch(98% 0.003 290);
+  --color-secondary: oklch(52% 0.040 290);
+  --color-secondary-content: oklch(98% 0.003 290);
+  --color-accent: oklch(76% 0.130 62);
+  --color-accent-content: oklch(18% 0.040 62);
+  --color-neutral: oklch(30% 0.012 300);
+  --color-neutral-content: oklch(97% 0.003 300);
+
+  --color-info: oklch(46% 0.120 240);
+  --color-info-content: oklch(98% 0.003 240);
+  --color-success: oklch(45% 0.110 150);
+  --color-success-content: oklch(98% 0.003 150);
+  --color-warning: oklch(72% 0.130 62);
+  --color-warning-content: oklch(18% 0.040 62);
+  --color-error: oklch(48% 0.170 22);
+  --color-error-content: oklch(98% 0.003 22);
+
+  --radius-selector: 0.3125rem;
+  --radius-field: 0.375rem;
   --radius-box: 0.5rem;
-  --size-selector: 0.21875rem;
-  --size-field: 0.21875rem;
-  --border: 1.5px;
-  --depth: 1;
+  --size-selector: 0.25rem;
+  --size-field: 0.25rem;
+  --border: 1px;
+  --depth: 0;
   --noise: 0;
 }
 
@@ -102,4 +135,12 @@
 /* Make LiveView wrapper divs transparent for layout */
 [data-phx-session], [data-phx-teleported-src] { display: contents }
 
-/* This file is for your main application CSS */
+/* Nothing pulses and nothing tails: motion is minimal and never decorative. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

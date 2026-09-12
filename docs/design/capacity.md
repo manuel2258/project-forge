@@ -1,0 +1,124 @@
+# Capacity and usage
+
+Scope: how consumption is modelled, recorded and drawn. Consumption is **consumed capacity, not
+money**: one unit is one percent of a five-hour window, and quantities are stated in **windows** to
+two significant figures (`1.4 windows`). This survives work that spans four windows and a week,
+which a percentage cannot, and it replaces `$0.15562769999999998` on every operator surface.
+
+`cost_usd` stays on jobs and tickets. It is what the harness reports, the PoC's definition of
+usable asks for a total per ticket, and a spend cap is enforced against it. It simply stops being
+something the operator is shown.
+
+## What the provider reports
+
+Claude Code emits an undocumented `rate_limit_event` on the stream-json channel. Evidence from the
+local dev node, 87 events across its job transcripts:
+
+```json
+{"type": "rate_limit_event",
+ "rate_limit_info": {"status": "allowed_warning", "resetsAt": 1789210800,
+                     "rateLimitType": "five_hour", "utilization": 0.96,
+                     "isUsingOverage": false, "surpassedThreshold": 0.9},
+ "uuid": "…", "session_id": "…"}
+```
+
+What the sample establishes:
+
+- `rateLimitType` was `five_hour` on all 87. **No weekly event was observed**, so the week is not
+  drawn until one is.
+- `resetsAt` (unix epoch) is present on all 87. The window boundary is provider-reported and does
+  not have to be inferred.
+- `utilization` is present on only 21 — exactly those with `status: "allowed_warning"`, once
+  `surpassedThreshold` (0.9) is crossed. **Below the threshold the provider reports no figure at
+  all.**
+- `status` was `allowed` (66) and `allowed_warning` (21). A rejecting status was not observed.
+- `overageStatus` / `overageDisabledReason` appear on the `allowed` events; `isUsingOverage` on
+  all of them.
+
+The consequence for drawing: the countdown is real and always available, and the gauge is only
+honest above 90%.
+
+## Two objects, never drawn the same way
+
+**Usage** is absolute and never resets: a job's usage, a timeline step's sum, a ticket's total
+against its allowance. It is derived from `cost_usd` through a single configured constant,
+`config :forge, :capacity, window_cost_usd:` — the cost of one whole five-hour window. The
+provider gives no per-job window share, so this constant is the only bridge from what the harness
+reports to the unit the operator reads. **It is a placeholder until dogfooding calibrates it**, and
+it is the one number in this note that is not evidence.
+
+Drawn as a figure plus a 5px meter filled accent, against the ticket allowance. The allowance is
+the existing `limits.ticket_cost` from the workflow grammar, displayed in windows; the grammar does
+not change. A ticket allowance stays absolute — a cap expressed as a share of a refilling pool
+would mean something different on Monday than on Friday.
+
+**Capacity** is a live shared pool that refills, and it comes from `rate_limit_event` rather than
+from anything forge computes. The current five-hour window carries a mono reset countdown derived
+from `resetsAt`, shown whenever a window is known. The twenty-tick gauge (one tick per five
+percent, compressing to ten ticks in the top bar) is drawn **only when the provider has supplied a
+`utilization` figure** — that is, once the warning threshold is crossed. Below it the countdown
+stands alone. Inventing the first ninety percent of a gauge's range would be exactly the failure
+the design warns about for the countdown, and a quiet page should stay quiet until capacity binds.
+
+The week becomes the headline only when it binds. Until a weekly `rate_limit_event` is observed
+there is nothing truthful to draw, so it is not drawn.
+
+**The window gauge is neutral, not accent.** The handoff lists it among the accent uses, which
+contradicts the rule accent exists to serve: accent means a human is being waited on, and window
+capacity is resolved by time rather than by a person. Drawing it in accent would put a loud mark on
+the one exhaustion the operator can do nothing about. Usage against a ticket allowance stays accent
+— that ceiling does need a human. This is a deliberate departure from the handoff, recorded here so
+it reads as a decision rather than a mistake.
+
+## Three exhaustions, three treatments
+
+Only one of them is the operator's.
+
+| Exhausted | Resolved by | Treatment |
+|---|---|---|
+| Job turn budget | the engine retries | outcome `budget_exhausted` on the job row, nowhere else |
+| Ticket allowance | **a human** — raise it or reroute | sticks the ticket, enters the queue, drawn in accent |
+| Window capacity | **time** | `PAUSED · CAPACITY 1h 12m`, neutral, on the board and the ticket, **never in the queue** |
+
+Keeping the third out of the queue is load-bearing. A paused ticket in the inbox trains the
+operator to open items they cannot act on, which is the exact failure the thesis is written
+against.
+
+## Engine support
+
+Three changes, in order of dependency.
+
+**1. Map the event.** `ForgeWorker.Harness.ClaudeCode` currently lets `rate_limit_event` fall
+through its catch-all into `harness.unknown`. It gains a clause emitting `harness.rate_limit` with
+`status`, `resets_at`, `rate_limit_type`, `utilization` and `is_using_overage`, keeping the raw
+message in `payload.raw` like every other event. `claude-code-events.md` records it as an
+undocumented type observed in practice.
+
+**2. Read the window from the event log.** No new table. The append-only event log is already the
+record, so `Forge.Capacity.window/0` reads the most recent `job.harness.rate_limit` event and
+returns the window it describes. Staleness is self-evident rather than hidden: a `resets_at` in the
+past means the window has rolled over and utilization is unknown again, which is the same state as
+having no figure yet.
+
+**3. Gate the scheduler.** `Forge.Jobs.Scheduler` refuses to start a job while the current window
+is blocking, leaving the ticket `active` — not `stuck`, and not in the queue — and surfacing as
+`PAUSED` until `resets_at`. The gate keys on the status string: anything beginning `allowed`
+permits, anything else pauses. That is forward-compatible with statuses this sample does not
+contain, and it fails towards not spending an invocation rather than towards burning one. A
+rejecting status has not been observed, so until one is, this path is written from the naming
+convention rather than from evidence, and it is the first thing to verify when a window is
+genuinely exhausted.
+
+## Open
+
+- **`window_cost_usd` is uncalibrated.** Every absolute usage figure is wrong by whatever factor it
+  is wrong by until dogfooding sets it. It is a display constant only: nothing schedules, caps or
+  refuses on it.
+- **The weekly window is unobserved.** If the provider emits one, the week is a thin plain bar
+  beneath the window gauge and becomes the headline when it is the binding ceiling.
+- **The rejecting status is unobserved**, so the scheduler gate's trigger is inferred from naming.
+- **Whether a job at a window edge hibernates and resumes or fails and retries** is unsettled. The
+  `PAUSED` treatment assumes the former, which is where the planned hibernation work surfaces.
+- **Whether dollars survive anywhere.** The recommendation is that they leave every operator
+  surface and stay in the API, the Mix tasks and the event log. A number the operator cannot act on
+  is noise; capacity is one they can act on.

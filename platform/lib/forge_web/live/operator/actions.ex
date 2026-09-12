@@ -8,7 +8,7 @@ defmodule ForgeWeb.Operator.Actions do
 
   require Logger
 
-  alias Forge.{Operator, Tickets}
+  alias Forge.{Artifacts, Operator, Tickets}
 
   @doc "Handles an operator event; returns `{:handled, socket}` or `:unknown`."
   def handle(event, params, socket) do
@@ -24,6 +24,30 @@ defmodule ForgeWeb.Operator.Actions do
   defp act("answer", %{"ticket" => id, "key" => key, "choice" => choice}, socket) do
     with {:ok, _} <- Operator.answer(ticket(id), user(socket), key, %{choice: choice}) do
       {:ok, "Answered #{key}: #{choice}"}
+    end
+  end
+
+  # The fast path answers every open blocking question on one artifact version with its own
+  # recommendation. The choices are read from the questions here rather than sent by the client,
+  # so a stale page cannot answer something other than what it showed.
+  defp act("answer_all", %{"ticket" => id, "version" => version_id}, socket) do
+    ticket = ticket(id)
+
+    questions =
+      ticket.id
+      |> Artifacts.open_questions()
+      |> Enum.filter(&(&1.artifact_version_id == version_id and &1.blocking and &1.default))
+
+    result =
+      Enum.reduce_while(questions, {:ok, 0}, fn question, {:ok, count} ->
+        case Operator.answer(ticket, user(socket), question.key, %{choice: question.default}) do
+          {:ok, _} -> {:cont, {:ok, count + 1}}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
+
+    with {:ok, count} <- result do
+      {:ok, "Accepted #{count} #{if count == 1, do: "recommendation", else: "recommendations"}"}
     end
   end
 

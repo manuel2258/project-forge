@@ -4,6 +4,9 @@ Read `docs/vision.md` for what this is, `docs/decisions.md` for what is settled,
 `docs/poc-plan.md` for what is being built and in what order. Design notes for the current
 milestone live in `docs/design/`; code follows them, and a change of mind updates the note first.
 
+`docs/design/ui.md` is the standard for every operator surface and `docs/design/capacity.md` for
+how consumption is modelled and drawn. Read both before changing anything the operator sees.
+
 ## Layout
 
 Three Mix projects joined by path dependencies. Not an umbrella.

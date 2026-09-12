@@ -36,6 +36,7 @@ defmodule ForgeWorker.Job.Runner do
 
   @default_wall_clock_ms :timer.hours(1)
   @default_grace_ms :timer.seconds(10)
+  @eof_grace_ms :timer.seconds(5)
   @max_line 4 * 1024 * 1024
 
   # -- API ----------------------------------------------------------------------------------
@@ -78,6 +79,7 @@ defmodule ForgeWorker.Job.Runner do
       started_event: nil,
       killed: nil,
       exit_status: nil,
+      eof: false,
       waiters: [],
       result: nil
     }
@@ -106,6 +108,7 @@ defmodule ForgeWorker.Job.Runner do
       Port.open({:spawn_executable, "/bin/sh"}, [
         :binary,
         :exit_status,
+        :eof,
         {:line, @max_line},
         {:args,
          ["-c", wrapper(secrets), "forge-job", Dir.prompt_path(job_dir), Dir.stderr_path(job_dir)] ++
@@ -169,11 +172,17 @@ defmodule ForgeWorker.Job.Runner do
     {:noreply, handle_line(state.buffer <> chunk, %{state | buffer: ""})}
   end
 
-  # Port data can still be queued behind the exit status (a final unterminated chunk is
-  # delivered on EOF), so concluding is deferred one hop to let it arrive first.
+  # The exit status arrives before the last of the output: a final unterminated chunk is only
+  # delivered when the pipe closes, which is strictly after the process has gone. `:eof` is the
+  # message that says the output is complete, so concluding waits for both. Deferring a hop
+  # instead would be a race — a self-sent message is queued immediately, and the trailing chunk
+  # has not necessarily been delivered yet.
   def handle_info({port, {:exit_status, status}}, %{port: port} = state) do
-    send(self(), :conclude)
-    {:noreply, %{state | exit_status: status}}
+    maybe_conclude(%{state | exit_status: status})
+  end
+
+  def handle_info({port, :eof}, %{port: port} = state) do
+    maybe_conclude(%{state | eof: true})
   end
 
   def handle_info(:conclude, %{result: nil} = state) do
@@ -195,6 +204,20 @@ defmodule ForgeWorker.Job.Runner do
   end
 
   def handle_info(:force_kill, state), do: {:noreply, state}
+
+  # Concluding needs both the exit status and `:eof`. A child that outlived the harness can hold
+  # the output pipe open, in which case the status arrives and `:eof` never does; the backstop
+  # bounds that wait rather than hanging the job. It is not the path a healthy run takes.
+  defp maybe_conclude(%{exit_status: status, eof: eof} = state) when status != nil do
+    if eof do
+      handle_info(:conclude, state)
+    else
+      Process.send_after(self(), :conclude, @eof_grace_ms)
+      {:noreply, state}
+    end
+  end
+
+  defp maybe_conclude(state), do: {:noreply, state}
 
   defp handle_line(line, state) do
     IO.binwrite(state.transcript, [line, "\n"])

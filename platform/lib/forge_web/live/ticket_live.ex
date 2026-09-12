@@ -1,13 +1,21 @@
 defmodule ForgeWeb.TicketLive do
-  @moduledoc "One ticket: state, pending decision, open questions, jobs, artifacts, events."
+  @moduledoc """
+  One ticket: what happened to it, what it cost, and the one thing it may be waiting for.
+
+  The spine is ordered by **time, not topology** — a step is a visit to a state, so a revisit is
+  another step further down with the same name. Stuck is drawn on the step it happened in, never
+  as a step of its own, because there is no such state. If the ticket has an answerable action it
+  is hoisted once, directly under the header; everything below it is reference.
+  """
 
   use ForgeWeb, :live_view
 
+  import ForgeWeb.Indicators
   import ForgeWeb.Operator.Components
 
   alias Forge.{Artifacts, Events, Jobs, Tickets}
   alias ForgeCore.Workflow
-  alias ForgeWeb.Markdown
+  alias ForgeWeb.{Format, Indicators, Markdown}
   alias ForgeWeb.Operator.Actions
 
   @impl true
@@ -21,6 +29,7 @@ defmodule ForgeWeb.TicketLive do
   defp load(%{assigns: %{ticket_id: id, project: project}} = socket) do
     ticket = Tickets.get!(id)
     workflow = Tickets.workflow(ticket)
+    jobs = Jobs.for_ticket(ticket.id)
 
     artifacts =
       for artifact <- Artifacts.list(ticket.id) do
@@ -29,28 +38,82 @@ defmodule ForgeWeb.TicketLive do
         %{
           artifact: artifact,
           latest: latest,
-          html: artifact.kind == :document && Markdown.to_html(latest.content)
+          approved: approved?(latest),
+          html: artifact.kind == :document && latest && Markdown.to_html(latest.content)
         }
       end
 
     assign(socket,
       page_title: "#{project.name}##{ticket.number}",
       ticket: ticket,
+      workflow: workflow,
       questions: Artifacts.open_questions(ticket.id),
-      jobs: Jobs.for_ticket(ticket.id),
+      jobs: jobs,
+      steps: steps(jobs, artifacts, ticket, workflow),
       artifacts: artifacts,
-      events:
-        ticket.id
-        |> Events.for_ticket()
-        |> Enum.reject(&String.starts_with?(&1.type, "job.harness."))
-        |> Enum.reverse(),
+      events: ticket.id |> Events.for_ticket() |> Enum.reverse() |> Enum.take(4),
       transitions:
         workflow |> Workflow.transitions_from(ticket.state) |> Enum.map(& &1.to) |> Enum.uniq(),
       human_state:
         ticket.status in [:active, :stuck] and
-          not Workflow.State.job?(Workflow.state(workflow, ticket.state))
+          not Workflow.State.job?(Workflow.state(workflow, ticket.state)),
+      approve: approve_versions(ticket),
+      now: DateTime.utc_now()
     )
   end
+
+  # One step per state visit, in the order the jobs ran. A state the ticket reached without a
+  # job — a human state it is resting in — still gets its step, because the operator is looking
+  # for where the ticket is, not only for where work happened.
+  defp steps(jobs, artifacts, ticket, workflow) do
+    visits =
+      jobs
+      |> Enum.chunk_by(& &1.state)
+      |> Enum.map(fn group ->
+        %{
+          name: hd(group).state,
+          jobs: group,
+          artifacts: Enum.filter(artifacts, &written_in?(&1, group)),
+          cost: Enum.reduce(group, Decimal.new(0), &Decimal.add(&2, &1.cost_usd))
+        }
+      end)
+
+    if Enum.any?(visits, &(&1.name == ticket.state)) do
+      visits
+    else
+      visits ++ [%{name: ticket.state, jobs: [], artifacts: [], cost: Decimal.new(0)}]
+    end
+    |> Enum.map(&Map.put(&1, :topology, topology(workflow, &1.name)))
+  end
+
+  # Approval attaches to this exact version: a newer version has none until it gets one.
+  defp approved?(nil), do: false
+
+  defp approved?(version),
+    do: version.id |> Artifacts.approvals() |> Enum.any?(&(&1.decision == :approved))
+
+  defp written_in?(%{latest: nil}, _jobs), do: false
+
+  defp written_in?(%{latest: latest}, jobs) do
+    case latest.author do
+      %{"kind" => "job", "id" => id} -> Enum.any?(jobs, &(&1.id == id))
+      _other -> false
+    end
+  end
+
+  defp topology(workflow, name) do
+    state = Workflow.state(workflow, name)
+
+    cond do
+      is_nil(state) -> :unknown
+      Workflow.State.job?(state) -> :job
+      Workflow.terminal?(workflow, name) -> :terminal
+      true -> :human
+    end
+  end
+
+  defp approve_versions(%{pending_transition: pending}) when is_map(pending), do: pending
+  defp approve_versions(_ticket), do: nil
 
   @impl true
   def handle_info({:ticket_changed, id}, %{assigns: %{ticket_id: id}} = socket),
@@ -69,86 +132,248 @@ defmodule ForgeWeb.TicketLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope}>
-      <div class="mx-auto max-w-2xl flex flex-col gap-6">
-        <header class="flex flex-col gap-1">
-          <div class="text-sm opacity-60">{@project.name}#{@ticket.number}</div>
-          <h1 class="text-xl font-semibold">{@ticket.title}</h1>
-          <div class="flex flex-wrap items-center gap-2 text-sm">
-            <span class="font-mono">{@ticket.state}</span>
-            <.status_badge status={@ticket.status} />
-            <span class="opacity-60">${@ticket.cost_usd}</span>
-            <span class="font-mono opacity-60">{@ticket.branch}</span>
+    <Layouts.app flash={@flash} current_scope={@current_scope} measure="74rem">
+      <header class="flex flex-col gap-2">
+        <div class="font-mono text-[12.5px] opacity-60">{@project.name}#{@ticket.number}</div>
+        <h1 class="text-[23px] font-semibold -tracking-[.03em] sm:text-3xl">{@ticket.title}</h1>
+        <div class="flex flex-wrap items-center gap-3">
+          <.state name={@ticket.state} topology={topology(@workflow, @ticket.state)} />
+          <.status_flag status={@ticket.status} age={Format.ago(@ticket.updated_at, @now)} />
+          <span :if={waiting_clause(assigns)} class="text-sm opacity-70">
+            {waiting_clause(assigns)}
+          </span>
+        </div>
+        <p :if={@ticket.body != ""} class="mt-2 text-sm/[1.55] whitespace-pre-line opacity-80">
+          {@ticket.body}
+        </p>
+      </header>
+
+      <section
+        :if={@ticket.pending_transition || @questions != [] || stuck_or_human?(assigns)}
+        class="mt-6 rounded-box border border-accent bg-accent/5 p-4"
+        id="hoisted-decision"
+      >
+        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase text-accent">Waiting on you</h2>
+        <div class="mt-3">
+          <.approval_card
+            :if={@ticket.pending_transition}
+            ticket={@ticket}
+            pending={@ticket.pending_transition}
+            approve={approve_pairs(@approve, @artifacts)}
+          />
+          <div :if={!@ticket.pending_transition and @questions != []} class="flex flex-col gap-6">
+            <.question_card :for={q <- @questions} question={q} ticket_id={@ticket.id} />
           </div>
-          <p :if={@ticket.body != ""} class="text-sm opacity-80 whitespace-pre-line">
-            {@ticket.body}
-          </p>
-        </header>
-
-        <section :if={@ticket.pending_transition} class="flex flex-col gap-2">
-          <.approval_card ticket={@ticket} pending={@ticket.pending_transition} />
-        </section>
-
-        <section :if={@questions != []} class="flex flex-col gap-2">
-          <h2 class="font-medium">Open questions</h2>
-          <.question_card :for={q <- @questions} question={q} ticket_id={@ticket.id} />
-        </section>
-
-        <section :if={(@ticket.status == :stuck or @human_state) and @transitions != []}>
           <.transition_card
+            :if={!@ticket.pending_transition and @questions == [] and stuck_or_human?(assigns)}
             ticket={@ticket}
             transitions={@transitions}
-            label={if @ticket.status == :stuck, do: "Stuck", else: "Human state"}
           />
-        </section>
+        </div>
+      </section>
 
-        <section class="flex flex-col gap-2">
-          <h2 class="font-medium">Jobs</h2>
-          <ul class="flex flex-col gap-1">
-            <li :for={job <- @jobs} class="flex flex-wrap items-center gap-2 text-sm">
-              <.link
-                navigate={~p"/tickets/#{@project.name}/#{@ticket.number}/jobs/#{job.id}"}
-                class="link link-hover font-mono"
-              >
-                {job.state} #{job.attempt}
-              </.link>
-              <.status_badge status={job.status} />
-              <span :if={job.outcome} class="opacity-70">{job.outcome}{if job.declared_outcome,
-                do: " (#{job.declared_outcome})"}</span>
-              <span class="opacity-60">{job.turns} turns · ${job.cost_usd}</span>
-            </li>
-          </ul>
-        </section>
+      <div class="mt-8 flex flex-col gap-10 lg:flex-row lg:gap-0">
+        <div class="lg:min-w-0 lg:flex-1 lg:pr-8">
+          <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Timeline</h2>
 
-        <section class="flex flex-col gap-2">
-          <h2 class="font-medium">Artifacts</h2>
-          <details
-            :for={entry <- @artifacts}
-            class="collapse collapse-arrow bg-base-200"
-            id={"artifact-#{entry.artifact.id}"}
-          >
-            <summary class="collapse-title text-sm font-mono">
-              {entry.artifact.name} · v{entry.latest.version} · {entry.artifact.kind}
-            </summary>
-            <div class="collapse-content text-sm">
-              <div :if={entry.html} class="prose prose-sm max-w-none">{entry.html}</div>
-              <p :if={!entry.html} class="font-mono opacity-70">{entry.latest.blob_uri}</p>
-            </div>
-          </details>
-        </section>
+          <ol class="mt-4">
+            <li :for={step <- @steps} class="grid grid-cols-[26px_1fr] pb-5 lg:pb-[26px]">
+              <div class="flex flex-col items-center">
+                <span class={[
+                  "mt-1.5 size-[11px] rounded-full",
+                  if(step.name == @ticket.state,
+                    do: "bg-accent ring-4 ring-accent/20",
+                    else: "bg-base-300"
+                  )
+                ]} />
+                <span class="mt-1 w-px flex-1 bg-base-300" />
+              </div>
 
-        <section class="flex flex-col gap-2">
-          <h2 class="font-medium">Timeline</h2>
-          <ol class="flex flex-col gap-1 text-xs font-mono">
-            <li :for={event <- @events} class="flex gap-2">
-              <span class="opacity-50 shrink-0">{Calendar.strftime(event.inserted_at, "%m-%d %H:%M")}</span>
-              <span>{event.type}</span>
-              <span class="opacity-60 truncate">{Events.summary(event)}</span>
+              <div class="pb-2">
+                <div class="flex flex-wrap items-baseline justify-between gap-2">
+                  <.state name={step.name} topology={step.topology} />
+                  <span :if={step.jobs != []} class="font-mono text-[12.5px] opacity-50">
+                    {length(step.jobs)} {if length(step.jobs) == 1, do: "job", else: "jobs"} · {Format.windows(
+                      step.cost
+                    ) || "—"}
+                  </span>
+                </div>
+
+                <table :if={step.jobs != []} class="mt-2 w-full text-[12.5px]">
+                  <tbody>
+                    <tr :for={job <- step.jobs} class="border-b border-base-300/60">
+                      <td class="py-1.5 font-mono">
+                        <.link
+                          navigate={~p"/tickets/#{@project.name}/#{@ticket.number}/jobs/#{job.id}"}
+                          class="hover:underline"
+                        >
+                          #{job.attempt}
+                        </.link>
+                      </td>
+                      <td class="py-1.5">
+                        <.outcome
+                          :if={job.declared_outcome || job.outcome}
+                          value={job.declared_outcome || to_string(job.outcome)}
+                          bucket={job.declared_outcome && Indicators.bucket(job.outcome)}
+                        />
+                        <.job_status :if={is_nil(job.outcome)} status={job.status} />
+                      </td>
+                      <td class="py-1.5 text-right font-mono opacity-60">{job.turns} turns</td>
+                      <td class="py-1.5 text-right font-mono opacity-60">
+                        {Format.windows(job.cost_usd) || "—"}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+
+                <div :if={step.artifacts != []} class="mt-2 flex flex-wrap gap-2">
+                  <.artifact_chip :for={entry <- step.artifacts} entry={entry} />
+                </div>
+              </div>
             </li>
           </ol>
-        </section>
+
+          <%!-- Until an artifact version is addressable on its own route, and until the
+                document-with-margin-questions view exists, this disclosure is the only way to
+                read what a job wrote. See the "not built yet" list in docs/design/ui.md. --%>
+          <section :if={Enum.any?(@artifacts, & &1.html)} class="mt-6 border-t border-base-300 pt-5">
+            <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Documents</h2>
+            <details
+              :for={entry <- Enum.filter(@artifacts, & &1.html)}
+              class="mt-3"
+              id={"artifact-#{entry.artifact.id}"}
+            >
+              <summary class="flex h-11 cursor-pointer items-center gap-2 font-mono text-[12.5px]">
+                {entry.artifact.name}
+                <span class="opacity-60">v{entry.latest.version}</span>
+              </summary>
+              <div class="prose prose-sm mt-2 max-w-none">{entry.html}</div>
+            </details>
+          </section>
+        </div>
+
+        <aside class="lg:w-[21rem] lg:shrink-0 lg:border-l lg:border-base-300 lg:pl-8">
+          <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Usage</h2>
+          <div class="mt-3">
+            <div class="font-mono text-[17px]">{Format.windows(@ticket.cost_usd) || "—"}</div>
+            <div class="mt-2 h-[5px] w-full bg-base-300">
+              <div class="h-full bg-accent" style={"width: #{usage_pct(@ticket, @workflow)}%"} />
+            </div>
+            <div class="mt-1 font-mono text-[11px] opacity-50">
+              allowance {Format.windows(@workflow.limits.ticket_cost) || "—"}
+            </div>
+          </div>
+
+          <h2 class="mt-6 font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Facts</h2>
+          <dl class="mt-3 flex flex-col gap-2 text-[12.5px]">
+            <div class="flex min-w-0 justify-between gap-3">
+              <dt class="opacity-50">branch</dt>
+              <dd class="truncate font-mono">{@ticket.branch}</dd>
+            </div>
+            <div class="flex min-w-0 justify-between gap-3">
+              <dt class="opacity-50">base</dt>
+              <dd class="truncate font-mono">{String.slice(@ticket.base_commit || "", 0, 12)}</dd>
+            </div>
+            <div class="flex min-w-0 justify-between gap-3">
+              <dt class="opacity-50">workflow</dt>
+              <dd class="truncate font-mono">
+                {String.slice(@ticket.workflow_commit || "", 0, 12)}
+              </dd>
+            </div>
+            <div class="flex min-w-0 justify-between gap-3">
+              <dt class="opacity-50">admitted</dt>
+              <dd class="font-mono">{Format.ago(@ticket.inserted_at, @now)} ago</dd>
+            </div>
+          </dl>
+
+          <h2 class="mt-6 font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Artifacts</h2>
+          <div class="mt-3 flex flex-wrap gap-2">
+            <.artifact_chip :for={entry <- @artifacts} entry={entry} />
+            <p :if={@artifacts == []} class="text-sm opacity-50">
+              The first job writes the first document.
+            </p>
+          </div>
+
+          <h2 class="mt-6 font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
+            Last four events
+          </h2>
+          <ol class="mt-3 flex flex-col gap-1 font-mono text-[12.5px]">
+            <li :for={event <- @events} class="flex gap-2">
+              <span class="shrink-0 opacity-50">
+                {Calendar.strftime(event.inserted_at, "%m-%d %H:%M")}
+              </span>
+              <span class="truncate">{event.type}</span>
+            </li>
+          </ol>
+        </aside>
       </div>
     </Layouts.app>
     """
+  end
+
+  # There is no chip without a version: approval attaches to an exact version, and a human edit
+  # creating v3 does not carry v2's approval. A presentation has no approval slot at all.
+  attr :entry, :map, required: true
+
+  defp artifact_chip(assigns) do
+    ~H"""
+    <span
+      :if={@entry.latest}
+      class={[
+        "inline-flex items-center gap-1.5 rounded-field px-2 py-1 font-mono text-[12.5px]",
+        if(@entry.artifact.kind == :presentation,
+          do: "border border-dashed border-base-300",
+          else: "border border-base-300"
+        )
+      ]}
+    >
+      {@entry.artifact.name}
+      <span class="opacity-60">v{@entry.latest.version}</span>
+      <span :if={@entry.artifact.kind == :presentation} class="tracking-[.14em] uppercase opacity-50">
+        view only
+      </span>
+      <span :if={@entry.artifact.kind != :presentation and @entry.approved} class="text-success">
+        ✓ approved
+      </span>
+      <span :if={@entry.artifact.kind != :presentation and not @entry.approved} class="text-warning">
+        ◇ unapproved
+      </span>
+    </span>
+    """
+  end
+
+  defp stuck_or_human?(assigns),
+    do: (assigns.ticket.status == :stuck or assigns.human_state) and assigns.transitions != []
+
+  defp waiting_clause(%{ticket: %{status: :stuck}}), do: "Stuck, and waiting for you to choose."
+
+  defp waiting_clause(%{ticket: %{pending_transition: p}}) when is_map(p),
+    do: "Waiting for approval."
+
+  defp waiting_clause(%{questions: [_ | _]}), do: "A job stopped to ask you something."
+  defp waiting_clause(_assigns), do: nil
+
+  defp approve_pairs(nil, _artifacts), do: []
+
+  defp approve_pairs(pending, artifacts) do
+    for name <- List.wrap(pending["approve"]),
+        entry = Enum.find(artifacts, &(&1.artifact.name == name)),
+        entry && entry.latest,
+        do: {name, entry.latest.version}
+  end
+
+  defp usage_pct(ticket, workflow) do
+    cap = workflow.limits.ticket_cost
+
+    if is_number(cap) and cap > 0 do
+      ticket.cost_usd
+      |> Decimal.to_float()
+      |> Kernel./(cap)
+      |> Kernel.*(100)
+      |> min(100)
+      |> round()
+    else
+      0
+    end
   end
 end

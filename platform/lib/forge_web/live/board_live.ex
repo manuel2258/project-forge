@@ -1,12 +1,23 @@
 defmodule ForgeWeb.BoardLive do
-  @moduledoc "Tickets by state, per project."
+  @moduledoc """
+  Tickets by state, per project, at the full viewport width.
+
+  The columns are the workflow topology, so capping the measure would destroy the artefact.
+  Columns cap at four rows and then say how many remain: a column that scrolls independently
+  hides its own count and breaks the board as a shape. Finding a specific ticket is a job for a
+  finder, not for this page.
+  """
 
   use ForgeWeb, :live_view
 
+  import ForgeWeb.Indicators
   import ForgeWeb.Operator.Components
 
   alias Forge.{Events, Projects, Tickets}
   alias ForgeCore.Workflow
+  alias ForgeWeb.Format
+
+  @rows 4
 
   @impl true
   def mount(_params, _session, socket) do
@@ -18,20 +29,48 @@ defmodule ForgeWeb.BoardLive do
     boards =
       for project <- Projects.list() do
         tickets = Tickets.list(project)
-        states = states(tickets)
         by_state = Enum.group_by(tickets, & &1.state)
-        %{project: project, columns: Enum.map(states, &{&1, Map.get(by_state, &1, [])})}
+        workflow = workflow(tickets)
+
+        columns =
+          for state <- states(tickets, workflow) do
+            rows = Map.get(by_state, state, [])
+
+            %{
+              name: state,
+              topology: topology(workflow, state),
+              tickets: rows,
+              shown: Enum.take(rows, @rows),
+              more: max(length(rows) - @rows, 0)
+            }
+          end
+
+        %{
+          project: project,
+          columns: columns,
+          open: Enum.count(tickets, &(&1.status in [:active, :stuck])),
+          waiting: Enum.count(tickets, &(&1.status == :stuck))
+        }
       end
 
-    assign(socket, :boards, boards)
+    assign(socket, boards: boards, now: DateTime.utc_now())
+  end
+
+  defp workflow([]), do: nil
+
+  defp workflow([first | _rest]) do
+    case Tickets.parsed_workflow(first) do
+      {:ok, workflow} -> workflow
+      {:error, _errors} -> nil
+    end
   end
 
   # Column order follows the first ticket's pinned workflow, walked from its initial state;
   # states only other tickets know are appended.
-  defp states([]), do: []
+  defp states([], _workflow), do: []
+  defp states(tickets, nil), do: tickets |> Enum.map(& &1.state) |> Enum.uniq()
 
-  defp states([first | _] = tickets) do
-    workflow = Tickets.workflow(first)
+  defp states(tickets, workflow) do
     ordered = walk(workflow, [workflow.initial], [])
     ordered ++ (tickets |> Enum.map(& &1.state) |> Enum.uniq() |> Enum.reject(&(&1 in ordered)))
   end
@@ -47,36 +86,81 @@ defmodule ForgeWeb.BoardLive do
     end
   end
 
+  defp topology(nil, _name), do: :unknown
+
+  defp topology(workflow, name) do
+    state = Workflow.state(workflow, name)
+
+    cond do
+      is_nil(state) -> :unknown
+      Workflow.State.job?(state) -> :job
+      Workflow.terminal?(workflow, name) -> :terminal
+      true -> :human
+    end
+  end
+
   @impl true
   def handle_info({:ticket_changed, _id}, socket), do: {:noreply, load(socket)}
 
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope}>
-      <div class="flex flex-col gap-8">
-        <h1 class="text-xl font-semibold">Board</h1>
-        <p :if={@boards == []} class="opacity-60">No projects yet.</p>
-        <section :for={board <- @boards} class="flex flex-col gap-2">
+    <Layouts.app flash={@flash} current_scope={@current_scope} active={:board} measure={nil}>
+      <h1 class="text-2xl font-semibold -tracking-[.025em]">Board</h1>
+      <p :if={@boards == []} class="mt-4 text-sm opacity-60">
+        No projects yet. A project appears here once one is registered.
+      </p>
+
+      <section :for={board <- @boards} class="mt-8 flex flex-col gap-3">
+        <header class="flex flex-wrap items-baseline gap-x-4 gap-y-1">
           <h2 class="font-medium">{board.project.name}</h2>
-          <div class="flex gap-3 overflow-x-auto pb-2">
-            <div :for={{state, tickets} <- board.columns} class="w-56 shrink-0 flex flex-col gap-2">
-              <div class="text-xs uppercase tracking-wide opacity-60 font-mono">
-                {state} · {length(tickets)}
-              </div>
-              <div :for={ticket <- tickets} class="card bg-base-200 shadow-sm">
-                <div class="card-body p-3 gap-1 text-sm">
-                  <.ticket_link ticket={ticket} project={board.project.name} />
-                  <div class="flex gap-2 items-center">
-                    <.status_badge status={ticket.status} />
-                    <span class="opacity-60">${ticket.cost_usd}</span>
-                  </div>
-                </div>
-              </div>
+          <span class="font-mono text-[12.5px] opacity-60">{board.open} open</span>
+          <span :if={board.waiting > 0} class="font-mono text-[12.5px] text-accent">
+            {board.waiting} waiting on you
+          </span>
+        </header>
+
+        <div class="flex gap-px overflow-x-auto bg-base-300">
+          <div
+            :for={column <- board.columns}
+            class={[
+              "flex w-60 shrink-0 flex-col gap-3 p-3",
+              if(column.topology == :human, do: "bg-base-200", else: "bg-base-100"),
+              column.topology == :terminal && "opacity-60"
+            ]}
+          >
+            <div class="flex items-baseline justify-between gap-2">
+              <.state name={column.name} topology={column.topology} />
+              <span class="font-mono text-[11px] opacity-50">{length(column.tickets)}</span>
             </div>
+
+            <p :if={column.tickets == []} class="text-[13px] opacity-40">nothing in this state</p>
+
+            <div
+              :for={ticket <- column.shown}
+              class={[
+                "flex flex-col gap-1 pl-2",
+                if(ticket.status == :stuck,
+                  do: "border-l-2 border-accent",
+                  else: "border-l border-base-300"
+                )
+              ]}
+            >
+              <.ticket_link ticket={ticket} project={board.project.name} />
+              <span
+                :if={ticket.status == :stuck}
+                class="font-mono text-[11px] tracking-[.14em] uppercase text-accent"
+              >
+                stuck {Format.ago(ticket.updated_at, @now)}
+              </span>
+            </div>
+
+            <span :if={column.more > 0} class="font-mono text-[11px] opacity-50">
+              {column.more} more →
+            </span>
           </div>
-        </section>
-      </div>
+        </div>
+      </section>
     </Layouts.app>
     """
   end

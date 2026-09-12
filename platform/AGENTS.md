@@ -30,7 +30,9 @@ custom classes must fully style the input
 
 - **Always use and maintain this import syntax** in the app.css file for projects generated with `phx.new`
 - **Never** use `@apply` when writing raw css
-- **Always** manually write your own tailwind-based components instead of using daisyUI for a unique, world-class design
+- daisyUI is loaded `themes: false` with two hand-authored themes in `assets/css/app.css`. Build
+  components from those theme variables — **never** hard-code a colour, and never introduce a third
+  theme or a third surface
 - Out of the box **only the app.js and app.css bundles are supported**
   - You cannot reference an external vendor'd script `src` or link `href` in the layouts
   - You must import the vendor deps into app.js and app.css to use them
@@ -38,10 +40,21 @@ custom classes must fully style the input
 
 ### UI/UX & design guidelines
 
-- **Produce world-class UI designs** with a focus on usability, aesthetics, and modern design principles
-- Implement **subtle micro-interactions** (e.g., button hover effects, and smooth transitions)
-- Ensure **clean typography, spacing, and layout balance** for a refined, premium look
-- Focus on **delightful details** like hover effects, loading states, and smooth page transitions
+**`docs/design/ui.md` is the standard. Read it before touching an operator surface.** It is not
+advisory: it carries the affordance rule, the three axes, the mono rule, colour discipline, the
+per-route measures and the semantics that must not be lost. A change of mind updates that note
+first, then the code.
+
+The short version, because these are the rules most easily broken by habit:
+
+- The product is **quiet**. Structure is 1px rules, not cards or shadows (`--depth: 0`). Nothing
+  pulses, nothing tails, nothing auto-scrolls, and there is no live transcript anywhere.
+- **A border means you can tap it.** Identifiers — states, outcomes, branches, artifact names — are
+  plain mono text with no box. Boxes are for things that do something.
+- **Accent means one thing: a human is being waited on.** Never use it for anything else.
+- Mono is for things the system named; never for language a person wrote or reads.
+- Tap targets are ≥46px and **`btn-sm` does not appear on any operator page**.
+- There is no global page padding and no global measure — each route sets its own.
 
 
 <!-- phoenix-gen-auth-start -->

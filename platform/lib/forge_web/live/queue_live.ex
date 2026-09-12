@@ -1,11 +1,24 @@
 defmodule ForgeWeb.QueueLive do
-  @moduledoc "The home screen: everything waiting on the operator, answerable in place."
+  @moduledoc """
+  The home screen: one ordered list of decisions, oldest first, answerable in place.
+
+  No tabs and no filters — the operator must be able to reach the end and know they are done.
+  Items are separated by a 1px rule rather than drawn as cards, and the measure does not widen
+  on a laptop, because width only lets a second item compete for the same glance.
+
+  An item is **one interruption, not one question**: a job that stops inside a document
+  typically stops with several questions, and one card per question would turn three decisions
+  into twenty items with identical timestamps. `Forge.Queue` keeps its per-question shape,
+  because the JSON API and the CLI are built on it; the grouping is this page's presentation.
+  """
 
   use ForgeWeb, :live_view
 
   import ForgeWeb.Operator.Components
 
-  alias Forge.{Events, Projects, Push, Queue}
+  alias Forge.{Artifacts, Events, Projects, Push, Queue, Tickets}
+  alias ForgeCore.Workflow
+  alias ForgeWeb.Format
   alias ForgeWeb.Operator.Actions
 
   @impl true
@@ -20,8 +33,91 @@ defmodule ForgeWeb.QueueLive do
 
   defp load(socket) do
     projects = Map.new(Projects.list(), &{&1.id, &1.name})
-    items = Enum.map(Queue.items(), &Map.put(&1, :project, projects[&1.ticket.project_id]))
-    assign(socket, :items, items)
+
+    items =
+      Queue.items()
+      |> Enum.map(&Map.put(&1, :project, projects[&1.ticket.project_id]))
+      |> group()
+      |> Enum.map(&decorate/1)
+
+    {waiting, digest} = Enum.split_with(items, & &1.actionable)
+
+    assign(socket,
+      items: waiting,
+      digest: digest,
+      decisions: Enum.sum(Enum.map(waiting, & &1.decisions)),
+      now: DateTime.utc_now()
+    )
+  end
+
+  # One job, stopped, against one artifact version, carrying N questions. Everything else is
+  # already one interruption on its own.
+  defp group(items) do
+    {questions, rest} = Enum.split_with(items, &(&1.kind == :question))
+
+    questions
+    |> Enum.group_by(& &1.question.artifact_version_id)
+    |> Enum.map(fn {_version_id, group} ->
+      first = hd(group)
+
+      %{
+        kind: :questions,
+        ticket: first.ticket,
+        project: first.project,
+        since: group |> Enum.map(& &1.since) |> Enum.min(DateTime),
+        questions: Enum.map(group, & &1.question),
+        version: first.question.artifact_version,
+        detail: %{}
+      }
+    end)
+    |> Enum.concat(rest)
+    |> Enum.sort_by(& &1.since, DateTime)
+  end
+
+  defp decorate(item) do
+    item
+    |> Map.put(:topology, topology(item.ticket))
+    |> Map.put(:decisions, decisions(item))
+    |> Map.put(:actionable, actionable?(item))
+    |> Map.put_new(:questions, [])
+    |> Map.put_new(:version, nil)
+    |> put_approve()
+  end
+
+  # A blocking question has halted a job; a non-blocking one has not, and must never compete
+  # with work that is actually waiting.
+  defp actionable?(%{kind: :questions} = item), do: Enum.any?(item.questions, & &1.blocking)
+  defp actionable?(_item), do: true
+
+  defp decisions(%{kind: :questions} = item), do: length(item.questions)
+  defp decisions(_item), do: 1
+
+  defp put_approve(%{kind: :approval, ticket: ticket, detail: detail} = item) do
+    approve =
+      for name <- List.wrap(detail["approve"]),
+          version = Artifacts.latest(ticket.id, name),
+          do: {name, version.version}
+
+    Map.put(item, :approve, approve)
+  end
+
+  defp put_approve(item), do: Map.put(item, :approve, [])
+
+  defp topology(ticket) do
+    case Tickets.parsed_workflow(ticket) do
+      {:ok, workflow} ->
+        state = Workflow.state(workflow, ticket.state)
+
+        cond do
+          is_nil(state) -> :unknown
+          Workflow.State.job?(state) -> :job
+          Workflow.terminal?(workflow, ticket.state) -> :terminal
+          true -> :human
+        end
+
+      {:error, _errors} ->
+        :unknown
+    end
   end
 
   @impl true
@@ -58,45 +154,183 @@ defmodule ForgeWeb.QueueLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope}>
-      <div class="mx-auto max-w-2xl flex flex-col gap-4">
-        <div class="flex items-center justify-between">
-          <h1 class="text-xl font-semibold">Queue</h1>
+    <Layouts.app
+      flash={@flash}
+      current_scope={@current_scope}
+      active={:queue}
+      queue_count={@decisions}
+      measure="34rem"
+    >
+      <header class="flex items-baseline justify-between gap-4">
+        <h1 class="text-2xl font-semibold -tracking-[.025em]">Queue</h1>
+        <div class="flex items-center gap-3">
+          <span :if={@items != []} class="font-mono text-[12.5px] opacity-60">
+            {@decisions} {noun(@decisions, "decision")} · {length(@items)} {noun(
+              length(@items),
+              "item"
+            )}
+          </span>
           <button
             :if={@push_key}
             id="push-toggle"
             type="button"
-            class="btn btn-ghost btn-sm"
+            class="flex h-11 items-center gap-2 px-2 text-sm opacity-60 hover:opacity-100"
             phx-hook="PushSubscribe"
             data-vapid-key={@push_key}
           >
             <.icon name="hero-bell" class="size-4" /> <span data-label>Notify me</span>
           </button>
         </div>
-        <p :if={@items == []} class="opacity-60" id="queue-empty">Nothing needs you right now.</p>
-        <div
+      </header>
+
+      <section class="mt-6 flex flex-col">
+        <article
           :for={item <- @items}
-          class="flex flex-col gap-1"
-          id={"item-#{item.kind}-#{item.ticket.id}-#{item.question && item.question.id}"}
+          id={item_id(item)}
+          class="flex flex-col gap-[11px] border-t border-base-300 py-[18px]"
         >
-          <.ticket_link ticket={item.ticket} project={item.project} />
-          <.question_card
-            :if={item.kind == :question}
-            question={item.question}
-            ticket_id={item.ticket.id}
+          <div class="flex items-start justify-between gap-4">
+            <div class="flex items-center gap-2">
+              <.mark kind={item.kind} />
+              <span class="font-mono text-[11px] tracking-[.14em] uppercase opacity-70">
+                {kind_label(item)}
+              </span>
+            </div>
+            <span class="font-mono text-[17px] leading-none opacity-70">
+              {Format.ago(item.since, @now)}
+            </span>
+          </div>
+
+          <p class="text-xl/[1.3] font-medium -tracking-[.01em]">{sentence(item)}</p>
+
+          <.questions_affordance :if={item.kind == :questions} item={item} />
+
+          <.approval_card
+            :if={item.kind == :approval}
+            ticket={item.ticket}
+            pending={item.detail}
+            approve={item.approve}
           />
-          <.approval_card :if={item.kind == :approval} ticket={item.ticket} pending={item.detail} />
+
           <.transition_card
             :if={item.kind in [:stuck, :review]}
             ticket={item.ticket}
             transitions={transitions(item)}
-            label={if item.kind == :stuck, do: "Stuck", else: "Ready for review"}
           />
-        </div>
-      </div>
+
+          <.identifiers
+            project={item.project}
+            ticket={item.ticket}
+            topology={item.topology}
+            artifact={item.version && item.version.artifact.name}
+            version={item.version && item.version.version}
+          />
+        </article>
+      </section>
+
+      <section :if={@digest != []} class="mt-8 border-t border-base-300 pt-5">
+        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
+          Not waiting on you
+        </h2>
+        <ul class="mt-3 flex flex-col gap-2">
+          <li :for={item <- @digest} class="flex items-baseline justify-between gap-3 text-sm">
+            <.link
+              navigate={~p"/tickets/#{item.project}/#{item.ticket.number}"}
+              class="truncate opacity-80 hover:opacity-100"
+            >
+              {sentence(item)}
+            </.link>
+            <span class="shrink-0 font-mono text-[12.5px] opacity-50">
+              {Format.ago(item.since, @now)}
+            </span>
+          </li>
+        </ul>
+      </section>
+
+      <section class="mt-8 border-t border-base-300 pt-5" id="queue-end">
+        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase text-success">End of queue</h2>
+        <p class="mt-2 text-sm/[1.55]">{closing(@items)}</p>
+      </section>
     </Layouts.app>
     """
   end
+
+  # Three marks carry every kind, so the vocabulary scales without becoming a colour quiz. The
+  # kind is named in words beside the mark.
+  attr :kind, :atom, required: true
+
+  defp mark(assigns) do
+    ~H"""
+    <span
+      aria-hidden="true"
+      class={[
+        "mt-0.5 inline-block size-2 shrink-0",
+        @kind in [:questions, :stuck] && "rotate-45 bg-accent",
+        @kind == :approval && "border border-primary",
+        @kind == :review && "rounded-full border border-success"
+      ]}
+    />
+    """
+  end
+
+  attr :item, :map, required: true
+
+  defp questions_affordance(assigns) do
+    ~H"""
+    <div class="flex flex-col gap-4">
+      <.answer_row
+        :if={length(@item.questions) > 1 and Enum.all?(@item.questions, & &1.default)}
+        phx-click="answer_all"
+        phx-disable-with="Sending…"
+        phx-value-ticket={@item.ticket.id}
+        phx-value-version={@item.version.id}
+      >
+        Accept all {length(@item.questions)} recommendations
+      </.answer_row>
+
+      <.question_card
+        :for={question <- @item.questions}
+        question={question}
+        ticket_id={@item.ticket.id}
+      />
+    </div>
+    """
+  end
+
+  defp item_id(%{kind: :questions} = item), do: "item-questions-#{item.version.id}"
+  defp item_id(item), do: "item-#{item.kind}-#{item.ticket.id}"
+
+  defp kind_label(%{kind: :questions, questions: questions}) do
+    blocking = Enum.count(questions, & &1.blocking)
+
+    if blocking > 0,
+      do: "#{blocking} blocking #{noun(blocking, "question")}",
+      else: "#{length(questions)} #{noun(length(questions), "question")}"
+  end
+
+  defp kind_label(%{kind: :approval}), do: "approval"
+  defp kind_label(%{kind: :stuck}), do: "stuck"
+  defp kind_label(%{kind: :review}), do: "review ready"
+
+  defp sentence(%{kind: :questions, questions: [question]}), do: question.text
+
+  defp sentence(%{kind: :questions} = item),
+    do:
+      "#{length(item.questions)} questions about #{item.version.artifact.name} v#{item.version.version}."
+
+  defp sentence(%{kind: :approval} = item),
+    do: "#{item.ticket.title} is ready to move to #{item.detail["to"]}."
+
+  defp sentence(%{kind: :stuck} = item),
+    do: "#{item.ticket.title} is stuck and needs a way forward."
+
+  defp sentence(%{kind: :review} = item), do: "#{item.ticket.title} is waiting for your review."
+
+  defp closing([]), do: "Nothing needs you. Work continues without you."
+  defp closing(_items), do: "That is everything waiting on you."
+
+  defp noun(1, word), do: word
+  defp noun(_count, word), do: word <> "s"
 
   # Both kinds carry the states the operator may pick in the queue item itself, so the page
   # renders what the API serves rather than reading the workflow a second time.

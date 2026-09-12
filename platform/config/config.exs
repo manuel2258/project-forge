@@ -89,6 +89,12 @@ config :logger, :default_formatter,
 # Use Jason for JSON parsing in Phoenix
 config :phoenix, :json_library, Jason
 
+# One unit of capacity is one percent of a five-hour window. `window_cost_usd` is the cost of a
+# whole window: the only bridge from the cost the harness estimates to the unit the operator
+# reads. PLACEHOLDER until dogfooding calibrates it — display only, nothing schedules or caps on
+# it. See docs/design/capacity.md.
+config :forge, :capacity, window_cost_usd: 5.0
+
 # Import environment specific config. This must remain at the bottom
 # of this file so it overrides the configuration defined above.
 import_config "#{config_env()}.exs"

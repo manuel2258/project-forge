@@ -41,6 +41,27 @@ on a subscription credential.
   questions are not a two-way choice with an obvious default. This is the gap to close before
   the question above can be answered.
 
+### Provider-reported capacity
+
+2026-09-12, read from the job transcripts the same node produced: 87 `rate_limit_event` messages
+on the stream-json channel, all on a subscription credential.
+
+- **The five-hour window is provider-reported.** Every event carried `rateLimitType: "five_hour"`
+  and a `resetsAt` unix epoch. The window boundary and reset time do not have to be inferred from
+  forge's own invocation record, which is what the operator UI's capacity readout assumed it would
+  have to do.
+- **Utilization is only reported once it matters.** `utilization` appeared on 21 of 87 — exactly
+  the events with `status: "allowed_warning"`, which also carry `surpassedThreshold: 0.9`. The
+  other 66 were `status: "allowed"` and carried no figure. Observed range where present: 0.92 to
+  0.99.
+- **No weekly event was seen.** `rateLimitType` was `five_hour` on all 87, so whether a weekly
+  ceiling is reported at all is unobserved.
+- **No rejecting status was seen.** Only `allowed` and `allowed_warning` occurred, so what the
+  harness emits when a window is actually exhausted is unobserved — including whether the job
+  fails, hibernates, or is refused before starting.
+- The events were reaching the platform as `job.harness.unknown` with the raw line, per the note
+  below; nothing was lost, and the payloads above were read back out of the stored transcripts.
+
 ### Message reliability
 
 - **Web push: not exercised.** VAPID keys were never configured on this node and no browser

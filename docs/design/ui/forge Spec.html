@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<script src="./doc-page.js"></script>
+<style>
+  doc-page:not(:defined) { visibility:hidden; }
+  a { color: oklch(0.45 0.14 290); }
+  a:hover { color: oklch(0.35 0.15 290); }
+</style>
+</helmet>
+
+<doc-page margin="0.7in">
+  <div style="font-family:'Instrument Sans',system-ui,sans-serif; color:oklch(0.2 0.012 300); font-size:14.5px; line-height:1.62;">
+
+    <h1 style="font-size:30px; font-weight:600; letter-spacing:-0.03em; line-height:1.2; margin:0 0 10px;">forge operator UI — design specification</h1>
+    <p style="font-family:'JetBrains Mono',monospace; font-size:11px; letter-spacing:0.12em; color:oklch(0.45 0.012 300); margin:0 0 22px;">DIRECTION “BUREAU”, DARK-FIRST · COMPANION TO <span style="color:oklch(0.45 0.14 290);">forge Mockups</span></p>
+
+    <p style="margin:0 0 14px;">This document specifies what the mockups show: both themes as complete daisyUI blocks, the type and spacing scales in Tailwind terms, per-component rules, the layout and IA recommendation, an implementation order, and a note on how each planned item in §7 of the brief lands. Where a decision belongs to the engineer or the product owner rather than to this document, it is called out as <strong style="font-weight:600;">Decide</strong>.</p>
+
+    <p style="margin:0 0 26px; padding:13px 16px; border-left:2px solid oklch(0.58 0.13 62); background:oklch(0.97 0.015 75);">The governing idea: the operator's attention is scarce, so exactly one thing in the interface is allowed to be loud — an item that is waiting on a human. It is marked in ochre, and ochre is used for nothing else. Everything else is ruled, monochrome and quiet.</p>
+
+    <h2 style="font-size:21px; font-weight:600; letter-spacing:-0.02em; margin:30px 0 12px;">1. Layout and information architecture</h2>
+
+    <h3 style="font-size:16px; font-weight:600; margin:20px 0 8px;">1.1 Routes and measures</h3>
+    <table style="width:100%; border-collapse:collapse; font-size:13.5px; margin:0 0 14px;">
+      <thead>
+        <tr>
+          <th style="text-align:left; padding:7px 10px 7px 0; border-bottom:1.5px solid oklch(0.3 0.012 300); font-weight:600; width:38%;">Route</th>
+          <th style="text-align:left; padding:7px 10px; border-bottom:1.5px solid oklch(0.3 0.012 300); font-weight:600; width:16%;">Measure</th>
+          <th style="text-align:left; padding:7px 0 7px 10px; border-bottom:1.5px solid oklch(0.3 0.012 300); font-weight:600;">Why</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace; font-size:12.5px;">/</td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace; font-size:12.5px;">34rem</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">One ordered list, same width at every viewport. Width would only let a second item compete for the same glance.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace; font-size:12.5px;">/projects/:project/board</td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace; font-size:12.5px;">none</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Full viewport width. The columns are the workflow topology; capping them destroys the artefact.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace; font-size:12.5px;">/projects/:project/tickets/:number</td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace; font-size:12.5px;">74rem</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">53rem timeline column + 21rem facts rail. Below <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">lg</code> the rail moves under the timeline.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace; font-size:12.5px;">…/tickets/:number/jobs/:job_id</td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace; font-size:12.5px;">74rem</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Same frame. Manifest in the rail, completed harness stream in the column.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace; font-size:12.5px;">…/artifacts/:name/:version <span style="font-family:'Instrument Sans',sans-serif; color:oklch(0.5 0.12 62); font-size:11px;">NEW</span></td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace; font-size:12.5px;">48rem</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">An artifact version must be addressable: approval attaches to a version, and a push notification has to be able to link at one. A collapsible section cannot be linked.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace; font-size:12.5px;">/tickets <span style="font-family:'Instrument Sans',sans-serif; color:oklch(0.5 0.12 62); font-size:11px;">NEW</span></td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace; font-size:12.5px;">60rem</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">A finder across projects. The board is a shape, not a finder; at 50 tickets you need both.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace; font-size:12.5px;">/users/log-in · /users/settings</td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace; font-size:12.5px;">26rem</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Same shell, same type, same buttons. They must not read as a different product.</td></tr>
+      </tbody>
+    </table>
+    <p style="margin:0 0 14px; padding:11px 14px; border-left:2px solid oklch(0.58 0.13 62); background:oklch(0.97 0.015 75);"><strong style="font-weight:600;">Decide.</strong> <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">/tickets</code> implies a query over tickets that may not exist yet. If that is expensive, drop it — nothing else here depends on it and the phone bar falls back to two items.</p>
+
+    <h3 style="font-size:16px; font-weight:600; margin:20px 0 8px;">1.2 Navigation</h3>
+    <p style="margin:0 0 10px;"><strong style="font-weight:600;">Phone:</strong> a fixed three-item bottom bar — Queue, Board, Tickets — 56px tall plus safe-area inset, each item a full-height tap target. Queue carries a count badge and it is the only badge in the product. Bottom rather than top because answering is a thumb action.</p>
+    <p style="margin:0 0 10px;"><strong style="font-weight:600;">Laptop:</strong> the same three as a hairline-ruled top row, left-aligned after the wordmark, with daily spend and the theme control on the right. No hamburger at any width.</p>
+    <p style="margin:0 0 10px;"><strong style="font-weight:600;">Ticket, job and artifact are pushed views.</strong> They get a back affordance naming where you came from, not a tab. A ticket opened from a push notification backs out to the queue.</p>
+    <p style="margin:0 0 16px;"><strong style="font-weight:600;">Answering never navigates.</strong> Every queue item is answerable in place; tapping an answer does not move you, open a page, or reorder the list. The item stays where it is and changes to its sent state.</p>
+
+    <h3 style="font-size:16px; font-weight:600; margin:20px 0 8px;">1.3 How the queue expresses order</h3>
+    <p style="margin:0 0 16px;">Oldest first, one list, no tabs and no filters — an operator must be able to reach the end and know they are done. Three devices carry the ordering: the waiting figure on every item (the sort key, set large and right-aligned so the age of the whole queue reads down one edge); a counter in the header (<code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">4 left · in order</code>); and a terminal <em>End of queue</em> block that is phrased as a completion. Non-blocking questions sit below the last actionable item under a heading that says they are not waiting on you — present, never hidden, never competing.</p>
+
+    <h2 style="font-size:21px; font-weight:600; letter-spacing:-0.02em; margin:30px 0 12px;">2. The three axes</h2>
+    <p style="margin:0 0 12px;">This is the central problem in the brief and everything else follows from it. The three axes are given three different <em>forms</em>, not three colours of the same badge — form survives colour-blindness, greyscale and a glance.</p>
+
+    <table style="width:100%; border-collapse:collapse; font-size:13.5px; margin:0 0 14px;">
+      <thead>
+        <tr>
+          <th style="text-align:left; padding:7px 10px 7px 0; border-bottom:1.5px solid oklch(0.3 0.012 300); font-weight:600; width:22%;">Axis</th>
+          <th style="text-align:left; padding:7px 10px; border-bottom:1.5px solid oklch(0.3 0.012 300); font-weight:600; width:30%;">Form</th>
+          <th style="text-align:left; padding:7px 0 7px 10px; border-bottom:1.5px solid oklch(0.3 0.012 300); font-weight:600;">Rules</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300);"><strong style="font-weight:600;">1 · workflow state</strong></td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Plain mono text with a leading topology glyph. No border and no padding — <strong style="font-weight:600;">a border in this system means the thing is tappable</strong>, so an identifier never has one.</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Glyph: <strong>▸</strong> job state (runs a job on entry, info hue) · <strong>●</strong> human state with outgoing transitions (primary hue) · <strong>■</strong> terminal (muted). Never coloured by status. Never abbreviated.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300);"><strong style="font-weight:600;">2 · ticket status</strong></td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Filled flag, placed <em>beside</em> the state chip.</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Rendered only when not <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">active</code>. <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">stuck</code> = filled accent with its age inside (<code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">STUCK 19h</code>). <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">done</code> = outlined success. Never replaces the state and never appears as a board column.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300);"><strong style="font-weight:600;">3 · job outcome</strong></td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Bare mono text at type scale, coloured.</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">The <em>declared</em> outcome is the largest: 30px on the job page, 12.5px in a jobs table column of its own. The engine outcome is demoted to smaller mono beside it. Job <em>status</em> is plain mono. Nothing on any axis is boxed.</td></tr>
+      </tbody>
+    </table>
+
+    <p style="margin:0 0 10px;"><strong style="font-weight:600;">Outcome colour mapping.</strong> <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">converged</code> and any declared success → success. <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">did_not_converge</code> and <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">budget_exhausted</code> → warning. <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">error</code> and declared failures the agent names (<code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">tests_failed</code>, <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">plan_invalid</code> when it blocks) → error. <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">did_not_converge</code> is deliberately not red: it is the agent honestly reporting it could not finish.</p>
+    <p style="margin:0 0 16px;"><strong style="font-weight:600;">Declared outcomes are project-defined strings.</strong> Do not hard-code the list. Map by three buckets the workflow declares — success, non-completion, failure — and fall back to neutral for an unrecognised value. <strong style="font-weight:600;">Decide:</strong> whether the workflow grammar can carry that bucket per allowed outcome, or whether the UI must infer it.</p>
+
+    <h2 style="font-size:21px; font-weight:600; letter-spacing:-0.02em; margin:30px 0 12px;">3. Type and spacing</h2>
+
+    <h3 style="font-size:16px; font-weight:600; margin:20px 0 8px;">3.1 Faces</h3>
+    <p style="margin:0 0 10px;"><strong style="font-weight:600;">Instrument Sans</strong> for everything that is language, <strong style="font-weight:600;">JetBrains Mono</strong> for everything that is an identifier. Both are OFL and self-hostable, which is the binding constraint — no CDN, possibly no egress. Ship subsetted woff2 (latin, weights 400/500/600 and 400/500/700) in <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">assets/fonts/</code> with a local <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">@font-face</code> block and <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">font-display: swap</code>; roughly 90 KB total.</p>
+    <p style="margin:0 0 16px;">Instrument Sans was chosen over the obvious UI sans for two reasons: it has a narrow, slightly condensed lower case that holds a 20px decision sentence on a 390px screen without wrapping to four lines, and its figures are unfussy enough to sit beside mono without the page reading as two products. <strong style="font-weight:600;">Decide:</strong> if self-hosting any webfont is unwelcome, the system stack degrades acceptably — the design depends on the sans/mono <em>distinction</em>, not on these two faces.</p>
+
+    <h3 style="font-size:16px; font-weight:600; margin:20px 0 8px;">3.2 Scale</h3>
+    <table style="width:100%; border-collapse:collapse; font-size:13.5px; margin:0 0 14px;">
+      <thead><tr>
+        <th style="text-align:left; padding:7px 10px 7px 0; border-bottom:1.5px solid oklch(0.3 0.012 300); font-weight:600; width:26%;">Role</th>
+        <th style="text-align:left; padding:7px 10px; border-bottom:1.5px solid oklch(0.3 0.012 300); font-weight:600; width:30%;">Tailwind</th>
+        <th style="text-align:left; padding:7px 0 7px 10px; border-bottom:1.5px solid oklch(0.3 0.012 300); font-weight:600;">Used for</th>
+      </tr></thead>
+      <tbody>
+        <tr><td style="padding:7px 10px 7px 0; border-bottom:1px solid oklch(0.9 0.006 300);">Page title</td><td style="padding:7px 10px; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace; font-size:12px;">text-3xl/tight -tracking-[.03em] font-semibold</td><td style="padding:7px 0 7px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Ticket title (laptop). 23px on phone.</td></tr>
+        <tr><td style="padding:7px 10px 7px 0; border-bottom:1px solid oklch(0.9 0.006 300);">Section title</td><td style="padding:7px 10px; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace; font-size:12px;">text-2xl -tracking-[.025em] font-semibold</td><td style="padding:7px 0 7px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Queue, Board.</td></tr>
+        <tr><td style="padding:7px 10px 7px 0; border-bottom:1px solid oklch(0.9 0.006 300);">Decision sentence</td><td style="padding:7px 10px; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace; font-size:12px;">text-xl/[1.3] font-medium</td><td style="padding:7px 0 7px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">The one sentence per queue item that states what is being asked. The largest text on a card.</td></tr>
+        <tr><td style="padding:7px 10px 7px 0; border-bottom:1px solid oklch(0.9 0.006 300);">Declared outcome</td><td style="padding:7px 10px; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace; font-size:12px;">font-mono text-3xl / text-xs</td><td style="padding:7px 0 7px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Job page headline / jobs-table column.</td></tr>
+        <tr><td style="padding:7px 10px 7px 0; border-bottom:1px solid oklch(0.9 0.006 300);">Waiting figure</td><td style="padding:7px 10px; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace; font-size:12px;">font-mono text-[17px]</td><td style="padding:7px 0 7px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Right-aligned on every queue item. Second-largest thing on the card.</td></tr>
+        <tr><td style="padding:7px 10px 7px 0; border-bottom:1px solid oklch(0.9 0.006 300);">Body</td><td style="padding:7px 10px; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace; font-size:12px;">text-sm/[1.55]</td><td style="padding:7px 0 7px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Prose, anchors, explanations. Never below 14px on phone.</td></tr>
+        <tr><td style="padding:7px 10px 7px 0; border-bottom:1px solid oklch(0.9 0.006 300);">Identifier</td><td style="padding:7px 10px; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace; font-size:12px;">font-mono text-[12.5px]</td><td style="padding:7px 0 7px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">States, outcomes, artifact names, branches, commits, money.</td></tr>
+        <tr><td style="padding:7px 10px 7px 0; border-bottom:1px solid oklch(0.9 0.006 300);">Micro label</td><td style="padding:7px 10px; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace; font-size:12px;">font-mono text-[11px] tracking-[.14em] uppercase</td><td style="padding:7px 0 7px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Card kind, rail section heads. One per block, never two adjacent.</td></tr>
+      </tbody>
+    </table>
+
+    <h3 style="font-size:16px; font-weight:600; margin:20px 0 8px;">3.3 When monospace applies</h3>
+    <p style="margin:0 0 10px;"><strong style="font-weight:600;">Mono is for things the system named:</strong> workflow states, ticket statuses, job statuses and outcomes, artifact names and version numbers, branches, commit shas, session ids, environments, money, counts, durations and ages, transition buttons (<code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">→ planned</code>), and micro labels.</p>
+    <p style="margin:0 0 16px;"><strong style="font-weight:600;">Mono is never for things a person wrote or reads as language:</strong> ticket titles, question text, option labels, anchor quotations, explanatory sentences, empty-state copy, button labels that are verbs (<em>Approve v3</em>, <em>Retry now</em>). This is the rule that fixes “monospace is the dominant texture” — the volume of mono drops by roughly half while every identifier still looks like one.</p>
+
+    <h3 style="font-size:16px; font-weight:600; margin:20px 0 8px;">3.4 Spacing and targets</h3>
+    <p style="margin:0 0 16px;">Base unit 4px. Page gutter <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">px-5</code> phone / <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">px-6</code>–<code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">px-[30px]</code> laptop. Queue item <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">py-[18px]</code>, internal stack gap <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">gap-[11px]</code>. Timeline step gap <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">pb-[26px]</code> laptop / <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">pb-5</code> phone. The old <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">py-20</code> page padding goes; vertical space on a phone is the scarcest resource in the product after attention. Every tap target is at least 46px tall, answer buttons 48px, and <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">btn-sm</code> does not appear on any operator page. Separation is a 1px rule, not a shadow — <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">--depth: 0</code>.</p>
+
+    <h2 style="font-size:21px; font-weight:600; letter-spacing:-0.02em; margin:30px 0 12px; break-before:page;">4. Colour — both themes</h2>
+    <p style="margin:0 0 12px;">Dark is the design target and light is derived from it. Hue is constant across both (300 neutrals, 290 primary, 62 accent, 240 info, 150 success, 22 error); only lightness and chroma move. Body text is ≥ 7:1 against its own base in both themes, muted text ≥ 4.5:1. The accent is deliberately identical in both themes with dark content text, so the one loud mark in the product does not shift meaning when the theme does.</p>
+
+    <h3 style="font-size:16px; font-weight:600; margin:20px 0 8px;">4.1 Dark</h3>
+    <pre style="font-family:'JetBrains Mono',monospace; font-size:11px; line-height:1.6; background:oklch(0.965 0.004 300); border:1px solid oklch(0.9 0.006 300); border-radius:6px; padding:14px 16px; margin:0 0 16px; overflow-x:auto; white-space:pre-wrap; break-inside:avoid;">@plugin "daisyui-theme" {
+  name: "dark";
+  default: false;
+  prefersdark: true;
+  color-scheme: dark;
+
+  --color-base-100: oklch(15.5% 0.008 300);
+  --color-base-200: oklch(19.5% 0.009 300);
+  --color-base-300: oklch(24.5% 0.008 300);
+  --color-base-content: oklch(94% 0.004 300);
+
+  --color-primary: oklch(72% 0.130 290);
+  --color-primary-content: oklch(16% 0.030 290);
+  --color-secondary: oklch(62% 0.040 290);
+  --color-secondary-content: oklch(15% 0.012 290);
+  --color-accent: oklch(76% 0.130 62);
+  --color-accent-content: oklch(18% 0.040 62);
+  --color-neutral: oklch(30% 0.010 300);
+  --color-neutral-content: oklch(92% 0.006 300);
+
+  --color-info: oklch(72% 0.100 240);
+  --color-info-content: oklch(16% 0.030 240);
+  --color-success: oklch(72% 0.120 150);
+  --color-success-content: oklch(16% 0.030 150);
+  --color-warning: oklch(82% 0.110 62);
+  --color-warning-content: oklch(18% 0.040 62);
+  --color-error: oklch(72% 0.170 22);
+  --color-error-content: oklch(16% 0.040 22);
+
+  --radius-selector: 0.3125rem;
+  --radius-field:    0.375rem;
+  --radius-box:      0.5rem;
+  --size-selector:   0.25rem;
+  --size-field:      0.25rem;
+  --border:          1px;
+  --depth:           0;
+  --noise:           0;
+}</pre>
+
+    <h3 style="font-size:16px; font-weight:600; margin:20px 0 8px;">4.2 Light</h3>
+    <pre style="font-family:'JetBrains Mono',monospace; font-size:11px; line-height:1.6; background:oklch(0.965 0.004 300); border:1px solid oklch(0.9 0.006 300); border-radius:6px; padding:14px 16px; margin:0 0 16px; overflow-x:auto; white-space:pre-wrap; break-inside:avoid;">@plugin "daisyui-theme" {
+  name: "light";
+  default: true;
+  prefersdark: false;
+  color-scheme: light;
+
+  --color-base-100: oklch(98.5% 0.003 300);
+  --color-base-200: oklch(96.5% 0.004 300);
+  --color-base-300: oklch(92.5% 0.005 300);
+  --color-base-content: oklch(20% 0.012 300);
+
+  --color-primary: oklch(47% 0.140 290);
+  --color-primary-content: oklch(98% 0.003 290);
+  --color-secondary: oklch(52% 0.040 290);
+  --color-secondary-content: oklch(98% 0.003 290);
+  --color-accent: oklch(76% 0.130 62);
+  --color-accent-content: oklch(18% 0.040 62);
+  --color-neutral: oklch(30% 0.012 300);
+  --color-neutral-content: oklch(97% 0.003 300);
+
+  --color-info: oklch(46% 0.120 240);
+  --color-info-content: oklch(98% 0.003 240);
+  --color-success: oklch(45% 0.110 150);
+  --color-success-content: oklch(98% 0.003 150);
+  --color-warning: oklch(72% 0.130 62);
+  --color-warning-content: oklch(18% 0.040 62);
+  --color-error: oklch(48% 0.170 22);
+  --color-error-content: oklch(98% 0.003 22);
+
+  --radius-selector: 0.3125rem;
+  --radius-field:    0.375rem;
+  --radius-box:      0.5rem;
+  --size-selector:   0.25rem;
+  --size-field:      0.25rem;
+  --border:          1px;
+  --depth:           0;
+  --noise:           0;
+}</pre>
+
+    <h3 style="font-size:16px; font-weight:600; margin:20px 0 8px;">4.3 Colour discipline</h3>
+    <p style="margin:0 0 10px;"><strong style="font-weight:600;">Accent (ochre) means one thing: a human is being waited on.</strong> The queue mark on a blocking or stuck item, the <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">STUCK</code> flag, the ticket's current-step dot, the board's left rule, the “waiting on you” count, the usage meter fill and the window gauge. Nothing else may use it — its value is entirely in its scarcity.</p>
+    <p style="margin:0 0 10px;"><strong style="font-weight:600;">Primary (indigo)</strong> is links, human states, and decisions that advance state or spend money. <strong style="font-weight:600;">Info (blue)</strong> is the job-state glyph and harness tool calls, nothing else. <strong style="font-weight:600;">Success</strong> is approval and the end of the queue. <strong style="font-weight:600;">Error</strong> is reserved: engine errors, declared failures, and failed sends.</p>
+    <p style="margin:0 0 16px;">Two surfaces per theme at most: <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">base-100</code> for pages, <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">base-200</code> for the one row that is in a changed state (answered, current attempt). Structure is rules, not cards — <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">border-base-300</code> at full strength for section rules, <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">border-base-300/60</code> for rows within a section.</p>
+
+    <h2 style="font-size:21px; font-weight:600; letter-spacing:-0.02em; margin:30px 0 12px;">5. Components</h2>
+    <p style="margin:0 0 14px; padding:13px 16px; border-left:2px solid oklch(0.47 0.14 290); background:oklch(0.97 0.01 290);"><strong style="font-weight:600;">The affordance rule, which governs every component below: a border means you can tap it.</strong> Identifiers — states, statuses, outcomes, branches, commits — are plain mono text with no box. Actions are boxed: a 52px row with the label left and a <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">›</code> right, which sends on tap. A filled button appears only where the operator has typed something to commit. A filled uppercase tag is a flag, never a control.</p>
+
+    <h3 style="font-size:16px; font-weight:600; margin:20px 0 8px;">5.1 Queue item — one shape, N kinds</h3>
+    <p style="margin:0 0 10px;">Every kind is the same five-part row, so the list never becomes soup as kinds are added: <strong style="font-weight:600;">(a)</strong> mark + kind label + waiting figure; <strong style="font-weight:600;">(b)</strong> the decision sentence at <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">text-xl</code>; <strong style="font-weight:600;">(c)</strong> optional context, one or two lines of prose, including the anchor quotation; <strong style="font-weight:600;">(d)</strong> the answer affordance; <strong style="font-weight:600;">(e)</strong> a mono footer of identifiers. Separation between items is a top rule, not a card.</p>
+    <p style="margin:0 0 10px;">Three marks carry all kinds. <strong style="font-weight:600;">Filled accent diamond</strong> — a job is held or the ticket is stuck (blocking question, stuck, and later experiment requests that hold a job). <strong style="font-weight:600;">Hollow primary square</strong> — a decision that advances state or spends money (approval, promotion decision). <strong style="font-weight:600;">Hollow success circle</strong> — routine (review ready, analysis proposal). The kind is named in words beside the mark, so eight kinds need eight labels but only three marks.</p>
+    <table style="width:100%; border-collapse:collapse; font-size:13.5px; margin:0 0 14px;">
+      <thead><tr>
+        <th style="text-align:left; padding:7px 10px 7px 0; border-bottom:1.5px solid oklch(0.3 0.012 300); font-weight:600; width:24%;">Kind</th>
+        <th style="text-align:left; padding:7px 10px; border-bottom:1.5px solid oklch(0.3 0.012 300); font-weight:600; width:22%;">Answer affordance</th>
+        <th style="text-align:left; padding:7px 0 7px 10px; border-bottom:1.5px solid oklch(0.3 0.012 300); font-weight:600;">Notes</th>
+      </tr></thead>
+      <tbody>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300);">Blocking question</td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Stacked 48px option buttons, default filled; free-text field last.</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Anchor quotation always shown with the artifact name and version. Free text is a peer of the options and is labelled <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">ALWAYS OPEN</code>, never hidden behind a link.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300);">Approval</td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Approve <em>vN</em> / Reject, plus optional comment.</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">The version number is inside the button label. Sentence states the transition and the artifact; one line states that approval pins that exact version.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300);">Stuck</td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">One mono button per available transition.</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Sentence states <em>why</em> it is stuck (cap, no match, ceiling). Footer carries the state chip — the ticket is still in it.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300);">Review ready</td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Transition buttons.</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Quietest kind. A human state with no outgoing transitions never appears in the queue at all — it is terminal, nothing is waiting.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300);">Non-blocking question</td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">None inline; links to the document.</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Digest block below the last actionable item, under <em>Not waiting on you</em>. One line each. Never pushed to the phone.</td></tr>
+      </tbody>
+    </table>
+
+    <h3 style="font-size:16px; font-weight:600; margin:20px 0 8px;">5.2 Ticket page</h3>
+    <p style="margin:0 0 10px;"><strong style="font-weight:600;">Header:</strong> project#number in mono, title at <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">text-3xl</code>, then the state chip, the status flag if any, and a plain-language clause for why it is waiting. Cost is not in the header — it is the first block of the rail, where it can carry its ceiling.</p>
+    <p style="margin:0 0 10px;"><strong style="font-weight:600;">Hoisted decision:</strong> if the ticket has an answerable action, it appears once, directly under the header, in an accent-bordered block. Everything below it is reference. This is the only place on the page where accent appears besides the current-step dot.</p>
+    <p style="margin:0 0 10px;"><strong style="font-weight:600;">Timeline:</strong> one step per workflow state, in the workflow's own order, walked from the initial state — the same walk the board uses for columns. Each step carries its dot and rail, the state name in mono, the topology glyph, a jobs table (attempt, declared outcome, turns, cost), artifact chips written in that state, and a right-aligned summary (<code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">3 jobs · $1.15</code>). States not yet reached are drawn at 50% so the operator can see where the ticket is going; the rail stops at a terminal state. Stuck is drawn <em>on</em> the current step — accent dot plus flag — never as a step of its own.</p>
+    <p style="margin:0 0 16px;"><strong style="font-weight:600;">Rail:</strong> usage meter and window capacity, facts (branch, base, workflow commit, admitted), artifact index with approval state per version, and the last four events with a link to all of them. The full event timeline moves off the ticket page to its own disclosure — 200 rows of mono is a post-mortem tool, not a page header.</p>
+
+    <h3 style="font-size:16px; font-weight:600; margin:20px 0 8px;">5.3 Job page</h3>
+    <p style="margin:0 0 16px;">Declared outcome is the page headline at <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">text-3xl</code> mono in its outcome colour, with the engine outcome as a chip beside it and a caption naming which is which. Turns, cost and duration are three figures in a row, turns always against its budget. The pinned manifest is the rail: branch, workflow commit, environment, budget, session, then each input artifact <em>at its exact version</em>. When an input has been superseded the row reads <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">v2 exists</code> in warning and a sentence below states the platform did not re-run on its own. Allowed outcomes are listed with the taken one marked. The harness stream is headed <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">COMPLETE · N ENTRIES</code>, newest first, 50 per page, no tailing and no autoscroll.</p>
+
+    <h3 style="font-size:16px; font-weight:600; margin:20px 0 8px;">5.4 Board</h3>
+    <p style="margin:0 0 16px;">Columns in workflow-walk order, each headed by the state name, its topology glyph and its count. <strong style="font-weight:600;">Columns cap at four rows and then say how many remain</strong> — a column that scrolls independently hides its own count and breaks the board as a shape. Cards are two lines: number in mono, title in sans; a ticket waiting on a human gains an accent left rule and a mono age. The human-state column gets a tinted ground. Terminal columns are dimmed. The header carries three figures only: open count, <em>N waiting on you</em> in accent, daily spend. On phone the columns become sections in the same order, collapsed except any section containing work that waits on you.</p>
+
+    <h3 style="font-size:16px; font-weight:600; margin:20px 0 8px;">5.5 Artifacts</h3>
+    <p style="margin:0 0 16px;">The unit is a chip: name, version, approval state. There is no chip without a version and the word “latest” appears nowhere in the product. States: <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">✓ approved</code> (success), <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">◇ unapproved</code> (warning), no marker where approval does not apply. Opening a chip discloses a version strip — <em>v1 agent → v2 you, edited → v3 agent</em> — which is both provenance and the place multi-user attribution lands later. A <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">presentation</code> is drawn with a dashed border and <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">VIEW ONLY</code> and has no approval slot at all, so it cannot be misread as approvable.</p>
+
+    <h3 style="font-size:16px; font-weight:600; margin:20px 0 8px;">5.6 Capacity and usage</h3>
+    <p style="margin:0 0 10px;">Cost is modelled as consumed capacity, not money. <strong style="font-weight:600;">One unit is one percent of a five-hour window</strong>, and quantities are stated in <em>windows</em> to two significant figures (<code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">1.4 windows</code>). This gives one unit that stays true when a ticket's work spans four windows and a week, which a percentage cannot.</p>
+    <p style="margin:0 0 10px;">The model has two objects and they are never drawn the same way. <strong style="font-weight:600;">Usage</strong> is absolute and never resets: a job's usage, a timeline step's sum, a ticket's total against its allowance. <strong style="font-weight:600;">Capacity</strong> is a live shared pool that refills: the current five-hour window and the week, each with a reset time. A ticket allowance stays absolute — a cap expressed as a share of a refilling pool would mean something different on Monday than on Friday.</p>
+    <p style="margin:0 0 10px;"><strong style="font-weight:600;">Drawing.</strong> The window is a twenty-tick gauge (one tick per five percent) with a mono reset countdown, because you are consuming it rather than progressing through it; it compresses to ten ticks in the top bar and replaces the daily-spend readout. The week is a thin plain bar beneath it and becomes the headline only when it is the binding ceiling. Ticket usage is a figure plus a 5px meter against its allowance, filled accent. A job states its usage, its turn budget, and — only when a reset interrupted it — which windows it drew from and how long it was paused.</p>
+    <p style="margin:0 0 10px;"><strong style="font-weight:600;">Three exhaustions, three treatments.</strong> A <em>job turn budget</em> running out is the engine's business: it appears as the outcome <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">budget_exhausted</code> and nowhere else. A <em>ticket allowance</em> running out needs a human, so it sticks the ticket, enters the queue and is drawn in accent. <em>Window or weekly capacity</em> running out is resolved by time: it is drawn neutral as <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">PAUSED · CAPACITY 1h 12m</code> on the board and the ticket, never in accent, and <strong style="font-weight:600;">never in the queue</strong>. That last rule is load-bearing — a paused ticket in the inbox trains the operator to open items they cannot act on, which is the failure the whole thesis is written against.</p>
+    <p style="margin:0 0 16px;"><strong style="font-weight:600;">Decide.</strong> (a) Whether the provider reports a real window boundary and reset time; a wrong countdown is worse than none. (b) Whether a job that meets a window edge hibernates and resumes or fails and retries — the <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">PAUSED</code> treatment assumes the former and is where §7's hibernation work surfaces. (c) Whether dollars survive as a secondary figure on the job page for reconciliation. The recommendation is that they leave every operator surface: a number the operator cannot act on is noise, and capacity is a number they can act on.</p>
+
+    <h3 style="font-size:16px; font-weight:600; margin:20px 0 8px;">5.7 Message state</h3>
+    <p style="margin:0 0 10px;">Four states, one row shape, always attached to the item acted on — never a toast, because a toast that disappears is precisely the failure the vision calls impossible by construction.</p>
+    <p style="margin:0 0 10px;"><strong style="font-weight:600;">Queued/sending</strong> — spinner, “saved on this device”, Undo. <strong style="font-weight:600;">Retrying</strong> — accent diamond, attempt count, next-attempt countdown, Retry now. <strong style="font-weight:600;">Failed</strong> — error dot, “gave up after 5 tries”, “still saved · tap to try again”. The answer is never discarded. <strong style="font-weight:600;">Confirmed</strong> — success tick, the time, and the consequence (<em>job resumed</em>), so the row closes the loop rather than just the request.</p>
+    <p style="margin:0 0 16px;">The item does not disappear on tap and does not reorder. An offline banner states how many answers are waiting to send. The two generic reconnect banners are replaced by one that names the consequence for the operator's own work. <strong style="font-weight:600;">Decide:</strong> offline compose needs a client-side outbox that survives LiveView DOM patching and page reload — an idempotency key per answer and a service-worker-backed store. That is engineering work this document assumes but does not specify.</p>
+
+    <h3 style="font-size:16px; font-weight:600; margin:20px 0 8px;">5.8 Empty states</h3>
+    <p style="margin:0 0 16px;">The empty queue is what a well-running system looks like, so it is drawn as a completion: a success micro-label <em>End of queue</em>, a sentence, and one line of evidence that work happened without you (<em>14 jobs ran today and none of them needed you</em>). The same block terminates a non-empty queue. Every other empty state names what would fill it rather than announcing absence — an empty board column says <em>nothing in this state</em>; a ticket with no artifacts yet says <em>the first job writes plan.md</em>.</p>
+
+    <h2 style="font-size:21px; font-weight:600; letter-spacing:-0.02em; margin:30px 0 12px;">6. Implementation order</h2>
+    <p style="margin:0 0 12px;">Ordered by impact per unit of work. Each step is shippable on its own and none of them requires the next.</p>
+    <table style="width:100%; border-collapse:collapse; font-size:13.5px; margin:0 0 14px;">
+      <thead><tr>
+        <th style="text-align:left; padding:7px 10px 7px 0; border-bottom:1.5px solid oklch(0.3 0.012 300); font-weight:600; width:6%;">#</th>
+        <th style="text-align:left; padding:7px 10px; border-bottom:1.5px solid oklch(0.3 0.012 300); font-weight:600; width:34%;">Step</th>
+        <th style="text-align:left; padding:7px 0 7px 10px; border-bottom:1.5px solid oklch(0.3 0.012 300); font-weight:600;">Why here</th>
+      </tr></thead>
+      <tbody>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace;">1</td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Theme blocks, fonts, remove <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">py-20</code>, raise tap targets off <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">btn-sm</code>.</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Pure CSS. Touches no LiveView logic and changes how the whole product feels on a phone in an afternoon.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace;">2</td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Cost formatter and relative-age helper; show the waiting figure on every queue item.</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Two small functions. The <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">since</code> value is already loaded and discarded — this is the cheapest real information gain in the list.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace;">3</td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">The three indicator components, replacing every <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">badge-sm</code>.</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Three function components in one HEEx module; every later step consumes them. This is the brief's highest-value item.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace;">4</td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Queue item shape, per-kind marks, the digest, the end-of-queue block.</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Rebuilds the home screen against components that now exist. No new data.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace;">5</td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Per-page measures and the phone bottom bar; drop the global <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">max-w-2xl</code>.</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">A layout change in the root template plus one class per page. Unblocks the board.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace;">6</td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Board: workflow-order columns at full width, row cap, waiting marks, phone sections.</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Now cheap, and it is the page that degrades worst at 50 tickets.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace;">7</td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Message state: pending / retrying / failed / confirmed, with an idempotency key per mutation.</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Real engineering, and the stated differentiator. Ship visible state and retry first, offline compose second.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace;">8</td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Ticket page as a state timeline; artifact chips; events behind a disclosure.</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">The largest rewrite, and it needs the workflow walk from step 6 and the indicators from step 3.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace;">9</td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Job page: declared outcome as headline, manifest rail, paged stream, stale-input notice.</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Lower traffic than the queue, and the stale-input notice may need engine support.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300); font-family:'JetBrains Mono',monospace;">10</td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Addressable artifact versions, then <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">/tickets</code>.</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">New routes and queries. Both are enabling work for §7 rather than fixes to today.</td></tr>
+      </tbody>
+    </table>
+
+    <h2 style="font-size:21px; font-weight:600; letter-spacing:-0.02em; margin:30px 0 12px;">7. Fit with the planned picture</h2>
+    <table style="width:100%; border-collapse:collapse; font-size:13.5px; margin:0 0 14px;">
+      <thead><tr>
+        <th style="text-align:left; padding:7px 10px 7px 0; border-bottom:1.5px solid oklch(0.3 0.012 300); font-weight:600; width:26%;">Planned item</th>
+        <th style="text-align:left; padding:7px 10px; border-bottom:1.5px solid oklch(0.3 0.012 300); font-weight:600; width:16%;">Verdict</th>
+        <th style="text-align:left; padding:7px 0 7px 10px; border-bottom:1.5px solid oklch(0.3 0.012 300); font-weight:600;">How</th>
+      </tr></thead>
+      <tbody>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300);">Queue grows to ~8 kinds</td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300); color:oklch(0.4 0.11 150); font-weight:600;">As-is</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">One row shape, three marks, a label in words. A new kind is a label and an affordance, not a new card design.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300);">Ticket as state timeline</td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300); color:oklch(0.4 0.11 150); font-weight:600;">As-is</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Already built that way here.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300);">Job hierarchy (blocks, children)</td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300); color:oklch(0.45 0.12 62); font-weight:600;">Extension</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">The jobs table inside a step indents children under parents; the job page gains “spawned by / spawned” rows in the manifest rail. Room is left; the indent rule is not specified.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300);">Blobs (logs, screenshots)</td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300); color:oklch(0.45 0.12 62); font-weight:600;">Extension</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">New chip types in the existing chip row. A <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">screenshots/*</code> prefix group is one chip with an open member count. An image viewer is a new view this document does not cover.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300);">Presentations</td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300); color:oklch(0.4 0.11 150); font-weight:600;">As-is</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Dashed chip, <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">VIEW ONLY</code>, no approval slot in the component at all.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300);">Experiments, advisory results</td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300); color:oklch(0.45 0.12 62); font-weight:600;">Extension</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">A chip variant with a hollow stroke and the word <em>experimental</em>, never a tick; the request is an accent-diamond queue kind. Promotion is a separate hollow-square kind. Left room, not specified.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300);">Merge approval view</td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300); color:oklch(0.45 0.12 62); font-weight:600;">Extension</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Its own route off the <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">review_ready</code> step, full viewport width like the board. The timeline is what it summarises down its side. Deliberately not designed.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300);">Workers, <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">hibernated</code></td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300); color:oklch(0.4 0.11 150); font-weight:600;">As-is</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">A job status chip plus a rail line saying where it resumes from. An infrastructure view would be a new route, unaffected by this system.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300);">Cancel, <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">cancelled</code></td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300); color:oklch(0.4 0.11 150); font-weight:600;">As-is</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">A destructive button beside the turn counter on a running job; the status chip and outcome mapping already have neutral slots for it.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300);">Second budget dimension</td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300); color:oklch(0.4 0.11 150); font-weight:600;">As-is</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Handled by §5.6 outright: the five-hour window and the week are already two ceilings, and a third stacks the same way.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300);">Multi-user, roles, audit</td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300); color:oklch(0.45 0.12 62); font-weight:600;">Extension</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">Attribution has a home already — the artifact version strip and the event rows. Role-gated affordances (who may approve, promote, spend) are not designed and would need a disabled-with-reason treatment.</td></tr>
+        <tr><td style="padding:8px 10px 8px 0; border-bottom:1px solid oklch(0.9 0.006 300);">Offline compose and sync</td><td style="padding:8px 10px; border-bottom:1px solid oklch(0.9 0.006 300); color:oklch(0.4 0.11 150); font-weight:600;">As-is</td><td style="padding:8px 0 8px 10px; border-bottom:1px solid oklch(0.9 0.006 300);">The four message states already assume no live socket at the moment of answering. The client outbox is engineering, not design.</td></tr>
+      </tbody>
+    </table>
+    <p style="margin:0 0 16px;"><strong style="font-weight:600;">Where this design could paint you into a corner.</strong> Two places. First, capping board columns at four rows assumes the board stays a shape rather than becoming a workspace; if tickets ever need to be dragged between states, the cap has to go and the column becomes a scroller. Second, the queue's refusal of tabs and filters is correct at one operator and 4 items, and will need revisiting — not reversing — if multi-user arrives and the list carries items addressed to other people. The honest answer then is per-person queues, not filters.</p>
+
+    <h2 style="font-size:21px; font-weight:600; letter-spacing:-0.02em; margin:30px 0 12px;">8. Decisions needed</h2>
+    <ol style="margin:0 0 16px; padding-left:20px;">
+      <li style="margin:0 0 8px;">Whether <code style="font-family:'JetBrains Mono',monospace; font-size:12.5px;">/tickets</code> is worth the query work now, or is deferred and the phone bar drops to two items.</li>
+      <li style="margin:0 0 8px;">Whether the workflow grammar can declare a bucket (success / non-completion / failure) per allowed outcome, so declared-outcome colour is not inferred from string matching.</li>
+      <li style="margin:0 0 8px;">Whether the engine can report “an input artifact of this job has been superseded”, which the stale-input notice needs.</li>
+      <li style="margin:0 0 8px;">Whether self-hosted webfonts are acceptable at all; if not, the system stack is a supported fallback.</li>
+      <li style="margin:0 0 8px;">The retry policy the message-state copy states literally — five attempts with backoff is assumed here and should match what is implemented.</li>
+      <li style="margin:0;">The three capacity questions in §5.6: provider-reported window boundaries, hibernate-or-retry at a window edge, and whether dollars survive anywhere in the operator UI.</li>
+    </ol>
+
+  </div>
+</doc-page>
+
+</x-dc>
+</body>
+</html>

@@ -192,7 +192,9 @@ defmodule Forge.Accounts do
     Repo.all(
       from t in UserToken,
         where: t.user_id == ^user_id and t.context == "api",
-        order_by: t.inserted_at,
+        # Timestamps are second-resolution, so two tokens created in the same second tie and the
+        # row order is whatever Postgres returns. Name breaks the tie so the listing is stable.
+        order_by: [asc: t.inserted_at, asc: t.sent_to],
         select: %{id: t.id, name: t.sent_to, inserted_at: t.inserted_at}
     )
   end

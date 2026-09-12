@@ -13,25 +13,36 @@ defmodule Forge.Operator do
   alias Forge.Tickets
   alias Forge.Tickets.Ticket
 
-  @doc "Answers the open question `key`; resumes the waiting job once it has no open blocking questions."
+  @doc """
+  Answers the open question `key`. The waiting job of the ticket's current state resumes in
+  the same transaction once no blocking question on the ticket remains open, whoever wrote
+  the document that carries it.
+  """
   @spec answer(Ticket.t(), User.t(), String.t(), map()) :: {:ok, Ticket.t()} | {:error, term()}
   def answer(%Ticket{} = ticket, %User{} = user, key, attrs) do
     with %{} = question <-
            Artifacts.find_open_question(ticket.id, key) || {:error, {:no_open_question, key}},
-         {:ok, _answer} <- Artifacts.answer(question, user.id, attrs) do
-      resume_if_unblocked(ticket, question)
+         {:ok, _answer} <-
+           Forge.Repo.transact(fn -> answer_and_resume(ticket, question, user, attrs) end) do
       notify(ticket)
     end
   end
 
-  defp resume_if_unblocked(ticket, question) do
-    job_id = question.artifact_version.author["id"]
+  defp answer_and_resume(ticket, question, user, attrs) do
+    with {:ok, answer} <- Artifacts.answer(question, user.id, attrs),
+         :ok <- resume_if_unblocked(ticket) do
+      {:ok, answer}
+    end
+  end
 
-    with %{status: :waiting} = job <- Jobs.get!(job_id),
-         [] <- Artifacts.open_blocking_questions(ticket.id, job.id) do
-      Jobs.resume(job)
-    else
-      _ -> :ok
+  defp resume_if_unblocked(%Ticket{id: ticket_id, state: state}) do
+    waiting =
+      Enum.find(Jobs.for_ticket(ticket_id), &(&1.status == :waiting and &1.state == state))
+
+    cond do
+      waiting == nil -> :ok
+      Artifacts.open_blocking_questions(ticket_id) != [] -> :ok
+      true -> with({:ok, _job} <- Jobs.resume(waiting), do: :ok)
     end
   end
 

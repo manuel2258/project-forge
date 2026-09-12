@@ -5,6 +5,49 @@
 let
   cfg = config.services.forge;
   inherit (lib) mkEnableOption mkOption mkIf types;
+
+  # What the release needs on PATH: git for repositories and worktrees, nix for `nix develop`,
+  # a shell and coreutils for the job wrapper, and Claude Code itself.
+  servicePath = [ pkgs.git pkgs.nix pkgs.bash pkgs.coreutils cfg.claudePackage ];
+
+  # The service's environment. `forge-admin` runs one-off commands with the same one.
+  serviceEnv = {
+    PHX_SERVER = "true";
+    PHX_HOST = cfg.host;
+    PORT = toString cfg.port;
+    LANG = "C.UTF-8";
+    HOME = cfg.dataDir;
+    # Distribution is off, so the cookie protects nothing; the release script still wants one.
+    RELEASE_DISTRIBUTION = "none";
+    RELEASE_COOKIE = "forge-no-distribution";
+    RELEASE_TMP = "${cfg.dataDir}/tmp";
+    FORGE_DATA_DIR = "${cfg.dataDir}/data";
+    FORGE_REPOS_DIR = "${cfg.dataDir}/repos";
+    FORGE_NIX_ENV = if cfg.nixEnv then "1" else "0";
+    FORGE_CLAUDE_EXECUTABLE = lib.getExe cfg.claudePackage;
+    FORGE_DIGEST_HOUR_UTC = toString cfg.digestHourUtc;
+  } // lib.optionalAttrs cfg.database.createLocally {
+    DATABASE_SOCKET_DIR = "/run/postgresql";
+    DATABASE_NAME = "forge";
+    DATABASE_USER = "forge";
+  };
+
+  # `forge-admin eval 'Forge.Release.create_operator(...)'`: runs `bin/forge` as the service
+  # user with the service's environment and secrets, in a transient unit, so first-run
+  # commands need no hand-assembled environment.
+  forgeAdmin = pkgs.writeShellScriptBin "forge-admin" ''
+    set -euo pipefail
+    if [ "$#" -eq 0 ]; then
+      echo "usage: forge-admin <bin/forge arguments>, e.g. forge-admin eval 'Forge.Release.list_tokens(\"you@example.org\")'" >&2
+      exit 64
+    fi
+    exec ${pkgs.systemd}/bin/systemd-run --quiet --pty --wait --collect \
+      --uid=forge --gid=forge --working-directory=${cfg.dataDir} \
+      ${lib.optionalString (cfg.environmentFile != null) "--property=EnvironmentFile=${cfg.environmentFile}"} \
+      --setenv=PATH=${lib.makeBinPath servicePath} \
+      ${lib.concatStringsSep " " (lib.mapAttrsToList (k: v: "--setenv=${k}=${lib.escapeShellArg v}") (removeAttrs serviceEnv [ "PHX_SERVER" ]))} \
+      -- ${cfg.package}/bin/forge "$@"
+  '';
 in
 {
   options.services.forge = {
@@ -70,9 +113,14 @@ in
   };
 
   config = mkIf cfg.enable {
-    # Claude Code is unfree in nixpkgs; allow exactly that package. Hosts that set
-    # `nixpkgs.pkgs` themselves must allow it in their own nixpkgs config instead.
-    nixpkgs.config.allowUnfreePredicate = pkg: builtins.elem (lib.getName pkg) [ "claude-code" ];
+    # Claude Code is unfree in nixpkgs. The host allows it (see docs/deploy.md); setting
+    # `nixpkgs.config` here would silently replace a predicate the host already has.
+    assertions = [{
+      assertion = cfg.claudePackage.meta.available or true;
+      message = "services.forge.claudePackage is not available; allow the unfree \"claude-code\" package in nixpkgs.config.allowUnfreePredicate";
+    }];
+
+    environment.systemPackages = [ forgeAdmin ];
 
     users.users.forge = {
       isSystemUser = true;
@@ -99,25 +147,8 @@ in
       requires = lib.optional cfg.database.createLocally "postgresql.service";
       wants = [ "network-online.target" ];
 
-      path = [ pkgs.git pkgs.nix pkgs.bash pkgs.coreutils cfg.claudePackage ];
-
-      environment = {
-        PHX_SERVER = "true";
-        PHX_HOST = cfg.host;
-        PORT = toString cfg.port;
-        LANG = "C.UTF-8";
-        HOME = cfg.dataDir;
-        RELEASE_DISTRIBUTION = "none";
-        RELEASE_TMP = "${cfg.dataDir}/tmp";
-        FORGE_DATA_DIR = "${cfg.dataDir}/data";
-        FORGE_NIX_ENV = if cfg.nixEnv then "1" else "0";
-        FORGE_CLAUDE_EXECUTABLE = lib.getExe cfg.claudePackage;
-        FORGE_DIGEST_HOUR_UTC = toString cfg.digestHourUtc;
-      } // lib.optionalAttrs cfg.database.createLocally {
-        DATABASE_SOCKET_DIR = "/run/postgresql";
-        DATABASE_NAME = "forge";
-        DATABASE_USER = "forge";
-      };
+      path = servicePath;
+      environment = serviceEnv;
 
       serviceConfig = {
         User = "forge";

@@ -5,7 +5,8 @@ use and the worker tier are additions, not rewrites. All ids are UUIDs. Times ar
 
 ## Entities
 
-**project** — `name`, `repo_path` (bare repository on the orchestrator), `default_branch`.
+**project** — `name`, `repo_path` (bare repository on the orchestrator; the API only ever
+sets `<repos_dir>/<name>.git`, an arbitrary path needs the command line), `default_branch`.
 
 **ticket** — `project_id`, `number` (per project, human-facing, allocated under a lock on
 the project row), `title`, `body`, `base_commit`, `branch` (`ticket/<number>`), `workflow`

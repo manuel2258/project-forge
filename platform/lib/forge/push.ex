@@ -2,6 +2,9 @@ defmodule Forge.Push do
   @moduledoc """
   Web push to the operator's browsers. Blocking questions are pushed as they appear;
   everything else goes into one daily digest. Enabled only when VAPID keys are configured.
+
+  Delivery runs in a supervised task so a slow or failing push service never blocks the
+  caller, and one bad subscription never prevents the others from being served.
   """
 
   import Ecto.Query, only: [from: 2]
@@ -27,25 +30,21 @@ defmodule Forge.Push do
   def public_key, do: Application.get_env(:web_push_elixir, :vapid_public_key)
 
   @doc "Stores a browser subscription as the browser produced it (`endpoint`, `keys`)."
-  @spec subscribe(User.t(), map(), String.t() | nil) ::
-          {:ok, Subscription.t()} | {:error, Ecto.Changeset.t()}
-  def subscribe(%User{id: user_id}, %{"endpoint" => endpoint, "keys" => keys}, user_agent \\ nil) do
-    attrs = %{
-      user_id: user_id,
-      endpoint: endpoint,
-      p256dh: keys["p256dh"],
-      auth: keys["auth"],
-      user_agent: user_agent
-    }
+  @spec subscribe(User.t(), map()) ::
+          {:ok, Subscription.t()} | {:error, Ecto.Changeset.t()} | {:error, :malformed}
+  def subscribe(%User{id: user_id}, %{"endpoint" => endpoint, "keys" => %{} = keys}) do
+    attrs = %{user_id: user_id, endpoint: endpoint, p256dh: keys["p256dh"], auth: keys["auth"]}
 
     %Subscription{}
     |> Subscription.changeset(attrs)
     |> Repo.insert(
-      on_conflict: {:replace, [:user_id, :p256dh, :auth, :user_agent, :updated_at]},
+      on_conflict: {:replace, [:user_id, :p256dh, :auth, :updated_at]},
       conflict_target: :endpoint,
       returning: true
     )
   end
+
+  def subscribe(%User{}, _), do: {:error, :malformed}
 
   @spec unsubscribe(User.t(), String.t()) :: :ok
   def unsubscribe(%User{id: user_id}, endpoint) do
@@ -64,13 +63,19 @@ defmodule Forge.Push do
   def blocking_question(%Ticket{} = ticket, question) do
     project = Projects.get!(ticket.project_id)
     label = "#{project.name}##{ticket.number}"
+    tag = "question-#{ticket.id}-#{question.key}"
 
-    deliver(%{
-      title: "Question on #{label}",
-      body: question.text,
-      url: "/tickets/#{project.name}/#{ticket.number}",
-      tag: "question-#{ticket.id}-#{question.key}"
-    })
+    deliver(
+      %{
+        title: "Question on #{label}",
+        body: question.text,
+        url: "/tickets/#{project.name}/#{ticket.number}",
+        tag: tag
+      },
+      ttl: 86_400,
+      urgency: :high,
+      topic: topic(tag)
+    )
   end
 
   @doc "Pushes one summary of the queue, if it is not empty."
@@ -86,27 +91,53 @@ defmodule Forge.Push do
           |> Enum.frequencies_by(& &1.kind)
           |> Enum.map_join(", ", fn {k, n} -> "#{n} #{k}" end)
 
-        deliver(%{
-          title: "forge: #{length(items)} waiting on you",
-          body: counts,
-          url: "/",
-          tag: "digest"
-        })
+        deliver(
+          %{
+            title: "forge: #{length(items)} waiting on you",
+            body: counts,
+            url: "/",
+            tag: "digest"
+          },
+          ttl: 43_200,
+          topic: "digest"
+        )
     end
   end
 
-  # Sends to every subscription, dropping the ones the push service says are gone.
-  defp deliver(payload) do
+  @doc "Waits for in-flight deliveries to finish. For tests."
+  @spec flush() :: :ok
+  def flush do
+    Forge.TaskSupervisor
+    |> Task.Supervisor.children()
+    |> Enum.each(fn pid ->
+      ref = Process.monitor(pid)
+
+      receive do
+        {:DOWN, ^ref, :process, ^pid, _} -> :ok
+      after
+        5_000 -> :ok
+      end
+    end)
+  end
+
+  # Sends to every subscription in the background, dropping the ones the push service says
+  # are gone. A subscription whose delivery raises is logged and skipped, not retried.
+  defp deliver(payload, opts) do
     if enabled?() do
       json = Jason.encode!(payload)
-      Enum.each(subscriptions(), &deliver_one(&1, json))
+      subscriptions = subscriptions()
+
+      {:ok, _pid} =
+        Task.Supervisor.start_child(Forge.TaskSupervisor, fn ->
+          Enum.each(subscriptions, &deliver_one(&1, json, opts))
+        end)
     end
 
     :ok
   end
 
-  defp deliver_one(subscription, json) do
-    case sender().deliver(Subscription.to_json(subscription), json) do
+  defp deliver_one(subscription, json, opts) do
+    case sender().deliver(Subscription.to_json(subscription), json, opts) do
       :ok ->
         now = DateTime.utc_now(:second)
 
@@ -115,11 +146,22 @@ defmodule Forge.Push do
         )
 
       {:error, :expired} ->
-        Repo.delete(subscription)
+        Repo.delete_all(from s in Subscription, where: s.id == ^subscription.id)
 
       {:error, reason} ->
         Logger.warning("push to #{subscription.endpoint} failed: #{inspect(reason)}")
     end
+  rescue
+    error ->
+      Logger.error(
+        "push to #{subscription.endpoint} raised: #{Exception.format(:error, error, __STACKTRACE__)}"
+      )
+  end
+
+  # The push service collapses queued messages with the same topic; topics are at most 32
+  # URL-safe characters, so hash the tag.
+  defp topic(tag) do
+    :sha256 |> :crypto.hash(tag) |> Base.url_encode64(padding: false) |> binary_part(0, 32)
   end
 
   defp sender,

@@ -38,6 +38,8 @@ The same operations are available as a JSON API under `/api/v1` with a bearer to
 ```
 mix forge.token you@example.com --name laptop     # prints the token once
 curl -H "Authorization: Bearer $TOKEN" http://localhost:4000/api/v1/queue
+mix forge.token.list you@example.com              # names, not tokens
+mix forge.token.revoke you@example.com laptop
 ```
 
 And as Mix tasks that write rows:

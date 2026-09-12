@@ -128,21 +128,25 @@ defmodule Forge.FlowTest do
     {:ok, _} =
       Forge.Push.subscribe(user, %{
         "endpoint" => "https://push.example/phone",
-        "keys" => %{"p256dh" => "p", "auth" => "a"}
+        "keys" => %{
+          "p256dh" => Base.url_encode64(:crypto.strong_rand_bytes(65), padding: false),
+          "auth" => Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)
+        }
       })
 
     scenario("blocking", "plan.md")
     {:ok, job} = Jobs.run(planned)
     assert job.status == :waiting
-    assert_receive {:push, "https://push.example/phone", %{"body" => "Which backend?"}}
+    Forge.Push.flush()
+    assert_receive {:push, "https://push.example/phone", %{"body" => "Which backend?"}, _opts}
     assert job.harness_session_id == "sess-42"
     assert [%{kind: :question, question: %{key: "backend"}}] = Queue.items()
     assert Tickets.get!(ticket.id).state == "planned"
 
     # answer, resume: the second run resumes the session and sees answers.md
-    [question] = Artifacts.open_blocking_questions(ticket.id, job.id)
+    [question] = Artifacts.open_blocking_questions(ticket.id)
     {:ok, _answer} = Artifacts.answer(question, user.id, %{choice: "b"})
-    assert Artifacts.open_blocking_questions(ticket.id, job.id) == []
+    assert Artifacts.open_blocking_questions(ticket.id) == []
     assert %{content: content} = Artifacts.latest(ticket.id, "answers.md")
     assert content =~ "A: b"
     assert Artifacts.answered_keys(ticket.id) == ["backend"]

@@ -8,7 +8,6 @@ defmodule Forge.Repo.Migrations.CreatePushSubscriptions do
       add :endpoint, :text, null: false
       add :p256dh, :text, null: false
       add :auth, :text, null: false
-      add :user_agent, :text
       add :last_sent_at, :utc_datetime
 
       timestamps(type: :utc_datetime)

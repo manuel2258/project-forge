@@ -55,6 +55,32 @@ defmodule Forge.Events do
   @spec subscribe() :: :ok | {:error, term()}
   def subscribe, do: Phoenix.PubSub.subscribe(Forge.PubSub, @topic)
 
+  @doc "A one-line, bounded rendering of an event's payload for lists and logs."
+  @spec summary(Event.t()) :: String.t()
+  def summary(%Event{type: "job.harness.text", payload: %{"text" => text}}),
+    do: String.slice(text, 0, 200)
+
+  def summary(%Event{type: "job.harness.tool_use", payload: %{"name" => name, "input" => input}}),
+    do: "#{name} #{input |> Jason.encode!() |> String.slice(0, 160)}"
+
+  def summary(%Event{type: "job.harness.tool_result", payload: %{"bytes" => bytes} = p}),
+    do: "#{bytes} bytes#{if p["is_error"], do: " (error)"}"
+
+  def summary(%Event{type: "job.harness.finished", payload: p}),
+    do: "#{p["subtype"]} · #{p["num_turns"]} turns · $#{p["total_cost_usd"]}"
+
+  def summary(%Event{type: "job.harness.started", payload: p}),
+    do: "#{p["model"]} · session #{p["session_id"]}"
+
+  def summary(%Event{payload: payload}) when map_size(payload) == 0, do: ""
+
+  def summary(%Event{payload: payload}) do
+    payload
+    |> Map.drop(["raw", "harness", "input", "excerpt", "usage"])
+    |> Enum.map_join(" ", fn {k, v} -> "#{k}=#{inspect(v)}" end)
+    |> String.slice(0, 160)
+  end
+
   @spec encode_actor(actor()) :: map()
   def encode_actor(:system), do: %{"kind" => "system", "id" => nil}
   def encode_actor({:user, id}), do: %{"kind" => "user", "id" => id}

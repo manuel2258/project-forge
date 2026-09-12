@@ -192,13 +192,10 @@ defmodule Forge.Artifacts do
     end)
   end
 
-  @doc "Open blocking questions written by `job_id` on the ticket."
-  @spec open_blocking_questions(String.t(), String.t()) :: [Question.t()]
-  def open_blocking_questions(ticket_id, job_id) do
-    ticket_id
-    |> open_questions()
-    |> Enum.filter(&(&1.blocking and &1.artifact_version.author["id"] == job_id))
-  end
+  @doc "Open blocking questions on the ticket, whichever version or author carries them."
+  @spec open_blocking_questions(String.t()) :: [Question.t()]
+  def open_blocking_questions(ticket_id),
+    do: ticket_id |> open_questions() |> Enum.filter(& &1.blocking)
 
   @doc "Keys answered anywhere on the ticket, for the worker to treat as no longer blocking."
   @spec answered_keys(String.t()) :: [String.t()]

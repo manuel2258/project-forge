@@ -5,12 +5,11 @@ defmodule ForgeWeb.JobLive do
 
   import ForgeWeb.Operator.Components
 
-  alias Forge.{Events, Jobs, Projects, Tickets}
+  alias Forge.{Events, Jobs, Tickets}
 
   @impl true
   def mount(%{"project" => name, "number" => number, "job_id" => job_id}, _session, socket) do
-    project = Projects.by_name(name) || raise Ecto.NoResultsError, queryable: Projects.Project
-    ticket = Tickets.get_by_number!(project, String.to_integer(number))
+    {ticket, project} = Tickets.fetch!(name, number)
 
     job =
       Enum.find(Jobs.for_ticket(ticket.id), &(&1.id == job_id)) ||
@@ -98,7 +97,7 @@ defmodule ForgeWeb.JobLive do
             <li :for={event <- @events} class="flex gap-2">
               <span class="opacity-50 shrink-0">{Calendar.strftime(event.inserted_at, "%H:%M:%S")}</span>
               <span class="shrink-0">{String.replace_prefix(event.type, "job.harness.", "")}</span>
-              <span class="opacity-70 break-all">{event_detail(event)}</span>
+              <span class="opacity-70 break-all">{Events.summary(event)}</span>
             </li>
           </ol>
         </section>
@@ -106,25 +105,4 @@ defmodule ForgeWeb.JobLive do
     </Layouts.app>
     """
   end
-
-  defp event_detail(%{type: "job.harness.text", payload: %{"text" => text}}),
-    do: String.slice(text, 0, 200)
-
-  defp event_detail(%{type: "job.harness.tool_use", payload: %{"name" => name, "input" => input}}),
-    do: "#{name} #{input |> Jason.encode!() |> String.slice(0, 160)}"
-
-  defp event_detail(%{
-         type: "job.harness.tool_result",
-         payload: %{"bytes" => bytes, "is_error" => err}
-       }),
-       do: "#{bytes} bytes#{if err, do: " (error)"}"
-
-  defp event_detail(%{type: "job.harness.finished", payload: p}),
-    do: "#{p["subtype"]} · #{p["num_turns"]} turns · $#{p["total_cost_usd"]}"
-
-  defp event_detail(%{type: "job.harness.started", payload: p}),
-    do: "#{p["model"]} · session #{p["session_id"]}"
-
-  defp event_detail(%{payload: payload}),
-    do: payload |> Map.drop(["raw"]) |> Jason.encode!() |> String.slice(0, 160)
 end

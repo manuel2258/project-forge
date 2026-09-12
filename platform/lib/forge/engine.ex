@@ -34,8 +34,12 @@ defmodule Forge.Engine do
     |> put_stuck(ticket, reason)
     |> Repo.transaction()
     |> case do
-      {:ok, %{ticket: ticket}} -> {:ok, ticket}
-      {:error, step, reason, _} -> {:error, {step, reason}}
+      {:ok, %{ticket: ticket}} ->
+        Events.notify(ticket.id)
+        {:ok, ticket}
+
+      {:error, step, reason, _} ->
+        {:error, {step, reason}}
     end
   end
 

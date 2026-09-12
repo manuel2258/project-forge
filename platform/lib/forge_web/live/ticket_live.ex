@@ -5,15 +5,14 @@ defmodule ForgeWeb.TicketLive do
 
   import ForgeWeb.Operator.Components
 
-  alias Forge.{Artifacts, Events, Jobs, Projects, Tickets}
+  alias Forge.{Artifacts, Events, Jobs, Tickets}
   alias ForgeCore.Workflow
   alias ForgeWeb.Markdown
   alias ForgeWeb.Operator.Actions
 
   @impl true
   def mount(%{"project" => name, "number" => number}, _session, socket) do
-    project = Projects.by_name(name) || raise Ecto.NoResultsError, queryable: Projects.Project
-    ticket = Tickets.get_by_number!(project, String.to_integer(number))
+    {ticket, project} = Tickets.fetch!(name, number)
     if connected?(socket), do: Events.subscribe()
 
     {:ok, socket |> assign(project: project, ticket_id: ticket.id) |> load()}
@@ -144,21 +143,12 @@ defmodule ForgeWeb.TicketLive do
             <li :for={event <- @events} class="flex gap-2">
               <span class="opacity-50 shrink-0">{Calendar.strftime(event.inserted_at, "%m-%d %H:%M")}</span>
               <span>{event.type}</span>
-              <span class="opacity-60 truncate">{summary(event.payload)}</span>
+              <span class="opacity-60 truncate">{Events.summary(event)}</span>
             </li>
           </ol>
         </section>
       </div>
     </Layouts.app>
     """
-  end
-
-  defp summary(payload) when map_size(payload) == 0, do: ""
-
-  defp summary(payload) do
-    payload
-    |> Map.drop(["harness", "raw"])
-    |> Enum.map_join(" ", fn {k, v} -> "#{k}=#{inspect(v)}" end)
-    |> String.slice(0, 100)
   end
 end

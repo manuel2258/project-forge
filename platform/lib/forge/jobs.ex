@@ -166,11 +166,21 @@ defmodule Forge.Jobs do
     repo_path = Projects.repo_path(project)
     worktree = worktree_dir(job)
 
+    # The row is marked before the harness is spawned, not after. A row the progress
+    # changeset refuses then costs nothing; marking second meant it was refused only once a
+    # billed invocation was already running, and the scheduler retried the job every tick.
     with :ok <-
            ensure_worktree(repo_path, worktree, ticket.branch, job.harness_session_id != nil),
-         {:ok, pid} <- start_runner(job, ticket, worktree),
-         {:ok, _} <- mark_started(job) do
-      {:ok, pid}
+         {:ok, job} <- mark_started(job) do
+      case start_runner(job, ticket, worktree) do
+        {:ok, pid} ->
+          {:ok, pid}
+
+        {:error, reason} ->
+          # Nothing is running, so the job must not sit `running` until the next boot.
+          Repo.update(Job.progress_changeset(job, %{status: :pending}))
+          {:error, reason}
+      end
     end
   end
 
@@ -252,10 +262,16 @@ defmodule Forge.Jobs do
       payload: %{"resume" => job.harness_session_id != nil}
     })
     |> Repo.transaction()
-    |> tap(fn
-      {:ok, _} -> Events.notify(job.ticket_id)
-      _ -> :ok
-    end)
+    |> case do
+      {:ok, %{job: job}} ->
+        Events.notify(job.ticket_id)
+        {:ok, job}
+
+      # `Repo.transaction/1` reports a Multi failure as a four-tuple, which callers of
+      # `start/1` are not promised and `Forge.Jobs.Scheduler` does not match.
+      {:error, failed, reason, _changes} ->
+        {:error, {failed, reason}}
+    end
   end
 
   @doc "Runs a job to its end synchronously and records the result. For tests and tasks."

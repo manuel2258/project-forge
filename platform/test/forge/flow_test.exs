@@ -404,6 +404,30 @@ defmodule Forge.FlowTest do
     assert content =~ "from the attempt this one resumes"
   end
 
+  # A row the progress changeset refuses must be refused before anything is spawned, and as a
+  # two-tuple. `mark_started/1` ends in `Repo.transaction/1`, whose Multi failure is a
+  # four-tuple that `Forge.Jobs.Scheduler.start_one/2` does not match: it raised, its
+  # supervisor restarted it, and the next tick tried the same job again. With the harness
+  # started before the row was marked, every one of those cycles billed a real invocation.
+  test "a job whose progress cannot be recorded is refused without starting a harness", %{
+    project: project,
+    user: user
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    job = only_pending(ticket)
+
+    # An outcome on a job that is not finished: rejected by `progress_changeset/2`. Written
+    # around the changeset, the way a stray query or a bad repair would leave it.
+    Repo.update_all(
+      from(j in Job, where: j.id == ^job.id),
+      set: [outcome: :converged]
+    )
+
+    # A four-tuple does not match this, which is the point.
+    assert {:error, _reason} = Jobs.start(Jobs.get!(job.id))
+    refute File.exists?(Path.join([Jobs.data_dir(), "jobs", job.id]))
+  end
+
   # The worktree is only removed once a job finishes, so a node that died mid-job leaves it
   # behind with whatever the harness had not committed. `blocking` leaves the job waiting, so
   # the worktree is still there to inspect after the run.

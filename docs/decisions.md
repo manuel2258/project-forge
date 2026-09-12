@@ -97,8 +97,9 @@ Settled for the PoC, reversible afterwards on evidence from it (see `poc-plan.md
 - Postgres on the orchestrator. Oban for durable background work.
 - Worker dials out over a Phoenix Channel, authenticated by a per-worker token injected at creation.
 - Git served by the platform over smart HTTP with a per-job short-lived token. SSH for the operator only.
-- API key billing by default; subscription authentication is a comparison experiment.
+- The operator's Claude subscription (OAuth token) funds execution. API key billing remains a configuration choice; the comparison is not run.
 - Job isolation by transient systemd units with memory and CPU limits, a Unix user per job, environment via `nix develop`.
 - btrfs for copy-on-write worktrees and build directories.
 - A local VM driver behind the provider driver for the PoC; Hetzner as the second implementation in the closing step. S3-compatible object storage, MinIO locally.
+- The PoC's goal is a functionally minimal platform the operator then deploys for their own project (a game); nothing in it may depend on that project or its language. The workload is a parameter: environment, build command and build directory come from the project's own workflow and flake.
 - The PoC runs entirely on the operator's machine and is independent of any particular real project. No deployment, no cloud machine, no phone until it concludes; those are one closing step after the last milestone.

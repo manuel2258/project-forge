@@ -2,7 +2,7 @@
 
 These questions are open. They have not been answered and no recommendation is recorded.
 
-- Which credential funds execution. Subscription authentication is individual-use; metered API billing is not. This decides whether team use is real.
+- Which credential funds execution. Subscription authentication is individual-use; metered API billing is not. This decides whether team use is real. Settled for the PoC: the operator's subscription token, by decision; the comparison is not run. Open for team use.
 - How structured questions are represented in a document.
 - The idle period before a worker is destroyed.
 - Branch granularity: one branch per job, or one per ticket with rebasing on conflict.

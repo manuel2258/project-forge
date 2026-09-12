@@ -10,6 +10,12 @@ small repository kept for the purpose. The real deployment, the cloud driver and
 are one step after the last milestone, so that step is the first time the design meets a
 network it does not control.
 
+The goal is a functionally minimal platform the operator can then deploy for their own
+project, a game. Nothing in the PoC may depend on that project or on its language: the
+workload is a parameter (the project's environment, build command and build directory, as
+its own workflow and flake declare them), and every measurement and milestone is run against
+a small project kept for the purpose.
+
 ## Definition of usable
 
 The PoC is done when all of the following hold:
@@ -37,7 +43,8 @@ The PoC is done when all of the following hold:
 - Git served by the platform over smart HTTP wrapping `git http-backend`; per-job short-lived
   token as the password. Bare repositories on the orchestrator filesystem. SSH for the
   operator only.
-- API key billing by default. Subscription authentication is a comparison experiment.
+- The operator's Claude subscription, as an OAuth token, funds execution. API key billing
+  remains a configuration choice but is not compared during the PoC.
 - Job isolation on the worker: transient systemd units with MemoryMax and CPUWeight, a fresh
   Unix user per job, environment entered through `nix develop` on the project's flake.
 - btrfs subvolumes and snapshots for copy-on-write worktrees and build directories.
@@ -73,25 +80,31 @@ agent editing the flake in its worktree is already part of the changeset.
 
 All run on the operator's machine. Measurements 1 to 4 gate milestone 3 only. Measurement 5
 is skipped by decision and taken as given; dogfooding in milestone 5 observes it instead.
-The build under measurement is a Rust workspace of realistic size, checked out for the
-purpose; which one does not matter as long as its link step and dependency tree are
-representative of what the platform will run.
+
+Each measurement is a script that takes a workload as parameters: a repository, the command
+that enters its environment (`nix develop .#<env>`), its build command, and the build
+directory that command warms. The script is what the PoC keeps; the workload it is first run
+on is a sample project with a dependency tree and a heavy build step, chosen for being
+representative, not for being the operator's. The same script is run on the operator's
+project in the closing step, where its numbers become that deployment's settings.
 
 **M1. Build cache acceptance.** Three variants, each measured as: restore cache into a fresh
-worktree, run `cargo build`, count recompiled crates and wall time against a warm local build.
-(a) A `target/` produced by a Nix builder (crane-style dependency artifacts) copied into the
-worktree. (b) sccache with an S3 backend, cold local disk, populated remote cache.
-(c) Baseline: a warm `target/` rsynced from a different checkout path, to expose absolute path
-and mtime sensitivity. Pass: only workspace crates rebuild and time is within 2x warm.
+worktree, run the build command, count what rebuilt and the wall time against a warm local
+build. (a) A build directory produced by a Nix builder from the dependency closure alone,
+copied into the worktree. (b) A remote compilation cache where the toolchain has one
+(sccache-style), cold local disk, populated remote cache, backed by MinIO. (c) Baseline: a
+warm build directory rsynced from a different checkout path, to expose absolute path and
+mtime sensitivity. Pass: only the project's own sources rebuild and time is within 2x warm.
 Outcome decides the build cache open question and the storage model.
 
-**M2. Copy-on-write divergence.** A btrfs subvolume holding a warm worktree and `target/`.
-Snapshot it four times, check out a different realistic branch in each, build. Record
-exclusive bytes per snapshot and wall time at 1, 2 and 4 concurrent builds. Pass: four
+**M2. Copy-on-write divergence.** A btrfs subvolume holding a warm worktree and its build
+directory. Snapshot it four times, check out a different realistic branch in each, build.
+Record exclusive bytes per snapshot and wall time at 1, 2 and 4 concurrent builds. Pass: four
 concurrent builds fit the disk and scale acceptably. Outcome sets agents per worker.
 
-**M3. Link peak memory.** Peak resident memory of the link step for dev and release profiles,
-with the default linker and with mold, read from the cgroup's memory peak under a transient
+**M3. Peak build memory.** Peak resident memory of the build command, and of its heaviest
+step where the toolchain exposes one (the link, for compiled languages), for the project's
+debug and release configurations, read from the cgroup's memory peak under a transient
 systemd unit. Outcome sets MemoryMax per slice, agents per worker and machine size.
 
 **M4. Worker cold start.** Scripted end to end with a timestamp per phase: create a local VM
@@ -129,8 +142,7 @@ Each milestone ends with a demo. The demo is the acceptance test.
 Demo: a ticket runs refine and plan on the demo project, produces two documents, blocks on a
 question, is answered from the CLI, continues, and the job view shows the pinned manifest.
 
-Probes: branch granularity (one branch per ticket), the credential comparison (same tickets
-on API key and subscription token, compare limits, cost visibility and failure modes).
+Probes: branch granularity (one branch per ticket).
 
 ### Milestone 2: human loop
 
@@ -207,7 +219,7 @@ Demo: the milestone 4 demo again, from the phone, on the host.
 
 | Open question | Where | What the PoC records |
 |---|---|---|
-| Which credential funds execution | Milestone 1 | Same tickets on both credentials: limits hit, cost visibility, failure modes, terms of use for each |
+| Which credential funds execution | Settled for the PoC: the operator's subscription token. Reopened only for team use | Limits hit and cost visibility on the subscription token, as they occur |
 | Structured question representation | Milestone 2 | Parse failures, answer taps per question, cases the format could not express |
 | Worker idle period | Measurement 4, milestone 3 | Cold start time, idle time distribution across real tickets, cost of idle versus recreate |
 | Branch granularity | Milestone 1 onward | Conflicts and rebases per ticket with one branch per ticket; whether any sequential job needed its own branch |

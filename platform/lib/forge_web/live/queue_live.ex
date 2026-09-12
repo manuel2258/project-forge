@@ -98,14 +98,8 @@ defmodule ForgeWeb.QueueLive do
     """
   end
 
-  defp transitions(%{kind: :review, detail: %{transitions: transitions}}), do: transitions
-
-  defp transitions(%{kind: :stuck, ticket: ticket}) do
-    workflow = Forge.Tickets.workflow(ticket)
-
-    workflow
-    |> ForgeCore.Workflow.transitions_from(ticket.state)
-    |> Enum.map(& &1.to)
-    |> Enum.uniq()
-  end
+  # Both kinds carry the states the operator may pick in the queue item itself, so the page
+  # renders what the API serves rather than reading the workflow a second time.
+  defp transitions(%{detail: %{transitions: transitions}}), do: transitions
+  defp transitions(_item), do: []
 end

@@ -150,6 +150,45 @@ defmodule ForgeWorker.Job.RunnerTest do
     assert result.harness.cost_usd == 1.5
   end
 
+  # A job re-queued after its node died runs again under the same job id, and so in the same
+  # job directory. It starts the harness cold, so anything the dead run left in out/ belongs
+  # to no run that produced a result, and must not be collected as this run's output.
+  test "a cold run does not collect a document left behind by a dead run", context do
+    spec = spec()
+    seed_output(context.root, spec, "written by the run that was killed")
+
+    {:ok, result} = context |> run("max_turns", spec: spec) |> Runner.await(5_000)
+
+    assert result.documents == %{}
+    assert "plan.md" in result.missing
+  end
+
+  test "a resumed run keeps the output the earlier attempt produced", context do
+    spec = spec()
+    seed_output(context.root, spec, "---\noutcome: done\n---\n# Plan\n")
+
+    pid =
+      run(context, "max_turns",
+        spec: spec,
+        harness_opts: [
+          executable: fake_executable(),
+          credential: {:api_key, "secret-key"},
+          resume_session: "sess-42"
+        ]
+      )
+
+    {:ok, result} = Runner.await(pid, 5_000)
+
+    assert Map.has_key?(result.documents, "plan.md")
+    assert result.missing == []
+  end
+
+  defp seed_output(root, spec, content) do
+    out = Path.join([root, spec.job_id, "out"])
+    File.mkdir_p!(out)
+    File.write!(Path.join(out, "plan.md"), content)
+  end
+
   test "a crash without a result is an error, and odd lines still become events", context do
     {:ok, result} = context |> run("crash") |> Runner.await(5_000)
     assert result.outcome == :error

@@ -25,19 +25,30 @@ defmodule ForgeWorker.Job.DirTest do
     assert File.ls!(Path.join(job_dir, "out")) == []
   end
 
-  test "prepare/2 on an existing job keeps out/ and refuses non-UUID ids", %{
-    root: root,
-    spec: spec
-  } do
+  test "prepare/3 on a resume keeps what the job already produced", %{root: root, spec: spec} do
     job_dir = Dir.prepare(root, spec)
     File.write!(Path.join([job_dir, "out", "plan.md"]), "kept")
     File.write!(Path.join([job_dir, "inputs", "stale"]), "gone")
 
-    assert Dir.prepare(root, spec) == job_dir
+    assert Dir.prepare(root, spec, resume: true) == job_dir
     assert File.read!(Path.join([job_dir, "out", "plan.md"])) == "kept"
     refute File.exists?(Path.join([job_dir, "inputs", "stale"]))
     assert File.dir?(Dir.home_dir(job_dir))
+  end
 
+  # A job re-queued after its node died starts the harness cold, with no session to resume.
+  # Whatever the dead run left in out/ was not written by this run, and `collect/2` would
+  # otherwise read it and decide an outcome on it.
+  test "prepare/3 on a cold start discards out/ from a dead run", %{root: root, spec: spec} do
+    job_dir = Dir.prepare(root, spec)
+    File.write!(Path.join([job_dir, "out", "plan.md"]), "written by the run that was killed")
+
+    assert Dir.prepare(root, spec) == job_dir
+    assert File.ls!(Path.join(job_dir, "out")) == []
+    assert File.dir?(Dir.home_dir(job_dir))
+  end
+
+  test "prepare/2 refuses a job id that is not a UUID", %{root: root, spec: spec} do
     assert_raise ArgumentError, ~r/UUID/, fn ->
       Dir.prepare(root, %{spec | job_id: "../escape"})
     end

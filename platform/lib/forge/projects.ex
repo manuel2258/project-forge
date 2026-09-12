@@ -63,6 +63,15 @@ defmodule Forge.Projects do
     # The name is validated by the changeset before anything touches the filesystem, so a
     # path-like name never becomes a path.
     repo_path = if is_binary(name), do: Path.join(repos_dir(), name <> ".git")
-    register(%{name: name, repo_path: repo_path, default_branch: default_branch})
+
+    case register(%{name: name, repo_path: repo_path, default_branch: default_branch}) do
+      # Here the path is derived from the name rather than given, so it is blank only because
+      # the name was. Reporting it would name a field the caller never sent.
+      {:error, %Ecto.Changeset{} = changeset} ->
+        {:error, update_in(changeset.errors, &Keyword.delete(&1, :repo_path))}
+
+      result ->
+        result
+    end
   end
 end

@@ -199,7 +199,12 @@ defmodule Forge.FlowTest do
     assert job.outcome == :budget_exhausted
     ticket = Tickets.get!(ticket.id)
     assert ticket.status == :stuck
-    assert [%{kind: :stuck}] = Queue.items()
+
+    # A stuck item lists the transitions out of the state, so the operator can see the
+    # choices without reading the workflow: docs/design/api-and-ui.md.
+    assert [%{kind: :stuck, detail: detail}] = Queue.items()
+    assert detail.state == "verified"
+    assert Enum.sort(detail.transitions) == ["implemented", "review_ready"]
 
     # unstick by choosing the retry edge by hand, then finish
     {:ok, ticket} = Engine.choose(ticket, user.id, "implemented")
@@ -332,5 +337,183 @@ defmodule Forge.FlowTest do
     {:ok, _} = Repo.update(Job.progress_changeset(job, %{status: :running}))
     assert Jobs.recover() == 1
     assert Jobs.get!(job.id).status == :pending
+  end
+
+  # `harness_session_id` is only ever persisted by the completion path (`Jobs.complete/2`),
+  # so a node killed mid-job always recovers with it nil, no matter how far the dead run got
+  # or what it left in the job's out/. Recovery must therefore hand that run a cold start,
+  # which clears out/ before the harness runs again; otherwise `collect/2` decides this run's
+  # outcome on a document the live run never wrote. See commit b3b7c77.
+  test "a job recovered after its node died runs cold and does not collect the dead run's output",
+       %{project: project, user: user} do
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    job = only_pending(ticket)
+
+    # The run that was in flight when the node died had reached the harness and written
+    # refinement.md, but the node was killed before the job ever completed.
+    job_dir = Path.join([Jobs.data_dir(), "jobs", job.id])
+    File.mkdir_p!(Path.join(job_dir, "out"))
+
+    File.write!(
+      Path.join([job_dir, "out", "refinement.md"]),
+      "---\noutcome: done\n---\nwritten by the run that was killed\n"
+    )
+
+    {:ok, _} = Repo.update(Job.progress_changeset(job, %{status: :running}))
+    assert Jobs.recover() == 1
+    job = Jobs.get!(job.id)
+    assert job.status == :pending
+    assert job.harness_session_id == nil
+
+    # The recovered run starts cold (no session to resume) and hits its turn budget without
+    # writing anything itself. A correct cold start clears out/ first, so the document left
+    # behind by the dead run must not be collected as this run's output.
+    scenario("max_turns", "refinement.md")
+    {:ok, job} = Jobs.run(job)
+
+    assert job.outcome == :budget_exhausted
+    refute Artifacts.latest(ticket.id, "refinement.md")
+  end
+
+  # The other half of the same behaviour: a job that *does* carry a session id is a genuine
+  # resume, and must keep what the earlier attempt already produced in out/.
+  test "a job resumed with a session id keeps the earlier attempt's output", %{
+    project: project,
+    user: user
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    job = only_pending(ticket)
+
+    job_dir = Path.join([Jobs.data_dir(), "jobs", job.id])
+    File.mkdir_p!(Path.join(job_dir, "out"))
+
+    File.write!(
+      Path.join([job_dir, "out", "refinement.md"]),
+      "---\noutcome: done\n---\nfrom the attempt this one resumes\n"
+    )
+
+    {:ok, job} = Repo.update(Job.progress_changeset(job, %{harness_session_id: "sess-42"}))
+
+    # Same lever: max_turns writes nothing itself, so whatever is collected came from out/
+    # as prepare/3 left it.
+    scenario("max_turns", "refinement.md")
+    {:ok, job} = Jobs.run(job)
+
+    assert job.outcome == :budget_exhausted
+    assert %{content: content} = Artifacts.latest(ticket.id, "refinement.md")
+    assert content =~ "from the attempt this one resumes"
+  end
+
+  # The worktree is only removed once a job finishes, so a node that died mid-job leaves it
+  # behind with whatever the harness had not committed. `blocking` leaves the job waiting, so
+  # the worktree is still there to inspect after the run.
+  test "a cold start discards uncommitted work the dead run left in the worktree", %{
+    project: project,
+    user: user,
+    repo: repo
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    job = only_pending(ticket)
+    worktree = Path.join([Jobs.data_dir(), "worktrees", job.id])
+    :ok = Forge.Git.worktree_add(repo, worktree, ticket.branch)
+    File.write!(Path.join(worktree, "half-done.txt"), "from the run that was killed")
+
+    scenario("blocking", "refinement.md")
+    {:ok, job} = Jobs.run(job)
+
+    assert job.status == :waiting
+    assert File.dir?(worktree)
+    refute File.exists?(Path.join(worktree, "half-done.txt"))
+  end
+
+  test "a resume keeps the work in progress in its worktree", %{
+    project: project,
+    user: user,
+    repo: repo
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    job = only_pending(ticket)
+    worktree = Path.join([Jobs.data_dir(), "worktrees", job.id])
+    :ok = Forge.Git.worktree_add(repo, worktree, ticket.branch)
+    File.write!(Path.join(worktree, "half-done.txt"), "from the attempt this one resumes")
+
+    {:ok, job} = Repo.update(Job.progress_changeset(job, %{harness_session_id: "sess-42"}))
+
+    scenario("blocking", "refinement.md")
+    {:ok, job} = Jobs.run(job)
+
+    assert job.status == :waiting
+    assert File.read!(Path.join(worktree, "half-done.txt")) =~ "resumes"
+  end
+
+  # A ticket pins its workflow, and the validator's rules move between milestones, so a
+  # pinned definition can stop parsing long after the row was written. The queue is shared:
+  # one such ticket must not take it away from every other one.
+  test "a stuck ticket whose pinned workflow no longer parses leaves the queue standing", %{
+    project: project,
+    user: user
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "unparseable"}, {:user, user.id})
+
+    {:ok, _} =
+      ticket
+      |> Ecto.Changeset.change(workflow: %{"no longer" => "a workflow"}, status: :stuck)
+      |> Repo.update()
+
+    assert [%{kind: :stuck, detail: detail}] =
+             Enum.filter(Queue.items(), &(&1.ticket.id == ticket.id))
+
+    assert detail.transitions == []
+  end
+
+  test "an active ticket whose pinned workflow no longer parses leaves the queue standing", %{
+    project: project,
+    user: user
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "unparseable"}, {:user, user.id})
+
+    {:ok, _} =
+      ticket
+      |> Ecto.Changeset.change(workflow: %{"no longer" => "a workflow"})
+      |> Repo.update()
+
+    assert Enum.filter(Queue.items(), &(&1.ticket.id == ticket.id)) == []
+  end
+
+  # The grammar requires `when` values to be distinct per `from`, not targets, so two edges
+  # may lead to the same state. The queue names states, so it must name each one once.
+  test "transitions out of a state are listed once per target", %{user: user} do
+    repo =
+      seeded_repo(%{
+        ".forge/workflow.yml" => """
+        version: 1
+        initial: built
+        states:
+          built:
+            prompt: agents/plan.md
+            inputs: [ticket]
+            produces: [plan.md]
+            outcomes: [done, retry]
+            budget: { turns: 1, cost: 0.01 }
+          waiting_room: {}
+        transitions:
+          - { from: built, to: waiting_room }
+          - { from: built, to: waiting_room, when: retry }
+        limits:
+          ticket_cost: 1.00
+        """
+      })
+
+    {:ok, project} =
+      Projects.register(%{name: "dup-#{System.unique_integer([:positive])}", repo_path: repo})
+
+    {:ok, ticket} = Tickets.admit(project, %{title: "two edges, one target"}, {:user, user.id})
+
+    {:ok, _} = ticket |> Ecto.Changeset.change(status: :stuck) |> Repo.update()
+
+    assert [%{kind: :stuck, detail: %{transitions: transitions}}] =
+             Enum.filter(Queue.items(), &(&1.ticket.id == ticket.id))
+
+    assert transitions == ["waiting_room"]
   end
 end

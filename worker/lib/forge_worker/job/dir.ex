@@ -19,20 +19,26 @@ defmodule ForgeWorker.Job.Dir do
 
   @doc """
   Prepares the directory for `spec` under `root` and returns its path. On a first run it is
-  created; on a resume the spec and inputs are refreshed while `out/`, earlier transcripts
-  and the harness home are kept, so nothing the job already produced is lost.
+  created; with `resume: true` the spec and inputs are refreshed while `out/`, earlier
+  transcripts and the harness home are kept, so nothing the job already produced is lost.
+
+  A cold start clears `out/`. The directory is keyed by job id, and a job re-queued after
+  its node died keeps that id, so without this the new run would inherit the dead run's
+  outputs and `collect/2` would decide an outcome on documents this run never wrote.
   """
-  @spec prepare(String.t(), Spec.t()) :: String.t()
-  def prepare(root, %Spec{job_id: job_id} = spec) do
+  @spec prepare(String.t(), Spec.t(), keyword()) :: String.t()
+  def prepare(root, %Spec{job_id: job_id} = spec, opts \\ []) do
     unless Regex.match?(@uuid, job_id) do
       raise ArgumentError, "job id must be a UUID, got #{inspect(job_id)}"
     end
 
     job_dir = Path.join(root, job_id)
     inputs = Path.join(job_dir, "inputs")
+    out = Path.join(job_dir, "out")
     File.rm_rf!(inputs)
+    unless Keyword.get(opts, :resume, false), do: File.rm_rf!(out)
     File.mkdir_p!(inputs)
-    File.mkdir_p!(Path.join(job_dir, "out"))
+    File.mkdir_p!(out)
     File.mkdir_p!(home_dir(job_dir))
     File.write!(Path.join(job_dir, "spec.json"), Spec.to_json(spec))
 

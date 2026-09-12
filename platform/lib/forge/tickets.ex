@@ -102,12 +102,23 @@ defmodule Forge.Tickets do
       1
   end
 
-  @doc "The pinned workflow of a ticket, as a validated struct."
+  @doc "The pinned workflow of a ticket, as a validated struct. Raises if it no longer parses."
   @spec workflow(Ticket.t()) :: Workflow.t()
-  def workflow(%Ticket{workflow: map}) do
-    {:ok, workflow} = Parser.from_map(map)
+  def workflow(%Ticket{} = ticket) do
+    {:ok, workflow} = parsed_workflow(ticket)
     workflow
   end
+
+  @doc """
+  The pinned workflow, or the validator's errors.
+
+  A definition is validated when the ticket is admitted and pinned as it was then, while the
+  validator's rules move between milestones, so a pinning can stop parsing long after it was
+  written. Callers serving more than one ticket at a time use this, so that one such row
+  cannot take the others down with it.
+  """
+  @spec parsed_workflow(Ticket.t()) :: {:ok, Workflow.t()} | {:error, [ForgeCore.Error.t()]}
+  def parsed_workflow(%Ticket{workflow: map}), do: Parser.from_map(map)
 
   @spec get!(String.t()) :: Ticket.t()
   def get!(id), do: Repo.get!(Ticket, id)

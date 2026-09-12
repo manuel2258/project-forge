@@ -20,7 +20,7 @@ defmodule Forge.GitTest do
     assert {:ok, "version: 1\n" <> _} = Git.show(repo, sha, ".forge/workflow.yml")
     assert Git.exists?(repo, sha, ".forge/agents/refine.md")
     refute Git.exists?(repo, sha, ".forge/agents/missing.md")
-    assert {:error, :unknown_ref} = Git.resolve(repo, "nope")
+    assert {:error, {:unknown_ref, "nope"}} = Git.resolve(repo, "nope")
   end
 
   test "branches, worktrees, commits and diffs round-trip", %{repo: repo, scratch: scratch} do

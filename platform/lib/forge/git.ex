@@ -23,11 +23,13 @@ defmodule Forge.Git do
   end
 
   @doc "Resolves a ref to a commit sha."
-  @spec resolve(repo(), String.t()) :: {:ok, sha()} | {:error, :unknown_ref}
+  @spec resolve(repo(), String.t()) :: {:ok, sha()} | {:error, {:unknown_ref, String.t()}}
   def resolve(repo, ref) do
     case run(repo, ["rev-parse", "--verify", "--quiet", ref <> "^{commit}"]) do
       {:ok, sha} -> {:ok, String.trim(sha)}
-      {:error, _} -> {:error, :unknown_ref}
+      # The ref travels with the error: this is called with a project's default branch and
+      # with a ticket's own branch, and a caller reporting the failure cannot tell which.
+      {:error, _} -> {:error, {:unknown_ref, ref}}
     end
   end
 
@@ -60,6 +62,18 @@ defmodule Forge.Git do
     File.mkdir_p!(Path.dirname(dir))
 
     with {:ok, _} <- run(repo, ["worktree", "add", "--quiet", dir, branch]) do
+      :ok
+    end
+  end
+
+  @doc """
+  Returns the existing worktree at `dir` to `branch`'s head, discarding everything that was
+  not committed. Ignored files are left alone, so a build directory survives.
+  """
+  @spec worktree_reset(String.t(), String.t()) :: :ok | {:error, term()}
+  def worktree_reset(dir, branch) do
+    with {:ok, _} <- run(dir, ["reset", "--quiet", "--hard", "refs/heads/" <> branch]),
+         {:ok, _} <- run(dir, ["clean", "--quiet", "-fd"]) do
       :ok
     end
   end

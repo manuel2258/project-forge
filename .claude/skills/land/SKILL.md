@@ -11,6 +11,10 @@ and no merge commits.
 
 ## Preconditions
 
+- **A human asked for this landing.** Not "the work is done", not "the gate is green", not "the
+  last piece landed the same way an hour ago" — an instruction, for this change. Landing writes
+  to `main` and cannot be taken back quietly, so it is the human's call every time. Without one,
+  report that the work is ready and stop.
 - The working tree is clean (`git status --porcelain` prints nothing). Commit or stash first.
 - The gate passes: `bin/check` from the repository root. A branch that does not pass is not
   landed.

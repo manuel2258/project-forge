@@ -40,9 +40,14 @@ machine. `bin/measure selftest` is what stands in for a test run.
 
 ## Landing
 
-Work lands on `main` directly, as one squashed commit per branch, fast-forward only. Use the
-`land` skill (`.claude/skills/land/SKILL.md`); it rebases, resolves conflicts, squashes and
-pushes. No pull requests, no merge commits.
+**Landing is never automatic. It happens when a human asks for it, and at no other time.**
+Finishing the work, passing the gate and committing to the branch are not a reason to land;
+neither is having landed something earlier in the same session. If the work looks ready, say so
+and stop. Push the branch if it should be safe from a lost machine — that is not landing.
+
+When asked, work lands on `main` directly, as one squashed commit per branch, fast-forward only.
+Use the `land` skill (`.claude/skills/land/SKILL.md`); it rebases, resolves conflicts, squashes
+and pushes. No pull requests, no merge commits.
 
 ## Rules
 

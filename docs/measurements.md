@@ -318,22 +318,32 @@ Run 2026-09-13, during milestone 3, on the operator's machine: `bin/measure m4 -
 sample-rust` against a machine created from `nix build .#worker-image`, dialling a platform on
 the host. Four cores, 8 GiB, a 40 GiB overlay, user-mode networking.
 
-| Phase | Wall | What it is |
-|---|---|---|
-| create-vm | 237 ms | Overlay, cloud-init seed, QEMU launch |
-| cloud-init | 20.0 s | Firmware, boot, cloud-init writing the identity and starting the unit |
-| worker-connects | 0.1 s | The release dialling the platform and joining its topic |
-| seed-fetched | 3.6 s | 192 MiB from the platform's store, unpacked into a subvolume |
-| nix-store-populated | 13.2 s | `nix develop .#build --command true`, from the binary cache |
-| first-build | 50.0 s | `cargo build -v` in a snapshot of the seed, peak 1496 MiB |
+Run twice: once with cloud-init doing the configuring, and again after it was replaced by
+`forge-worker-config.service` (`docs/design/worker-tier.md` § How a machine learns what it is).
 
-**37 seconds from nothing to a machine that can build**, and 87 seconds to a first build
-finished. The four phases before the build are the cost of destroying an idle worker and
-making another one when the next ticket arrives.
+| Phase | With cloud-init | After | What it is |
+|---|---|---|---|
+| create-vm | 237 ms | 188 ms | Overlay, config disk, QEMU launch |
+| machine-configured | 20.0 s | **12.5 s** | Firmware, boot, the machine reading its own identity |
+| worker-connects | 0.1 s | 0.1 s | The release dialling the platform and joining its topic |
+| seed-fetched | 3.6 s | 3.3 s | 192 MiB from the platform's store, unpacked into a subvolume |
+| nix-store-populated | 13.2 s | 18.4 s | `nix develop .#build --command true`, from the binary cache |
+| first-build | 50.0 s | 46.2 s | `cargo build -v` in a snapshot of the seed, peak ~1.5 GiB |
+
+**Roughly 35 seconds from nothing to a machine that can build**, and about 80 to a first build
+finished. The phases before the build are the cost of destroying an idle worker and making
+another one when the next ticket arrives.
+
+**Only one column difference is attributable.** `machine-configured` fell 7.5 s — 37 % — and that
+is the change: no Python agent to start, no module pipeline to walk, one oneshot that reads a
+disk. Boot to a worker that has joined the platform went 20.4 s to 12.9 s. The other phases moved
+in both directions by more than any of them should care about; `repeats=1`, so every figure here
+is one sample, and `nix-store-populated` in particular is bounded by a download. Reading the
+18.4 s as a regression caused by this change would be reading noise.
 
 **What this sets.** `idle_period_ms` was a labelled ten-minute guess with a note saying M4
 would replace it. It is now five minutes, and the reasoning is that being wrong is cheap: a
-machine destroyed a moment before the next ticket costs 37 seconds, which is less than the
+machine destroyed a moment before the next ticket costs about 35 seconds, less than the
 operator's own round trip to approve the artifact that produced the ticket. Five minutes
 covers an approval gap — the case where a worker is genuinely about to be used again — without
 holding a machine through a lunch break.

@@ -39,7 +39,7 @@ The PoC is done when all of the following hold:
   `forge_worker` (worker release). Each is a Nix-built release.
 - Postgres on the orchestrator. Oban for durable background work.
 - Worker dials out to the platform over a Phoenix Channel, authenticated by a per-worker token
-  injected at creation via cloud-init. Slipstream as the client.
+  injected at creation on a config disk. Slipstream as the client.
 - Git served by the platform over smart HTTP wrapping `git http-backend`; per-job short-lived
   token as the password. Bare repositories on the orchestrator filesystem. SSH for the
   operator only.
@@ -112,7 +112,7 @@ debug and release configurations, read from the cgroup's memory peak under a tra
 systemd unit. Outcome sets MemoryMax per slice, agents per worker and machine size.
 
 **M4. Worker cold start.** Scripted end to end with a timestamp per phase: create a local VM
-from the worker image, cloud-init, worker release connects, Nix store populated from the
+from the worker image, the machine configuring itself, worker release connects, Nix store populated from the
 binary cache, btrfs seed fetched from the platform's store, first incremental build
 completes. Outcome
 decides whether destroying the worker is viable and sets the default idle period. The cloud
@@ -172,7 +172,7 @@ Probes: question representation under real use, message reliability.
   and destroyed. Nothing outside the driver knows the provider; the Hetzner implementation
   is the closing step's job.
 - NixOS worker image: btrfs root, Nix daemon with the binary cache, Claude Code, the worker
-  release started by cloud-init with its token. The same image boots locally and, later, on
+  release started with the token the config disk carries. The same image boots locally and, later, on
   the provider.
 - Worker connects out over a channel. Platform schedules a job only when its slice fits the
   remaining memory budget.

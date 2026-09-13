@@ -7,9 +7,10 @@ defmodule Forge.Provider.LocalVm do
   the machine removes the overlay. Networking is user-mode with no inbound ports, because
   nothing needs to reach the worker — it dials out.
 
-  Cloud-init is how the machine learns its worker id, its token and where the platform is,
-  and it is used here rather than something simpler precisely because the same image has to
-  boot on a cloud provider unchanged.
+  The machine learns its worker id, its token and where the platform is from a small disk this
+  driver builds and attaches, labelled so the image knows it by name. On a provider the same
+  bytes go in the server's user data instead; see `docs/design/worker-tier.md` § How a machine
+  learns what it is, which is also where the reasoning for dropping cloud-init lives.
 
   **This is the part of the milestone that cannot be exercised without KVM.** What is tested
   is the command this builds and the states it maps; that a machine actually boots is the
@@ -19,6 +20,11 @@ defmodule Forge.Provider.LocalVm do
   @behaviour Forge.Provider
 
   alias Forge.Provider
+
+  # The contract with the image: a filesystem with this label holding this file. See
+  # `docs/design/worker-tier.md` § How a machine learns what it is.
+  @config_label "forge-config"
+  @config_file "worker.env"
 
   require Logger
 
@@ -34,8 +40,8 @@ defmodule Forge.Provider.LocalVm do
          :ok <- File.mkdir_p(dir),
          :ok <- write_overlay(dir, image),
          :ok <- write_firmware_vars(dir, vars),
-         :ok <- write_cloud_init(dir, opts),
-         :ok <- write_seed_image(dir),
+         :ok <- write_config(dir, opts),
+         :ok <- write_config_image(dir),
          {:ok, port} <- boot(dir, id, code) do
       File.write!(Path.join(dir, "qemu.port"), inspect(port))
       {:ok, %{provider_id: id, address: nil}}
@@ -100,7 +106,7 @@ defmodule Forge.Provider.LocalVm do
        "-drive",
        "file=#{Path.join(dir, "disk.qcow2")},if=virtio,format=qcow2",
        "-drive",
-       "file=#{Path.join(dir, "seed.iso")},if=virtio,format=raw,readonly=on",
+       "file=#{Path.join(dir, "config.iso")},if=virtio,format=raw,readonly=on",
        # User-mode networking: the guest reaches the platform, nothing reaches the guest —
        # unless the operator asked for the ssh door below, which is off by default.
        "-netdev",
@@ -120,44 +126,37 @@ defmodule Forge.Provider.LocalVm do
   defp hostfwd(nil), do: ""
   defp hostfwd(port), do: ",hostfwd=tcp:127.0.0.1:#{port}-:22"
 
-  @doc "The cloud-init user data a machine boots with. The token is in it; the image is not."
-  @spec user_data(Provider.opts()) :: String.t()
-  def user_data(opts) do
-    env =
+  @doc """
+  What a machine is told about itself: one file of `KEY=VALUE` lines, which becomes
+  `/etc/forge-worker.env` in the guest. The token is in it; the image is not.
+
+  The same bytes go on the local config disk and, on a provider, into the server's user data —
+  the image reads whichever is there (`docs/design/worker-tier.md` § How a machine learns what
+  it is), so a driver has nothing to format and nothing to parse.
+  """
+  @spec config_blob(Provider.opts()) :: String.t()
+  def config_blob(opts) do
+    lines =
       [
         "FORGE_WORKER_ID=#{opts.worker_id}",
         "FORGE_WORKER_TOKEN=#{opts.token}",
         "FORGE_PLATFORM_URL=#{opts.platform_url}"
-      ] ++ for({name, value} <- Map.get(opts, :harness_env, []), do: "#{name}=#{value}")
+      ] ++
+        for({name, value} <- Map.get(opts, :harness_env, []), do: "#{name}=#{value}") ++
+        ssh_key_line(config(:ssh_key))
 
-    """
-    #cloud-config
-    #{authorized_keys(config(:ssh_key))}write_files:
-      - path: /etc/forge-worker.env
-        permissions: "0600"
-        owner: root:root
-        content: |
-    #{Enum.map_join(env, "\n", &("      " <> &1))}
-    runcmd:
-      - [ systemctl, restart, forge-worker.service ]
-    """
+    Enum.map_join(lines, "\n", & &1) <> "\n"
   end
 
-  defp authorized_keys(key) when is_binary(key),
-    do: "ssh_authorized_keys:\n  - #{String.trim(key)}\n"
-
-  defp authorized_keys(_key), do: ""
+  # The ssh door travels in the same file rather than by a mechanism of its own; the config unit
+  # takes it out again before the release ever sees it.
+  defp ssh_key_line(key) when is_binary(key), do: ["FORGE_SSH_KEY=#{String.trim(key)}"]
+  defp ssh_key_line(_key), do: []
 
   # The worker token and the harness credential are in here, so it is written the way a secret
   # is written: to the owner only, and before anything is put in it.
-  defp write_cloud_init(dir, opts) do
-    write_private(Path.join(dir, "user-data"), user_data(opts))
-
-    File.write!(
-      Path.join(dir, "meta-data"),
-      "instance-id: #{opts.worker_id}\nlocal-hostname: forge-worker\n"
-    )
-
+  defp write_config(dir, opts) do
+    write_private(Path.join(dir, @config_file), config_blob(opts))
     :ok
   end
 
@@ -167,24 +166,24 @@ defmodule Forge.Provider.LocalVm do
     File.write!(path, contents)
   end
 
-  # cloud-init reads a filesystem labelled `cidata`. Building it needs a tool that is on the
-  # operator's machine and in the devshell, not in the release.
-  defp write_seed_image(dir) do
+  # The label is the contract: the guest looks for a filesystem called this and reads one file
+  # out of it. Building it needs a tool that is on the operator's machine and in the devshell,
+  # not in the release.
+  defp write_config_image(dir) do
     args = [
       "-output",
-      Path.join(dir, "seed.iso"),
+      Path.join(dir, "config.iso"),
       "-volid",
-      "cidata",
+      @config_label,
       "-joliet",
       "-rock",
-      Path.join(dir, "user-data"),
-      Path.join(dir, "meta-data")
+      Path.join(dir, @config_file)
     ]
 
     case System.cmd(config(:iso_tool, "genisoimage"), args, stderr_to_stdout: true) do
-      # The image carries the user data, so it carries the token too.
-      {_out, 0} -> File.chmod(Path.join(dir, "seed.iso"), 0o600)
-      {out, code} -> {:error, {:seed_image, code, out}}
+      # The image carries the environment file, so it carries the token too.
+      {_out, 0} -> File.chmod(Path.join(dir, "config.iso"), 0o600)
+      {out, code} -> {:error, {:config_image, code, out}}
     end
   end
 

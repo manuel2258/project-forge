@@ -19,7 +19,7 @@ A `destroyed` worker is refused even with a valid token: destruction is the plat
 this machine is gone, and a machine that disagrees does not get to argue.
 
 The token is minted once, when the worker row is created, and handed to the provider driver for
-cloud-init. The platform keeps only the hash — the same shape `Forge.Accounts.UserToken` uses, for
+the config disk. The platform keeps only the hash — the same shape `Forge.Accounts.UserToken` uses, for
 the same reason.
 
 **The token authenticates the machine, not any job.** Everything a worker is allowed to touch

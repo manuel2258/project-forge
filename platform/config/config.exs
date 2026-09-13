@@ -59,8 +59,8 @@ config :forge, Forge.Workers,
   slice_bytes: 2210 * 1024 * 1024,
   cpu_weight: 100,
   max_workers: 1,
-  # M4: a machine goes from nothing to able to build in 37 seconds (docs/measurements.md § M4),
-  # so being wrong about this costs 37 seconds, which is less than the operator's own round trip
+  # M4: a machine goes from nothing to able to build in about 35 seconds (docs/measurements.md
+  # § M4), so being wrong about this costs 35 seconds, less than the operator's own round trip
   # to approve an artifact. Five minutes covers an approval gap without holding a machine
   # through a lunch break. The closing step re-measures it on a provider, where the seed and the
   # Nix store stop arriving over loopback and the cold start gets longer.

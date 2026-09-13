@@ -1,6 +1,6 @@
-# NixOS module for the forge worker image: a machine that boots, learns from cloud-init who it
-# is and where the platform is, and runs the forge_worker release. One systemd unit, a btrfs
-# root for the volume layer to snapshot, a Nix daemon pointed at the binary cache, and Claude
+# NixOS module for the forge worker image: a machine that boots, learns who it is and where the
+# platform is from a config disk or a metadata service, and runs the forge_worker release. A
+# btrfs root for the volume layer to snapshot, a Nix daemon pointed at the binary cache, and Claude
 # Code. No project toolchain: that comes from the workload's own flake through `nix develop`.
 #
 # See docs/design/worker-tier.md § The worker image. The image pins nothing about any
@@ -10,6 +10,11 @@
 let
   root = "/var/lib/forge";
   envFile = "/etc/forge-worker.env";
+
+  # The contract between the provider driver and the machine: a filesystem with this label
+  # holding this file, or a metadata service returning the same bytes.
+  configLabel = "forge-config";
+  configFile = "worker.env";
 
   # What the worker needs to do its work and to confine a job: git for the clone and the push,
   # nix for `nix develop`, btrfs-progs for the volume layer, tar and gzip for the seed, shadow
@@ -148,36 +153,95 @@ in
     max-jobs = "auto";
   };
 
-  # -- cloud-init -----------------------------------------------------------------------------
+  # -- learning what this machine is ------------------------------------------------------------
 
-  # How the machine learns its identity. Used rather than something simpler for a local VM
-  # precisely because the same image has to boot on a cloud provider unchanged.
-  services.cloud-init = {
-    enable = true;
-    network.enable = true;
-    settings.datasource_list = [ "NoCloud" ];
+  # docs/design/worker-tier.md § How a machine learns what it is. The image is identical for
+  # every worker, so the identity and the secrets arrive at boot: from a labelled disk the local
+  # driver attaches, or from the provider's metadata service. Same content either way — a file of
+  # KEY=VALUE lines — so there is one parser and one contract.
+  systemd.services.forge-worker-config = {
+    description = "Fetch this worker's identity";
+    wantedBy = [ "multi-user.target" ];
+    before = [ "forge-worker.service" ];
+    after = [ "network-online.target" ];
+    wants = [ "network-online.target" ];
+
+    path = [ pkgs.util-linux pkgs.curl pkgs.coreutils pkgs.iproute2 ];
+
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+    };
+
+    script = ''
+      set -euo pipefail
+      umask 077
+
+      # A disk the driver attached. Its device node is root's, so a job cannot read it even
+      # while it is mounted.
+      if device=$(blkid -L ${configLabel} 2> /dev/null); then
+        mkdir -p /run/forge-config
+        mount -o ro,nosuid,nodev,noexec "$device" /run/forge-config
+        cp /run/forge-config/${configFile} ${envFile}
+        umount /run/forge-config
+        echo "identity: ${configLabel}"
+      elif curl -fsS --max-time 20 -o ${envFile} "''${FORGE_CONFIG_URL}"; then
+        echo "identity: ''${FORGE_CONFIG_URL}"
+      else
+        echo "no identity: no ${configLabel} disk and nothing at ''${FORGE_CONFIG_URL}" >&2
+        exit 1
+      fi
+
+      chmod 0600 ${envFile}
+
+      # The ssh door, when the operator opened one. Carried in the same file rather than by a
+      # mechanism of its own, and removed from it so the release is not handed a stray variable.
+      key=$(sed -n 's/^FORGE_SSH_KEY=//p' ${envFile})
+      if [ -n "$key" ]; then
+        mkdir -p /root/.ssh
+        printf '%s\n' "$key" > /root/.ssh/authorized_keys
+        chmod 0600 /root/.ssh/authorized_keys
+        sed -i '/^FORGE_SSH_KEY=/d' ${envFile}
+      fi
+
+      # The metadata service answers every process on the machine, including the agent, and what
+      # it answers with is the worker token and the harness credential. Nothing needs it once
+      # this unit has run. Locally there is nothing there and this is a no-op.
+      ip route replace blackhole 169.254.169.254/32 || true
+    '';
+
+    environment.FORGE_CONFIG_URL = "http://169.254.169.254/hetzner/v1/userdata";
   };
 
-  # cloud-init configures the interface; systemd-networkd is what renders it.
-  networking.useDHCP = false;
+  # Plain DHCP on whatever interface the machine has. This was cloud-init's to render; it is one
+  # line, and a worker that cannot reach the platform is no worker at all.
+  networking.hostName = "forge-worker";
+  networking.useDHCP = true;
   networking.useNetworkd = true;
   systemd.network.wait-online.anyInterface = true;
 
   # -- the release ----------------------------------------------------------------------------
 
-  # Modelled on nix/module.nix's systemd.services.forge. The unit is skipped at boot and started
-  # by cloud-init's runcmd once the environment file exists: a machine that has not been told
-  # who it is has nothing to dial, and that is a wait rather than a failure.
+  # Modelled on nix/module.nix's systemd.services.forge. It is ordered after the unit that
+  # fetches the identity and requires it, so there is no window in which the release is up and
+  # unconfigured — and no restart to arrange, which is what this cost while cloud-init owned
+  # the file and had to poke the unit afterwards.
   systemd.services.forge-worker = {
     description = "forge worker";
     wantedBy = [ "multi-user.target" ];
-    after = [ "network-online.target" "nix-daemon.service" "nix-store-register.service" ];
-    wants = [ "network-online.target" ];
-    requires = [ "nix-store-register.service" ];
 
-    # Not optional: without the environment file the machine does not know who it is. The
-    # condition is what keeps that a wait rather than a restart loop — cloud-init writes the
-    # file and then starts the unit, and the condition is re-evaluated then.
+    after = [
+      "network-online.target"
+      "nix-daemon.service"
+      "nix-store-register.service"
+      "forge-worker-config.service"
+    ];
+
+    wants = [ "network-online.target" ];
+    requires = [ "nix-store-register.service" "forge-worker-config.service" ];
+
+    # Belt as well as braces: a config unit that succeeded without writing anything would
+    # otherwise start a release with no identity, which only fails once it tries to dial.
     unitConfig.ConditionPathExists = envFile;
 
     path = servicePath;
@@ -223,7 +287,7 @@ in
   # -- the rest -------------------------------------------------------------------------------
 
   # No inbound port is needed — the worker dials out — but M4 measures phases from outside the
-  # guest, and an ssh key put there by cloud-init is how it gets in. Password login is off.
+  # guest, and a key the config disk carries is how it gets in. Password login is off.
   services.openssh = {
     enable = true;
     settings = {
@@ -236,10 +300,9 @@ in
   # network is up.
   systemd.services."serial-getty@ttyS0".enable = true;
 
-  # The service's own tools, plus what an operator needs to work out why a machine is not
-  # doing what it should: cloud-init's client (the NixOS module puts it only on the service's
-  # path) and curl, which is how the measurement harness fetches a seed from the guest.
-  environment.systemPackages = servicePath ++ [ pkgs.cloud-init pkgs.curl ];
+  # The service's own tools, plus curl: how the config unit reads a metadata service, and how
+  # the measurement harness fetches a seed from inside the guest.
+  environment.systemPackages = servicePath ++ [ pkgs.curl ];
 
   # Nothing on this machine is worth keeping: it is created for a ticket and destroyed when it
   # has had nothing to do for a while.

@@ -30,7 +30,7 @@ m4_require() {
 }
 
 # The same machine the provider driver makes, made here: the overlay larger than the image,
-# the cloud-init seed with the identity in it, UEFI firmware and a per-machine variable store.
+# the config disk with the identity on it, UEFI firmware and a per-machine variable store.
 # A measurement of a machine built some other way would not transfer.
 m4_create_vm() {
   local port=$1 pubkey
@@ -40,31 +40,23 @@ m4_create_vm() {
   run qemu-img create -f qcow2 -F qcow2 -b "$FORGE_M_WORKER_IMAGE" \
     "$M4_DIR/disk.qcow2" "${FORGE_M_WORKER_DISK_GB:-40}G" > /dev/null
 
+  # The same file the provider driver writes, on a disk with the same label: the image looks for
+  # `forge-config` and reads `worker.env` out of it. See docs/design/worker-tier.md § How a
+  # machine learns what it is.
   if [ "$FORGE_M_DRY_RUN" = 1 ]; then
-    info "would write $M4_DIR/user-data: the worker id, its token and $FORGE_M_PLATFORM_URL"
+    info "would write $M4_DIR/worker.env: the worker id, its token and $FORGE_M_PLATFORM_URL"
   else
-    cat > "$M4_DIR/user-data" << EOF
-#cloud-config
-ssh_authorized_keys:
-  - $pubkey
-write_files:
-  - path: /etc/forge-worker.env
-    permissions: "0600"
-    owner: root:root
-    content: |
-      FORGE_WORKER_ID=$FORGE_M_WORKER_ID
-      FORGE_WORKER_TOKEN=$FORGE_M_WORKER_TOKEN
-      FORGE_PLATFORM_URL=$FORGE_M_PLATFORM_URL
-runcmd:
-  - [ systemctl, restart, forge-worker.service ]
+    cat > "$M4_DIR/worker.env" << EOF
+FORGE_WORKER_ID=$FORGE_M_WORKER_ID
+FORGE_WORKER_TOKEN=$FORGE_M_WORKER_TOKEN
+FORGE_PLATFORM_URL=$FORGE_M_PLATFORM_URL
+FORGE_SSH_KEY=$pubkey
 EOF
-    chmod 600 "$M4_DIR/user-data"
-    printf 'instance-id: %s\nlocal-hostname: forge-worker\n' "$FORGE_M_WORKER_ID" \
-      > "$M4_DIR/meta-data"
+    chmod 600 "$M4_DIR/worker.env"
   fi
 
-  run genisoimage -quiet -output "$M4_DIR/seed.iso" -volid cidata -joliet -rock \
-    "$M4_DIR/user-data" "$M4_DIR/meta-data"
+  run genisoimage -quiet -output "$M4_DIR/config.iso" -volid forge-config -joliet -rock \
+    "$M4_DIR/worker.env"
   run install -m 600 "$FORGE_M_OVMF_VARS" "$M4_DIR/firmware-vars.fd"
 
   run qemu-system-x86_64 \
@@ -74,7 +66,7 @@ EOF
     -drive "if=pflash,format=raw,unit=0,readonly=on,file=$FORGE_M_OVMF_CODE" \
     -drive "if=pflash,format=raw,unit=1,file=$M4_DIR/firmware-vars.fd" \
     -drive "file=$M4_DIR/disk.qcow2,if=virtio,format=qcow2" \
-    -drive "file=$M4_DIR/seed.iso,if=virtio,format=raw,readonly=on" \
+    -drive "file=$M4_DIR/config.iso,if=virtio,format=raw,readonly=on" \
     -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:$port-:22" \
     -device virtio-net-pci,netdev=net0 \
     -pidfile "$M4_DIR/qemu.pid" -daemonize -serial "file:$M4_DIR/console.log"
@@ -187,16 +179,18 @@ cmd_m4() {
   m4_create_vm "$port"
   phase_end create-vm
 
-  section "cloud-init"
-  phase_begin cloud-init
-  # `cloud-final` rather than `cloud-init status`: the unit is the thing that finishes, and
-  # asking systemd about it works whether or not cloud-init's own client is on root's PATH.
+  # Named for what it measures rather than for what used to do it: boot, plus the machine
+  # reading its own identity off the config disk. cloud-init was this phase until it was
+  # replaced (docs/design/worker-tier.md § How a machine learns what it is).
+  section "machine-configured"
+  phase_begin machine-configured
   if m4_wait_for "the guest to answer ssh" 300 true &&
-    m4_wait_for "cloud-init to finish" 300 "systemctl is-active --quiet cloud-final.service"; then
-    phase_end cloud-init
+    m4_wait_for "the machine to read its identity" 300 \
+      "systemctl is-active --quiet forge-worker-config.service"; then
+    phase_end machine-configured
   else
-    phase_end cloud-init timeout
-    die "the machine never finished cloud-init (console: $M4_DIR/console.log)"
+    phase_end machine-configured timeout
+    die "the machine never configured itself (console: $M4_DIR/console.log)"
   fi
 
   section "worker-connects"

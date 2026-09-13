@@ -53,13 +53,13 @@ callback set exists to prevent, and the Hetzner implementation in the closing st
 whether it worked.
 
 `Forge.Provider.LocalVm` boots the NixOS worker image under QEMU: a copy-on-write overlay on the
-image so the base is never written, user-mode networking with no inbound ports, and a cloud-init
-seed ISO carrying the worker id, the token and the platform's address. `destroy` kills the process
-and removes the overlay and the ISO. `status` reads the process.
+image so the base is never written, user-mode networking with no inbound ports, and a config disk
+carrying the worker id, the token and the platform's address. `destroy` kills the process and
+removes the overlay and the disk. `status` reads the process.
 
 **One door, and it is shut by default.** A worker has no inbound port; that is the property the
 direction of the channel exists to give. `ssh_key` and `ssh_port` open one anyway — a forward
-from the platform host's loopback to the guest's sshd, with a key cloud-init puts there — and
+from the platform host's loopback to the guest's sshd, with a key the config disk carries — and
 two things need it. M4 measures cold-start phases from outside the guest
 (`docs/design/measurement-harness.md` § What M4 reuses), and a job that failed on a machine
 about to be destroyed has left its stderr on that machine and nowhere else. Both are the
@@ -72,8 +72,7 @@ against, and it is also the honest way to develop the platform on a machine that
 ## The worker image
 
 A NixOS image, built by the flake, that boots unchanged both locally and — after the closing step
-— on the provider. That last constraint is what keeps cloud-init in the picture for a local VM
-that could have been configured by other means.
+— on the provider.
 
 - btrfs root, so the volume layer below has subvolumes to snapshot.
 - The Nix daemon, with the binary cache configured, so `nix develop` on the project's flake is a
@@ -81,9 +80,65 @@ that could have been configured by other means.
 - Claude Code, which is unfree and needs the same `allowUnfreePredicate` the platform module
   already carries (`docs/deploy.md`).
 - The `forge_worker` release, started by a systemd unit that reads the worker id, token and
-  platform address that cloud-init wrote.
+  platform address `forge-worker-config.service` found.
 - No project toolchain. The workload is a parameter: the environment comes from the project's own
   flake through `nix develop .#<env>`, exactly as `ForgeWorker.Job.Runner` already does it.
+
+## How a machine learns what it is
+
+The image is **identical for every worker**, and that is load-bearing rather than tidy: it is what
+makes `create` a `qemu-img` overlay on a shared read-only base — 237 ms, M4 — instead of a Nix
+build, and it is why the image can be cached and copied. The moment one per-machine fact is in it,
+a worker needs an image of its own. So something has to inject at boot, and the only question is
+what.
+
+`forge-worker-config.service`, a oneshot ordered before the release, writes `/etc/forge-worker.env`
+(0600, root) from the first source that answers:
+
+1. **A filesystem labelled `forge-config`**, mounted read-only, holding one file of `KEY=VALUE`
+   lines. Locally the driver builds it with `genisoimage` and attaches it as a virtio disk. The
+   block device is root's, so a job cannot read it.
+2. **The provider's metadata service**, `FORGE_CONFIG_URL`, defaulting to Hetzner Cloud's
+   `http://169.254.169.254/hetzner/v1/userdata` — which returns whatever was passed as the
+   server's user data, so the provider driver passes exactly the bytes the disk would have held.
+
+Same content both ways, so the unit has one parser and the image has one contract: *give me an
+environment file, by whichever route you have.*
+
+**This replaced cloud-init, which used to do it.** Cloud-init was chosen because a provider speaks
+it, and it was doing exactly one job nothing else could — the injection above. Everything else it
+did on a worker, NixOS already did or could do in a line: hostname, DHCP, growing the root
+partition (which it did *twice*, once as NixOS's `boot.growPartition` and once as its own
+`growpart`), the random seed, ssh host keys.
+
+**The reason is not size, and the first draft of this paragraph said it was.** Cloud-init's own
+closure is 422 MiB, which is what made removing it look obviously worthwhile; its *marginal* cost
+to the image was 27 MiB (1507 → 1480 MiB), because nearly all of that 422 is shared. In
+particular the Python runtime stays — `git` depends on it, and a worker cannot do without git. A
+change argued on a number should be checked against the number, and this one was not until after
+it was written.
+
+What it is actually worth: **7.5 seconds off every cold start** — M4's `machine-configured` phase
+went from 20.0 s to 12.5 s, a 37 % fall, and that one is attributable because nothing else in the
+phase changed. Beyond the clock, the boot path is now twenty lines of shell that can be read in
+one sitting instead of a module pipeline whose default list nobody on this project had audited;
+the double `growpart` is gone; and the contract between a driver and the image is one sentence
+rather than a dialect of YAML. In an appliance whose whole purpose is confining code an agent
+wrote, that is worth 27 MiB of nothing.
+
+**The metadata service is closed after it is read.** On a provider, `169.254.169.254` answers any
+process on the machine, including the agent — so the user data holding the worker token and the
+harness credential would be one `curl` away from a job. The config unit drops the route to it once
+it has what it needs. Locally there is nothing there to drop, and the rule is harmless.
+
+**What this gives up, and why it is worth it.** Cloud-init's other modules were free in the sense
+that nobody had to write them; a provider whose networking needs more than DHCP, or whose disks
+need `disk_setup`, would have been handled without a change here. That bill comes due at the
+closing step if Hetzner turns out to need any of it. Against that: the injection path is now
+twenty lines that can be read in one sitting, and the boot no longer depends on an agent whose
+default module list nobody had audited. **The Hetzner half of this is written but unrun** — the
+local half is exercised on every boot, and § What the operator's machine settled says what that
+distinction has been worth so far.
 
 The image pins nothing about any particular project, and it is the one artefact of this milestone
 that cannot be built or booted anywhere but the operator's machine.
@@ -113,9 +168,9 @@ registers it once at first boot, as the installer images do. Without that a fres
 **The harness's environment is the machine's, not the job's.** Claude Code needs an
 `ANTHROPIC_API_KEY` or a `CLAUDE_CODE_OAUTH_TOKEN`, and neither is scoped to one job nor short
 lived, so neither belongs in an assignment: `docs/design/worker-channel.md` reserves per-
-assignment tokens for credentials that are both. It is injected at creation by the same
-cloud-init that carries the worker token, and the release reads it from its environment exactly
-as the platform did while it ran jobs itself. The blast radius is one machine, which is already
+assignment tokens for credentials that are both. It is injected at creation by the same route
+that carries the worker token — § How a machine learns what it is — and the release reads it from
+its environment exactly as the platform did while it ran jobs itself. The blast radius is one machine, which is already
 the blast radius of the worker token sitting beside it. The model rides along for the same
 reason — it is an operator setting, not a per-job one, until the workflow grammar has something
 to say about it. The executable does not: the platform's is a path on the platform's host, and
@@ -319,7 +374,7 @@ waits for the last job to end, destroys the machine through the driver, and mark
 `destroyed`. The next ticket creates a new one.
 
 The period is configuration, and its default is now M4's rather than a guess: **five minutes**.
-M4 measured a machine going from nothing to able to build in 37 seconds
+M4 measured a machine going from nothing to able to build in about 35 seconds
 (`docs/measurements.md` § M4), which is what being wrong costs — less than the operator's own
 round trip to approve the artifact that produces the next ticket. Five minutes covers an
 approval gap without holding a machine through a lunch break.
@@ -347,8 +402,8 @@ against the fakes passed and the real thing did not.
 - **`Volume.Btrfs` works, and the seed it snapshots did not.** `tar` as root restores the owners
   the archive recorded, so every seeded worktree was a repository git refused as dubiously owned.
   It fell back to cloning, which is why this was a slow first run rather than a failed one.
-- **The image builds and boots**, and M4 measured the cold start it makes: 37 seconds from
-  nothing to a machine that can build (`docs/measurements.md` § M4). The idle period is that
+- **The image builds and boots**, and M4 measured the cold start it makes: about 35 seconds
+  from nothing to a machine that can build (`docs/measurements.md` § M4). The idle period is that
   measurement's now rather than a guess.
 - **The claim the tier rests on is measured.** Four concurrent builds with one under a ceiling
   below its own peak: the constrained build was killed by its own cgroup, the other three

@@ -73,8 +73,8 @@ defmodule Forge.ProviderTest do
 
     # And no key in the cloud-init while none is configured, so a forwarded port would reach
     # an sshd nobody can authenticate to.
-    refute LocalVm.user_data(%{worker_id: "w", token: "t", platform_url: "u"}) =~
-             "ssh_authorized_keys"
+    refute LocalVm.config_blob(%{worker_id: "w", token: "t", platform_url: "u"}) =~
+             "FORGE_SSH_KEY"
   end
 
   test "a driver with no firmware refuses to create rather than booting a machine that hangs" do
@@ -88,40 +88,53 @@ defmodule Forge.ProviderTest do
              LocalVm.create(%{worker_id: "w-1", token: "t", platform_url: "http://localhost"})
   end
 
-  test "cloud-init carries the identity and nothing about the image" do
-    user_data =
-      LocalVm.user_data(%{
+  test "the config blob carries the identity and nothing about the image" do
+    blob =
+      LocalVm.config_blob(%{
         worker_id: "w-1",
         token: "the-token",
         platform_url: "http://10.0.2.2:4000"
       })
 
-    assert user_data =~ "FORGE_WORKER_ID=w-1"
-    assert user_data =~ "FORGE_WORKER_TOKEN=the-token"
-    assert user_data =~ "FORGE_PLATFORM_URL=http://10.0.2.2:4000"
-    assert user_data =~ "permissions: \"0600\""
-    assert user_data =~ "systemctl, restart, forge-worker.service"
+    # An environment file and nothing else: the same bytes go on the local config disk and into
+    # a provider's user data, so there is one shape and the guest has one parser.
+    assert blob == """
+           FORGE_WORKER_ID=w-1
+           FORGE_WORKER_TOKEN=the-token
+           FORGE_PLATFORM_URL=http://10.0.2.2:4000
+           """
 
     # No credential given, no line written: the machine still boots and its jobs fail visibly.
-    refute user_data =~ "ANTHROPIC_API_KEY"
-    refute user_data =~ "CLAUDE_CODE_OAUTH_TOKEN"
+    refute blob =~ "ANTHROPIC_API_KEY"
+    refute blob =~ "CLAUDE_CODE_OAUTH_TOKEN"
   end
 
-  test "the harness environment is injected at creation, indented into the env file" do
-    user_data =
-      LocalVm.user_data(%{
+  test "the harness environment is injected at creation" do
+    blob =
+      LocalVm.config_blob(%{
         worker_id: "w-1",
         token: "the-token",
         platform_url: "http://10.0.2.2:4000",
         harness_env: [{"CLAUDE_CODE_OAUTH_TOKEN", "sk-oauth"}, {"FORGE_CLAUDE_MODEL", "haiku"}]
       })
 
-    # Every line of the file is one indent inside `content: |`, or cloud-init writes YAML
-    # instead of an environment file.
-    assert user_data =~ "\n      FORGE_WORKER_ID=w-1\n"
-    assert user_data =~ "\n      CLAUDE_CODE_OAUTH_TOKEN=sk-oauth\n"
-    assert user_data =~ "\n      FORGE_CLAUDE_MODEL=haiku\n"
-    assert user_data =~ "\nruncmd:\n"
+    assert blob =~ "\nCLAUDE_CODE_OAUTH_TOKEN=sk-oauth\n"
+    assert blob =~ "\nFORGE_CLAUDE_MODEL=haiku\n"
+  end
+
+  test "the ssh key travels in the same file, as one line the guest can lift out" do
+    Application.put_env(
+      :forge,
+      Provider,
+      Keyword.put(Application.get_env(:forge, Provider), :ssh_key, "ssh-ed25519 AAAAC3 me@host\n")
+    )
+
+    blob = LocalVm.config_blob(%{worker_id: "w-1", token: "t", platform_url: "u"})
+
+    # One line, newline-terminated by the blob rather than by the key: a trailing newline in the
+    # configured value would otherwise split the file and take the rest of it with it.
+    assert blob =~ "\nFORGE_SSH_KEY=ssh-ed25519 AAAAC3 me@host\n"
+    refute blob =~ "\n\n"
   end
 
   test "the cloud-init a machine boots with is written as a secret" do
@@ -152,7 +165,7 @@ defmodule Forge.ProviderTest do
                harness_env: [{"CLAUDE_CODE_OAUTH_TOKEN", "sk-oauth"}]
              })
 
-    for name <- ["user-data", "seed.iso"] do
+    for name <- ["worker.env", "config.iso"] do
       path = Path.join([dir, "machines", "w-1", name])
       assert File.exists?(path), "#{name} was not written"
       assert %File.Stat{mode: mode} = File.stat!(path)

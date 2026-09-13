@@ -378,7 +378,7 @@ M4 is a sequence of timed phases against a VM, not a build measurement, and the 
 shaped so it did not have to be rewritten for it. What it reuses, as planned:
 
 - `phase_begin` and `phase_end` are the timing primitive; `measure_run` is built on them. M4
-  records `create-vm`, `cloud-init`, `worker-connects`, `seed-fetched`, `nix-store-populated`
+  records `create-vm`, `machine-configured`, `worker-connects`, `seed-fetched`, `nix-store-populated`
   and `first-build` as ordinary phases and uses `measure_run` for the last.
 - `measure_exec` is the single function that decides how a command runs. `FORGE_M_SSH` selects
   the variant that starts the unit inside the guest instead of on this host; M1 to M3 did not
@@ -396,7 +396,7 @@ rest of it: a machine cannot fetch a seed before it knows which project it is fo
 tells it that is an assignment.
 
 **M4 boots the machine itself rather than asking the platform to.** It builds the same overlay,
-the same cloud-init seed and the same QEMU invocation the provider driver does, with credentials
+the same config disk and the same QEMU invocation the provider driver does, with credentials
 from `mix forge.worker.new`. The alternative — admit a ticket and watch — would measure the
 scheduler's poll interval and the agent's wall clock along with the cold start, and could not
 separate them. The cost is that the driver and M4 now describe the same machine in two places,

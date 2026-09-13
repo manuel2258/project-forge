@@ -7,6 +7,9 @@ use and the worker tier are additions, not rewrites. All ids are UUIDs. Times ar
 
 **project** — `name`, `repo_path` (bare repository on the orchestrator; the API only ever
 sets `<repos_dir>/<name>.git`, an arbitrary path needs the command line), `default_branch`.
+The mirror is deliberately **not** a column: it lives in the repository's own `git config` under
+`forge.mirror`, because the `post-receive` hook is what pushes it and a hook can read only git
+config. See `design/git-hosting.md`.
 
 **ticket** — `project_id`, `number` (per project, human-facing, allocated under a lock on
 the project row), `title`, `body`, `base_commit`, `branch` (`ticket/<number>`), `workflow`
@@ -21,7 +24,9 @@ is empty in v1; `answers.md` and the answered keys are added at run time, not st
 `outcome` (`converged | did_not_converge | budget_exhausted | error | cancelled`, null until
 finished), `declared_outcome` (the workflow outcome the agent selected, null unless converged),
 `turns`, `cost_usd`, `harness_session_id` (opaque, nullable, an optimisation only),
-`worker_id` (nullable), `started_at`, `finished_at`.
+`worker_id` (nullable), `started_at`, `finished_at`. Its timestamps are sub-second: jobs are read
+back in creation order and that order is the ticket's timeline, so two jobs created within one
+second must still be ordered.
 
 **artifact** — `ticket_id`, `name` (as in the workflow, e.g. `plan.md`), `kind`
 (`document | blob | presentation`). Unique per ticket and name. Holds no content. The
@@ -56,6 +61,13 @@ newer version has no approval until it gets one.
 **worker** — `provider`, `provider_id`, `status`, `token_hash`, `memory_budget`,
 `last_seen_at`. Empty until milestone 3; the local worker manager registers as one row.
 
+**git_token** — `project_id`, `ticket_id`, `job_id` (the last two nullable), `token_hash`,
+`ref` (the one ref a write token may update, `refs/heads/ticket/<n>`), `write`, `expires_at`,
+`revoked_at`, `last_used_at`. The credential the git endpoint accepts. Not a user token: no user,
+a ref rather than an account for a scope, and a job rather than "until revoked" for a lifetime.
+Rows are revoked rather than deleted, because they are the audit trail behind the
+`git.token.issued` and `git.token.revoked` events.
+
 ## Statechart persistence
 
 The ticket's current state is `ticket.state`. The history is the `transition.taken` events.
@@ -83,8 +95,10 @@ branch and the manifest. Transitions from `waiting` back to `running` start a ne
 - A job whose ticket moved on while it ran (a person took a transition) is recorded as
   orphaned and decides nothing. Human transitions are refused while a job for the current
   state is live.
-- Budgets in `spec` are copied from the pinned workflow at job creation and are never read
-  from anywhere else afterwards.
+- Budgets in `spec` are copied from the pinned workflow at job creation and the row is never
+  rewritten. The *effective* cost budget a run is handed is the least of what the spec declared,
+  what the ticket allowance has left and what the daily cap has left, computed at start and
+  recorded as `job.budget_lowered` when it differs. The turn budget is the spec's, always.
 
 ## Not in v1, but shaped for
 

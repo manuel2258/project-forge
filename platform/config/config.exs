@@ -33,7 +33,13 @@ config :forge, Forge.Jobs,
   poll_ms: 2_000,
   wall_clock_ms: 3_600_000,
   nix_env: false,
-  harness_opts: []
+  harness_opts: [],
+  # A job reaches its repository over the platform's own git endpoint. The base URL is derived
+  # from the endpoint unless something in front rewrites the host; the token outlives the job's
+  # wall clock by a margin. See docs/design/git-hosting.md.
+  git_base_url: nil,
+  git_token_ttl_minutes: 90,
+  git_max_body_bytes: 100 * 1024 * 1024
 
 # Mailer for account emails (magic links). Local adapter in dev; see runtime.exs for prod.
 config :forge, Forge.Mailer, adapter: Swoosh.Adapters.Local
@@ -88,6 +94,12 @@ config :logger, :default_formatter,
 
 # Use Jason for JSON parsing in Phoenix
 config :phoenix, :json_library, Jason
+
+# The platform's own daily spend cap, in USD. `nil` means none. Unlike the ticket allowance, which
+# a human resolves by raising it or rerouting, this one is resolved by midnight — so it pauses the
+# node rather than sticking tickets, and never puts anything in the queue. See
+# docs/design/capacity.md.
+config :forge, Forge.Spend, daily_cost_usd: nil
 
 # One unit of capacity is one percent of a five-hour window. `window_cost_usd` is the cost of a
 # whole window: the only bridge from the cost the harness estimates to the unit the operator

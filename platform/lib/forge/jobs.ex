@@ -11,13 +11,15 @@ defmodule Forge.Jobs do
   import Ecto.Query, only: [from: 2]
 
   alias Ecto.Multi
-  alias Forge.{Artifacts, Engine, Events, Git, Projects, Repo, Tickets}
+  alias Forge.{Artifacts, Engine, Events, Git, Projects, Repo, Spend, Tickets}
+  alias Forge.Git.{Tokens, Url}
   alias Forge.Jobs.Job
   alias Forge.Tickets.Ticket
   alias ForgeCore.Job.Spec
   alias ForgeCore.Job.Spec.Input
   alias ForgeCore.{Prompt, Workflow}
   alias ForgeCore.Workflow.State
+  alias ForgeWorker.Checkout
   alias ForgeWorker.Job.{Result, Runner}
 
   require Logger
@@ -163,28 +165,29 @@ defmodule Forge.Jobs do
   def start(%Job{} = job) do
     ticket = Tickets.get!(job.ticket_id)
     project = Projects.get!(ticket.project_id)
-    repo_path = Projects.repo_path(project)
-    worktree = worktree_dir(job)
 
     # The row is marked before the harness is spawned, not after. A row the progress
     # changeset refuses then costs nothing; marking second meant it was refused only once a
     # billed invocation was already running, and the scheduler retried the job every tick.
-    with :ok <-
-           ensure_worktree(repo_path, worktree, ticket.branch, job.harness_session_id != nil),
+    with :ok <- spend_gate(ticket),
+         {:ok, token, _row} <- Tokens.issue_for_job(job, ticket, project),
+         :ok <- ensure_checkout(job, ticket, project, token),
          {:ok, job} <- mark_started(job) do
-      case start_runner(job, ticket, worktree) do
+      case start_runner(job, ticket, project, token) do
         {:ok, pid} ->
           {:ok, pid}
 
         {:error, reason} ->
           # Nothing is running, so the job must not sit `running` until the next boot.
           Repo.update(Job.progress_changeset(job, %{status: :pending}))
+          Tokens.revoke_for_job(job.id)
           {:error, reason}
       end
     end
   end
 
-  defp start_runner(job, ticket, worktree) do
+  defp start_runner(job, ticket, project, token) do
+    worktree = checkout_dir(job)
     spec = runtime_spec(job, ticket)
     job_id = job.id
     ticket_id = ticket.id
@@ -206,16 +209,51 @@ defmodule Forge.Jobs do
       harness_opts: harness_opts,
       wall_clock_ms: config(:wall_clock_ms, :timer.hours(1)),
       nix_env: config(:nix_env, false),
-      extra_env: config(:extra_env, [])
+      extra_env: config(:extra_env, []) ++ git_env(project, token)
     ]
 
     DynamicSupervisor.start_child(ForgeWorker.Job.Supervisor, {Runner, opts})
   end
 
-  # The stored spec never changes; answers given since are appended at run time, and the
-  # keys already answered are passed so the worker does not wait on them again.
-  defp runtime_spec(%Job{} = job, %Ticket{id: ticket_id}) do
+  # Every billed invocation passes through `start/1`, including `run/1` from a Mix task, so this
+  # is where both caps are asked rather than in the scheduler alone. A ticket over its own
+  # allowance is stuck, which also takes it out of `pending/1` and stops the scheduler retrying it
+  # every tick; the daily cap only pauses, and the ticket stays active and out of the queue.
+  defp spend_gate(%Ticket{} = ticket) do
+    case Spend.gate(ticket, Tickets.workflow(ticket)) do
+      :ok ->
+        :ok
+
+      {:stick, reason} ->
+        Engine.stick(ticket, reason)
+        {:error, {:spend_exhausted, :ticket}}
+
+      {:pause, reason} ->
+        Events.append("spend.paused", :system, %{
+          ticket_id: ticket.id,
+          payload: %{"reason" => reason}
+        })
+
+        {:error, {:spend_paused, :day}}
+    end
+  end
+
+  # The agent works in a real clone, so it can fetch and push on its own. The token is marked
+  # secret, which is what keeps it out of argv and out of the runner's state.
+  defp git_env(project, token) do
+    [
+      {"FORGE_GIT_URL", Url.for(project)},
+      {"FORGE_GIT_TOKEN", {:secret, token}}
+    ]
+  end
+
+  # The stored spec never changes; answers given since are appended at run time, the keys already
+  # answered are passed so the worker does not wait on them again, and the cost budget is lowered
+  # to whatever cap binds first. That last one is what stops a runaway job mid-flight: the figure
+  # reaches the harness as its own budget, and the harness stops itself.
+  defp runtime_spec(%Job{} = job, %Ticket{id: ticket_id} = ticket) do
     spec = %{spec(job) | answered_keys: Artifacts.answered_keys(ticket_id)}
+    spec = lower_budget(spec, job, ticket)
 
     case Artifacts.latest(ticket_id, Workflow.answers_artifact()) do
       nil ->
@@ -229,6 +267,29 @@ defmodule Forge.Jobs do
         }
 
         %{spec | inputs: spec.inputs ++ [answers]}
+    end
+  end
+
+  # The job row's `spec` is written once and never rewritten — the invariant holds for what was
+  # declared. Only the copy the harness runs with is narrowed, and the difference is an event,
+  # without which a job stopping at a tenth of its declared budget is inexplicable later.
+  defp lower_budget(spec, %Job{} = job, %Ticket{} = ticket) do
+    {cost, binding} = Spend.effective_cost(spec.budget.cost, ticket, Tickets.workflow(ticket))
+
+    if binding == :state or cost >= spec.budget.cost do
+      spec
+    else
+      Events.append("job.budget_lowered", :system, %{
+        ticket_id: ticket.id,
+        job_id: job.id,
+        payload: %{
+          "spec_cost" => spec.budget.cost,
+          "effective_cost" => cost,
+          "binding" => Atom.to_string(binding)
+        }
+      })
+
+      %{spec | budget: %{spec.budget | cost: cost}}
     end
   end
 
@@ -287,13 +348,17 @@ defmodule Forge.Jobs do
   Records a runner result, then lets the engine decide what follows. Recording (documents,
   transcript, changeset head, status, accounting, event) is one transaction that never
   depends on the follow-up; if creating the next job fails, the ticket is stuck with the
-  reason rather than the result being lost. A waiting job keeps its worktree; a finished
+  reason rather than the result being lost. A waiting job keeps its checkout; a finished
   one loses it. A resume that never reached the harness is re-queued as a fresh run.
+
+  The branch is pushed first, so what the transaction records as the changeset is what the
+  agent actually wrote rather than what the last run left behind.
   """
   @spec complete(String.t(), Result.t()) :: {:ok, Job.t()} | {:error, term()}
   def complete(job_id, %Result{} = result) do
     job = get!(job_id)
     ticket = Tickets.get!(job.ticket_id)
+    push_checkout(job, ticket, Projects.get!(ticket.project_id))
 
     if resume_failed?(job, result),
       do: requeue_fresh(job, ticket, result),
@@ -334,7 +399,8 @@ defmodule Forge.Jobs do
     with {:ok, %{job: job, ticket_cost: ticket}} <- record(job, ticket, result) do
       case job.status do
         :finished ->
-          remove_worktree(ticket, job)
+          remove_checkout(ticket, job)
+          Tokens.revoke_for_job(job.id)
           follow_up(ticket, job, result)
 
         :waiting ->
@@ -399,7 +465,8 @@ defmodule Forge.Jobs do
     |> Repo.transaction()
     |> case do
       {:ok, %{job: job}} ->
-        remove_worktree(ticket, job)
+        remove_checkout(ticket, job)
+        Tokens.revoke_for_job(job.id)
         follow_up(ticket, job, %Result{status: :finished, outcome: :error})
         Events.notify(ticket.id)
         {:ok, job}
@@ -523,32 +590,59 @@ defmodule Forge.Jobs do
   @spec data_dir() :: String.t()
   def data_dir, do: Path.expand(config(:data_dir, "tmp/forge"))
 
-  defp worktree_dir(%Job{id: id}), do: Path.join([data_dir(), "worktrees", id])
+  defp checkout_dir(%Job{id: id}), do: Path.join([data_dir(), "checkouts", id])
 
-  # The worktree is removed when a job finishes, so one still standing belongs to a run that
-  # did not: a node that died. A resume continues that run and keeps its work in progress; a
-  # cold start does not, and must not inherit it. Commits are on the branch either way.
-  defp ensure_worktree(repo_path, worktree, branch, resume?) do
-    cond do
-      not File.dir?(worktree) -> Git.worktree_add(repo_path, worktree, branch)
-      resume? -> :ok
-      true -> Git.worktree_reset(worktree, branch)
+  # The checkout is removed when a job finishes, so one still standing belongs to a run that did
+  # not: a node that died. A resume continues that run and keeps its work in progress; a cold
+  # start does not, and must not inherit it. Commits are on the branch either way.
+  defp ensure_checkout(job, ticket, project, token) do
+    Checkout.ensure(
+      dir: checkout_dir(job),
+      url: Url.for(project),
+      branch: ticket.branch,
+      token: token,
+      resume: job.harness_session_id != nil
+    )
+  end
+
+  # Best effort, and deliberately so: the result of a run is recorded whatever git did. A push
+  # that failed leaves the branch where the last successful one put it, which is what
+  # `put_changeset/4` then records.
+  defp push_checkout(job, ticket, project) do
+    dir = checkout_dir(job)
+
+    if File.dir?(Path.join(dir, ".git")) do
+      case Tokens.issue_for_job(job, ticket, project) do
+        {:ok, token, _row} -> do_push(job, ticket, dir, token)
+        {:error, reason} -> log_push_failure(job, ticket, reason)
+      end
+    else
+      :ok
     end
   end
 
-  defp remove_worktree(ticket, job) do
-    repo_path = ticket |> Tickets.project_of() |> Projects.repo_path()
-    worktree = worktree_dir(job)
-
-    if File.dir?(worktree) do
-      case Git.worktree_remove(repo_path, worktree) do
-        :ok ->
-          :ok
-
-        {:error, reason} ->
-          Logger.warning("could not remove worktree #{worktree}: #{inspect(reason)}")
-      end
+  defp do_push(job, ticket, dir, token) do
+    case Checkout.push(dir: dir, branch: ticket.branch, token: token) do
+      :ok -> :ok
+      {:error, reason} -> log_push_failure(job, ticket, reason)
     end
+  end
+
+  defp log_push_failure(job, ticket, reason) do
+    Logger.warning("job #{job.id} could not push #{ticket.branch}: #{inspect(reason)}")
+
+    Events.append("job.push_failed", {:job, job.id}, %{
+      ticket_id: ticket.id,
+      job_id: job.id,
+      payload: %{"branch" => ticket.branch, "reason" => inspect(reason)}
+    })
+
+    :ok
+  end
+
+  defp remove_checkout(_ticket, job) do
+    File.rm_rf!(checkout_dir(job))
+    :ok
   end
 
   defp decimal(nil), do: Decimal.new(0)

@@ -86,6 +86,57 @@ defmodule Forge.Release do
     end)
   end
 
+  @doc """
+  Prints a clone URL carrying a short-lived git credential, once.
+
+  Without a ticket number the token may only read. With one it may also write that ticket's
+  branch, and nothing else. See `docs/design/git-hosting.md`.
+  """
+  def git_token(name, ticket_number \\ nil) do
+    with_app(fn ->
+      case Forge.Projects.by_name(name) do
+        nil -> fail("unknown project #{name}")
+        project -> print_git_token(project, ticket_number)
+      end
+    end)
+  end
+
+  defp print_git_token(project, ticket_number) do
+    scope =
+      case ticket_number do
+        nil ->
+          []
+
+        number ->
+          ticket = Forge.Tickets.get_by_number!(project, number)
+          [ticket_id: ticket.id, ref: "refs/heads/" <> ticket.branch, write: true]
+      end
+
+    {:ok, secret, token} = Forge.Git.Tokens.issue(project, scope)
+    IO.puts(Forge.Git.Url.with_token(project, secret))
+    IO.puts("writes #{token.ref || "nothing"}, until #{token.expires_at}")
+  end
+
+  @doc """
+  Points a project's repository at a mirror, or removes it with `nil`. `refs` is the glob the
+  mirror carries, defaulting to the default branch alone.
+  """
+  def set_mirror(name, url, refs \\ nil) do
+    with_app(fn ->
+      case Forge.Projects.by_name(name) do
+        nil -> fail("unknown project #{name}")
+        project -> put_mirror(project, url, refs)
+      end
+    end)
+  end
+
+  defp put_mirror(project, url, refs) do
+    case Forge.Projects.set_mirror(project, url, refs) do
+      :ok -> IO.puts(url || "mirror removed")
+      {:error, reason} -> fail(inspect(reason))
+    end
+  end
+
   @doc "Prints a fresh VAPID key pair for web push, to put into the environment."
   def generate_vapid_keys do
     {public_key, private_key} = :crypto.generate_key(:ecdh, :prime256v1)

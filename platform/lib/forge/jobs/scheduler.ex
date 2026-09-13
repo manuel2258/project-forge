@@ -7,7 +7,7 @@ defmodule Forge.Jobs.Scheduler do
 
   use GenServer
 
-  alias Forge.Jobs
+  alias Forge.{Jobs, Projects}
   alias ForgeWorker.Job.Runner
 
   require Logger
@@ -22,6 +22,12 @@ defmodule Forge.Jobs.Scheduler do
   def init(_opts) do
     recovered = Jobs.recover()
     if recovered > 0, do: Logger.info("re-queued #{recovered} interrupted job(s)")
+
+    # This is the process that owns the repositories on this node's filesystem, so it is where
+    # the generated hooks are brought up to date — a rule that only ever reached repositories
+    # created after it was written would not be enforcement at all.
+    Projects.ensure_hooks()
+
     schedule()
     {:ok, %{running: %{}}}
   end

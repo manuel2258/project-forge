@@ -113,6 +113,7 @@ measure; each route sets its own:
 | `/` | 34rem at every viewport | One ordered list. Width only lets a second item compete for the same glance. |
 | `/board` | none | Full viewport. The columns are the workflow topology; capping them destroys the artefact. |
 | `/tickets/:project/:number` | 74rem | 53rem timeline column plus a 21rem facts rail, divided by a 1px rule. Below `lg` the rail moves under the timeline. |
+| `…/review` | 74rem | Same frame. The diff needs the width; the rail carries the evidence. |
 | `…/jobs/:job_id` | 74rem | Same frame. Manifest in the rail, completed harness stream in the column. |
 | `/users/log-in`, `/users/settings` | 26rem | Same shell, same type, same buttons. They must not read as a different product. |
 
@@ -149,6 +150,13 @@ Getting these wrong makes the UI lie. They are acceptance criteria, not preferen
   list; the item changes to its sent state in place.
 - **Presentations carry no approval slot at all**, so they cannot be misread as approvable.
   Experimental results are advisory and must never read as verified.
+- **The diff is bounded and says where.** Past the page's limit it offers the `git diff` command
+  for the exact range instead of trailing off. The file table above it is never truncated: it is
+  the map of the change. Dollars do not appear here either — the review page is the surface where
+  they are most tempting and least useful.
+- A **merge decision** is reached from the queue by a link, never by an answer row. Answering
+  never navigates, and the answer row is the one shape in the queue that commits something; a
+  link that looked like one would make "read this" and "approve this" the same gesture.
 
 ## The queue item
 

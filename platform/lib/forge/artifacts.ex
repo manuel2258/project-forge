@@ -282,20 +282,36 @@ defmodule Forge.Artifacts do
     end
   end
 
+  @doc """
+  Every question a person answered on this ticket, oldest first, with the answer and the exact
+  artifact version the question was asked against.
+  """
+  @spec answered(String.t()) :: [
+          %{
+            question: Question.t(),
+            answer: Answer.t(),
+            artifact: String.t(),
+            version: pos_integer()
+          }
+        ]
+  def answered(ticket_id) do
+    Repo.all(
+      from ans in Answer,
+        join: q in assoc(ans, :question),
+        join: v in assoc(q, :artifact_version),
+        join: a in assoc(v, :artifact),
+        where: a.ticket_id == ^ticket_id,
+        order_by: ans.inserted_at,
+        select: %{question: q, answer: ans, artifact: a.name, version: v.version}
+    )
+  end
+
   @doc "Renders the ticket's answers so far, plus `pending` ones being written, as a document."
   @spec render_answers(String.t(), [{Question.t(), String.t() | nil, String.t() | nil}]) ::
           String.t()
   def render_answers(ticket_id, pending \\ []) do
     existing =
-      Repo.all(
-        from ans in Answer,
-          join: q in assoc(ans, :question),
-          join: v in assoc(q, :artifact_version),
-          join: a in assoc(v, :artifact),
-          where: a.ticket_id == ^ticket_id,
-          order_by: ans.inserted_at,
-          select: {q, ans.choice, ans.text}
-      )
+      Enum.map(answered(ticket_id), &{&1.question, &1.answer.choice, &1.answer.text})
 
     entries =
       Enum.map_join(existing ++ pending, "\n", fn {question, choice, text} ->

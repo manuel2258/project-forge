@@ -63,6 +63,20 @@ defmodule ForgeWeb.Api.TicketController do
     json(conn, %{events: Enum.map(Events.for_ticket(conn.assigns.ticket.id), &Render.event/1)})
   end
 
+  @doc """
+  The merge decision as data: the diff, the documents the change was built from, the questions
+  answered and the total cost. The same material the review page draws, because the API is the
+  product surface and the page is one client of it.
+  """
+  def review(conn, _params) do
+    %{ticket: ticket, project: project} = conn.assigns
+
+    case Artifacts.latest(ticket.id, ForgeCore.Workflow.changeset_artifact()) do
+      nil -> {:error, :not_found}
+      changeset -> json(conn, Render.review(ticket, project, changeset))
+    end
+  end
+
   def job(conn, %{"job_id" => job_id}) do
     ticket = conn.assigns.ticket
 

@@ -18,6 +18,7 @@ defmodule ForgeCore.Workflow.Validator do
       names(workflow),
       initial(workflow),
       state_shapes(workflow),
+      entry_actions(workflow),
       artifact_names(workflow),
       outcome_declarations(workflow),
       transitions(workflow),
@@ -91,6 +92,71 @@ defmodule ForgeCore.Workflow.Validator do
     do: [Error.new(Error.join(path, "budget"), "is required on a job state")]
 
   defp state_shape(_path, %State{}), do: []
+
+  # `on_enter` is a state's entry, and a job state's entry already runs a job: two things on one
+  # entry would leave their order undefined. A ticket has one branch and merges once, so at most
+  # one state may merge, and it cannot be where a ticket starts.
+  defp entry_actions(%Workflow{states: states, initial: initial} = workflow) do
+    merging =
+      states
+      |> Enum.filter(fn {_name, state} -> State.merges?(state) end)
+      |> Enum.map(fn {name, _state} -> name end)
+      |> Enum.sort()
+
+    Enum.concat([
+      Enum.flat_map(states, &entry_action_shape/1),
+      merge_count(merging),
+      merge_not_initial(merging, initial),
+      merge_needs_changeset(merging, workflow)
+    ])
+  end
+
+  defp entry_action_shape({name, %State{on_enter: [_ | _]} = state}) do
+    if State.job?(state) do
+      [
+        Error.new(
+          Error.join(Error.join("states", name), "on_enter"),
+          "not allowed on a job state: entering it already runs a job"
+        )
+      ]
+    else
+      []
+    end
+  end
+
+  defp entry_action_shape({_name, %State{}}), do: []
+
+  defp merge_count([_one]), do: []
+  defp merge_count([]), do: []
+
+  defp merge_count(many) do
+    [Error.new("states", "only one state may merge; #{Enum.join(many, ", ")} all do")]
+  end
+
+  defp merge_not_initial(merging, initial) do
+    if initial in merging do
+      [Error.new("initial", "names a state that merges, so a ticket would merge at admission")]
+    else
+      []
+    end
+  end
+
+  defp merge_needs_changeset([], _workflow), do: []
+
+  defp merge_needs_changeset([name | _rest], %Workflow{states: states}) do
+    changeset = Workflow.changeset_artifact()
+
+    if Enum.any?(states, fn {_n, state} -> changeset in state.produces end) do
+      []
+    else
+      [
+        Error.new(
+          Error.join(Error.join("states", name), "on_enter"),
+          "merge needs a state that produces #{changeset}"
+        )
+      ]
+    end
+  end
 
   defp artifact_names(%Workflow{states: states} = workflow) do
     Enum.flat_map(states, fn {name, state} ->

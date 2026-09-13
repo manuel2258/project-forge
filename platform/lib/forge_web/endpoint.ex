@@ -43,6 +43,12 @@ defmodule ForgeWeb.Endpoint do
   plug Plug.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
 
+  # Git's smart HTTP is served here rather than from the router: it authenticates with a per-job
+  # token over HTTP Basic rather than the session or the API bearer, and its request body is a
+  # packfile that must reach `git http-backend` unread. Above the parsers, the session and the
+  # method override, all of which are meaningless to git and are surface we do not want.
+  plug ForgeWeb.Plugs.GitHttp, at: "/git"
+
   plug Plug.Parsers,
     parsers: [:urlencoded, :multipart, :json],
     pass: ["*/*"],

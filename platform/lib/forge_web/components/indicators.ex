@@ -71,6 +71,25 @@ defmodule ForgeWeb.Indicators do
   end
 
   @doc """
+  A pause, as a neutral flag: the node is not spending, and time is what resolves it.
+
+  Deliberately not accent. Accent means a human is being waited on, and nobody is: a spend cap
+  lifts at midnight and a provider window refills on its own. Drawing it loud would put the
+  product's one loud mark on the exhaustion the operator can do least about. See
+  `docs/design/capacity.md`.
+  """
+  attr :reason, :string, required: true, doc: "what is exhausted, e.g. `spend`"
+  attr :until, :string, default: nil, doc: "how long until it lifts"
+
+  def paused(assigns) do
+    ~H"""
+    <span class="font-mono text-[11px] tracking-[.14em] whitespace-nowrap uppercase bg-base-300 px-1.5 py-0.5 text-base-content/70">
+      paused · {@reason}{if @until, do: " #{@until}"}
+    </span>
+    """
+  end
+
+  @doc """
   A job outcome as bare coloured mono.
 
   Colour maps by bucket, never by string match: declared outcomes are project-defined, so an

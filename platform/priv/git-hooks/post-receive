@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Installed by forge (Forge.Git.Hooks) and rewritten on every boot. Do not edit here.
+#
+# The mirror, so one machine is never the only copy. Configured per repository:
+#
+#   forge.mirror      a URL or a path; empty means no mirror
+#   forge.mirrorRefs  a glob, default refs/heads/<default branch>
+#
+# A mirror failure never fails the push: a durability copy that can block work is worse than no
+# copy. See docs/design/git-hosting.md.
+set -uo pipefail
+
+zero=0000000000000000000000000000000000000000
+
+mirror=$(git config --get forge.mirror || true)
+[ -n "$mirror" ] || exit 0
+
+default=$(git config --get forge.defaultBranch || echo main)
+pattern=$(git config --get forge.mirrorRefs || echo "refs/heads/$default")
+
+refs=""
+while read -r _old new ref; do
+  [ "$new" = "$zero" ] && continue
+  # shellcheck disable=SC2254 # the pattern is a glob by design
+  case "$ref" in
+    $pattern) refs="$refs $ref" ;;
+  esac
+done
+[ -n "$refs" ] || exit 0
+
+# shellcheck disable=SC2086 # refs is a deliberate word list
+if git push --quiet "$mirror" $refs 2>&1; then
+  echo "forge: mirrored$refs to $mirror"
+else
+  echo "forge: mirror to $mirror FAILED; the push itself stands" >&2
+fi
+
+exit 0

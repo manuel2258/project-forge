@@ -201,6 +201,11 @@ build cache in practice.
 
 Demo: a ticket from idea to merged, entirely from the queue page, mirrored.
 
+Jobs moved onto the git endpoint here rather than in milestone 3: a job clones and pushes over it
+with its own credential, so the token, the hooks and the branch discipline are load-bearing before
+a second machine exists to depend on them. The checkout lives in `forge_worker`, so the worker
+tier inherits it rather than replacing it. See `design/git-hosting.md`.
+
 ### Milestone 5: dogfood
 
 Two weeks of real tickets on a real project, still on the operator's machine with local

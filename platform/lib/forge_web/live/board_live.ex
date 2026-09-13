@@ -53,7 +53,7 @@ defmodule ForgeWeb.BoardLive do
         }
       end
 
-    assign(socket, boards: boards, now: DateTime.utc_now())
+    assign(socket, boards: boards, paused: Forge.Spend.paused?(), now: DateTime.utc_now())
   end
 
   defp workflow([]), do: nil
@@ -106,7 +106,12 @@ defmodule ForgeWeb.BoardLive do
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash} current_scope={@current_scope} active={:board} measure={nil}>
-      <h1 class="text-2xl font-semibold -tracking-[.025em]">Board</h1>
+      <div class="flex flex-wrap items-center gap-3">
+        <h1 class="text-2xl font-semibold -tracking-[.025em]">Board</h1>
+        <%!-- Neutral, and only here and on the ticket: a pause is resolved by the clock, so it
+              never enters the queue. See docs/design/capacity.md. --%>
+        <.paused :if={@paused} reason="spend" />
+      </div>
       <p :if={@boards == []} class="mt-4 text-sm opacity-60">
         No projects yet. A project appears here once one is registered.
       </p>

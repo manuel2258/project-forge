@@ -31,7 +31,9 @@ defmodule Forge.Jobs.Job do
     belongs_to :worker, Forge.Workers.Worker
     has_many :events, Forge.Events.Event
 
-    timestamps(type: :utc_datetime)
+    # Sub-second, because the order jobs are read back in is the ticket's timeline and two jobs
+    # of one ticket can be created within the same second.
+    timestamps(type: :utc_datetime_usec)
   end
 
   def statuses, do: @statuses

@@ -49,7 +49,8 @@ states:
     budget: { turns: 60, cost: 3.00 }
 
   review_ready: {}                    # human state: no prompt, no job
-  merged: {}                          # terminal: no outgoing transitions
+  merged:
+    on_enter: merge                   # terminal: entering it merges the approved changeset
 
 transitions:
   - { from: refined,      to: planned,      approve: [refinement.md] }
@@ -70,6 +71,13 @@ limits:
 *human state* has no prompt; the ticket waits there, holding no process, until a transition is
 taken by a human or by the engine. `initial` names the state a ticket enters at admission. A
 state with no outgoing transitions is terminal.
+
+**Entry actions.** `on_enter` names what the platform does when a ticket arrives in a state: one
+action, or a list of them. v1 has exactly one, `merge`, which merges the ticket's approved
+changeset into the project's default branch — see `git-hosting.md` for how. It is declared on the
+state rather than on the edge because entering the state is the invariant: two edges into the same
+state would each have to carry it, and a transition a person takes by hand down a third would
+skip it silently. `on_enter` is not allowed on a job state, whose entry already runs a job.
 
 **Inputs** are artifact names. `ticket` is reserved and means the ticket body as a document.
 Every other name must be produced by a state that can run before the consumer (one from
@@ -107,6 +115,12 @@ part of the choice. Approval attaches to those exact versions. Rejection keeps t
 `from` and the operator chooses what happens next, including editing the artifact (which
 creates a new version) and approving that.
 
+**Merging.** A state declaring `on_enter: merge` merges the `changeset` the ticket's approval
+pinned, not whatever the branch head happens to be. The merge is checked before the transition is
+taken, so a conflict refuses the approval and leaves the ticket where it was, with its edges out
+intact; had it moved into a terminal `merged` first, there would be nowhere to go from there. It
+is idempotent, so entering the state twice merges once.
+
 **Budget.** `turns` and `cost` (USD) are per job and required on every job state. Reaching
 either ends the job with `budget_exhausted`. `limits.ticket_cost` is required and caps the sum
 over all jobs of a ticket; reaching it sticks the ticket. Budgets are never modifiable by a
@@ -124,8 +138,8 @@ file do not affect that ticket. Re-pinning is a human action and not in v1.
 ## Validation (rejects the file, never partially runs it)
 
 - `version` is `1`; `initial` names a job state; every state name is unique.
-- A job state has `prompt` and `budget`. A human state is `{}`: no `prompt`, `env`, `inputs`,
-  `produces`, `outcomes` or `budget`.
+- A job state has `prompt` and `budget`. A human state has no `prompt`, `env`, `inputs`,
+  `produces`, `outcomes` or `budget`; `on_enter` is the one key it may carry.
 - State and artifact names are single path segments: letters, digits, `.`, `_`, `-`.
 - Every `inputs` entry is `ticket` or produced by a state that can run before the consumer;
   every `produces` entry other than `changeset` is produced by exactly one state. `ticket` is never produced; `answers.md`
@@ -138,11 +152,14 @@ file do not affect that ticket. Re-pinning is a human action and not in v1.
 - Prompt files exist at the pinned commit.
 - Artifact names are fixed. The prefix form `name/*` is reserved for blob groups and is
   rejected in v1 with a message saying so.
+- Every `on_enter` entry is a known action (`merge` alone in v1); `on_enter` is absent from every
+  job state; at most one state in a workflow merges; `initial` does not merge; and a workflow that
+  merges has a state producing `changeset`.
 - Keys outside this grammar (`blocks`, `use`, `can_spawn`, `fanout`, `spawn_depth`,
   `child_budget`, `experiments`) are errors in v1.
 
 ## Deferred, with the intended shape
 
 Named blocks with fan-out and join, `can_spawn` with `spawn_depth` and `child_budget`,
-experiment states, `on_enter` actions such as merging, and guarded transitions on document
-fields. None of these change the meaning of anything above.
+experiment states, further `on_enter` actions, and guarded transitions on document fields. None of
+these change the meaning of anything above.

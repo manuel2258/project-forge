@@ -13,7 +13,7 @@ defmodule ForgeWeb.TicketLive do
   import ForgeWeb.Indicators
   import ForgeWeb.Operator.Components
 
-  alias Forge.{Artifacts, Events, Jobs, Tickets}
+  alias Forge.{Artifacts, Events, Jobs, Spend, Tickets}
   alias ForgeCore.Workflow
   alias ForgeWeb.{Format, Indicators, Markdown}
   alias ForgeWeb.Operator.Actions
@@ -58,6 +58,9 @@ defmodule ForgeWeb.TicketLive do
         ticket.status in [:active, :stuck] and
           not Workflow.State.job?(Workflow.state(workflow, ticket.state)),
       approve: approve_versions(ticket),
+      reviewable: reviewable?(ticket, workflow),
+      paused: ticket.status == :active and Spend.paused?(),
+      until_midnight: until_midnight(),
       now: DateTime.utc_now()
     )
   end
@@ -139,6 +142,7 @@ defmodule ForgeWeb.TicketLive do
         <div class="flex flex-wrap items-center gap-3">
           <.state name={@ticket.state} topology={topology(@workflow, @ticket.state)} />
           <.status_flag status={@ticket.status} age={Format.ago(@ticket.updated_at, @now)} />
+          <.paused :if={@paused} reason="spend" until={@until_midnight} />
           <span :if={waiting_clause(assigns)} class="text-sm opacity-70">
             {waiting_clause(assigns)}
           </span>
@@ -161,6 +165,14 @@ defmodule ForgeWeb.TicketLive do
             pending={@ticket.pending_transition}
             approve={approve_pairs(@approve, @artifacts)}
           />
+
+          <.link
+            :if={@reviewable}
+            navigate={~p"/tickets/#{@project.name}/#{@ticket.number}/review"}
+            class="mt-2 flex h-11 items-center text-sm text-primary hover:underline"
+          >
+            Read the change first ›
+          </.link>
           <div :if={!@ticket.pending_transition and @questions != []} class="flex flex-col gap-6">
             <.question_card :for={q <- @questions} question={q} ticket_id={@ticket.id} />
           </div>
@@ -353,6 +365,17 @@ defmodule ForgeWeb.TicketLive do
   defp waiting_clause(%{questions: [_ | _]}), do: "A job stopped to ask you something."
   defp waiting_clause(_assigns), do: nil
 
+  # A decision that pins the changeset is a merge decision, which has a page of its own — whether
+  # it is waiting as a pending approval or as the transition out of the state the ticket rests in.
+  defp reviewable?(%{pending_transition: pending}, _workflow) when is_map(pending),
+    do: Workflow.changeset_artifact() in List.wrap(pending["approve"])
+
+  defp reviewable?(ticket, workflow) do
+    workflow
+    |> Workflow.transitions_from(ticket.state)
+    |> Enum.any?(&(Workflow.changeset_artifact() in &1.approve))
+  end
+
   defp approve_pairs(nil, _artifacts), do: []
 
   defp approve_pairs(pending, artifacts) do
@@ -360,6 +383,17 @@ defmodule ForgeWeb.TicketLive do
         entry = Enum.find(artifacts, &(&1.artifact.name == name)),
         entry && entry.latest,
         do: {name, entry.latest.version}
+  end
+
+  # The daily cap is resolved by the clock, so the figure beside it is a countdown, not an age.
+  defp until_midnight do
+    now = DateTime.utc_now()
+    {:ok, midnight} = DateTime.new(Date.add(DateTime.to_date(now), 1), ~T[00:00:00], "Etc/UTC")
+
+    case DateTime.diff(midnight, now, :second) do
+      s when s < 3600 -> "#{div(s, 60)}m"
+      s -> "#{div(s, 3600)}h #{div(rem(s, 3600), 60)}m"
+    end
   end
 
   defp usage_pct(ticket, workflow) do

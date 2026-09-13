@@ -15,7 +15,7 @@ defmodule ForgeCore.Workflow.Parser do
   alias ForgeCore.Workflow.{Budget, Limits, State, Transition, Validator}
 
   @top_keys ~w(version initial states transitions limits)
-  @state_keys ~w(prompt env inputs produces outcomes budget)
+  @state_keys ~w(prompt env inputs produces outcomes budget on_enter)
   @transition_keys ~w(from to when approve max)
   @budget_keys ~w(turns cost)
   @limit_keys ~w(ticket_cost)
@@ -122,6 +122,7 @@ defmodule ForgeCore.Workflow.Parser do
     {produces, e4} = string_list(definition, "produces", path)
     {outcomes, e5} = string_list(definition, "outcomes", path)
     {budget, e6} = budget(definition, path)
+    {on_enter, e7} = on_enter(definition, path)
 
     state = %State{
       name: name,
@@ -130,15 +131,44 @@ defmodule ForgeCore.Workflow.Parser do
       inputs: inputs || [],
       produces: produces || [],
       outcomes: outcomes,
-      budget: budget
+      budget: budget,
+      on_enter: on_enter
     }
 
-    {state, unknown_keys(definition, @state_keys, path) ++ e1 ++ e2 ++ e3 ++ e4 ++ e5 ++ e6}
+    {state, unknown_keys(definition, @state_keys, path) ++ e1 ++ e2 ++ e3 ++ e4 ++ e5 ++ e6 ++ e7}
   end
 
   defp state(name, _definition) do
     {%State{name: name},
      [Error.new(Error.join("states", name), "must be a mapping ({} for a human state)")]}
+  end
+
+  # One action or a list of them. Unknown actions are named here rather than in the validator,
+  # because the struct holds atoms and an unknown one has nowhere to go.
+  defp on_enter(definition, path) do
+    known = Enum.map(State.actions(), &Atom.to_string/1)
+    action_path = Error.join(path, "on_enter")
+
+    case Map.get(definition, "on_enter") do
+      nil ->
+        {[], []}
+
+      value when is_binary(value) ->
+        on_enter_actions([value], known, action_path)
+
+      value when is_list(value) ->
+        on_enter_actions(value, known, action_path)
+
+      _other ->
+        {[], [Error.new(action_path, "must be an action or a list of them")]}
+    end
+  end
+
+  defp on_enter_actions(values, known, path) do
+    case Enum.reject(values, &(is_binary(&1) and &1 in known)) do
+      [] -> {Enum.map(values, &String.to_existing_atom/1), []}
+      bad -> {[], Enum.map(bad, &Error.new(path, "unknown action #{inspect(&1)}"))}
+    end
   end
 
   defp budget(definition, path) do

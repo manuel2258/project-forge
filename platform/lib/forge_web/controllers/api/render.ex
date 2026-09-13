@@ -119,4 +119,60 @@ defmodule ForgeWeb.Api.Render do
       detail: item.detail
     }
   end
+
+  @doc """
+  The merge decision: the diff beside what the platform knows about it. The patch is served whole
+  here — a client that asked for it can decide what to do with it — while the page bounds what it
+  draws.
+  """
+  def review(%Ticket{} = ticket, %Project{} = project, %Version{} = changeset) do
+    repo = Forge.Projects.repo_path(project)
+    head = String.replace_prefix(changeset.blob_uri || "", "git:", "")
+
+    %{
+      ticket: ticket(ticket, project.name),
+      changeset: %{version: changeset.version, commit: head, base: ticket.base_commit},
+      merged: Forge.Merge.merged?(ticket),
+      diff: diff(repo, ticket.base_commit, head),
+      documents: review_documents(ticket),
+      answers: review_answers(ticket),
+      cost_usd: Decimal.to_string(ticket.cost_usd)
+    }
+  end
+
+  defp diff(repo, base, head) do
+    with {:ok, stat} <- Forge.Git.diff_stat(repo, base, head),
+         {:ok, patch} <- Forge.Git.diff(repo, base, head) do
+      files =
+        Enum.map(stat, fn {path, added, removed} ->
+          %{path: path, added: added, removed: removed}
+        end)
+
+      %{files: files, patch: patch}
+    else
+      {:error, reason} -> %{error: inspect(reason)}
+    end
+  end
+
+  defp review_documents(%Ticket{} = ticket) do
+    for artifact <- Forge.Artifacts.list(ticket.id),
+        artifact.kind == :document,
+        version = Forge.Artifacts.latest(ticket.id, artifact.name),
+        version != nil do
+      %{name: artifact.name, version: version.version, content: version.content}
+    end
+  end
+
+  defp review_answers(%Ticket{} = ticket) do
+    for entry <- Forge.Artifacts.answered(ticket.id) do
+      %{
+        key: entry.question.key,
+        text: entry.question.text,
+        choice: entry.answer.choice,
+        answer_text: entry.answer.text,
+        artifact: entry.artifact,
+        version: entry.version
+      }
+    end
+  end
 end

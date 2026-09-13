@@ -4,7 +4,7 @@ A self-hosted platform that moves software tickets through a per-repository, sta
 
 The concept is described in full in [docs/vision.md](docs/vision.md). Settled decisions, open questions, required measurements and prior-art findings are recorded alongside it in `docs/`. The proof-of-concept plan is [docs/poc-plan.md](docs/poc-plan.md), and the design notes it calls for are in [docs/design/](docs/design/).
 
-**Status:** milestone 1 of the [PoC plan](docs/poc-plan.md) is complete and milestone 2 is in progress. The stack is Elixir, with Phoenix and LiveView for the platform and a standalone Elixir release for the worker; further PoC-scoped choices are listed in [docs/decisions.md](docs/decisions.md). The PoC runs entirely on the operator's machine and independent of any particular project; deployment, cloud workers and the phone are one closing step after the last milestone.
+**Status:** milestones 1, 2 and 4 of the [PoC plan](docs/poc-plan.md) are complete. Milestone 3, the separate worker tier, is not: jobs still run on the platform's own machine, though they now reach their repository over the platform's git endpoint exactly as a remote worker will. The stack is Elixir, with Phoenix and LiveView for the platform and a standalone Elixir release for the worker; further PoC-scoped choices are listed in [docs/decisions.md](docs/decisions.md). The PoC runs entirely on the operator's machine and independent of any particular project; deployment, cloud workers and the phone are one closing step after the last milestone.
 
 ## Layout
 
@@ -47,11 +47,17 @@ mix forge.token.list you@example.com              # names, not tokens
 mix forge.token.revoke you@example.com laptop
 ```
 
+Repositories are served over smart HTTP at `/git/<project>.git` with a short-lived per-job token
+as the password; hooks enforce one branch per ticket and mirror the default branch. See
+[docs/design/git-hosting.md](docs/design/git-hosting.md).
+
 And as Mix tasks that write rows:
 
 ```
 mix forge.user.add you@example.com 'a long password'
 mix forge.project.add game /srv/git/game.git      # bare repo; push your project to it
+mix forge.project.mirror game /srv/git/game-mirror.git   # one machine is never the only copy
+mix forge.git.token game --ticket 1               # a clone URL with a short-lived credential
 mix forge.admit game "Persist the high score table" --body-file ticket.md
 mix forge.queue                                   # questions, approvals, stuck, review
 mix forge.show game#1                             # state, jobs, artifacts, events

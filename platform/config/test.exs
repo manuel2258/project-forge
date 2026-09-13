@@ -16,12 +16,14 @@ config :forge, Forge.Repo,
   pool: Ecto.Adapters.SQL.Sandbox,
   pool_size: System.schedulers_online() * 2
 
-# We don't run a server during test. If one is required,
-# you can enable the server option below.
+# The server runs during test, because a job now reaches its repository over the platform's own
+# git endpoint: a real `git clone` against a real socket is the only honest proof of it. Tests
+# that run a job are `async: false`, and `Forge.DataCase.setup_sandbox/1` shares the connection
+# for those, so the request process sees the test's data.
 config :forge, ForgeWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 4002],
   secret_key_base: "r9SkKtYQxa5nfNBAIjrrB0CK9osMfY223Mzy75zOxWYusuvAaHxPslIeH3VkiV8z",
-  server: false
+  server: true
 
 # Print only warnings and errors during test
 config :logger, level: :warning

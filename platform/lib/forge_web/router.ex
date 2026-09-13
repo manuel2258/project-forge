@@ -33,6 +33,7 @@ defmodule ForgeWeb.Router do
       live "/", QueueLive
       live "/board", BoardLive
       live "/tickets/:project/:number", TicketLive
+      live "/tickets/:project/:number/review", ReviewLive
       live "/tickets/:project/:number/jobs/:job_id", JobLive
     end
   end
@@ -48,6 +49,7 @@ defmodule ForgeWeb.Router do
     post "/projects/:project/tickets", TicketController, :create
     get "/tickets/:project/:number", TicketController, :show
     get "/tickets/:project/:number/events", TicketController, :events
+    get "/tickets/:project/:number/review", TicketController, :review
     get "/tickets/:project/:number/jobs/:job_id", TicketController, :job
     get "/tickets/:project/:number/artifacts/:name", TicketController, :artifact
     post "/tickets/:project/:number/artifacts/:name", TicketController, :edit

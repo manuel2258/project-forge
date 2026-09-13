@@ -61,6 +61,15 @@ defmodule ForgeCore.Workflow do
   @spec terminal?(t(), state_name()) :: boolean()
   def terminal?(workflow, name), do: transitions_from(workflow, name) == []
 
+  @doc "Whether entering `name` merges the ticket's approved changeset. See `State`."
+  @spec merges_on_enter?(t(), state_name()) :: boolean()
+  def merges_on_enter?(workflow, name) do
+    case state(workflow, name) do
+      nil -> false
+      state -> State.merges?(state)
+    end
+  end
+
   @doc "Names of the states that produce `artifact`, sorted."
   @spec producers(t(), artifact_name()) :: [state_name()]
   def producers(%__MODULE__{states: states}, artifact) do

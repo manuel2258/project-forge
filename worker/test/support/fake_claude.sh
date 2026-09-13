@@ -17,6 +17,14 @@ case "${FAKE_SCENARIO:-success}" in
   no_start) exit 1 ;;
 esac
 
+# An agent that actually changes the repository. The harness runs in the checkout, so this is
+# what a real one does: ordinary commits on the current branch, which the platform then pushes.
+if [ -n "${FAKE_COMMIT-}" ]; then
+  printf '%s\n' "$FAKE_COMMIT" > "$FAKE_COMMIT"
+  git add "$FAKE_COMMIT" >&2
+  git commit --quiet -m "add $FAKE_COMMIT" >&2
+fi
+
 emit '{"type":"system","subtype":"init","session_id":"sess-42","model":"fake-model","tools":["Read","Edit"]}'
 emit '{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"Reading the plan."},{"type":"tool_use","id":"t1","name":"Read","input":{"path":"plan.md"}}]}}'
 emit '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"contents of plan.md"}]}}'
@@ -36,6 +44,10 @@ case "${FAKE_SCENARIO:-success}" in
     emit "$result_success" ;;
   max_turns)
     emit '{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":40,"duration_ms":99,"total_cost_usd":1.5,"session_id":"sess-42"}'
+    exit 1 ;;
+  max_budget)
+    # A runaway: it spends up to whatever budget it was handed and the harness stops it there.
+    emit '{"type":"result","subtype":"error_max_budget_usd","is_error":true,"num_turns":7,"duration_ms":99,"total_cost_usd":30.0,"session_id":"sess-42"}'
     exit 1 ;;
   crash)
     emit 'this is not json'

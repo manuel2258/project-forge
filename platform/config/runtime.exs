@@ -65,6 +65,13 @@ if public = System.get_env("FORGE_VAPID_PUBLIC_KEY") do
     vapid_subject: System.get_env("FORGE_VAPID_SUBJECT") || "mailto:operator@localhost"
 end
 
+if cap = System.get_env("FORGE_DAILY_COST_USD") do
+  case Float.parse(cap) do
+    {value, ""} when value > 0 -> config :forge, Forge.Spend, daily_cost_usd: value
+    _ -> raise "FORGE_DAILY_COST_USD must be a positive number, got #{inspect(cap)}"
+  end
+end
+
 if hour = System.get_env("FORGE_DIGEST_HOUR_UTC") do
   case Integer.parse(hour) do
     {h, ""} when h in 0..23 -> config :forge, Forge.Push, digest_hour_utc: h
@@ -77,6 +84,9 @@ if config_env() != :test do
     data_dir: System.get_env("FORGE_DATA_DIR") || "tmp/forge",
     repos_dir: System.get_env("FORGE_REPOS_DIR"),
     nix_env: System.get_env("FORGE_NIX_ENV") in ["1", "true"],
+    # Set this where something in front of the platform rewrites the host, so a job's clone URL
+    # is the one a client outside the node would use. Derived from the endpoint otherwise.
+    git_base_url: System.get_env("FORGE_GIT_BASE_URL"),
     harness_opts: harness_opts
 end
 

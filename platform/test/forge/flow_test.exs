@@ -305,7 +305,11 @@ defmodule Forge.FlowTest do
     start_supervised!(Forge.Jobs.Scheduler)
 
     assert Forge.Jobs.Scheduler.tick() == 1
-    wait_until(fn -> Jobs.get!(only_job(ticket).id).status == :finished end)
+
+    # Recording a job's result and deciding what follows it are deliberately two transactions,
+    # so a finished job is visible before the engine has moved the ticket. Waiting on the
+    # decision rather than on the status is waiting for the thing this asserts.
+    wait_until(fn -> Tickets.get!(ticket.id).pending_transition != nil end)
     assert Tickets.get!(ticket.id).pending_transition["to"] == "planned"
 
     # a runner that dies leaves no job running: the scheduler fails it and the engine decides
@@ -320,8 +324,6 @@ defmodule Forge.FlowTest do
     assert Jobs.get!(job2.id).outcome == :error
     assert Tickets.get!(ticket2.id).status == :stuck
   end
-
-  defp only_job(ticket), do: hd(Jobs.for_ticket(ticket.id))
 
   defp wait_until(fun, attempts \\ 100) do
     cond do
@@ -428,38 +430,29 @@ defmodule Forge.FlowTest do
     refute File.exists?(Path.join([Jobs.data_dir(), "jobs", job.id]))
   end
 
-  # The worktree is only removed once a job finishes, so a node that died mid-job leaves it
+  # The checkout is only removed once a job finishes, so a node that died mid-job leaves it
   # behind with whatever the harness had not committed. `blocking` leaves the job waiting, so
-  # the worktree is still there to inspect after the run.
-  test "a cold start discards uncommitted work the dead run left in the worktree", %{
+  # the checkout is still there to inspect after the run.
+  test "a cold start discards uncommitted work the dead run left in the checkout", %{
     project: project,
-    user: user,
-    repo: repo
+    user: user
   } do
     {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
     job = only_pending(ticket)
-    worktree = Path.join([Jobs.data_dir(), "worktrees", job.id])
-    :ok = Forge.Git.worktree_add(repo, worktree, ticket.branch)
-    File.write!(Path.join(worktree, "half-done.txt"), "from the run that was killed")
+    checkout = seed_checkout(project, ticket, job, "from the run that was killed")
 
     scenario("blocking", "refinement.md")
     {:ok, job} = Jobs.run(job)
 
     assert job.status == :waiting
-    assert File.dir?(worktree)
-    refute File.exists?(Path.join(worktree, "half-done.txt"))
+    assert File.dir?(checkout)
+    refute File.exists?(Path.join(checkout, "half-done.txt"))
   end
 
-  test "a resume keeps the work in progress in its worktree", %{
-    project: project,
-    user: user,
-    repo: repo
-  } do
+  test "a resume keeps the work in progress in its checkout", %{project: project, user: user} do
     {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
     job = only_pending(ticket)
-    worktree = Path.join([Jobs.data_dir(), "worktrees", job.id])
-    :ok = Forge.Git.worktree_add(repo, worktree, ticket.branch)
-    File.write!(Path.join(worktree, "half-done.txt"), "from the attempt this one resumes")
+    checkout = seed_checkout(project, ticket, job, "from the attempt this one resumes")
 
     {:ok, job} = Repo.update(Job.progress_changeset(job, %{harness_session_id: "sess-42"}))
 
@@ -467,7 +460,24 @@ defmodule Forge.FlowTest do
     {:ok, job} = Jobs.run(job)
 
     assert job.status == :waiting
-    assert File.read!(Path.join(worktree, "half-done.txt")) =~ "resumes"
+    assert File.read!(Path.join(checkout, "half-done.txt")) =~ "resumes"
+  end
+
+  # What a killed run leaves behind: a clone of the ticket branch with an uncommitted file in it.
+  defp seed_checkout(project, ticket, job, content) do
+    dir = Path.join([Jobs.data_dir(), "checkouts", job.id])
+    {:ok, token, _row} = Forge.Git.Tokens.issue_for_job(job, ticket, project)
+
+    :ok =
+      ForgeWorker.Checkout.ensure(
+        dir: dir,
+        url: Forge.Git.Url.for(project),
+        branch: ticket.branch,
+        token: token
+      )
+
+    File.write!(Path.join(dir, "half-done.txt"), content)
+    dir
   end
 
   # A ticket pins its workflow, and the validator's rules move between milestones, so a

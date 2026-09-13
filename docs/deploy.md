@@ -63,19 +63,40 @@ their sessions. Projects registered through the API get their repository under
 `/var/lib/forge/repos/<name>.git`; only the command line may point a project at another path.
 
 Push your project into the bare repository, with `.forge/workflow.yml` and the prompts under
-`.forge/agents/` on the default branch:
+`.forge/agents/` on the default branch. The repository is served over the platform's own smart
+HTTP endpoint as well as over SSH to the host; both reach the same bare repository:
 
 ```
 git remote add forge forge@forge.example.org:/var/lib/forge/repos/game.git
 git push forge main
 ```
 
+The default branch is written by SSH and by the platform's merge only. A credential handed out
+for the HTTP endpoint is scoped to one ticket branch, and the repository's own `pre-receive` hook
+refuses everything else — including a credential trying to move the default branch. A short-lived
+one for a clone or a look is printed by:
+
+```
+forge-admin eval 'Forge.Release.git_token("game")'          # read only
+forge-admin eval 'Forge.Release.git_token("game", 12)'      # and may write ticket/12
+```
+
+Point the repository at a mirror so the host is never the only copy of the project. The default
+branch is what mirrors; `--refs` widens it:
+
+```
+forge-admin eval 'Forge.Release.set_mirror("game", "git@github.com:you/game.git")'
+```
+
+The mirror is pushed by a `post-receive` hook and never fails a push: a failure is reported to
+whoever pushed and logged, and the push stands. See `design/git-hosting.md`.
+
 Then log in at `https://forge.example.org`, admit a ticket through the API, and watch the
 queue. Everything the Mix tasks do in development is available through `/api/v1`.
 
 ## What the module sets
 
-- User `forge` with home `/var/lib/forge`; repositories under `repos/`, worktrees and job
+- User `forge` with home `/var/lib/forge`; repositories under `repos/`, job checkouts and job
   directories under `data/`.
 - Postgres locally, reached over its Unix socket with peer authentication.
 - `git`, `nix` and Claude Code on the service PATH; `FORGE_CLAUDE_EXECUTABLE` points at the

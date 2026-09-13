@@ -31,6 +31,9 @@ It lints the shell (shellcheck, shfmt) and runs `mix check` in every project: co
 warnings as errors, format check, Credo strict, tests. A commit that does not pass the gate
 is not made.
 
+`platform/priv/git-hooks/` holds the generated git hooks; the gate lints them with the rest of the
+shell.
+
 `measure/` holds the measurement harness (`bin/measure`, `docs/design/measurement-harness.md`).
 The gate lints it but cannot run it: it needs btrfs, systemd and Nix on the operator's
 machine. `bin/measure selftest` is what stands in for a test run.

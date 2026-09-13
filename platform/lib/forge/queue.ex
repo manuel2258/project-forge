@@ -57,7 +57,11 @@ defmodule Forge.Queue do
         ticket: ticket,
         since: ticket.updated_at,
         question: nil,
-        detail: %{state: ticket.state, transitions: transitions_from(ticket)}
+        detail: %{
+          state: ticket.state,
+          transitions: transitions_from(ticket),
+          reviewable: reviewable?(ticket)
+        }
       }
     ]
   end
@@ -84,7 +88,11 @@ defmodule Forge.Queue do
           ticket: ticket,
           since: ticket.updated_at,
           question: nil,
-          detail: %{state: ticket.state, transitions: transitions_from(ticket)}
+          detail: %{
+            state: ticket.state,
+            transitions: transitions_from(ticket),
+            reviewable: reviewable?(ticket)
+          }
         }
       ]
     else
@@ -106,6 +114,21 @@ defmodule Forge.Queue do
 
       {:error, errors} ->
         unparseable(ticket, errors, [])
+    end
+  end
+
+  # Whether a decision from here pins the changeset — that is, whether it is a merge decision, and
+  # so whether the operator should be offered the diff before taking it. Held on the item rather
+  # than recomputed by the page, so the API serves the same fact.
+  defp reviewable?(%Ticket{} = ticket) do
+    case Tickets.parsed_workflow(ticket) do
+      {:ok, workflow} ->
+        workflow
+        |> Workflow.transitions_from(ticket.state)
+        |> Enum.any?(&(Workflow.changeset_artifact() in &1.approve))
+
+      {:error, errors} ->
+        unparseable(ticket, errors, false)
     end
   end
 

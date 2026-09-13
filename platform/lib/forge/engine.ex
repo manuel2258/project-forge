@@ -7,7 +7,7 @@ defmodule Forge.Engine do
   import Ecto.Query, only: [from: 2]
 
   alias Ecto.Multi
-  alias Forge.{Artifacts, Events, Jobs, Repo, Tickets}
+  alias Forge.{Artifacts, Events, Jobs, Merge, Repo, Tickets}
   alias Forge.Events.Event
   alias Forge.Jobs.Job
   alias Forge.Tickets.Ticket
@@ -22,10 +22,21 @@ defmodule Forge.Engine do
     |> put_after_job(ticket, job, outcome)
     |> Repo.transaction()
     |> case do
-      {:ok, changes} -> {:ok, Map.get(changes, :ticket, ticket)}
-      {:error, step, reason, _} -> {:error, {step, reason}}
+      {:ok, changes} ->
+        moved = Map.get(changes, :ticket, ticket)
+        {:ok, entered(ticket, moved)}
+
+      {:error, step, reason, _} ->
+        {:error, {step, reason}}
     end
   end
+
+  # A transition the engine took by itself may land in a state with an entry action, exactly as
+  # one a person approved may.
+  defp entered(%Ticket{state: before}, %Ticket{state: before} = ticket), do: ticket
+
+  defp entered(_before, %Ticket{} = ticket),
+    do: enter(ticket, Tickets.workflow(ticket), ticket.state, nil)
 
   @doc "Sticks a ticket with a reason, in its own transaction."
   @spec stick(Ticket.t(), String.t()) :: {:ok, Ticket.t()} | {:error, term()}
@@ -231,6 +242,38 @@ defmodule Forge.Engine do
 
   # Records approvals (or rejections) for the transition's artifacts, then takes it if approved.
   defp take(ticket, workflow, %Transition{} = transition, outcome, user_id, decision, comment) do
+    with :ok <- mergeable(ticket, workflow, transition, decision) do
+      commit_take(ticket, workflow, transition, outcome, user_id, decision, comment)
+    end
+  end
+
+  # A git side effect can live neither inside the transaction, which may roll back, nor simply
+  # after it: a conflict would then leave the ticket reading `merged` while the default branch
+  # never moved, and a terminal state has no edges to get out by. So the merge is checked first,
+  # with no side effect, and the approval is refused while the ticket still has a way forward.
+  defp mergeable(ticket, workflow, %Transition{to: to}, :approved) do
+    if Workflow.merges_on_enter?(workflow, to) do
+      case Merge.check(ticket) do
+        :ok -> :ok
+        {:conflict, paths} -> {:error, {:merge_conflict, paths}}
+        {:error, reason} -> {:error, {:merge_impossible, reason}}
+      end
+    else
+      :ok
+    end
+  end
+
+  defp mergeable(_ticket, _workflow, _transition, _decision), do: :ok
+
+  defp commit_take(
+         ticket,
+         workflow,
+         %Transition{} = transition,
+         outcome,
+         user_id,
+         decision,
+         comment
+       ) do
     transition_map = %{"from" => transition.from, "to" => transition.to}
 
     multi =
@@ -274,8 +317,69 @@ defmodule Forge.Engine do
     multi
     |> Repo.transaction()
     |> case do
-      {:ok, changes} -> {:ok, Map.get(changes, :ticket, ticket)}
-      {:error, _step, reason, _} -> {:error, reason}
+      {:ok, changes} ->
+        moved = Map.get(changes, :ticket, ticket)
+        {:ok, run_entry_actions(moved, workflow, transition, decision, user_id)}
+
+      {:error, _step, reason, _} ->
+        {:error, reason}
     end
   end
+
+  # -- entry actions ---------------------------------------------------------------------------
+
+  @doc """
+  Runs what entering `state_name` does, after the transition into it has been recorded.
+
+  `merge` is the only action in v1. It was checked before the transition was taken, so a failure
+  here is a race — something else moved the default branch in between — and the ticket is stuck
+  with the reason rather than left claiming to be merged. `Forge.Merge.perform/2` is idempotent,
+  so retrying is always safe.
+  """
+  @spec enter(Ticket.t(), Workflow.t(), String.t(), String.t() | nil) :: Ticket.t()
+  def enter(%Ticket{} = ticket, %Workflow{} = workflow, state_name, user_id) do
+    if Workflow.merges_on_enter?(workflow, state_name) do
+      merge_now(ticket, user_id)
+    else
+      ticket
+    end
+  end
+
+  defp run_entry_actions(ticket, workflow, %Transition{to: to}, :approved, user_id),
+    do: enter(ticket, workflow, to, user_id)
+
+  defp run_entry_actions(ticket, _workflow, _transition, _decision, _user_id), do: ticket
+
+  defp merge_now(ticket, user_id) do
+    user = user_id && Repo.get(Forge.Accounts.User, user_id)
+
+    case Merge.perform(ticket, user) do
+      {:ok, %{sha: sha, already: already}} ->
+        Events.append("ticket.merged", actor(user_id), %{
+          ticket_id: ticket.id,
+          payload: %{"sha" => sha, "already" => already}
+        })
+
+        ticket
+
+      other ->
+        stick_after_merge(ticket, other)
+    end
+  end
+
+  defp stick_after_merge(ticket, outcome) do
+    reason =
+      case outcome do
+        {:conflict, paths} -> "merge conflict in #{Enum.join(paths, ", ")}"
+        {:error, reason} -> "could not merge: #{inspect(reason)}"
+      end
+
+    case stick(ticket, reason) do
+      {:ok, stuck} -> stuck
+      {:error, _reason} -> ticket
+    end
+  end
+
+  defp actor(nil), do: :system
+  defp actor(user_id), do: {:user, user_id}
 end

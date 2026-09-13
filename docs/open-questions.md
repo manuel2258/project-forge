@@ -41,6 +41,35 @@ on a subscription credential.
   questions are not a two-way choice with an obvious default. This is the gap to close before
   the question above can be answered.
 
+### Spend caps, and one runaway job stopped
+
+2026-09-13, milestone 4. The definition of usable asks for a cap to have stopped at least one
+runaway job in testing. It has, though so far in the test suite rather than on a real ticket.
+
+- **The mechanism is the harness's, not a meter of ours.** The provider streams no per-turn cost,
+  so the platform has nothing to watch a running job against. What it does instead is hand the
+  harness a smaller budget: the effective cost budget of a job is the least of what its state
+  declared, what the ticket allowance has left and what the daily cap has left. A job on a ticket
+  with $0.10 left is started with `--max-budget-usd 0.10` against a state that declared $0.50, the
+  harness stops itself at that figure, and the ticket sticks. The wall clock is the platform's own
+  coarse stop beside it.
+- **Two caps, two treatments**, per `capacity.md`: a ticket allowance sticks the ticket into the
+  queue, a daily cap pauses the node and puts nothing in the queue. Both are asked in
+  `Forge.Jobs.start/1`, the one place every billed invocation passes.
+- **What is still unobserved:** whether the harness honours `--max-budget-usd` as precisely as the
+  test's stand-in does, and what a real overshoot costs. That is dogfooding's to record.
+
+### Branch granularity, mechanically enforced
+
+2026-09-13, milestone 4. The question is still open — it needs conflicts and rebases from real
+tickets — but the discipline is no longer a convention. A job reaches its repository over the
+platform's own git endpoint with a credential scoped to exactly one ref, and the repository's
+`pre-receive` hook refuses anything else: another ticket's branch, a branch that is not
+`ticket/<n>`, a deletion, or the default branch, which only the platform's own merge may write.
+A rewrite of a ticket's own branch is allowed and noted, because a job squashes; what an approval
+attaches to is the changeset's sha, which is pinned under `refs/forge/approved/<n>` so a rewrite
+cannot lose it.
+
 ### Provider-reported capacity
 
 2026-09-12, read from the job transcripts the same node produced: 87 `rate_limit_event` messages

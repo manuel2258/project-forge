@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Installed by forge (Forge.Git.Hooks) and rewritten on every boot. Do not edit here.
+#
+# The branch discipline, enforced mechanically rather than by convention. See
+# docs/design/git-hosting.md.
+#
+#   FORGE_ALLOWED_REF  the one ref this credential may write, set per request by the CGI wrapper
+#   FORGE_INTERNAL     set to 1 only by the platform's own merge, never by anything on the network
+set -euo pipefail
+
+zero=0000000000000000000000000000000000000000
+default=$(git config --get forge.defaultBranch || echo main)
+allowed=${FORGE_ALLOWED_REF:-}
+internal=${FORGE_INTERNAL:-}
+
+deny() {
+  echo "forge: $1" >&2
+  exit 1
+}
+
+while read -r old new ref; do
+  [ "$new" = "$zero" ] && deny "refs are never deleted here ($ref)"
+
+  case "$ref" in
+    refs/heads/*) : ;;
+    *) deny "only branches may be written, not $ref" ;;
+  esac
+
+  if [ "$ref" = "refs/heads/$default" ]; then
+    [ "$internal" = "1" ] || deny "$default is written by the platform's merge only"
+    if [ "$old" != "$zero" ] && ! git merge-base --is-ancestor "$old" "$new"; then
+      deny "$default must be fast-forward"
+    fi
+    continue
+  fi
+
+  if [ -n "$allowed" ]; then
+    [ "$ref" = "$allowed" ] || deny "this credential may write $allowed only, not $ref"
+  else
+    [ "$internal" = "1" ] || deny "this credential may not write $ref"
+  fi
+
+  case "$ref" in
+    refs/heads/ticket/[0-9]*) : ;;
+    *) deny "branches are ticket/<number>; $ref is not" ;;
+  esac
+
+  # A job may rewrite its own branch: it squashes, and a resume may amend. The record that an
+  # approval attaches to is the changeset version's sha, not the ref, so a rewrite loses nothing
+  # -- but it is never silent.
+  if [ "$old" != "$zero" ] && ! git merge-base --is-ancestor "$old" "$new"; then
+    echo "forge: note: $ref was rewritten (non-fast-forward)" >&2
+  fi
+done

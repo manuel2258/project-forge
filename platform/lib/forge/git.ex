@@ -86,9 +86,48 @@ defmodule Forge.Git do
     end
   end
 
-  @doc "The diff from `base` to `head`, as a patch."
-  @spec diff(repo(), sha(), String.t()) :: {:ok, String.t()} | {:error, term()}
-  def diff(repo, base, head), do: run(repo, ["diff", "#{base}..#{head}"])
+  @doc "The diff from `base` to `head`, as a patch. `paths` narrows it to those files."
+  @spec diff(repo(), sha(), String.t(), [String.t()]) :: {:ok, String.t()} | {:error, term()}
+  def diff(repo, base, head, paths \\ []) do
+    args = ["diff", "#{base}..#{head}"]
+    run(repo, if(paths == [], do: args, else: args ++ ["--"] ++ paths))
+  end
+
+  @doc """
+  Per-file line counts from `base` to `head`: `{path, added, removed}`, binary files as `:binary`.
+  """
+  @spec diff_stat(repo(), sha(), String.t()) ::
+          {:ok, [{String.t(), non_neg_integer() | :binary, non_neg_integer() | :binary}]}
+          | {:error, term()}
+  def diff_stat(repo, base, head) do
+    with {:ok, out} <- run(repo, ["diff", "--numstat", "#{base}..#{head}"]) do
+      {:ok, out |> String.split("\n", trim: true) |> Enum.map(&numstat_line/1)}
+    end
+  end
+
+  defp numstat_line(line) do
+    case String.split(line, "\t", parts: 3) do
+      [added, removed, path] -> {path, count(added), count(removed)}
+      _other -> {line, :binary, :binary}
+    end
+  end
+
+  defp count("-"), do: :binary
+  defp count(value), do: String.to_integer(value)
+
+  @doc "Whether `ancestor` is reachable from `descendant`."
+  @spec ancestor?(repo(), String.t(), String.t()) :: boolean()
+  def ancestor?(repo, ancestor, descendant),
+    do: match?({:ok, _}, run(repo, ["merge-base", "--is-ancestor", ancestor, descendant]))
+
+  @doc """
+  Points `ref` at `sha`, creating it. Used for `refs/forge/approved/<n>`, which keeps an approved
+  commit reachable after the ticket branch is rewritten.
+  """
+  @spec pin(repo(), String.t(), sha()) :: :ok | {:error, term()}
+  def pin(repo, ref, sha) do
+    with {:ok, _out} <- run(repo, ["update-ref", ref, sha]), do: :ok
+  end
 
   @doc "Commit shas on `head` since `base`, newest first."
   @spec commits_since(repo(), sha(), String.t()) :: {:ok, [sha()]} | {:error, term()}
@@ -98,14 +137,20 @@ defmodule Forge.Git do
     end
   end
 
-  @doc "Runs git with `args` in `dir`. Public so contexts can do the odd extra call."
-  @spec run(String.t(), [String.t()]) :: {:ok, String.t()} | {:error, {integer(), String.t()}}
-  def run(dir, args) do
-    case System.cmd("git", args,
-           cd: dir,
-           stderr_to_stdout: true,
-           env: [{"GIT_TERMINAL_PROMPT", "0"}]
-         ) do
+  @doc """
+  Runs git with `args` in `dir`. Public so contexts can do the odd extra call.
+
+  Options: `:env` adds variables to the child's environment, and `:stderr` set to `:separate`
+  keeps stderr out of the returned output — a hook's messages arrive there, and a caller that
+  parses stdout must not have them mixed in.
+  """
+  @spec run(String.t(), [String.t()], keyword()) ::
+          {:ok, String.t()} | {:error, {integer(), String.t()}}
+  def run(dir, args, opts \\ []) do
+    env = [{"GIT_TERMINAL_PROMPT", "0"} | Keyword.get(opts, :env, [])]
+    separate? = Keyword.get(opts, :stderr) == :separate
+
+    case System.cmd("git", args, cd: dir, stderr_to_stdout: not separate?, env: env) do
       {out, 0} -> {:ok, out}
       {out, code} -> {:error, {code, out}}
     end

@@ -318,6 +318,76 @@ defmodule ForgeCore.Workflow.ParserTest do
     end
   end
 
+  describe "on_enter" do
+    test "the example's terminal state merges", %{yaml: yaml} do
+      assert {:ok, workflow} = Parser.parse(yaml)
+      assert workflow.states["merged"].on_enter == [:merge]
+      assert State.merges?(workflow.states["merged"])
+      assert Workflow.merges_on_enter?(workflow, "merged")
+      refute Workflow.merges_on_enter?(workflow, "review_ready")
+      assert workflow.states["review_ready"].on_enter == []
+    end
+
+    test "a list is accepted as well as a single action", %{map: map} do
+      map = put_in(map, ["states", "merged", "on_enter"], ["merge"])
+      assert {:ok, workflow} = Parser.from_map(map)
+      assert workflow.states["merged"].on_enter == [:merge]
+    end
+
+    test "an unknown action is an error", %{map: map} do
+      map = put_in(map, ["states", "merged", "on_enter"], ["deploy"])
+      assert messages(map) == [{"states.merged.on_enter", ~s|unknown action "deploy"|}]
+    end
+
+    test "anything but an action or a list of them is an error", %{map: map} do
+      map = put_in(map, ["states", "merged", "on_enter"], %{"do" => "merge"})
+
+      assert {"states.merged.on_enter", "must be an action or a list of them"} in messages(map)
+    end
+
+    # Entering a job state already runs a job; two things on one entry would leave their order
+    # undefined, so the grammar refuses rather than picking one.
+    test "a job state may not carry one", %{map: map} do
+      map = put_in(map, ["states", "verified", "on_enter"], "merge")
+
+      assert {"states.verified.on_enter",
+              "not allowed on a job state: entering it already runs a job"} in messages(map)
+    end
+
+    test "only one state may merge", %{map: map} do
+      map = put_in(map, ["states", "review_ready"], %{"on_enter" => "merge"})
+
+      assert {"states", "only one state may merge; merged, review_ready all do"} in messages(map)
+    end
+
+    test "the initial state may not merge", %{map: map} do
+      map =
+        map
+        |> put_in(["states", "merged"], %{})
+        |> put_in(["initial"], "review_ready")
+        |> put_in(["states", "review_ready"], %{"on_enter" => "merge"})
+
+      assert {"initial", "names a state that merges, so a ticket would merge at admission"} in messages(
+               map
+             )
+    end
+
+    test "merging needs a state that produces the changeset", %{map: map} do
+      map =
+        map
+        |> put_in(["states", "implemented", "produces"], ["implementation.md"])
+        |> put_in(["states", "verified", "inputs"], ["plan.md", "implementation.md"])
+        |> update_in(["transitions"], fn transitions ->
+          Enum.reject(transitions, &(&1["to"] == "merged" and &1["approve"] == ["changeset"]))
+        end)
+        |> Map.update!("transitions", &(&1 ++ [%{"from" => "review_ready", "to" => "merged"}]))
+
+      assert {"states.merged.on_enter", "merge needs a state that produces changeset"} in messages(
+               map
+             )
+    end
+  end
+
   defp errors(map) do
     {:error, errors} = Parser.from_map(map)
     errors

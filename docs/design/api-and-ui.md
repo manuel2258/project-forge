@@ -33,6 +33,7 @@ and audited like any other.
 | `POST /projects/:name/tickets` | Admit `{title, body}` |
 | `GET /tickets/:project/:number` | Ticket with jobs, artifacts, open questions, pending transition |
 | `GET /tickets/:project/:number/events` | The event timeline |
+| `GET /tickets/:project/:number/review` | The merge decision: diff, documents, answers, cost |
 | `GET /tickets/:project/:number/jobs/:job_id` | Job with its spec and harness events |
 | `GET /tickets/:project/:number/artifacts/:name[?version=n]` | A version with content |
 | `POST /tickets/:project/:number/artifacts/:name` | New version `{content}` |
@@ -52,6 +53,9 @@ flow; public registration is disabled, users are created from the command line.
   field; approvals have approve and reject; stuck and review items list the transitions.
 - `/tickets/:project/:number` — timeline: state, cost, pending decision, open questions,
   jobs, artifacts with the latest document rendered, events.
+- `/tickets/:project/:number/review` — the merge decision: the diff, the documents the change was
+  built from, the questions answered, the total cost, and the approval that pins the changeset by
+  version. Reached by a link from the queue's approval item and from the ticket page.
 - `/tickets/:project/:number/jobs/:id` — the pinned manifest and the harness events.
 - `/board` — tickets by state per project.
 
@@ -82,4 +86,6 @@ questions are shown as cards above the rendered text, each with its options as b
 
 ## Not in this slice
 
-The merge approval view (milestone 4), presentations, offline compose.
+Presentations, offline compose. The merge approval view arrived with milestone 4; the git
+endpoint it reviews is documented in `git-hosting.md` and sits deliberately outside `/api/v1`,
+because it takes HTTP Basic with a per-job token rather than the API bearer.

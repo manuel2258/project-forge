@@ -70,7 +70,7 @@ the one exhaustion the operator can do nothing about. Usage against a ticket all
 — that ceiling does need a human. This is a deliberate departure from the handoff, recorded here so
 it reads as a decision rather than a mistake.
 
-## Three exhaustions, three treatments
+## Four exhaustions, three treatments
 
 Only one of them is the operator's.
 
@@ -78,11 +78,38 @@ Only one of them is the operator's.
 |---|---|---|
 | Job turn budget | the engine retries | outcome `budget_exhausted` on the job row, nowhere else |
 | Ticket allowance | **a human** — raise it or reroute | sticks the ticket, enters the queue, drawn in accent |
+| Daily spend cap | **time**, or the operator raising it | `PAUSED · SPEND 6h 12m`, neutral, on the board and the ticket, **never in the queue** |
 | Window capacity | **time** | `PAUSED · CAPACITY 1h 12m`, neutral, on the board and the ticket, **never in the queue** |
 
-Keeping the third out of the queue is load-bearing. A paused ticket in the inbox trains the
+Keeping the pauses out of the queue is load-bearing. A paused ticket in the inbox trains the
 operator to open items they cannot act on, which is the exact failure the thesis is written
-against.
+against. The daily cap is the platform's own rather than the provider's — it is what the operator
+sets so a bad night cannot cost a month — but it is resolved the same way, by a clock, so it is
+drawn the same way. The countdown is to the next UTC midnight.
+
+## Spend caps
+
+`cost_usd` is what a cap is enforced against, even though it is not what the operator is shown.
+Both caps live in `Forge.Spend` and are asked in `Forge.Jobs.start/1`, which every billed
+invocation passes through — including `run/1` from a Mix task, which a gate in the scheduler alone
+would not catch. A ticket over its allowance is stuck, which also drops it out of
+`Forge.Jobs.pending/1` so the scheduler stops retrying it every tick.
+
+**The day's total** is the sum of job costs where the job *started* in that UTC day: monotonic,
+and it matches what the operator watched happen. A job in flight has recorded nothing — cost lands
+at completion — so the figure the gate reads adds the budgeted cost of every live job to what is
+already spent. Without that, several concurrent jobs each pass the gate on their own and together
+walk straight through the cap.
+
+**Stopping a job already running** is the harness's, because the provider streams no per-turn
+cost and the platform therefore has no meter to watch. What the platform does instead is hand the
+harness a smaller budget: the effective cost budget of a job is the least of what its state
+declared, what the ticket has left and what the day has left, so the existing `--max-budget-usd`
+enforcement stops a runaway job at whichever cap binds. The stored spec is not touched — a job's
+budget is written once — and the difference is recorded as `job.budget_lowered`, without which a
+job stopping at a tenth of its declared budget is inexplicable to anyone reading the log later.
+The wall clock remains the platform's own coarse stop, independent of whether the harness honours
+its flag.
 
 ## Engine support
 

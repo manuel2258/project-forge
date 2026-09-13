@@ -212,6 +212,16 @@ defmodule ForgeWeb.QueueLive do
             approve={item.approve}
           />
 
+          <%!-- A link, never an answer row: answering never navigates, and the answer row is the
+                one shape in the queue that commits something. --%>
+          <.link
+            :if={reviewable?(item)}
+            navigate={~p"/tickets/#{item.project}/#{item.ticket.number}/review"}
+            class="flex h-11 items-center text-sm text-primary hover:underline"
+          >
+            Read the change first ›
+          </.link>
+
           <.transition_card
             :if={item.kind in [:stuck, :review]}
             ticket={item.ticket}
@@ -299,6 +309,17 @@ defmodule ForgeWeb.QueueLive do
 
   defp item_id(%{kind: :questions} = item), do: "item-questions-#{item.version.id}"
   defp item_id(item), do: "item-#{item.kind}-#{item.ticket.id}"
+
+  # A decision that pins the changeset is a merge decision, and a merge decision is not one the
+  # operator should take from a one-line summary. It arrives either as a pending approval or, when
+  # the workflow leaves the ticket resting in a human state, as the transition out of it.
+  defp reviewable?(%{kind: :approval, approve: approve}),
+    do: Enum.any?(approve, fn {name, _version} -> name == Workflow.changeset_artifact() end)
+
+  defp reviewable?(%{kind: kind, detail: detail}) when kind in [:review, :stuck],
+    do: Map.get(detail, :reviewable, false)
+
+  defp reviewable?(_item), do: false
 
   defp kind_label(%{kind: :questions, questions: questions}) do
     blocking = Enum.count(questions, & &1.blocking)

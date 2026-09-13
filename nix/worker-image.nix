@@ -185,11 +185,23 @@ in
         cp /run/forge-config/${configFile} ${envFile}
         umount /run/forge-config
         echo "identity: ${configLabel}"
-      elif curl -fsS --max-time 20 -o ${envFile} "''${FORGE_CONFIG_URL}"; then
-        echo "identity: ''${FORGE_CONFIG_URL}"
       else
-        echo "no identity: no ${configLabel} disk and nothing at ''${FORGE_CONFIG_URL}" >&2
-        exit 1
+        # A metadata service lives on a link-local address, and a link-local address is not
+        # routable unless something says it is on-link. The provider's own images get that from
+        # their DHCP; this one uses plain DHCP and does not, which the local network stack made
+        # plain by refusing to forward to 169.254.169.254 at all. Cheap to add, total to omit.
+        iface=$(ip -o route show default | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)
+        host=$(printf '%s' "''${FORGE_CONFIG_URL}" | sed -n 's|^[a-z]*://\([^/:]*\).*|\1|p')
+        if [ -n "$iface" ] && [ -n "$host" ]; then
+          ip route replace "$host/32" dev "$iface" 2> /dev/null || true
+        fi
+
+        if curl -fsS --max-time 20 -o ${envFile} "''${FORGE_CONFIG_URL}"; then
+          echo "identity: ''${FORGE_CONFIG_URL}"
+        else
+          echo "no identity: no ${configLabel} disk and nothing at ''${FORGE_CONFIG_URL}" >&2
+          exit 1
+        fi
       fi
 
       chmod 0600 ${envFile}
@@ -206,7 +218,16 @@ in
 
       # The metadata service answers every process on the machine, including the agent, and what
       # it answers with is the worker token and the harness credential. Nothing needs it once
-      # this unit has run. Locally there is nothing there and this is a no-op.
+      # this unit has run, so the route added above — or the provider's own — is replaced by one
+      # that goes nowhere. Locally there is nothing there and this is a no-op.
+      # Only a link-local one. The property being closed is "unauthenticated, answers every
+      # process, on an address nobody routes deliberately" — that is a metadata service, not
+      # any host an operator might point FORGE_CONFIG_URL at. Blackholing one of those would
+      # be a machine cutting off something it was told to talk to.
+      case "''${host:-}" in
+        169.254.*) ip route replace blackhole "$host/32" || true ;;
+        *) ;;
+      esac
       ip route replace blackhole 169.254.169.254/32 || true
     '';
 

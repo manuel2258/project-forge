@@ -14,8 +14,17 @@ vol_is_mounted() {
   mountpoint -q "$FORGE_M_VOLUME" 2> /dev/null
 }
 
-# A loopback image by default, sized by the workload; FORGE_M_BTRFS_MOUNT replaces it with a
-# real btrfs mountpoint, which is the better measurement where the operator has one.
+vol_fstype() {
+  stat -f -c %T "$1" 2> /dev/null || echo unknown
+}
+
+# A loopback image by default, sized by the workload; FORGE_M_BTRFS_MOUNT replaces it with
+# somewhere on the operator's own btrfs, which is the better measurement where they have one.
+#
+# Anywhere on btrfs, not a mountpoint: what the volume layer needs is a filesystem that can
+# make subvolumes, and requiring a mountpoint meant requiring root to make one. An operator
+# whose home is btrfs can now run every measurement — including the isolation cross, which is
+# the one the worker tier rests on — without granting passwordless sudo.
 vol_up() {
   local img mkfs_opts=()
   mkdir -p "$FORGE_M_VOLUME"
@@ -26,7 +35,8 @@ vol_up() {
   fi
 
   if [ -n "$FORGE_M_BTRFS_MOUNT" ]; then
-    vol_is_mounted || die "FORGE_M_BTRFS_MOUNT=$FORGE_M_BTRFS_MOUNT is not a mountpoint"
+    [ "$(vol_fstype "$FORGE_M_VOLUME")" = btrfs ] ||
+      die "FORGE_M_BTRFS_MOUNT=$FORGE_M_BTRFS_MOUNT is not on a btrfs filesystem"
     info "volume: operator-supplied $FORGE_M_VOLUME"
     return 0
   fi
@@ -41,7 +51,7 @@ vol_up() {
     run truncate -s "$m2_volume_size" "$img"
     # Nesting copy-on-write inside copy-on-write is pathological, so the image itself opts
     # out where the containing filesystem is btrfs.
-    if [ "$(stat -f -c %T "$FORGE_M_WORKLOAD_DIR" 2> /dev/null || echo unknown)" = btrfs ]; then
+    if [ "$(vol_fstype "$FORGE_M_WORKLOAD_DIR")" = btrfs ]; then
       run chattr +C "$img" || warn "chattr +C on the image failed; nested CoW will distort M2"
     fi
     if mkfs.btrfs -O list-all 2>&1 | grep -q squota; then
@@ -79,7 +89,9 @@ subvol_delete() {
   if [ "$FORGE_M_FAKE" = 1 ]; then
     run rm -rf "$path"
   else
-    run btrfs subvolume delete "$path" > /dev/null || run rm -rf "$path"
+    # stderr too: without user_subvol_rm_allowed an unprivileged delete fails with EPERM and
+    # says so loudly, and the rm -rf below is the answer rather than a symptom.
+    run btrfs subvolume delete "$path" > /dev/null 2>&1 || run rm -rf "$path"
   fi
 }
 

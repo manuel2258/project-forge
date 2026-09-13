@@ -254,9 +254,17 @@ finding.
 
 The volume is a loopback image by default, sized by config, with `chattr +C` on the image when
 the containing filesystem is itself btrfs, because nesting copy-on-write is pathological.
-`FORGE_M_BTRFS_MOUNT` overrides it with a real btrfs mountpoint, which is the better
-measurement where the operator has one; the table marks loopback wall times as indicative,
+`FORGE_M_BTRFS_MOUNT` overrides it with somewhere on the operator's own btrfs, which is the
+better measurement where they have one; the table marks loopback wall times as indicative,
 since space numbers survive the loopback and throughput does not.
+
+**Anywhere on btrfs, not a mountpoint.** This asked for a mountpoint first, which meant asking
+for root to make one — and the loopback alternative needs `sudo mount` too, so an operator
+without passwordless sudo could run no volume measurement at all, including the isolation cross
+the whole tier rests on. What the layer actually needs is a filesystem that can make
+subvolumes, and `stat -f` answers that. Unprivileged `btrfs subvolume delete` still fails
+without `user_subvol_rm_allowed`; `subvol_delete` already falls back to `rm -rf`, which modern
+kernels let the owner use on an empty subvolume.
 
 ## M3
 
@@ -287,6 +295,44 @@ that exposes no separable step records `not_applicable`.
 
 Most of M3's data is already collected by the time `m3` runs: every M1 and M2 build carried a
 peak. `m3` aggregates those and adds the runs nothing else performs.
+
+## The isolation cross
+
+M2 runs four builds together but never under a binding ceiling; M3 drives a build to its
+ceiling but always alone. Neither tests the claim the worker tier actually rests on — *an
+out-of-memory build kills one job, not the machine* — and `docs/measurements.md` says so. The
+`isolation` subcommand is that crossing, and it exists as its own subcommand rather than as a
+flag on M2 because the interesting case is asymmetric: one build under a ceiling below its own
+peak, three beside it with none. Constraining all four kills all four and says nothing about
+neighbours.
+
+Two four-way rounds on fresh snapshots, in this order:
+
+1. **The control round.** Four concurrent builds, no ceiling. It supplies the peak the ceiling
+   is derived from and the wall times the neighbours are judged against, from the same
+   contention as the round being judged. A serial reference would flatter the crossed round.
+2. **The crossed round.** The same four branches, and branch 0 alone gets
+   `MemoryMax = peak(branch 0, control) × isolation_victim_factor` (default 0.5).
+
+The verdict needs three things, and names whichever is missing:
+
+- **The victim died.** OOM-killed, or exited non-zero with the ceiling in force. A victim that
+  finished means the ceiling did not bind, which is a failed measurement rather than a passing
+  one — the harness says `indeterminate`, because it has learned nothing about isolation.
+- **Every neighbour finished**, exit status zero.
+- **The neighbours were not dragged down.** Each neighbour's wall time against its own wall time
+  in the control round, gated on `isolation_min_efficiency`. This is the part that separates
+  "killed one job" from "took the machine with it": a neighbour that survives but runs at a
+  third of its speed is a machine that thrashed.
+
+That the host survived is not asserted anywhere, because the harness asserting it would be the
+harness reporting on its own existence. It prints the verdict from the host, which is the
+evidence.
+
+**The ceiling is derived, never configured.** A fixed number would drift out of relevance the
+moment the workload or the machine changed, and the whole point is a ceiling that is below
+*this* build's peak on *this* machine. `isolation_victim_factor` is a fraction of a measured
+peak for that reason.
 
 ## Results
 
@@ -326,18 +372,39 @@ self-test table can never be mistaken for evidence.
 - shellcheck and shfmt run in `bin/check`, over the harness and over the workload configs, since
   a sourced config's bugs are the harness's bugs.
 
-## What M4 reuses
+## M4
 
-M4 is a sequence of timed phases against a VM, not a build measurement, and the harness is
-shaped so it does not have to be rewritten for it.
+M4 is a sequence of timed phases against a VM, not a build measurement, and the harness was
+shaped so it did not have to be rewritten for it. What it reuses, as planned:
 
 - `phase_begin` and `phase_end` are the timing primitive; `measure_run` is built on them. M4
-  records `create-vm`, `cloud-init`, `worker-connects`, `nix-store-populated`, `seed-fetched`
-  and `first-build` as ordinary phases and reuses `measure_run` for the last.
-- `measure_exec` is the single function that decides how a command runs. Today it is
-  `systemd-run` locally; M4 adds an ssh variant into the QEMU guest without touching M1 to M3.
-  Nothing else may call `systemd-run` or assume the working directory is local.
-- `seed_create` stands alone rather than being inlined into M2, because M4 fetches exactly that
-  artefact from the platform's store, and `btrfs send` belongs next to it when it arrives.
-- The config schema, `workload_validate` with a caller-supplied key set, `preflight`, the record
-  schema and the renderer are all shared, which is what keeps the results table single.
+  records `create-vm`, `cloud-init`, `worker-connects`, `seed-fetched`, `nix-store-populated`
+  and `first-build` as ordinary phases and uses `measure_run` for the last.
+- `measure_exec` is the single function that decides how a command runs. `FORGE_M_SSH` selects
+  the variant that starts the unit inside the guest instead of on this host; M1 to M3 did not
+  change for it. Nothing else may call `systemd-run` or assume the working directory is local.
+- The config schema, `workload_validate` with a caller-supplied key set, the record schema and
+  the renderer are all shared, which is what keeps the results table single.
+
+Two things came out differently from the plan, and both are in the measurement rather than in
+the harness:
+
+**The seed is fetched before the Nix store is populated**, not after. The seed carries the
+checkout whose flake the store is populated from, so the other order would need a second
+checkout that no worker ever makes. `docs/design/worker-tier.md` § Volumes and the seed has the
+rest of it: a machine cannot fetch a seed before it knows which project it is for, and what
+tells it that is an assignment.
+
+**M4 boots the machine itself rather than asking the platform to.** It builds the same overlay,
+the same cloud-init seed and the same QEMU invocation the provider driver does, with credentials
+from `mix forge.worker.new`. The alternative — admit a ticket and watch — would measure the
+scheduler's poll interval and the agent's wall clock along with the cold start, and could not
+separate them. The cost is that the driver and M4 now describe the same machine in two places,
+and a change to one is a change to the other.
+
+**No preflight.** M4 needs a hypervisor, an image and a platform; it does not need this host's
+btrfs or cgroups. `m4_require` checks what it does need and names what is missing, the way
+preflight does for the rest.
+
+`seed_create` stands alone rather than being inlined into M2 for the same reason it always did:
+`btrfs send` belongs next to it when it arrives.

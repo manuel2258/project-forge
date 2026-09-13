@@ -39,6 +39,15 @@ measure_exec() {
   local key value
   eval "extra_setenv=(\"\${${setenv_name}[@]:-}\")"
 
+  # M4's builds happen inside the guest, in a unit there, so that the number it reports is the
+  # one a job on that machine would get. Everything else about the record — the in-unit peak,
+  # the two wall times, the log — is the same, because this is the only function that has to
+  # change for it to be.
+  if [ -n "${FORGE_M_SSH:-}" ]; then
+    measure_exec_ssh "$unit" "$workdir" "$mem_max" "$cpu_weight" extra_setenv "$cmd"
+    return $?
+  fi
+
   if [ "$FORGE_M_FAKE" = 1 ]; then
     # Self-test: no systemd. The substitution is stamped into every record.
     local -a assignments=()
@@ -101,6 +110,93 @@ measure_exec() {
   fi
 
   "${argv[@]}"
+}
+
+# The guest. FORGE_M_SSH is set by M4 to `<user>@<host>` and the port and key come beside it,
+# because ssh and scp spell the same three facts differently and parsing one into the other is
+# how a measurement ends up talking to the wrong machine. The options are the ones that stop
+# ssh asking questions about a host that is minutes old and about to be destroyed.
+FORGE_M_SSH_OPTS=(
+  -o StrictHostKeyChecking=no
+  -o UserKnownHostsFile=/dev/null
+  -o LogLevel=ERROR
+  -o ConnectTimeout=10
+)
+
+measure_ssh() {
+  if [ "$FORGE_M_DRY_RUN" = 1 ]; then
+    printf '    would run in the guest: %s\n' "$*"
+    return 0
+  fi
+  ssh "${FORGE_M_SSH_OPTS[@]}" -p "${FORGE_M_SSH_PORT:-22}" -i "$FORGE_M_SSH_KEY" \
+    "$FORGE_M_SSH" "$@"
+}
+
+measure_scp() {
+  local src=$1 dest=$2
+  if [ "$FORGE_M_DRY_RUN" = 1 ]; then
+    printf '    would copy to the guest: %s -> %s\n' "$src" "$dest"
+    return 0
+  fi
+  scp "${FORGE_M_SSH_OPTS[@]}" -P "${FORGE_M_SSH_PORT:-22}" -i "$FORGE_M_SSH_KEY" \
+    "$src" "$FORGE_M_SSH:$dest"
+}
+
+# The same unit as measure_exec builds, started inside the guest. `in_unit.sh` has to be over
+# there for the peak to be read from inside the cgroup, which m4_prepare_guest copies.
+measure_exec_ssh() {
+  local unit=$1 workdir=$2 mem_max=$3 cpu_weight=$4 setenv_name=$5 cmd=$6
+  local -a extra_setenv=()
+  local key value remote
+  eval "extra_setenv=(\"\${${setenv_name}[@]:-}\")"
+
+  local -a argv=(
+    systemd-run
+    --unit="$unit"
+    --service-type=exec
+    --wait
+    --pipe
+    --working-directory="$workdir"
+    --property=MemoryAccounting=yes
+    --property=MemoryMax="$mem_max"
+    --property=MemorySwapMax=0
+    --property=CPUAccounting=yes
+    --property=IOAccounting=yes
+    --property=TasksAccounting=yes
+    --property=CPUWeight="$cpu_weight"
+    --property=RuntimeMaxSec="${build_timeout_seconds:-7200}"
+    --setenv=PATH=/run/current-system/sw/bin
+    --setenv=HOME=/root
+    --setenv=LANG=C.UTF-8
+    --setenv=FORGE_M_STATS="$FORGE_M_GUEST_DIR/stats.env"
+    --setenv=FORGE_M_LOG="$FORGE_M_GUEST_DIR/build.log"
+  )
+  for value in "${extra_setenv[@]}"; do
+    [ -n "$value" ] && argv+=(--setenv="$value")
+  done
+
+  if [ -n "${workload_env:-}" ]; then
+    argv+=(-- nix develop ".#${workload_env}" --command bash "$FORGE_M_GUEST_DIR/in_unit.sh" "$cmd")
+  else
+    argv+=(-- bash "$FORGE_M_GUEST_DIR/in_unit.sh" "$cmd")
+  fi
+
+  remote=$(printf '%q ' "${argv[@]}")
+
+  if [ "$FORGE_M_DRY_RUN" = 1 ]; then
+    printf '    would run in the guest: %s\n' "$remote"
+    return 0
+  fi
+
+  local status=0
+  measure_ssh "$remote" || status=$?
+
+  # The readings are written inside the guest; bring them back so measure_collect_stats reads
+  # them exactly as it does for a local run.
+  measure_ssh "cat $FORGE_M_GUEST_DIR/stats.env 2>/dev/null" > "$MR_STATS_FILE" || true
+  measure_ssh "cat $FORGE_M_GUEST_DIR/build.log 2>/dev/null" > "$MR_LOG" || true
+  measure_ssh "systemctl reset-failed $unit" > /dev/null 2>&1 || true
+  return $status
 }
 
 # workload_shell <workdir> <command>
@@ -192,6 +288,10 @@ measure_collect_stats() {
     [ "$MR_MEM_PEAK_SOURCE" = none ] && MR_MEM_PEAK_SOURCE=fake
     return 0
   fi
+
+  # The unit ran in the guest, so the host's systemctl and journal know nothing about it. The
+  # in-unit reading came back with the stats file, which is the authoritative one anyway.
+  [ -n "${FORGE_M_SSH:-}" ] && return 0
 
   if [ "${MR_MEM_PEAK:-0}" -eq 0 ] 2> /dev/null && have systemctl; then
     shown=$(measure_systemctl show --property=MemoryPeak --value "$MR_UNIT" 2> /dev/null || true)

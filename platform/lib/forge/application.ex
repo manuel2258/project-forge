@@ -14,6 +14,9 @@ defmodule Forge.Application do
         {DNSCluster, query: Application.get_env(:forge, :dns_cluster_query) || :ignore},
         {Phoenix.PubSub, name: Forge.PubSub},
         {Task.Supervisor, name: Forge.TaskSupervisor},
+        # Where a connected worker's channel process registers itself, so the platform has
+        # somewhere to look when it wants to speak to a machine.
+        {Registry, keys: :unique, name: Forge.Workers.Registry},
         # Start to serve requests, typically the last entry
         ForgeWeb.Endpoint
       ] ++ scheduler() ++ digest()

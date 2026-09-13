@@ -246,6 +246,8 @@ workload_defaults() {
   m2_scaling_min_efficiency=0.5
   mem_probe_max=infinity
   mem_sweep_factors=(1.5 1.25 1.0 0.75)
+  isolation_victim_factors=(0.5 0.25 0.1 0.05)
+  isolation_min_efficiency=0.5
   m3_sweep_max_inflation=1.25
   m3_safety_margin=1.1
   repeats=1

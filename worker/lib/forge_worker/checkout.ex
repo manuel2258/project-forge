@@ -24,6 +24,7 @@ defmodule ForgeWorker.Checkout do
           branch: String.t(),
           token: (-> String.t()),
           resume: boolean(),
+          clean: boolean(),
           identity: {String.t(), String.t()}
         ]
 
@@ -34,6 +35,13 @@ defmodule ForgeWorker.Checkout do
   resets the working tree to the branch head and removes what is not tracked, so a cold start
   never inherits a dead run's uncommitted work. Ignored files are left alone, so a build
   directory survives.
+
+  `clean: false` keeps the untracked files as well, which is what a worktree freshly snapshotted
+  from a seed needs: it has nothing a dead run left in it, and what it does have beside the
+  checkout is the warm build directory the seed exists to carry
+  (`docs/design/worker-tier.md` § Volumes and the seed). A build directory that is *not* in
+  `.gitignore` would otherwise be deleted by the one command meant to protect the run from a
+  predecessor it never had.
   """
   @spec ensure(opts()) :: :ok | {:error, term()}
   def ensure(opts) do
@@ -43,6 +51,54 @@ defmodule ForgeWorker.Checkout do
       refresh(dir, opts)
     else
       clone(dir, opts)
+    end
+  end
+
+  @doc """
+  Points the checkout's `origin` at `url`, whatever it was pointing at before.
+
+  A seed was cloned from wherever it was built, which is not necessarily where this job fetches
+  from — a different host, a different platform address — so the remote is set rather than
+  trusted. A checkout with no origin at all still ends up with one.
+  """
+  @spec remote(String.t(), String.t()) :: :ok | {:error, term()}
+  def remote(dir, url) do
+    case git(dir, ["remote", "set-url", "origin", url], []) do
+      {:ok, _out} ->
+        :ok
+
+      {:error, _reason} ->
+        with {:ok, _out} <- git(dir, ["remote", "add", "origin", url], []), do: :ok
+    end
+  end
+
+  @doc """
+  Stages everything the run did as one change on top of `base` and commits it, saying whether
+  there was anything to commit.
+
+  The reset is what makes this a squash rather than an append, and it is not optional: an agent
+  that used git itself — which Claude Code does — leaves its work in commits, so `git add -A`
+  finds nothing staged, nothing is committed, and a converged job's changes never leave the
+  machine. `decisions.md` asks for one commit per run rather than an agent's keystrokes, and
+  this is where that happens.
+  """
+  @spec squash(String.t(), String.t(), String.t()) :: {:ok, boolean()} | {:error, term()}
+  def squash(dir, base, message) do
+    with {:ok, _out} <- git(dir, ["reset", "--soft", base], []),
+         {:ok, _out} <- git(dir, ["add", "-A"], []) do
+      commit(dir, message)
+    end
+  end
+
+  # A non-zero status from `diff --cached --quiet` means something is staged, which is the only
+  # reason to make a commit at all.
+  defp commit(dir, message) do
+    case git(dir, ["diff", "--cached", "--quiet"], []) do
+      {:ok, _out} ->
+        {:ok, false}
+
+      {:error, _reason} ->
+        with {:ok, _out} <- git(dir, ["commit", "--quiet", "-m", message], []), do: {:ok, true}
     end
   end
 
@@ -81,16 +137,24 @@ defmodule ForgeWorker.Checkout do
 
     with {:ok, _out} <- git(dir, ["fetch", "--quiet", "origin", branch], opts),
          :ok <- identity(dir, opts) do
-      if Keyword.get(opts, :resume, false), do: :ok, else: reset(dir)
+      if Keyword.get(opts, :resume, false),
+        do: :ok,
+        else: reset(dir, branch, Keyword.get(opts, :clean, true))
     end
   end
 
-  defp reset(dir) do
-    with {:ok, _out} <- git(dir, ["reset", "--quiet", "--hard", "FETCH_HEAD"], []),
-         {:ok, _out} <- git(dir, ["clean", "--quiet", "-fd"], []) do
+  # `-B` rather than a bare reset: a snapshot of a seed is on whatever commit the seed was
+  # built at, and often not on this branch at all.
+  defp reset(dir, branch, clean?) do
+    with {:ok, _out} <- git(dir, ["checkout", "--quiet", "-B", branch, "FETCH_HEAD"], []),
+         {:ok, _out} <- git(dir, ["reset", "--quiet", "--hard", "FETCH_HEAD"], []),
+         {:ok, _out} <- maybe_clean(dir, clean?) do
       :ok
     end
   end
+
+  defp maybe_clean(_dir, false), do: {:ok, ""}
+  defp maybe_clean(dir, true), do: git(dir, ["clean", "--quiet", "-fd"], [])
 
   # The harness runs with a private HOME, so a fresh clone has no global identity and the agent's
   # first commit would fail with git's "please tell me who you are".

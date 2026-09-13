@@ -102,11 +102,15 @@ url-safe base64, stored as a sha256 hash, looked up by hash so no secret is ever
   `refs/heads/ticket/<n>`.
 - **Lifetime.** Absolute `expires_at`, the job's wall clock plus a margin. Absolute rather than
   computed from `inserted_at`, because a waiting job may legitimately need a longer one.
-- **Issuance.** `Forge.Jobs.start/1`, immediately before the checkout — the single choke point
-  every invocation already passes.
-- **Delivery.** Into the job's process environment as `FORGE_GIT_TOKEN`, through the runner's
-  existing `{:secret, _}` path, so it reaches the environment and never argv. **It is never
-  written into the job's `spec`**, which is stored on the row forever.
+- **Issuance.** `Forge.Jobs.assign/2`, immediately before the job is handed to a worker — the
+  single choke point every invocation passes. This was `start/1` while the platform ran jobs in
+  its own BEAM; milestone 3 moved them to a worker and the choke point moved with them, which is
+  the whole of what changed here (`docs/design/worker-tier.md` § Git).
+- **Delivery.** In the assignment, and from there into the job's process environment as
+  `FORGE_GIT_TOKEN`, through the runner's existing `{:secret, _}` path, so it reaches the
+  environment and never argv — not the runner's, and not the transient unit's either, which names
+  a secret without its value. **It is never written into the job's `spec`**, which is stored on
+  the row forever. The worker holds it for the length of the job and dies with it.
 - **Revocation.** When the job finishes or fails. A waiting job keeps its token; a resumed one is
   issued a fresh one. Rows are kept rather than deleted: they are the audit trail behind the
   `git.token.issued` and `git.token.revoked` events.
@@ -233,6 +237,13 @@ endpoint any other client uses, with its own token, and pushes its branch back w
 is what makes the credential, the hooks and the branch discipline load-bearing today rather than
 in the milestone that adds a separate worker machine — and the module that does it lives in
 `forge_worker`, so the worker tier inherits it unchanged rather than replacing it.
+
+**And it did.** Milestone 3 landed beside this one and moved the caller from the platform to the
+worker's own machine without changing `ForgeWorker.Checkout` at all beyond what the volume layer
+needed: a `clean: false` for a worktree snapshotted from a seed, which has nothing a dead run left
+in it and does have the warm build directory the seed exists to carry
+(`docs/design/worker-tier.md` § Volumes and the seed). Every `git` invocation on a worker is still
+in this one module, which is what keeps the credential's handling in one place.
 
 - Clone `--branch <ticket branch> --single-branch` on a first run; fetch and reset on a later one,
   keeping the working tree on a resume.

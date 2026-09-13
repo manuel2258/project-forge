@@ -21,7 +21,11 @@ defmodule Forge.Projects do
 
     with {:ok, project} <- Ecto.Changeset.apply_action(changeset, :insert),
          :ok <- Git.init_bare(Path.expand(project.repo_path)),
-         :ok <- Hooks.install(Path.expand(project.repo_path), project) do
+         :ok <- Hooks.install(Path.expand(project.repo_path), project),
+         # A bare repository `git init` made points HEAD at whatever git's default is, which a
+         # worker's `clone --branch <default>` then cannot find. Harmless while the platform
+         # cloned on its own disk; not harmless once the clone comes over the wire.
+         :ok <- Git.ensure_head(Path.expand(project.repo_path), project.default_branch) do
       Multi.new()
       |> Multi.insert(:project, changeset)
       |> Events.log(:event, "project.registered", :system, fn %{project: project} ->
@@ -43,6 +47,11 @@ defmodule Forge.Projects do
 
   @spec list() :: [Project.t()]
   def list, do: Repo.all(from p in Project, order_by: p.name)
+
+  @doc "Changes a registered project. `mix forge.seed.publish` uses it to move the seed on."
+  @spec update(Project.t(), map()) :: {:ok, Project.t()} | {:error, Ecto.Changeset.t()}
+  def update(%Project{} = project, attrs),
+    do: project |> Project.changeset(attrs) |> Repo.update()
 
   @doc "Absolute path of the project's bare repository."
   @spec repo_path(Project.t()) :: String.t()

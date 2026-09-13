@@ -46,10 +46,12 @@ config :forge, Forge.Mailer, adapter: Swoosh.Adapters.Test
 config :swoosh, :api_client, false
 
 # Tests drive jobs explicitly; the scheduler stays off and data lives under tmp/test.
-config :forge, Forge.Jobs,
-  data_dir: "tmp/test",
-  run_jobs: false,
-  harness_opts: [executable: Path.expand("../../worker/test/support/fake_claude.sh", __DIR__)]
+config :forge, Forge.Jobs, data_dir: "tmp/test", run_jobs: false
+
+config :forge, Forge.Storage, dir: "tmp/test/store"
+
+# No machine is created in tests; the fake records what the platform asked for.
+config :forge, Forge.Provider, impl: Forge.Provider.Fake, name: "fake"
 
 # Push goes to a test double; keys are set so the feature counts as enabled.
 config :forge, Forge.Push, sender: Forge.Push.TestSender

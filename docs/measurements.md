@@ -5,7 +5,7 @@ These experiments determine whether parts of the design survive contact with rea
 - [x] Whether the build tool accepts a cache produced by the environment system without rebuilding from scratch. The storage model depends on it.
 - [x] How much a copy-on-write build directory actually diverges during a realistic branch build. Determines whether one worker can host several parallel compiles.
 - [x] Peak memory of the build, and of its heaviest step where there is one. Sets slice limits, agents per worker, and machine size.
-- [ ] End-to-end cold start of a worker. Decides whether destroying it is viable at all.
+- [x] End-to-end cold start of a worker. Decides whether destroying it is viable at all.
 - [ ] Whether agents, prompted well, produce bounded, well-formed artifacts and ask few good questions. The quietest risk and the largest — everything can work mechanically and still be useless if the output sprawls.
   Skipped by decision: taken as given for the PoC. Milestone 5 dogfooding is where this gets observed instead.
 
@@ -248,18 +248,106 @@ measurements landed rather than that they passed.
 
 **The claim none of them tested.** The worker tier rests on "an out-of-memory build kills one
 job, not the machine". M3 drove builds toward ceilings but always alone; M2 ran four together
-but never under a binding one. Crossing them — four concurrent builds, one with a `MemoryMax`
-below its own peak — is a mechanism test the harness can already perform, and it would produce
-evidence on the sample that does transfer. It is currently deferred to milestone 3's demo,
-which is the last place it should first be tried.
+but never under a binding one. Crossing them was deferred to milestone 3's demo, which is the
+last place it should first be tried — and § The isolation cross above is that crossing, run
+during milestone 3 and before the demo depended on it. It passes.
 
 **Worth measuring next, in this order:** M1 variant (b), the only remaining question whose
-answer cannot be predicted; M1 again on a multi-crate workload, where variant (c)'s 497 files
-embedding the old checkout path have more chances to matter; and the isolation cross above,
-before milestone 3 depends on it.
+answer cannot be predicted; and M1 again on a multi-crate workload, where variant (c)'s 497
+files embedding the old checkout path have more chances to matter.
+
+### The isolation cross
+
+Run 2026-09-13, on the operator's machine, during milestone 3. `bin/measure isolation
+--workload sample-rust`, user slices, volume on the host's own btrfs rather than a loopback
+image.
+
+Four concurrent builds of the four M2 branches, each in its own transient unit with equal
+`CPUWeight`. A control round with no ceiling supplies the peak and the wall times; the crossed
+round repeats it with branch `leaf` alone under `MemoryMax` at half its own control peak.
+
+| Round | Branch | MemoryMax | Peak | Wall | Exit |
+|---|---|---|---|---|---|
+| control | leaf | ∞ | 350 MiB | 3048 ms | 0 |
+| control | core | ∞ | 349 MiB | 3028 ms | 0 |
+| control | wide | ∞ | 350 MiB | 3050 ms | 0 |
+| control | deps | ∞ | 350 MiB | 3766 ms | 0 |
+| crossed | leaf | **175 MiB** | 175 MiB | 4555 ms | **1** |
+| crossed | core | ∞ | 348 MiB | 3684 ms | 0 |
+| crossed | wide | ∞ | 348 MiB | 3646 ms | 0 |
+| crossed | deps | ∞ | 350 MiB | 4727 ms | 0 |
+
+**Verdict: pass.** The constrained build was killed at its ceiling — its peak reads 175 MiB,
+which is the ceiling exactly, and it exited non-zero. All three neighbours finished. The
+slowest kept 0.783 of its unconstrained speed (core 0.807, wide 0.820, deps 0.783).
+
+**This is the claim the worker tier rests on, and until now nothing had tested it.** M3 drove
+builds to their ceilings but always alone; M2 ran four together but never under a binding one.
+The sentence "an out-of-memory build kills one job, not the machine" was an assumption
+everywhere it appeared. It now has one measurement behind it, on a sample workload, on one
+machine.
+
+**One fraction was not enough, and that is a finding about ceilings rather than about the
+harness.** The first attempt set the ceiling at half the peak and the victim *finished*: its
+peak came out at exactly the ceiling, so the limit bound, and the build reclaimed its way
+through anyway. That is `docs/design/measurement-harness.md` § M3's "the usable limit is not
+the peak" arriving from the other direction — a slice under mild pressure often still
+completes. The measurement now descends through `isolation_victim_factors` until the victim
+actually dies, and reports which fraction did it. Two runs on the same workload disagreed about
+whether 0.5 kills, which is a warning against reading the fraction as a property of the
+toolchain; what reproduces is that *some* ceiling kills one job and leaves its neighbours
+running.
+
+**What it does not say.** One workload, one machine, one repetition, and a 350 MiB peak rather
+than the 2 GiB a cold build reaches — the neighbours had room to spare, and a machine genuinely
+short of memory is a harder case this does not cover. The 22 % the slowest neighbour lost is
+against a four-way control round, so it is the cost of the victim thrashing before it died,
+not the cost of concurrency, which M2 already measured at 13–19 %.
+
+**And then the demo showed it again with real jobs.** Milestone 3's demo ran two tickets at
+once on one worker, each in its own transient unit at the configured 2210 MiB. One ticket's
+agent was asked to allocate six gigabytes; the kernel killed it with
+`constraint=CONSTRAINT_MEMCG` and `oom_memcg=/system.slice/forge-job-07f2c802.service`, and
+systemd recorded `Failed with result 'oom-kill'`. The ticket beside it on the same machine
+converged and produced its artifact. That is the same mechanism at the size the tier actually
+configures, which the cross above could not reach on a workload that peaks at 350 MiB.
 
 ### M4 worker cold start
 
-Separate: it needs the worker image and the platform's store from milestone 3, and lands with
-it. It reuses this harness's phases, records and renderer, so its numbers arrive in the same
-table.
+Run 2026-09-13, during milestone 3, on the operator's machine: `bin/measure m4 --workload
+sample-rust` against a machine created from `nix build .#worker-image`, dialling a platform on
+the host. Four cores, 8 GiB, a 40 GiB overlay, user-mode networking.
+
+| Phase | Wall | What it is |
+|---|---|---|
+| create-vm | 237 ms | Overlay, cloud-init seed, QEMU launch |
+| cloud-init | 20.0 s | Firmware, boot, cloud-init writing the identity and starting the unit |
+| worker-connects | 0.1 s | The release dialling the platform and joining its topic |
+| seed-fetched | 3.6 s | 192 MiB from the platform's store, unpacked into a subvolume |
+| nix-store-populated | 13.2 s | `nix develop .#build --command true`, from the binary cache |
+| first-build | 50.0 s | `cargo build -v` in a snapshot of the seed, peak 1496 MiB |
+
+**37 seconds from nothing to a machine that can build**, and 87 seconds to a first build
+finished. The four phases before the build are the cost of destroying an idle worker and
+making another one when the next ticket arrives.
+
+**What this sets.** `idle_period_ms` was a labelled ten-minute guess with a note saying M4
+would replace it. It is now five minutes, and the reasoning is that being wrong is cheap: a
+machine destroyed a moment before the next ticket costs 37 seconds, which is less than the
+operator's own round trip to approve the artifact that produced the ticket. Five minutes
+covers an approval gap — the case where a worker is genuinely about to be used again — without
+holding a machine through a lunch break.
+
+**What it does not say.** One machine, one run, locally. Two of the phases are flattered by
+being on the operator's own host: the seed came 192 MiB over loopback in 3.6 s, and the Nix
+store was populated from `cache.nixos.org` over a connection the guest shares with the host. On
+a provider both are network-bound and both get larger, which moves the cold start up and the
+argument for a *longer* idle period with it — so the closing step should re-run this before
+trusting five minutes on a Hetzner machine. `worker-connects` at 0.1 s is the release dialling
+a platform one hop away and means little beyond "the credential worked".
+
+The phases also ran in a different order than this document first planned: the seed is fetched
+before the Nix store is populated, because the seed carries the checkout whose flake the store
+is populated from. `docs/design/worker-tier.md` § Volumes and the seed has the longer version —
+a machine cannot fetch a seed before it knows which project it is for, which is what an
+assignment tells it.

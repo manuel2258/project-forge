@@ -1,20 +1,24 @@
 defmodule Forge.Jobs.Scheduler do
   @moduledoc """
-  Starts pending jobs on the running node, up to the configured concurrency, and records
-  their results. Jobs are rows, so anything may enqueue one; only this process runs them.
-  On boot, jobs left running by a previous node are re-queued.
+  Assigns pending jobs to workers that have room for them, and re-queues jobs left running by
+  a previous node on boot. Jobs are rows, so anything may enqueue one; only this process hands
+  them out.
+
+  The gate is memory, not a count: a job is assigned only when its slice fits what its worker
+  has left, because the tier rests on an out-of-memory build killing one job rather than the
+  machine (`docs/design/worker-tier.md` § Scheduling). A job that fits nowhere stays pending
+  and is offered again on the next pass; that is a queue, not an error.
   """
 
   use GenServer
 
-  alias Forge.{Jobs, Projects}
-  alias ForgeWorker.Job.Runner
+  alias Forge.{Jobs, Projects, Workers}
 
   require Logger
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
-  @doc "Runs one scheduling pass now. Returns how many jobs were started."
+  @doc "Runs one scheduling pass now. Returns how many jobs were assigned."
   @spec tick() :: non_neg_integer()
   def tick, do: GenServer.call(__MODULE__, :tick)
 
@@ -29,67 +33,56 @@ defmodule Forge.Jobs.Scheduler do
     Projects.ensure_hooks()
 
     schedule()
-    {:ok, %{running: %{}}}
+    {:ok, %{}}
   end
 
   @impl true
-  def handle_call(:tick, _from, state) do
-    {started, state} = start_pending(state)
-    {:reply, started, state}
-  end
+  def handle_call(:tick, _from, state), do: {:reply, assign_pending(), state}
 
   @impl true
   def handle_info(:tick, state) do
-    {_started, state} = start_pending(state)
+    assign_pending()
     schedule()
     {:noreply, state}
   end
 
-  def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
-    {:noreply, %{state | running: Map.delete(state.running, pid)}}
+  defp assign_pending do
+    slice = Workers.slice_bytes()
+    pending = Jobs.pending(Jobs.config(:max_pending_per_pass, 10))
+
+    # First, before anything asks for capacity: a worker the platform cannot reach still counts
+    # against `max_workers`, so one machine it has lost track of is one machine's worth of
+    # capacity that never comes back — and with `max_workers` at 1, that is a queue that never
+    # moves again.
+    Workers.sweep_unreachable()
+
+    # Nothing to run is the only moment a machine may be destroyed for being idle: a worker with
+    # work is not idle, and one without it has been idle since its last job ended.
+    if pending == [], do: Workers.sweep_idle()
+
+    Enum.reduce(pending, 0, fn job, assigned ->
+      case Workers.provide(slice) do
+        {:ok, worker} -> assigned + assign(job, worker)
+        # Being created, or none allowed: the job waits and is offered again next pass.
+        {:error, _reason} -> assigned
+      end
+    end)
   end
 
-  defp start_pending(state) do
-    capacity = Jobs.config(:max_concurrent, 2) - map_size(state.running)
+  defp assign(job, worker) do
+    case Jobs.assign(job, worker) do
+      {:ok, _job} ->
+        1
 
-    if capacity > 0 do
-      Enum.reduce(Jobs.pending(capacity), {0, state}, &start_one/2)
-    else
-      {0, state}
-    end
-  end
-
-  defp start_one(job, {count, state}) do
-    case Jobs.start(job) do
-      {:ok, runner} ->
-        {:ok, task} =
-          Task.Supervisor.start_child(Forge.TaskSupervisor, fn -> finish(job.id, runner) end)
-
-        Process.monitor(task)
-        {count + 1, %{state | running: Map.put(state.running, task, job.id)}}
+      # Not an error the operator needs: a worker that went away between being chosen and
+      # being spoken to leaves the job pending, and the next pass finds another.
+      {:error, :not_connected} ->
+        0
 
       {:error, reason} ->
-        Logger.error("could not start job #{job.id}: #{inspect(reason)}")
-        {count, state}
+        Logger.error("could not assign job #{job.id}: #{inspect(reason)}")
+        0
     end
-  end
-
-  # A runner that dies, or a result that cannot be recorded, must not leave the job
-  # `running` forever: it is failed, which also lets the engine decide what follows.
-  defp finish(job_id, runner) do
-    {:ok, result} = Runner.await(runner)
-
-    case Jobs.complete(job_id, result) do
-      {:ok, _job} -> :ok
-      {:error, reason} -> Jobs.fail(job_id, {:record_failed, reason})
-    end
-  catch
-    kind, reason ->
-      Logger.error(
-        "job #{job_id} runner failed: #{Exception.format(kind, reason, __STACKTRACE__)}"
-      )
-
-      Jobs.fail(job_id, {kind, reason})
   end
 
   defp schedule, do: Process.send_after(self(), :tick, Jobs.config(:poll_ms, 2_000))

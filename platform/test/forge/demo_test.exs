@@ -14,7 +14,18 @@ defmodule Forge.DemoTest do
   import Forge.AccountsFixtures
   import Forge.GitFixtures
 
-  alias Forge.{Artifacts, Events, Git, Jobs, Merge, Operator, Projects, Queue, Tickets}
+  alias Forge.{
+    Artifacts,
+    Events,
+    FakeWorker,
+    Git,
+    Jobs,
+    Merge,
+    Operator,
+    Projects,
+    Queue,
+    Tickets
+  }
 
   setup do
     data_dir = tmp_dir("demo-data")
@@ -30,31 +41,39 @@ defmodule Forge.DemoTest do
     {:ok, project} = Projects.register(%{name: name, repo_path: bare, default_branch: "main"})
     :ok = Projects.set_mirror(project, mirror)
 
-    %{project: project, bare: bare, mirror: mirror, user: user_fixture()}
+    # One worker, connected, with room for anything: the tier is milestone 3's and is tested
+    # there. What this demo needs from it is that a job runs somewhere and pushes.
+    %{
+      project: project,
+      bare: bare,
+      mirror: mirror,
+      user: user_fixture(),
+      worker: FakeWorker.connect()
+    }
   end
 
   test "a ticket from idea to merged, and mirrored", context do
-    %{project: project, bare: bare, mirror: mirror, user: user} = context
+    %{project: project, bare: bare, mirror: mirror, user: user, worker: worker} = context
     {:ok, base} = Git.resolve(bare, "refs/heads/main")
 
     {:ok, ticket} =
       Tickets.admit(project, %{title: "Persist scores", body: "They vanish."}, {:user, user.id})
 
     # refined — the first job writes a document, and the transition out of it asks for approval.
-    run("success", "refinement.md")
+    run(worker, "success", "refinement.md")
     assert [%{kind: :approval}] = queue(ticket)
     {:ok, ticket} = Operator.decide(Tickets.get!(ticket.id), user, :approved, "reads right")
     assert ticket.state == "planned"
 
     # planned — stops to ask something, which is answered from the queue.
-    run("blocking", "plan.md")
+    run(worker, "blocking", "plan.md")
     assert [%{kind: :question, question: %{key: "backend"}}] = queue(ticket)
     {:ok, _} = Operator.answer(Tickets.get!(ticket.id), user, "backend", %{choice: "b"})
-    run("success", "plan.md")
+    run(worker, "success", "plan.md")
     assert Tickets.get!(ticket.id).state == "implemented"
 
     # implemented — the agent commits in its checkout, which the platform pushes to the branch.
-    run("success", "implementation.md", commit: "score.ex")
+    run(worker, "success", "implementation.md", commit: {"score.ex", "def persist, do: :ok\n"})
     ticket = Tickets.get!(ticket.id)
     assert ticket.state == "verified"
 
@@ -64,7 +83,7 @@ defmodule Forge.DemoTest do
 
     # verified — converges, and the ticket comes to rest in a human state where a person looks at
     # it. The queue marks it reviewable, because the way out of it pins the changeset.
-    run("success", "report.md")
+    run(worker, "success", "report.md")
     ticket = Tickets.get!(ticket.id)
     assert ticket.state == "review_ready"
 
@@ -80,7 +99,7 @@ defmodule Forge.DemoTest do
 
     {:ok, merged} = Git.resolve(bare, "refs/heads/main")
     assert Git.ancestor?(bare, head, merged)
-    assert {:ok, "score.ex\n"} = Git.show(bare, merged, "score.ex")
+    assert {:ok, "def persist, do: :ok\n"} = Git.show(bare, merged, "score.ex")
 
     # …and the mirror has it, pushed by the repository's own post-receive hook.
     assert {:ok, ^merged} = Git.resolve(mirror, "refs/heads/main")
@@ -93,21 +112,11 @@ defmodule Forge.DemoTest do
     assert Decimal.compare(ticket.cost_usd, 0) == :gt
   end
 
-  # Runs the one job the ticket is waiting on, the way the scheduler would.
-  defp run(scenario, doc, opts \\ []) do
-    config = Application.get_env(:forge, Forge.Jobs)
-
-    env =
-      [{"FAKE_SCENARIO", scenario}, {"FAKE_DOC", doc}] ++
-        case Keyword.get(opts, :commit) do
-          nil -> []
-          path -> [{"FAKE_COMMIT", path}]
-        end
-
-    Application.put_env(:forge, Forge.Jobs, Keyword.put(config, :extra_env, env))
-
+  # Runs the one job the ticket is waiting on, the way the scheduler would: assign it to the
+  # worker and let the worker answer.
+  defp run(worker, scenario, doc, opts \\ []) do
     [job] = Enum.filter(Jobs.pending(), &(&1.status == :pending))
-    {:ok, _job} = Jobs.run(job)
+    {:ok, _job} = FakeWorker.run(job, worker, scenario, Keyword.put(opts, :doc, doc))
     :ok
   end
 

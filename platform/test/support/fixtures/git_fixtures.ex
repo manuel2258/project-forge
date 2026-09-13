@@ -64,6 +64,45 @@ defmodule Forge.GitFixtures do
     bare
   end
 
+  @doc """
+  Commits `content` at `path` on a ticket's branch, over the platform's own git endpoint, the
+  way a job does — clone, commit, push, all with a write token scoped to that branch. Returns
+  the sha the branch now points at.
+
+  A plain git client rather than `ForgeWorker.Checkout`: since milestone 3 the platform does
+  not compile the worker in, so its tests cannot borrow the worker's git any more than its code
+  can. The token rides in the URL, which is the form `Forge.Git.Url.with_token/2` exists for.
+  """
+  def commit_over_http(project, branch, path, content, message \\ nil) do
+    dir = Path.join(tmp_dir("client"), "clone")
+
+    {:ok, token, _row} =
+      Forge.Git.Tokens.issue(project, ref: "refs/heads/" <> branch, write: true)
+
+    url = Forge.Git.Url.with_token(project, token)
+
+    git!(Path.dirname(dir), ["clone", "--quiet", "--branch", branch, url, dir])
+    File.mkdir_p!(Path.dirname(Path.join(dir, path)))
+    File.write!(Path.join(dir, path), content <> "\n")
+    git!(dir, ["add", path])
+
+    git!(dir, [
+      "-c",
+      "user.name=job",
+      "-c",
+      "user.email=job@forge",
+      "commit",
+      "-q",
+      "-m",
+      message || content
+    ])
+
+    git!(dir, ["push", "--quiet", "--force", url, "HEAD:refs/heads/" <> branch])
+
+    {:ok, sha} = Git.resolve(Forge.Projects.repo_path(project), "refs/heads/" <> branch)
+    sha
+  end
+
   defp git!(dir, args) do
     {:ok, _} = Git.run(dir, args)
   end

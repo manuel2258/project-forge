@@ -15,6 +15,9 @@ defmodule ForgeWorker.Job.Runner do
     * `:wall_clock_ms` - kill after this long. Default one hour.
     * `:grace_ms` - time between SIGTERM and SIGKILL. Default 10 seconds.
     * `:nix_env` - when true and the spec has an `env`, wrap in `nix develop .#env`.
+    * `:slice` - how the process is confined (`ForgeWorker.Slice`). Default: the configured
+      implementation, which is `Slice.Direct` unless the image says otherwise.
+    * `:slice_opts` - the ceiling and share for this job, from the assignment.
     * `:extra_env` - additional `{name, value}` pairs for the process environment.
 
   The harness process gets a clean environment: an allowlist of the worker's own variables
@@ -28,9 +31,9 @@ defmodule ForgeWorker.Job.Runner do
   # place; `Dir.prepare/3` clears `out/` for it, so it never inherits a dead run's outputs.
   use GenServer, restart: :temporary
 
-  alias ForgeCore.Job.{Outcome, Spec}
+  alias ForgeCore.Job.{Outcome, Result, Spec}
   alias ForgeCore.Prompt
-  alias ForgeWorker.Job.{Dir, Result}
+  alias ForgeWorker.Job.Dir
 
   require Logger
 
@@ -79,6 +82,8 @@ defmodule ForgeWorker.Job.Runner do
       started_event: nil,
       killed: nil,
       exit_status: nil,
+      slice: nil,
+      slice_context: nil,
       eof: false,
       waiters: [],
       result: nil
@@ -97,12 +102,53 @@ defmodule ForgeWorker.Job.Runner do
   def handle_continue({:spawn, opts}, %{spec: spec, job_dir: job_dir, harness: harness} = state) do
     {executable, args, env} = harness.command(spec, job_dir, Keyword.get(opts, :harness_opts, []))
     {executable, args} = maybe_nix(executable, args, spec, Keyword.get(opts, :nix_env, false))
-    {plain, secrets} = split_env(env ++ Keyword.get(opts, :extra_env, []))
 
-    assignments =
-      Enum.map(inherited_env() ++ [{"HOME", Dir.home_dir(job_dir)}] ++ plain, fn {k, v} ->
-        "#{k}=#{v}"
-      end)
+    # The environment is composed before the slice is made, not after, because a slice that
+    # starts the process somewhere else has to be told what it is.
+    {plain, secrets} = split_env(env ++ Keyword.get(opts, :extra_env, []))
+    plain = inherited_env() ++ [{"HOME", Dir.home_dir(job_dir)}] ++ plain
+
+    case slice(opts, spec, job_dir, plain, secrets) do
+      {:ok, slice, context} ->
+        {executable, args} = slice.wrap(executable, args, context)
+        state = %{state | slice: slice, slice_context: context}
+        {:noreply, spawn_harness(state, opts, executable, args, plain, secrets)}
+
+      {:error, reason} ->
+        {:noreply, conclude_without_starting(state, reason)}
+    end
+  end
+
+  # The slice is made before the process and removed after it, whatever the outcome: a Unix
+  # user left behind is a Unix user left behind on every job this worker ever ran.
+  defp slice(opts, %Spec{} = spec, job_dir, plain, secrets) do
+    slice = Keyword.get(opts, :slice) || ForgeWorker.Slice.impl()
+
+    slice_opts =
+      opts
+      |> Keyword.get(:slice_opts, %{})
+      |> Map.merge(%{
+        job_id: spec.job_id,
+        worktree: Keyword.fetch!(opts, :worktree),
+        job_dir: job_dir,
+        env: plain,
+        secret_names: Enum.map(secrets, fn {name, _value} -> name end)
+      })
+
+    with {:ok, context} <- slice.prepare(slice_opts), do: {:ok, slice, context}
+  end
+
+  # A slice that cannot be made is a job that cannot run: it concludes with nothing started,
+  # which `ForgeCore.Job.Outcome` already reads as an error, rather than running unconfined.
+  defp conclude_without_starting(state, reason) do
+    Logger.error("could not make a slice for job #{state.spec.job_id}: #{inspect(reason)}")
+    send(self(), :conclude)
+    state
+  end
+
+  defp spawn_harness(state, opts, executable, args, plain, secrets) do
+    job_dir = state.job_dir
+    assignments = Enum.map(plain, fn {k, v} -> "#{k}=#{v}" end)
 
     port =
       Port.open({:spawn_executable, "/bin/sh"}, [
@@ -117,7 +163,7 @@ defmodule ForgeWorker.Job.Runner do
         {:env, Enum.map(secrets, fn {k, v} -> {String.to_charlist(k), String.to_charlist(v)} end)}
       ])
 
-    {:noreply, %{state | port: port}}
+    %{state | port: port}
   end
 
   # The shell reads the prompt into stdin, sends stderr to its file, and `exec`s `env -i`
@@ -190,6 +236,7 @@ defmodule ForgeWorker.Job.Runner do
       if state.buffer == "", do: state, else: handle_line(state.buffer, %{state | buffer: ""})
 
     File.close(state.transcript)
+    if state.slice, do: state.slice.cleanup(state.slice_context)
     result = conclude(state)
     Enum.each(state.waiters, &GenServer.reply(&1, {:ok, result}))
     {:stop, :normal, %{state | result: result, waiters: []}}
@@ -302,16 +349,19 @@ defmodule ForgeWorker.Job.Runner do
     started = started || %{}
     finished = finished || %{}
 
+    # String keys, because this is the provider's own summary and it crosses the channel as
+    # JSON. An atom key here would arrive as a string key there, and the platform would read
+    # nil for the cost of every job.
     %{
-      session_id: Map.get(finished, :session_id) || Map.get(started, :session_id),
-      model: Map.get(started, :model),
-      subtype: Map.get(finished, :subtype),
-      is_error: Map.get(finished, :is_error),
-      turns: Map.get(finished, :num_turns),
-      cost_usd: Map.get(finished, :total_cost_usd),
-      duration_ms: Map.get(finished, :duration_ms),
-      usage: Map.get(finished, :usage),
-      exit_status: exit_status
+      "session_id" => Map.get(finished, :session_id) || Map.get(started, :session_id),
+      "model" => Map.get(started, :model),
+      "subtype" => Map.get(finished, :subtype),
+      "is_error" => Map.get(finished, :is_error),
+      "turns" => Map.get(finished, :num_turns),
+      "cost_usd" => Map.get(finished, :total_cost_usd),
+      "duration_ms" => Map.get(finished, :duration_ms),
+      "usage" => Map.get(finished, :usage),
+      "exit_status" => exit_status
     }
   end
 end

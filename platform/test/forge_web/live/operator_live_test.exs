@@ -20,24 +20,30 @@ defmodule ForgeWeb.OperatorLiveTest do
     data_dir = tmp_dir("data")
     original = Application.get_env(:forge, Forge.Jobs)
     Application.put_env(:forge, Forge.Jobs, Keyword.put(original, :data_dir, data_dir))
-    on_exit(fn -> Application.put_env(:forge, Forge.Jobs, original) end)
+
+    store = Application.get_env(:forge, Forge.Storage, [])
+    Application.put_env(:forge, Forge.Storage, Keyword.put(store, :dir, tmp_dir("store")))
+
+    on_exit(fn ->
+      Application.put_env(:forge, Forge.Jobs, original)
+      Application.put_env(:forge, Forge.Storage, store)
+    end)
+
+    Process.put(:worker, Forge.FakeWorker.connect())
 
     %{project: project}
   end
 
-  defp scenario(name, doc) do
-    config = Application.get_env(:forge, Forge.Jobs)
-
-    Application.put_env(
-      :forge,
-      Forge.Jobs,
-      Keyword.put(config, :extra_env, [{"FAKE_SCENARIO", name}, {"FAKE_DOC", doc}])
-    )
-  end
+  # The worker is a machine on the far end of a channel now, and in these tests it is this
+  # process: it takes assignments out of its own mailbox and answers them. Its handle and the
+  # scenario it is to play live in the process dictionary because they belong to this process
+  # in exactly the same way. See Forge.FakeWorker.
+  defp scenario(name, doc), do: Process.put(:scenario, {name, doc})
 
   defp run_pending(ticket_id) do
     [job] = Enum.filter(Jobs.for_ticket(ticket_id), &(&1.status == :pending))
-    {:ok, job} = Jobs.run(job)
+    {name, doc} = Process.get(:scenario, {"success", "plan.md"})
+    {:ok, job} = Forge.FakeWorker.run(job, Process.get(:worker), name, doc: doc)
     job
   end
 

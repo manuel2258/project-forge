@@ -145,6 +145,19 @@ cmd_selftest() {
       ' "$FORGE_M_RUN_DIR/run.jsonl")" \
     "true"
 
+  section "isolation"
+  cmd_isolation
+  selftest_expect "the control round ran four builds" \
+    "$(selftest_count 'map(select(.round == "control"))')" 4
+  # Here the builds run with no unit around them, so a ceiling is derived from the fallback
+  # peak and then binds on nothing: every build finishes, including the one that was supposed
+  # to die. Refusing to call that a pass is the assertion — a crossing that could not bind has
+  # learned nothing about what happens when it does, and the harness has to say so rather than
+  # report four healthy builds as isolation working.
+  selftest_expect "a ceiling that could not bind is not a pass" \
+    "$(jq -rs 'map(select(.label == "isolation-verdict")) | .[0].status' "$FORGE_M_RUN_DIR/run.jsonl")" \
+    "indeterminate"
+
   section "report"
   local rendered section_heading
   rendered=$(cmd_report --run "$FORGE_M_RUN_DIR")

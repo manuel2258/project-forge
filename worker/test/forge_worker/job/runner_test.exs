@@ -1,10 +1,31 @@
+defmodule ForgeWorker.Job.RunnerTest.RecordingSlice do
+  @moduledoc "A slice that only reports what it was asked to make, and runs the command as it is."
+
+  @behaviour ForgeWorker.Slice
+
+  @impl ForgeWorker.Slice
+  def prepare(opts) do
+    send(opts.reply_to, {:slice_prepared, opts})
+    {:ok, opts}
+  end
+
+  @impl ForgeWorker.Slice
+  def wrap(executable, args, _context), do: {executable, args}
+
+  @impl ForgeWorker.Slice
+  def cleanup(_context), do: :ok
+end
+
 defmodule ForgeWorker.Job.RunnerTest do
   use ExUnit.Case, async: true
+
+  alias ForgeWorker.Job.RunnerTest.RecordingSlice
 
   import ForgeWorker.Fixtures
 
   alias ForgeCore.Document.Question
-  alias ForgeWorker.Job.{Result, Runner}
+  alias ForgeCore.Job.Result
+  alias ForgeWorker.Job.Runner
 
   setup do
     %{root: tmp_dir("root"), worktree: tmp_dir("worktree")}
@@ -43,6 +64,27 @@ defmodule ForgeWorker.Job.RunnerTest do
     end
   end
 
+  test "the slice is told the environment the process will need", context do
+    pid = run(context, "success", slice: RecordingSlice, slice_opts: %{reply_to: self()})
+
+    assert_receive {:slice_prepared, opts}
+    assert {:ok, %Result{}} = Runner.await(pid, 5_000)
+
+    # A slice that starts the process somewhere else — which is what a transient unit is — sees
+    # nothing of the runner's own environment, so everything the harness needs has to be here.
+    assert opts.worktree == context.worktree
+    assert String.starts_with?(opts.job_dir, context.root)
+    assert {"HOME", home} = List.keyfind(opts.env, "HOME", 0)
+    assert String.starts_with?(home, context.root)
+    assert List.keyfind(opts.env, "FORGE_JOB", 0)
+    assert List.keyfind(opts.env, "PATH", 0)
+
+    # The credential is named and not valued: it is the one thing that must not be copied into
+    # a list that ends up in an argument vector.
+    assert "ANTHROPIC_API_KEY" in opts.secret_names
+    refute List.keyfind(opts.env, "ANTHROPIC_API_KEY", 0)
+  end
+
   test "a successful run converges with the declared outcome and full accounting", context do
     pid = run(context, "success")
     assert {:ok, %Result{} = result} = Runner.await(pid, 5_000)
@@ -55,11 +97,11 @@ defmodule ForgeWorker.Job.RunnerTest do
     assert %{"plan.md" => %ForgeCore.Document{outcome: "done"}} = result.documents
 
     assert %{
-             session_id: "sess-42",
-             model: "fake-model",
-             turns: 3,
-             cost_usd: 0.0421,
-             subtype: "success"
+             "session_id" => "sess-42",
+             "model" => "fake-model",
+             "turns" => 3,
+             "cost_usd" => 0.0421,
+             "subtype" => "success"
            } = result.harness
 
     assert Enum.map(events(), & &1.type) ==
@@ -118,7 +160,7 @@ defmodule ForgeWorker.Job.RunnerTest do
   test "a final line without a newline is still parsed", context do
     {:ok, result} = context |> run("noeol") |> Runner.await(5_000)
     assert result.outcome == :converged
-    assert result.harness.subtype == "success"
+    assert result.harness["subtype"] == "success"
   end
 
   test "a resumed run keeps earlier outputs and transcripts", context do
@@ -147,7 +189,7 @@ defmodule ForgeWorker.Job.RunnerTest do
     {:ok, result} = context |> run("max_turns") |> Runner.await(5_000)
     assert result.outcome == :budget_exhausted
     assert result.exit_status == 1
-    assert result.harness.cost_usd == 1.5
+    assert result.harness["cost_usd"] == 1.5
   end
 
   # A job re-queued after its node died runs again under the same job id, and so in the same

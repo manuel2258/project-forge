@@ -10,8 +10,6 @@ defmodule Forge.MergeTest do
   import Forge.GitFixtures
 
   alias Forge.{Artifacts, Engine, Events, Git, Merge, Operator, Projects, Tickets}
-  alias Forge.Git.{Tokens, Url}
-  alias ForgeWorker.Checkout
 
   setup do
     data_dir = tmp_dir("merge-data")
@@ -167,19 +165,7 @@ defmodule Forge.MergeTest do
 
   # A commit on the ticket branch, pushed the way a job pushes: over the platform's endpoint.
   defp commit_on_branch(%{project: project, ticket: ticket}, path, content) do
-    dir = Path.join(tmp_dir("merge-clone"), "clone")
-    {:ok, token, _row} = Tokens.issue(project, ref: "refs/heads/" <> ticket.branch, write: true)
-
-    :ok =
-      Checkout.ensure(dir: dir, url: Url.for(project), branch: ticket.branch, token: token)
-
-    File.write!(Path.join(dir, path), content <> "\n")
-    {:ok, _out} = Git.run(dir, ["add", path])
-    {:ok, _out} = Git.run(dir, ["commit", "--quiet", "-m", content])
-    :ok = Checkout.push(dir: dir, branch: ticket.branch, token: token)
-
-    {:ok, sha} = Git.resolve(Projects.repo_path(project), "refs/heads/" <> ticket.branch)
-    sha
+    commit_over_http(project, ticket.branch, path, content)
   end
 
   # Moves the default branch somewhere the ticket branch cannot merge into cleanly. Written

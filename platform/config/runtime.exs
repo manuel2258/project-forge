@@ -79,15 +79,88 @@ if hour = System.get_env("FORGE_DIGEST_HOUR_UTC") do
   end
 end
 
+# Settings that are only settings when someone set them: an absent variable must leave the
+# compiled default alone rather than overwrite it with nil.
+set = fn pairs -> Enum.reject(pairs, fn {_key, value} -> is_nil(value) end) end
+
+integer_env = fn name ->
+  case System.get_env(name) do
+    nil ->
+      nil
+
+    value ->
+      case Integer.parse(value) do
+        {number, ""} -> number
+        _other -> raise "#{name} must be an integer, got #{inspect(value)}"
+      end
+  end
+end
+
+# The worker is a different machine, so the endpoint's own URL says nothing useful about where
+# it should dial: under QEMU's user-mode networking the platform is the guest's gateway, which
+# is http://10.0.2.2:4000. FORGE_PLATFORM_URL is read for the socket the worker joins, the
+# store it fetches from, and — unless FORGE_GIT_BASE_URL says otherwise — the git URL the job
+# clones from.
 if config_env() != :test do
-  config :forge, Forge.Jobs,
-    data_dir: System.get_env("FORGE_DATA_DIR") || "tmp/forge",
-    repos_dir: System.get_env("FORGE_REPOS_DIR"),
-    nix_env: System.get_env("FORGE_NIX_ENV") in ["1", "true"],
-    # Set this where something in front of the platform rewrites the host, so a job's clone URL
-    # is the one a client outside the node would use. Derived from the endpoint otherwise.
-    git_base_url: System.get_env("FORGE_GIT_BASE_URL"),
-    harness_opts: harness_opts
+  data_dir = System.get_env("FORGE_DATA_DIR") || "tmp/forge"
+
+  config :forge,
+         Forge.Jobs,
+         set.(
+           data_dir: data_dir,
+           repos_dir: System.get_env("FORGE_REPOS_DIR"),
+           platform_url: System.get_env("FORGE_PLATFORM_URL"),
+           nix_env: System.get_env("FORGE_NIX_ENV") in ["1", "true"],
+           # Set this where something in front of the platform rewrites the host, so a job's
+           # clone URL is the one a client outside the node would use.
+           git_base_url: System.get_env("FORGE_GIT_BASE_URL"),
+           harness_opts: harness_opts
+         )
+
+  # The store lives beside the rest of the platform's data unless it is told otherwise; the
+  # S3 implementation in the closing step replaces the implementation, not the path.
+  config :forge, Forge.Storage,
+    dir: System.get_env("FORGE_STORE_DIR") || Path.join(data_dir, "store")
+
+  # Where machines come from, and what shape they are. The image and the UEFI firmware are
+  # paths on this host — `nix build .#worker-image` makes the first, and the devshell exports
+  # the other two — so nothing here can guess them.
+  config :forge,
+         Forge.Provider,
+         set.(
+           image: System.get_env("FORGE_WORKER_IMAGE"),
+           firmware_code: System.get_env("FORGE_OVMF_CODE"),
+           firmware_vars: System.get_env("FORGE_OVMF_VARS"),
+           dir: System.get_env("FORGE_MACHINES_DIR"),
+           cpus: integer_env.("FORGE_WORKER_CPUS"),
+           memory_mb: integer_env.("FORGE_WORKER_MEMORY_MB"),
+           disk_gb: integer_env.("FORGE_WORKER_DISK_GB"),
+           # The ssh door, shut unless both are set: see docs/design/worker-tier.md § The
+           # provider driver for the two things that need it and why it is not on by default.
+           ssh_key: System.get_env("FORGE_WORKER_SSH_KEY"),
+           ssh_port: integer_env.("FORGE_WORKER_SSH_PORT")
+         )
+
+  # The tier's numbers. All three are the sample project's or a labelled guess, and
+  # docs/measurements.md says the operator's own project replaces them: they are settings so
+  # that replacing one is a setting, not a patch.
+  config :forge,
+         Forge.Workers,
+         set.(
+           slice_bytes: integer_env.("FORGE_SLICE_BYTES"),
+           max_workers: integer_env.("FORGE_MAX_WORKERS"),
+           idle_period_ms: integer_env.("FORGE_IDLE_PERIOD_MS"),
+           worker_timeout_ms: integer_env.("FORGE_WORKER_TIMEOUT_MS")
+         )
+end
+
+# The worker reaches the platform over the network, not over loopback, and dev binds to
+# 127.0.0.1. FORGE_HTTP_IP is what the endpoint binds to when something has to reach it.
+if ip = System.get_env("FORGE_HTTP_IP") do
+  case :inet.parse_address(String.to_charlist(ip)) do
+    {:ok, address} -> config :forge, ForgeWeb.Endpoint, http: [ip: address]
+    {:error, _reason} -> raise "FORGE_HTTP_IP must be an IP address, got #{inspect(ip)}"
+  end
 end
 
 if config_env() == :prod do

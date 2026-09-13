@@ -1,7 +1,7 @@
 defmodule Forge.Workers.Worker do
   @moduledoc """
-  A machine that hosts jobs. Empty until the worker tier; the local worker manager registers
-  as one row so jobs always have a `worker_id`.
+  A machine that hosts jobs: created on demand, destroyed after an idle period, and recorded
+  from before it exists until after it is gone. See `docs/design/worker-tier.md`.
   """
 
   use Ecto.Schema
@@ -16,6 +16,7 @@ defmodule Forge.Workers.Worker do
     field :token_hash, :string, redact: true
     field :memory_budget, :integer
     field :last_seen_at, :utc_datetime
+    field :idle_since, :utc_datetime
 
     has_many :jobs, Forge.Jobs.Job
 
@@ -24,7 +25,15 @@ defmodule Forge.Workers.Worker do
 
   def changeset(worker, attrs) do
     worker
-    |> cast(attrs, [:provider, :provider_id, :status, :token_hash, :memory_budget, :last_seen_at])
+    |> cast(attrs, [
+      :provider,
+      :provider_id,
+      :status,
+      :token_hash,
+      :memory_budget,
+      :last_seen_at,
+      :idle_since
+    ])
     |> validate_required([:provider, :status])
   end
 end

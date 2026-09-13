@@ -35,6 +35,9 @@ result_success='{"type":"result","subtype":"success","is_error":false,"num_turns
 case "${FAKE_SCENARIO:-success}" in
   success)
     printf -- '---\noutcome: done\n---\n# Plan\n\nDo the thing.\n' > "$doc"
+    # In the worktree, which is where the agent's actual work goes: the job directory is the
+    # interface, the worktree is the change.
+    printf 'edited by the agent\n' > CHANGED.md
     emit "$result_success" ;;
   plan_invalid)
     printf -- '---\noutcome: plan_invalid\n---\n# Plan\n\nThe plan cannot work.\n' > "$doc"

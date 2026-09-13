@@ -28,6 +28,10 @@ export FORGE_M_ROOT
 . measure/lib/m2.sh
 # shellcheck source=measure/lib/m3.sh
 . measure/lib/m3.sh
+# shellcheck source=measure/lib/isolation.sh
+. measure/lib/isolation.sh
+# shellcheck source=measure/lib/m4.sh
+. measure/lib/m4.sh
 # shellcheck source=measure/lib/selftest.sh
 . measure/lib/selftest.sh
 # shellcheck source=measure/lib/sample.sh
@@ -44,6 +48,8 @@ usage: bin/measure <subcommand> [--workload <name>] [--dry-run] [options]
      [--keep] [--reuse]
   m3 [--sweep]         peak build memory
      [--profile P]
+  isolation [--keep]   four concurrent builds, one under a ceiling below its own peak
+  m4 [--keep]          worker cold start, phase by phase, against a real machine
   report [--run DIR]   render the results table for pasting into docs/measurements.md
      [--measurement M]   the latest run of one measurement (m1, m2, m3) rather than of any
   selftest             run all three against a fake workload, with no btrfs, Nix or systemd
@@ -160,6 +166,13 @@ main() {
       preflight_unless_dry_run
       cmd_m3 ${rest[@]+"${rest[@]}"}
       ;;
+    isolation)
+      preflight_unless_dry_run
+      cmd_isolation ${rest[@]+"${rest[@]}"}
+      ;;
+    # No preflight: M4 needs a hypervisor and a platform, not a btrfs volume and cgroups on
+    # this host, and m4_require checks what it does need.
+    m4) cmd_m4 ${rest[@]+"${rest[@]}"} ;;
     report) cmd_report ${rest[@]+"${rest[@]}"} ;;
     clean) cmd_clean ${rest[@]+"${rest[@]}"} ;;
     *) usage ;;

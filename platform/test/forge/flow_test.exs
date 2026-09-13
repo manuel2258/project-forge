@@ -9,7 +9,7 @@ defmodule Forge.FlowTest do
   import Forge.AccountsFixtures
   import Forge.GitFixtures
 
-  alias Forge.{Artifacts, Engine, Events, Jobs, Projects, Queue, Tickets}
+  alias Forge.{Artifacts, Engine, Events, FakeWorker, Jobs, Projects, Queue, Tickets}
   alias Forge.Jobs.Job
 
   setup do
@@ -23,20 +23,24 @@ defmodule Forge.FlowTest do
     data_dir = tmp_dir("data")
     original = Application.get_env(:forge, Forge.Jobs)
     Application.put_env(:forge, Forge.Jobs, Keyword.put(original, :data_dir, data_dir))
-    on_exit(fn -> Application.put_env(:forge, Forge.Jobs, original) end)
 
-    %{project: project, user: user, repo: repo}
+    store = Application.get_env(:forge, Forge.Storage, [])
+    Application.put_env(:forge, Forge.Storage, Keyword.put(store, :dir, tmp_dir("store")))
+
+    on_exit(fn ->
+      Application.put_env(:forge, Forge.Jobs, original)
+      Application.put_env(:forge, Forge.Storage, store)
+    end)
+
+    # The worker is a machine on the far end of a channel now. This one is this process:
+    # it takes assignments out of its own mailbox and answers them. See Forge.FakeWorker.
+    worker = FakeWorker.connect()
+
+    %{project: project, user: user, repo: repo, worker: worker}
   end
 
-  defp scenario(name, doc) do
-    config = Application.get_env(:forge, Forge.Jobs)
-
-    Application.put_env(
-      :forge,
-      Forge.Jobs,
-      Keyword.put(config, :extra_env, [{"FAKE_SCENARIO", name}, {"FAKE_DOC", doc}])
-    )
-  end
+  defp run(job, worker, scenario, doc, opts \\ []),
+    do: FakeWorker.run(job, worker, scenario, Keyword.put(opts, :doc, doc))
 
   defp only_pending(ticket) do
     assert [%Job{status: :pending} = job] =
@@ -89,20 +93,24 @@ defmodule Forge.FlowTest do
 
   test "the whole loop: run, approve, block, answer, resume, backward edge, stuck, unstick", %{
     project: project,
-    user: user
+    user: user,
+    worker: worker
   } do
     {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
 
     # refined: converges, transition needs approval of refinement.md
-    scenario("success", "refinement.md")
-    {:ok, job} = Jobs.run(only_pending(ticket))
+    {:ok, job} = run(only_pending(ticket), worker, "success", "refinement.md")
     assert %Job{status: :finished, outcome: :converged, declared_outcome: "done", turns: 3} = job
     assert Decimal.equal?(job.cost_usd, Decimal.from_float(0.0421))
 
     assert %{version: 1, author: %{"kind" => "job"}} =
              Artifacts.latest(ticket.id, "refinement.md")
 
-    assert %{blob_uri: "file://" <> _} = Artifacts.latest(ticket.id, "transcript-refined-1.jsonl")
+    assert %{blob_uri: "store:" <> key, content_hash: "sha256:" <> _} =
+             Artifacts.latest(ticket.id, "transcript-refined-1.jsonl")
+
+    assert {:ok, transcript} = Forge.Storage.get(key)
+    assert transcript =~ "\"type\":"
 
     ticket = Tickets.get!(ticket.id)
     assert ticket.state == "refined"
@@ -134,8 +142,7 @@ defmodule Forge.FlowTest do
         }
       })
 
-    scenario("blocking", "plan.md")
-    {:ok, job} = Jobs.run(planned)
+    {:ok, job} = run(planned, worker, "blocking", "plan.md")
     assert job.status == :waiting
     Forge.Push.flush()
     assert_receive {:push, "https://push.example/phone", %{"body" => "Which backend?"}, _opts}
@@ -158,32 +165,34 @@ defmodule Forge.FlowTest do
     {:ok, job} = Jobs.resume(Jobs.get!(job.id))
     assert job.status == :pending
 
-    # the resumed agent keeps its question block; the answered key no longer blocks it
-    scenario("blocking", "plan.md")
-    {:ok, job} = Jobs.run(job)
+    # the resumed agent keeps its question block; the answered key no longer blocks it.
+    # What the worker is told is the platform's half of this: the session to resume, the
+    # answer as a pinned input, and the key that no longer blocks.
+    assignment = FakeWorker.assign(job, worker)
+    assert assignment["resume_session"] == "sess-42"
+    spec = ForgeCore.Job.Spec.from_map(assignment["spec"])
+    assert spec.answered_keys == ["backend"]
+    assert %{name: "answers.md", content: answers} = List.last(spec.inputs)
+    assert answers =~ "A: b"
+    assert assignment["git"]["branch"] == "ticket/1"
+
+    {:ok, job} = FakeWorker.finish(assignment, "blocking", doc: "plan.md")
     assert job.status == :finished
     assert job.turns == 6
-    job_dir = Path.join([Jobs.data_dir(), "jobs", job.id])
-    assert File.read!(Path.join(job_dir, "fake-args.txt")) =~ "--resume sess-42"
-    assert File.read!(Path.join(job_dir, "fake-prompt.txt")) =~ "answers.md"
-    assert File.read!(Path.join([job_dir, "inputs", "answers.md"])) =~ "A: b"
     assert Artifacts.versions(ticket.id, "plan.md") |> length() == 2
     assert Queue.items() |> Enum.reject(&(&1.kind == :question)) |> length() == 0
 
     # planned -> implemented automatically; implemented reports plan_invalid -> back to planned
     ticket = Tickets.get!(ticket.id)
     assert ticket.state == "implemented"
-    scenario("plan_invalid", "implementation.md")
-    {:ok, _} = Jobs.run(only_pending(ticket))
+    {:ok, _} = run(only_pending(ticket), worker, "plan_invalid", "implementation.md")
     ticket = Tickets.get!(ticket.id)
     assert ticket.state == "planned"
     assert Jobs.spec(only_pending(ticket)).attempt == 2
 
     # planned again -> implemented -> verified; verified exhausts its budget -> stuck
-    scenario("success", "plan.md")
-    {:ok, _} = Jobs.run(only_pending(ticket))
-    scenario("success", "implementation.md")
-    {:ok, _} = Jobs.run(only_pending(Tickets.get!(ticket.id)))
+    {:ok, _} = run(only_pending(ticket), worker, "success", "plan.md")
+    {:ok, _} = run(only_pending(Tickets.get!(ticket.id)), worker, "success", "implementation.md")
     ticket = Tickets.get!(ticket.id)
     assert ticket.state == "verified"
     verified = only_pending(ticket)
@@ -194,8 +203,7 @@ defmodule Forge.FlowTest do
              "changeset"
            ]
 
-    scenario("max_turns", "report.md")
-    {:ok, job} = Jobs.run(verified)
+    {:ok, job} = run(verified, worker, "max_turns", "report.md")
     assert job.outcome == :budget_exhausted
     ticket = Tickets.get!(ticket.id)
     assert ticket.status == :stuck
@@ -209,10 +217,8 @@ defmodule Forge.FlowTest do
     # unstick by choosing the retry edge by hand, then finish
     {:ok, ticket} = Engine.choose(ticket, user.id, "implemented")
     assert {ticket.status, ticket.state} == {:active, "implemented"}
-    scenario("success", "implementation.md")
-    {:ok, _} = Jobs.run(only_pending(ticket))
-    scenario("success", "report.md")
-    {:ok, _} = Jobs.run(only_pending(Tickets.get!(ticket.id)))
+    {:ok, _} = run(only_pending(ticket), worker, "success", "implementation.md")
+    {:ok, _} = run(only_pending(Tickets.get!(ticket.id)), worker, "success", "report.md")
     ticket = Tickets.get!(ticket.id)
     assert ticket.state == "review_ready"
     assert [%{kind: :review, detail: %{transitions: ["merged"]}}] = Queue.items()
@@ -231,11 +237,11 @@ defmodule Forge.FlowTest do
 
   test "rejecting keeps the ticket pending; a stale job's result is orphaned", %{
     project: project,
-    user: user
+    user: user,
+    worker: worker
   } do
     {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
-    scenario("success", "refinement.md")
-    {:ok, _} = Jobs.run(only_pending(ticket))
+    {:ok, _} = run(only_pending(ticket), worker, "success", "refinement.md")
     ticket = Tickets.get!(ticket.id)
 
     {:ok, rejected} = Engine.decide(ticket, user.id, :rejected, "not yet")
@@ -267,15 +273,15 @@ defmodule Forge.FlowTest do
         })
       )
 
-    scenario("success", "plan.md")
-    {:ok, _} = Jobs.run(planned)
+    {:ok, _} = run(planned, worker, "success", "plan.md")
     assert Tickets.get!(moved.id).state == "verified"
     assert "job.orphaned" in event_types(ticket)
   end
 
   test "a resume that never reaches the harness is re-queued as a fresh run", %{
     project: project,
-    user: user
+    user: user,
+    worker: worker
   } do
     {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
     job = only_pending(ticket)
@@ -285,53 +291,66 @@ defmodule Forge.FlowTest do
         Job.progress_changeset(job, %{status: :pending, harness_session_id: "stale-session"})
       )
 
-    scenario("no_start", "refinement.md")
-    {:ok, job} = Jobs.run(job)
+    {:ok, job} = run(job, worker, "no_start", "refinement.md")
     assert job.status == :pending
     assert job.harness_session_id == nil
     assert "job.resume_failed" in event_types(ticket)
 
-    scenario("success", "refinement.md")
-    {:ok, job} = Jobs.run(job)
+    {:ok, job} = run(job, worker, "success", "refinement.md")
     assert job.outcome == :converged
   end
 
-  test "the scheduler starts pending jobs and survives a dead runner", %{
+  test "the scheduler hands pending jobs to a worker with room, and holds the rest",
+       %{project: project, user: user} = context do
+    # A worker with room for exactly one slice, so the second ticket has nowhere to go until
+    # the first job is done with it. The setup's roomier worker steps aside.
+    Registry.unregister(Forge.Workers.Registry, context.worker.id)
+    worker = FakeWorker.connect(memory_budget: Forge.Workers.slice_bytes())
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    {:ok, ticket2} = Tickets.admit(project, %{title: "y"}, {:user, user.id})
+    start_supervised!(Forge.Jobs.Scheduler)
+
+    # One slice, two jobs: one goes out and the other waits. Which one is not the point —
+    # both were admitted in the same second, and `pending/1` orders by `inserted_at`.
+    assert Forge.Jobs.Scheduler.tick() == 1
+
+    [running, waiting] =
+      Enum.split_with([ticket, ticket2], &(job_status(&1) == :running))
+      |> then(fn {a, b} -> [hd(a), hd(b)] end)
+
+    assert job_status(waiting) == :pending
+    assert Jobs.get!(only_job(running).id).worker_id == worker.id
+
+    # Nothing changes while the slice is taken: the job is offered again, not dropped.
+    assert Forge.Jobs.Scheduler.tick() == 0
+
+    assignment = FakeWorker.take_assignment(only_job(running).id)
+    {:ok, _job} = FakeWorker.finish(assignment, "success", doc: "refinement.md")
+    assert Tickets.get!(running.id).pending_transition["to"] == "planned"
+
+    # With the slice free again, the one that waited goes out.
+    assert Forge.Jobs.Scheduler.tick() == 1
+    assert job_status(waiting) == :running
+  end
+
+  test "a job assigned to a worker that has gone away stays pending", %{
     project: project,
     user: user
   } do
+    worker = FakeWorker.connect()
     {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
-    scenario("success", "refinement.md")
-    start_supervised!(Forge.Jobs.Scheduler)
+    job = only_pending(ticket)
 
-    assert Forge.Jobs.Scheduler.tick() == 1
+    # The registry entry goes when the channel process does; here, when this one unregisters.
+    Registry.unregister(Forge.Workers.Registry, worker.id)
 
-    # Recording a job's result and deciding what follows it are deliberately two transactions,
-    # so a finished job is visible before the engine has moved the ticket. Waiting on the
-    # decision rather than on the status is waiting for the thing this asserts.
-    wait_until(fn -> Tickets.get!(ticket.id).pending_transition != nil end)
-    assert Tickets.get!(ticket.id).pending_transition["to"] == "planned"
-
-    # a runner that dies leaves no job running: the scheduler fails it and the engine decides
-    {:ok, ticket2} = Tickets.admit(project, %{title: "y"}, {:user, user.id})
-    job2 = only_pending(ticket2)
-    scenario("hang", "refinement.md")
-    Forge.Jobs.Scheduler.tick()
-    wait_until(fn -> Jobs.get!(job2.id).status == :running end)
-    [{_, runner, _, _}] = DynamicSupervisor.which_children(ForgeWorker.Job.Supervisor)
-    Process.exit(runner, :kill)
-    wait_until(fn -> Jobs.get!(job2.id).status == :finished end)
-    assert Jobs.get!(job2.id).outcome == :error
-    assert Tickets.get!(ticket2.id).status == :stuck
+    assert {:error, :not_connected} = Jobs.assign(job, worker)
+    assert Jobs.get!(job.id).status == :pending
   end
 
-  defp wait_until(fun, attempts \\ 100) do
-    cond do
-      fun.() -> :ok
-      attempts == 0 -> flunk("condition not met in time")
-      true -> Process.sleep(50) && wait_until(fun, attempts - 1)
-    end
-  end
+  defp only_job(ticket), do: hd(Jobs.for_ticket(ticket.id))
+
+  defp job_status(ticket), do: Jobs.get!(only_job(ticket).id).status
 
   test "recover/0 re-queues jobs a dead node left running", %{project: project, user: user} do
     {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
@@ -341,143 +360,32 @@ defmodule Forge.FlowTest do
     assert Jobs.get!(job.id).status == :pending
   end
 
-  # `harness_session_id` is only ever persisted by the completion path (`Jobs.complete/2`),
-  # so a node killed mid-job always recovers with it nil, no matter how far the dead run got
-  # or what it left in the job's out/. Recovery must therefore hand that run a cold start,
-  # which clears out/ before the harness runs again; otherwise `collect/2` decides this run's
-  # outcome on a document the live run never wrote. See commit b3b7c77.
-  test "a job recovered after its node died runs cold and does not collect the dead run's output",
-       %{project: project, user: user} do
-    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
-    job = only_pending(ticket)
+  # Two behaviours that used to be tested here are the worker's now, and are tested there:
+  # that a cold start clears `out/` so a recovered job does not collect the dead run's
+  # documents (worker/test/forge_worker/job/dir_test.exs), and that a resume keeps them
+  # (worker/test/forge_worker/job/runner_test.exs). The platform no longer has a job
+  # directory or a worktree to get this wrong in.
 
-    # The run that was in flight when the node died had reached the harness and written
-    # refinement.md, but the node was killed before the job ever completed.
-    job_dir = Path.join([Jobs.data_dir(), "jobs", job.id])
-    File.mkdir_p!(Path.join(job_dir, "out"))
-
-    File.write!(
-      Path.join([job_dir, "out", "refinement.md"]),
-      "---\noutcome: done\n---\nwritten by the run that was killed\n"
-    )
-
-    {:ok, _} = Repo.update(Job.progress_changeset(job, %{status: :running}))
-    assert Jobs.recover() == 1
-    job = Jobs.get!(job.id)
-    assert job.status == :pending
-    assert job.harness_session_id == nil
-
-    # The recovered run starts cold (no session to resume) and hits its turn budget without
-    # writing anything itself. A correct cold start clears out/ first, so the document left
-    # behind by the dead run must not be collected as this run's output.
-    scenario("max_turns", "refinement.md")
-    {:ok, job} = Jobs.run(job)
-
-    assert job.outcome == :budget_exhausted
-    refute Artifacts.latest(ticket.id, "refinement.md")
-  end
-
-  # The other half of the same behaviour: a job that *does* carry a session id is a genuine
-  # resume, and must keep what the earlier attempt already produced in out/.
-  test "a job resumed with a session id keeps the earlier attempt's output", %{
+  # A row the progress changeset refuses must be refused before anything is assigned, and as
+  # a two-tuple. `mark_started/2` ends in `Repo.transaction/1`, whose Multi failure is a
+  # four-tuple that the scheduler does not match: it raised, its supervisor restarted it, and
+  # the next tick tried the same job again. With the assignment sent before the row was
+  # marked, every one of those cycles billed a real invocation.
+  test "a job whose progress cannot be recorded is refused without assigning anything", %{
     project: project,
-    user: user
-  } do
-    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
-    job = only_pending(ticket)
-
-    job_dir = Path.join([Jobs.data_dir(), "jobs", job.id])
-    File.mkdir_p!(Path.join(job_dir, "out"))
-
-    File.write!(
-      Path.join([job_dir, "out", "refinement.md"]),
-      "---\noutcome: done\n---\nfrom the attempt this one resumes\n"
-    )
-
-    {:ok, job} = Repo.update(Job.progress_changeset(job, %{harness_session_id: "sess-42"}))
-
-    # Same lever: max_turns writes nothing itself, so whatever is collected came from out/
-    # as prepare/3 left it.
-    scenario("max_turns", "refinement.md")
-    {:ok, job} = Jobs.run(job)
-
-    assert job.outcome == :budget_exhausted
-    assert %{content: content} = Artifacts.latest(ticket.id, "refinement.md")
-    assert content =~ "from the attempt this one resumes"
-  end
-
-  # A row the progress changeset refuses must be refused before anything is spawned, and as a
-  # two-tuple. `mark_started/1` ends in `Repo.transaction/1`, whose Multi failure is a
-  # four-tuple that `Forge.Jobs.Scheduler.start_one/2` does not match: it raised, its
-  # supervisor restarted it, and the next tick tried the same job again. With the harness
-  # started before the row was marked, every one of those cycles billed a real invocation.
-  test "a job whose progress cannot be recorded is refused without starting a harness", %{
-    project: project,
-    user: user
+    user: user,
+    worker: worker
   } do
     {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
     job = only_pending(ticket)
 
     # An outcome on a job that is not finished: rejected by `progress_changeset/2`. Written
     # around the changeset, the way a stray query or a bad repair would leave it.
-    Repo.update_all(
-      from(j in Job, where: j.id == ^job.id),
-      set: [outcome: :converged]
-    )
+    Repo.update_all(from(j in Job, where: j.id == ^job.id), set: [outcome: :converged])
 
     # A four-tuple does not match this, which is the point.
-    assert {:error, _reason} = Jobs.start(Jobs.get!(job.id))
-    refute File.exists?(Path.join([Jobs.data_dir(), "jobs", job.id]))
-  end
-
-  # The checkout is only removed once a job finishes, so a node that died mid-job leaves it
-  # behind with whatever the harness had not committed. `blocking` leaves the job waiting, so
-  # the checkout is still there to inspect after the run.
-  test "a cold start discards uncommitted work the dead run left in the checkout", %{
-    project: project,
-    user: user
-  } do
-    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
-    job = only_pending(ticket)
-    checkout = seed_checkout(project, ticket, job, "from the run that was killed")
-
-    scenario("blocking", "refinement.md")
-    {:ok, job} = Jobs.run(job)
-
-    assert job.status == :waiting
-    assert File.dir?(checkout)
-    refute File.exists?(Path.join(checkout, "half-done.txt"))
-  end
-
-  test "a resume keeps the work in progress in its checkout", %{project: project, user: user} do
-    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
-    job = only_pending(ticket)
-    checkout = seed_checkout(project, ticket, job, "from the attempt this one resumes")
-
-    {:ok, job} = Repo.update(Job.progress_changeset(job, %{harness_session_id: "sess-42"}))
-
-    scenario("blocking", "refinement.md")
-    {:ok, job} = Jobs.run(job)
-
-    assert job.status == :waiting
-    assert File.read!(Path.join(checkout, "half-done.txt")) =~ "resumes"
-  end
-
-  # What a killed run leaves behind: a clone of the ticket branch with an uncommitted file in it.
-  defp seed_checkout(project, ticket, job, content) do
-    dir = Path.join([Jobs.data_dir(), "checkouts", job.id])
-    {:ok, token, _row} = Forge.Git.Tokens.issue_for_job(job, ticket, project)
-
-    :ok =
-      ForgeWorker.Checkout.ensure(
-        dir: dir,
-        url: Forge.Git.Url.for(project),
-        branch: ticket.branch,
-        token: token
-      )
-
-    File.write!(Path.join(dir, "half-done.txt"), content)
-    dir
+    assert {:error, _reason} = Jobs.assign(Jobs.get!(job.id), worker)
+    refute_receive {:assign, _assignment}, 100
   end
 
   # A ticket pins its workflow, and the validator's rules move between milestones, so a

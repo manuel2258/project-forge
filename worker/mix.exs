@@ -34,6 +34,14 @@ defmodule ForgeWorker.MixProject do
     [
       {:forge_core, path: "../core"},
       {:jason, "~> 1.4"},
+      # The channel client the plan names, and an HTTP client for the platform's blob store.
+      # Slipstream already brings Mint, which is what Req's Finch uses, so this is one
+      # transport, not two.
+      {:slipstream, "~> 1.2"},
+      {:req, "~> 0.5"},
+      # Test only: Req.Test serves requests from a plug instead of the network, so the store
+      # can be answered without a platform and without stubbing Req itself.
+      {:plug, "~> 1.16", only: :test},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
     ]
   end

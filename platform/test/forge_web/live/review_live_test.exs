@@ -10,8 +10,6 @@ defmodule ForgeWeb.ReviewLiveTest do
   import Phoenix.LiveViewTest
 
   alias Forge.{Artifacts, Git, Projects, Tickets}
-  alias Forge.Git.{Tokens, Url}
-  alias ForgeWorker.Checkout
 
   setup :register_and_log_in_user
 
@@ -112,18 +110,7 @@ defmodule ForgeWeb.ReviewLiveTest do
   # -- helpers ---------------------------------------------------------------------------------
 
   defp commit_on_branch(%{project: project, ticket: ticket}, path, content) do
-    dir = Path.join(tmp_dir("review-clone"), "clone")
-    {:ok, token, _row} = Tokens.issue(project, ref: "refs/heads/" <> ticket.branch, write: true)
-
-    :ok = Checkout.ensure(dir: dir, url: Url.for(project), branch: ticket.branch, token: token)
-
-    File.write!(Path.join(dir, path), content <> "\n")
-    {:ok, _out} = Git.run(dir, ["add", path])
-    {:ok, _out} = Git.run(dir, ["commit", "--quiet", "-m", "work"])
-    :ok = Checkout.push(dir: dir, branch: ticket.branch, token: token)
-
-    {:ok, sha} = Git.resolve(Projects.repo_path(project), "refs/heads/" <> ticket.branch)
-    sha
+    commit_over_http(project, ticket.branch, path, content)
   end
 
   defp changeset!(ticket, sha) do

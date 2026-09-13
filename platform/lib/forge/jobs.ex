@@ -1,26 +1,27 @@
 defmodule Forge.Jobs do
   @moduledoc """
-  Jobs: creating one from a ticket's state (building the immutable spec), running it
-  through the embedded worker, and recording what it produced. The engine decides what
-  happens to the ticket afterwards; see `Forge.Engine`.
+  Jobs: creating one from a ticket's state (building the immutable spec), assigning it to a
+  worker, and recording what it produced. The engine decides what happens to the ticket
+  afterwards; see `Forge.Engine`.
 
-  Execution model in milestone 1: jobs are rows. Anything may create a `pending` job;
-  the running node's `Forge.Jobs.Scheduler` starts them and records their results.
+  Jobs are rows. Anything may create a `pending` job; `Forge.Jobs.Scheduler` assigns them to
+  a worker over the channel (`docs/design/worker-channel.md`) and the channel brings back
+  events, a result, or a hibernation. The platform runs nothing itself: it has not compiled
+  the worker in since milestone 3.
   """
 
   import Ecto.Query, only: [from: 2]
 
   alias Ecto.Multi
-  alias Forge.{Artifacts, Engine, Events, Git, Projects, Repo, Spend, Tickets}
+  alias Forge.{Artifacts, Engine, Events, Git, Projects, Repo, Spend, Storage, Tickets, Workers}
   alias Forge.Git.{Tokens, Url}
   alias Forge.Jobs.Job
   alias Forge.Tickets.Ticket
-  alias ForgeCore.Job.Spec
+  alias Forge.Workers.Worker
+  alias ForgeCore.Job.{Result, Spec}
   alias ForgeCore.Job.Spec.Input
   alias ForgeCore.{Prompt, Workflow}
   alias ForgeCore.Workflow.State
-  alias ForgeWorker.Checkout
-  alias ForgeWorker.Job.{Result, Runner}
 
   require Logger
 
@@ -158,62 +159,83 @@ defmodule Forge.Jobs do
   # -- execution ------------------------------------------------------------------------------
 
   @doc """
-  Starts the job's harness process and returns the runner pid. The caller must later pass
-  the awaited result to `complete/2`. Use `run/1` for the synchronous form.
+  Assigns a pending job to a worker and tells that worker to run it. The assignment carries
+  everything the job needs from the platform and nothing it can get for itself: the spec, a
+  git endpoint with a token scoped to the ticket branch, the store key and token for its
+  transcript, and the limits its slice is to have.
+
+  The row is marked before the assignment goes out, not after, and the same reasoning holds
+  as when the runner was in-process: a row the progress changeset refuses costs nothing, and
+  marking second meant it was refused only once a billed invocation was already running. A
+  worker that never gets the message is reconciled on its next join.
   """
-  @spec start(Job.t()) :: {:ok, pid()} | {:error, term()}
-  def start(%Job{} = job) do
+  @spec assign(Job.t(), Worker.t()) :: {:ok, Job.t()} | {:error, term()}
+  def assign(%Job{} = job, %Worker{} = worker) do
     ticket = Tickets.get!(job.ticket_id)
     project = Projects.get!(ticket.project_id)
 
-    # The row is marked before the harness is spawned, not after. A row the progress
-    # changeset refuses then costs nothing; marking second meant it was refused only once a
-    # billed invocation was already running, and the scheduler retried the job every tick.
+    # Both caps are asked here, as they were when the runner was in-process: this is still the
+    # one place every billed invocation passes. A ticket over its allowance is stuck before a
+    # machine is spoken to, not after.
     with :ok <- spend_gate(ticket),
          {:ok, token, _row} <- Tokens.issue_for_job(job, ticket, project),
-         :ok <- ensure_checkout(job, ticket, project, token),
-         {:ok, job} <- mark_started(job) do
-      case start_runner(job, ticket, project, token) do
-        {:ok, pid} ->
-          {:ok, pid}
-
-        {:error, reason} ->
-          # Nothing is running, so the job must not sit `running` until the next boot.
-          Repo.update(Job.progress_changeset(job, %{status: :pending}))
-          Tokens.revoke_for_job(job.id)
-          {:error, reason}
-      end
+         {:ok, started} <- mark_started(job, worker),
+         :ok <- Workers.push(worker.id, {:assign, assignment(started, ticket, project, token)}) do
+      {:ok, _worker} = Workers.busy(worker)
+      {:ok, started}
+    else
+      {:error, reason} ->
+        # Nothing is running, so the job must not sit `running` until the next boot, and the
+        # credential it would have used is no good to anyone.
+        Repo.update(Job.progress_changeset(get!(job.id), %{status: :pending}))
+        Tokens.revoke_for_job(job.id)
+        {:error, reason}
     end
   end
 
-  defp start_runner(job, ticket, project, token) do
-    worktree = checkout_dir(job)
-    spec = runtime_spec(job, ticket)
-    job_id = job.id
-    ticket_id = ticket.id
+  @doc "What the worker is told when a job is assigned. See `docs/design/worker-channel.md`."
+  @spec assignment(Job.t(), Ticket.t(), Forge.Projects.Project.t(), String.t()) :: map()
+  def assignment(%Job{} = job, %Ticket{} = ticket, project, git_token) do
+    # Per assignment, not per job: a resumed run uploads its own transcript, and the store
+    # refuses to overwrite one that is already there.
+    nonce = Base.url_encode64(:crypto.strong_rand_bytes(6), padding: false) |> String.downcase()
+    transcript = Storage.Key.job(job.id, "transcript-#{job.attempt}-#{nonce}.jsonl")
 
-    # The credential is resolved by the driver at spawn time, so it never sits in the
-    # runner's start arguments or state, which crash reports would print.
-    harness_opts =
-      config(:harness_opts, [])
-      |> Keyword.put(:credential, fn -> Keyword.get(config(:harness_opts, []), :credential) end)
-      |> Keyword.merge(
-        if(job.harness_session_id, do: [resume_session: job.harness_session_id], else: [])
-      )
-
-    opts = [
-      spec: spec,
-      root: Path.join(data_dir(), "jobs"),
-      worktree: worktree,
-      sink: fn event -> record_harness_event(ticket_id, job_id, event) end,
-      harness_opts: harness_opts,
-      wall_clock_ms: config(:wall_clock_ms, :timer.hours(1)),
-      nix_env: config(:nix_env, false),
-      extra_env: config(:extra_env, []) ++ git_env(project, token)
-    ]
-
-    DynamicSupervisor.start_child(ForgeWorker.Job.Supervisor, {Runner, opts})
+    %{
+      "job_id" => job.id,
+      "spec" => job |> runtime_spec(ticket) |> Spec.to_json() |> Jason.decode!(),
+      "git" => %{
+        "url" => Url.for(project),
+        "token" => git_token,
+        "branch" => ticket.branch,
+        "base" => ticket.base_commit
+      },
+      "store" => %{
+        "transcript_key" => transcript,
+        "transcript_token" => Storage.Token.sign(:put, transcript)
+      },
+      "seed" => seed(project),
+      "slice" => %{
+        "memory_max" => Workers.slice_bytes(),
+        "cpu_weight" => Workers.config(:cpu_weight, 100)
+      },
+      "resume_session" => job.harness_session_id,
+      "wall_clock_ms" => config(:wall_clock_ms, :timer.hours(1))
+    }
   end
+
+  # The warm starting point the worker snapshots this job's worktree from, with a token to
+  # fetch it. A project nobody has published a seed for gets nil and the worker clones, which
+  # is slow rather than wrong (`docs/design/worker-tier.md` § Volumes and the seed).
+  #
+  # The token is minted per assignment like every other one the worker holds: a machine that
+  # already has this seed never spends it, and one that does not is fetching within minutes.
+  defp seed(%{seed_id: seed_id, name: name}) when is_binary(seed_id) do
+    key = Storage.Key.seed(name, seed_id)
+    %{"key" => key, "token" => Storage.Token.sign(:get, key)}
+  end
+
+  defp seed(_project), do: nil
 
   # Every billed invocation passes through `start/1`, including `run/1` from a Mix task, so this
   # is where both caps are asked rather than in the scheduler alone. A ticket over its own
@@ -236,15 +258,6 @@ defmodule Forge.Jobs do
 
         {:error, {:spend_paused, :day}}
     end
-  end
-
-  # The agent works in a real clone, so it can fetch and push on its own. The token is marked
-  # secret, which is what keeps it out of argv and out of the runner's state.
-  defp git_env(project, token) do
-    [
-      {"FORGE_GIT_URL", Url.for(project)},
-      {"FORGE_GIT_TOKEN", {:secret, token}}
-    ]
   end
 
   # The stored spec never changes; answers given since are appended at run time, the keys already
@@ -293,7 +306,15 @@ defmodule Forge.Jobs do
     end
   end
 
-  defp record_harness_event(ticket_id, job_id, %{type: type, payload: payload}) do
+  @doc """
+  Records one harness event against its job. Events arrive over the channel and are the
+  timeline, not the contract: one that cannot be written is logged and dropped rather than
+  failing anything.
+  """
+  @spec record_harness_event(String.t(), ForgeCore.Job.Event.t()) :: :ok
+  def record_harness_event(job_id, %{type: type, payload: payload}) do
+    ticket_id = Repo.one(from j in Job, where: j.id == ^job_id, select: j.ticket_id)
+
     case Events.append(type, {:job, job_id}, %{
            ticket_id: ticket_id,
            job_id: job_id,
@@ -309,13 +330,17 @@ defmodule Forge.Jobs do
 
   defp json_safe(term), do: term |> Jason.encode!() |> Jason.decode!()
 
-  defp mark_started(%Job{} = job) do
+  defp mark_started(%Job{} = job, %Worker{} = worker) do
     now = DateTime.utc_now(:second)
 
     Multi.new()
     |> Multi.update(
       :job,
-      Job.progress_changeset(job, %{status: :running, started_at: job.started_at || now})
+      Job.progress_changeset(job, %{
+        status: :running,
+        worker_id: worker.id,
+        started_at: job.started_at || now
+      })
     )
     |> Events.log(:event, "job.started", :system, %{
       ticket_id: job.ticket_id,
@@ -335,41 +360,36 @@ defmodule Forge.Jobs do
     end
   end
 
-  @doc "Runs a job to its end synchronously and records the result. For tests and tasks."
-  @spec run(Job.t()) :: {:ok, Job.t()} | {:error, term()}
-  def run(%Job{} = job) do
-    with {:ok, pid} <- start(job),
-         {:ok, %Result{} = result} <- Runner.await(pid) do
-      complete(job.id, result)
-    end
-  end
-
   @doc """
   Records a runner result, then lets the engine decide what follows. Recording (documents,
   transcript, changeset head, status, accounting, event) is one transaction that never
   depends on the follow-up; if creating the next job fails, the ticket is stuck with the
-  reason rather than the result being lost. A waiting job keeps its checkout; a finished
-  one loses it. A resume that never reached the harness is re-queued as a fresh run.
+  reason rather than the result being lost. A resume that never reached the harness is
+  re-queued as a fresh run.
 
-  The branch is pushed first, so what the transaction records as the changeset is what the
-  agent actually wrote rather than what the last run left behind.
+  The push is the worker's now, and it happens before the worker reports at all
+  (`docs/design/worker-tier.md` § Git): the branch already carries what the agent wrote by the
+  time this is called, so there is nothing left for the platform to push.
   """
-  @spec complete(String.t(), Result.t()) :: {:ok, Job.t()} | {:error, term()}
+  @spec complete(String.t(), Result.t()) :: {:ok, Job.t()} | {:error, :already_recorded | term()}
   def complete(job_id, %Result{} = result) do
     job = get!(job_id)
     ticket = Tickets.get!(job.ticket_id)
-    push_checkout(job, ticket, Projects.get!(ticket.project_id))
 
-    if resume_failed?(job, result),
-      do: requeue_fresh(job, ticket, result),
-      else: record_and_follow_up(job, ticket, result)
+    cond do
+      # The worker re-sends a result until it is acked, so the platform has to be able to
+      # hear the same one twice. Keyed by the job: a job is recorded once.
+      job.status == :finished -> {:error, :already_recorded}
+      resume_failed?(job, result) -> requeue_fresh(job, ticket, result)
+      true -> record_and_follow_up(job, ticket, result)
+    end
   end
 
   # A resumed harness that produced no `started` event never got going (session not found,
   # different host); the design says fall back to a fresh invocation.
   defp resume_failed?(%Job{harness_session_id: session}, %Result{} = result) do
     session != nil and result.status == :finished and result.killed == nil and
-      result.harness[:model] == nil and result.outcome == :error
+      result.harness["model"] == nil and result.outcome == :error
   end
 
   defp requeue_fresh(job, ticket, result) do
@@ -399,8 +419,11 @@ defmodule Forge.Jobs do
     with {:ok, %{job: job, ticket_cost: ticket}} <- record(job, ticket, result) do
       case job.status do
         :finished ->
-          remove_checkout(ticket, job)
+          # The worktree is the worker's to throw away, and it already has. What is left here
+          # is the credential, which is no good to anyone once the job is over, and the
+          # worker's memory, which the next job wants back.
           Tokens.revoke_for_job(job.id)
+          Workers.release(job.worker_id)
           follow_up(ticket, job, result)
 
         :waiting ->
@@ -419,7 +442,7 @@ defmodule Forge.Jobs do
     |> put_changeset(ticket, job, result)
     |> Multi.update(:job, Job.progress_changeset(job, progress_attrs(job, result)))
     |> Tickets.put_progress(:ticket_cost, ticket, %{
-      cost_usd: Decimal.add(ticket.cost_usd, decimal(result.harness[:cost_usd]))
+      cost_usd: Decimal.add(ticket.cost_usd, decimal(result.harness["cost_usd"]))
     })
     |> Events.log(:event, "job.#{result.status}", {:job, job.id}, %{
       ticket_id: ticket.id,
@@ -465,8 +488,8 @@ defmodule Forge.Jobs do
     |> Repo.transaction()
     |> case do
       {:ok, %{job: job}} ->
-        remove_checkout(ticket, job)
         Tokens.revoke_for_job(job.id)
+        Workers.release(job.worker_id)
         follow_up(ticket, job, %Result{status: :finished, outcome: :error})
         Events.notify(ticket.id)
         {:ok, job}
@@ -484,20 +507,27 @@ defmodule Forge.Jobs do
     end)
   end
 
-  defp put_transcript(multi, ticket, job, %Result{transcript_path: path}) do
+  # The transcript is in the store before the worker sends its result: it uploaded it with a
+  # token for exactly that key. What crosses the wire is the key, and the platform asks the
+  # store what it holds rather than trusting a size or a hash the worker reported.
+  #
+  # A transcript that never arrived is logged and skipped rather than failing the job. The
+  # documents and the outcome are the contract; the conversation never was.
+  defp put_transcript(multi, ticket, job, %Result{transcript: key}) when is_binary(key) do
     name = "transcript-#{job.state}-#{job.attempt}.jsonl"
-    attrs = %{blob_uri: "file://" <> path, content_hash: file_hash(path)}
-    Artifacts.put_version(multi, :transcript, ticket.id, name, :blob, {:job, job.id}, attrs)
-  end
 
-  # The transcript sits in the job directory, which the harness could write to; hashing it at
-  # completion pins what was recorded.
-  defp file_hash(path) do
-    case File.read(path) do
-      {:ok, content} -> "sha256:" <> Base.encode16(:crypto.hash(:sha256, content), case: :lower)
-      {:error, _} -> "missing"
+    case Storage.stat(key) do
+      {:ok, %{hash: hash}} ->
+        attrs = %{blob_uri: Storage.uri(key), content_hash: hash}
+        Artifacts.put_version(multi, :transcript, ticket.id, name, :blob, {:job, job.id}, attrs)
+
+      {:error, reason} ->
+        Logger.warning("job #{job.id} reported transcript #{key}: #{inspect(reason)}")
+        multi
     end
   end
+
+  defp put_transcript(multi, _ticket, _job, %Result{}), do: multi
 
   # A finished job that produces the changeset gets the branch head recorded as a version,
   # so an approval of `changeset` attaches to an exact commit.
@@ -520,9 +550,9 @@ defmodule Forge.Jobs do
 
   defp progress_attrs(job, %Result{} = result) do
     base = %{
-      turns: job.turns + (result.harness[:turns] || 0),
-      cost_usd: Decimal.add(job.cost_usd, decimal(result.harness[:cost_usd])),
-      harness_session_id: result.harness[:session_id] || job.harness_session_id
+      turns: job.turns + (result.harness["turns"] || 0),
+      cost_usd: Decimal.add(job.cost_usd, decimal(result.harness["cost_usd"])),
+      harness_session_id: result.harness["session_id"] || job.harness_session_id
     }
 
     case result.status do
@@ -564,6 +594,69 @@ defmodule Forge.Jobs do
     end
   end
 
+  @doc """
+  Records that a job committed its work and stopped. `commit` is where that work is on the
+  ticket branch; resuming reconstructs from the branch and the manifest, never from the
+  conversation (`docs/decisions.md`).
+  """
+  @spec hibernate(String.t(), String.t() | nil, String.t() | nil) ::
+          {:ok, Job.t()} | {:error, term()}
+  def hibernate(job_id, commit, reason) do
+    job = get!(job_id)
+
+    if job.status == :hibernated do
+      {:ok, job}
+    else
+      Multi.new()
+      |> Multi.update(:job, Job.progress_changeset(job, %{status: :hibernated}))
+      |> Events.log(:event, "job.hibernated", {:job, job.id}, %{
+        ticket_id: job.ticket_id,
+        job_id: job.id,
+        payload: %{"commit" => commit, "reason" => reason}
+      })
+      |> Repo.transaction()
+      |> case do
+        {:ok, %{job: job}} ->
+          Events.notify(job.ticket_id)
+          {:ok, job}
+
+        {:error, step, reason, _changes} ->
+          {:error, {step, reason}}
+      end
+    end
+  end
+
+  @doc """
+  Puts a job back in the queue without recording a result: the run it was having is gone.
+  Used when a worker rejoins without a job the platform believes it is running.
+  """
+  @spec requeue(String.t(), atom()) :: {:ok, Job.t()} | {:error, term()}
+  def requeue(job_id, reason) do
+    job = get!(job_id)
+
+    Multi.new()
+    |> Multi.update(:job, Job.progress_changeset(job, %{status: :pending}))
+    |> Events.log(:event, "job.interrupted", :system, %{
+      ticket_id: job.ticket_id,
+      job_id: job.id,
+      payload: %{"reason" => to_string(reason)}
+    })
+    |> Repo.transaction()
+    |> case do
+      {:ok, %{job: job}} ->
+        Events.notify(job.ticket_id)
+        {:ok, job}
+
+      {:error, step, reason, _changes} ->
+        {:error, {step, reason}}
+    end
+  end
+
+  @doc "Jobs a worker is supposed to be running."
+  @spec running_on(String.t()) :: [Job.t()]
+  def running_on(worker_id),
+    do: Repo.all(from j in Job, where: j.worker_id == ^worker_id and j.status == :running)
+
   @doc "On boot: jobs left `running` by a previous node are re-queued. Their spec still holds."
   @spec recover() :: non_neg_integer()
   def recover do
@@ -587,63 +680,11 @@ defmodule Forge.Jobs do
 
   # -- filesystem -----------------------------------------------------------------------------
 
+  # Worktrees and build directories belong to the worker now: it snapshots them from its seed
+  # and throws them away, and the platform has no disk they live on. What is left here is the
+  # job directory root the platform still uses for its own scratch space.
   @spec data_dir() :: String.t()
   def data_dir, do: Path.expand(config(:data_dir, "tmp/forge"))
-
-  defp checkout_dir(%Job{id: id}), do: Path.join([data_dir(), "checkouts", id])
-
-  # The checkout is removed when a job finishes, so one still standing belongs to a run that did
-  # not: a node that died. A resume continues that run and keeps its work in progress; a cold
-  # start does not, and must not inherit it. Commits are on the branch either way.
-  defp ensure_checkout(job, ticket, project, token) do
-    Checkout.ensure(
-      dir: checkout_dir(job),
-      url: Url.for(project),
-      branch: ticket.branch,
-      token: token,
-      resume: job.harness_session_id != nil
-    )
-  end
-
-  # Best effort, and deliberately so: the result of a run is recorded whatever git did. A push
-  # that failed leaves the branch where the last successful one put it, which is what
-  # `put_changeset/4` then records.
-  defp push_checkout(job, ticket, project) do
-    dir = checkout_dir(job)
-
-    if File.dir?(Path.join(dir, ".git")) do
-      case Tokens.issue_for_job(job, ticket, project) do
-        {:ok, token, _row} -> do_push(job, ticket, dir, token)
-        {:error, reason} -> log_push_failure(job, ticket, reason)
-      end
-    else
-      :ok
-    end
-  end
-
-  defp do_push(job, ticket, dir, token) do
-    case Checkout.push(dir: dir, branch: ticket.branch, token: token) do
-      :ok -> :ok
-      {:error, reason} -> log_push_failure(job, ticket, reason)
-    end
-  end
-
-  defp log_push_failure(job, ticket, reason) do
-    Logger.warning("job #{job.id} could not push #{ticket.branch}: #{inspect(reason)}")
-
-    Events.append("job.push_failed", {:job, job.id}, %{
-      ticket_id: ticket.id,
-      job_id: job.id,
-      payload: %{"branch" => ticket.branch, "reason" => inspect(reason)}
-    })
-
-    :ok
-  end
-
-  defp remove_checkout(_ticket, job) do
-    File.rm_rf!(checkout_dir(job))
-    :ok
-  end
 
   defp decimal(nil), do: Decimal.new(0)
   defp decimal(number) when is_float(number), do: Decimal.from_float(number)

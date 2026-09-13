@@ -12,14 +12,67 @@ defmodule Forge.Git do
   @spec init_bare(String.t()) :: :ok | {:error, term()}
   def init_bare(path) do
     if File.exists?(Path.join(path, "HEAD")) do
-      :ok
+      install_hooks(path)
     else
       File.mkdir_p!(path)
 
       with {:ok, _} <- run(path, ["init", "--bare", "--quiet"]) do
-        :ok
+        install_hooks(path)
       end
     end
+  end
+
+  # A job's push may touch exactly one ref: the branch its token names, which the platform
+  # puts in the environment when it runs `git http-backend`. The check is a hook because only
+  # git knows what a push contains; a plug would have to parse the pack to find out.
+  #
+  # An empty variable allows the push. Nothing but the platform's git endpoint sets it, so an
+  # empty one means this is not a job pushing — it is the operator, on this machine, with the
+  # repository's path, and `docs/decisions.md` leaves them SSH and the command line.
+  @pre_receive """
+  #!/bin/sh
+  # Installed by forge. See Forge.Git.install_hooks/1.
+  allowed="${FORGE_ALLOWED_REF:-}"
+  [ -z "$allowed" ] && exit 0
+  status=0
+  while read -r _old _new ref; do
+    if [ "$ref" != "$allowed" ]; then
+      echo "forge: this credential may only update $allowed, not $ref" >&2
+      status=1
+    fi
+  done
+  exit $status
+  """
+
+  @doc "Installs the hooks the platform relies on. Idempotent, and safe on an existing repo."
+  @spec install_hooks(repo()) :: :ok
+  def install_hooks(repo) do
+    path = Path.join([repo, "hooks", "pre-receive"])
+    File.mkdir_p!(Path.dirname(path))
+
+    unless File.read(path) == {:ok, @pre_receive} do
+      File.write!(path, @pre_receive)
+      File.chmod!(path, 0o755)
+    end
+
+    :ok
+  end
+
+  @doc """
+  Points an unborn `HEAD` at `branch`. A bare repository starts with `HEAD` on whatever git's
+  `init.defaultBranch` was, and a clone of a repository whose `HEAD` names a branch that does
+  not exist checks out nothing — which is what a worker cloning its project would get. An
+  existing `HEAD` is left alone: it is the operator's to set.
+  """
+  @spec ensure_head(repo(), String.t()) :: :ok
+  def ensure_head(repo, branch) do
+    with {:ok, current} <- run(repo, ["symbolic-ref", "--quiet", "HEAD"]),
+         false <-
+           branch_exists?(repo, current |> String.trim() |> String.replace("refs/heads/", "")) do
+      run(repo, ["symbolic-ref", "HEAD", "refs/heads/" <> branch])
+    end
+
+    :ok
   end
 
   @doc "Resolves a ref to a commit sha."

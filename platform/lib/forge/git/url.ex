@@ -3,8 +3,10 @@ defmodule Forge.Git.Url do
   Where a client reaches a project's repository.
 
   Configured rather than derived wherever the platform sits behind something that rewrites the
-  host — `FORGE_GIT_BASE_URL` — and taken from the endpoint otherwise, which is right on the one
-  machine the PoC runs on.
+  host — `FORGE_GIT_BASE_URL` — and taken from the worker tier's `platform_url` otherwise, which
+  is the address the platform already tells a worker to dial. The endpoint's own URL is the last
+  resort and is only ever right for a client on this machine: to a worker it says `localhost`,
+  which is the worker.
   """
 
   alias Forge.Projects.Project
@@ -21,7 +23,7 @@ defmodule Forge.Git.Url do
   end
 
   defp base do
-    case Forge.Jobs.config(:git_base_url, nil) do
+    case Forge.Jobs.config(:git_base_url, nil) || Forge.Jobs.config(:platform_url, nil) do
       nil -> ForgeWeb.Endpoint.url()
       url -> String.trim_trailing(url, "/")
     end

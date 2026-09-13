@@ -41,6 +41,35 @@ config :forge, Forge.Jobs,
   git_token_ttl_minutes: 90,
   git_max_body_bytes: 100 * 1024 * 1024
 
+# Blobs and worker seeds. One implementation in the PoC: a directory on this host, served over
+# HTTP to the worker with a short-lived per-key token. See docs/design/storage.md.
+config :forge, Forge.Storage,
+  impl: Forge.Storage.Local,
+  dir: "tmp/forge/store",
+  token_max_age: 900
+
+# Where machines come from. A local VM under QEMU for the PoC; Hetzner is the closing step's,
+# behind the same behaviour. See docs/design/worker-tier.md.
+config :forge, Forge.Provider, impl: Forge.Provider.LocalVm, name: "local"
+
+# The worker tier's numbers. `slice_bytes` is M3's observed peak plus its margin and
+# `idle_period_ms` is a labelled guess until M4 runs, which it cannot until this milestone
+# exists. Both are the sample's, not the operator's: docs/measurements.md § M3.
+config :forge, Forge.Workers,
+  slice_bytes: 2210 * 1024 * 1024,
+  cpu_weight: 100,
+  max_workers: 1,
+  # M4: a machine goes from nothing to able to build in 37 seconds (docs/measurements.md § M4),
+  # so being wrong about this costs 37 seconds, which is less than the operator's own round trip
+  # to approve an artifact. Five minutes covers an approval gap without holding a machine
+  # through a lunch break. The closing step re-measures it on a provider, where the seed and the
+  # Nix store stop arriving over loopback and the cold start gets longer.
+  idle_period_ms: 300_000,
+  # How long a worker may be out of touch before the platform stops waiting for it. Three
+  # missed heartbeats would be a minute; this is generous because a machine that is booting
+  # has not reported yet and is timed from when its row was made.
+  worker_timeout_ms: 180_000
+
 # Mailer for account emails (magic links). Local adapter in dev; see runtime.exs for prod.
 config :forge, Forge.Mailer, adapter: Swoosh.Adapters.Local
 

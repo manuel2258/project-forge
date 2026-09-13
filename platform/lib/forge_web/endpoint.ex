@@ -11,6 +11,9 @@ defmodule ForgeWeb.Endpoint do
     same_site: "Lax"
   ]
 
+  # Workers dial in here. See docs/design/worker-channel.md.
+  socket "/worker", ForgeWeb.WorkerSocket, websocket: true, longpoll: false
+
   socket "/live", Phoenix.LiveView.Socket,
     websocket: [connect_info: [session: @session_options]],
     longpoll: [connect_info: [session: @session_options]]

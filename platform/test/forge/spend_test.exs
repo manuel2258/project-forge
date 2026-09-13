@@ -10,7 +10,7 @@ defmodule Forge.SpendTest do
   import Forge.AccountsFixtures
   import Forge.GitFixtures
 
-  alias Forge.{Jobs, Projects, Queue, Spend, Tickets}
+  alias Forge.{FakeWorker, Jobs, Projects, Queue, Spend, Tickets}
   alias Forge.Jobs.Job
 
   @workflow Path.expand("../../../core/test/fixtures/workflow_example.yml", __DIR__)
@@ -26,16 +26,18 @@ defmodule Forge.SpendTest do
       Application.put_env(:forge, Forge.Spend, spend)
     end)
 
-    %{user: user_fixture()}
+    # A worker with room for anything: what is under test is the spend gate, which runs
+    # before a machine is spoken to at all.
+    %{user: user_fixture(), worker: FakeWorker.connect()}
   end
 
   describe "the ticket allowance" do
-    test "a ticket over it is refused, stuck, and in the queue", %{user: user} do
+    test "a ticket over it is refused, stuck, and in the queue", %{user: user, worker: worker} do
       ticket = admit(user, ticket_cost: 0.50)
       spend!(ticket, "0.60")
       job = only_pending(ticket)
 
-      assert {:error, {:spend_exhausted, :ticket}} = Jobs.start(job)
+      assert {:error, {:spend_exhausted, :ticket}} = Jobs.assign(job, worker)
       assert Jobs.get!(job.id).status == :pending
 
       ticket = Tickets.get!(ticket.id)
@@ -46,33 +48,43 @@ defmodule Forge.SpendTest do
       refute Enum.any?(Jobs.pending(), &(&1.id == job.id))
     end
 
-    test "a ticket under it runs with a budget narrowed to what is left", %{user: user} do
+    test "a ticket under it runs with a budget narrowed to what is left", %{
+      user: user,
+      worker: worker
+    } do
       ticket = admit(user, ticket_cost: 0.30)
       job = only_pending(ticket)
 
-      scenario("success", "refinement.md")
-      {:ok, _job} = Jobs.run(job)
+      assignment = FakeWorker.assign(job, worker)
+      {:ok, _job} = FakeWorker.finish(assignment, "success", doc: "refinement.md")
 
-      # The state declares 0.50; the ticket allows 0.30. The smaller figure is what the harness
-      # was told, which is what stops a runaway before the ticket's allowance is gone.
-      assert args(job) =~ "--max-budget-usd 0.30"
+      # The state declares 0.50; the ticket allows 0.30. The smaller figure is what the
+      # assignment carries, which is what the worker hands the harness as its own budget and
+      # what stops a runaway before the ticket's allowance is gone.
+      assert budget(assignment) == 0.30
       assert %{"binding" => "ticket", "effective_cost" => 0.3} = lowered(ticket)
     end
 
-    test "a job whose state budget is the smallest runs on it untouched", %{user: user} do
+    test "a job whose state budget is the smallest runs on it untouched", %{
+      user: user,
+      worker: worker
+    } do
       ticket = admit(user, ticket_cost: 25.0)
       job = only_pending(ticket)
 
-      scenario("success", "refinement.md")
-      {:ok, _job} = Jobs.run(job)
+      assignment = FakeWorker.assign(job, worker)
+      {:ok, _job} = FakeWorker.finish(assignment, "success", doc: "refinement.md")
 
-      assert args(job) =~ "--max-budget-usd 0.50"
+      assert budget(assignment) == 0.50
       refute lowered(ticket)
     end
   end
 
   describe "the daily cap" do
-    test "pauses the node without sticking anything or filling the queue", %{user: user} do
+    test "pauses the node without sticking anything or filling the queue", %{
+      user: user,
+      worker: worker
+    } do
       # The day's spend is another ticket's; this one has an allowance of its own and has spent
       # nothing, so only the daily cap can refuse it.
       spend!(admit(user, ticket_cost: 25.0), "2.00", started: true)
@@ -80,7 +92,7 @@ defmodule Forge.SpendTest do
       Application.put_env(:forge, Forge.Spend, daily_cost_usd: 1.0)
 
       job = only_pending(ticket)
-      assert {:error, {:spend_paused, :day}} = Jobs.start(job)
+      assert {:error, {:spend_paused, :day}} = Jobs.assign(job, worker)
 
       ticket = Tickets.get!(ticket.id)
       assert ticket.status == :active
@@ -119,15 +131,15 @@ defmodule Forge.SpendTest do
 
   # The clause of the definition of usable this milestone exists to satisfy: a cap has to have
   # stopped a runaway job, not merely to have been declared.
-  test "a cap stops a runaway job mid-flight", %{user: user} do
+  test "a cap stops a runaway job mid-flight", %{user: user, worker: worker} do
     ticket = admit(user, ticket_cost: 0.10)
     job = only_pending(ticket)
 
-    scenario("max_budget", "refinement.md")
-    {:ok, job} = Jobs.run(job)
+    assignment = FakeWorker.assign(job, worker)
+    {:ok, job} = FakeWorker.finish(assignment, "max_budget", doc: "refinement.md")
 
     assert job.outcome == :budget_exhausted
-    assert args(job) =~ "--max-budget-usd 0.10"
+    assert budget(assignment) == 0.10
 
     ticket = Tickets.get!(ticket.id)
     assert ticket.status == :stuck
@@ -180,9 +192,9 @@ defmodule Forge.SpendTest do
     job
   end
 
-  defp args(job) do
-    File.read!(Path.join([Jobs.data_dir(), "jobs", job.id, "fake-args.txt"]))
-  end
+  # The cost the assignment tells the worker to run under. It is the platform's whole part in
+  # stopping a runaway: the harness flag it becomes is the worker's, and is tested there.
+  defp budget(assignment), do: assignment["spec"]["budget"]["cost"]
 
   defp lowered(ticket) do
     ticket.id
@@ -192,15 +204,5 @@ defmodule Forge.SpendTest do
       nil -> nil
       event -> event.payload
     end
-  end
-
-  defp scenario(name, doc) do
-    config = Application.get_env(:forge, Forge.Jobs)
-
-    Application.put_env(
-      :forge,
-      Forge.Jobs,
-      Keyword.put(config, :extra_env, [{"FAKE_SCENARIO", name}, {"FAKE_DOC", doc}])
-    )
   end
 end

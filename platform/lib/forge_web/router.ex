@@ -58,6 +58,18 @@ defmodule ForgeWeb.Router do
     post "/tickets/:project/:number/transition", TicketController, :transition
   end
 
+  # The worker's door to the blob store. No session and no pipeline: the short-lived token in
+  # the query string authorises exactly one key and one verb, and nothing else here does.
+  # See docs/design/storage.md.
+  scope "/store", ForgeWeb do
+    get "/*key", StoreController, :show
+    put "/*key", StoreController, :update
+  end
+
+  # The platform's repositories, over git's own smart HTTP, with a per-job token as the Basic
+  # auth password. See docs/design/worker-tier.md § Git.
+  forward "/git", ForgeWeb.Plugs.GitHttp
+
   # Enable LiveDashboard in development
   if Application.compile_env(:forge, :dev_routes) do
     # If you want to use the LiveDashboard in production, you should put

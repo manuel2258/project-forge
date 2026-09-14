@@ -21,7 +21,7 @@ defmodule Forge.SchemasTest do
                    branch: "ticket/x",
                    workflow: %{},
                    workflow_commit: "b",
-                   state: "refined"
+                   state: "refining"
                  })
                )
 

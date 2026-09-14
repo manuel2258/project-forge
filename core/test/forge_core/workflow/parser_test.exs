@@ -18,7 +18,7 @@ defmodule ForgeCore.Workflow.ParserTest do
       assert {:ok, %Workflow{} = workflow} = Parser.parse(yaml)
 
       assert workflow.version == 1
-      assert workflow.initial == "refined"
+      assert workflow.initial == "refining"
       assert workflow.limits.ticket_cost == 25.0
       assert map_size(workflow.states) == 6
       assert length(workflow.transitions) == 7
@@ -30,11 +30,11 @@ defmodule ForgeCore.Workflow.ParserTest do
                produces: ["implementation.md", "changeset"],
                outcomes: ["done", "plan_invalid"],
                budget: %Budget{turns: 200, cost: 10.0}
-             } = workflow.states["implemented"]
+             } = workflow.states["implementing"]
 
       assert %Transition{
-               from: "verified",
-               to: "implemented",
+               from: "verifying",
+               to: "implementing",
                when: "tests_failed",
                max: 3,
                approve: []
@@ -44,7 +44,7 @@ defmodule ForgeCore.Workflow.ParserTest do
 
     test "defaults outcomes of a job state to [done] and leaves human states bare", %{yaml: yaml} do
       {:ok, workflow} = Parser.parse(yaml)
-      assert workflow.states["refined"].outcomes == ["done"]
+      assert workflow.states["refining"].outcomes == ["done"]
 
       assert %State{prompt: nil, outcomes: nil, budget: nil, inputs: [], produces: []} =
                workflow.states["merged"]
@@ -56,22 +56,22 @@ defmodule ForgeCore.Workflow.ParserTest do
 
     test "answers questions about the definition", %{yaml: yaml} do
       {:ok, workflow} = Parser.parse(yaml)
-      assert Workflow.producers(workflow, "plan.md") == ["planned"]
-      assert Workflow.producers(workflow, "changeset") == ["implemented"]
+      assert Workflow.producers(workflow, "plan.md") == ["planning"]
+      assert Workflow.producers(workflow, "changeset") == ["implementing"]
 
-      assert Workflow.outcomes(workflow, "verified") ==
+      assert Workflow.outcomes(workflow, "verifying") ==
                Workflow.engine_outcomes() ++ ["done", "tests_failed"]
 
       assert Workflow.outcomes(workflow, "merged") == Workflow.engine_outcomes()
       assert Transition.outcome(Enum.at(workflow.transitions, 1)) == "done"
       assert Transition.requires_approval?(Enum.at(workflow.transitions, 0))
-      assert State.outcome_document(workflow.states["implemented"]) == "implementation.md"
+      assert State.outcome_document(workflow.states["implementing"]) == "implementation.md"
     end
 
     test "checks prompt files when asked", %{yaml: yaml} do
       assert {:ok, _} = Parser.parse(yaml, prompt_exists: fn _ -> true end)
       assert {:error, errors} = Parser.parse(yaml, prompt_exists: &(&1 != "agents/plan.md"))
-      assert [%Error{path: "states.planned.prompt"}] = errors
+      assert [%Error{path: "states.planning.prompt"}] = errors
     end
 
     test "parse!/2 raises with every error listed" do
@@ -98,7 +98,7 @@ defmodule ForgeCore.Workflow.ParserTest do
       map =
         map
         |> Map.put("blocks", %{})
-        |> put_in(["states", "refined", "can_spawn"], ["x"])
+        |> put_in(["states", "refining", "can_spawn"], ["x"])
         |> update_in(["transitions"], fn [first | rest] ->
           [Map.put(first, "guard", "x") | rest]
         end)
@@ -107,7 +107,7 @@ defmodule ForgeCore.Workflow.ParserTest do
       assert paths(map) == [
                "blocks",
                "limits.spawn_depth",
-               "states.refined.can_spawn",
+               "states.refining.can_spawn",
                "transitions[0].guard"
              ]
 
@@ -120,17 +120,17 @@ defmodule ForgeCore.Workflow.ParserTest do
     end
 
     test "budget fields are typed", %{map: map} do
-      map = put_in(map, ["states", "refined", "budget"], %{"turns" => 0, "cost" => "cheap"})
+      map = put_in(map, ["states", "refining", "budget"], %{"turns" => 0, "cost" => "cheap"})
 
       assert messages(map) == [
-               {"states.refined.budget.cost", "must be a non-negative number"},
-               {"states.refined.budget.turns", "must be a positive integer"}
+               {"states.refining.budget.cost", "must be a non-negative number"},
+               {"states.refining.budget.turns", "must be a positive integer"}
              ]
     end
 
     test "lists must hold non-empty strings", %{map: map} do
-      map = put_in(map, ["states", "refined", "inputs"], ["ticket", 3])
-      assert messages(map) == [{"states.refined.inputs", "must be a list of non-empty strings"}]
+      map = put_in(map, ["states", "refining", "inputs"], ["ticket", 3])
+      assert messages(map) == [{"states.refining.inputs", "must be a list of non-empty strings"}]
     end
 
     test "limits are required", %{map: map} do
@@ -144,8 +144,8 @@ defmodule ForgeCore.Workflow.ParserTest do
     test "states must be a non-empty mapping and each state a mapping", %{map: map} do
       assert messages(Map.put(map, "states", %{})) |> Enum.map(&elem(&1, 0)) == ["states"]
 
-      assert [{"states.refined", "must be a mapping" <> _}] =
-               messages(put_in(map, ["states", "refined"], nil))
+      assert [{"states.refining", "must be a mapping" <> _}] =
+               messages(put_in(map, ["states", "refining"], nil))
     end
 
     test "transitions must be mappings with from and to", %{map: map} do
@@ -176,22 +176,22 @@ defmodule ForgeCore.Workflow.ParserTest do
     test "job states need a budget; human states carry nothing else", %{map: map} do
       map =
         map
-        |> update_in(["states", "refined"], &Map.delete(&1, "budget"))
+        |> update_in(["states", "refining"], &Map.delete(&1, "budget"))
         |> put_in(["states", "merged"], %{"env" => "x", "produces" => ["y"]})
 
       assert messages(map) == [
                {"states.merged.env", "not allowed on a human state (no prompt)"},
                {"states.merged.produces", "not allowed on a human state (no prompt)"},
-               {"states.refined.budget", "is required on a job state"}
+               {"states.refining.budget", "is required on a job state"}
              ]
     end
 
     test "inputs must be ticket or produced somewhere", %{map: map} do
-      map = put_in(map, ["states", "planned", "inputs"], ["ticket", "missing.md", "answers.md"])
+      map = put_in(map, ["states", "planning", "inputs"], ["ticket", "missing.md", "answers.md"])
 
       assert messages(map) == [
-               {"states.planned.inputs[1]", "\"missing.md\" is not produced by any state"},
-               {"states.planned.inputs[2]", "answers.md is platform-managed and never declared"}
+               {"states.planning.inputs[1]", "\"missing.md\" is not produced by any state"},
+               {"states.planning.inputs[2]", "answers.md is platform-managed and never declared"}
              ]
     end
 
@@ -200,22 +200,22 @@ defmodule ForgeCore.Workflow.ParserTest do
     } do
       map =
         map
-        |> put_in(["states", "planned", "produces"], ["plan.md", "ticket"])
-        |> put_in(["states", "verified", "produces"], ["report.md", "plan.md"])
+        |> put_in(["states", "planning", "produces"], ["plan.md", "ticket"])
+        |> put_in(["states", "verifying", "produces"], ["report.md", "plan.md"])
 
       assert messages(map) == [
-               {"states.planned.produces[0]",
-                "\"plan.md\" is produced by more than one state: planned, verified"},
-               {"states.planned.produces[1]", "\"ticket\" is reserved and cannot be produced"},
-               {"states.verified.produces[1]",
-                "\"plan.md\" is produced by more than one state: planned, verified"}
+               {"states.planning.produces[0]",
+                "\"plan.md\" is produced by more than one state: planning, verifying"},
+               {"states.planning.produces[1]", "\"ticket\" is reserved and cannot be produced"},
+               {"states.verifying.produces[1]",
+                "\"plan.md\" is produced by more than one state: planning, verifying"}
              ]
     end
 
     test "the prefix group form is reserved", %{map: map} do
-      map = put_in(map, ["states", "verified", "produces"], ["report.md", "screenshots/*"])
+      map = put_in(map, ["states", "verifying", "produces"], ["report.md", "screenshots/*"])
 
-      assert [{"states.verified.produces[1]", "prefix groups (name/*) are reserved" <> _}] =
+      assert [{"states.verifying.produces[1]", "prefix groups (name/*) are reserved" <> _}] =
                messages(map)
     end
 
@@ -223,15 +223,15 @@ defmodule ForgeCore.Workflow.ParserTest do
          %{map: map} do
       map =
         map
-        |> put_in(["states", "planned", "outcomes"], ["done", "error", "done"])
-        |> put_in(["states", "implemented", "produces"], ["changeset"])
-        |> put_in(["states", "verified", "inputs"], ["plan.md", "changeset"])
+        |> put_in(["states", "planning", "outcomes"], ["done", "error", "done"])
+        |> put_in(["states", "implementing", "produces"], ["changeset"])
+        |> put_in(["states", "verifying", "inputs"], ["plan.md", "changeset"])
 
       assert messages(map) == [
-               {"states.implemented.outcomes",
+               {"states.implementing.outcomes",
                 "declaring outcomes other than done requires a document in produces"},
-               {"states.planned.outcomes", "\"done\" is declared more than once"},
-               {"states.planned.outcomes",
+               {"states.planning.outcomes", "\"done\" is declared more than once"},
+               {"states.planning.outcomes",
                 "\"error\" is an engine outcome and cannot be declared"}
              ]
     end
@@ -242,8 +242,8 @@ defmodule ForgeCore.Workflow.ParserTest do
           transitions ++
             [
               %{"from" => "ghost", "to" => "merged"},
-              %{"from" => "planned", "to" => "ghost", "when" => "budget_exhausted"},
-              %{"from" => "planned", "to" => "merged", "when" => "tests_failed"},
+              %{"from" => "planning", "to" => "ghost", "when" => "budget_exhausted"},
+              %{"from" => "planning", "to" => "merged", "when" => "tests_failed"},
               %{"from" => "review_ready", "to" => "merged", "when" => "done"}
             ]
         end)
@@ -252,16 +252,16 @@ defmodule ForgeCore.Workflow.ParserTest do
                {"transitions[10].when", "not allowed on a transition from a human state"},
                {"transitions[7].from", "names an unknown state \"ghost\""},
                {"transitions[8].to", "names an unknown state \"ghost\""},
-               {"transitions[9].when", "\"tests_failed\" is not an outcome of state \"planned\""}
+               {"transitions[9].when", "\"tests_failed\" is not an outcome of state \"planning\""}
              ]
     end
 
     test "one transition per outcome from a job state", %{map: map} do
-      map = Map.update!(map, "transitions", &(&1 ++ [%{"from" => "planned", "to" => "merged"}]))
+      map = Map.update!(map, "transitions", &(&1 ++ [%{"from" => "planning", "to" => "merged"}]))
 
       assert messages(map) == [
-               {"transitions[1]", "more than one transition from \"planned\" on \"done\""},
-               {"transitions[7]", "more than one transition from \"planned\" on \"done\""}
+               {"transitions[1]", "more than one transition from \"planning\" on \"done\""},
+               {"transitions[7]", "more than one transition from \"planning\" on \"done\""}
              ]
     end
 
@@ -273,7 +273,7 @@ defmodule ForgeCore.Workflow.ParserTest do
 
       assert [
                {"transitions[0].approve[0]",
-                "\"plan.md\" is not produced by \"refined\" or a state before it"}
+                "\"plan.md\" is not produced by \"refining\" or a state before it"}
              ] = messages(map)
     end
 
@@ -287,10 +287,10 @@ defmodule ForgeCore.Workflow.ParserTest do
     end
 
     test "inputs must come from a state that runs before the consumer", %{map: map} do
-      map = put_in(map, ["states", "refined", "inputs"], ["ticket", "plan.md"])
+      map = put_in(map, ["states", "refining", "inputs"], ["ticket", "plan.md"])
 
       assert [
-               {"states.refined.inputs[1]",
+               {"states.refining.inputs[1]",
                 "\"plan.md\" is not produced by any state that runs before this one"}
              ] = messages(map)
     end
@@ -298,7 +298,7 @@ defmodule ForgeCore.Workflow.ParserTest do
     test "state and artifact names are single path segments", %{map: map} do
       map =
         map
-        |> put_in(["states", "verified", "produces"], ["../report.md"])
+        |> put_in(["states", "verifying", "produces"], ["../report.md"])
         |> put_in(["states", "review_ready"], %{})
         |> Map.update!("states", &Map.put(&1, "bad/name", %{}))
         |> Map.update!("transitions", &(&1 ++ [%{"from" => "review_ready", "to" => "bad/name"}]))
@@ -306,7 +306,7 @@ defmodule ForgeCore.Workflow.ParserTest do
       assert {"states.bad/name",
               "state name must be a single path segment: letters, digits, . _ -"} in messages(map)
 
-      assert {"states.verified",
+      assert {"states.verifying",
               "artifact name \"../report.md\" must be a single path segment: letters, digits, . _ -"} in messages(
                map
              )
@@ -348,9 +348,9 @@ defmodule ForgeCore.Workflow.ParserTest do
     # Entering a job state already runs a job; two things on one entry would leave their order
     # undefined, so the grammar refuses rather than picking one.
     test "a job state may not carry one", %{map: map} do
-      map = put_in(map, ["states", "verified", "on_enter"], "merge")
+      map = put_in(map, ["states", "verifying", "on_enter"], "merge")
 
-      assert {"states.verified.on_enter",
+      assert {"states.verifying.on_enter",
               "not allowed on a job state: entering it already runs a job"} in messages(map)
     end
 
@@ -375,8 +375,8 @@ defmodule ForgeCore.Workflow.ParserTest do
     test "merging needs a state that produces the changeset", %{map: map} do
       map =
         map
-        |> put_in(["states", "implemented", "produces"], ["implementation.md"])
-        |> put_in(["states", "verified", "inputs"], ["plan.md", "implementation.md"])
+        |> put_in(["states", "implementing", "produces"], ["implementation.md"])
+        |> put_in(["states", "verifying", "inputs"], ["plan.md", "implementation.md"])
         |> update_in(["transitions"], fn transitions ->
           Enum.reject(transitions, &(&1["to"] == "merged" and &1["approve"] == ["changeset"]))
         end)

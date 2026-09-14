@@ -20,8 +20,8 @@ defmodule Forge.CLITest do
     assert CLI.label(ticket) == "#{project.name}#1"
 
     shown = CLI.show(ticket)
-    assert shown =~ "state: refined  status: active"
-    assert shown =~ "refined #1  pending"
+    assert shown =~ "state: refining  status: active"
+    assert shown =~ "refining #1  pending"
     assert shown =~ "ticket.admitted"
 
     assert CLI.queue() == "queue is empty"

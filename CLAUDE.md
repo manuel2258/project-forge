@@ -38,6 +38,16 @@ shell.
 The gate lints it but cannot run it: it needs btrfs, systemd and Nix on the operator's
 machine. `bin/measure selftest` is what stands in for a test run.
 
+## Reviewing
+
+Work that is committed but not landed gets a pass by reviewers who did not write it: the
+`review` skill (`.claude/skills/review/SKILL.md`). It dispatches independent subagents — one on
+correctness and security, one mutation-testing whether the new tests can fail, one on duplication
+and whether the design notes still describe the code — and they report rather than fix.
+
+`bin/check` says the code runs. This says whether it does what it claims, which is a different
+question and the one this repository gets wrong more often.
+
 ## Landing
 
 **Landing is never automatic. It happens when a human asks for it, and at no other time.**
@@ -55,3 +65,14 @@ and pushes. No pull requests, no merge commits.
 - Prefer Phoenix generators for boilerplate, then edit the generated code.
 - Read the docs of a library from `deps/<name>` before using an API you are not certain of.
 - Do not add a dependency without saying why in the commit message.
+- **A guard must use the same model as the operation it guards.** `Path.expand` is lexical and
+  `File.read` follows symlinks, so a string check in front of a filesystem call is decorative.
+  The same trap exists wherever validate-then-act uses two different models of the same thing.
+- **Fix the class, not the instance.** After fixing a defect, grep for the pattern; fix every
+  site or record in the commit message why one was left.
+- **Check a claim before writing it down.** "Removed the duplication" means running the count
+  both ways; "everything links to X" means grepping for the ones that do not. A note, a comment
+  or a commit message that asserts something unverified is the defect this repository produces
+  most often — the design notes are the standard precisely so that they can be checked against.
+- A handler subscribed to a global topic filters before it does any work.
+- Stage the files a commit is about. `git add -A` sweeps unrelated work into it.

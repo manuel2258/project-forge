@@ -57,18 +57,18 @@ defmodule Forge.FlowTest do
       Tickets.admit(project, %{title: "Persist scores", body: "They vanish."}, {:user, user.id})
 
     assert ticket.number == 1
-    assert ticket.state == "refined"
+    assert ticket.state == "refining"
     assert ticket.branch == "ticket/1"
     assert Forge.Git.branch_exists?(repo, "ticket/1")
     assert String.length(ticket.workflow_commit) == 40
-    assert Tickets.workflow(ticket).initial == "refined"
+    assert Tickets.workflow(ticket).initial == "refining"
 
     assert %{content: "# Persist scores\n\nThey vanish.", version: 1} =
              Artifacts.latest(ticket.id, "ticket")
 
     job = only_pending(ticket)
     spec = Jobs.spec(job)
-    assert spec.state == "refined"
+    assert spec.state == "refining"
     assert spec.prompt == "Refine the ticket into a crisp problem statement.\n"
     assert [%{name: "ticket", version: 1}] = spec.inputs
     assert spec.produces == ["refinement.md"]
@@ -98,7 +98,7 @@ defmodule Forge.FlowTest do
   } do
     {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
 
-    # refined: converges, transition needs approval of refinement.md
+    # refining: converges, transition needs approval of refinement.md
     {:ok, job} = run(only_pending(ticket), worker, "success", "refinement.md")
     assert %Job{status: :finished, outcome: :converged, declared_outcome: "done", turns: 3} = job
     assert Decimal.equal?(job.cost_usd, Decimal.from_float(0.0421))
@@ -107,30 +107,30 @@ defmodule Forge.FlowTest do
              Artifacts.latest(ticket.id, "refinement.md")
 
     assert %{blob_uri: "store:" <> key, content_hash: "sha256:" <> _} =
-             Artifacts.latest(ticket.id, "transcript-refined-1.jsonl")
+             Artifacts.latest(ticket.id, "transcript-refining-1.jsonl")
 
     assert {:ok, transcript} = Forge.Storage.get(key)
     assert transcript =~ "\"type\":"
 
     ticket = Tickets.get!(ticket.id)
-    assert ticket.state == "refined"
-    assert ticket.pending_transition["to"] == "planned"
+    assert ticket.state == "refining"
+    assert ticket.pending_transition["to"] == "planning"
     assert Decimal.equal?(ticket.cost_usd, Decimal.from_float(0.0421))
     assert [%{kind: :approval}] = Queue.items()
     assert "job.harness.started" in event_types(ticket)
 
-    # approve: transition taken, planned job created
+    # approve: transition taken, planning job created
     {:ok, ticket} = Engine.decide(ticket, user.id, :approved, "looks right")
-    assert ticket.state == "planned"
+    assert ticket.state == "planning"
     assert ticket.pending_transition == nil
 
     assert [%{decision: :approved}] =
              Artifacts.approvals(Artifacts.latest(ticket.id, "refinement.md").id)
 
-    planned = only_pending(ticket)
-    assert Enum.map(Jobs.spec(planned).inputs, & &1.name) == ["ticket", "refinement.md"]
+    planning = only_pending(ticket)
+    assert Enum.map(Jobs.spec(planning).inputs, & &1.name) == ["ticket", "refinement.md"]
 
-    # planned: blocks on a question, which is pushed to subscribed browsers
+    # planning: blocks on a question, which is pushed to subscribed browsers
     Forge.Push.TestSender.watch()
 
     {:ok, _} =
@@ -142,13 +142,13 @@ defmodule Forge.FlowTest do
         }
       })
 
-    {:ok, job} = run(planned, worker, "blocking", "plan.md")
+    {:ok, job} = run(planning, worker, "blocking", "plan.md")
     assert job.status == :waiting
     Forge.Push.flush()
     assert_receive {:push, "https://push.example/phone", %{"body" => "Which backend?"}, _opts}
     assert job.harness_session_id == "sess-42"
     assert [%{kind: :question, question: %{key: "backend"}}] = Queue.items()
-    assert Tickets.get!(ticket.id).state == "planned"
+    assert Tickets.get!(ticket.id).state == "planning"
 
     # answer, resume: the second run resumes the session and sees answers.md
     [question] = Artifacts.open_blocking_questions(ticket.id)
@@ -159,8 +159,8 @@ defmodule Forge.FlowTest do
     assert Artifacts.answered_keys(ticket.id) == ["backend"]
 
     # a human transition is refused while the job is live
-    assert {:error, {:job_live, "planned"}} =
-             Engine.choose(Tickets.get!(ticket.id), user.id, "implemented")
+    assert {:error, {:job_live, "planning"}} =
+             Engine.choose(Tickets.get!(ticket.id), user.id, "implementing")
 
     {:ok, job} = Jobs.resume(Jobs.get!(job.id))
     assert job.status == :pending
@@ -182,28 +182,28 @@ defmodule Forge.FlowTest do
     assert Artifacts.versions(ticket.id, "plan.md") |> length() == 2
     assert Queue.items() |> Enum.reject(&(&1.kind == :question)) |> length() == 0
 
-    # planned -> implemented automatically; implemented reports plan_invalid -> back to planned
+    # planning -> implementing automatically; implementing reports plan_invalid -> back to planning
     ticket = Tickets.get!(ticket.id)
-    assert ticket.state == "implemented"
+    assert ticket.state == "implementing"
     {:ok, _} = run(only_pending(ticket), worker, "plan_invalid", "implementation.md")
     ticket = Tickets.get!(ticket.id)
-    assert ticket.state == "planned"
+    assert ticket.state == "planning"
     assert Jobs.spec(only_pending(ticket)).attempt == 2
 
-    # planned again -> implemented -> verified; verified exhausts its budget -> stuck
+    # planning again -> implementing -> verifying; verifying exhausts its budget -> stuck
     {:ok, _} = run(only_pending(ticket), worker, "success", "plan.md")
     {:ok, _} = run(only_pending(Tickets.get!(ticket.id)), worker, "success", "implementation.md")
     ticket = Tickets.get!(ticket.id)
-    assert ticket.state == "verified"
-    verified = only_pending(ticket)
+    assert ticket.state == "verifying"
+    verifying = only_pending(ticket)
 
-    assert Enum.map(Jobs.spec(verified).inputs, & &1.name) == [
+    assert Enum.map(Jobs.spec(verifying).inputs, & &1.name) == [
              "plan.md",
              "implementation.md",
              "changeset"
            ]
 
-    {:ok, job} = run(verified, worker, "max_turns", "report.md")
+    {:ok, job} = run(verifying, worker, "max_turns", "report.md")
     assert job.outcome == :budget_exhausted
     ticket = Tickets.get!(ticket.id)
     assert ticket.status == :stuck
@@ -211,12 +211,12 @@ defmodule Forge.FlowTest do
     # A stuck item lists the transitions out of the state, so the operator can see the
     # choices without reading the workflow: docs/design/api-and-ui.md.
     assert [%{kind: :stuck, detail: detail}] = Queue.items()
-    assert detail.state == "verified"
-    assert Enum.sort(detail.transitions) == ["implemented", "review_ready"]
+    assert detail.state == "verifying"
+    assert Enum.sort(detail.transitions) == ["implementing", "review_ready"]
 
     # unstick by choosing the retry edge by hand, then finish
-    {:ok, ticket} = Engine.choose(ticket, user.id, "implemented")
-    assert {ticket.status, ticket.state} == {:active, "implemented"}
+    {:ok, ticket} = Engine.choose(ticket, user.id, "implementing")
+    assert {ticket.status, ticket.state} == {:active, "implementing"}
     {:ok, _} = run(only_pending(ticket), worker, "success", "implementation.md")
     {:ok, _} = run(only_pending(Tickets.get!(ticket.id)), worker, "success", "report.md")
     ticket = Tickets.get!(ticket.id)
@@ -245,8 +245,8 @@ defmodule Forge.FlowTest do
     ticket = Tickets.get!(ticket.id)
 
     {:ok, rejected} = Engine.decide(ticket, user.id, :rejected, "not yet")
-    assert rejected.state == "refined"
-    assert rejected.pending_transition["to"] == "planned"
+    assert rejected.state == "refining"
+    assert rejected.pending_transition["to"] == "planning"
 
     assert [%{decision: :rejected}] =
              Artifacts.approvals(Artifacts.latest(ticket.id, "refinement.md").id)
@@ -258,23 +258,23 @@ defmodule Forge.FlowTest do
       })
 
     {:ok, ticket} = Engine.decide(rejected, user.id, :approved, nil)
-    assert ticket.state == "planned"
+    assert ticket.state == "planning"
     assert [%{decision: :approved}] = Artifacts.approvals(v2.id)
 
     # a job whose ticket moved on decides nothing
-    planned = only_pending(ticket)
+    planning = only_pending(ticket)
 
     {:ok, moved} =
       Repo.update(
         Forge.Tickets.Ticket.progress_changeset(ticket, %{
-          state: "verified",
+          state: "verifying",
           status: :active,
           cost_usd: ticket.cost_usd
         })
       )
 
-    {:ok, _} = run(planned, worker, "success", "plan.md")
-    assert Tickets.get!(moved.id).state == "verified"
+    {:ok, _} = run(planning, worker, "success", "plan.md")
+    assert Tickets.get!(moved.id).state == "verifying"
     assert "job.orphaned" in event_types(ticket)
   end
 
@@ -326,7 +326,7 @@ defmodule Forge.FlowTest do
 
     assignment = FakeWorker.take_assignment(only_job(running).id)
     {:ok, _job} = FakeWorker.finish(assignment, "success", doc: "refinement.md")
-    assert Tickets.get!(running.id).pending_transition["to"] == "planned"
+    assert Tickets.get!(running.id).pending_transition["to"] == "planning"
 
     # With the slice free again, the one that waited goes out.
     assert Forge.Jobs.Scheduler.tick() == 1
@@ -429,9 +429,9 @@ defmodule Forge.FlowTest do
       seeded_repo(%{
         ".forge/workflow.yml" => """
         version: 1
-        initial: built
+        initial: building
         states:
-          built:
+          building:
             prompt: agents/plan.md
             inputs: [ticket]
             produces: [plan.md]
@@ -439,8 +439,8 @@ defmodule Forge.FlowTest do
             budget: { turns: 1, cost: 0.01 }
           waiting_room: {}
         transitions:
-          - { from: built, to: waiting_room }
-          - { from: built, to: waiting_room, when: retry }
+          - { from: building, to: waiting_room }
+          - { from: building, to: waiting_room, when: retry }
         limits:
           ticket_cost: 1.00
         """

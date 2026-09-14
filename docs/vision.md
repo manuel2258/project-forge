@@ -59,8 +59,8 @@ that provider.
 
 ## The ticket lifecycle
 
-A ticket is a statechart, not a linear pipeline. The forward path (idea → refined → planned
-→ implemented → verified → review-ready → merged) is the easy part; the backward edges —
+A ticket is a statechart, not a linear pipeline. The forward path (idea → refining → planning
+→ implementing → verifying → review-ready → merged) is the easy part; the backward edges —
 replanning when implementation invalidates a plan, splitting, blocking — are where the
 design lives.
 
@@ -93,28 +93,28 @@ A rough sketch of what a project's file might look like:
 version: 1
 
 states:
-  refined:
+  refining:
     prompt: agents/refine.md
     env: refine                    # devshell name from the project's flake
     inputs: [ticket]
     produces: refinement.md
     budget: { turns: 20, cost: 0.50 }
 
-  planned:
+  planning:
     prompt: agents/plan.md
     env: implement
     inputs: [ticket, refinement.md]
     use: compare-drafts            # reusable block, below
     produces: plan.md
 
-  implemented:
+  implementing:
     prompt: agents/implement.md
     env: implement
     inputs: [plan.md]
     can_spawn: [self-review]       # bounded choice: agent decides if and how often
     produces: [changeset, env-proposal.nix?]
 
-  verified:
+  verifying:
     prompt: agents/verify.md
     env: release
     inputs: [plan.md, changeset]
@@ -126,13 +126,13 @@ blocks:
     join:   { type: plan-compare }
 
 transitions:
-  - from: refined      to: planned        approve: [refinement.md]
-  - from: planned      to: implemented                          # no approval
-  - from: implemented  to: verified
-  - from: verified     to: review_ready
-  - from: review_ready to: merged         approve: [changeset]
-  - from: verified     to: implemented    when: tests_failed  max: 3
-  - from: implemented  to: planned        when: plan_invalid            # backward edge
+  - from: refining     to: planning       approve: [refinement.md]
+  - from: planning     to: implementing                     # no approval
+  - from: implementing to: verifying
+  - from: verifying    to: review_ready
+  - from: review_ready to: merged          approve: [changeset]
+  - from: verifying    to: implementing    when: tests_failed  max: 3
+  - from: implementing to: planning        when: plan_invalid  # backward edge
 
 limits:
   spawn_depth: 2

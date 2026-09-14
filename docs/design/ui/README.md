@@ -84,7 +84,7 @@ honestly reporting it could not finish). `error` and declared failures → error
   beside a free-text field).
 - **Flag** — filled, uppercase, sharp corners. A label, never a control.
 
-Transition actions carry a verb: `Move to planned ›`, not `→ planned`.
+Transition actions carry a verb: `Move to planning ›`, not `→ planning`.
 
 ## Screens
 
@@ -107,8 +107,8 @@ version, carrying N questions.
 Each item is three lines plus its fast path:
 - Mark + kind label (counting: `6 BLOCKING QUESTIONS`) + waiting figure, right-aligned mono 16–17px.
 - The decision sentence, 17px on the list / 20px when focused, `font-medium`, `-tracking-[.01em]`.
-- One answer row carrying the fast path (`Accept all 6 recommendations`, `Approve v3`, `Move to planned`).
-- A mono footer of identifiers: `forge#41 · ▸ planned · plan.md v2`.
+- One answer row carrying the fast path (`Accept all 6 recommendations`, `Approve v3`, `Move to planning`).
+- A mono footer of identifiers: `forge#41 · ▸ planning · plan.md v2`.
 
 **Three marks carry all kinds**, so the vocabulary scales to the ~8 planned kinds without
 becoming a colour quiz:
@@ -139,7 +139,7 @@ Body 22px/20px padding. Footer: a 58px `‹` back button and a full-width `Skip 
 
 **Every kind renders here**, not just questions — an approval, a stuck ticket and a
 review-ready ticket are each one screen. A focused screen can afford context the card cannot;
-the approval screen states what the work cost to reach that point (`3 jobs in implemented ·
+the approval screen states what the work cost to reach that point (`3 jobs in implementing ·
 0.9 windows · 2 questions answered`) and links to the document.
 
 **Skip is not dismiss.** It advances and leaves the decision open; the item stays in the queue
@@ -191,7 +191,7 @@ because there is no such state.
 **Branching and going back** (discussed, not yet drawn — implement when the case arises): order
 the spine by **time, not topology**. A step is a *visit* to a state, so a revisit is simply
 another step further down with the same name, its head carrying the cause
-(`planned · returned from implemented`). Unreached states then collapse into one dimmed *ahead*
+(`planning · returned from implementing`). Unreached states then collapse into one dimmed *ahead*
 block at the foot rather than being interleaved. Fan-out within a state (planned §7 "blocks")
 stays inside the jobs table as one level of indent with a rejoin label — **never a drawn graph.
 The spine is always linear, because it is a history and history does not branch.**

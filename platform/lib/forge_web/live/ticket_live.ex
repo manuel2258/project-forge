@@ -17,6 +17,7 @@ defmodule ForgeWeb.TicketLive do
   alias ForgeCore.Workflow
   alias ForgeWeb.{Format, Indicators, Markdown}
   alias ForgeWeb.Operator.Actions
+  alias ForgeWeb.Operator.Board
 
   @impl true
   def mount(%{"project" => name, "number" => number}, _session, socket) do
@@ -31,6 +32,11 @@ defmodule ForgeWeb.TicketLive do
     workflow = Tickets.workflow(ticket)
     jobs = Jobs.for_ticket(ticket.id)
 
+    # Approval state is shown only where approval is possible: an artifact no transition lists in
+    # `approve:` would otherwise be marked `unapproved` for ever, flagging a job the operator does
+    # not have. See docs/design/ui.md § Semantics that must not be lost.
+    approvable = Artifacts.approvable(workflow)
+
     artifacts =
       for artifact <- Artifacts.list(ticket.id) do
         latest = Artifacts.latest(ticket.id, artifact.name)
@@ -38,7 +44,9 @@ defmodule ForgeWeb.TicketLive do
         %{
           artifact: artifact,
           latest: latest,
-          approved: approved?(latest),
+          approved: Artifacts.approved?(latest),
+          approvable:
+            artifact.kind != :presentation and MapSet.member?(approvable, artifact.name),
           html: artifact.kind == :document && latest && Markdown.to_html(latest.content)
         }
       end
@@ -86,14 +94,8 @@ defmodule ForgeWeb.TicketLive do
     else
       visits ++ [%{name: ticket.state, jobs: [], artifacts: [], cost: Decimal.new(0)}]
     end
-    |> Enum.map(&Map.put(&1, :topology, topology(workflow, &1.name)))
+    |> Enum.map(&Map.put(&1, :topology, Board.topology(workflow, &1.name)))
   end
-
-  # Approval attaches to this exact version: a newer version has none until it gets one.
-  defp approved?(nil), do: false
-
-  defp approved?(version),
-    do: version.id |> Artifacts.approvals() |> Enum.any?(&(&1.decision == :approved))
 
   defp written_in?(%{latest: nil}, _jobs), do: false
 
@@ -101,17 +103,6 @@ defmodule ForgeWeb.TicketLive do
     case latest.author do
       %{"kind" => "job", "id" => id} -> Enum.any?(jobs, &(&1.id == id))
       _other -> false
-    end
-  end
-
-  defp topology(workflow, name) do
-    state = Workflow.state(workflow, name)
-
-    cond do
-      is_nil(state) -> :unknown
-      Workflow.State.job?(state) -> :job
-      Workflow.terminal?(workflow, name) -> :terminal
-      true -> :human
     end
   end
 
@@ -137,10 +128,14 @@ defmodule ForgeWeb.TicketLive do
     ~H"""
     <Layouts.app flash={@flash} current_scope={@current_scope} measure="74rem">
       <header class="flex flex-col gap-2">
-        <div class="font-mono text-[12.5px] opacity-60">{@project.name}#{@ticket.number}</div>
+        <div class="font-mono text-[12.5px] opacity-60">
+          <.link navigate={~p"/projects/#{@project.name}"} class="hover:opacity-100">
+            {@project.name}
+          </.link>#{@ticket.number}
+        </div>
         <h1 class="text-[23px] font-semibold -tracking-[.03em] sm:text-3xl">{@ticket.title}</h1>
         <div class="flex flex-wrap items-center gap-3">
-          <.state name={@ticket.state} topology={topology(@workflow, @ticket.state)} />
+          <.state name={@ticket.state} topology={Board.topology(@workflow, @ticket.state)} />
           <.status_flag status={@ticket.status} age={Format.ago(@ticket.updated_at, @now)} />
           <.paused :if={@paused} reason="spend" until={@until_midnight} />
           <span :if={waiting_clause(assigns)} class="text-sm opacity-70">
@@ -169,7 +164,7 @@ defmodule ForgeWeb.TicketLive do
           <.link
             :if={@reviewable}
             navigate={~p"/tickets/#{@project.name}/#{@ticket.number}/review"}
-            class="mt-2 flex h-11 items-center text-sm text-primary hover:underline"
+            class="mt-2 flex min-h-[46px] items-center text-sm text-primary hover:underline"
           >
             Read the change first ›
           </.link>
@@ -211,55 +206,72 @@ defmodule ForgeWeb.TicketLive do
                   </span>
                 </div>
 
-                <table :if={step.jobs != []} class="mt-2 w-full text-[12.5px]">
-                  <tbody>
-                    <tr :for={job <- step.jobs} class="border-b border-base-300/60">
-                      <td class="py-1.5 font-mono">
-                        <.link
-                          navigate={~p"/tickets/#{@project.name}/#{@ticket.number}/jobs/#{job.id}"}
-                          class="hover:underline"
-                        >
-                          #{job.attempt}
-                        </.link>
-                      </td>
-                      <td class="py-1.5">
+                <%!-- The whole row is the target, at the full 46px: hunting for a 20px `#3` is
+                      the failure docs/design/ui.md § The affordance rule names. Nothing inside
+                      a job row commits anything, so the row may be a link. --%>
+                <ol :if={step.jobs != []} class="mt-2 flex flex-col">
+                  <li :for={job <- step.jobs}>
+                    <.link
+                      navigate={~p"/tickets/#{@project.name}/#{@ticket.number}/jobs/#{job.id}"}
+                      class="flex min-h-[46px] items-center gap-3 border-b border-base-300/60 text-[12.5px] hover:bg-base-200"
+                    >
+                      <span class="w-8 shrink-0 font-mono">#{job.attempt}</span>
+                      <span class="min-w-0 flex-1">
                         <.outcome
                           :if={job.declared_outcome || job.outcome}
                           value={job.declared_outcome || to_string(job.outcome)}
                           bucket={job.declared_outcome && Indicators.bucket(job.outcome)}
                         />
                         <.job_status :if={is_nil(job.outcome)} status={job.status} />
-                      </td>
-                      <td class="py-1.5 text-right font-mono opacity-60">{job.turns} turns</td>
-                      <td class="py-1.5 text-right font-mono opacity-60">
+                      </span>
+                      <span class="shrink-0 font-mono opacity-60">{job.turns} turns</span>
+                      <span class="w-20 shrink-0 text-right font-mono opacity-60">
                         {Format.windows(job.cost_usd) || "—"}
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
+                      </span>
+                      <span class="shrink-0 font-mono opacity-40" aria-hidden="true">›</span>
+                    </.link>
+                  </li>
+                </ol>
 
                 <div :if={step.artifacts != []} class="mt-2 flex flex-wrap gap-2">
-                  <.artifact_chip :for={entry <- step.artifacts} entry={entry} />
+                  <.artifact_chip
+                    :for={entry <- step.artifacts}
+                    entry={entry}
+                    project={@project.name}
+                    number={@ticket.number}
+                  />
                 </div>
               </div>
             </li>
           </ol>
 
-          <%!-- Until an artifact version is addressable on its own route, and until the
-                document-with-margin-questions view exists, this disclosure is the only way to
-                read what a job wrote. See the "not built yet" list in docs/design/ui.md. --%>
+          <%!-- Until the document-with-margin-questions view exists, this disclosure is how a
+                rendered document is read; `source ›` is the exact bytes behind it. The body is
+                `.doc` on base-200: a document is the one thing on the page the product did not
+                write, and it is contained so it can never widen this column into the rail. See
+                docs/design/ui.md § Documents. --%>
           <section :if={Enum.any?(@artifacts, & &1.html)} class="mt-6 border-t border-base-300 pt-5">
             <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Documents</h2>
             <details
               :for={entry <- Enum.filter(@artifacts, & &1.html)}
-              class="mt-3"
+              class="mt-3 min-w-0"
               id={"artifact-#{entry.artifact.id}"}
             >
-              <summary class="flex h-11 cursor-pointer items-center gap-2 font-mono text-[12.5px]">
+              <summary class="flex min-h-[46px] cursor-pointer items-center gap-2 font-mono text-[12.5px]">
                 {entry.artifact.name}
                 <span class="opacity-60">v{entry.latest.version}</span>
               </summary>
-              <div class="prose prose-sm mt-2 max-w-none">{entry.html}</div>
+              <div class="mt-2 min-w-0 rounded-box bg-base-200 px-4 py-3">
+                <div class="doc">{entry.html}</div>
+                <.link
+                  href={
+                    ~p"/tickets/#{@project.name}/#{@ticket.number}/artifacts/#{entry.artifact.name}/#{entry.latest.version}"
+                  }
+                  class="mt-3 flex min-h-[46px] items-center font-mono text-[12.5px] text-primary hover:underline"
+                >
+                  source ›
+                </.link>
+              </div>
             </details>
           </section>
         </div>
@@ -278,29 +290,20 @@ defmodule ForgeWeb.TicketLive do
 
           <h2 class="mt-6 font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Facts</h2>
           <dl class="mt-3 flex flex-col gap-2 text-[12.5px]">
-            <div class="flex min-w-0 justify-between gap-3">
-              <dt class="opacity-50">branch</dt>
-              <dd class="truncate font-mono">{@ticket.branch}</dd>
-            </div>
-            <div class="flex min-w-0 justify-between gap-3">
-              <dt class="opacity-50">base</dt>
-              <dd class="truncate font-mono">{String.slice(@ticket.base_commit || "", 0, 12)}</dd>
-            </div>
-            <div class="flex min-w-0 justify-between gap-3">
-              <dt class="opacity-50">workflow</dt>
-              <dd class="truncate font-mono">
-                {String.slice(@ticket.workflow_commit || "", 0, 12)}
-              </dd>
-            </div>
-            <div class="flex min-w-0 justify-between gap-3">
-              <dt class="opacity-50">admitted</dt>
-              <dd class="font-mono">{Format.ago(@ticket.inserted_at, @now)} ago</dd>
-            </div>
+            <.fact label="branch">{@ticket.branch}</.fact>
+            <.fact label="base">{String.slice(@ticket.base_commit || "", 0, 12)}</.fact>
+            <.fact label="workflow">{String.slice(@ticket.workflow_commit || "", 0, 12)}</.fact>
+            <.fact label="admitted">{Format.ago(@ticket.inserted_at, @now)} ago</.fact>
           </dl>
 
           <h2 class="mt-6 font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Artifacts</h2>
           <div class="mt-3 flex flex-wrap gap-2">
-            <.artifact_chip :for={entry <- @artifacts} entry={entry} />
+            <.artifact_chip
+              :for={entry <- @artifacts}
+              entry={entry}
+              project={@project.name}
+              number={@ticket.number}
+            />
             <p :if={@artifacts == []} class="text-sm opacity-50">
               The first job writes the first document.
             </p>
@@ -324,15 +327,25 @@ defmodule ForgeWeb.TicketLive do
   end
 
   # There is no chip without a version: approval attaches to an exact version, and a human edit
-  # creating v3 does not carry v2's approval. A presentation has no approval slot at all.
+  # creating v3 does not carry v2's approval. A presentation has no approval slot at all, and
+  # neither has an artifact the pinned workflow never approves — see docs/design/ui.md.
+  #
+  # The chip is a link to the exact version's bytes, which is also why it is bordered: a border
+  # means you can tap it. A changeset is a commit rather than a file and the controller sends it
+  # to the review page, where a diff is rendered.
   attr :entry, :map, required: true
+  attr :project, :string, required: true
+  attr :number, :integer, required: true
 
   defp artifact_chip(assigns) do
     ~H"""
-    <span
+    <.link
       :if={@entry.latest}
+      href={
+        ~p"/tickets/#{@project}/#{@number}/artifacts/#{@entry.artifact.name}/#{@entry.latest.version}"
+      }
       class={[
-        "inline-flex items-center gap-1.5 rounded-field px-2 py-1 font-mono text-[12.5px]",
+        "inline-flex min-h-[46px] items-center gap-1.5 rounded-field px-2 py-1 font-mono text-[12.5px] hover:bg-base-200",
         if(@entry.artifact.kind == :presentation,
           do: "border border-dashed border-base-300",
           else: "border border-base-300"
@@ -344,13 +357,9 @@ defmodule ForgeWeb.TicketLive do
       <span :if={@entry.artifact.kind == :presentation} class="tracking-[.14em] uppercase opacity-50">
         view only
       </span>
-      <span :if={@entry.artifact.kind != :presentation and @entry.approved} class="text-success">
-        ✓ approved
-      </span>
-      <span :if={@entry.artifact.kind != :presentation and not @entry.approved} class="text-warning">
-        ◇ unapproved
-      </span>
-    </span>
+      <span :if={@entry.approvable and @entry.approved} class="text-success">✓ approved</span>
+      <span :if={@entry.approvable and not @entry.approved} class="text-warning">◇ unapproved</span>
+    </.link>
     """
   end
 

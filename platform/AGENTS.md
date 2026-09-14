@@ -18,6 +18,35 @@ This is a web application written using the Phoenix web framework.
 - If you override the default input classes (`<.input class="myclass px-2 py-1 rounded-lg">)`) class with your own values, no default classes are inherited, so your
 custom classes must fully style the input
 
+### Testing
+
+These are written down because every one of them was learned from a defect that reached `main`'s
+doorstep with a green suite.
+
+**Watch a new test fail before trusting it.** Break the line it covers, run it, see red, restore.
+This is the only thing that catches an assertion which cannot fail, and there is no substitute
+for it. Five tests on one branch asserted nothing: the production code was reverted to its
+pre-fix state and the whole suite stayed green.
+
+**`assert html =~ "..."` matches the whole page.** The nav, the theme switcher, the CSRF token,
+every Tailwind class name. Short generic strings match the layout rather than the feature —
+`"initial"` matches `initial-scale=1`, `"disabled"` matches the `disabled:` variant in a class
+list, `"main"` matches `data-phx-main`. Prefer `has_element?(view, selector)`, which asserts
+*placement*; where `=~` is right, assert on data the test itself created (`html =~ ticket.title`)
+rather than a literal you guessed. `test/forge_web/live/assertion_probe_test.exs` catches the
+known traps and grows when a new one gets through.
+
+**Assert placement, not presence.** "Both words appear on the page" passes when the two labels
+are swapped. "One link exists" passes when the link moves to the nav that is supposed not to have
+it. Scope the assertion to the row, the region or the element.
+
+**Test at the layer the bug lives.** Extracting a helper and testing the helper leaves the line
+that calls it uncovered. If the commit message names a symptom an operator would see, something
+must exercise that symptom through the surface that showed it.
+
+**A test's name and moduledoc are claims.** If it says it distinguishes two things, it has to
+fail when they are swapped.
+
 ### JS and CSS guidelines
 
 - **Use Tailwind CSS classes and custom CSS rules** to create polished, responsive, and visually stunning interfaces.

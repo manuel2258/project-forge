@@ -20,7 +20,13 @@ if System.get_env("PHX_SERVER") do
   config :forge, ForgeWeb.Endpoint, server: true
 end
 
-config :forge, ForgeWeb.Endpoint, http: [port: String.to_integer(System.get_env("PORT", "4000"))]
+# Only when PORT is actually set. The generated line defaults it to 4000, and because
+# runtime.exs is evaluated last that default overrode config/test.exs's 4002 — so the whole
+# suite refused to start whenever a dev node was running on this machine, which is exactly when
+# somebody is most likely to run it.
+if port = System.get_env("PORT") do
+  config :forge, ForgeWeb.Endpoint, http: [port: String.to_integer(port)]
+end
 
 if config_env() == :dev do
   # Reload browser tabs when matching files change.

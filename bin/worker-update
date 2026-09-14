@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Ships the worker release to a running machine without rebuilding its image.
+#   bin/worker-update <ssh-target> [-p <port>] [-i <key>]
+#
+# The image is 1.8 GiB and the release's own store path is 24 MiB, so shipping a code change
+# through a new image is the wrong size of operation — worse on a provider, where there is no
+# image upload at all and a new one means booting a rescue server to write a disk. This copies
+# the release, repoints the symlink `ExecStart` runs, and restarts the unit: seconds, and the
+# machine keeps the warm Nix store and the seeds that a replaced machine would lose.
+#
+# **This is the development-phase tool.** It needs the ssh door, which is shut by default and
+# forwards from loopback (docs/design/worker-tier.md § The provider driver), so it works where
+# the operator can already reach the machine and nowhere else. A worker on a provider has no
+# inbound port by construction; what that needs is the same operation pulled over the channel,
+# which is described in § Updating a worker and is not built.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+usage() {
+  sed -n '2,12p' "$0" >&2
+  exit 64
+}
+
+[ $# -ge 1 ] || usage
+target=$1
+shift
+port=22
+key=""
+
+while [ $# -gt 0 ]; do
+  case $1 in
+    -p)
+      port=$2
+      shift 2
+      ;;
+    -i)
+      key=$2
+      shift 2
+      ;;
+    *) usage ;;
+  esac
+done
+
+ssh_opts=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p "$port")
+[ -n "$key" ] && ssh_opts+=(-i "$key")
+
+say() { printf '==> %s\n' "$1"; }
+
+say "building the release"
+release=$(nix build .#forge-worker --no-link --print-out-paths | tail -1)
+echo "    $release"
+
+# --no-check-sigs because this closure was built here and was never signed for anybody; the
+# machine trusts what root puts in its store, and root is what we are over this door.
+say "copying it to $target"
+NIX_SSHOPTS="${ssh_opts[*]}" nix copy --to "ssh://$target" --no-check-sigs "$release"
+
+# The restart is what picks it up: ExecStart runs the symlink, not a store path. `ln -sfn` is
+# atomic enough for this — the unit is stopped between the two.
+say "pointing the worker at it and restarting"
+# The path is expanded here on purpose — it is the store path we just built and copied, and
+# the machine has no way to know it otherwise. shellcheck's SC2029 is about accidents of that
+# kind; this one is the point.
+# shellcheck disable=SC2029
+ssh "${ssh_opts[@]}" "$target" \
+  "ln -sfn '$release' /var/lib/forge/release && systemctl restart forge-worker"
+
+say "what it is running now"
+ssh "${ssh_opts[@]}" "$target" \
+  "readlink /var/lib/forge/release; systemctl is-active forge-worker"

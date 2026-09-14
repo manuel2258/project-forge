@@ -1,22 +1,22 @@
 version: 1
-initial: refined
+initial: refining
 
 states:
-  refined:
+  refining:
     prompt: agents/refine.md
     env: refine
     inputs: [ticket]
     produces: [refinement.md]
     budget: { turns: 20, cost: 0.50 }
 
-  planned:
+  planning:
     prompt: agents/plan.md
     env: implement
     inputs: [ticket, refinement.md]
     produces: [plan.md]
     budget: { turns: 40, cost: 2.00 }
 
-  implemented:
+  implementing:
     prompt: agents/implement.md
     env: implement
     inputs: [plan.md]
@@ -24,7 +24,7 @@ states:
     outcomes: [done, plan_invalid]
     budget: { turns: 200, cost: 10.00 }
 
-  verified:
+  verifying:
     prompt: agents/verify.md
     env: release
     inputs: [plan.md, implementation.md, changeset]
@@ -37,12 +37,12 @@ states:
     on_enter: merge                   # terminal: entering it merges the approved changeset
 
 transitions:
-  - { from: refined,      to: planned,      approve: [refinement.md] }
-  - { from: planned,      to: implemented }
-  - { from: implemented,  to: verified }
-  - { from: implemented,  to: planned,      when: plan_invalid }
-  - { from: verified,     to: review_ready }
-  - { from: verified,     to: implemented,  when: tests_failed, max: 3 }
+  - { from: refining,      to: planning,      approve: [refinement.md] }
+  - { from: planning,      to: implementing }
+  - { from: implementing,  to: verifying }
+  - { from: implementing,  to: planning,      when: plan_invalid }
+  - { from: verifying,     to: review_ready }
+  - { from: verifying,     to: implementing,  when: tests_failed, max: 3 }
   - { from: review_ready, to: merged,       approve: [changeset] }
 
 limits:

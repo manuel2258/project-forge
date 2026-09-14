@@ -12,43 +12,44 @@ defmodule ForgeCore.EngineTest do
 
   describe "step/4 along the grammar example" do
     test "a transition with approve is queued, not taken", %{workflow: workflow} do
-      assert {:approval, %Transition{from: "refined", to: "planned", approve: ["refinement.md"]}} =
-               Engine.step(workflow, "refined", "done", %{})
+      assert {:approval,
+              %Transition{from: "refining", to: "planning", approve: ["refinement.md"]}} =
+               Engine.step(workflow, "refining", "done", %{})
     end
 
     test "a plain transition on the default outcome is taken", %{workflow: workflow} do
-      assert {:transition, %Transition{from: "planned", to: "implemented"}} =
-               Engine.step(workflow, "planned", "done", %{})
+      assert {:transition, %Transition{from: "planning", to: "implementing"}} =
+               Engine.step(workflow, "planning", "done", %{})
     end
 
     test "a declared outcome selects its transition, including backward edges", %{
       workflow: workflow
     } do
-      assert {:transition, %Transition{from: "implemented", to: "planned"}} =
-               Engine.step(workflow, "implemented", "plan_invalid", %{})
+      assert {:transition, %Transition{from: "implementing", to: "planning"}} =
+               Engine.step(workflow, "implementing", "plan_invalid", %{})
 
-      assert {:transition, %Transition{from: "implemented", to: "verified"}} =
-               Engine.step(workflow, "implemented", "done", %{})
+      assert {:transition, %Transition{from: "implementing", to: "verifying"}} =
+               Engine.step(workflow, "implementing", "done", %{})
     end
 
     test "max caps how often a transition fires", %{workflow: workflow} do
-      retry = {"verified", "implemented", "tests_failed"}
+      retry = {"verifying", "implementing", "tests_failed"}
 
       for count <- 0..2 do
-        assert {:transition, %Transition{to: "implemented"}} =
-                 Engine.step(workflow, "verified", "tests_failed", %{retry => count})
+        assert {:transition, %Transition{to: "implementing"}} =
+                 Engine.step(workflow, "verifying", "tests_failed", %{retry => count})
       end
 
-      assert {:stuck, {:max_exceeded, %Transition{to: "implemented", max: 3}}} =
-               Engine.step(workflow, "verified", "tests_failed", %{retry => 3})
+      assert {:stuck, {:max_exceeded, %Transition{to: "implementing", max: 3}}} =
+               Engine.step(workflow, "verifying", "tests_failed", %{retry => 3})
     end
 
     test "an outcome with no transition sticks the ticket", %{workflow: workflow} do
       assert {:stuck, {:no_transition, "budget_exhausted"}} =
-               Engine.step(workflow, "verified", "budget_exhausted", %{})
+               Engine.step(workflow, "verifying", "budget_exhausted", %{})
 
       assert {:stuck, {:no_transition, "did_not_converge"}} =
-               Engine.step(workflow, "refined", "did_not_converge", %{})
+               Engine.step(workflow, "refining", "did_not_converge", %{})
     end
 
     test "rejects unknown and human states", %{workflow: workflow} do
@@ -64,10 +65,10 @@ defmodule ForgeCore.EngineTest do
       assert {:ok, %Transition{from: "review_ready", to: "merged"}} =
                Engine.choose(workflow, "review_ready", "merged")
 
-      assert {:ok, %Transition{from: "verified", to: "implemented", max: 3}} =
-               Engine.choose(workflow, "verified", "implemented")
+      assert {:ok, %Transition{from: "verifying", to: "implementing", max: 3}} =
+               Engine.choose(workflow, "verifying", "implementing")
 
-      assert {:error, :no_such_transition} = Engine.choose(workflow, "refined", "merged")
+      assert {:error, :no_such_transition} = Engine.choose(workflow, "refining", "merged")
     end
 
     test "disambiguates parallel edges by outcome" do
@@ -90,14 +91,14 @@ defmodule ForgeCore.EngineTest do
   end
 
   test "record/2 counts firings by transition id", %{workflow: workflow} do
-    {:transition, retry} = Engine.step(workflow, "verified", "tests_failed", %{})
+    {:transition, retry} = Engine.step(workflow, "verifying", "tests_failed", %{})
 
     counts = %{} |> Engine.record(retry) |> Engine.record(retry)
-    assert counts == %{{"verified", "implemented", "tests_failed"} => 2}
-    assert {:transition, _} = Engine.step(workflow, "verified", "tests_failed", counts)
+    assert counts == %{{"verifying", "implementing", "tests_failed"} => 2}
+    assert {:transition, _} = Engine.step(workflow, "verifying", "tests_failed", counts)
 
     assert {:stuck, _} =
-             Engine.step(workflow, "verified", "tests_failed", Engine.record(counts, retry))
+             Engine.step(workflow, "verifying", "tests_failed", Engine.record(counts, retry))
   end
 
   test "within_ticket_budget?/2 compares against limits.ticket_cost", %{workflow: workflow} do

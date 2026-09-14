@@ -219,12 +219,20 @@ defmodule Forge.Workers do
     }
   end
 
-  # What the machine needs to run an agent at all. It is the machine's and not any job's, so it
-  # is injected at creation rather than carried in an assignment (`docs/design/worker-tier.md`
-  # § The worker image), and it is the same environment the platform read for itself while it
-  # still ran jobs. `executable` is deliberately not here: it is a path on this host, and the
-  # worker image has its own.
-  defp harness_env do
+  @doc """
+  What the machine needs to run an agent at all, as `{name, value}` pairs.
+
+  It is the machine's and not any job's, so it is injected at creation rather than carried in an
+  assignment (`docs/design/worker-tier.md` § The worker image), and it is the same environment
+  the platform read for itself while it still ran jobs. `executable` is deliberately not here:
+  it is a path on this host, and the worker image has its own.
+
+  Public because `mix forge.worker.new` mints the environment for a machine the operator is
+  provisioning by hand, and that machine needs exactly what the driver would have given it. A
+  worker minted without this joins and reports `ready` and then fails every job with *Not logged
+  in* — see § Managed and unmanaged.
+  """
+  def harness_env do
     opts = Forge.Jobs.config(:harness_opts, [])
 
     credential =
@@ -256,7 +264,7 @@ defmodule Forge.Workers do
   def sweep_idle do
     cutoff = DateTime.add(now(), -config(:idle_period_ms, :timer.minutes(10)), :millisecond)
 
-    from(w in Worker, where: w.status == :idle and w.idle_since < ^cutoff)
+    from(w in Worker, where: w.status == :idle and w.managed and w.idle_since < ^cutoff)
     |> Repo.all()
     |> Enum.count(&(destroy(&1) == :ok))
   end
@@ -287,6 +295,26 @@ defmodule Forge.Workers do
   # finishes booting has to expire too, or a failed create holds the slot for ever.
   defp last_seen(%Worker{last_seen_at: nil, inserted_at: inserted_at}), do: inserted_at
   defp last_seen(%Worker{last_seen_at: last_seen_at}), do: last_seen_at
+
+  # An unmanaged worker is the operator's machine, and it may well come back — a `destroyed` row
+  # never can. So it loses its jobs, which are re-runnable and which nothing is observing, and
+  # keeps its row. It is not assignable while it is out of touch either way: `assignable/1` asks
+  # the registry, not the row.
+  defp lose(%Worker{managed: false} = worker) do
+    case Forge.Jobs.running_on(worker.id) do
+      [] ->
+        :skip
+
+      jobs ->
+        Logger.warning(
+          "worker #{worker.id} is unreachable; re-queueing #{length(jobs)} job(s). It is not " <>
+            "the platform's to destroy, so its row stays and it may rejoin."
+        )
+
+        Enum.each(jobs, &Forge.Jobs.requeue(&1.id, :worker_lost))
+        :ok
+    end
+  end
 
   defp lose(%Worker{} = worker) do
     Logger.warning("worker #{worker.id} is unreachable; re-queueing its jobs and destroying it")

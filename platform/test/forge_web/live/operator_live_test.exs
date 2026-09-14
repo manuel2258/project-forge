@@ -47,6 +47,65 @@ defmodule ForgeWeb.OperatorLiveTest do
     job
   end
 
+  test "a queue item's link stops before the thing that commits", %{
+    conn: conn,
+    user: user,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
+    scenario("blocking", "refinement.md")
+    run_pending(ticket.id)
+
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    # docs/design/ui.md § The affordance rule: a navigating region never encloses a control that
+    # commits, or "read this" and "approve this" become the same gesture. A regression that
+    # wrapped the answer affordance inside the link is the precise failure this pins.
+    link =
+      view
+      |> element(~s(article > a[href="/tickets/#{project.name}/#{ticket.number}"]))
+      |> render()
+
+    assert link =~ "QUESTION" or link =~ "question"
+    refute link =~ "<form"
+    refute link =~ "phx-submit"
+  end
+
+  test "a job page shows what it declared and what it wrote", %{
+    conn: conn,
+    user: user,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
+    # `refining` declares refinement.md; the file's default scenario writes plan.md.
+    scenario("success", "refinement.md")
+    job = run_pending(ticket.id)
+
+    {:ok, _view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/jobs/#{job.id}")
+
+    assert html =~ "Declares"
+    assert html =~ "Wrote"
+    # What the run actually produced, linked to its exact version.
+    assert html =~ "refinement.md"
+    assert html =~ ~s(/artifacts/refinement.md/1)
+    refute html =~ "not written"
+  end
+
+  test "a job that did not write what it declared says so", %{
+    conn: conn,
+    user: user,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
+    # The default scenario writes plan.md, which `refining` does not declare, so the
+    # refinement.md it *did* declare is missing — the case the two lists exist to tell apart.
+    job = run_pending(ticket.id)
+
+    {:ok, _view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/jobs/#{job.id}")
+
+    assert html =~ "not written"
+  end
+
   test "pages require login", %{project: _project} do
     conn = build_conn()
     assert {:error, {:redirect, %{to: "/users/log-in"}}} = live(conn, ~p"/")
@@ -66,14 +125,14 @@ defmodule ForgeWeb.OperatorLiveTest do
     run_pending(ticket.id)
     # the page refreshes on its own when the job finishes
     assert render(view) =~ "approval"
-    assert render(view) =~ "refined"
+    assert render(view) =~ "refining"
 
     view
     |> form("#approval-#{ticket.id} form", %{"comment" => "fine"})
     |> render_submit(%{"decision" => "approved"})
 
-    assert render(view) =~ "approved; now in planned"
-    assert Tickets.get!(ticket.id).state == "planned"
+    assert render(view) =~ "approved; now in planning"
+    assert Tickets.get!(ticket.id).state == "planning"
 
     scenario("blocking", "plan.md")
     run_pending(ticket.id)
@@ -94,7 +153,7 @@ defmodule ForgeWeb.OperatorLiveTest do
     refute render(view) =~ "blocking question"
 
     assert [%{status: :pending}] =
-             Enum.filter(Jobs.for_ticket(ticket.id), &(&1.state == "planned"))
+             Enum.filter(Jobs.for_ticket(ticket.id), &(&1.state == "planning"))
   end
 
   test "the queue offers notifications and stores a browser subscription", %{
@@ -135,7 +194,7 @@ defmodule ForgeWeb.OperatorLiveTest do
     {:ok, view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
     assert html =~ "Persist scores"
     assert html =~ "They vanish."
-    assert html =~ "refined"
+    assert html =~ "refining"
     assert html =~ "#1"
     assert html =~ "refinement.md"
     assert html =~ "v1"
@@ -144,7 +203,7 @@ defmodule ForgeWeb.OperatorLiveTest do
     assert has_element?(view, "#hoisted-decision")
 
     view |> form("#approval-#{ticket.id} form") |> render_submit(%{"decision" => "rejected"})
-    assert render(view) =~ "rejected; now in refined"
+    assert render(view) =~ "rejected; now in refining"
   end
 
   test "the job page shows the pinned manifest and harness events", %{
@@ -180,8 +239,8 @@ defmodule ForgeWeb.OperatorLiveTest do
 
     {:ok, _view, html} = live(conn, ~p"/board")
     assert html =~ project.name
-    assert html =~ "refined"
+    assert html =~ "refining"
     assert html =~ "merged"
-    assert :binary.match(html, "refined") < :binary.match(html, "merged")
+    assert :binary.match(html, "refining") < :binary.match(html, "merged")
   end
 end

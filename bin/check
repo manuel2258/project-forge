@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 echo "==> shell"
-shellcheck -x bin/check bin/measure measure/lib/*.sh measure/workloads/*.sh \
+shellcheck -x bin/check bin/measure bin/worker-update measure/lib/*.sh measure/workloads/*.sh \
   platform/priv/git-hooks/*
 shfmt -d -i 2 -ci -sr bin measure platform/priv/git-hooks
 

@@ -16,6 +16,12 @@ let
   configLabel = "forge-config";
   configFile = "worker.env";
 
+  # The release the unit actually runs, as a symlink rather than a store path: see
+  # docs/design/worker-tier.md § Updating a worker. The image is the wrong size to ship a code
+  # change through, so the release is separable from it.
+  releaseLink = "${root}/release";
+  gcRoot = "/nix/var/nix/gcroots/forge-worker-release";
+
   # What the worker needs to do its work and to confine a job: git for the clone and the push,
   # nix for `nix develop`, btrfs-progs for the volume layer, tar and gzip for the seed, shadow
   # and systemd for the per-job user and its transient unit, and Claude Code itself.
@@ -151,6 +157,16 @@ in
     trusted-public-keys = [ "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=" ];
     # A cold machine's first job populates the store; two jobs doing it at once should share.
     max-jobs = "auto";
+
+    # Every project a worker ever builds leaves its closure behind, and a worker that is never
+    # destroyed never stops accumulating them. The daemon collects *during a build* when free
+    # space drops below min-free, up to max-free — rather than on a timer, which fires when
+    # nothing is wrong and not when something is. The cost is that a seldom-used project may
+    # have to fetch its closure again; the alternative is a full disk, which costs every
+    # project at once. See docs/design/worker-tier.md § What a machine that never dies
+    # accumulates.
+    min-free = 5 * 1024 * 1024 * 1024;
+    max-free = 20 * 1024 * 1024 * 1024;
   };
 
   # -- learning what this machine is ------------------------------------------------------------
@@ -292,9 +308,19 @@ in
       User = "root";
       WorkingDirectory = root;
       EnvironmentFile = envFile;
-      ExecStartPre =
-        "${pkgs.coreutils}/bin/mkdir -p ${root}/tmp ${root}/jobs ${root}/worktrees ${root}/volumes";
-      ExecStart = "${workerPackage}/bin/forge_worker start";
+      ExecStartPre = [
+        "${pkgs.coreutils}/bin/mkdir -p ${root}/tmp ${root}/jobs ${root}/worktrees ${root}/volumes"
+        # A machine with nothing overriding it runs the release the image was built with. Only
+        # when absent, so an update put here by hand survives a reboot — which is the whole
+        # point of the indirection.
+        "${pkgs.bash}/bin/sh -c '[ -e ${releaseLink} ] || ln -sfn ${workerPackage} ${releaseLink}'"
+        # An *indirect* GC root, the way a NixOS profile is one: nix follows the symlink, so
+        # whatever the link currently points at is protected from the min-free sweep. Without
+        # this, a release copied here by hand is collectable the moment the disk gets tight.
+        "${pkgs.bash}/bin/sh -c 'mkdir -p $(dirname ${gcRoot}) && ln -sfn ${releaseLink} ${gcRoot}'"
+      ];
+
+      ExecStart = "${releaseLink}/bin/forge_worker start";
       Restart = "on-failure";
       RestartSec = 5;
     };

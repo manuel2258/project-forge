@@ -160,7 +160,7 @@ defmodule ForgeWeb.Operator.Components do
   defp approve_label(pairs), do: "Approve #{length(pairs)} versions"
 
   @doc """
-  The transitions a person may take. Each carries a verb: `Move to planned ›`, never `→ planned`.
+  The transitions a person may take. Each carries a verb: `Move to planning ›`, never `→ planning`.
   """
   attr :ticket, :map, required: true
   attr :transitions, :list, required: true
@@ -197,7 +197,15 @@ defmodule ForgeWeb.Operator.Components do
       <span aria-hidden="true">·</span>
       <.state name={@ticket.state} topology={@topology} />
       <span :if={@artifact} aria-hidden="true">·</span>
-      <span :if={@artifact}>{@artifact} v{@version}</span>
+      <%!-- Every artifact name in the product links to its exact version; see
+            docs/design/ui.md § Addressable artifact versions. --%>
+      <.link
+        :if={@artifact}
+        href={~p"/tickets/#{@project}/#{@ticket.number}/artifacts/#{@artifact}/#{@version}"}
+        class="hover:opacity-100"
+      >
+        {@artifact} v{@version}
+      </.link>
     </div>
     """
   end
@@ -208,10 +216,30 @@ defmodule ForgeWeb.Operator.Components do
 
   def ticket_link(assigns) do
     ~H"""
-    <.link navigate={~p"/tickets/#{@project}/#{@ticket.number}"} class="flex flex-col gap-0.5">
+    <.link
+      navigate={~p"/tickets/#{@project}/#{@ticket.number}"}
+      class="flex min-h-[46px] flex-col justify-center gap-0.5"
+    >
       <span class="font-mono text-[11px] opacity-60">{@project}#{@ticket.number}</span>
       <span class="text-[13px] leading-snug">{@ticket.title}</span>
     </.link>
+    """
+  end
+
+  @doc """
+  One `label / value` row of a facts rail. Nine of these were written out by hand across the
+  ticket, job, review and project pages before it existed.
+  """
+  attr :label, :string, required: true
+  attr :value, :string, default: nil, doc: "the value, when it is plain text"
+  slot :inner_block, doc: "the value, when it is markup"
+
+  def fact(assigns) do
+    ~H"""
+    <div class="flex min-w-0 justify-between gap-3">
+      <dt class="opacity-50">{@label}</dt>
+      <dd class="truncate font-mono">{@value}{render_slot(@inner_block)}</dd>
+    </div>
     """
   end
 end

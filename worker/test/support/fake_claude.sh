@@ -52,6 +52,12 @@ case "${FAKE_SCENARIO:-success}" in
     # A runaway: it spends up to whatever budget it was handed and the harness stops it there.
     emit '{"type":"result","subtype":"error_max_budget_usd","is_error":true,"num_turns":7,"duration_ms":99,"total_cost_usd":30.0,"session_id":"sess-42"}'
     exit 1 ;;
+  unauthenticated)
+    # Verbatim from a machine whose credential never arrived: `is_error` set, exit 1, one turn,
+    # not a token spent — and it still calls itself a success. The cause is only ever in
+    # `result`. See docs/design/claude-code-events.md § Naming the failure.
+    emit '{"type":"result","subtype":"success","is_error":true,"num_turns":1,"duration_ms":103,"total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0},"result":"Not logged in · Please run /login","session_id":"sess-42"}'
+    exit 1 ;;
   crash)
     emit 'this is not json'
     emit '{"type":"weird_thing","x":1}'

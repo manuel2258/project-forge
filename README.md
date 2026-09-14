@@ -63,7 +63,7 @@ mix forge.queue                                   # questions, approvals, stuck,
 mix forge.show game#1                             # state, jobs, artifacts, events
 mix forge.answer game#1 storage-backend --choice sqlite
 mix forge.approve game#1 [--reject --comment "..."]
-mix forge.transition game#1 implemented           # human states and stuck tickets
+mix forge.transition game#1 implementing       # human states and stuck tickets
 mix forge.edit game#1 plan.md plan.md             # a human edit is a new version
 ```
 

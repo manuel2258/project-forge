@@ -59,29 +59,29 @@ defmodule Forge.DemoTest do
     {:ok, ticket} =
       Tickets.admit(project, %{title: "Persist scores", body: "They vanish."}, {:user, user.id})
 
-    # refined — the first job writes a document, and the transition out of it asks for approval.
+    # refining — the first job writes a document, and the transition out of it asks for approval.
     run(worker, "success", "refinement.md")
     assert [%{kind: :approval}] = queue(ticket)
     {:ok, ticket} = Operator.decide(Tickets.get!(ticket.id), user, :approved, "reads right")
-    assert ticket.state == "planned"
+    assert ticket.state == "planning"
 
-    # planned — stops to ask something, which is answered from the queue.
+    # planning — stops to ask something, which is answered from the queue.
     run(worker, "blocking", "plan.md")
     assert [%{kind: :question, question: %{key: "backend"}}] = queue(ticket)
     {:ok, _} = Operator.answer(Tickets.get!(ticket.id), user, "backend", %{choice: "b"})
     run(worker, "success", "plan.md")
-    assert Tickets.get!(ticket.id).state == "implemented"
+    assert Tickets.get!(ticket.id).state == "implementing"
 
-    # implemented — the agent commits in its checkout, which the platform pushes to the branch.
+    # implementing — the agent commits in its checkout, which the platform pushes to the branch.
     run(worker, "success", "implementation.md", commit: {"score.ex", "def persist, do: :ok\n"})
     ticket = Tickets.get!(ticket.id)
-    assert ticket.state == "verified"
+    assert ticket.state == "verifying"
 
     {:ok, head} = Git.resolve(bare, "refs/heads/" <> ticket.branch)
     assert head != base
     assert %{blob_uri: "git:" <> ^head} = Artifacts.latest(ticket.id, "changeset")
 
-    # verified — converges, and the ticket comes to rest in a human state where a person looks at
+    # verifying — converges, and the ticket comes to rest in a human state where a person looks at
     # it. The queue marks it reviewable, because the way out of it pins the changeset.
     run(worker, "success", "report.md")
     ticket = Tickets.get!(ticket.id)

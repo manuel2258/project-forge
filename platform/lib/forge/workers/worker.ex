@@ -17,6 +17,9 @@ defmodule Forge.Workers.Worker do
     field :memory_budget, :integer
     field :last_seen_at, :utc_datetime
     field :idle_since, :utc_datetime
+    # Whether the platform may destroy this machine. False for one the operator provisioned;
+    # see docs/design/worker-tier.md § Managed and unmanaged.
+    field :managed, :boolean, default: true
 
     has_many :jobs, Forge.Jobs.Job
 
@@ -32,7 +35,8 @@ defmodule Forge.Workers.Worker do
       :token_hash,
       :memory_budget,
       :last_seen_at,
-      :idle_since
+      :idle_since,
+      :managed
     ])
     |> validate_required([:provider, :status])
   end

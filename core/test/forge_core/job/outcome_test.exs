@@ -84,11 +84,83 @@ defmodule ForgeCore.Job.OutcomeTest do
                })
              )
 
-    assert {:finished, :error, nil, "harness result: error_during_execution"} =
+    assert {:finished, :error, nil, "harness error: error_during_execution"} =
              Outcome.decide(
                spec(),
                run(%{result: %{subtype: "error_during_execution", is_error: true}})
              )
+  end
+
+  describe "naming the failure" do
+    # The exact result a machine with no usable credential returns: `is_error` set, exit 1, one
+    # turn, no tokens — and `subtype: "success"`. Reading the subtype alone reported a job that
+    # never reached the model as "harness result: success", which is the opposite of what
+    # happened. This is the shape that cost a session's debugging, so it is the shape tested.
+    test "a result that calls itself a success but sets is_error is never reported as success" do
+      unauthenticated = %{
+        subtype: "success",
+        is_error: true,
+        text: "Not logged in · Please run /login"
+      }
+
+      assert {:finished, :error, nil, reason} =
+               Outcome.decide(spec(), run(%{result: unauthenticated, exit_status: 1}))
+
+      assert reason == "harness error: Not logged in · Please run /login"
+      refute reason =~ "success"
+    end
+
+    test "an informative subtype is kept alongside the harness's own words" do
+      assert {:finished, :error, nil, "harness error: error_during_execution: boom"} =
+               Outcome.decide(
+                 spec(),
+                 run(%{
+                   result: %{subtype: "error_during_execution", is_error: true, text: "boom"}
+                 })
+               )
+    end
+
+    test "a reason is one line and bounded, whatever the harness printed" do
+      trace = "fatal: everything broke\n" <> String.duplicate("  at some/frame.ex:1\n", 50)
+
+      assert {:finished, :error, nil, reason} =
+               Outcome.decide(
+                 spec(),
+                 run(%{result: %{subtype: "success", is_error: true, text: trace}})
+               )
+
+      assert reason == "harness error: fatal: everything broke"
+    end
+
+    test "a long first line is truncated rather than allowed to fill the timeline" do
+      assert {:finished, :error, nil, reason} =
+               Outcome.decide(
+                 spec(),
+                 run(%{
+                   result: %{
+                     subtype: "success",
+                     is_error: true,
+                     text: String.duplicate("x", 500)
+                   }
+                 })
+               )
+
+      assert String.length(reason) == String.length("harness error: ") + 200
+    end
+
+    test "a harness with nothing to say falls back to its subtype, then to saying so" do
+      assert {:finished, :error, nil, "harness error: error_during_execution"} =
+               Outcome.decide(
+                 spec(),
+                 run(%{result: %{subtype: "error_during_execution", is_error: true, text: "  "}})
+               )
+
+      assert {:finished, :error, nil, "harness error: no message"} =
+               Outcome.decide(
+                 spec(),
+                 run(%{result: %{subtype: nil, is_error: true, text: nil}})
+               )
+    end
   end
 
   test "outputs must be complete, declared and parseable" do

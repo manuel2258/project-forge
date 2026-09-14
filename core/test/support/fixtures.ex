@@ -4,12 +4,12 @@ defmodule ForgeCore.Fixtures do
   alias ForgeCore.Job.Spec
   alias ForgeCore.Job.Spec.Input
 
-  @doc "A job spec for the planned state of the grammar example."
+  @doc "A job spec for the planning state of the grammar example."
   def spec do
     %Spec{
       job_id: "job-1",
       ticket: %{number: 7, title: "Persist the high score table"},
-      state: "planned",
+      state: "planning",
       attempt: 1,
       prompt: "Write a plan.",
       prompt_path: "agents/plan.md",

@@ -15,6 +15,8 @@ defmodule ForgeWorker.Job.Dir do
   alias ForgeCore.Document
   alias ForgeCore.Job.Spec
 
+  require Logger
+
   @uuid ~r/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
   @doc """
@@ -49,6 +51,49 @@ defmodule ForgeWorker.Job.Dir do
     end)
 
     job_dir
+  end
+
+  @doc """
+  Removes job directories under `root` that nothing has touched for `older_than_ms`, and says
+  how many went.
+
+  Retention rather than lifecycle, and that is the point. A job directory holds the agent's
+  private `HOME`, which is where Claude Code keeps the session a resume needs, so it cannot go
+  the moment a job ends — and a worker cannot always tell whether a job will be resumed. An age
+  is something it can tell. `docs/design/worker-tier.md` § What a machine that never dies
+  accumulates says why this exists at all: until a worker could be permanent, the machine's own
+  destruction collected these.
+
+  The directory currently in use is never old, because `prepare/3` has just written to it.
+  """
+  @spec sweep(Path.t(), non_neg_integer()) :: non_neg_integer()
+  def sweep(root, older_than_ms) do
+    cutoff = System.os_time(:second) - div(older_than_ms, 1000)
+
+    case File.ls(root) do
+      {:ok, entries} -> Enum.count(entries, &remove_if_stale(Path.join(root, &1), cutoff))
+      {:error, _reason} -> 0
+    end
+  end
+
+  defp remove_if_stale(path, cutoff) do
+    with true <- File.dir?(path),
+         {:ok, %File.Stat{mtime: mtime}} <- File.stat(path, time: :posix),
+         true <- mtime < cutoff do
+      # Not the bang form: this runs on the path that reports a job's result, and an unlinkable
+      # leftover would take the link process down with it and re-queue the worker's jobs. A
+      # directory that will not go away is worth a line in the log and nothing more.
+      case File.rm_rf(path) do
+        {:ok, _removed} ->
+          true
+
+        {:error, reason, file} ->
+          Logger.warning("could not sweep #{file}: #{inspect(reason)}")
+          false
+      end
+    else
+      _other -> false
+    end
   end
 
   @doc "The harness's private HOME, so its own state lives with the job and not the operator."

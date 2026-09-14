@@ -35,7 +35,7 @@ defmodule Forge.ForgeFixtures do
         branch: "ticket/1",
         workflow: workflow_map(),
         workflow_commit: String.duplicate("a", 40),
-        state: "refined"
+        state: "refining"
       })
 
     Repo.insert!(Forge.Tickets.Ticket.admit_changeset(%Forge.Tickets.Ticket{}, attrs))

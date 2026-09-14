@@ -16,7 +16,7 @@ defmodule ForgeCore.PromptTest do
 
     assert [preamble, project, manifest] = String.split(prompt, "\n---\n\n")
     assert String.starts_with?(preamble, "# You are one job")
-    assert String.trim(project) == "# Project instructions for state `planned`\n\nWrite a plan."
+    assert String.trim(project) == "# Project instructions for state `planning`\n\nWrite a plan."
     assert String.starts_with?(manifest, "# Job manifest")
 
     assert manifest =~ "- Ticket 7: Persist the high score table"

@@ -20,6 +20,7 @@ defmodule ForgeWeb.ReviewLive do
   alias ForgeCore.Workflow
   alias ForgeWeb.{Format, Markdown}
   alias ForgeWeb.Operator.Actions
+  alias ForgeWeb.Operator.Board
 
   # Beyond this the patch is offered per file instead. A page nobody can read is not a review.
   @max_patch_bytes 512 * 1024
@@ -43,7 +44,7 @@ defmodule ForgeWeb.ReviewLive do
       ticket: ticket,
       workflow: workflow,
       changeset: changeset,
-      approved: changeset && approved?(changeset),
+      approved: changeset && Artifacts.approved?(changeset),
       merged: Merge.merged?(ticket),
       diff: diff(project, ticket, changeset),
       documents: documents(ticket),
@@ -97,15 +98,12 @@ defmodule ForgeWeb.ReviewLive do
       %{
         name: artifact.name,
         version: version,
-        approved: approved?(version),
+        approved: Artifacts.approved?(version),
         html: Markdown.to_html(version.content)
       }
     end
     |> Enum.sort_by(& &1.version.inserted_at, DateTime)
   end
-
-  defp approved?(version),
-    do: version.id |> Artifacts.approvals() |> Enum.any?(&(&1.decision == :approved))
 
   defp approve_pairs(%{pending_transition: pending}, changeset) when is_map(pending) do
     for name <- List.wrap(pending["approve"]),
@@ -144,7 +142,7 @@ defmodule ForgeWeb.ReviewLive do
         <div class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">The change</div>
         <h1 class="text-[23px] font-semibold -tracking-[.03em] sm:text-3xl">{@ticket.title}</h1>
         <div class="flex flex-wrap items-center gap-3">
-          <.state name={@ticket.state} topology={topology(@workflow, @ticket.state)} />
+          <.state name={@ticket.state} topology={Board.topology(@workflow, @ticket.state)} />
           <.status_flag status={@ticket.status} age={Format.ago(@ticket.updated_at, @now)} />
           <span :if={@merged} class="font-mono text-[12.5px] text-success">✓ merged</span>
         </div>
@@ -175,13 +173,27 @@ defmodule ForgeWeb.ReviewLive do
             <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
               What it was built from
             </h2>
-            <details :for={doc <- @documents} class="mt-3" id={"review-doc-#{doc.name}"}>
-              <summary class="flex h-11 cursor-pointer items-center gap-2 font-mono text-[12.5px]">
+            <details
+              :for={doc <- @documents}
+              class="mt-3 min-w-0"
+              id={"review-doc-#{doc.name}"}
+            >
+              <summary class="flex min-h-[46px] cursor-pointer items-center gap-2 font-mono text-[12.5px]">
                 {doc.name}
                 <span class="opacity-60">v{doc.version.version}</span>
                 <span :if={doc.approved} class="text-success">✓ approved</span>
               </summary>
-              <div class="prose prose-sm mt-2 max-w-none">{doc.html}</div>
+              <div class="mt-2 min-w-0 rounded-box bg-base-200 px-4 py-3">
+                <div class="doc">{doc.html}</div>
+                <.link
+                  href={
+                    ~p"/tickets/#{@project.name}/#{@ticket.number}/artifacts/#{doc.name}/#{doc.version.version}"
+                  }
+                  class="mt-3 flex min-h-[46px] items-center font-mono text-[12.5px] text-primary hover:underline"
+                >
+                  source ›
+                </.link>
+              </div>
             </details>
           </section>
 
@@ -206,7 +218,15 @@ defmodule ForgeWeb.ReviewLive do
                   <span :if={entry.answer.text}>{entry.answer.text}</span>
                 </p>
                 <div class="font-mono text-[12.5px] opacity-50">
-                  {entry.question.key} · {entry.artifact} v{entry.version}
+                  {entry.question.key} ·
+                  <.link
+                    href={
+                      ~p"/tickets/#{@project.name}/#{@ticket.number}/artifacts/#{entry.artifact}/#{entry.version}"
+                    }
+                    class="hover:opacity-100"
+                  >
+                    {entry.artifact} v{entry.version}
+                  </.link>
                 </div>
               </li>
             </ol>
@@ -280,29 +300,6 @@ defmodule ForgeWeb.ReviewLive do
       </p>
     </section>
     """
-  end
-
-  attr :label, :string, required: true
-  attr :value, :string, required: true
-
-  defp fact(assigns) do
-    ~H"""
-    <div class="flex min-w-0 justify-between gap-3">
-      <dt class="opacity-50">{@label}</dt>
-      <dd class="truncate font-mono">{@value}</dd>
-    </div>
-    """
-  end
-
-  defp topology(workflow, name) do
-    state = Workflow.state(workflow, name)
-
-    cond do
-      is_nil(state) -> :unknown
-      Workflow.State.job?(state) -> :job
-      Workflow.terminal?(workflow, name) -> :terminal
-      true -> :human
-    end
   end
 
   defp count(:binary, _sign), do: "binary"

@@ -90,6 +90,29 @@ defmodule Forge.Tickets do
     end
   end
 
+  @doc """
+  Whether `project` can take a ticket right now, and why not when it cannot.
+
+  Exactly the checks `admit/3` makes before it writes anything, run on their own so the create
+  form can say what is wrong before the operator types a title — `docs/design/ui.md` § Creating
+  things. A new project always fails this: its repository is empty, so there is no workflow, and
+  the fix is to push one.
+
+  It is a moment, not a guarantee. The repository is a shared surface and `admit/3` checks again.
+
+  The workflow comes back so a caller that has asked this question does not have to read and
+  parse the same file a second time to say anything about it.
+  """
+  @spec admissible(Project.t()) :: {:ok, Workflow.t()} | {:error, term()}
+  def admissible(%Project{} = project) do
+    repo = Projects.repo_path(project)
+
+    with {:ok, base} <- Git.resolve(repo, project.default_branch),
+         {:ok, yaml} <- workflow_yaml(repo, base) do
+      Parser.parse(yaml, prompt_exists: &Git.exists?(repo, base, ".forge/" <> &1))
+    end
+  end
+
   defp workflow_yaml(repo, base) do
     case Git.show(repo, base, @workflow_file) do
       {:ok, yaml} -> {:ok, yaml}

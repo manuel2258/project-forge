@@ -7,6 +7,11 @@ import Config
 # before starting your production server.
 config :forge, ForgeWeb.Endpoint, cache_static_manifest: "priv/static/cache_manifest.json"
 
+# The port, stated here rather than defaulted in runtime.exs. Bandit yields no listener at all
+# for a missing `:http` key — not a default — so a release started without PORT would otherwise
+# boot healthy, log nothing, and listen on nothing. runtime.exs overrides this when PORT is set.
+config :forge, ForgeWeb.Endpoint, http: [port: 4000]
+
 # Force using SSL in production. This also sets the "strict-security-transport" header,
 # known as HSTS. If you have a health check endpoint, you may want to exclude it below.
 # Note `:force_ssl` is required to be set at compile-time.

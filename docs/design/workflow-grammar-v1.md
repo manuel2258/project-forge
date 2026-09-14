@@ -14,10 +14,10 @@ pinned (see below).
 
 ```yaml
 version: 1
-initial: refined
+initial: refining
 
 states:
-  refined:
+  refining:
     prompt: agents/refine.md
     env: refine
     inputs: [ticket]
@@ -25,14 +25,14 @@ states:
     outcomes: [done]                  # default; may be omitted
     budget: { turns: 20, cost: 0.50 }
 
-  planned:
+  planning:
     prompt: agents/plan.md
     env: implement
     inputs: [ticket, refinement.md]
     produces: [plan.md]
     budget: { turns: 40, cost: 2.00 }
 
-  implemented:
+  implementing:
     prompt: agents/implement.md
     env: implement
     inputs: [plan.md]
@@ -40,7 +40,7 @@ states:
     outcomes: [done, plan_invalid]
     budget: { turns: 200, cost: 10.00 }
 
-  verified:
+  verifying:
     prompt: agents/verify.md
     env: release
     inputs: [plan.md, implementation.md, changeset]
@@ -53,12 +53,12 @@ states:
     on_enter: merge                   # terminal: entering it merges the approved changeset
 
 transitions:
-  - { from: refined,      to: planned,      approve: [refinement.md] }
-  - { from: planned,      to: implemented }
-  - { from: implemented,  to: verified }
-  - { from: implemented,  to: planned,      when: plan_invalid }
-  - { from: verified,     to: review_ready }
-  - { from: verified,     to: implemented,  when: tests_failed, max: 3 }
+  - { from: refining,     to: planning,     approve: [refinement.md] }
+  - { from: planning,     to: implementing }
+  - { from: implementing, to: verifying }
+  - { from: implementing, to: planning,     when: plan_invalid }
+  - { from: verifying,    to: review_ready }
+  - { from: verifying,    to: implementing, when: tests_failed, max: 3 }
   - { from: review_ready, to: merged,       approve: [changeset] }
 
 limits:
@@ -72,6 +72,26 @@ limits:
 taken by a human or by the engine. `initial` names the state a ticket enters at admission. A
 state with no outgoing transitions is terminal.
 
+**A job is the state's ongoing activity, not its entry action.** The distinction is in the
+grammar: `on_enter` is the entry-action slot and a job is deliberately not in it. The engine sets
+the ticket's state to the target and creates the job in the same transaction, so the ticket
+*occupies* the state for the job's whole life — minutes, through cancellation, through a park on
+a blocking question, through retries. In statechart terms the job is the state's do-activity and
+the edges out are completion transitions, selected by the outcome.
+
+**Naming: the tense follows the topology.** A job state is named for the activity, as a gerund —
+`planning`, `implementing`. A human or terminal state is named for the condition it rests in —
+`review_ready`, `merged`. Names are the project's to choose and nothing validates this, but
+getting it backwards makes the platform assert something false: a ticket in a job state called
+`implemented` is *not* implemented, and will not be until the job it is running ends. The name is
+read at the moment it is least true — on the board while the work is in flight, and as the
+timeline step heading the job's rows sit under.
+
+The tempting objection is that a ticket also rests in a job state *after* its job, while a
+transition waits for approval, so no tense is true throughout. It does not hold: that phase is
+carried by `pending_transition`, a separate field, and a ticket parked on the edge out is not
+doing the state's work. The state name has one job, and it is to name the activity.
+
 **Entry actions.** `on_enter` names what the platform does when a ticket arrives in a state: one
 action, or a list of them. v1 has exactly one, `merge`, which merges the ticket's approved
 changeset into the project's default branch — see `git-hosting.md` for how. It is declared on the
@@ -79,10 +99,11 @@ state rather than on the edge because entering the state is the invariant: two e
 state would each have to carry it, and a transition a person takes by hand down a third would
 skip it silently. `on_enter` is not allowed on a job state, whose entry already runs a job.
 
-**Inputs** are artifact names. `ticket` is reserved and means the ticket body as a document.
-Every other name must be produced by a state that can run before the consumer (one from
-which the consumer is reachable), so a job never starts with a missing input. At job start the engine resolves each input
-to the latest version of that artifact on the ticket and pins it in the job's manifest.
+**Inputs** are artifact names. `ticket` is reserved and means the ticket body as a document. Every
+other name must be produced by a state that can run before the consumer (one from which the
+consumer is reachable), so a job never starts with a missing input. At job start the engine
+resolves each input to the latest version of that artifact on the ticket and pins it in the job's
+manifest.
 
 **Produces** are the artifacts the job must write. `changeset` is reserved and means the diff
 of the job's branch against the ticket's base. Every other name is a document the job writes
@@ -141,9 +162,9 @@ file do not affect that ticket. Re-pinning is a human action and not in v1.
 - A job state has `prompt` and `budget`. A human state has no `prompt`, `env`, `inputs`,
   `produces`, `outcomes` or `budget`; `on_enter` is the one key it may carry.
 - State and artifact names are single path segments: letters, digits, `.`, `_`, `-`.
-- Every `inputs` entry is `ticket` or produced by a state that can run before the consumer;
-  every `produces` entry other than `changeset` is produced by exactly one state. `ticket` is never produced; `answers.md`
-  is platform-managed and never declared.
+- Every `inputs` entry is `ticket` or produced by a state that can run before the consumer; every
+`produces` entry other than `changeset` is produced by exactly one state. `ticket` is never
+produced; `answers.md` is platform-managed and never declared.
 - A state declaring outcomes other than `done` produces at least one document.
 - Every state is reachable from `initial` through transitions.
 - Every transition names existing states; for one `from`, `when` values are distinct.

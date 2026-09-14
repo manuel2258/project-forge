@@ -11,11 +11,9 @@ defmodule ForgeWeb.BoardLive do
   use ForgeWeb, :live_view
 
   import ForgeWeb.Indicators
-  import ForgeWeb.Operator.Components
 
   alias Forge.{Events, Projects, Tickets}
-  alias ForgeCore.Workflow
-  alias ForgeWeb.Format
+  alias ForgeWeb.Operator.Board
 
   @rows 4
 
@@ -29,74 +27,16 @@ defmodule ForgeWeb.BoardLive do
     boards =
       for project <- Projects.list() do
         tickets = Tickets.list(project)
-        by_state = Enum.group_by(tickets, & &1.state)
-        workflow = workflow(tickets)
-
-        columns =
-          for state <- states(tickets, workflow) do
-            rows = Map.get(by_state, state, [])
-
-            %{
-              name: state,
-              topology: topology(workflow, state),
-              tickets: rows,
-              shown: Enum.take(rows, @rows),
-              more: max(length(rows) - @rows, 0)
-            }
-          end
 
         %{
           project: project,
-          columns: columns,
+          columns: Board.columns(tickets, Board.workflow(tickets), cap: @rows),
           open: Enum.count(tickets, &(&1.status in [:active, :stuck])),
           waiting: Enum.count(tickets, &(&1.status == :stuck))
         }
       end
 
     assign(socket, boards: boards, paused: Forge.Spend.paused?(), now: DateTime.utc_now())
-  end
-
-  defp workflow([]), do: nil
-
-  defp workflow([first | _rest]) do
-    case Tickets.parsed_workflow(first) do
-      {:ok, workflow} -> workflow
-      {:error, _errors} -> nil
-    end
-  end
-
-  # Column order follows the first ticket's pinned workflow, walked from its initial state;
-  # states only other tickets know are appended.
-  defp states([], _workflow), do: []
-  defp states(tickets, nil), do: tickets |> Enum.map(& &1.state) |> Enum.uniq()
-
-  defp states(tickets, workflow) do
-    ordered = walk(workflow, [workflow.initial], [])
-    ordered ++ (tickets |> Enum.map(& &1.state) |> Enum.uniq() |> Enum.reject(&(&1 in ordered)))
-  end
-
-  defp walk(_workflow, [], seen), do: Enum.reverse(seen)
-
-  defp walk(workflow, [state | rest], seen) do
-    if state in seen do
-      walk(workflow, rest, seen)
-    else
-      next = workflow |> Workflow.transitions_from(state) |> Enum.map(& &1.to)
-      walk(workflow, rest ++ next, [state | seen])
-    end
-  end
-
-  defp topology(nil, _name), do: :unknown
-
-  defp topology(workflow, name) do
-    state = Workflow.state(workflow, name)
-
-    cond do
-      is_nil(state) -> :unknown
-      Workflow.State.job?(state) -> :job
-      Workflow.terminal?(workflow, name) -> :terminal
-      true -> :human
-    end
   end
 
   @impl true
@@ -111,59 +51,44 @@ defmodule ForgeWeb.BoardLive do
         <%!-- Neutral, and only here and on the ticket: a pause is resolved by the clock, so it
               never enters the queue. See docs/design/capacity.md. --%>
         <.paused :if={@paused} reason="spend" />
+        <.link
+          navigate={~p"/projects/new"}
+          class="ml-auto flex min-h-[46px] items-center text-sm text-primary hover:underline"
+        >
+          New project ›
+        </.link>
       </div>
       <p :if={@boards == []} class="mt-4 text-sm opacity-60">
-        No projects yet. A project appears here once one is registered.
+        No projects yet.
+        <.link navigate={~p"/projects/new"} class="text-primary hover:underline">
+          Register the first one ›
+        </.link>
       </p>
 
       <section :for={board <- @boards} class="mt-8 flex flex-col gap-3">
         <header class="flex flex-wrap items-baseline gap-x-4 gap-y-1">
-          <h2 class="font-medium">{board.project.name}</h2>
+          <.link navigate={~p"/projects/#{board.project.name}"} class="font-medium hover:underline">
+            {board.project.name}
+          </.link>
           <span class="font-mono text-[12.5px] opacity-60">{board.open} open</span>
           <span :if={board.waiting > 0} class="font-mono text-[12.5px] text-accent">
             {board.waiting} waiting on you
           </span>
+          <.link
+            navigate={~p"/tickets/new?project=#{board.project.name}"}
+            class="ml-auto flex min-h-[46px] items-center text-sm text-primary hover:underline"
+          >
+            New ticket ›
+          </.link>
         </header>
 
         <div class="flex gap-px overflow-x-auto bg-base-300">
-          <div
+          <Board.column
             :for={column <- board.columns}
-            class={[
-              "flex w-60 shrink-0 flex-col gap-3 p-3",
-              if(column.topology == :human, do: "bg-base-200", else: "bg-base-100"),
-              column.topology == :terminal && "opacity-60"
-            ]}
-          >
-            <div class="flex items-baseline justify-between gap-2">
-              <.state name={column.name} topology={column.topology} />
-              <span class="font-mono text-[11px] opacity-50">{length(column.tickets)}</span>
-            </div>
-
-            <p :if={column.tickets == []} class="text-[13px] opacity-40">nothing in this state</p>
-
-            <div
-              :for={ticket <- column.shown}
-              class={[
-                "flex flex-col gap-1 pl-2",
-                if(ticket.status == :stuck,
-                  do: "border-l-2 border-accent",
-                  else: "border-l border-base-300"
-                )
-              ]}
-            >
-              <.ticket_link ticket={ticket} project={board.project.name} />
-              <span
-                :if={ticket.status == :stuck}
-                class="font-mono text-[11px] tracking-[.14em] uppercase text-accent"
-              >
-                stuck {Format.ago(ticket.updated_at, @now)}
-              </span>
-            </div>
-
-            <span :if={column.more > 0} class="font-mono text-[11px] opacity-50">
-              {column.more} more →
-            </span>
-          </div>
+            column={column}
+            project={board.project.name}
+            now={@now}
+          />
         </div>
       </section>
     </Layouts.app>

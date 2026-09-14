@@ -199,7 +199,7 @@ defmodule ForgeWeb.ApiTest do
   } do
     name = project.name
 
-    assert %{"ref" => ref, "state" => "refined", "number" => 1} =
+    assert %{"ref" => ref, "state" => "refining", "number" => 1} =
              conn
              |> post(~p"/api/v1/projects/#{name}/tickets", %{
                title: "Persist scores",
@@ -211,8 +211,8 @@ defmodule ForgeWeb.ApiTest do
     ticket = Tickets.get_by_number!(project, 1)
 
     assert %{
-             "ticket" => %{"state" => "refined"},
-             "jobs" => [%{"state" => "refined", "status" => "pending"}],
+             "ticket" => %{"state" => "refining"},
+             "jobs" => [%{"state" => "refining", "status" => "pending"}],
              "artifacts" => [%{"name" => "ticket"}],
              "open_questions" => []
            } =
@@ -231,7 +231,7 @@ defmodule ForgeWeb.ApiTest do
     assert %{"items" => [%{"kind" => "approval", "ticket" => ^ref}]} =
              conn |> get(~p"/api/v1/queue") |> json_response(200)
 
-    assert %{"state" => "planned", "pending_transition" => nil} =
+    assert %{"state" => "planning", "pending_transition" => nil} =
              conn
              |> post(~p"/api/v1/tickets/#{name}/1/approve", %{comment: "ok"})
              |> json_response(200)
@@ -253,7 +253,7 @@ defmodule ForgeWeb.ApiTest do
 
     assert %{"error" => %{"reason" => "job_live"}} =
              conn
-             |> post(~p"/api/v1/tickets/#{name}/1/transition", %{to: "implemented"})
+             |> post(~p"/api/v1/tickets/#{name}/1/transition", %{to: "implementing"})
              |> json_response(409)
 
     assert %{"error" => %{"reason" => "no_open_question"}} =
@@ -261,13 +261,13 @@ defmodule ForgeWeb.ApiTest do
              |> post(~p"/api/v1/tickets/#{name}/1/answers", %{key: "nope", choice: "a"})
              |> json_response(404)
 
-    assert %{"state" => "planned"} =
+    assert %{"state" => "planning"} =
              conn
              |> post(~p"/api/v1/tickets/#{name}/1/answers", %{key: "backend", choice: "b"})
              |> json_response(200)
 
     assert [%{status: :pending}] =
-             Enum.filter(Jobs.for_ticket(ticket.id), &(&1.state == "planned"))
+             Enum.filter(Jobs.for_ticket(ticket.id), &(&1.state == "planning"))
 
     assert %{"artifact" => "answers.md", "content" => content, "version" => 1} =
              conn |> get(~p"/api/v1/tickets/#{name}/1/artifacts/answers.md") |> json_response(200)
@@ -299,9 +299,9 @@ defmodule ForgeWeb.ApiTest do
     # By state, not by position: `for_ticket/1` orders by `inserted_at`, which is
     # second-granular, so two jobs created in the same second tie and come back in
     # whichever order Postgres chose.
-    job = Enum.find(Jobs.for_ticket(ticket.id), &(&1.state == "refined"))
+    job = Enum.find(Jobs.for_ticket(ticket.id), &(&1.state == "refining"))
 
-    assert %{"job" => %{"spec" => %{"state" => "refined"}}, "events" => job_events} =
+    assert %{"job" => %{"spec" => %{"state" => "refining"}}, "events" => job_events} =
              conn |> get(~p"/api/v1/tickets/#{name}/1/jobs/#{job.id}") |> json_response(200)
 
     assert Enum.any?(job_events, &(&1["type"] == "job.harness.started"))

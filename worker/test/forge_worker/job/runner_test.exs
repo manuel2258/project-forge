@@ -240,6 +240,18 @@ defmodule ForgeWorker.Job.RunnerTest do
     assert "job.harness.unknown" in types
   end
 
+  test "a harness that never authenticated says so in the reason", context do
+    {:ok, result} = context |> run("unauthenticated") |> Runner.await(5_000)
+
+    # The half that was missing: the parser reads `result` off the message, and the runner used
+    # to drop it on the floor when it narrowed the result for `Outcome.decide`. The job then
+    # reported "harness result: success" as the reason it failed.
+    assert result.outcome == :error
+    assert result.reason == "harness error: Not logged in · Please run /login"
+    assert result.harness["subtype"] == "success"
+    assert result.harness["is_error"] == true
+  end
+
   test "undeclared and invalid outputs are errors", context do
     {:ok, result} = context |> run("undeclared") |> Runner.await(5_000)
     assert {:error, "undeclared outputs: notes.md"} = {result.outcome, result.reason}

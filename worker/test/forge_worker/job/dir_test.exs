@@ -85,4 +85,27 @@ defmodule ForgeWorker.Job.DirTest do
     File.write!(Path.join([job_dir, "out", "plan.md"]), "---\noutcome: done\n")
     assert %{documents: %{}, invalid: %{"plan.md" => [_]}} = Dir.collect(job_dir, spec)
   end
+
+  describe "sweep/2" do
+    @tag :tmp_dir
+    test "removes what nothing has touched, and keeps what something has", %{tmp_dir: tmp_dir} do
+      old = Path.join(tmp_dir, "11111111-1111-1111-1111-111111111111")
+      recent = Path.join(tmp_dir, "22222222-2222-2222-2222-222222222222")
+      File.mkdir_p!(Path.join(old, "home"))
+      File.mkdir_p!(Path.join(recent, "home"))
+
+      # A week and a day ago, as the filesystem sees it.
+      long_ago = System.os_time(:second) - 8 * 24 * 60 * 60
+      File.touch!(old, long_ago)
+
+      assert Dir.sweep(tmp_dir, 7 * 24 * 60 * 60 * 1000) == 1
+      refute File.exists?(old)
+      assert File.dir?(recent)
+    end
+
+    @tag :tmp_dir
+    test "a root that is not there yet is not an error", %{tmp_dir: tmp_dir} do
+      assert Dir.sweep(Path.join(tmp_dir, "no-jobs-have-run"), 1000) == 0
+    end
+  end
 end

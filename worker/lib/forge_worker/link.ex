@@ -17,7 +17,7 @@ defmodule ForgeWorker.Link do
 
   alias ForgeCore.Job.Result
   alias ForgeWorker.{Config, Store}
-  alias ForgeWorker.Job.{Runner, Seed, Workspace}
+  alias ForgeWorker.Job.{Dir, Runner, Seed, Workspace}
 
   require Logger
 
@@ -62,8 +62,13 @@ defmodule ForgeWorker.Link do
   @impl Slipstream
   def handle_join(topic, _reply, socket) do
     # The line M4 watches for: joining is a phase of the cold start, and from outside the
-    # machine it is otherwise indistinguishable from the release merely having started.
-    Logger.info("joined #{topic}; ready with #{Config.memory_budget()} bytes")
+    # machine it is otherwise indistinguishable from the release merely having started. The
+    # version is here because a worker can now be updated without its image being rebuilt
+    # (`docs/design/worker-tier.md` § Updating a worker), so "which release is this machine
+    # running" stopped being answerable from the image alone.
+    Logger.info(
+      "joined #{topic} running #{version()}; ready with #{Config.memory_budget()} bytes"
+    )
 
     push(socket, socket.assigns.topic, "ready", %{
       "memory_budget" => Config.memory_budget(),
@@ -257,6 +262,14 @@ defmodule ForgeWorker.Link do
       # snapshot of the seed and the next attempt takes a fresh one; keeping this one would
       # keep every job this machine ever ran.
       Workspace.discard(assignment, root)
+
+      # And the job directories of runs old enough that nobody is going to resume them. A
+      # worker that is never destroyed has nothing else to collect them; the end of a job is
+      # already a moment spent on the filesystem. See docs/design/worker-tier.md § What a
+      # machine that never dies accumulates.
+      swept = Dir.sweep(Path.join(root, "jobs"), job_retention_ms())
+      if swept > 0, do: Logger.info("swept #{swept} job director(ies) past their retention")
+
       terminal
     end
   end
@@ -311,6 +324,11 @@ defmodule ForgeWorker.Link do
 
   defp resume_opts(_assignment), do: []
 
+  # Long enough that a job an operator is still thinking about survives, short enough that a
+  # machine running for months does not keep every run it ever made. A week.
+  defp job_retention_ms,
+    do: Application.get_env(:forge_worker, :job_retention_ms, 7 * 24 * 60 * 60 * 1000)
+
   defp commit_message(assignment) do
     spec = assignment["spec"]
     "#{spec["state"]}: attempt #{spec["attempt"]}\n\nJob #{assignment["job_id"]}.\n"
@@ -349,6 +367,31 @@ defmodule ForgeWorker.Link do
   end
 
   # -- bookkeeping --------------------------------------------------------------------------
+
+  # The application version says almost nothing here — every dev-phase release is 0.1.0 — so the
+  # build is named by the store path's hash, which is what actually changes when `bin/worker-update`
+  # ships one. On anything that is not a Nix store path this degrades to the version alone.
+  defp version do
+    vsn =
+      case :application.get_key(:forge_worker, :vsn) do
+        {:ok, value} -> to_string(value)
+        :undefined -> "unknown"
+      end
+
+    case build() do
+      nil -> vsn
+      hash -> "#{vsn} (#{hash})"
+    end
+  end
+
+  defp build do
+    path = List.to_string(:code.root_dir())
+
+    case Regex.run(~r"^/nix/store/([a-z0-9]{32})-", path) do
+      [_all, hash] -> binary_part(hash, 0, 12)
+      nil -> nil
+    end
+  end
 
   defp join_payload(socket) do
     %{

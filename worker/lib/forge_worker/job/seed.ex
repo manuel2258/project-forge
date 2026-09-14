@@ -103,11 +103,35 @@ defmodule ForgeWorker.Job.Seed do
     case File.rename(staging, path) do
       :ok ->
         Logger.info("fetched seed #{key} in #{System.monotonic_time(:millisecond) - started}ms")
+        superseded(volume, path)
         path
 
       {:error, _reason} ->
         volume.delete(staging)
         if File.dir?(path), do: path
     end
+  end
+
+  # `fetch/1` stages into `<path>.fetching.<rand>` and downloads to `<staging>.tar.gz`, both
+  # siblings of the installed seed. Sweeping them would delete another job's fetch mid-flight —
+  # two jobs assigned at the same moment both miss the seed, the winner installs, and the loser's
+  # tar then fails and it builds cold. Degradation only, but at exactly the busiest moment.
+  defp in_flight?(entry), do: String.contains?(Path.basename(entry), ".fetching.")
+
+  # A worker needs one seed per project: the current one. The others are what the project's
+  # `seed_id` used to be, at a few hundred megabytes each, and on a machine that is never
+  # destroyed they are for ever. A job already holding a snapshot of one is unaffected — a btrfs
+  # snapshot is not a child of its source, and the extents live as long as anything references
+  # them.
+  defp superseded(volume, path) do
+    path
+    |> Path.dirname()
+    |> Path.join("*")
+    |> Path.wildcard()
+    |> Enum.reject(&(&1 == path or in_flight?(&1)))
+    |> Enum.each(fn stale ->
+      Logger.info("removing superseded seed #{Path.basename(stale)}")
+      volume.delete(stale)
+    end)
   end
 end

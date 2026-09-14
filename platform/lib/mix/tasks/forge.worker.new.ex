@@ -1,5 +1,5 @@
 defmodule Mix.Tasks.Forge.Worker.New do
-  @shortdoc "Mints a worker's credentials: mix forge.worker.new [PROJECT]"
+  @shortdoc "Mints a worker's credentials: mix forge.worker.new [PROJECT] [--out FILE]"
 
   @moduledoc """
   Creates a worker row and prints what a machine needs to become that worker, as shell
@@ -11,15 +11,20 @@ defmodule Mix.Tasks.Forge.Worker.New do
   With a PROJECT whose seed has been published, it also prints the seed's key and a token to
   fetch it with, because M4 times that fetch as a phase of the cold start.
 
-  The token is returned once and only its hash is kept, exactly as it is when the provider
+  The worker token is returned once and only its hash is kept, exactly as it is when the provider
   driver asks for one. Nothing is created on any provider: the row exists and the machine does
-  not, which is what a failed `create` leaves and what the platform recovers from — so a row
-  minted here and never used is swept and marked `destroyed` after `worker_timeout_ms`, and
-  costs nothing but a line in the table.
+  not, and it is up to whoever ran this to make one.
 
-  **It counts against `max_workers` until then.** On a platform with pending work that is a
-  machine's worth of capacity spent on a measurement, which is why a measurement run wants a
-  quiet platform anyway.
+  **The agent's credential is printed too.** It is the machine's environment and not any job's,
+  and the driver injects it into every machine it creates; this command stands in for the driver
+  and so it does the same. That means this output is a secret in two ways rather than one — pipe
+  it somewhere with a sane umask, not into a shell history.
+
+  **The row is unmanaged, and so it is permanent.** Neither sweep will destroy it — not the idle
+  period, and not the unreachable timeout, which re-queues its jobs and leaves the row so the
+  machine can rejoin. That is what makes a long-lived worker possible, and it is also the catch:
+  a row minted here and never used sits there counting against `max_workers` until somebody
+  removes it. `mix forge.worker.list` shows them.
   """
 
   use Mix.Task
@@ -28,25 +33,43 @@ defmodule Mix.Tasks.Forge.Worker.New do
 
   @impl true
   def run(args) do
-    case args do
-      [] -> mint(nil)
-      [project] -> mint(project)
-      _other -> CLI.fail("usage: mix forge.worker.new [PROJECT]")
+    {opts, positional, _} = OptionParser.parse(args, strict: [out: :string])
+
+    case positional do
+      [] -> mint(nil, opts)
+      [project] -> mint(project, opts)
+      _other -> CLI.fail("usage: mix forge.worker.new [PROJECT] [--out FILE]")
     end
   end
 
-  defp mint(name) do
+  defp mint(name, opts) do
     CLI.boot()
 
     project = name && (Projects.by_name(name) || CLI.fail("unknown project #{name}"))
 
-    case Workers.create(%{provider: Forge.Provider.name()}) do
+    # Unmanaged, always: this command exists because somebody is provisioning the machine
+    # themselves, and a machine the platform did not create is not the platform's to destroy.
+    # It is skipped by both sweeps; see docs/design/worker-tier.md § Managed and unmanaged.
+    case Workers.create(%{provider: Forge.Provider.name(), managed: false}) do
       {:ok, worker, token} ->
-        Mix.shell().info(assignments(worker, token, project) |> Enum.join("\n"))
+        emit(Enum.join(assignments(worker, token, project), "\n"), Keyword.get(opts, :out))
 
       {:error, changeset} ->
         CLI.fail(inspect(changeset.errors))
     end
+  end
+
+  # 0600 before anything is written to it: the file carries the platform's Anthropic credential,
+  # and a umask that would have made it readable is not the operator's mistake to discover later.
+  defp emit(env, nil), do: Mix.shell().info(env)
+
+  defp emit(env, path) do
+    File.write!(path, env <> "\n")
+    File.chmod!(path, 0o600)
+
+    Mix.shell().info(
+      "wrote #{path} (mode 0600); it holds this machine's token and the agent credential"
+    )
   end
 
   defp assignments(worker, token, project) do
@@ -54,7 +77,14 @@ defmodule Mix.Tasks.Forge.Worker.New do
       ~s(FORGE_WORKER_ID=#{worker.id}),
       ~s(FORGE_WORKER_TOKEN=#{token}),
       ~s(FORGE_PLATFORM_URL=#{platform_url()})
-    ] ++ seed(project)
+    ] ++ harness() ++ seed(project)
+  end
+
+  # The agent's credential and model, which the driver injects into a machine it creates. This
+  # command stands in for the driver, so it injects them too: a machine minted without the
+  # credential joins, reports `ready`, is scheduled, and fails every job with "Not logged in".
+  defp harness do
+    Enum.map(Workers.harness_env(), fn {name, value} -> ~s(#{name}=#{value}) end)
   end
 
   defp seed(%{seed_id: seed_id, name: name}) when is_binary(seed_id) do

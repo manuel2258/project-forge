@@ -220,7 +220,7 @@ default branch never moved. The resolution is a **pre-flight check**, shaped lik
 
 1. Before the transaction, `Forge.Merge.check/1` runs `merge-tree` and nothing else. It has no
    side effect. On a conflict the approval is refused, nothing is recorded, and **the ticket stays
-   in `review_ready`** — where the workflow does have edges out, back to `implemented`. Had the
+   in `review_ready`** — where the workflow does have edges out, back to `implementing`. Had the
    ticket been moved into terminal `merged` first, a stuck item there would offer no transitions
    at all, because a terminal state has none. That dead end is the reason for the pre-flight.
 2. The transaction records the approvals, the transition and the events, as it does today.

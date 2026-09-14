@@ -20,6 +20,7 @@ defmodule ForgeWeb.QueueLive do
   alias ForgeCore.Workflow
   alias ForgeWeb.Format
   alias ForgeWeb.Operator.Actions
+  alias ForgeWeb.Operator.Board
 
   @impl true
   def mount(_params, _session, socket) do
@@ -103,20 +104,11 @@ defmodule ForgeWeb.QueueLive do
 
   defp put_approve(item), do: Map.put(item, :approve, [])
 
+  # A ticket carries its own pinned workflow; one that no longer parses has no topology to read.
   defp topology(ticket) do
     case Tickets.parsed_workflow(ticket) do
-      {:ok, workflow} ->
-        state = Workflow.state(workflow, ticket.state)
-
-        cond do
-          is_nil(state) -> :unknown
-          Workflow.State.job?(state) -> :job
-          Workflow.terminal?(workflow, ticket.state) -> :terminal
-          true -> :human
-        end
-
-      {:error, _errors} ->
-        :unknown
+      {:ok, workflow} -> Board.topology(workflow, ticket.state)
+      {:error, _errors} -> :unknown
     end
   end
 
@@ -170,11 +162,17 @@ defmodule ForgeWeb.QueueLive do
               "item"
             )}
           </span>
+          <.link
+            navigate={~p"/tickets/new"}
+            class="flex min-h-[46px] items-center px-2 text-sm text-primary hover:underline"
+          >
+            New ticket ›
+          </.link>
           <button
             :if={@push_key}
             id="push-toggle"
             type="button"
-            class="flex h-11 items-center gap-2 px-2 text-sm opacity-60 hover:opacity-100"
+            class="flex min-h-[46px] items-center gap-2 px-2 text-sm opacity-60 hover:opacity-100"
             phx-hook="PushSubscribe"
             data-vapid-key={@push_key}
           >
@@ -189,19 +187,28 @@ defmodule ForgeWeb.QueueLive do
           id={item_id(item)}
           class="flex flex-col gap-[11px] border-t border-base-300 py-[18px]"
         >
-          <div class="flex items-start justify-between gap-4">
-            <div class="flex items-center gap-2">
-              <.mark kind={item.kind} />
-              <span class="font-mono text-[11px] tracking-[.14em] uppercase opacity-70">
-                {kind_label(item)}
+          <%!-- The header and the sentence are one target, and they stop where the answer
+                affordance begins. A whole-card link would put an answer row inside a link and
+                make "read this" and "approve this" the same gesture — see docs/design/ui.md
+                § The affordance rule. --%>
+          <.link
+            navigate={~p"/tickets/#{item.project}/#{item.ticket.number}"}
+            class="flex flex-col gap-[11px]"
+          >
+            <div class="flex items-start justify-between gap-4">
+              <div class="flex items-center gap-2">
+                <.mark kind={item.kind} />
+                <span class="font-mono text-[11px] tracking-[.14em] uppercase opacity-70">
+                  {kind_label(item)}
+                </span>
+              </div>
+              <span class="font-mono text-[17px] leading-none opacity-70">
+                {Format.ago(item.since, @now)}
               </span>
             </div>
-            <span class="font-mono text-[17px] leading-none opacity-70">
-              {Format.ago(item.since, @now)}
-            </span>
-          </div>
 
-          <p class="text-xl/[1.3] font-medium -tracking-[.01em]">{sentence(item)}</p>
+            <p class="text-xl/[1.3] font-medium -tracking-[.01em]">{sentence(item)}</p>
+          </.link>
 
           <.questions_affordance :if={item.kind == :questions} item={item} />
 
@@ -217,7 +224,7 @@ defmodule ForgeWeb.QueueLive do
           <.link
             :if={reviewable?(item)}
             navigate={~p"/tickets/#{item.project}/#{item.ticket.number}/review"}
-            class="flex h-11 items-center text-sm text-primary hover:underline"
+            class="flex min-h-[46px] items-center text-sm text-primary hover:underline"
           >
             Read the change first ›
           </.link>

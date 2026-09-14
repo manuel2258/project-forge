@@ -163,6 +163,55 @@ defmodule Forge.WorkersTest do
       assert Workers.get!(worker.id).status == :destroyed
     end
 
+    test "an unmanaged worker is never destroyed by either sweep", %{} do
+      configure(idle_period_ms: 60_000, worker_timeout_ms: 60_000)
+      {:ok, worker, _token} = Workers.create(%{provider: "fake", managed: false})
+      {:ok, worker} = Workers.update(worker, %{status: :idle})
+      long_ago = DateTime.add(DateTime.utc_now(:second), -600)
+
+      {:ok, _worker} =
+        Workers.update(Workers.get!(worker.id), %{idle_since: long_ago, last_seen_at: long_ago})
+
+      # The operator's machine, idle for ten minutes and out of touch for ten minutes. Neither
+      # is the platform's business: it did not make this machine and cannot make another.
+      assert Workers.sweep_idle() == 0
+      assert Workers.sweep_unreachable() == 0
+      assert Workers.get!(worker.id).status == :idle
+      refute_receive {:provider_destroy, _id}
+    end
+
+    test "an unreachable unmanaged worker loses its jobs but keeps its row", %{} do
+      configure(worker_timeout_ms: 60_000)
+
+      {:ok, project} =
+        Forge.Projects.register(%{
+          name: "perm-#{System.unique_integer([:positive])}",
+          repo_path: Forge.GitFixtures.seeded_repo()
+        })
+
+      {:ok, ticket} = Forge.Tickets.admit(project, %{title: "x"}, :system)
+      [job] = Forge.Jobs.for_ticket(ticket.id)
+
+      {:ok, worker, _token} = Workers.create(%{provider: "fake", managed: false})
+      {:ok, worker} = Workers.ready(worker, 8_000_000_000)
+      :ok = Workers.connected(worker.id)
+      {:ok, _job} = Forge.Jobs.assign(job, worker)
+      assert Forge.Jobs.get!(job.id).status == :running
+
+      # The machine goes quiet. Its work has to come back — nothing is watching it — but a
+      # destroyed row could never rejoin, and this machine may well return.
+      Registry.unregister(Forge.Workers.Registry, worker.id)
+      long_ago = DateTime.add(DateTime.utc_now(:second), -600)
+      {:ok, _worker} = Workers.update(Workers.get!(worker.id), %{last_seen_at: long_ago})
+
+      assert Workers.sweep_unreachable() == 1
+      assert Forge.Jobs.get!(job.id).status == :pending
+      refute Workers.get!(worker.id).status == :destroyed
+
+      # And it does not keep saying so once there is nothing left to re-queue.
+      assert Workers.sweep_unreachable() == 0
+    end
+
     test "a connected worker is never swept, however quiet it has been" do
       configure(worker_timeout_ms: 60_000)
       {:ok, worker, _token} = Workers.create(%{provider: "fake"})

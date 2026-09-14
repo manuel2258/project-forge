@@ -32,6 +32,41 @@ is what a failed `create` leaves.
 A worker joins the channel when the release boots, which is minutes before its Nix store and seed
 are usable. `docs/design/worker-channel.md` § Messages says why `ready` is a separate message.
 
+### Managed and unmanaged
+
+A `managed` worker is one the platform created through the driver and may therefore destroy. An
+**unmanaged** worker is a machine the operator provisioned and told the platform about with
+`mix forge.worker.new` — long-lived, and not the platform's to power off. The column exists
+because the two differ in exactly one way, and it is the only way that matters: *who may end
+this machine's life.*
+
+Everything else is the same. An unmanaged worker joins the same channel with the same kind of
+token, is scheduled by the same memory gate, runs the same slices, and counts against
+`max_workers` like any other — that setting is how many machines exist, not how many the
+platform made. Setting `max_workers` to 0 and provisioning by hand is the pure permanent model;
+leaving room above the permanent ones is a permanent worker with burst capacity.
+
+**"Everything else is the same" includes the harness credential**, and that is the part it is
+easy to get wrong. `mix forge.worker.new` prints the whole environment a machine needs, the
+credential included, because it stands in for the driver and the driver injects it — see below.
+A machine minted without it joins, reports `ready`, is scheduled, and then fails every job it is
+given with *Not logged in*: a worker that looks healthy on every surface the operator has and
+cannot do the one thing it exists for. Anything that mints a machine's environment mints all of
+it.
+
+**Why not infer it from `provider_id`.** A machine the platform did not create has no
+`provider_id`, and `destroy/1` already reads that to skip the driver — so it looks like the
+signal is there for free. It is not: a `create` that fails leaves a row with no `provider_id`
+either, and treating that as permanent would leave it holding a `max_workers` slot for ever.
+That is precisely the deadlock § What the operator's machine settled records finding the hard
+way. A failed create and a machine somebody else owns are not the same thing and must not be
+spelled the same.
+
+**An unreachable unmanaged worker loses its jobs but keeps its row.** The jobs are re-queued —
+they are re-runnable by construction and nothing is observing them — but the row stays, because
+the machine may well come back and a `destroyed` row can never rejoin. A managed one is
+destroyed as before: it is cattle, and the platform can make another.
+
 ## The provider driver
 
 `Forge.Provider`, one implementation in the PoC:
@@ -168,13 +203,15 @@ registers it once at first boot, as the installer images do. Without that a fres
 **The harness's environment is the machine's, not the job's.** Claude Code needs an
 `ANTHROPIC_API_KEY` or a `CLAUDE_CODE_OAUTH_TOKEN`, and neither is scoped to one job nor short
 lived, so neither belongs in an assignment: `docs/design/worker-channel.md` reserves per-
-assignment tokens for credentials that are both. It is injected at creation by the same route
-that carries the worker token — § How a machine learns what it is — and the release reads it from
-its environment exactly as the platform did while it ran jobs itself. The blast radius is one machine, which is already
-the blast radius of the worker token sitting beside it. The model rides along for the same
-reason — it is an operator setting, not a per-job one, until the workflow grammar has something
-to say about it. The executable does not: the platform's is a path on the platform's host, and
-the image has its own.
+assignment tokens for credentials that are both. It is injected at creation by the same route that
+carries the worker token — § How a machine learns what it is — and the release reads it from its
+environment exactly as the platform did while it ran jobs itself. That is one route and not two:
+the driver writes it into the config the machine reads at boot, and `mix forge.worker.new` prints
+it beside the worker token for a machine the operator is provisioning by hand. The blast radius is
+one machine, which is already the blast radius of the worker token sitting beside it. The model
+rides along for the same reason — it is an operator setting, not a per-job one, until the workflow
+grammar has something to say about it. The executable does not: the platform's is a path on the
+platform's host, and the image has its own.
 
 ## Scheduling
 
@@ -347,6 +384,91 @@ is a property `docs/design/git-hosting.md` states more carefully.
 The lesson is worth more than the code was. Two milestones built from one base will both build
 whatever sits between them, and the one that is *only* enough to unblock the other is the one to
 throw away — not the one that was designed.
+
+## Updating a worker
+
+The image is an appliance and a worker is replaced rather than updated — that is the rule, and
+it stays the rule for the base: NixOS, Claude Code, the Nix settings, the unit that fetches the
+identity. Those change rarely and no-drift is worth having.
+
+**It is the wrong mechanism for the release, and the numbers say so.** The image is 1.8 GiB; the
+worker release's own store path, which is all that changes on a code edit, is 24 MiB. On a
+provider it is worse than a ratio: Hetzner Cloud has no image upload, so a new image means
+booting a rescue server, writing the disk, snapshotting it and throwing the server away — minutes
+of pipeline to deliver a few megabytes of BEAM code, for the component that changes most often
+while the tier is being built.
+
+So the release is separable from the image. `ExecStart` runs `/var/lib/forge/release`, a symlink
+rather than a store path, and an *indirect* GC root points at it so a release put there by hand
+is not collected by the `min-free` sweep. A machine with nothing overriding it points the symlink
+at the release the image was built with, so the default is exactly what it was.
+
+**`bin/worker-update` is the dev-phase tool and only that.** It builds the release, `nix copy`s
+it over the ssh door, repoints the symlink and restarts the unit — seconds, and the machine keeps
+its warm Nix store and its seeds, which a replaced machine does not. It needs the ssh door
+(§ The provider driver), which is shut by default and forwards from loopback, so it works where
+the operator can already reach the machine and nowhere else. **It does not work on a provider**,
+by construction: a worker there has no inbound port, which is the property the whole channel
+direction exists to give.
+
+What that needs instead is the same operation pulled rather than pushed, and every piece is
+already here: `drain` stops the worker taking work, the store serves it blobs under scoped
+short-lived tokens, and the channel carries platform-to-worker messages. An `update` message
+carrying a store key and a token, a fetch, a symlink swap and a restart uses no new transport and
+no new kind of credential. It is not built, because nothing yet runs a worker the operator cannot
+ssh to.
+
+**A machine says which build it is running when it joins.** Once the release is separable from
+the image, "what is this worker running" stops being answerable from the image, and the
+application version does not answer it either — every release in the PoC is `0.1.0`. What
+changes on a code edit is the store path, so the join line names it:
+
+```
+joined worker:8eaaacc1-… running 0.1.0 (8rh57whmgk6m); ready with 6176456704 bytes
+```
+
+which is the first twelve characters of what `nix build .#forge-worker` prints, so the operator
+can compare the two without logging in. It is a log line and not a channel field on purpose —
+see the second point below for why it will have to become one.
+
+Two things it will need that do not exist, and both get harder the longer they wait:
+
+- **Rollback.** A release that will not start leaves a machine that will not work, and the
+  symlink's previous target is the whole of the fix.
+- **A version on the wire.** Nothing in `docs/design/worker-channel.md` carries one, which is
+  harmless only because platform and worker are built from one flake and move together. A worker
+  that can be updated on its own — or simply kept for months — breaks that, and an unknown
+  message is currently a log line rather than a refusal. The build identifier above is in the
+  worker's log, where the platform cannot see it; the platform is the side that has to decide
+  whether to send a machine work.
+
+## What a machine that never dies accumulates
+
+Three things grew without bound and nobody noticed, because until a worker could be permanent
+the machine's own destruction collected them. Each now has a rule, and the rules are retention
+rather than lifecycle on purpose: a worker cannot always tell whether a job will be resumed,
+and a sweep that only has to know an age is a sweep that cannot get that wrong.
+
+- **Job directories.** `<root>/jobs/<job_id>` holds the prompt, stderr, the transcripts and the
+  agent's private `HOME` — which is where Claude Code keeps the session a resume needs, so it
+  cannot simply go when the job ends. Directories untouched for `job_retention_ms` are removed
+  when a job finishes, which is a moment the worker is already doing filesystem work. A crash
+  leaves nothing behind that the next job's sweep will not collect.
+- **Seeds.** A worker keeps one seed per project and fetches a new one when the project's
+  `seed_id` moves; the old one used to stay for ever at a few hundred megabytes a time. Fetching
+  a seed now removes the others under `seed/<project>/`. A running job holding a snapshot of the
+  old one is unaffected — a btrfs snapshot is not a child of its source, and the extents live as
+  long as anything references them.
+- **The Nix store.** Every project's `nix develop` closure stays for ever. The image sets
+  `min-free`/`max-free`, so the daemon collects during a build when the disk gets tight, rather
+  than on a timer that fires when nothing is wrong. The cost is that a seldom-used project's
+  closure may have to be fetched again; the alternative is a full disk, which costs every
+  project at once.
+
+**None of this is per-job hygiene, and it should not become it.** A job's *worktree* is deleted
+the moment the job ends, because that is a snapshot whose whole cost is what the job wrote into
+it. These three are shared or resumable, and deleting them eagerly would either break a resume
+or throw away the warm start the seed exists to provide.
 
 ## Hibernation and resume
 

@@ -94,7 +94,7 @@ Non-negotiable — a design that ignores these cannot be built.
 four-colour mapping. Separating them is the single most valuable thing you can do.
 
 **Axis 1 — workflow state.** Where the ticket is in its lifecycle. Project-defined, not
-fixed; e.g. `refined → planned → implemented → verified → review_ready → merged`. Two kinds:
+fixed; e.g. `refining → planning → implementing → verifying → review_ready → merged`. Two kinds:
 *job states* run an agent job on entry; *human states* hold the ticket for a person
 (`review_ready`), and a state with no outgoing transitions is terminal (`merged`). Transitions
 may require **approval** of named artifacts, may be conditional on a job's outcome, and may

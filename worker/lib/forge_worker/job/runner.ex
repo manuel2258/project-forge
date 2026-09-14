@@ -320,7 +320,15 @@ defmodule ForgeWorker.Job.Runner do
       Map.merge(collected, %{
         killed: state.killed,
         exit_status: state.exit_status,
-        result: finished && %{subtype: finished.subtype, is_error: finished.is_error}
+        # `:result` is the harness's own closing message, and it is the only field that ever
+        # names why a run failed — it used to be parsed and then dropped right here.
+        result:
+          finished &&
+            %{
+              subtype: finished.subtype,
+              is_error: finished.is_error,
+              text: Map.get(finished, :result)
+            }
       })
 
     base = %Result{

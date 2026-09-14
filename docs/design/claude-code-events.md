@@ -124,6 +124,26 @@ Decided in this order, first match wins:
 7. Front matter `outcome` is a declared outcome of the state: `converged`, with
    `declared_outcome` set. Anything else: `error`.
 
+### Naming the failure
+
+The outcome says a job failed; the reason stored beside it is the only thing that says why, and
+it is what the timeline and the queue have to work with. **The reason comes from the result
+message's `result` field — the harness's own last words — in preference to its `subtype`.**
+
+`subtype` is not a diagnosis and sometimes not even a fact. A machine with no usable credential
+returns `subtype: "success"` with `is_error: true`, exit status 1, one turn and zero tokens, and
+`result: "Not logged in · Please run /login"`. Reading the subtype alone produced the reason
+*"harness result: success"* on a job that failed without reaching the model — the operator was
+told the opposite of what happened, while the sentence naming the cause sat unused in the same
+message. So: prefer the text, keep the subtype alongside it when the subtype is informative, and
+never print `success` as the reason a job failed.
+
+This also retires a guess recorded earlier in this note. Exit status 2 was described as the cost
+ceiling "or an authentication failure before the first turn, which yields no result message and
+is caught earlier". It does not: an authentication failure exits **1** and does produce a result
+message, so it was never caught earlier. Rule 3 is unchanged — exit 2 with an error result is
+still the cost ceiling — but nothing may assume an unauthenticated run is silent.
+
 ## Resume
 
 `system/init` supplies `session_id`, stored as `job.harness_session_id`. After hibernation,

@@ -5,7 +5,7 @@ defmodule ForgeWeb.JobLive do
 
   import ForgeWeb.Indicators
 
-  alias Forge.{Events, Jobs, Tickets}
+  alias Forge.{Artifacts, Events, Jobs, Tickets}
   alias ForgeWeb.{Format, Indicators}
 
   # Newest first, 50 at a time, and never tailed: there is deliberately no live transcript in
@@ -29,11 +29,14 @@ defmodule ForgeWeb.JobLive do
   defp load(%{assigns: %{job_id: job_id, ticket: ticket, project: project}} = socket) do
     job = Jobs.get!(job_id)
     spec = Jobs.spec(job)
+    written = Artifacts.written_by(job.id)
 
     assign(socket,
       page_title: "#{project.name}##{ticket.number} · #{job.state} ##{job.attempt}",
       job: job,
       spec: spec,
+      written: written,
+      written_names: MapSet.new(written, fn {artifact, _v} -> artifact.name end),
       events: Events.for_job(job.id)
     )
   end
@@ -123,25 +126,32 @@ defmodule ForgeWeb.JobLive do
               {stream_heading(@job, @events)}
             </h2>
             <ol class="mt-3 flex flex-col" id="job-events">
+              <%!-- Two rows narrow, one row wide. The type column is 196px because the longest
+                    type in the product, `artifact.version_written`, is 24 mono characters and
+                    a column narrower than its content does not clip — it overlaps the next one,
+                    which is what a vertical screen showed. --%>
               <li
                 :for={event <- Enum.take(Enum.reverse(@events), @shown)}
-                class="grid grid-cols-[56px_132px_1fr] gap-2 border-b border-base-300/60 py-1.5 font-mono text-[12.5px]"
+                class="grid grid-cols-[64px_1fr] gap-x-2 border-b border-base-300/60 py-1.5 font-mono text-[12.5px] sm:grid-cols-[64px_196px_1fr]"
               >
                 <span class="opacity-50">{Calendar.strftime(event.inserted_at, "%H:%M:%S")}</span>
                 <span class={[
+                  "min-w-0 truncate",
                   String.ends_with?(event.type, "tool_use") && "text-info",
                   String.ends_with?(event.type, "error") && "text-error"
                 ]}>
                   {String.replace_prefix(event.type, "job.harness.", "")}
                 </span>
-                <span class="min-w-0 truncate opacity-70">{Events.summary(event)}</span>
+                <span class="col-start-2 min-w-0 truncate opacity-70 sm:col-start-3">
+                  {Events.summary(event)}
+                </span>
               </li>
             </ol>
             <button
               :if={length(@events) > @shown}
               type="button"
               phx-click="more"
-              class="mt-3 h-11 rounded-field border border-base-300 px-4 text-sm hover:border-base-content/30"
+              class="mt-3 min-h-[46px] rounded-field border border-base-300 px-4 text-sm hover:border-base-content/30"
             >
               Load 50 more
             </button>
@@ -196,9 +206,38 @@ defmodule ForgeWeb.JobLive do
             </li>
           </ul>
 
-          <h3 class="mt-6 font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Produces</h3>
+          <%!-- What it declared, and what it actually wrote. A job that failed for a missing
+                output appears in the first list and not the second, and that difference is the
+                whole story of the run. Every name links to its exact bytes; see
+                docs/design/ui.md § Addressable artifact versions. --%>
+          <h3 class="mt-6 font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Declares</h3>
           <ul class="mt-3 flex flex-col gap-1 font-mono text-[12.5px]">
-            <li :for={name <- @spec.produces}>{name}</li>
+            <li
+              :for={name <- @spec.produces}
+              class={not MapSet.member?(@written_names, name) && "opacity-50"}
+            >
+              {name}<span :if={not MapSet.member?(@written_names, name)} class="ml-2 opacity-70">not written</span>
+            </li>
+            <li :if={@spec.produces == []} class="opacity-50">nothing</li>
+          </ul>
+
+          <h3 class="mt-6 font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Wrote</h3>
+          <ul class="mt-3 flex flex-col">
+            <li :for={{artifact, version} <- @written}>
+              <.link
+                href={
+                  ~p"/tickets/#{@project.name}/#{@ticket.number}/artifacts/#{artifact.name}/#{version.version}"
+                }
+                class="flex min-h-[46px] items-center gap-2 border-b border-base-300/60 font-mono text-[12.5px] hover:bg-base-200"
+              >
+                <span class="min-w-0 flex-1 truncate">{artifact.name}</span>
+                <span class="shrink-0 opacity-60">v{version.version}</span>
+                <span class="shrink-0 opacity-40" aria-hidden="true">›</span>
+              </.link>
+            </li>
+            <li :if={@written == []} class="font-mono text-[12.5px] opacity-50">
+              this run wrote nothing
+            </li>
           </ul>
 
           <details class="mt-6">

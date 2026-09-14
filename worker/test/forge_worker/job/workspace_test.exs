@@ -31,7 +31,7 @@ defmodule ForgeWorker.Job.WorkspaceTest do
   defp assignment(origin, opts \\ []) do
     %{
       "job_id" => Keyword.get(opts, :job_id, uuid()),
-      "spec" => %{"state" => "planned", "attempt" => 1},
+      "spec" => %{"state" => "planning", "attempt" => 1},
       "resume_session" => Keyword.get(opts, :resume_session),
       "git" => %{"url" => origin, "branch" => "ticket/1", "base" => nil}
     }
@@ -79,7 +79,7 @@ defmodule ForgeWorker.Job.WorkspaceTest do
     {:ok, dir} = Workspace.prepare(job, root)
     File.write!(Path.join(dir, "NOTES.md"), "work happened\n")
 
-    assert {:ok, head} = Workspace.commit_and_push(job, dir, "planned: attempt 1")
+    assert {:ok, head} = Workspace.commit_and_push(job, dir, "planning: attempt 1")
 
     assert git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"]) |> String.trim() == head
     assert git!(nil, ["-C", origin, "show", head <> ":NOTES.md"]) == "work happened\n"
@@ -91,7 +91,7 @@ defmodule ForgeWorker.Job.WorkspaceTest do
     File.write!(Path.join(dir, "a.md"), "a")
     File.write!(Path.join(dir, "b.md"), "b")
 
-    {:ok, _head} = Workspace.commit_and_push(job, dir, "planned: attempt 1")
+    {:ok, _head} = Workspace.commit_and_push(job, dir, "planning: attempt 1")
 
     commits = git!(dir, ["rev-list", "--count", "HEAD"]) |> String.trim() |> String.to_integer()
     assert commits == 2
@@ -115,7 +115,7 @@ defmodule ForgeWorker.Job.WorkspaceTest do
     git!(dir, ["commit", "--quiet", "-m", "and another"])
     File.write!(Path.join(dir, "three.md"), "third\n")
 
-    assert {:ok, head} = Workspace.commit_and_push(job, dir, "planned: attempt 1")
+    assert {:ok, head} = Workspace.commit_and_push(job, dir, "planning: attempt 1")
 
     assert git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"]) |> String.trim() == head
     assert git!(nil, ["-C", origin, "show", head <> ":one.md"]) == "first\n"
@@ -123,7 +123,7 @@ defmodule ForgeWorker.Job.WorkspaceTest do
 
     # And still one commit per run: the agent's keystrokes are not the branch's history.
     assert git!(dir, ["rev-list", "--count", "HEAD"]) |> String.trim() == "2"
-    assert git!(dir, ["log", "-1", "--format=%s"]) |> String.trim() == "planned: attempt 1"
+    assert git!(dir, ["log", "-1", "--format=%s"]) |> String.trim() == "planning: attempt 1"
   end
 
   test "a run that changed nothing pushes nothing", %{origin: origin, root: root} do
@@ -131,7 +131,7 @@ defmodule ForgeWorker.Job.WorkspaceTest do
     {:ok, dir} = Workspace.prepare(job, root)
     before = git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"])
 
-    assert {:ok, head} = Workspace.commit_and_push(job, dir, "planned: attempt 1")
+    assert {:ok, head} = Workspace.commit_and_push(job, dir, "planning: attempt 1")
 
     assert git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"]) == before
     assert String.trim(before) == head
@@ -222,6 +222,21 @@ defmodule ForgeWorker.Job.WorkspaceTest do
       assert ForgeWorker.Job.Seed.present(root) == []
       {:ok, _dir} = Workspace.prepare(seeded(origin), root)
       assert ForgeWorker.Job.Seed.present(root) == ["seed/demo/sha256-abc"]
+    end
+
+    test "a new seed supersedes the old one rather than joining it", %{
+      origin: origin,
+      root: root
+    } do
+      {:ok, _dir} = Workspace.prepare(seeded(origin), root)
+      assert ForgeWorker.Job.Seed.present(root) == ["seed/demo/sha256-abc"]
+
+      # The project's seed_id moved. A worker needs the current seed and no other; on a machine
+      # that is never destroyed, keeping them all is a few hundred megabytes a time, for ever.
+      newer = put_in(seeded(origin, job_id: uuid()), ["seed", "key"], "seed/demo/sha256-def")
+      {:ok, _dir} = Workspace.prepare(newer, root)
+
+      assert ForgeWorker.Job.Seed.present(root) == ["seed/demo/sha256-def"]
     end
 
     test "the worktree is thrown away when the job ends", %{origin: origin, root: root} do

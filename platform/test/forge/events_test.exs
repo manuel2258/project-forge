@@ -13,7 +13,7 @@ defmodule Forge.EventsTest do
     {:ok, first} =
       Events.append("ticket.admitted", :system, %{
         ticket_id: ticket.id,
-        payload: %{"state" => "refined"}
+        payload: %{"state" => "refining"}
       })
 
     {:ok, second} =
@@ -35,7 +35,7 @@ defmodule Forge.EventsTest do
         :job,
         Forge.Jobs.Job.create_changeset(%Forge.Jobs.Job{}, %{
           ticket_id: ticket.id,
-          state: "refined",
+          state: "refining",
           attempt: 1,
           spec: %{}
         })

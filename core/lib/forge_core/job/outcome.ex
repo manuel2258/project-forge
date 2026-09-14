@@ -14,7 +14,8 @@ defmodule ForgeCore.Job.Outcome do
 
     * `killed` - whether the platform killed the process, and why.
     * `exit_status` - the process exit status, nil if it never started.
-    * `result` - the harness's final result message, normalised to `subtype` and `is_error`.
+    * `result` - the harness's final result message, normalised to `subtype`, `is_error` and
+      `text` (its own closing words, which are the only field that ever names a cause).
     * `documents` - declared documents that parsed, by name.
     * `invalid` - declared documents that did not parse, by name.
     * `missing` - declared documents not written.
@@ -23,7 +24,7 @@ defmodule ForgeCore.Job.Outcome do
   @type run :: %{
           killed: nil | :operator | :wall_clock,
           exit_status: integer() | nil,
-          result: %{subtype: String.t() | nil, is_error: boolean()} | nil,
+          result: %{subtype: String.t() | nil, is_error: boolean(), text: String.t() | nil} | nil,
           documents: %{String.t() => Document.t()},
           invalid: %{String.t() => term()},
           missing: [String.t()],
@@ -75,7 +76,7 @@ defmodule ForgeCore.Job.Outcome do
         {:budget_exhausted, nil, "harness stopped: #{result.subtype}"}
 
       result.subtype != "success" or result.is_error ->
-        {:error, nil, "harness result: #{result.subtype || "unknown"}"}
+        {:error, nil, "harness error: #{detail(result)}"}
 
       run.missing != [] ->
         {:error, nil, "missing outputs: #{Enum.join(run.missing, ", ")}"}
@@ -91,8 +92,41 @@ defmodule ForgeCore.Job.Outcome do
     end
   end
 
-  # Exit status 2 is documented as the cost ceiling (or an authentication failure before the
-  # first turn, which yields no result message and is caught earlier).
+  # What to call the failure, per `docs/design/claude-code-events.md` § Naming the failure. The
+  # harness's own closing words come first: `subtype` is not a diagnosis, and on a machine whose
+  # credential is missing it is the outright lie `"success"` on a result that sets `is_error`.
+  # That case used to be reported as "harness result: success" — the opposite of what happened,
+  # while the sentence naming the cause sat unread in the same message.
+  defp detail(result) do
+    case {text(result), result.subtype} do
+      {nil, nil} -> "no message"
+      {nil, subtype} -> subtype
+      {text, subtype} when subtype in [nil, "success"] -> text
+      {text, subtype} -> "#{subtype}: #{text}"
+    end
+  end
+
+  # One line of it. The reason sits in a timeline row and a queue line, and a harness that ends
+  # by printing a stack trace must not push everything else off the screen.
+  defp text(result) do
+    case result |> Map.get(:text) |> to_line() do
+      "" -> nil
+      line -> line
+    end
+  end
+
+  defp to_line(text) when is_binary(text) do
+    text
+    |> String.split("\n", parts: 2)
+    |> hd()
+    |> String.trim()
+    |> String.slice(0, 200)
+  end
+
+  defp to_line(_other), do: ""
+
+  # Exit status 2 is documented as the cost ceiling. It does not also cover an authentication
+  # failure: that exits 1 and does produce a result message, so it never reaches here.
   defp budget_stop?(%{subtype: subtype, is_error: is_error}, exit_status) do
     subtype == "error_max_turns" or String.starts_with?(subtype || "", "error_max_budget") or
       (exit_status == 2 and is_error)

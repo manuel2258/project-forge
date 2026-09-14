@@ -43,6 +43,24 @@ defmodule Forge.Events do
     Repo.all(from e in Event, where: e.job_id == ^job_id, order_by: e.seq)
   end
 
+  @doc """
+  The newest events of a project, across its tickets, newest first.
+
+  Events carry a `ticket_id` and not a `project_id`, so this joins. `project.registered` has
+  neither and so is not here — the project page is showing what has happened since.
+  """
+  @spec for_project(String.t(), pos_integer()) :: [Event.t()]
+  def for_project(project_id, limit) do
+    Repo.all(
+      from e in Event,
+        join: t in Forge.Tickets.Ticket,
+        on: t.id == e.ticket_id,
+        where: t.project_id == ^project_id,
+        order_by: [desc: e.seq],
+        limit: ^limit
+    )
+  end
+
   @topic "tickets"
 
   @doc "Tells subscribers that `ticket_id` changed. Pages reload on it."

@@ -13,7 +13,7 @@ defmodule ForgeWorker.Fixtures do
       %Spec{
         job_id: uuid(),
         ticket: %{number: 7, title: "Persist the high score table"},
-        state: "planned",
+        state: "planning",
         attempt: 1,
         prompt: "Write a plan for the ticket.",
         prompt_path: "agents/plan.md",

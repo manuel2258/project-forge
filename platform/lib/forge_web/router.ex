@@ -32,10 +32,19 @@ defmodule ForgeWeb.Router do
     live_session :operator, on_mount: [{ForgeWeb.UserAuth, :require_authenticated}] do
       live "/", QueueLive
       live "/board", BoardLive
+      live "/workers", WorkersLive
+      # Before /tickets/:project/:number, or "new" is read as a project name.
+      live "/projects/new", ProjectNewLive
+      live "/projects/:name", ProjectLive
+      live "/tickets/new", TicketNewLive
       live "/tickets/:project/:number", TicketLive
       live "/tickets/:project/:number/review", ReviewLive
       live "/tickets/:project/:number/jobs/:job_id", JobLive
     end
+
+    # Not a LiveView: this serves bytes, and every artifact name in the product links to it.
+    # See docs/design/ui.md § Addressable artifact versions.
+    get "/tickets/:project/:number/artifacts/:name/:version", ArtifactController, :show
   end
 
   scope "/api/v1", ForgeWeb.Api do

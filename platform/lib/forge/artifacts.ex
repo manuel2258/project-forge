@@ -8,7 +8,7 @@ defmodule Forge.Artifacts do
 
   alias Ecto.Multi
   alias Forge.Artifacts.{Answer, Approval, Artifact, Question, Version}
-  alias Forge.{Events, Repo}
+  alias Forge.{Events, Repo, Storage}
   alias ForgeCore.Document
 
   @answers ForgeCore.Workflow.answers_artifact()
@@ -165,9 +165,115 @@ defmodule Forge.Artifacts do
   @spec get_version!(String.t()) :: Version.t()
   def get_version!(id), do: Repo.get!(Version, id)
 
+  @doc """
+  The bytes of one version, wherever they live. A document carries its own text; a blob is in
+  the store; a changeset is a commit and is not a file at all — `docs/design/ui.md`
+  § Addressable artifact versions says the changeset links to the review page instead.
+
+  `file://` is the milestone 1 form, written before the store existed and still present on old
+  rows because `artifact_versions` is append-only. It is served, but only from inside the
+  platform's own data directory: the path comes from a database column, and a column that can
+  name any absolute path on the host is a file-read primitive waiting for its first bug.
+  """
+  @spec content(Version.t()) ::
+          {:ok, binary()} | {:error, :not_a_file | :not_found | :outside_data_dir}
+  def content(%Version{content: text}) when is_binary(text), do: {:ok, text}
+
+  def content(%Version{blob_uri: "store:" <> _rest = uri}) do
+    case Storage.key_from_uri(uri) do
+      {:ok, key} -> Storage.get(key)
+      :error -> {:error, :not_found}
+    end
+  end
+
+  def content(%Version{blob_uri: "file://" <> path}), do: read_inside_data_dir(path)
+  def content(%Version{blob_uri: "git:" <> _sha}), do: {:error, :not_a_file}
+  def content(%Version{}), do: {:error, :not_found}
+
+  defp read_inside_data_dir(path) do
+    root = Path.expand(Forge.Jobs.config(:data_dir, "tmp/forge"))
+    full = Path.expand(path)
+
+    cond do
+      not inside?(full, root) -> {:error, :outside_data_dir}
+      linked?(full, root) -> {:error, :outside_data_dir}
+      true -> read(full)
+    end
+  end
+
+  defp inside?(full, root), do: full == root or String.starts_with?(full, root <> "/")
+
+  # `Path.expand/1` is lexical — it collapses `..` and knows nothing about symlinks, while
+  # `File.read/1` follows them. Without this, a link *inside* the data directory pointing
+  # anywhere on the host passes the prefix check and its target is served: the confinement above
+  # would have been decorative. Nothing the platform writes under the data directory is ever a
+  # link, so one found on the way down is refused rather than resolved.
+  defp linked?(full, root) do
+    full
+    |> Path.relative_to(root)
+    |> Path.split()
+    |> Enum.reduce_while(root, fn segment, dir ->
+      candidate = Path.join(dir, segment)
+
+      case File.lstat(candidate) do
+        {:ok, %File.Stat{type: :symlink}} -> {:halt, :symlink}
+        _other -> {:cont, candidate}
+      end
+    end)
+    |> Kernel.==(:symlink)
+  end
+
+  defp read(full) do
+    case File.read(full) do
+      {:ok, bytes} -> {:ok, bytes}
+      {:error, _reason} -> {:error, :not_found}
+    end
+  end
+
+  @doc """
+  Whether this exact version carries an approval.
+
+  Approval attaches to a version, never to an artifact: a human edit creating v3 does not carry
+  v2's approval, and `docs/design/ui.md` forbids the product from ever implying otherwise.
+  """
+  @spec approved?(Version.t() | nil) :: boolean()
+  def approved?(nil), do: false
+  def approved?(%Version{id: id}), do: id |> approvals() |> Enum.any?(&(&1.decision == :approved))
+
+  @doc """
+  Artifact names the pinned workflow can ever approve: every name in any transition's `approve`.
+
+  The UI marks approval state only for these. An artifact no transition approves would otherwise
+  sit marked `unapproved` for ever, which reads as a job for the operator and is not one — see
+  `docs/design/ui.md` § Semantics that must not be lost.
+  """
+  @spec approvable(ForgeCore.Workflow.t() | nil) :: MapSet.t()
+  def approvable(nil), do: MapSet.new()
+
+  def approvable(%ForgeCore.Workflow{transitions: transitions}),
+    do: transitions |> Enum.flat_map(& &1.approve) |> MapSet.new()
+
   @spec list(String.t()) :: [Artifact.t()]
   def list(ticket_id),
     do: Repo.all(from a in Artifact, where: a.ticket_id == ^ticket_id, order_by: a.name)
+
+  @doc """
+  Every version a job wrote, as `{artifact, version}`, by name.
+
+  The job page needs what the run actually produced, not what its spec declared: a job that
+  ended `error` for a missing output declared it and did not write it, and the difference
+  between those two lists is the whole story of that job.
+  """
+  @spec written_by(String.t()) :: [{Artifact.t(), Version.t()}]
+  def written_by(job_id) do
+    Repo.all(
+      from v in Version,
+        join: a in assoc(v, :artifact),
+        where: fragment("?->>'id'", v.author) == ^job_id,
+        order_by: [a.name, v.version],
+        select: {a, v}
+    )
+  end
 
   # -- questions and answers ----------------------------------------------------------------
 

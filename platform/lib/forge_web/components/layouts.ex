@@ -46,6 +46,9 @@ defmodule ForgeWeb.Layouts do
       <nav class="flex items-center gap-5 text-sm">
         <.nav_link navigate={~p"/"} active={@active == :queue} count={@queue_count}>Queue</.nav_link>
         <.nav_link navigate={~p"/board"} active={@active == :board}>Board</.nav_link>
+        <%!-- Laptop only, and deliberately: the phone is where decisions are answered and a
+              machine is never a decision. See docs/design/ui.md. --%>
+        <.nav_link navigate={~p"/workers"} active={@active == :workers}>Workers</.nav_link>
       </nav>
       <div class="ml-auto flex items-center gap-4">
         <.theme_toggle />

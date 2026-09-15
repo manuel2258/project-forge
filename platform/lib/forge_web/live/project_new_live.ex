@@ -2,13 +2,22 @@ defmodule ForgeWeb.ProjectNewLive do
   @moduledoc """
   Registering a project, and then telling the operator the one thing they now have to do.
 
-  The repository this makes is empty, so the project cannot take a ticket until a
-  `.forge/workflow.yml` is pushed to it. Redirecting to the board here would leave that to be
-  discovered later as a parse error naming a file nobody has seen. So the view has a second
-  state: the clone URL and what to put in it. See `docs/design/ui.md` § Creating things.
+  The repository this makes has no workflow, so the project cannot take a ticket until one
+  exists. Redirecting to the board here would leave that to be discovered later as a parse error
+  naming a file nobody has seen. So the view has a second state: what to do about it.
+
+  **It used to say "clone it and push a workflow", which the product refuses to do.**
+  `pre-receive` accepts a write to the default branch from the platform's own merge and from
+  nothing else, and a credential is scoped to exactly one branch that is never that one. There
+  was no push an operator could have made. The way in is a conversation: it writes the workflow
+  on its own branch and a person merges it, which is the same route every other change takes.
+
+  See `docs/design/ui.md` § Creating things.
   """
 
   use ForgeWeb, :live_view
+
+  import ForgeWeb.Operator.Components
 
   alias Forge.Git.Url
   alias Forge.Projects
@@ -68,22 +77,45 @@ defmodule ForgeWeb.ProjectNewLive do
           {@created.name} is registered
         </h1>
         <p class="mt-3 text-sm/[1.55] opacity-80">
-          Its repository is empty, so it cannot take a ticket yet. Clone it, add a workflow at
+          It has no workflow yet, so it cannot take a ticket. A workflow is
           <code class="font-mono text-[12.5px]">.forge/workflow.yml</code>
-          with the prompts it names under <code class="font-mono text-[12.5px]">.forge/</code>, and push to <code class="font-mono text-[12.5px]">{@created.default_branch}</code>.
+          in the repository, with the prompts it names under <code class="font-mono text-[12.5px]">.forge/</code>.
         </p>
 
-        <h2 class="mt-6 font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Clone it</h2>
-        <div class="mt-2 rounded-box bg-base-200 px-4 py-3">
-          <p class="font-mono text-[12.5px] break-all">git clone {@clone_url}</p>
+        <%!-- The way in, and the only one that reaches the default branch: a conversation writes
+              the workflow on its own branch and you merge it. Nothing may push to
+              {@created.default_branch} — `pre-receive` accepts the platform's own merge and
+              nothing else — so "clone it and push a workflow", which this page used to say, was
+              an instruction the product refuses to carry out. --%>
+        <div class="mt-6">
+          <.link
+            navigate={~p"/chats/new?project=#{@created.name}"}
+            class="flex min-h-[64px] items-center justify-between rounded-box bg-base-content px-5 text-base font-medium text-base-100"
+          >
+            Set it up in a chat <span aria-hidden="true">›</span>
+          </.link>
+          <p class="mt-2 text-sm/[1.55] opacity-60">
+            It sees the empty repository, asks what the project is, and writes the workflow on a
+            branch of its own. You read the diff and merge it.
+          </p>
+        </div>
+
+        <div class="mt-8">
+          <.copyable id="clone-url" value={@clone_url} label="Or work in it yourself" />
         </div>
         <p class="mt-2 text-sm/[1.55] opacity-60">
-          It asks for a credential. Issue one with
-          <code class="font-mono text-[12.5px]">mix forge.git.token {@created.name} --write</code>
-          and give it as the password.
+          Cloning asks for a credential —
+          <.link
+            navigate={~p"/projects/#{@created.name}/settings"}
+            class="text-primary hover:underline"
+          >
+            issue one in settings ›
+          </.link>
+          . A credential writes one branch, never {@created.default_branch}, so work arrives the
+          same way: a branch, reviewed and merged.
         </p>
 
-        <div class="mt-6 flex flex-col gap-2">
+        <div class="mt-8 flex flex-col gap-2">
           <.link
             navigate={~p"/tickets/new?project=#{@created.name}"}
             class="flex h-[52px] items-center justify-between rounded-field border border-base-300 bg-base-200 px-4 text-sm hover:border-base-content/30"
@@ -100,7 +132,8 @@ defmodule ForgeWeb.ProjectNewLive do
       <% else %>
         <h1 class="mt-4 text-2xl font-semibold -tracking-[.025em]">New project</h1>
         <p class="mt-2 text-sm/[1.55] opacity-70">
-          The platform hosts the repository. It is created empty and you push to it.
+          The platform hosts the repository. It is created empty, and work reaches its default
+          branch one way: a branch, reviewed and merged.
         </p>
 
         <.form

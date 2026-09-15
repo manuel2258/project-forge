@@ -36,10 +36,14 @@ defmodule ForgeWeb.Router do
       # Before /tickets/:project/:number, or "new" is read as a project name.
       live "/projects/new", ProjectNewLive
       live "/projects/:name", ProjectLive
+      live "/projects/:name/settings", ProjectSettingsLive
       live "/tickets/new", TicketNewLive
       live "/tickets/:project/:number", TicketLive
       live "/tickets/:project/:number/review", ReviewLive
       live "/tickets/:project/:number/jobs/:job_id", JobLive
+      live "/chats", ChatsLive
+      live "/chats/new", ChatNewLive
+      live "/chats/:id", ChatLive
     end
 
     # Not a LiveView: this serves bytes, and every artifact name in the product links to it.
@@ -92,6 +96,9 @@ defmodule ForgeWeb.Router do
       pipe_through :browser
 
       live_dashboard "/dashboard", metrics: ForgeWeb.Telemetry
+      # The login page links here for the magic link. Without it that link 404s, which looks
+      # like the mail failed rather than like the route was missing.
+      forward "/mailbox", Plug.Swoosh.MailboxPreview
     end
   end
 

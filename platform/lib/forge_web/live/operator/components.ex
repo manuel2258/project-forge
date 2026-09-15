@@ -12,6 +12,168 @@ defmodule ForgeWeb.Operator.Components do
   import ForgeWeb.Indicators
 
   @doc """
+  The field that picks a model, wherever one is picked.
+
+  **A dropdown of what is connected.** The names are not written down anywhere in the product:
+  each worker reports the aliases its harness resolves and the models its credential may use
+  (`docs/design/worker-channel.md` § What a worker offers), and this shows the union. Because it
+  is discovered on every worker join rather than authored here, a model released last week is in
+  it as soon as a machine connects — which is what makes a closed list safe where a written-down
+  one would not be.
+
+  Aliases and ids are separate groups. `opus` floats to whatever the harness resolves it to,
+  an id pins; showing them apart is what makes choosing between them deliberate rather than
+  alphabetical.
+
+  **Free text when there is nothing to offer**, which is a fleet with no worker connected. A
+  select with one empty option would make configuring a project before starting a machine
+  impossible, and that is the order a new operator does it in.
+
+  A value already set that nothing currently offers stays in the list and stays selected. The
+  worker that has it may be asleep rather than gone, and a form that silently dropped it would
+  change a setting nobody touched.
+  """
+  attr :field, Phoenix.HTML.FormField, required: true
+  attr :offered, :map, required: true, doc: "as `Forge.Workers.offered/0`"
+  attr :label, :string, default: "Model"
+  attr :fallback, :string, required: true, doc: "what an empty choice means, in words"
+
+  def model_field(assigns) do
+    assigns = assign(assigns, :options, options(assigns.offered, assigns.field.value))
+
+    ~H"""
+    <div>
+      <.input :if={@options == []} field={@field} type="text" label={@label} autocomplete="off" />
+
+      <.input
+        :if={@options != []}
+        field={@field}
+        type="select"
+        label={@label}
+        options={[{"— #{@fallback} —", ""} | @options]}
+      />
+
+      <p class="mt-1.5 text-[12.5px] opacity-60">
+        <%= if @options == [] do %>
+          No worker is connected, so there is nothing to offer. Type a name, or leave it for {@fallback}.
+        <% else %>
+          Offered by the workers connected now.
+        <% end %>
+      </p>
+    </div>
+    """
+  end
+
+  # Grouped for `options_for_select`, which renders a list of `{group, options}` as `<optgroup>`.
+  # The set one is last and appears only when the fleet no longer offers it: it is not a group
+  # anyone picks from, it is the reason the current value is still there to be seen.
+  defp options(offered, value) do
+    aliases = Enum.map(offered.aliases, &{&1, &1})
+    models = Enum.map(offered.models, &{&1.name, &1.id})
+
+    group("Aliases", aliases) ++ group("Models", models) ++ group("Set", kept(offered, value))
+  end
+
+  defp group(_name, []), do: []
+  defp group(name, options), do: [{name, options}]
+
+  defp kept(offered, value) when is_binary(value) and value != "" do
+    if value in offered.aliases or Enum.any?(offered.models, &(&1.id == value)),
+      do: [],
+      else: [{value, value}]
+  end
+
+  defp kept(_offered, _value), do: []
+
+  @doc """
+  A pane that scrolls inside itself instead of growing the page.
+
+  Live output goes in one: a conversation's messages, a job's harness stream. `docs/design/ui.md`
+  § Motion and structure sets what it must do — **it does not auto-scroll away from something you
+  are reading.** Pinned to the bottom while you are at the bottom, still when you are not, and it
+  says how much arrived beneath so the stillness is informative rather than a page that stopped
+  working.
+
+  The list inside carries `data-scroll-items`; its children are what gets counted.
+  """
+  attr :id, :string, required: true
+  attr :height, :string, default: "60vh", doc: "max height; the pane scrolls past it"
+  attr :class, :string, default: nil
+  slot :inner_block, required: true
+
+  def scroll_pane(assigns) do
+    ~H"""
+    <div class="relative">
+      <div
+        id={@id}
+        phx-hook=".StickToBottom"
+        class={["overflow-y-auto overscroll-contain", @class]}
+        style={"max-height: #{@height}"}
+      >
+        {render_slot(@inner_block)}
+      </div>
+
+      <%!-- Only while there is something below: a control that is always there is a control
+            nobody reads. --%>
+      <button
+        id={@id <> "-below"}
+        type="button"
+        hidden
+        class="absolute right-3 bottom-3 min-h-[46px] rounded-field border border-base-300 bg-base-100 px-3 font-mono text-[12.5px] shadow-none hover:border-base-content/30"
+      ></button>
+    </div>
+
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".StickToBottom">
+      export default {
+        slack: 24,
+
+        atBottom() {
+          return this.el.scrollHeight - this.el.scrollTop - this.el.clientHeight <= this.slack
+        },
+
+        // How many items are past the bottom of what you can see. Measured rather than counted
+        // from events, so it stays true after a reload, a resize, or a message that wrapped.
+        below() {
+          const list = this.el.querySelector("[data-scroll-items]")
+          if (!list) return 0
+          const fold = this.el.scrollTop + this.el.clientHeight
+          return [...list.children].filter((item) => item.offsetTop + item.offsetHeight > fold).length
+        },
+
+        report() {
+          const count = this.atBottom() ? 0 : this.below()
+          this.badge.hidden = count === 0
+          this.badge.textContent = count === 0 ? "" : `${count} below ↓`
+        },
+
+        toBottom() {
+          this.el.scrollTop = this.el.scrollHeight
+          this.report()
+        },
+
+        mounted() {
+          this.badge = document.getElementById(this.el.id + "-below")
+          this.el.addEventListener("scroll", () => this.report())
+          this.badge.addEventListener("click", () => this.toBottom())
+          this.toBottom()
+        },
+
+        // Whether you were at the bottom *before* the update is the only moment that can be
+        // asked: afterwards the content is taller and the answer is always no.
+        beforeUpdate() {
+          this.pinned = this.atBottom()
+        },
+
+        updated() {
+          if (this.pinned) this.toBottom()
+          else this.report()
+        }
+      }
+    </script>
+    """
+  end
+
+  @doc """
   The one shape in the queue that commits something: 52px, label left, `›` right, sends on tap.
   """
   attr :rest, :global,
@@ -240,6 +402,76 @@ defmodule ForgeWeb.Operator.Components do
       <dt class="opacity-50">{@label}</dt>
       <dd class="truncate font-mono">{@value}{render_slot(@inner_block)}</dd>
     </div>
+    """
+  end
+
+  @doc """
+  A value worth copying, with a button that copies it.
+
+  Used wherever the product hands the operator something to paste elsewhere: a clone URL, and the
+  one-time URL carrying a freshly issued token. The value stays visible and selectable — the
+  button is a convenience over it, never the only way to get at it, because the clipboard API
+  needs a secure context and a LAN address over plain http is not one.
+  """
+  attr :id, :string, required: true
+  attr :value, :string, required: true
+  attr :label, :string, default: nil
+
+  def copyable(assigns) do
+    ~H"""
+    <div>
+      <p :if={@label} class="font-mono text-[11px] tracking-[.14em] uppercase opacity-50">
+        {@label}
+      </p>
+      <div class={["flex items-stretch gap-2", @label && "mt-2"]}>
+        <div class="min-w-0 flex-1 rounded-box bg-base-200 px-4 py-3">
+          <p id={@id} class="font-mono text-[12.5px] break-all">{@value}</p>
+        </div>
+        <button
+          type="button"
+          id={@id <> "-copy"}
+          phx-hook=".CopyToClipboard"
+          data-target={@id}
+          class="min-h-[46px] shrink-0 rounded-field border border-base-300 px-3 text-sm hover:border-base-content/30"
+        >
+          <span data-label>Copy</span>
+        </button>
+      </div>
+    </div>
+
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".CopyToClipboard">
+      export default {
+        mounted() {
+          this.el.addEventListener("click", async () => {
+            const source = document.getElementById(this.el.dataset.target)
+            if (!source) return
+
+            const label = this.el.querySelector("[data-label]")
+            const text = source.textContent.trim()
+
+            try {
+              // The clipboard API needs a secure context — https, or localhost. Over plain http
+              // on a LAN address it is simply absent, so the fallback selects the text and says
+              // so rather than failing silently.
+              await navigator.clipboard.writeText(text)
+              label.textContent = "Copied"
+            } catch {
+              const range = document.createRange()
+              range.selectNodeContents(source)
+              const selection = window.getSelection()
+              selection.removeAllRanges()
+              selection.addRange(range)
+              label.textContent = "Selected"
+            }
+
+            clearTimeout(this.reset)
+            this.reset = setTimeout(() => { label.textContent = "Copy" }, 2000)
+          })
+        },
+
+        destroyed() { clearTimeout(this.reset) }
+      }
+    </script>
     """
   end
 end

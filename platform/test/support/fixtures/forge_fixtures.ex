@@ -43,18 +43,62 @@ defmodule Forge.ForgeFixtures do
 
   def job_fixture(attrs \\ %{}) do
     ticket = Map.get_lazy(attrs, :ticket, fn -> ticket_fixture() end)
+    {status, attrs} = Map.pop(attrs, :status)
 
     attrs =
       attrs
       |> Map.delete(:ticket)
       |> Enum.into(%{
         ticket_id: ticket.id,
+        project_id: ticket.project_id,
         state: ticket.state,
         attempt: 1,
         spec: %{"prompt" => "agents/refine.md"}
       })
 
-    Repo.insert!(Forge.Jobs.Job.create_changeset(%Forge.Jobs.Job{}, attrs))
+    %Forge.Jobs.Job{}
+    |> Forge.Jobs.Job.create_changeset(attrs)
+    |> Repo.insert!()
+    |> with_status(status)
+  end
+
+  # `create_changeset/2` does not cast a status, on purpose: a job is created pending and gets
+  # anywhere else through `progress_changeset/2`. A fixture that wants a running row has to go
+  # the same way, or it silently gets a pending one and every test about running work is vacuous.
+  defp with_status(job, nil), do: job
+
+  defp with_status(job, status) do
+    job
+    |> Forge.Jobs.Job.progress_changeset(%{status: status})
+    |> Repo.update!()
+  end
+
+  @doc """
+  A conversation: a job with a kind, a project, and none of a workflow job's fields.
+
+  `ticket_id` is left out unless a caller passes one — a project chat is the shape most likely
+  to break a reader that assumes every job has a ticket.
+  """
+  def chat_fixture(attrs \\ %{}) do
+    project =
+      Map.get_lazy(attrs, :project, fn ->
+        case Map.get(attrs, :ticket) do
+          nil -> project_fixture()
+          ticket -> Forge.Projects.get!(ticket.project_id)
+        end
+      end)
+
+    {status, attrs} = Map.pop(attrs, :status)
+
+    attrs =
+      attrs
+      |> Map.drop([:project, :ticket])
+      |> Enum.into(%{kind: :chat, project_id: project.id, attempt: 1})
+
+    %Forge.Jobs.Job{}
+    |> Forge.Jobs.Job.create_changeset(attrs)
+    |> Repo.insert!()
+    |> with_status(status)
   end
 
   def artifact_fixture(attrs \\ %{}) do

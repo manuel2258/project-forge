@@ -32,6 +32,8 @@ export FORGE_M_ROOT
 . measure/lib/isolation.sh
 # shellcheck source=measure/lib/m4.sh
 . measure/lib/m4.sh
+# shellcheck source=measure/lib/streaming.sh
+. measure/lib/streaming.sh
 # shellcheck source=measure/lib/selftest.sh
 . measure/lib/selftest.sh
 # shellcheck source=measure/lib/sample.sh
@@ -50,6 +52,7 @@ usage: bin/measure <subcommand> [--workload <name>] [--dry-run] [options]
      [--profile P]
   isolation [--keep]   four concurrent builds, one under a ceiling below its own peak
   m4 [--keep]          worker cold start, phase by phase, against a real machine
+  streaming [--keep]   does the harness take streaming input? the conversations spike
   report [--run DIR]   render the results table for pasting into docs/measurements.md
      [--measurement M]   the latest run of one measurement (m1, m2, m3) rather than of any
   selftest             run all three against a fake workload, with no btrfs, Nix or systemd
@@ -143,6 +146,11 @@ main() {
       ;;
     sample-init)
       cmd_sample_init ${rest[@]+"${rest[@]}"}
+      return 0
+      ;;
+    # No workload: the spike drives the harness itself, not a build of anything.
+    streaming)
+      cmd_streaming ${rest[@]+"${rest[@]}"}
       return 0
       ;;
     -h | --help | help) usage ;;

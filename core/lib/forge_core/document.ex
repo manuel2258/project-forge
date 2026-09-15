@@ -26,12 +26,26 @@ defmodule ForgeCore.Document do
   # CommonMark: up to three spaces of indentation; the info string is trimmed.
   @fence ~r/^ {0,3}(`{3,})(.*)$/
 
-  @spec parse(String.t()) :: {:ok, t()} | {:error, [Error.t()]}
-  def parse(text) when is_binary(text) do
+  @typedoc """
+  `blocking: :always` reads every question as blocking whatever its flag says, and ignores an
+  assumption rather than refusing one.
+
+  It is for conversations. In a workflow a blocking question is what stops a job, and a
+  non-blocking one must say what the job proceeded with instead — that is what an assumption is.
+  A conversation has already stopped: the turn ended and the agent is waiting either way, and
+  there is nothing for it to have proceeded with. Without this the rule does not merely mislead,
+  it refuses the whole message: one question missing an assumption fails the parse, and the
+  question disappears rather than being shown without its one-tap answers.
+  See `docs/design/conversations.md` § Asking a question.
+  """
+  @type opts :: [blocking: :always | :declared]
+
+  @spec parse(String.t(), opts()) :: {:ok, t()} | {:error, [Error.t()]}
+  def parse(text, opts \\ []) when is_binary(text) do
     text = String.replace_prefix(text, "\uFEFF", "")
     {front_matter, body, offset, front_errors} = split_front_matter(text)
     {outcome, outcome_errors} = outcome(front_matter)
-    {questions, question_errors} = questions(body, offset)
+    {questions, question_errors} = questions(body, offset, opts)
 
     case front_errors ++ outcome_errors ++ question_errors do
       [] ->
@@ -49,9 +63,9 @@ defmodule ForgeCore.Document do
     end
   end
 
-  @spec parse!(String.t()) :: t()
-  def parse!(text) do
-    case parse(text) do
+  @spec parse!(String.t(), opts()) :: t()
+  def parse!(text, opts \\ []) do
+    case parse(text, opts) do
       {:ok, document} -> document
       {:error, errors} -> raise ArgumentError, "invalid document:\n" <> Error.format(errors)
     end
@@ -118,12 +132,12 @@ defmodule ForgeCore.Document do
 
   # Walks the body line by line, tracking fenced code blocks so a ```question inside another
   # code block is not mistaken for a real one. Line numbers are file lines, hence `offset`.
-  defp questions(body, offset) do
+  defp questions(body, offset, opts) do
     body
     |> String.split(~r/\r?\n/)
     |> Enum.with_index(offset + 1)
     |> Enum.reduce({:outside, [], []}, &scan_line/2)
-    |> finish_scan()
+    |> finish_scan(opts)
   end
 
   defp scan_line({line, number}, {:outside, blocks, errors}) do
@@ -160,23 +174,24 @@ defmodule ForgeCore.Document do
     end
   end
 
-  defp finish_scan({{:question, _width, start, _acc}, blocks, errors}) do
+  defp finish_scan({{:question, _width, start, _acc}, blocks, errors}, opts) do
     finish_scan(
       {:outside, blocks,
        [
          Error.new("question[#{length(blocks)}]", "block starting at line #{start} is not closed")
          | errors
-       ]}
+       ]},
+      opts
     )
   end
 
-  defp finish_scan({_state, blocks, errors}) do
+  defp finish_scan({_state, blocks, errors}, opts) do
     {questions, build_errors} =
       blocks
       |> Enum.reverse()
       |> Enum.with_index()
       |> Enum.map(fn {{line, yaml}, index} ->
-        Question.build(yaml, line, "question[#{index}]")
+        Question.build(yaml, line, "question[#{index}]", opts)
       end)
       |> Enum.reduce({[], []}, fn
         {:ok, question}, {questions, errs} -> {[question | questions], errs}

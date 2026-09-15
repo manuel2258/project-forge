@@ -49,8 +49,22 @@ defmodule ForgeWeb.Layouts do
         <%!-- Laptop only, and deliberately: the phone is where decisions are answered and a
               machine is never a decision. See docs/design/ui.md. --%>
         <.nav_link navigate={~p"/workers"} active={@active == :workers}>Workers</.nav_link>
+        <%!-- Laptop only too, but for a different reason: a conversation that needs you is
+              already in the queue. This is for finding one again, which is a laptop errand. --%>
+        <.nav_link navigate={~p"/chats"} active={@active == :chats}>Chats</.nav_link>
       </nav>
       <div class="ml-auto flex items-center gap-4">
+        <%!-- An action, not a destination, so it sits beside the theme toggle rather than among
+              the nav items. A project is made rarely and from nowhere in particular; a ticket is
+              always made for a project and lives on that project's page. See docs/design/ui.md
+              § Creating things. --%>
+        <.link
+          :if={@current_scope}
+          navigate={~p"/projects/new"}
+          class="flex min-h-[46px] items-center rounded-field border border-base-300 px-3 text-sm hover:border-base-content/30"
+        >
+          New project
+        </.link>
         <.theme_toggle />
         <div :if={@current_scope} class="flex items-center gap-3 text-sm">
           <.link navigate={~p"/users/settings"} class="link link-hover opacity-70">

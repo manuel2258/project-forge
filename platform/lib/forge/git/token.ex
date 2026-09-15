@@ -6,12 +6,16 @@ defmodule Forge.Git.Token do
   is a job rather than "until revoked". Only the mechanics are shared with
   `Forge.Accounts.UserToken` — 32 random bytes handed out once, a sha256 hash stored.
 
-  `ref` is the one ref a write token may update, `refs/heads/ticket/<n>`. A read token has none.
-  See `docs/design/git-hosting.md`.
+  `ref` is the one ref a write token may update: `refs/heads/ticket/<n>` for a ticket's job, or
+  `refs/heads/chat/<uuid>` for a conversation. A read token has none.
+  See `docs/design/git-hosting.md` and `docs/design/conversations.md` § Commits.
   """
 
   use Ecto.Schema
   import Ecto.Changeset
+
+  @uuid "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+  @write_ref ~r{^refs/heads/(ticket/\d+|chat/#{@uuid})$}
 
   @type t :: %__MODULE__{}
 
@@ -63,8 +67,12 @@ defmodule Forge.Git.Token do
         changeset
 
       {_write, _ref} ->
-        validate_format(changeset, :ref, ~r{^refs/heads/ticket/\d+$},
-          message: "must be refs/heads/ticket/<number>"
+        # The same two namespaces `priv/git-hooks/pre-receive` accepts, and for the same reason:
+        # a token wider than one branch is a token that can write someone else's work. Both are
+        # matched to their shape rather than to a glob — the hook is the enforcement point and
+        # this is what is allowed to be minted, so they have to agree.
+        validate_format(changeset, :ref, @write_ref,
+          message: "must be refs/heads/ticket/<number> or refs/heads/chat/<id>"
         )
     end
   end

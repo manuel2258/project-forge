@@ -10,14 +10,73 @@ defmodule ForgeWorker.Harness do
   @type event :: %{type: String.t(), payload: map()}
 
   @typedoc """
-  Options a runner passes through: `:executable`, `:credential`, `:resume_session`, `:model`.
-  `:credential` is `{:api_key, value}`, `{:oauth, value}`, or a zero-arity function
-  returning one, so the secret never sits in process state or crash reports.
+  Options a runner passes through: `:executable`, `:credential`, `:resume_session`, `:model`,
+  `:mode` and `:max_cost`. `:credential` is `{:api_key, value}`, `{:oauth, value}`, or a
+  zero-arity function returning one, so the secret never sits in process state or crash reports.
+
+  `:mode` is `:prompt` (the default: one prompt on stdin, one result, the process exits) or
+  `:streaming` (stdin stays open and takes many messages, one result each). A conversation is
+  the second; `docs/design/conversations.md` § The harness supports this directly.
+
+  `:max_cost` is the ceiling for this invocation in dollars. In `:prompt` mode it comes from the
+  spec's budget; in `:streaming` mode there is no spec budget to take it from, so the caller
+  passes what is left of the day.
   """
   @type opts :: keyword()
 
-  @doc "Capabilities the engine may rely on, e.g. `%{resume: true, permission_prompting: false}`."
+  @typedoc "How the process is fed. See `t:opts/0`."
+  @type mode :: :prompt | :streaming
+
+  @doc """
+  Capabilities the engine may rely on, e.g. `%{resume: true, permission_prompting: false}`.
+  `:streaming_input` says the driver can be written to after it starts — a runner asked for a
+  conversation refuses a harness without it rather than starting one that can never be spoken to.
+  """
   @callback capabilities() :: %{atom() => boolean()}
+
+  @typedoc """
+  What this machine can offer, as `ready` reports it: which harness, which version, whether the
+  credential is accepted, and the models it may use. See `docs/design/worker-channel.md`
+  § What a worker offers.
+  """
+  @type offer :: %{
+          driver: String.t(),
+          name: String.t(),
+          version: String.t() | nil,
+          login: :ok | :invalid | :unknown,
+          models: [%{id: String.t(), name: String.t()}],
+          aliases: [String.t()]
+        }
+
+  @doc """
+  Asks the machine what it can offer. Takes the same opts as `command/3` — the credential above
+  all, since the model list is the credential's and not the machine's.
+
+  Must never raise and must always answer: a probe that could not reach anything reports
+  `login: :unknown` with no models, because a worker that cannot describe itself is still a
+  worker that can run work.
+
+  `:req_options` is merged into any HTTP request the probe makes, which is what lets a test
+  answer it from a plug instead of the network.
+  """
+  @callback probe(opts()) :: offer()
+
+  @doc """
+  Encodes one user message as the bytes to write to the process's stdin, newline included.
+
+  Only meaningful in `:streaming` mode, and only a driver that reports `streaming_input` is
+  asked for it.
+  """
+  @callback encode_message(String.t()) :: iodata()
+
+  @doc """
+  Encodes a request to end the turn in flight while leaving the process running, newline
+  included. `request_id` correlates the acknowledgement the harness writes back.
+
+  This is not the channel's `cancel`, which ends the process. For a conversation the process is
+  the thing being kept — see `docs/design/conversations.md` § Turns.
+  """
+  @callback encode_interrupt(String.t()) :: iodata()
 
   @doc """
   The executable, its arguments and environment for running `spec` in `job_dir`. An env

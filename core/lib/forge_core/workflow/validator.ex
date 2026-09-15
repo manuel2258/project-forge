@@ -74,6 +74,7 @@ defmodule ForgeCore.Workflow.Validator do
     present =
       [
         env: human.env,
+        model: human.model,
         inputs: human.inputs,
         produces: human.produces,
         outcomes: human.outcomes,

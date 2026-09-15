@@ -10,7 +10,13 @@ config :forge, ForgeWeb.Endpoint, cache_static_manifest: "priv/static/cache_mani
 # The port, stated here rather than defaulted in runtime.exs. Bandit yields no listener at all
 # for a missing `:http` key — not a default — so a release started without PORT would otherwise
 # boot healthy, log nothing, and listen on nothing. runtime.exs overrides this when PORT is set.
-config :forge, ForgeWeb.Endpoint, http: [port: 4000]
+#
+# **Loopback, because `force_ssl` trusts `x-forwarded-proto`.** Anything that can reach this port
+# directly can assert that header and the platform will believe it is on TLS: no redirect, and a
+# session cookie accepted over cleartext. The header is only trustworthy if the proxy is the only
+# thing that can reach the port. `FORGE_HTTP_IP` widens this where a worker has to dial in from
+# another machine — see docs/deploy.md, which says what else has to be true then.
+config :forge, ForgeWeb.Endpoint, http: [ip: {127, 0, 0, 1}, port: 4000]
 
 # Force using SSL in production. This also sets the "strict-security-transport" header,
 # known as HSTS. If you have a health check endpoint, you may want to exclude it below.

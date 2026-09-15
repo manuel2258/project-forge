@@ -128,9 +128,13 @@ measure; each route sets its own:
 | `/board` | none | Full viewport. The columns are the workflow topology; capping them destroys the artefact. |
 | `/projects/:name` | none | The same board for one project, beside a 21rem rail. Same reason. |
 | `/workers` | 74rem | One table of machines. Wide enough for the row, no wider. |
+| `/projects/:name/settings` | 48rem | A form and a table of credentials. Narrower loses the row; wider is a rail with nothing to put in it. |
 | `/tickets/:project/:number` | 74rem | 53rem timeline column plus a 21rem facts rail, divided by a 1px rule. Below `lg` the rail moves under the timeline. |
 | `…/review` | 74rem | Same frame. The diff needs the width; the rail carries the evidence. |
 | `…/jobs/:job_id` | 74rem | Same frame. Manifest in the rail, completed harness stream in the column. |
+| `/chats` | 34rem | One ordered list, so the queue's measure and for the queue's reason: width only lets a second row compete for the same glance. |
+| `/chats/:id` | 74rem | Same frame again: a conversation is work with a branch, a cost and a record. The talking is the column; what it cost and what it wrote is the rail. |
+| `/chats/new` | 34rem | The first message is prose and needs the queue's measure, not a form field's — the same reason `/tickets/new` has it. |
 | `/projects/new` | 26rem | A short form. Same frame as log-in, for the same reason. |
 | `/tickets/new` | 34rem | The body is prose and needs the queue's measure, not a form field's. |
 | `/users/log-in`, `/users/settings` | 26rem | Same shell, same type, same buttons. They must not read as a different product. |
@@ -138,18 +142,52 @@ measure; each route sets its own:
 Navigation is a fixed bottom bar on a phone (56px plus safe-area inset, each item a full-height
 tap target, Queue carrying the only badge in the product) and a hairline-ruled top row on a
 laptop. **No hamburger at any width.** The phone bar carries Queue and Board; it gains Tickets as
-a third item when `/tickets` exists, and not before. **The laptop row carries Workers as well, and
-the phone bar does not** — the phone is where decisions are answered and a machine is never a
-decision. Nothing on `/workers` waits on a human, which is also why nothing on it is accent.
+a third item when `/tickets` exists, and not before. **The laptop row carries Workers and Chats as
+well, and the phone bar does not** — the phone is where decisions are answered and a machine is
+never a decision. Nothing on `/workers` waits on a human, which is also why nothing on it is
+accent.
+
+**Chats is on the laptop row for a different reason, and it is worth separating them.** A
+conversation *does* wait on a human — but when it does it is already in the queue, with its
+question and its answer rows, which is where an operator meets it on a phone. `/chats` is for
+finding a conversation again: the one you had about the parser last week, the one still running
+that you closed the tab on. That is a laptop errand. A conversation that needs you does not wait
+for you to go looking.
 Ticket, job and artifact are pushed views with a back affordance naming where you came from, not
 tabs.
 
 ## Motion and structure
 
-Motion is minimal and respects `prefers-reduced-motion`. **Nothing pulses and nothing tails.**
-There is deliberately no live transcript, no streaming log, and no activity feed — nothing that
-invites watching agents work. The harness stream is paged, newest first, and is headed by its
+Motion is minimal and respects `prefers-reduced-motion`. **Nothing pulses and nothing is
+decorative.** No spinner that conveys nothing, no shimmer, no animation that exists to look busy.
+
+**Live output is allowed where a person is waiting for it.** This reverses a rule that said
+otherwise — see the note below — so: a conversation streams its reply as it arrives, and a job
+may show its stream while it runs. Neither auto-scrolls away from something you are reading; a
+view that has been scrolled up stays there and says how much arrived beneath.
+
+**Output that accumulates scrolls inside itself rather than growing the page.** A conversation's
+messages and a job's stream are both bounded panes, because a page that grows downwards moves the
+box you type in further away with every reply, and puts the thing you are waiting for below the
+fold you are already at.
+
+Which end is pinned follows which end is new. A conversation arrives at the bottom, so it is
+pinned there while you are there, still when you are not, and it says how many messages are
+beneath. A job's stream is newest first and needs no pinning at all: what arrives appears at the
+top, where the reader already is, and pinning it to the bottom would scroll away from the newest
+entry to reach the oldest.
+
+Where nobody is waiting, nothing streams. The board does not animate, the queue does not
+rearrange itself under a thumb, and a finished job's stream is paged, newest first, headed by its
 completion state and entry count.
+
+**Why this used to be forbidden, and why it is not.** The rule was "no live transcript, no
+streaming log, no activity feed — nothing that invites watching agents work", from `vision.md`'s
+*"watching agents work is how a review budget disappears"*. That is a true observation about
+**unattended** work: a feed of agents grinding through tickets is a machine for spending the
+operator's attention on nothing. It was overstated into a prohibition on live output as such,
+which also forbids the case where the operator is the one who asked the question and is waiting
+for the answer. The distinction is who is waiting, not whether bytes move.
 
 ## Semantics that must not be lost
 
@@ -211,6 +249,20 @@ announcing absence.
 
 ## Creating things
 
+**Where the two create actions live, and why they are not in the same place.** A project is made
+rarely and from nowhere in particular, so it is an action in the laptop top bar, beside the theme
+toggle rather than among the nav items — those are destinations and this is not one. A ticket is
+always made *for a project*, so it is offered on the project page and nowhere else: the queue is
+an inbox and the board is every project at once, and neither has a project to make a ticket for.
+
+Both are laptop-only, because the header is. That is the same reasoning as the workers page: the
+phone is where decisions are answered, and creating a project is not a decision waiting on
+anyone.
+
+**A ticket form reached from a project does not ask which project.** It says which one, as an
+identifier, and the select appears only on the bare `/tickets/new` — a route nothing links to,
+kept so the address works and so the no-projects-at-all case still has somewhere to say so.
+
 A project and a ticket are made in the product. A **workflow is not**: it is
 `.forge/workflow.yml` in the project's own repository, read at the ticket's base commit and
 pinned at admission, so it versions with the code it governs and there is nothing for a form to
@@ -218,11 +270,17 @@ edit. The two create views are pushed views with a back affordance, reached from
 project, and a ticket in a named project) and from the queue (a ticket).
 
 **A new project cannot take a ticket yet, and the product says so rather than failing.** The
-repository it just made is empty, so it has no workflow, so admission would fail on a parse
-error naming a file the operator has never seen. Instead:
+repository it just made has no workflow, so admission would fail on a parse error naming a file
+the operator has never seen. Instead:
 
-- Creating a project ends on what to do next, not on a redirect: the **clone URL**, and the fact
-  that a `.forge/workflow.yml` has to be pushed before the project can take work.
+- Creating a project ends on what to do next, not on a redirect: **a conversation that writes the
+  workflow**, offered as the primary action, with the clone URL beneath it for working by hand.
+- **It used to say to clone the repository and push a `.forge/workflow.yml`, and that was not
+  possible.** `pre-receive` accepts a write to the default branch from the platform's own merge
+  and nothing else, and a credential is scoped to one branch which is never that one. There was
+  no push that would have been accepted. Work reaches the default branch one way — a branch, read
+  and merged — and bootstrapping is not an exception to it, which is why a conversation is the
+  answer rather than a special case in the hook.
 - The ticket form resolves the chosen project's workflow *before* the operator types anything,
   and says plainly when there is none. A form that accepts a title and a body and then rejects
   them for a reason in a third place is the failure being avoided.
@@ -251,6 +309,32 @@ versions with the code it governs. What the page shows is the *repository's curr
 the one the **next** ticket will pin — which is not necessarily the one the board is arranged by,
 because every ticket on that board pinned its own at admission. On a project whose workflow has
 just changed those differ, and saying which is which is the point rather than a detail.
+
+**It lists the project's conversations, live ones first.** The board is the workflow and a
+conversation is not on it — it has no state to be in — so without this a chat is a thing you can
+start from the page and then cannot find from the page. Live first because that is the one that
+is costing something and holding a machine; the rest are a record, and are folded away once there
+are more than a handful of them.
+
+## Project settings
+
+`/projects/:name/settings` is where a project's credentials are issued and seen, reached from
+the project page. It exists because the product sent the operator to a terminal: the project
+page hands out a clone URL and says to push a workflow, and `mix forge.git.token` was the only
+way to get the credential for either.
+
+**A token is shown once and then only described.** Only the hash is kept, exactly as for the
+worker token and the operator's API tokens, so the row afterwards can say what a token may do
+and when it was last used but never what it is. The one-time display is the same shape as the
+create view's clone URL: the moment it is useful is the moment it is on screen.
+
+What a row shows is its *capability*, not its identity: the ref it may write, or that it may only
+read; when it expires; when it was last used; and whether a job holds it. A token minted for a
+job is listed and never offered for revocation by hand — the engine revokes it when the job ends,
+and a human revoking one mid-run would fail that job for a reason nothing records.
+
+Expired and revoked rows stay, behind the same disclosure the workers page uses for destroyed
+machines. They are the audit trail: what was issued, to what scope, and whether it was ever used.
 
 ## The workers page
 

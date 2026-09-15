@@ -42,6 +42,10 @@ defmodule ForgeWorker.Job.Runner do
   @eof_grace_ms :timer.seconds(5)
   @max_line 4 * 1024 * 1024
 
+  # Cannot collide with a message: every line the runner writes to a streaming harness is JSON,
+  # so a line that is not JSON is not a message.
+  @close_sentinel "__FORGE_CLOSE__"
+
   # -- API ----------------------------------------------------------------------------------
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
@@ -54,13 +58,51 @@ defmodule ForgeWorker.Job.Runner do
   @spec cancel(pid()) :: :ok
   def cancel(pid), do: GenServer.cast(pid, :cancel)
 
+  @doc """
+  Sends a user message to a streaming harness. The harness queues it if a turn is in flight and
+  echoes it when it takes it, so `:ok` means written, not answered.
+
+  `{:error, :closed}` when the process is already gone, which is a conversation whose machine
+  was lost rather than a message worth retrying.
+  """
+  @spec send_message(pid(), String.t()) :: :ok | {:error, :closed | :unsupported}
+  def send_message(pid, text) when is_binary(text),
+    do: GenServer.call(pid, {:send_message, text})
+
+  @doc """
+  Ends the turn in flight, leaving the process running. The turn it cuts is reported as
+  interrupted rather than as the error the harness calls it.
+  """
+  @spec interrupt(pid()) :: :ok | {:error, :closed | :unsupported}
+  def interrupt(pid), do: GenServer.call(pid, :interrupt)
+
+  @doc """
+  Closes the harness's stdin, which is how a conversation ends: the process sees EOF and exits
+  on its own, so nothing is signalled and the last turn is not cut short.
+  """
+  @spec close(pid()) :: :ok | {:error, :closed | :unsupported}
+  def close(pid), do: GenServer.call(pid, :close)
+
   # -- lifecycle ----------------------------------------------------------------------------
 
   @impl true
   def init(opts) do
     spec = Keyword.fetch!(opts, :spec)
     harness = Keyword.get(opts, :harness, ForgeWorker.Harness.ClaudeCode)
+    mode = Keyword.get(Keyword.get(opts, :harness_opts, []), :mode, :prompt)
 
+    # Refused here rather than discovered later: a harness that cannot take streaming input
+    # starts perfectly well and then ignores every message, which looks like a conversation
+    # that has stopped answering. This is the first caller `capabilities/0` has ever had.
+    if mode == :streaming and not Map.get(harness.capabilities(), :streaming_input, false) do
+      {:stop, {:unsupported, :streaming_input}}
+    else
+      {state, continue} = start_state(opts, spec, harness, mode)
+      {:ok, state, continue}
+    end
+  end
+
+  defp start_state(opts, spec, harness, mode) do
     # A session to resume is what makes this a continuation of an earlier attempt rather than
     # a fresh one, and so what decides whether `out/` is kept or cleared.
     resume? = Keyword.get(Keyword.get(opts, :harness_opts, []), :resume_session) != nil
@@ -72,6 +114,8 @@ defmodule ForgeWorker.Job.Runner do
       spec: spec,
       job_dir: job_dir,
       harness: harness,
+      mode: mode,
+      owner: Keyword.get(opts, :owner),
       sink: Keyword.get(opts, :sink, fn _ -> :ok end),
       grace_ms: Keyword.get(opts, :grace_ms, @default_grace_ms),
       port: nil,
@@ -80,6 +124,11 @@ defmodule ForgeWorker.Job.Runner do
       transcript: File.open!(transcript_path, [:write, :binary]),
       finished_event: nil,
       started_event: nil,
+      # A conversation produces one of these per turn. `finished_event` is the latest, which is
+      # what the result is built from; `turns` is how many there have been, which is what tells
+      # a second turn from a first.
+      turns: 0,
+      interrupting: nil,
       killed: nil,
       exit_status: nil,
       slice: nil,
@@ -95,7 +144,7 @@ defmodule ForgeWorker.Job.Runner do
       Keyword.get(opts, :wall_clock_ms, @default_wall_clock_ms)
     )
 
-    {:ok, state, {:continue, {:spawn, opts}}}
+    {state, {:continue, {:spawn, opts}}}
   end
 
   @impl true
@@ -157,22 +206,55 @@ defmodule ForgeWorker.Job.Runner do
         :eof,
         {:line, @max_line},
         {:args,
-         ["-c", wrapper(secrets), "forge-job", Dir.prompt_path(job_dir), Dir.stderr_path(job_dir)] ++
-           assignments ++ [executable | args]},
+         [
+           "-c",
+           wrapper(secrets, state.mode),
+           "forge-job",
+           Dir.prompt_path(job_dir),
+           Dir.stderr_path(job_dir)
+         ] ++ assignments ++ [executable | args]},
         {:cd, Keyword.fetch!(opts, :worktree)},
         {:env, Enum.map(secrets, fn {k, v} -> {String.to_charlist(k), String.to_charlist(v)} end)}
       ])
 
-    %{state | port: port}
+    state = %{state | port: port}
+
+    # The prompt is composed the same way for both modes and written to the same file; in
+    # streaming mode it goes down the pipe as the first message instead of being redirected in.
+    case state.mode do
+      :streaming -> deliver(state, File.read!(Dir.prompt_path(job_dir)))
+      :prompt -> state
+    end
   end
 
   # The shell reads the prompt into stdin, sends stderr to its file, and `exec`s `env -i`
   # with only the assignments we pass as arguments plus the secrets forwarded by name from
   # its own environment. `exec` keeps the wrapper the process group leader we signal.
-  defp wrapper(secrets) do
-    forwarded = Enum.map_join(secrets, " ", fn {k, _} -> ~s(${#{k}+"#{k}=$#{k}"}) end)
+  #
+  # **In streaming mode the prompt redirect is omitted, and that is the whole point.** `<"$prompt"`
+  # replaces the port's stdin pipe with a regular file already at EOF, so a harness started that
+  # way can never be written to — the pipe Erlang holds is discarded before the process starts.
+  # A conversation keeps the pipe and gets its first message through `Port.command/2` like every
+  # message after it, which also means there is one path for the first turn and the rest.
+  defp wrapper(secrets, :prompt) do
+    ~s(prompt="$1"; stderr="$2"; shift 2; exec /usr/bin/env -i #{forwarded(secrets)} "$@" <"$prompt" 2>"$stderr")
+  end
 
-    ~s(prompt="$1"; stderr="$2"; shift 2; exec /usr/bin/env -i #{forwarded} "$@" <"$prompt" 2>"$stderr")
+  # Ending a conversation is stdin reaching EOF — the harness exits cleanly on it and a turn in
+  # flight is allowed to finish, which signalling would cut short. BEAM cannot do that itself:
+  # `:erlang` offers `port_close/1` and no half-close, so closing stdin would close stdout with
+  # it and lose the last turn's output. The relay supplies the EOF instead — it forwards every
+  # line and exits on the sentinel, which the child sees as the pipe closing. `fflush` is what
+  # keeps it a relay rather than a buffer.
+  defp wrapper(secrets, :streaming) do
+    relay = "awk '/^" <> @close_sentinel <> "$/{exit} {print; fflush()}'"
+
+    ~s(stderr="$2"; shift 2; ) <>
+      relay <> ~s( | exec /usr/bin/env -i #{forwarded(secrets)} "$@" 2>"$stderr")
+  end
+
+  defp forwarded(secrets) do
+    Enum.map_join(secrets, " ", fn {k, _} -> ~s(${#{k}+"#{k}=$#{k}"}) end)
   end
 
   defp split_env(env) do
@@ -203,6 +285,30 @@ defmodule ForgeWorker.Job.Runner do
     do: {:noreply, %{state | waiters: [from | state.waiters]}}
 
   def handle_call(:await, _from, %{result: result} = state), do: {:reply, {:ok, result}, state}
+
+  def handle_call(_request, _from, %{mode: :prompt} = state),
+    do: {:reply, {:error, :unsupported}, state}
+
+  def handle_call({:send_message, text}, _from, state) do
+    {:reply, write(state, state.harness.encode_message(text)), state}
+  end
+
+  def handle_call(:interrupt, _from, state) do
+    request_id = "forge-" <> Integer.to_string(state.turns + 1)
+
+    case write(state, state.harness.encode_interrupt(request_id)) do
+      :ok -> {:reply, :ok, %{state | interrupting: request_id}}
+      error -> {:reply, error, state}
+    end
+  end
+
+  # Closing stdin is the whole of it: the spike measured that the harness exits cleanly on EOF,
+  # so there is nothing to signal and a turn in flight is allowed to finish.
+  def handle_call(:close, _from, %{port: port} = state) when is_port(port) do
+    {:reply, close_stdin(port), state}
+  end
+
+  def handle_call(:close, _from, state), do: {:reply, {:error, :closed}, state}
 
   @impl true
   def handle_cast(:cancel, state), do: {:noreply, kill(state, :operator)}
@@ -239,6 +345,12 @@ defmodule ForgeWorker.Job.Runner do
     if state.slice, do: state.slice.cleanup(state.slice_context)
     result = conclude(state)
     Enum.each(state.waiters, &GenServer.reply(&1, {:ok, result}))
+
+    # A conversation's owner is not blocked on `await/1` — it has been handling turns all
+    # along — so the result is sent to it rather than only left for a caller that will never
+    # arrive. It goes before the stop, so it is in the mailbox ahead of the exit signal.
+    if state.mode == :streaming, do: notify(state, {:ended, state.spec.job_id, result})
+
     {:stop, :normal, %{state | result: result, waiters: []}}
   end
 
@@ -251,6 +363,30 @@ defmodule ForgeWorker.Job.Runner do
   end
 
   def handle_info(:force_kill, state), do: {:noreply, state}
+
+  # Writing to a port whose process has gone raises rather than returning an error, and a
+  # conversation whose machine was lost is exactly the case that reaches here — so the failure
+  # is turned into a value the caller can report instead of one that takes the runner with it.
+  defp write(%{port: port}, iodata) when is_port(port) do
+    Port.command(port, iodata)
+    :ok
+  rescue
+    ArgumentError -> {:error, :closed}
+  end
+
+  defp write(_state, _iodata), do: {:error, :closed}
+
+  defp deliver(state, text) do
+    write(state, state.harness.encode_message(text))
+    state
+  end
+
+  defp close_stdin(port) do
+    Port.command(port, [@close_sentinel, "\n"])
+    :ok
+  rescue
+    ArgumentError -> {:error, :closed}
+  end
 
   # Concluding needs both the exit status and `:eof`. A child that outlived the harness can hold
   # the output pipe open, in which case the status arrives and `:eof` never does; the backstop
@@ -280,11 +416,36 @@ defmodule ForgeWorker.Job.Runner do
     end
 
     case type do
-      "finished" -> %{state | finished_event: event}
+      "finished" -> finished(state, event)
       "started" -> %{state | started_event: event}
       _ -> state
     end
   end
+
+  # A turn ended. In prompt mode there is exactly one and this is the end of the run; in
+  # streaming mode there is one per turn and the process carries on, so the count is kept and
+  # the owner is told. `finished_event` holds the latest rather than the first — the run's
+  # result is built from the last thing the harness said, not the first.
+  defp finished(state, event) do
+    state = %{state | finished_event: event, turns: state.turns + 1}
+
+    if state.mode == :streaming do
+      notify(state, {:turn, state.spec.job_id, state.turns, label(state, event)})
+      %{state | interrupting: nil}
+    else
+      state
+    end
+  end
+
+  # An interrupted turn reports `error_during_execution` with a null result — exactly what a
+  # genuine execution error reports, which the spike measured. Only this process knows it asked
+  # for the interrupt, so only this process can say so; left to the payload, an operator's own
+  # Stop renders in their conversation as a failure. See `docs/design/conversations.md` § Turns.
+  defp label(%{interrupting: nil}, event), do: event
+  defp label(_state, event), do: put_in(event.payload[:interrupted], true)
+
+  defp notify(%{owner: nil}, _message), do: :ok
+  defp notify(%{owner: owner}, message), do: send(owner, message)
 
   # -- ending -------------------------------------------------------------------------------
 
@@ -292,8 +453,13 @@ defmodule ForgeWorker.Job.Runner do
     signal(port, "TERM")
     Process.send_after(self(), :force_kill, state.grace_ms)
     # A harness that already produced its result finished on its own; the signal only
-    # hurries the exit and must not relabel the outcome.
-    if state.finished_event, do: state, else: %{state | killed: reason}
+    # hurries the exit and must not relabel the outcome. That holds for a single-turn run,
+    # where a result means the work is done — but a conversation produces one every turn and is
+    # not finished by any of them, so after turn one a cancel would silently stop being recorded
+    # as a cancel. In streaming mode the reason is always kept.
+    if state.finished_event && state.mode == :prompt,
+      do: state,
+      else: %{state | killed: reason}
   end
 
   defp kill(state, _reason), do: state
@@ -344,6 +510,17 @@ defmodule ForgeWorker.Job.Runner do
       harness: harness_summary(started, finished, state.exit_status)
     }
 
+    decide(state, spec, run, base)
+  end
+
+  # A conversation has no outcome, ever, and nothing asks it for one: there is no state to leave
+  # and no transition to select. Running `Outcome.decide/2` over it would invent a `declared`
+  # from the last turn's document and hand the engine something to act on — see
+  # `docs/design/conversations.md` § Shape, where the guard against exactly that is described as
+  # belonging at the one place jobs complete.
+  defp decide(%{mode: :streaming}, _spec, _run, base), do: base
+
+  defp decide(_state, spec, run, base) do
     case Outcome.decide(spec, run) do
       {:waiting, questions} ->
         %{base | status: :waiting, questions: questions}

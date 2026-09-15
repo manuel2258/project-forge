@@ -60,6 +60,22 @@ defmodule Forge.MergeTest do
       assert message =~ "Ticket: #{Tickets.project_of(ticket).name}##{ticket.number}"
     end
 
+    # The author is who approved; the committer is the platform, and is *stated* rather than
+    # left to git. `commit-tree` with no committer falls back to the host's passwd entry and
+    # hostname — a different commit on every host, and no commit at all where there is neither,
+    # which is precisely the container image (`docs/deploy.md` § In a container), where git
+    # fails with "unable to auto-detect email address".
+    test "the committer is the platform, stated rather than taken from the host", context do
+      %{ticket: ticket, bare: bare, user: user} = context
+      sha = commit_on_branch(context, "feature.txt", "the change")
+      changeset!(ticket, sha)
+
+      {:ok, %{sha: merged}} = Merge.perform(ticket, user)
+      {:ok, who} = Git.run(bare, ["show", "--no-patch", "--format=%cn <%ce>|%an", merged])
+
+      assert String.trim(who) == "forge <forge@localhost>|#{user.email}"
+    end
+
     test "is idempotent", context do
       %{ticket: ticket, bare: bare} = context
       sha = commit_on_branch(context, "feature.txt", "the change")
@@ -216,4 +232,100 @@ defmodule Forge.MergeTest do
   end
 
   defp event_types(ticket), do: ticket.id |> Events.for_ticket() |> Enum.map(& &1.type)
+
+  describe "a conversation's branch" do
+    setup %{project: project} do
+      {:ok, chat} = Forge.Conversations.open(project, "have a look at this")
+      %{chat: chat}
+    end
+
+    defp commit_on_chat(project, chat, path, content) do
+      repo = Forge.Projects.repo_path(project)
+      branch = Forge.Jobs.chat_branch(chat)
+      work = tmp_dir("chat-work")
+      {_out, 0} = System.cmd("git", ["clone", "--quiet", "--branch", branch, repo, work])
+      File.write!(Path.join(work, path), content)
+
+      # FORGE_INTERNAL because this stands in for the worker, which pushes with a token scoped
+      # to exactly this ref. The hook refuses an uncredentialed push, which is the point of it.
+      for args <- [
+            ["config", "user.name", "chat"],
+            ["config", "user.email", "chat@forge"],
+            ["add", "."],
+            ["commit", "--quiet", "-m", "from the conversation"],
+            ["push", "--quiet", "origin", "HEAD:refs/heads/" <> branch]
+          ] do
+        {_out, 0} =
+          System.cmd("git", ["-C", work] ++ args,
+            stderr_to_stdout: true,
+            env: [{"FORGE_INTERNAL", "1"}]
+          )
+      end
+
+      {:ok, head} = Git.resolve(repo, "refs/heads/" <> branch)
+      head
+    end
+
+    test "merges into the default branch by the same route a ticket takes", context do
+      %{project: project, chat: chat, bare: bare, user: user} = context
+      head = commit_on_chat(project, chat, "NOTES.md", "from a conversation\n")
+
+      assert {:ok, %{sha: sha, already: false}} = Merge.perform_chat(chat, user)
+
+      {:ok, default} = Git.resolve(bare, "refs/heads/main")
+      assert default == sha
+      assert Git.ancestor?(bare, head, default)
+      assert {:ok, "from a conversation\n"} = Git.show(bare, sha, "NOTES.md")
+    end
+
+    # The pin is what keeps the merged commit reachable. Deleting the branch before it exists
+    # would leave the commit collectable in between, and "the branch is deleted when done" would
+    # quietly mean the work was too.
+    test "the branch is gone afterwards, and the commit is still reachable", context do
+      %{project: project, chat: chat, bare: bare, user: user} = context
+      head = commit_on_chat(project, chat, "NOTES.md", "keep me\n")
+
+      assert {:ok, _result} = Merge.perform_chat(chat, user)
+
+      refute Git.branch_exists?(bare, Forge.Jobs.chat_branch(chat))
+      assert {:ok, ^head} = Git.resolve(bare, "refs/forge/chat/#{chat.id}")
+    end
+
+    test "a conflicting change is refused, naming the paths", context do
+      %{project: project, chat: chat, bare: bare, user: user} = context
+
+      # The default branch moves under the conversation, on the same file.
+      commit_on_chat(project, chat, "README.md", "the conversation's version\n")
+      work = tmp_dir("main-work")
+      {_out, 0} = System.cmd("git", ["clone", "--quiet", bare, work])
+      File.write!(Path.join(work, "README.md"), "someone else's version\n")
+
+      for args <- [
+            ["config", "user.name", "other"],
+            ["config", "user.email", "other@forge"],
+            ["add", "."],
+            ["commit", "--quiet", "-m", "meanwhile"],
+            ["push", "--quiet", "origin", "HEAD:refs/heads/main"]
+          ] do
+        {_out, 0} =
+          System.cmd("git", ["-C", work] ++ args,
+            stderr_to_stdout: true,
+            env: [{"FORGE_INTERNAL", "1"}]
+          )
+      end
+
+      assert {:conflict, paths} = Merge.perform_chat(chat, user)
+      assert "README.md" in paths
+
+      # And the branch stays: there is nothing merged for the pin to protect.
+      assert Git.branch_exists?(bare, Forge.Jobs.chat_branch(chat))
+    end
+
+    test "a conversation that changed nothing is already merged", context do
+      %{chat: chat, user: user} = context
+
+      assert Merge.merged_chat?(chat)
+      assert {:ok, %{already: true}} = Merge.perform_chat(chat, user)
+    end
+  end
 end

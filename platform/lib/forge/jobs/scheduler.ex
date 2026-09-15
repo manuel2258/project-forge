@@ -24,8 +24,12 @@ defmodule Forge.Jobs.Scheduler do
 
   @impl true
   def init(_opts) do
-    recovered = Jobs.recover()
-    if recovered > 0, do: Logger.info("re-queued #{recovered} interrupted job(s)")
+    # **Recovery is a boot, not a restart.** This used to run here, which meant any crash in a
+    # scheduling pass took every *running* conversation with it: the supervisor restarts this
+    # process, `recover/0` runs again, and a chat that was mid-reply on a healthy worker goes
+    # dormant. A workflow job survived that — it went back to pending and was scheduled again —
+    # so the cost was invisible until conversations existed. It is `Forge.Application`'s now, and
+    # happens once per node.
 
     # This is the process that owns the repositories on this node's filesystem, so it is where
     # the generated hooks are brought up to date — a rule that only ever reached repositories
@@ -69,7 +73,18 @@ defmodule Forge.Jobs.Scheduler do
     end)
   end
 
+  # A job that raises on its way to a worker is one job's problem. Left to crash the scheduler it
+  # is every job's and every conversation's, because the restart recovers the node — see `init/1`.
   defp assign(job, worker) do
+    do_assign(job, worker)
+  rescue
+    error ->
+      Logger.error("assigning job #{job.id} raised: #{Exception.message(error)}")
+      Jobs.fail(job.id, {:assign_raised, Exception.message(error)})
+      0
+  end
+
+  defp do_assign(job, worker) do
     case Jobs.assign(job, worker) do
       {:ok, _job} ->
         1

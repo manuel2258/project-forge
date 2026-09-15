@@ -10,10 +10,15 @@ defmodule Forge.Jobs.Job do
 
   @statuses [:pending, :running, :waiting, :hibernated, :finished]
   @outcomes [:converged, :did_not_converge, :budget_exhausted, :error, :cancelled]
+  @kinds [:workflow, :chat]
 
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id
   schema "jobs" do
+    field :kind, Ecto.Enum, values: @kinds, default: :workflow
+    # A conversation's model, chosen when it was opened. A workflow job has none: its model is
+    # its state's, which is in the pinned workflow rather than on the row.
+    field :model, :string
     field :state, :string
     field :attempt, :integer
     field :spec, :map
@@ -27,6 +32,9 @@ defmodule Forge.Jobs.Job do
     field :finished_at, :utc_datetime
 
     belongs_to :ticket, Forge.Tickets.Ticket
+    # A workflow job reaches its project through its ticket, but a project chat has no ticket;
+    # without this there is nothing to clone and no project to schedule it for.
+    belongs_to :project, Forge.Projects.Project
     belongs_to :parent_job, __MODULE__
     belongs_to :worker, Forge.Workers.Worker
     has_many :events, Forge.Events.Event
@@ -38,17 +46,55 @@ defmodule Forge.Jobs.Job do
 
   def statuses, do: @statuses
   def outcomes, do: @outcomes
+  def kinds, do: @kinds
 
-  @doc "Changeset for creating a job. The spec is immutable from here on."
+  @doc """
+  Changeset for creating a job. The spec is immutable from here on.
+
+  What is required depends on the kind, and the database says the same thing in a CHECK
+  constraint: a workflow job has a ticket, a state and a spec; a chat has a project and none of
+  them. Two statements of one rule, because a changeset can be bypassed and a constraint cannot.
+  """
   def create_changeset(job, attrs) do
     job
-    |> cast(attrs, [:ticket_id, :state, :attempt, :parent_job_id, :spec, :worker_id])
-    |> validate_required([:ticket_id, :state, :attempt, :spec])
+    |> cast(attrs, [
+      :kind,
+      :ticket_id,
+      :project_id,
+      :state,
+      :attempt,
+      :parent_job_id,
+      :spec,
+      :worker_id,
+      :model
+    ])
+    |> validate_required([:kind, :project_id, :attempt])
+    |> validate_shape()
     |> validate_number(:attempt, greater_than: 0)
     |> foreign_key_constraint(:ticket_id)
+    |> foreign_key_constraint(:project_id)
     |> foreign_key_constraint(:parent_job_id)
     |> foreign_key_constraint(:worker_id)
     |> unique_constraint([:ticket_id, :state, :attempt])
+    |> check_constraint(:kind, name: :jobs_kind_shape)
+  end
+
+  defp validate_shape(changeset) do
+    case get_field(changeset, :kind) do
+      :chat -> validate_absent(changeset, [:state, :spec])
+      _workflow -> validate_required(changeset, [:ticket_id, :state, :spec])
+    end
+  end
+
+  # A chat with a state would be a chat the timeline draws as a visit to it, and a chat with a
+  # spec would be a chat the engine can read a budget and an outcome list out of.
+  defp validate_absent(changeset, fields) do
+    Enum.reduce(fields, changeset, fn field, changeset ->
+      case get_field(changeset, field) do
+        nil -> changeset
+        _value -> add_error(changeset, field, "belongs to a workflow job, not a conversation")
+      end
+    end)
   end
 
   @doc "Changeset for everything that may change after creation. Never touches the spec."
@@ -69,6 +115,16 @@ defmodule Forge.Jobs.Job do
     |> validate_number(:turns, greater_than_or_equal_to: 0)
     |> validate_number(:cost_usd, greater_than_or_equal_to: 0)
     |> validate_outcome_only_when_finished()
+  end
+
+  # A conversation is over when a person is done with it, and that is not an outcome: there is no
+  # state it left and no transition it selects. "Finished" means over; "outcome" is a workflow
+  # word, and a chat carrying one would be a chat the engine could act on.
+  defp validate_outcome_only_when_finished(%{data: %{kind: :chat}} = changeset) do
+    case get_field(changeset, :outcome) do
+      nil -> changeset
+      _outcome -> add_error(changeset, :outcome, "a conversation has no outcome")
+    end
   end
 
   defp validate_outcome_only_when_finished(changeset) do

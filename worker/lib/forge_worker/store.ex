@@ -18,8 +18,7 @@ defmodule ForgeWorker.Store do
     Req.put(
       url,
       options(
-        params: [token: token],
-        headers: [{"content-type", "application/octet-stream"}],
+        headers: [{"content-type", "application/octet-stream"} | bearer(token)],
         body: File.stream!(path, 1024 * 1024),
         retry: :transient
       )
@@ -31,6 +30,10 @@ defmodule ForgeWorker.Store do
     end
   end
 
+  # In a header and not the query string: a URL reaches every proxy log on the path. The rule is
+  # `docs/design/storage.md` § The token is a header, and it is the channel's rule too.
+  defp bearer(token), do: [{"authorization", "Bearer " <> token}]
+
   # Tests point Req at a plug instead of the network; nothing else sets this.
   defp options(opts),
     do: Keyword.merge(opts, Application.get_env(:forge_worker, :req_options, []))
@@ -41,7 +44,7 @@ defmodule ForgeWorker.Store do
     url = URI.parse(platform_url) |> URI.append_path("/store/" <> key) |> URI.to_string()
     File.mkdir_p!(Path.dirname(path))
 
-    Req.get(url, options(params: [token: token], into: File.stream!(path), retry: :transient))
+    Req.get(url, options(headers: bearer(token), into: File.stream!(path), retry: :transient))
     |> case do
       {:ok, %{status: 200}} -> :ok
       {:ok, %{status: status, body: body}} -> {:error, {status, body}}

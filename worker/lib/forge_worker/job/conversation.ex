@@ -1,0 +1,444 @@
+defmodule ForgeWorker.Job.Conversation do
+  @moduledoc """
+  One running conversation on this worker: the worktree, the long-lived harness process, and a
+  commit per turn. `docs/design/conversations.md` is the standard.
+
+  A workflow job runs in a task that blocks on `Runner.await/1` and does everything else once,
+  afterwards — prepare, run, commit, report, discard. A conversation cannot be written that way,
+  because it has no afterwards until a person says so: it must commit while it is still running,
+  and it must take messages in the meantime.
+
+  So this is a process rather than a task, and it is the runner's owner: it hears every turn end,
+  commits what the turn wrote, and tells the link. It also holds the git work, which is why it
+  exists at all — the link is one process for the whole worker, and a push on the channel process
+  is a push that stops every other job's events for as long as it takes.
+
+  It is the first user of `ForgeWorker.Job.Supervisor`, which was declared when the worker was
+  written and never started anything.
+  """
+
+  use GenServer, restart: :temporary
+
+  alias ForgeCore.Job.Result
+  alias ForgeWorker.Config
+  alias ForgeWorker.Job.{Dir, Runner, Workspace}
+  alias ForgeWorker.Store
+
+  require Logger
+
+  # Long enough to think, short enough that a conversation nobody closed does not hold the
+  # machine all night. The platform sends its own; this is the fallback.
+  @default_idle_ms :timer.minutes(30)
+
+  def start_link(opts),
+    do: GenServer.start_link(__MODULE__, opts, name: via(Keyword.fetch!(opts, :assignment)))
+
+  @doc "The process running this conversation, if it is on this worker."
+  @spec whereis(String.t()) :: pid() | nil
+  def whereis(job_id) do
+    case Registry.lookup(ForgeWorker.Job.Registry, job_id) do
+      [{pid, _value}] -> pid
+      [] -> nil
+    end
+  end
+
+  @doc "Sends a message. `id` is the platform's, and comes back with the delivery."
+  @spec send_message(pid(), String.t(), String.t()) :: :ok
+  def send_message(pid, id, text), do: GenServer.cast(pid, {:message, id, text})
+
+  @doc "Ends the turn in flight, keeping the process."
+  @spec interrupt(pid()) :: :ok
+  def interrupt(pid), do: GenServer.cast(pid, :interrupt)
+
+  @doc "Ends the conversation: stdin closes, the last turn finishes, the machine is released."
+  @spec close(pid(), String.t()) :: :ok
+  def close(pid, reason \\ "closed"), do: GenServer.cast(pid, {:close, reason})
+
+  defp via(assignment), do: {:via, Registry, {ForgeWorker.Job.Registry, assignment["job_id"]}}
+
+  # -- lifecycle ----------------------------------------------------------------------------
+
+  @impl true
+  def init(opts) do
+    assignment = Keyword.fetch!(opts, :assignment)
+    # The runner is linked, and its ending is the conversation's ending rather than a crash.
+    Process.flag(:trap_exit, true)
+
+    {:ok,
+     %{
+       link: Keyword.fetch!(opts, :link),
+       root: Keyword.fetch!(opts, :root),
+       assignment: assignment,
+       job_id: assignment["job_id"],
+       worktree: nil,
+       runner: nil,
+       turns: 0,
+       # The platform's ids for messages written but not yet taken by the harness, oldest
+       # first. The harness echoes the text and not the id, so the queue is the correlation:
+       # it takes them in the order they were written. The prompt is the first of them, sent
+       # by the runner itself.
+       pending: [:prompt],
+       idle_ms: Keyword.get(opts, :idle_ms) || assignment["idle_ms"] || @default_idle_ms,
+       idle_timer: nil,
+       closing: nil,
+       result: nil
+     }, {:continue, :start}}
+  end
+
+  # Anything that goes wrong starting up is a conversation that failed, reported as one. A
+  # workflow job runs in a task with a catch-all around it for exactly this reason; this is a
+  # process, so it needs its own. Without it a preparation that *raises* rather than returning
+  # an error — a root that does not exist, a disk that is full — leaves the platform believing
+  # the conversation is running, for ever, with a worker's slice held against it.
+  @impl true
+  def handle_continue(:start, state) do
+    case Workspace.prepare(state.assignment, state.root) do
+      {:ok, worktree} ->
+        write_history(state)
+        start_runner(%{state | worktree: worktree})
+
+      {:error, reason} ->
+        report_failed(state, "could not prepare the worktree: #{inspect(reason)}")
+        {:stop, :normal, state}
+    end
+  rescue
+    error ->
+      report_failed(state, Exception.format(:error, error, __STACKTRACE__))
+      {:stop, :normal, state}
+  end
+
+  defp start_runner(state) do
+    case Runner.start_link(runner_opts(state)) do
+      {:ok, runner} ->
+        send(state.link, {:runner, state.job_id, runner})
+        {:noreply, reset_idle(%{state | runner: runner})}
+
+      {:error, reason} ->
+        report_failed(state, "could not start the harness: #{inspect(reason)}")
+        {:stop, :normal, state}
+    end
+  end
+
+  # What already ran on this ticket, laid out as a folder the agent can read: a metadata document
+  # per job and, beside it, that job's transcript fetched from the store.
+  #
+  # Written before the runner starts, because `Dir.prepare/3` clears `inputs/` and `out/` and
+  # nothing else — and because the first message is delivered the moment the harness opens, so a
+  # folder written afterwards is a folder that might not be there when it is looked for.
+  #
+  # A transcript that will not fetch costs a line in a file, not the conversation: it is context,
+  # and the conversation is worth having without it.
+  # The directory is named after the **spec's** job id, because that is what `Dir.prepare/3`
+  # names it after. The assignment carries an id too and in production they are the same value,
+  # so writing this beside the assignment's worked — by coincidence. A test whose fixture gave
+  # the two different ids found it: the folder was written where the harness would never look.
+  defp write_history(%{assignment: assignment, job_id: job_id} = state) do
+    case assignment["history"] || [] do
+      [] ->
+        :ok
+
+      entries ->
+        base = Path.join([job_dir(state), "history"])
+        File.mkdir_p!(base)
+        Enum.each(entries, &write_entry(base, &1))
+        Logger.info("chat #{state.job_id}: wrote #{length(entries)} job(s) of history")
+    end
+  rescue
+    error -> Logger.warning("chat #{job_id}: could not write the history: #{inspect(error)}")
+  end
+
+  defp job_dir(%{assignment: assignment, root: root}) do
+    spec = ForgeCore.Job.Spec.from_map(assignment["spec"])
+    Path.join([root, "jobs", spec.job_id])
+  end
+
+  defp write_entry(base, entry) do
+    case contained(base, entry["dir"]) do
+      {:ok, dir} ->
+        File.mkdir_p!(dir)
+        File.write!(Path.join(dir, "job.md"), entry["metadata"] || "")
+        maybe_fetch(dir, entry["transcript"])
+
+      :error ->
+        Logger.warning("chat history: refusing #{inspect(entry["dir"])}, which leaves the folder")
+    end
+  end
+
+  # The name comes over the channel and is joined to a path, so it is checked against the same
+  # model the write uses: expanded, then required to be under the folder. A check on the string
+  # — "does it contain ..?" — is a different model from the one `File.write!` follows, and
+  # CLAUDE.md says that is the trap.
+  defp contained(base, name) when is_binary(name) do
+    base = Path.expand(base)
+    dir = Path.expand(Path.join(base, name))
+
+    if dir != base and String.starts_with?(dir, base <> "/"), do: {:ok, dir}, else: :error
+  end
+
+  defp contained(_base, _name), do: :error
+
+  defp maybe_fetch(dir, %{"key" => key, "token" => token}), do: fetch_transcript(dir, key, token)
+  defp maybe_fetch(_dir, _none), do: :ok
+
+  defp fetch_transcript(dir, key, token) do
+    path = Path.join(dir, "transcript.jsonl")
+
+    case Store.fetch(Config.platform_url(), key, token, path) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        File.write!(path <> ".missing", "could not fetch #{key}: #{inspect(reason)}\n")
+    end
+  end
+
+  defp runner_opts(state) do
+    me = self()
+    assignment = state.assignment
+    slice = assignment["slice"] || %{}
+    spec = ForgeCore.Job.Spec.from_map(assignment["spec"])
+
+    harness_opts =
+      Application.get_env(:forge_worker, :harness_opts, [])
+      |> Keyword.put(:mode, :streaming)
+      |> put_max_cost(assignment)
+      |> put_model(spec)
+
+    [
+      spec: spec,
+      root: Path.join(state.root, "jobs"),
+      worktree: state.worktree,
+      owner: me,
+      # Events go through here rather than straight to the link, because a delivery has to be
+      # matched to the message it delivers before the platform can be told which one it was.
+      sink: fn event -> send(me, {:harness_event, event}) end,
+      slice_opts: %{memory_max: slice["memory_max"], cpu_weight: slice["cpu_weight"]},
+      harness_opts: harness_opts,
+      # A conversation is bounded by going idle, not by the clock: a chat someone is still in
+      # is not a runaway. The wall clock stays as a backstop, far out.
+      wall_clock_ms: assignment["wall_clock_ms"] || :timer.hours(24),
+      nix_env: Application.get_env(:forge_worker, :nix_env, true),
+      extra_env: Application.get_env(:forge_worker, :extra_env, []) ++ git_env(assignment)
+    ]
+  end
+
+  # What is left of the day, decided by the platform and passed through. A turn is refused by
+  # the harness at this ceiling rather than by us afterwards — see § Spend.
+  defp put_max_cost(opts, %{"max_cost_usd" => cost}) when is_number(cost),
+    do: Keyword.put(opts, :max_cost, cost)
+
+  defp put_max_cost(opts, _assignment), do: opts
+
+  # The model the conversation was opened with, or the project's — resolved by the platform,
+  # which knows both. A spec that names none leaves the machine's alone.
+  defp put_model(opts, %ForgeCore.Job.Spec{model: model}) when is_binary(model),
+    do: Keyword.put(opts, :model, model)
+
+  defp put_model(opts, _spec), do: opts
+
+  defp git_env(%{"git" => %{"url" => url, "token" => token}}) when is_binary(token),
+    do: [{"FORGE_GIT_URL", url}, {"FORGE_GIT_TOKEN", {:secret, token}}]
+
+  defp git_env(_assignment), do: []
+
+  # -- what the operator asks for -------------------------------------------------------------
+
+  @impl true
+  def handle_cast({:message, id, text}, state) do
+    case Runner.send_message(state.runner, text) do
+      :ok ->
+        {:noreply, reset_idle(%{state | pending: state.pending ++ [id]})}
+
+      {:error, reason} ->
+        Logger.warning("chat #{state.job_id} could not take a message: #{inspect(reason)}")
+        {:noreply, state}
+    end
+  end
+
+  def handle_cast(:interrupt, state) do
+    Runner.interrupt(state.runner)
+    {:noreply, state}
+  end
+
+  def handle_cast({:close, reason}, state) do
+    Runner.close(state.runner)
+    {:noreply, %{state | closing: reason}}
+  end
+
+  # -- what the harness says ------------------------------------------------------------------
+
+  @impl true
+  def handle_info({:harness_event, %{type: "job.harness.delivered"} = event}, state) do
+    {id, pending} = take_pending(state.pending)
+
+    # The prompt's own echo is not a message anyone is waiting on, so it is not reported as one.
+    if is_binary(id) do
+      send(state.link, {:event, state.job_id, delivery_event(event, id)})
+    end
+
+    {:noreply, %{state | pending: pending}}
+  end
+
+  def handle_info({:harness_event, event}, state) do
+    send(state.link, {:event, state.job_id, event})
+    {:noreply, state}
+  end
+
+  # A turn ended: commit what it wrote before saying it happened, for the same reason a job
+  # pushes before it reports — the platform records the branch head as the changeset the moment
+  # it hears from us, and work that is not on the branch is work that was lost.
+  def handle_info({:turn, _job_id, index, event}, state) do
+    head = commit_turn(state, index)
+
+    send(
+      state.link,
+      {:chat_turn, state.job_id, index,
+       %{
+         "job_id" => state.job_id,
+         "turn" => index,
+         "commit" => head,
+         "interrupted" => event.payload[:interrupted] == true,
+         "harness" => turn_summary(event)
+       }}
+    )
+
+    {:noreply, %{state | turns: index}}
+  end
+
+  def handle_info({:ended, _job_id, result}, state), do: {:noreply, %{state | result: result}}
+
+  def handle_info({:EXIT, runner, _reason}, %{runner: runner} = state) do
+    {:stop, :normal, finish(state)}
+  end
+
+  def handle_info(:idle, state) do
+    Logger.info("chat #{state.job_id} went idle; releasing the machine")
+    Runner.close(state.runner)
+    {:noreply, %{state | closing: "idle"}}
+  end
+
+  def handle_info(message, state) do
+    Logger.debug("conversation ignored #{inspect(message)}")
+    {:noreply, state}
+  end
+
+  # -- ending ---------------------------------------------------------------------------------
+
+  # The harness is gone. What is left is what a job's task does after `await`: get the
+  # transcript off the machine, give the worktree back, and report.
+  defp finish(state) do
+    # The runner sends its result before it stops, so it is already here. A conversation whose
+    # machine died mid-turn has none, and reports what it can rather than nothing.
+    result = upload_transcript(state.result || %Result{status: :finished}, state.assignment)
+
+    send(
+      state.link,
+      {:terminal, state.job_id, "hibernated",
+       %{
+         "job_id" => state.job_id,
+         "reason" => state.closing || "ended",
+         "commit" => head(state),
+         "turns" => state.turns,
+         "result" => Result.to_map(result)
+       }}
+    )
+
+    Workspace.discard(state.assignment, state.root)
+    Dir.sweep(Path.join(state.root, "jobs"), job_retention_ms())
+    state
+  end
+
+  defp report_failed(state, reason) do
+    send(
+      state.link,
+      {:terminal, state.job_id, "failed", %{"job_id" => state.job_id, "reason" => reason}}
+    )
+  end
+
+  # -- the work -------------------------------------------------------------------------------
+
+  # One commit per turn, and they accumulate: `Checkout.squash/3` resets to `origin/<branch>`,
+  # and pushing moves that remote-tracking ref, so turn two is built on turn one rather than
+  # replacing it. That was measured before it was relied on, because the opposite reading —
+  # every turn rewriting the last into a single amended commit — is equally plausible from the
+  # code and would silently lose each turn's history.
+  defp commit_turn(state, index) do
+    case Workspace.commit_and_push(state.assignment, state.worktree, commit_message(state, index)) do
+      {:ok, head} ->
+        head
+
+      {:error, reason} ->
+        Logger.warning("chat #{state.job_id} could not commit turn #{index}: #{inspect(reason)}")
+        nil
+    end
+  end
+
+  defp commit_message(state, index),
+    do: "chat: turn #{index}\n\nConversation #{state.job_id}.\n"
+
+  defp head(%{worktree: nil}), do: nil
+
+  defp head(state) do
+    case ForgeWorker.Checkout.head(state.worktree) do
+      {:ok, head} -> head
+      _other -> nil
+    end
+  end
+
+  defp take_pending([]), do: {nil, []}
+  defp take_pending([id | rest]), do: {id, rest}
+
+  defp delivery_event(event, id) do
+    %{event | type: "job.harness.delivered", payload: Map.put(event.payload, :message_id, id)}
+  end
+
+  # String keys: this crosses the channel as JSON, and an atom key here arrives as a string key
+  # there. The same trap `harness_summary/3` already carries a comment about.
+  defp turn_summary(event) do
+    payload = event.payload
+
+    %{
+      "session_id" => payload[:session_id],
+      "subtype" => payload[:subtype],
+      "is_error" => payload[:is_error],
+      "turns" => payload[:num_turns],
+      "cost_usd" => payload[:total_cost_usd],
+      "duration_ms" => payload[:duration_ms],
+      "usage" => payload[:usage],
+      "result" => payload[:result]
+    }
+  end
+
+  defp reset_idle(state) do
+    if state.idle_timer, do: Process.cancel_timer(state.idle_timer)
+    %{state | idle_timer: Process.send_after(self(), :idle, state.idle_ms)}
+  end
+
+  defp upload_transcript(%Result{transcript_path: nil} = result, _assignment), do: result
+
+  defp upload_transcript(%Result{} = result, assignment) do
+    store = assignment["store"] || %{}
+
+    if is_nil(Config.platform_url()) or is_nil(store["transcript_key"]) do
+      result
+    else
+      case Store.put(
+             Config.platform_url(),
+             store["transcript_key"],
+             store["transcript_token"],
+             result.transcript_path
+           ) do
+        {:ok, _info} -> %{result | transcript: store["transcript_key"]}
+        {:error, reason} -> log_transcript(result, reason)
+      end
+    end
+  end
+
+  defp log_transcript(result, reason) do
+    Logger.warning("could not upload the transcript: #{inspect(reason)}")
+    result
+  end
+
+  defp job_retention_ms,
+    do: Application.get_env(:forge_worker, :job_retention_ms, 7 * 24 * 60 * 60 * 1000)
+end

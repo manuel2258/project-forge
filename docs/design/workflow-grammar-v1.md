@@ -4,6 +4,14 @@ Scope: the subset of the RFC sketch that milestone 1 executes. Blocks, fan-out, 
 experiments are not in v1 and are rejected by the validator if present, so nothing silently
 half-works.
 
+**This file is compiled into the release.** `ForgeCore.Workflow` reads it at compile time and
+serves it as `grammar/0` — a conversation asked to bootstrap a project is handed *this note*
+rather than a copy of it, because a copy would drift from the validator the first time either
+changed and the copy is what the agent would read. Two consequences worth knowing before you
+touch it: editing it rebuilds `forge_core` and everything downstream, and moving or renaming it
+breaks the build rather than a link. It is named in `flake.nix`'s `embeddedDocs` for exactly
+that reason — the build sandbox has no `docs/` unless a file is listed there.
+
 ## Location
 
 `.forge/workflow.yml` in the project repository. Prompts referenced by the file live under
@@ -35,6 +43,7 @@ states:
   implementing:
     prompt: agents/implement.md
     env: implement
+    model: opus                       # optional; falls back to the project's, then the machine's
     inputs: [plan.md]
     produces: [implementation.md, changeset]   # notes on what was done, and the diff
     outcomes: [done, plan_invalid]
@@ -150,6 +159,37 @@ job.
 **Environment.** `env` is a devShell name in the project's `flake.nix`; the job runs inside
 `nix develop .#<env>`. Absent `env` means no toolchain beyond the harness.
 
+**Model.** `model` names the model this state's job runs on — `opus`, `sonnet`, `haiku`, or a
+full id. It is optional, and what fills the gap is a chain: the state's, then the project's, then
+whatever the machine was built with.
+
+It is per state because states differ in what they need. Refining a ticket into prose and
+implementing it across twenty files are not the same problem, and a workflow that cannot say so
+pays for the larger model on every state or accepts the smaller one everywhere.
+
+**Not validated against a list of models.** Model names change faster than this file, and a
+validator that knew them would reject a workflow naming a model released last week — refusing
+work for being newer than the platform. What is checked is that it is a non-empty string. A name
+the harness does not recognise fails the job, visibly, with the harness's own message, which is a
+better error than one the platform invents from a stale list.
+
+**The product offers a list; the grammar still does not.** Workers report the models their
+credential may use (`docs/design/worker-channel.md` § What a worker offers), so a surface where a
+person picks a model is a dropdown of what is connected now — the four aliases the harness
+resolves, and the model ids the credential may use. That list is discovered on every worker join
+rather than written down here, which is what dissolves the staleness objection above: a model
+released last week is in it as soon as a worker connects.
+
+The dropdown appears **only when there is something to put in it.** With no worker connected there
+is nothing to discover, and the field is free text — otherwise configuring a project before
+starting a machine would be impossible, which is the order a new operator does it in. A value
+already set that the fleet no longer offers stays selectable rather than being silently dropped,
+for the same reason: the worker that has it may be asleep rather than gone.
+
+Parsing this file reaches no worker at all — `forge_core` has no network and no database — so the
+rule above is what the grammar checks, and it is unchanged. A workflow may name any model; only
+the form has a list.
+
 ## Pinning
 
 At admission the engine reads `.forge/workflow.yml` at the ticket's base commit, validates
@@ -160,7 +200,8 @@ file do not affect that ticket. Re-pinning is a human action and not in v1.
 
 - `version` is `1`; `initial` names a job state; every state name is unique.
 - A job state has `prompt` and `budget`. A human state has no `prompt`, `env`, `inputs`,
-  `produces`, `outcomes` or `budget`; `on_enter` is the one key it may carry.
+  `produces`, `outcomes`, `budget` or `model`; `on_enter` is the one key it may carry.
+- `model`, where present, is a non-empty string. Its value is not checked against anything.
 - State and artifact names are single path segments: letters, digits, `.`, `_`, `-`.
 - Every `inputs` entry is `ticket` or produced by a state that can run before the consumer; every
 `produces` entry other than `changeset` is produced by exactly one state. `ticket` is never

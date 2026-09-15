@@ -25,7 +25,12 @@ defmodule Forge.Projects do
          # A bare repository `git init` made points HEAD at whatever git's default is, which a
          # worker's `clone --branch <default>` then cannot find. Harmless while the platform
          # cloned on its own disk; not harmless once the clone comes over the wire.
-         :ok <- Git.ensure_head(Path.expand(project.repo_path), project.default_branch) do
+         :ok <- Git.ensure_head(Path.expand(project.repo_path), project.default_branch),
+         # And a commit on it. Everything the platform does starts from the default branch — a
+         # ticket's base, a conversation's branch, a merge's destination — and `pre-receive`
+         # lets nothing but the platform's own merge write it, so no push could create it.
+         :ok <-
+           Git.ensure_initial_commit(Path.expand(project.repo_path), project.default_branch) do
       Multi.new()
       |> Multi.insert(:project, changeset)
       |> Events.log(:event, "project.registered", :system, fn %{project: project} ->
@@ -58,21 +63,67 @@ defmodule Forge.Projects do
   def repo_path(%Project{repo_path: path}), do: Path.expand(path)
 
   @doc """
-  Reinstalls the hooks in every registered repository. Called at boot, so a change to a rule
-  reaches repositories that already exist rather than new ones only.
+  Reinstalls the hooks in every registered repository, and gives any repository with an unborn
+  default branch its first commit. Called at boot, so a change to a rule reaches repositories
+  that already exist rather than new ones only.
+
+  The second half is here for exactly the reason the first is. Registering a project writes an
+  empty root commit, but a project registered *before* that existed still has nothing on its
+  default branch — and everything starts from that branch, so a chat or a ticket on one fails
+  with a ref error. Fixing it only on the way in would leave every project that already exists
+  broken for ever, since nothing outside the platform may write that branch.
   """
   @spec ensure_hooks() :: non_neg_integer()
   def ensure_hooks do
     Enum.count(list(), fn project ->
-      case Hooks.install(repo_path(project), project) do
-        :ok ->
-          true
+      path = repo_path(project)
 
-        {:error, reason} ->
-          Logger.error("could not install hooks in #{project.name}: #{inspect(reason)}")
-          false
+      with :ok <- install_hooks(project, path),
+           :ok <- ensure_branch(project, path) do
+        true
+      else
+        _error -> false
       end
     end)
+  end
+
+  defp install_hooks(project, path) do
+    case Hooks.install(path, project) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("could not install hooks in #{project.name}: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  defp ensure_branch(project, path) do
+    case Git.ensure_initial_commit(path, project.default_branch) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("could not start #{project.name}'s default branch: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  @doc """
+  Sets the project's default model, or clears it when given nothing.
+
+  Cleared is not "no model": it is the machine's, which is the platform-wide setting. The value
+  is not checked against a list of models — see `docs/design/workflow-grammar-v1.md` § Model.
+  """
+  @spec set_model(Project.t(), String.t() | nil) :: {:ok, Project.t()} | {:error, term()}
+  def set_model(%Project{} = project, model) do
+    with {:ok, project} <- project |> Project.changeset(%{model: model}) |> Repo.update() do
+      Events.append("project.model_set", :system, %{
+        payload: %{"project" => project.name, "model" => project.model}
+      })
+
+      {:ok, project}
+    end
   end
 
   @doc """

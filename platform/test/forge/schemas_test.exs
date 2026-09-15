@@ -42,6 +42,7 @@ defmodule Forge.SchemasTest do
       changeset =
         Job.create_changeset(%Job{}, %{
           ticket_id: job.ticket_id,
+          project_id: job.project_id,
           state: job.state,
           attempt: 1,
           spec: %{}

@@ -16,7 +16,7 @@ defmodule ForgeWeb.ProjectLive do
   import ForgeWeb.Indicators
   import ForgeWeb.Operator.Components
 
-  alias Forge.{Events, Projects, Tickets}
+  alias Forge.{Conversations, Events, Projects, Tickets}
   alias Forge.Git.Url
   alias ForgeCore.Workflow
   alias ForgeWeb.Format
@@ -49,6 +49,9 @@ defmodule ForgeWeb.ProjectLive do
       waiting: Enum.count(tickets, &(&1.status == :stuck)),
       spent: Enum.reduce(tickets, Decimal.new(0), &Decimal.add(&2, &1.cost_usd)),
       events: Events.for_project(project.id, 8),
+      # The board is the workflow, and a conversation is not on it — it has no state to be in.
+      # Without this a chat is a thing you can start from this page and then cannot find from it.
+      chats: Conversations.summaries(project_id: project.id),
       paused: Forge.Spend.paused?(),
       now: DateTime.utc_now()
     )
@@ -103,10 +106,22 @@ defmodule ForgeWeb.ProjectLive do
         </span>
         <.paused :if={@paused} reason="spend" />
         <.link
-          navigate={~p"/tickets/new?project=#{@project.name}"}
+          navigate={~p"/projects/#{@project.name}/settings"}
           class="ml-auto flex min-h-[46px] items-center text-sm text-primary hover:underline"
         >
+          Settings ›
+        </.link>
+        <.link
+          navigate={~p"/tickets/new?project=#{@project.name}"}
+          class="flex min-h-[46px] items-center text-sm text-primary hover:underline"
+        >
           New ticket ›
+        </.link>
+        <.link
+          navigate={~p"/chats/new?project=#{@project.name}"}
+          class="flex min-h-[46px] items-center text-sm text-primary hover:underline"
+        >
+          New chat ›
         </.link>
       </header>
 
@@ -189,13 +204,31 @@ defmodule ForgeWeb.ProjectLive do
               </tr>
             </tbody>
           </table>
+
+          <section class="mt-10">
+            <div class="flex flex-wrap items-baseline justify-between gap-3">
+              <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
+                Conversations
+              </h2>
+              <.link
+                navigate={~p"/chats/new?project=#{@project.name}"}
+                class="flex min-h-[46px] items-center text-sm text-primary hover:underline"
+              >
+                New chat ›
+              </.link>
+            </div>
+
+            <ForgeWeb.Conversations.list
+              summaries={@chats}
+              now={@now}
+              project={false}
+              empty="None yet. A chat is for the work that does not fit a ticket."
+            />
+          </section>
         </div>
 
         <aside class="lg:w-[21rem] lg:shrink-0 lg:border-l lg:border-base-300 lg:pl-8">
-          <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Repository</h2>
-          <div class="mt-3 rounded-box bg-base-200 px-3 py-2">
-            <p class="font-mono text-[12.5px] break-all">{@clone_url}</p>
-          </div>
+          <.copyable id="clone-url" value={@clone_url} label="Repository" />
           <dl class="mt-3 flex flex-col gap-2 text-[12.5px]">
             <.fact label="default branch">{@project.default_branch}</.fact>
             <.fact label="mirror">{@mirror || "none"}</.fact>

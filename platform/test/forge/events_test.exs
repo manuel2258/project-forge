@@ -35,6 +35,7 @@ defmodule Forge.EventsTest do
         :job,
         Forge.Jobs.Job.create_changeset(%Forge.Jobs.Job{}, %{
           ticket_id: ticket.id,
+          project_id: ticket.project_id,
           state: "refining",
           attempt: 1,
           spec: %{}

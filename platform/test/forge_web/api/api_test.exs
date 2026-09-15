@@ -109,7 +109,13 @@ defmodule ForgeWeb.ApiTest do
 
   # A project registered but not yet pushed to is a client mistake, not a platform fault:
   # docs/design/api-and-ui.md lists 400/401/404/409/422 as the error statuses.
-  test "admitting against a repository with no commits is a client error", %{conn: conn} do
+  #
+  # It used to fail as `unknown_ref` naming `main`, because a fresh repository's default branch
+  # was unborn. Registering now puts an empty commit there — everything starts from that branch
+  # and nothing outside the platform may write it — so the ref resolves and the operator is told
+  # the thing that is actually wrong: there is no workflow. A git-level ref error was a true
+  # statement about the wrong layer.
+  test "admitting against a repository with no workflow is a client error", %{conn: conn} do
     {:ok, %{name: name}} =
       Projects.register(%{
         name: "empty-#{System.unique_integer([:positive])}",
@@ -121,10 +127,8 @@ defmodule ForgeWeb.ApiTest do
       |> post(~p"/api/v1/projects/#{name}/tickets", %{title: "Nowhere to run"})
       |> json_response(422)
 
-    # The detail names the ref that could not be resolved, rather than assuming which one it
-    # was: `Git.resolve/2` is also called with a ticket's own branch.
-    assert %{"error" => %{"reason" => "unknown_ref"}} = response
-    assert response["error"]["detail"] =~ "main"
+    assert %{"error" => %{"reason" => "no_workflow_file"}} = response
+    assert response["error"]["detail"] =~ ".forge/workflow.yml"
   end
 
   test "identifies the user and lists projects", %{conn: conn, user: user, project: project} do

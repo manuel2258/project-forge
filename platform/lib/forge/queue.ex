@@ -9,14 +9,22 @@ defmodule Forge.Queue do
 
   require Logger
 
-  alias Forge.{Artifacts, Repo, Tickets}
+  alias Forge.{Artifacts, Conversations, Projects, Repo, Tickets}
   alias Forge.Artifacts.Question
+  alias Forge.Jobs.Job
   alias Forge.Tickets.Ticket
   alias ForgeCore.Workflow
 
+  @typedoc """
+  One thing waiting on a person.
+
+  `ticket` is nil for a conversation about a project, which is why every reader of this has to
+  take a project of its own rather than reaching through the ticket.
+  """
   @type item :: %{
-          kind: :question | :approval | :stuck | :review,
-          ticket: Ticket.t(),
+          kind: :question | :approval | :stuck | :review | :chat,
+          ticket: Ticket.t() | nil,
+          project: Projects.Project.t(),
           since: DateTime.t(),
           question: Question.t() | nil,
           detail: map()
@@ -27,8 +35,41 @@ defmodule Forge.Queue do
     tickets =
       Repo.all(from t in Ticket, where: t.status in [:active, :stuck], order_by: t.inserted_at)
 
-    (questions(tickets) ++ Enum.flat_map(tickets, &ticket_items/1))
+    (questions(tickets) ++ Enum.flat_map(tickets, &ticket_items/1) ++ chats())
     |> Enum.sort_by(& &1.since, DateTime)
+  end
+
+  # A conversation waiting on a person is literally what the queue is for: something that will
+  # not move until someone acts. It is in the queue only while it is waiting — a chat mid-reply
+  # is not waiting on you, it is working (`docs/design/conversations.md` § In the queue).
+  defp chats do
+    Repo.all(
+      from j in Job,
+        where: j.kind == :chat and j.status in ^Conversations.live_statuses()
+    )
+    |> Enum.flat_map(&chat_item/1)
+  end
+
+  defp chat_item(%Job{} = chat) do
+    case Conversations.messages(chat.id) do
+      [] ->
+        []
+
+      messages ->
+        last = List.last(messages)
+        if last.role == :assistant, do: [waiting_chat(chat, last)], else: []
+    end
+  end
+
+  defp waiting_chat(%Job{} = chat, last) do
+    %{
+      kind: :chat,
+      ticket: chat.ticket_id && Tickets.get!(chat.ticket_id),
+      project: Projects.get!(chat.project_id),
+      since: last.at,
+      question: nil,
+      detail: %{chat_id: chat.id, text: last.text, question: Conversations.question(last)}
+    }
   end
 
   defp questions(tickets) do
@@ -42,6 +83,7 @@ defmodule Forge.Queue do
         %{
           kind: :question,
           ticket: by_id[ticket.id],
+          project: Projects.get!(ticket.project_id),
           since: question.inserted_at,
           question: question,
           detail: %{key: question.key, text: question.text}
@@ -55,6 +97,7 @@ defmodule Forge.Queue do
       %{
         kind: :stuck,
         ticket: ticket,
+        project: Projects.get!(ticket.project_id),
         since: ticket.updated_at,
         question: nil,
         detail: %{
@@ -67,7 +110,16 @@ defmodule Forge.Queue do
   end
 
   defp ticket_items(%Ticket{pending_transition: pending} = ticket) when is_map(pending) do
-    [%{kind: :approval, ticket: ticket, since: ticket.updated_at, question: nil, detail: pending}]
+    [
+      %{
+        kind: :approval,
+        ticket: ticket,
+        project: Projects.get!(ticket.project_id),
+        since: ticket.updated_at,
+        question: nil,
+        detail: pending
+      }
+    ]
   end
 
   defp ticket_items(%Ticket{} = ticket) do
@@ -86,6 +138,7 @@ defmodule Forge.Queue do
         %{
           kind: :review,
           ticket: ticket,
+          project: Projects.get!(ticket.project_id),
           since: ticket.updated_at,
           question: nil,
           detail: %{

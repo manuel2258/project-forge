@@ -13,6 +13,10 @@ defmodule ForgeWeb.WorkerChannelTest do
   alias ForgeCore.Job.Result
   alias ForgeWeb.{WorkerChannel, WorkerSocket}
 
+  # The credential travels in the handshake's headers, which Phoenix surfaces as `x_headers`.
+  defp bearer(token),
+    do: [connect_info: %{x_headers: [{"x-forge-worker-token", token}]}]
+
   setup do
     {:ok, worker, token} = Workers.create(%{provider: "local"})
 
@@ -24,7 +28,7 @@ defmodule ForgeWeb.WorkerChannelTest do
   end
 
   defp connect_worker(worker, token) do
-    {:ok, socket} = connect(WorkerSocket, %{"worker_id" => worker.id, "token" => token})
+    {:ok, socket} = connect(WorkerSocket, %{"worker_id" => worker.id}, bearer(token))
     socket
   end
 
@@ -56,23 +60,33 @@ defmodule ForgeWeb.WorkerChannelTest do
 
   describe "connecting" do
     test "a worker with its own token gets in", %{worker: worker, token: token} do
-      assert {:ok, socket} = connect(WorkerSocket, %{"worker_id" => worker.id, "token" => token})
+      assert {:ok, socket} = connect(WorkerSocket, %{"worker_id" => worker.id}, bearer(token))
       assert socket.assigns.worker_id == worker.id
     end
 
     test "a wrong, missing or malformed token does not", %{worker: worker, token: token} do
-      assert :error = connect(WorkerSocket, %{"worker_id" => worker.id, "token" => "nope"})
+      assert :error = connect(WorkerSocket, %{"worker_id" => worker.id}, bearer("nope"))
       assert :error = connect(WorkerSocket, %{"worker_id" => worker.id})
-      assert :error = connect(WorkerSocket, %{"token" => token})
+      assert :error = connect(WorkerSocket, %{}, bearer(token))
+
+      # No query-parameter fallback: a URL reaches every proxy log on the path, and this token
+      # is long lived. docs/design/worker-channel.md § Authentication.
+      assert :error = connect(WorkerSocket, %{"worker_id" => worker.id, "token" => token})
+
+      # And nothing else in the header is a credential.
+      assert :error =
+               connect(WorkerSocket, %{"worker_id" => worker.id},
+                 connect_info: %{x_headers: [{"x-forge-worker-token", ""}]}
+               )
 
       {:ok, other, _other_token} = Workers.create(%{provider: "local"})
-      assert :error = connect(WorkerSocket, %{"worker_id" => other.id, "token" => token})
+      assert :error = connect(WorkerSocket, %{"worker_id" => other.id}, bearer(token))
     end
 
     test "a destroyed worker does not, even with a valid token", %{worker: worker, token: token} do
       {:ok, _worker} = Workers.status(worker, :destroyed)
 
-      assert :error = connect(WorkerSocket, %{"worker_id" => worker.id, "token" => token})
+      assert :error = connect(WorkerSocket, %{"worker_id" => worker.id}, bearer(token))
     end
   end
 
@@ -109,6 +123,28 @@ defmodule ForgeWeb.WorkerChannelTest do
                Workers.get!(worker.id)
 
       assert seen
+    end
+
+    # The `harness` half of that same message, which is how the platform learns which models
+    # exist at all — it holds no credential and cannot ask for itself.
+    test "ready records what its harness offers", %{worker: worker, token: token} do
+      {:ok, _reply, socket} = join_worker(worker, token)
+
+      ref =
+        push(socket, "ready", %{
+          "memory_budget" => 8_000_000_000,
+          "harness" => %{
+            "driver" => "claude_code",
+            "version" => "2.1.220",
+            "login" => "ok",
+            "models" => [%{"id" => "claude-opus-5", "name" => "Claude Opus 5"}]
+          }
+        })
+
+      assert_reply ref, :ok
+
+      assert Workers.get!(worker.id).harness["version"] == "2.1.220"
+      assert Workers.models() == [%{id: "claude-opus-5", name: "Claude Opus 5"}]
     end
 
     test "heartbeat says we are still here", %{worker: worker, token: token} do

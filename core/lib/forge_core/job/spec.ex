@@ -12,8 +12,40 @@ defmodule ForgeCore.Job.Spec do
   alias ForgeCore.Job.Spec.Input
   alias ForgeCore.Workflow
 
-  @enforce_keys [
+  # A conversation has no state, no outcomes and no budget of its own, so the keys a workflow
+  # job must have cannot be enforced by the struct any more. They are enforced by `validate/1`
+  # instead, at the one place a workflow spec is built — which is a weaker guarantee than the
+  # compiler's and is why it is called rather than merely available.
+  #
+  # The alternative was a second struct, and it was rejected because a union type would then have
+  # to be threaded through `Dir.prepare/3`, `Dir.collect/2`, `Prompt.compose/2`, `Slice.prepare/1`
+  # and the whole wire format, to distinguish two things that are the same job everywhere else.
+  @enforce_keys [:job_id, :branch]
+  defstruct [
     :job_id,
+    :ticket,
+    :state,
+    :attempt,
+    :prompt,
+    :prompt_path,
+    :env,
+    # What this job runs on, already resolved: the state's model, else the project's, else nil
+    # for whatever the machine was built with. The worker does not re-decide it — the platform
+    # knows the state and the project, and the machine knows neither.
+    :model,
+    :commit,
+    :branch,
+    :budget,
+    :preamble_hash,
+    kind: :workflow,
+    inputs: [],
+    produces: [],
+    outcomes: ["done"],
+    permitted_children: [],
+    answered_keys: []
+  ]
+
+  @workflow_keys [
     :ticket,
     :state,
     :attempt,
@@ -24,33 +56,17 @@ defmodule ForgeCore.Job.Spec do
     :commit,
     :branch
   ]
-  defstruct [
-    :job_id,
-    :ticket,
-    :state,
-    :attempt,
-    :prompt,
-    :prompt_path,
-    :env,
-    :commit,
-    :branch,
-    :budget,
-    :preamble_hash,
-    inputs: [],
-    produces: [],
-    outcomes: ["done"],
-    permitted_children: [],
-    answered_keys: []
-  ]
 
   @type t :: %__MODULE__{
           job_id: String.t(),
-          ticket: %{number: pos_integer(), title: String.t()},
-          state: String.t(),
-          attempt: pos_integer(),
-          prompt: String.t(),
+          kind: :workflow | :chat,
+          ticket: %{number: pos_integer(), title: String.t()} | nil,
+          state: String.t() | nil,
+          attempt: pos_integer() | nil,
+          prompt: String.t() | nil,
           prompt_path: String.t() | nil,
           env: String.t() | nil,
+          model: String.t() | nil,
           commit: String.t(),
           branch: String.t(),
           budget: %{turns: pos_integer(), cost: number()},
@@ -110,15 +126,17 @@ defmodule ForgeCore.Job.Spec do
 
     %__MODULE__{
       job_id: get.(:job_id),
-      ticket: %{number: nested(get.(:ticket), :number), title: nested(get.(:ticket), :title)},
+      kind: kind(get.(:kind)),
+      ticket: ticket_from_map(get.(:ticket)),
       state: get.(:state),
       attempt: get.(:attempt),
       prompt: get.(:prompt),
       prompt_path: get.(:prompt_path),
       env: get.(:env),
+      model: get.(:model),
       commit: get.(:commit),
       branch: get.(:branch),
-      budget: %{turns: nested(get.(:budget), :turns), cost: nested(get.(:budget), :cost)},
+      budget: budget_from_map(get.(:budget)),
       preamble_hash: get.(:preamble_hash),
       inputs: Enum.map(get.(:inputs) || [], &input_from_map/1),
       produces: get.(:produces) || [],
@@ -126,6 +144,38 @@ defmodule ForgeCore.Job.Spec do
       permitted_children: get.(:permitted_children) || [],
       answered_keys: get.(:answered_keys) || []
     }
+  end
+
+  # A conversation's spec carries no ticket and no budget, and a round trip must give back the
+  # nil rather than a map of nils — `%{number: nil, title: nil}` is truthy, and every `if
+  # spec.ticket` downstream would take the wrong branch.
+  defp ticket_from_map(nil), do: nil
+  defp ticket_from_map(map), do: %{number: nested(map, :number), title: nested(map, :title)}
+
+  defp budget_from_map(nil), do: nil
+  defp budget_from_map(map), do: %{turns: nested(map, :turns), cost: nested(map, :cost)}
+
+  defp kind(nil), do: :workflow
+  defp kind("chat"), do: :chat
+  defp kind("workflow"), do: :workflow
+  defp kind(kind) when is_atom(kind), do: kind
+
+  @doc """
+  Checks that a workflow spec has everything a workflow job needs, now that the struct cannot.
+
+  Called where a spec is built, not where one is read: a spec that reaches the worker incomplete
+  is a job that fails on the machine after a credential has been minted and a slice made.
+  """
+  @spec validate(t()) :: :ok | {:error, [atom()]}
+  def validate(%__MODULE__{kind: :chat} = spec) do
+    if spec.job_id && spec.branch, do: :ok, else: {:error, [:job_id, :branch]}
+  end
+
+  def validate(%__MODULE__{} = spec) do
+    case Enum.filter(@workflow_keys, &is_nil(Map.fetch!(spec, &1))) do
+      [] -> :ok
+      missing -> {:error, missing}
+    end
   end
 
   defp input_from_map(map) do

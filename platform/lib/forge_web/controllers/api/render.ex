@@ -108,15 +108,28 @@ defmodule ForgeWeb.Api.Render do
     }
   end
 
-  def queue_item(%{kind: kind, ticket: t, since: since} = item, project_name) do
+  def queue_item(%{kind: kind, since: since} = item, project_name) do
     %{
       kind: kind,
-      ticket: "#{project_name}##{t.number}",
-      title: t.title,
-      state: t.state,
       since: since,
       question: item.question && question(item.question),
       detail: item.detail
+    }
+    |> Map.merge(queue_subject(item.ticket, project_name))
+  end
+
+  # A conversation about a project has no ticket, no title of its own and no state. Naming the
+  # project is what an API client has to go on, and inventing the other three would be a lie
+  # that reads exactly like a ticket.
+  defp queue_subject(nil, project_name),
+    do: %{ticket: nil, title: nil, state: nil, project: project_name}
+
+  defp queue_subject(ticket, project_name) do
+    %{
+      ticket: "#{project_name}##{ticket.number}",
+      title: ticket.title,
+      state: ticket.state,
+      project: project_name
     }
   end
 

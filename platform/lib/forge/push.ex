@@ -10,6 +10,7 @@ defmodule Forge.Push do
   import Ecto.Query, only: [from: 2]
 
   alias Forge.Accounts.User
+  alias Forge.Jobs.Job
   alias Forge.Projects
   alias Forge.Push.Subscription
   alias Forge.Queue
@@ -70,6 +71,36 @@ defmodule Forge.Push do
         title: "Question on #{label}",
         body: question.text,
         url: "/tickets/#{project.name}/#{ticket.number}",
+        tag: tag
+      },
+      ttl: 86_400,
+      urgency: :high,
+      topic: topic(tag)
+    )
+  end
+
+  @doc """
+  Pushes a conversation's completed reply.
+
+  **Every completed reply pushes**, not every token: a turn ending is the event. This is a
+  deliberate widening of `docs/decisions.md`'s "push notification for blocking questions,
+  everything else digested" — a reply to a question you asked is the same shape of thing as an
+  answer you are owed, and the product's premise is that you asked it from a train platform.
+  See `docs/design/conversations.md` § In the queue, and on the phone.
+
+  Tagged per conversation rather than per turn, so a chat you are having replaces its own
+  notification instead of stacking one per exchange.
+  """
+  @spec chat_reply(Job.t(), String.t() | nil) :: :ok
+  def chat_reply(%Job{kind: :chat} = chat, text) do
+    project = Projects.get!(chat.project_id)
+    tag = "chat-#{chat.id}"
+
+    deliver(
+      %{
+        title: "Reply on #{project.name}",
+        body: String.slice(text || "It replied.", 0, 200),
+        url: "/chats/#{chat.id}",
         tag: tag
       },
       ttl: 86_400,

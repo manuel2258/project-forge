@@ -49,6 +49,39 @@ defmodule ForgeWeb.WorkersLiveTest do
     assert html =~ "0 connected"
   end
 
+  # A machine minted without a working credential joins, reports ready, and then fails every job
+  # it is given with *Not logged in*. The probe at `ready` is what makes that visible before the
+  # first job instead of after it — docs/design/worker-channel.md § What a worker offers.
+  test "a worker that is not logged in says so before it is given work", %{conn: conn} do
+    w = worker()
+
+    {:ok, _w} =
+      Workers.ready(w, 6 * 1024 * 1024 * 1024, %{
+        "name" => "Claude Code",
+        "version" => "2.1.220",
+        "login" => "invalid",
+        "models" => []
+      })
+
+    {:ok, _view, html} = live(conn, ~p"/workers")
+
+    assert html =~ "Claude Code"
+    assert html =~ "2.1.220"
+    assert html =~ "login invalid"
+  end
+
+  # A worker running a release older than the probe reports no harness at all, and is still a
+  # worker: the column shows a dash rather than the page failing to render.
+  test "a worker that reported no harness still renders", %{conn: conn} do
+    w = worker()
+    {:ok, _w} = Workers.ready(w, 6 * 1024 * 1024 * 1024)
+
+    {:ok, _view, html} = live(conn, ~p"/workers")
+
+    assert html =~ String.slice(w.id, 0, 8)
+    refute html =~ "login"
+  end
+
   test "a connected worker is shown as connected", %{conn: conn} do
     w = worker()
     {:ok, _w} = Workers.ready(w, 6 * 1024 * 1024 * 1024)

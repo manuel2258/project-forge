@@ -16,7 +16,7 @@ defmodule ForgeWeb.QueueLive do
 
   import ForgeWeb.Operator.Components
 
-  alias Forge.{Artifacts, Events, Projects, Push, Queue, Tickets}
+  alias Forge.{Artifacts, Conversations, Events, Push, Queue, Tickets}
   alias ForgeCore.Workflow
   alias ForgeWeb.Format
   alias ForgeWeb.Operator.Actions
@@ -33,11 +33,9 @@ defmodule ForgeWeb.QueueLive do
   end
 
   defp load(socket) do
-    projects = Map.new(Projects.list(), &{&1.id, &1.name})
-
     items =
       Queue.items()
-      |> Enum.map(&Map.put(&1, :project, projects[&1.ticket.project_id]))
+      |> Enum.map(&Map.put(&1, :project, &1.project.name))
       |> group()
       |> Enum.map(&decorate/1)
 
@@ -104,7 +102,10 @@ defmodule ForgeWeb.QueueLive do
 
   defp put_approve(item), do: Map.put(item, :approve, [])
 
-  # A ticket carries its own pinned workflow; one that no longer parses has no topology to read.
+  # A ticket carries its own pinned workflow; one that no longer parses has no topology to read,
+  # and a conversation has no workflow at all.
+  defp topology(nil), do: :unknown
+
   defp topology(ticket) do
     case Tickets.parsed_workflow(ticket) do
       {:ok, workflow} -> Board.topology(workflow, ticket.state)
@@ -114,6 +115,23 @@ defmodule ForgeWeb.QueueLive do
 
   @impl true
   def handle_info({:ticket_changed, _id}, socket), do: {:noreply, load(socket)}
+
+  # Answering from the queue sends the choice as the next message, exactly as answering from the
+  # conversation does. Nothing is written to `answers`: the transcript is already the record.
+  def handle_event("chat:answer", %{"chat" => id, "choice" => choice}, socket) do
+    case Conversations.send(Conversations.get!(id), choice) do
+      {:ok, _event} ->
+        {:noreply, load(socket)}
+
+      # The queue lists only live conversations, so this is the race rather than the rule: it
+      # ended between the page rendering and the tap. Reloading drops the item.
+      {:error, :not_live} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "That conversation stopped before the answer reached it.")
+         |> load()}
+    end
+  end
 
   @impl true
   def handle_event("push:subscribe", %{"endpoint" => _} = subscription, socket) do
@@ -162,12 +180,6 @@ defmodule ForgeWeb.QueueLive do
               "item"
             )}
           </span>
-          <.link
-            navigate={~p"/tickets/new"}
-            class="flex min-h-[46px] items-center px-2 text-sm text-primary hover:underline"
-          >
-            New ticket ›
-          </.link>
           <button
             :if={@push_key}
             id="push-toggle"
@@ -191,10 +203,7 @@ defmodule ForgeWeb.QueueLive do
                 affordance begins. A whole-card link would put an answer row inside a link and
                 make "read this" and "approve this" the same gesture — see docs/design/ui.md
                 § The affordance rule. --%>
-          <.link
-            navigate={~p"/tickets/#{item.project}/#{item.ticket.number}"}
-            class="flex flex-col gap-[11px]"
-          >
+          <.link navigate={destination(item)} class="flex flex-col gap-[11px]">
             <div class="flex items-start justify-between gap-4">
               <div class="flex items-center gap-2">
                 <.mark kind={item.kind} />
@@ -235,7 +244,10 @@ defmodule ForgeWeb.QueueLive do
             transitions={transitions(item)}
           />
 
+          <.chat_answer :if={item.kind == :chat} item={item} />
+
           <.identifiers
+            :if={item.ticket}
             project={item.project}
             ticket={item.ticket}
             topology={item.topology}
@@ -251,10 +263,7 @@ defmodule ForgeWeb.QueueLive do
         </h2>
         <ul class="mt-3 flex flex-col gap-2">
           <li :for={item <- @digest} class="flex items-baseline justify-between gap-3 text-sm">
-            <.link
-              navigate={~p"/tickets/#{item.project}/#{item.ticket.number}"}
-              class="truncate opacity-80 hover:opacity-100"
-            >
+            <.link navigate={destination(item)} class="truncate opacity-80 hover:opacity-100">
               {sentence(item)}
             </.link>
             <span class="shrink-0 font-mono text-[12.5px] opacity-50">
@@ -275,6 +284,34 @@ defmodule ForgeWeb.QueueLive do
   # Three marks carry every kind, so the vocabulary scales without becoming a colour quiz. The
   # kind is named in words beside the mark.
   attr :kind, :atom, required: true
+
+  defp destination(%{kind: :chat} = item), do: ~p"/chats/#{item.detail.chat_id}"
+  defp destination(item), do: ~p"/tickets/#{item.project}/#{item.ticket.number}"
+
+  # A chat question gets the same answer rows a job's does, so it can be answered without
+  # opening the conversation — the difference between answering from a phone and not.
+  attr :item, :map, required: true
+
+  defp chat_answer(assigns) do
+    ~H"""
+    <div :if={@item.detail.question} class="flex flex-col gap-2">
+      <.answer_row
+        :for={option <- @item.detail.question.options}
+        phx-click="chat:answer"
+        phx-value-chat={@item.detail.chat_id}
+        phx-value-choice={option}
+      >
+        {option}
+      </.answer_row>
+    </div>
+
+    <div :if={is_nil(@item.detail.question)} class="font-mono text-[12.5px] opacity-60">
+      <.link navigate={~p"/chats/#{@item.detail.chat_id}"} class="hover:opacity-100">
+        Open the conversation ›
+      </.link>
+    </div>
+    """
+  end
 
   defp mark(assigns) do
     ~H"""
@@ -315,6 +352,7 @@ defmodule ForgeWeb.QueueLive do
   end
 
   defp item_id(%{kind: :questions} = item), do: "item-questions-#{item.version.id}"
+  defp item_id(%{kind: :chat} = item), do: "item-chat-#{item.detail.chat_id}"
   defp item_id(item), do: "item-#{item.kind}-#{item.ticket.id}"
 
   # A decision that pins the changeset is a merge decision, and a merge decision is not one the
@@ -336,6 +374,7 @@ defmodule ForgeWeb.QueueLive do
       else: "#{length(questions)} #{noun(length(questions), "question")}"
   end
 
+  defp kind_label(%{kind: :chat}), do: "conversation"
   defp kind_label(%{kind: :approval}), do: "approval"
   defp kind_label(%{kind: :stuck}), do: "stuck"
   defp kind_label(%{kind: :review}), do: "review ready"
@@ -346,6 +385,15 @@ defmodule ForgeWeb.QueueLive do
     do:
       "#{length(item.questions)} questions about #{item.version.artifact.name} v#{item.version.version}."
 
+  # What it said, not what it is: a conversation waiting on you is waiting with its last reply
+  # on screen, and that reply is the thing you are deciding about.
+  defp sentence(%{kind: :chat} = item) do
+    case item.detail.question do
+      nil -> first_line(item.detail.text)
+      question -> question.text
+    end
+  end
+
   defp sentence(%{kind: :approval} = item),
     do: "#{item.ticket.title} is ready to move to #{item.detail["to"]}."
 
@@ -353,6 +401,15 @@ defmodule ForgeWeb.QueueLive do
     do: "#{item.ticket.title} is stuck and needs a way forward."
 
   defp sentence(%{kind: :review} = item), do: "#{item.ticket.title} is waiting for your review."
+
+  defp first_line(nil), do: "It is waiting for you."
+
+  defp first_line(text) do
+    text
+    |> String.split("\n", parts: 2)
+    |> hd()
+    |> String.slice(0, 160)
+  end
 
   defp closing([]), do: "Nothing needs you. Work continues without you."
   defp closing(_items), do: "That is everything waiting on you."

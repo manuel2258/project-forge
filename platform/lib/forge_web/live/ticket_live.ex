@@ -145,6 +145,14 @@ defmodule ForgeWeb.TicketLive do
         <p :if={@ticket.body != ""} class="mt-2 text-sm/[1.55] whitespace-pre-line opacity-80">
           {@ticket.body}
         </p>
+        <div class="flex flex-wrap items-center gap-4">
+          <.link
+            navigate={~p"/chats/new?project=#{@project.name}&ticket=#{@ticket.number}"}
+            class="flex min-h-[46px] items-center text-sm text-primary hover:underline"
+          >
+            New chat ›
+          </.link>
+        </div>
       </header>
 
       <section

@@ -16,11 +16,18 @@ defmodule ForgeWeb.TicketNewLive do
   @impl true
   def mount(params, _session, socket) do
     projects = Projects.list()
-    chosen = params["project"] || with([first | _rest] <- projects, do: first.name)
+    named = params["project"]
+    chosen = named || with([first | _rest] <- projects, do: first.name)
 
     {:ok,
      socket
-     |> assign(page_title: "New ticket", projects: projects, error: nil)
+     |> assign(
+       page_title: "New ticket",
+       projects: projects,
+       error: nil,
+       # Named in the address and real: then it is stated rather than asked.
+       fixed: is_binary(named) and Enum.any?(projects, &(&1.name == named))
+     )
      |> assign(form: to_form(%{"project" => chosen, "title" => "", "body" => ""}, as: :ticket))
      |> assign_workflow(chosen)}
   end
@@ -84,8 +91,11 @@ defmodule ForgeWeb.TicketNewLive do
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash} current_scope={@current_scope} active={:queue} measure="34rem">
-      <.link navigate={~p"/board"} class="font-mono text-[12.5px] opacity-60 hover:opacity-100">
-        ‹ Board
+      <.link
+        navigate={if @fixed, do: ~p"/projects/#{@project.name}", else: ~p"/board"}
+        class="font-mono text-[12.5px] opacity-60 hover:opacity-100"
+      >
+        ‹ {if @fixed, do: @project.name, else: "Board"}
       </.link>
 
       <h1 class="mt-4 text-2xl font-semibold -tracking-[.025em]">New ticket</h1>
@@ -105,7 +115,22 @@ defmodule ForgeWeb.TicketNewLive do
         phx-submit="create"
         class="mt-6 flex flex-col gap-4"
       >
+        <%!-- Reached from a project, the project is not a question. The select survives only for
+              the bare /tickets/new, which nothing links to. See docs/design/ui.md § Creating
+              things. --%>
+        <div :if={@fixed} class="flex flex-wrap items-baseline gap-2">
+          <span class="font-mono text-[11px] tracking-[.14em] uppercase opacity-50">Project</span>
+          <.link
+            navigate={~p"/projects/#{@project.name}"}
+            class="font-mono text-[12.5px] hover:underline"
+          >
+            {@project.name}
+          </.link>
+        </div>
+        <input :if={@fixed} type="hidden" name="ticket[project]" value={@project.name} />
+
         <.input
+          :if={not @fixed}
           field={@form[:project]}
           type="select"
           label="Project"

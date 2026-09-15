@@ -15,6 +15,9 @@ the repository and nothing in it is committed.
 - `$FORGE_JOB/out/<name>` — where you write each declared output. Nothing else may be
   written there; an undeclared file ends the job with outcome `error`.
 - `$FORGE_JOB/spec.json` — this job's full specification, for reference.
+- `$FORGE_JOB/platform/platform.md` — how the platform around you works: what becomes of your
+  documents, how outcomes select transitions, how work reaches the default branch. Reference,
+  not required reading.
 
 Code changes go into the repository you are running in, on the current branch, as ordinary
 commits. Commit before you finish; history is squashed later, so commit freely.

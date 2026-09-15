@@ -5,6 +5,8 @@ defmodule Forge.Application do
 
   use Application
 
+  require Logger
+
   @impl true
   def start(_type, _args) do
     children =
@@ -42,8 +44,22 @@ defmodule Forge.Application do
   end
 
   # The scheduler runs jobs on this node; off in tests, which drive jobs explicitly.
+  #
+  # Recovery is a task beside it rather than part of its `init/1`, and once per boot rather than
+  # once per restart. In the scheduler it meant a crash in one scheduling pass recovered the
+  # whole node: every running conversation went dormant because one job raised. A task runs when
+  # the tree comes up and then finishes, which is what "on boot" means.
   defp scheduler do
-    if Forge.Jobs.config(:run_jobs, true), do: [Forge.Jobs.Scheduler], else: []
+    if Forge.Jobs.config(:run_jobs, true),
+      do: [{Task, &recover/0}, Forge.Jobs.Scheduler],
+      else: []
+  end
+
+  defp recover do
+    case Forge.Jobs.recover() do
+      0 -> :ok
+      count -> Logger.info("recovered #{count} interrupted job(s) from a previous run")
+    end
   end
 
   @impl true

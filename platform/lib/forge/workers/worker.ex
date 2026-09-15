@@ -15,6 +15,9 @@ defmodule Forge.Workers.Worker do
     field :status, Ecto.Enum, values: [:creating, :ready, :busy, :idle, :destroyed]
     field :token_hash, :string, redact: true
     field :memory_budget, :integer
+    # What the machine said about its harness at `ready`, verbatim. Read only to show and to
+    # offer; nothing is scheduled on it. See docs/design/worker-channel.md § What a worker offers.
+    field :harness, :map
     field :last_seen_at, :utc_datetime
     field :idle_since, :utc_datetime
     # Whether the platform may destroy this machine. False for one the operator provisioned;
@@ -34,6 +37,7 @@ defmodule Forge.Workers.Worker do
       :status,
       :token_hash,
       :memory_budget,
+      :harness,
       :last_seen_at,
       :idle_since,
       :managed

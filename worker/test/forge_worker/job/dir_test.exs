@@ -108,4 +108,40 @@ defmodule ForgeWorker.Job.DirTest do
       assert Dir.sweep(Path.join(tmp_dir, "no-jobs-have-run"), 1000) == 0
     end
   end
+
+  describe "the platform folder" do
+    # Every job and every conversation gets it. On disk rather than in the prompt: the prompt
+    # names the folder, so an agent reads it when the machinery is the question and pays nothing
+    # for it when it is not.
+    test "is written for every job, read-only" do
+      root = tmp_dir("root")
+      job_dir = Dir.prepare(root, spec())
+
+      platform = Path.join(job_dir, "platform")
+      assert File.read!(Path.join(platform, "platform.md")) =~ "The platform you are running on"
+      assert File.read!(Path.join(platform, "workflow-grammar.md")) =~ "Workflow grammar"
+
+      # What a workflow may contain is the thing a conversation asked to bootstrap needs, and it
+      # is the design note itself rather than a copy of it.
+      assert File.read!(Path.join(platform, "workflow-grammar.md")) =~ ".forge/workflow.yml"
+
+      %File.Stat{mode: mode} = File.stat!(Path.join(platform, "platform.md"))
+      assert Bitwise.band(mode, 0o222) == 0
+    end
+
+    # A resumed run gets the current documents, not the ones its first attempt was handed.
+    test "is rewritten on a resume" do
+      root = tmp_dir("root")
+      spec = spec()
+      job_dir = Dir.prepare(root, spec)
+
+      path = Path.join([job_dir, "platform", "platform.md"])
+      File.chmod!(path, 0o644)
+      File.write!(path, "stale")
+
+      Dir.prepare(root, spec, resume: true)
+
+      assert File.read!(path) =~ "The platform you are running on"
+    end
+  end
 end

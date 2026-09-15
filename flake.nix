@@ -26,9 +26,22 @@
           # three. The platform stopped embedding the worker in milestone 3; they meet
           # over a channel now.
           pathDeps = _subdir: [ ./core ];
+
+          # `ForgeCore.Workflow` reads this at compile time: the grammar an agent is handed to
+          # write `.forge/workflow.yml` is the design note itself rather than a copy, so the
+          # note is a source file of core and of everything that depends on it. Outside the
+          # fileset the sandbox has no `docs/` at all and the compile fails on `File.read!` —
+          # which `bin/check` cannot catch, because it never builds a release.
+          #
+          # Listed one by one and not as `./docs`: a whole directory here would put every note
+          # in the store and rebuild the release whenever any of them changed, and only the
+          # ones actually embedded are inputs.
+          embeddedDocs = [ ./docs/design/workflow-grammar-v1.md ];
+
           projectSrc = subdir: lib.fileset.toSource {
             root = ./.;
-            fileset = lib.fileset.unions ([ (./. + "/${subdir}") ] ++ pathDeps subdir);
+            fileset = lib.fileset.unions
+              ([ (./. + "/${subdir}") ] ++ pathDeps subdir ++ embeddedDocs);
           };
 
           # Only the files `mix deps.get` needs, so dependency fetching is not
@@ -94,6 +107,10 @@
           packages = {
             inherit forge forge-worker;
             default = forge;
+          } // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+            # The platform as an OCI image. Linux only, because an image's contents are Linux
+            # binaries: on darwin the release itself would not run inside it.
+            platform-image = import ./nix/platform-image.nix { inherit pkgs forge version; };
           } // lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
             worker-image = workerImage pkgs.stdenv.hostPlatform.system;
           };

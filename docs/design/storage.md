@@ -128,3 +128,13 @@ two keys.
   is the worker tier's question. See `docs/design/worker-tier.md` § Seed.
 - **No integrity check on read.** `stat` reports the hash the store recorded at write; nothing
   re-reads a blob to confirm it. A local disk that silently rots is out of scope.
+
+## The token is a header
+
+A store token goes in `Authorization: Bearer <token>`, never in the query string, for the reason
+`docs/design/worker-channel.md` § Authentication gives at greater length: a URL is recorded by
+every proxy and access log on the path, and a request header is not.
+
+It matters less here than it does for the channel — a store token is scoped to one key and one
+verb and expires in minutes — but the two are minted by the same platform and read by the same
+worker, and having one rule instead of two is worth more than the minutes of exposure it saves.

@@ -40,9 +40,14 @@ while read -r old new ref; do
     [ "$internal" = "1" ] || deny "this credential may not write $ref"
   fi
 
+  # A conversation's branch is chat/<uuid>. Matched to the UUID's shape rather than to `chat/*`,
+  # because this hook is the enforcement point and a glob here would hand out the namespace: a
+  # credential scoped to one ref cannot reach another, but `chat/anything` is a wider grant than
+  # any conversation needs. See docs/design/conversations.md § Commits.
   case "$ref" in
     refs/heads/ticket/[0-9]*) : ;;
-    *) deny "branches are ticket/<number>; $ref is not" ;;
+    refs/heads/chat/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) : ;;
+    *) deny "branches are ticket/<number> or chat/<id>; $ref is not" ;;
   esac
 
   # A job may rewrite its own branch: it squashes, and a resume may amend. The record that an

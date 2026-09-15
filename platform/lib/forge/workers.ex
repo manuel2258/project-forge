@@ -103,10 +103,73 @@ defmodule Forge.Workers do
     end
   end
 
-  @doc "Records that the worker is up, with the memory it has to give out."
-  @spec ready(Worker.t(), non_neg_integer()) :: {:ok, Worker.t()} | {:error, Ecto.Changeset.t()}
-  def ready(%Worker{} = worker, memory_budget),
-    do: update(worker, %{status: :ready, memory_budget: memory_budget, last_seen_at: now()})
+  @doc """
+  Records that the worker is up, with the memory it has to give out and what its harness offers.
+
+  `harness` is kept as reported. A worker that sends none — one running a release older than the
+  probe, or one whose probe could not reach anything — keeps whatever it last said rather than
+  having it cleared: the last answer is better than no answer, and a worker with no answer is
+  still a worker that takes jobs.
+  """
+  @spec ready(Worker.t(), non_neg_integer(), map() | nil) ::
+          {:ok, Worker.t()} | {:error, Ecto.Changeset.t()}
+  def ready(%Worker{} = worker, memory_budget, harness \\ nil) do
+    attrs = %{status: :ready, memory_budget: memory_budget, last_seen_at: now()}
+
+    update(worker, if(is_map(harness), do: Map.put(attrs, :harness, harness), else: attrs))
+  end
+
+  @doc """
+  What a person may pick from: the aliases the harness resolves, and the models the credential
+  may use.
+
+  Two lists rather than one, because they are different kinds of name. An alias floats — `opus`
+  is whatever the harness resolves it to today, which is usually what a workflow wants — and an
+  id is exact and pins. A form shows them apart so that choosing between them is deliberate.
+
+  The union across live workers rather than the intersection: workers built by one driver share
+  an image and a credential and answer alike, so a union that is not a single set means an image
+  rollout is half done or the fleet holds more than one account. Refusing the models only some of
+  them have would then refuse work that would have run.
+
+  Both empty when nothing is connected, which is a form with nothing to offer and never a reason
+  to stop one being submitted — `docs/design/workflow-grammar-v1.md` § Model.
+  """
+  @spec offered() :: %{aliases: [String.t()], models: [%{id: String.t(), name: String.t()}]}
+  def offered do
+    harnesses =
+      Repo.all(
+        from w in Worker,
+          where: w.status in [:ready, :busy, :idle] and not is_nil(w.harness),
+          select: w.harness
+      )
+
+    %{aliases: aliases(harnesses), models: models(harnesses)}
+  end
+
+  defp aliases(harnesses) do
+    harnesses
+    |> Enum.flat_map(&(&1["aliases"] || []))
+    |> Enum.filter(&is_binary/1)
+    |> Enum.uniq()
+  end
+
+  defp models(harnesses) do
+    harnesses
+    |> Enum.flat_map(&(&1["models"] || []))
+    |> Enum.flat_map(fn
+      %{"id" => id} = model when is_binary(id) -> [%{id: id, name: model_name(model, id)}]
+      _other -> []
+    end)
+    |> Enum.uniq_by(& &1.id)
+  end
+
+  @doc "Just the models of `offered/0`, for a caller with no use for the aliases."
+  @spec models() :: [%{id: String.t(), name: String.t()}]
+  def models, do: offered().models
+
+  defp model_name(%{"name" => name}, _id) when is_binary(name), do: name
+  defp model_name(_model, id), do: id
 
   @doc "Records that we have heard from the worker."
   @spec touch(Worker.t()) :: {:ok, Worker.t()} | {:error, Ecto.Changeset.t()}

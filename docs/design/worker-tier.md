@@ -549,3 +549,8 @@ ticket.
   costs more than it saves is a dogfooding question.
 - **A partitioned worker is destroyed, not waited for.** Correct while jobs are re-runnable and
   machines are cattle; revisit if a job ever becomes expensive enough to want recovery.
+- **The model a job asks for is not part of what makes a worker assignable.** It cannot bite
+  while `max_workers` is 1, which is the item above that gates it: this matters only once the
+  fleet is large enough to be heterogeneous. Stated once, in
+  `docs/design/worker-channel.md` § Open, beside the `ready` message that carries the data it
+  would be matched against.

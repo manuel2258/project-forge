@@ -13,6 +13,9 @@ defmodule ForgeWorker.Application do
       [
         # One runner per running job; started by the link, gone when the job ends.
         {DynamicSupervisor, name: ForgeWorker.Job.Supervisor, strategy: :one_for_one},
+        # A conversation is reached by its job id for as long as it is running, because unlike
+        # a job it is spoken to while it runs.
+        {Registry, keys: :unique, name: ForgeWorker.Job.Registry},
         {Task.Supervisor, name: ForgeWorker.TaskSupervisor}
       ] ++ link()
 

@@ -25,10 +25,10 @@ defmodule ForgeCore.Document.Question do
 
   @doc "Builds a question from the YAML inside a block that starts at `line`."
   @spec build(String.t(), pos_integer(), String.t()) :: {:ok, t()} | {:error, [Error.t()]}
-  def build(yaml, line, path) do
+  def build(yaml, line, path, opts \\ []) do
     case YamlElixir.read_from_string(yaml) do
       {:ok, map} when is_map(map) ->
-        from_map(map, line, path)
+        from_map(map, line, path, opts)
 
       {:ok, _other} ->
         {:error, [Error.new(path, "block at line #{line} must be a YAML mapping")]}
@@ -38,14 +38,14 @@ defmodule ForgeCore.Document.Question do
     end
   end
 
-  defp from_map(map, line, path) do
+  defp from_map(map, line, path, opts) do
     {key, e1} = key(map, path)
     {text, e2} = string(map, "text", path, required: true)
     {anchor, e3} = string(map, "anchor", path, required: false)
     {options, e4} = options(map, path)
     {blocking, e5} = blocking(map, path)
     {default, e6} = default(map, options, path)
-    {assumption, e7} = assumption(map, blocking, path)
+    {blocking, assumption, e7} = resolve_blocking(map, blocking, path, opts)
 
     case unknown_keys(map, path) ++ e1 ++ e2 ++ e3 ++ e4 ++ e5 ++ e6 ++ e7 do
       [] ->
@@ -128,6 +128,17 @@ defmodule ForgeCore.Document.Question do
       value in options -> {value, []}
       true -> {value, [Error.new(field_path, "#{inspect(value)} is not one of the options")]}
     end
+  end
+
+  # In a conversation every question is blocking, because the turn has ended and the agent is
+  # waiting whichever way the flag was written. An assumption is what a job proceeded with
+  # instead, and there is no instead here — so one is ignored rather than refused, which matters
+  # because refusing it fails the whole message and the question vanishes with it.
+  defp resolve_blocking(_map, _blocking, _path, blocking: :always), do: {true, nil, []}
+
+  defp resolve_blocking(map, blocking, path, _opts) do
+    {assumption, errors} = assumption(map, blocking, path)
+    {blocking, assumption, errors}
   end
 
   defp assumption(map, blocking, path) do

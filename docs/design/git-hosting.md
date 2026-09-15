@@ -260,3 +260,17 @@ in this one module, which is what keeps the credential's handling in one place.
 - **Sideband progress on a clone** — see the CGI limit above.
 - **Mirroring more than a push hook** is on the PoC's cut list; there is no reconciliation, no
   retry queue and no mirror health surface.
+
+## Issuing a token
+
+`mix forge.git.token` was the only way to get one, which made the product's own instructions —
+clone this, push a workflow — unfollowable without a terminal. `/projects/:name/settings` issues
+them too, over `Forge.Git.Tokens.issue/2`, which is the same call the task makes.
+
+The UI may issue exactly two shapes, because they are the two an operator has a use for: a
+**read** token for the whole project, and a **write** token scoped to one ticket's branch. It
+cannot mint a job-scoped token — those belong to a job, are issued by the engine as part of an
+assignment, and are revoked when it ends.
+
+Revocation from the UI is refused for a token a job holds, for the same reason: revoking it
+mid-run fails that job, and nothing would record why.

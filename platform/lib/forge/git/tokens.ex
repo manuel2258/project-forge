@@ -51,9 +51,21 @@ defmodule Forge.Git.Tokens do
 
   @doc """
   Issues the write token a job works with: scoped to the project, the ticket and its branch.
+
+  A conversation gets one scoped to `chat/<id>` and to no ticket — its work goes to its own
+  branch, never the ticket's, so a token that could write the ticket's branch would be a token
+  wider than anything it is for (`docs/design/conversations.md` § Commits).
   """
-  @spec issue_for_job(Job.t(), Ticket.t(), Project.t()) ::
+  @spec issue_for_job(Job.t(), Ticket.t() | nil, Project.t()) ::
           {:ok, String.t(), Token.t()} | {:error, term()}
+  def issue_for_job(%Job{kind: :chat} = job, _ticket, %Project{} = project) do
+    issue(project,
+      job_id: job.id,
+      ref: "refs/heads/" <> Forge.Jobs.chat_branch(job),
+      write: true
+    )
+  end
+
   def issue_for_job(%Job{} = job, %Ticket{} = ticket, %Project{} = project) do
     issue(project,
       ticket_id: ticket.id,
@@ -107,6 +119,44 @@ defmodule Forge.Git.Tokens do
   def put_revoke_for_job(multi, key, job_id) do
     Multi.run(multi, key, fn _repo, _changes -> {:ok, revoke_for_job(job_id)} end)
   end
+
+  @doc """
+  Every token ever issued for `project`, newest first.
+
+  The secret is not among them and cannot be: only its hash is kept. A row says what a token may
+  do and whether it has been used, which is what an audit trail is for.
+  """
+  @spec list(Project.t()) :: [Token.t()]
+  def list(%Project{id: project_id}) do
+    Repo.all(from t in Token, where: t.project_id == ^project_id, order_by: [desc: t.inserted_at])
+  end
+
+  @doc """
+  Revokes one token by id. The row is kept — it is the record that it existed.
+
+  Refuses a token a job holds: the engine revokes those when the job ends, and revoking one
+  mid-run fails that job for a reason nothing would record. See `docs/design/git-hosting.md`.
+  """
+  @spec revoke(String.t()) :: {:ok, Token.t()} | {:error, :not_found | :held_by_job}
+  def revoke(id) do
+    case Repo.get(Token, id) do
+      nil ->
+        {:error, :not_found}
+
+      %Token{job_id: job_id} when is_binary(job_id) ->
+        {:error, :held_by_job}
+
+      token ->
+        {:ok, Repo.update!(Ecto.Changeset.change(token, revoked_at: DateTime.utc_now(:second)))}
+    end
+  end
+
+  @doc "Whether this token can still authorise anything."
+  @spec live?(Token.t(), DateTime.t()) :: boolean()
+  def live?(%Token{revoked_at: nil, expires_at: expires_at}, now),
+    do: DateTime.after?(expires_at, now)
+
+  def live?(%Token{}, _now), do: false
 
   @doc "Deletes tokens that expired more than a day ago. Nothing calls this on a timer yet."
   @spec sweep() :: non_neg_integer()

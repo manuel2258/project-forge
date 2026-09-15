@@ -245,4 +245,75 @@ defmodule Forge.WorkersTest do
       assert Workers.get!(worker.id).status == :busy
     end
   end
+
+  # The models are the worker's answer, not the platform's assumption: the platform holds no
+  # credential and a fleet may hold more than one. See docs/design/worker-channel.md § What a
+  # worker offers.
+  describe "what the workers offer" do
+    test "ready keeps what the machine said about its harness" do
+      {:ok, worker, _token} = Workers.create(%{provider: "fake"})
+
+      {:ok, worker} =
+        Workers.ready(worker, 8_000, %{
+          "driver" => "claude_code",
+          "version" => "2.1.220",
+          "login" => "ok",
+          "models" => [%{"id" => "claude-opus-5", "name" => "Claude Opus 5"}]
+        })
+
+      assert worker.harness["version"] == "2.1.220"
+      assert Workers.models() == [%{id: "claude-opus-5", name: "Claude Opus 5"}]
+    end
+
+    # A worker running a release older than the probe sends no `harness` at all. Clearing the
+    # column on its next `ready` would make an update that touched nothing else look like a
+    # machine that suddenly offers nothing.
+    test "a ready with no harness keeps the last answer rather than erasing it" do
+      {:ok, worker, _token} = Workers.create(%{provider: "fake"})
+      {:ok, worker} = Workers.ready(worker, 8_000, %{"models" => [%{"id" => "m", "name" => "M"}]})
+      {:ok, worker} = Workers.ready(worker, 8_000, nil)
+
+      assert worker.harness["models"] == [%{"id" => "m", "name" => "M"}]
+    end
+
+    test "the union of the live workers, each model once" do
+      {:ok, one, _t1} = Workers.create(%{provider: "fake"})
+      {:ok, two, _t2} = Workers.create(%{provider: "fake"})
+      {:ok, gone, _t3} = Workers.create(%{provider: "fake"})
+
+      {:ok, _one} = Workers.ready(one, 8_000, %{"models" => [model("a"), model("shared")]})
+      {:ok, _two} = Workers.ready(two, 8_000, %{"models" => [model("shared"), model("b")]})
+      {:ok, gone} = Workers.ready(gone, 8_000, %{"models" => [model("only-on-the-dead-one")]})
+      {:ok, _gone} = Workers.status(gone, :destroyed)
+
+      ids = Enum.map(Workers.models(), & &1.id)
+
+      # Union and not intersection: a model only one worker has is a model the fleet can run,
+      # and refusing it would refuse work that would have succeeded.
+      assert Enum.sort(ids) == ~w(a b shared)
+      assert Enum.count(ids, &(&1 == "shared")) == 1
+    end
+
+    test "nothing connected offers nothing, and says so by being empty" do
+      {:ok, _worker, _token} = Workers.create(%{provider: "fake"})
+
+      assert Workers.models() == []
+    end
+
+    # A worker is free to report a model the platform has never heard of and one with no label
+    # at all. Neither is a reason to drop it: the list is an offer, and a missing label is not a
+    # missing model.
+    test "a malformed row is skipped and an unlabelled one keeps its id" do
+      {:ok, worker, _token} = Workers.create(%{provider: "fake"})
+
+      {:ok, _worker} =
+        Workers.ready(worker, 8_000, %{
+          "models" => [%{"id" => "bare"}, %{"name" => "no id at all"}, "not even a map"]
+        })
+
+      assert Workers.models() == [%{id: "bare", name: "bare"}]
+    end
+  end
+
+  defp model(id), do: %{"id" => id, "name" => String.upcase(id)}
 end

@@ -75,6 +75,58 @@ defmodule Forge.Git do
     :ok
   end
 
+  @root_message """
+  Empty
+
+  Made by forge so the default branch exists. Everything else starts from it: a ticket's base
+  commit, a conversation's branch, and the merge that puts work back.
+  """
+
+  @doc """
+  Makes sure `branch` exists, with an empty root commit if the repository has nothing yet.
+
+  A bare repository `git init` made has no commits, so its default branch is unborn — and
+  everything the platform does starts from it. A conversation forks its branch from it, a ticket
+  takes its base commit from it, and a merge fast-forwards onto it; all three fail on a repository
+  that has never been written to, with an error naming a ref rather than the situation.
+
+  Nothing can fix that from outside either: `pre-receive` lets only the platform's own merge write
+  the default branch, so there is no push an operator could make to create it. The first commit
+  has to be the platform's, and this is it.
+
+  Written with `commit-tree` and `update-ref` rather than a worktree: there is nothing to check
+  out, and the empty tree is a constant.
+  """
+  @spec ensure_initial_commit(repo(), String.t()) :: :ok | {:error, term()}
+  def ensure_initial_commit(repo, branch) do
+    if branch_exists?(repo, branch) do
+      :ok
+    else
+      create_root_commit(repo, branch)
+    end
+  end
+
+  defp create_root_commit(repo, branch) do
+    env = [
+      {"GIT_AUTHOR_NAME", "forge"},
+      {"GIT_AUTHOR_EMAIL", "forge@localhost"},
+      {"GIT_COMMITTER_NAME", "forge"},
+      {"GIT_COMMITTER_EMAIL", "forge@localhost"}
+    ]
+
+    # `hash-object -w -t tree /dev/null` writes the empty tree and prints its id. `mktree` would
+    # want it on stdin, and `run/3` has no stdin to give — nor should it grow one for this. The
+    # empty tree's id is also a well-known constant, and is deliberately not hard-coded here:
+    # it is only constant for SHA-1, and a repository can be SHA-256.
+    with {:ok, tree} <- run(repo, ["hash-object", "-w", "-t", "tree", "/dev/null"], env: env),
+         {:ok, sha} <-
+           run(repo, ["commit-tree", String.trim(tree), "-m", @root_message], env: env),
+         {:ok, _out} <-
+           run(repo, ["update-ref", "refs/heads/" <> branch, String.trim(sha)], env: env) do
+      :ok
+    end
+  end
+
   @doc "Resolves a ref to a commit sha."
   @spec resolve(repo(), String.t()) :: {:ok, sha()} | {:error, {:unknown_ref, String.t()}}
   def resolve(repo, ref) do
@@ -108,6 +160,22 @@ defmodule Forge.Git do
 
   @spec branch_exists?(repo(), String.t()) :: boolean()
   def branch_exists?(repo, branch), do: match?({:ok, _}, resolve(repo, "refs/heads/" <> branch))
+
+  @doc """
+  Deletes `branch`. A branch that is not there is not an error — this runs after work that may
+  already have removed it, and failing then would report a problem that is not one.
+
+  `-D` rather than `-d`: the branch may not be merged, which is the caller's decision and not
+  git's. What keeps a merged commit reachable afterwards is the pin under `refs/forge/*`.
+  """
+  @spec delete_branch(repo(), String.t()) :: :ok | {:error, term()}
+  def delete_branch(repo, branch) do
+    if branch_exists?(repo, branch) do
+      with {:ok, _out} <- run(repo, ["branch", "-D", branch]), do: :ok
+    else
+      :ok
+    end
+  end
 
   @doc "Checks `branch` out into a new worktree at `dir`, which must not exist."
   @spec worktree_add(repo(), String.t(), String.t()) :: :ok | {:error, term()}

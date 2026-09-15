@@ -18,10 +18,11 @@ defmodule ForgeWeb.StoreController do
 
   @chunk 1024 * 1024
 
-  def show(conn, %{"key" => segments} = params) do
+  def show(conn, %{"key" => segments}) do
     key = Enum.join(segments, "/")
 
-    with :ok <- Token.verify(params["token"], :get, key),
+    with {:ok, token} <- bearer(conn),
+         :ok <- Token.verify(token, :get, key),
          {:ok, content} <- Storage.get(key) do
       # No charset: these are bytes, and the only reader is a worker writing them to a file.
       conn
@@ -32,16 +33,26 @@ defmodule ForgeWeb.StoreController do
     end
   end
 
-  def update(conn, %{"key" => segments} = params) do
+  def update(conn, %{"key" => segments}) do
     key = Enum.join(segments, "/")
 
-    with :ok <- Token.verify(params["token"], :put, key),
+    with {:ok, token} <- bearer(conn),
+         :ok <- Token.verify(token, :put, key),
          {:ok, temp} <- temp_file(),
          {:ok, conn} <- stream_body(conn, temp),
          {:ok, info} <- put(key, temp) do
       json(conn, %{key: key, size: info.size, hash: info.hash})
     else
       {:error, reason} -> fail(conn, reason)
+    end
+  end
+
+  # In a header, never the query string: a URL reaches every proxy log between the worker and
+  # here. See docs/design/storage.md § The token is a header.
+  defp bearer(conn) do
+    case get_req_header(conn, "authorization") do
+      ["Bearer " <> token] -> {:ok, token}
+      _other -> {:error, :unauthorized}
     end
   end
 
@@ -97,6 +108,7 @@ defmodule ForgeWeb.StoreController do
     conn |> put_status(status) |> json(%{error: %{reason: name, detail: nil}})
   end
 
+  defp status(:unauthorized), do: {:unauthorized, "missing_token"}
   defp status(:invalid), do: {:unauthorized, "invalid_token"}
   defp status(:expired), do: {:unauthorized, "expired_token"}
   defp status(:wrong_key), do: {:forbidden, "wrong_key"}

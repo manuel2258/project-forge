@@ -26,11 +26,16 @@ defmodule ForgeCore.Workflow.ParserTest do
       assert %State{
                prompt: "agents/implement.md",
                env: "implement",
+               model: "opus",
                inputs: ["plan.md"],
                produces: ["implementation.md", "changeset"],
                outcomes: ["done", "plan_invalid"],
                budget: %Budget{turns: 200, cost: 10.0}
              } = workflow.states["implementing"]
+
+      # A state that names none says nothing, rather than saying "the default": what fills the
+      # gap is the project's, and then the machine's, and neither is core's to know.
+      assert %State{model: nil} = workflow.states["refining"]
 
       assert %Transition{
                from: "verifying",
@@ -177,10 +182,12 @@ defmodule ForgeCore.Workflow.ParserTest do
       map =
         map
         |> update_in(["states", "refining"], &Map.delete(&1, "budget"))
-        |> put_in(["states", "merged"], %{"env" => "x", "produces" => ["y"]})
+        |> put_in(["states", "merged"], %{"env" => "x", "produces" => ["y"], "model" => "opus"})
 
+      # A human state runs no job, so naming a model for it is naming one for nothing.
       assert messages(map) == [
                {"states.merged.env", "not allowed on a human state (no prompt)"},
+               {"states.merged.model", "not allowed on a human state (no prompt)"},
                {"states.merged.produces", "not allowed on a human state (no prompt)"},
                {"states.refining.budget", "is required on a job state"}
              ]

@@ -4,15 +4,22 @@ defmodule ForgeWeb.Endpoint do
   # The session will be stored in the cookie and signed,
   # this means its contents can be read but not tampered with.
   # Set :encryption_salt if you would also like to encrypt it.
+  # `secure` in production, where docs/deploy.md puts TLS in front: the browser then never sends
+  # this cookie over cleartext, whatever a link or a stale bookmark says. Not in dev, which is
+  # plain http on loopback and where setting it would simply break login.
   @session_options [
     store: :cookie,
     key: "_forge_key",
     signing_salt: "i+BpcGu5",
-    same_site: "Lax"
+    same_site: "Lax",
+    secure: Mix.env() == :prod
   ]
 
-  # Workers dial in here. See docs/design/worker-channel.md.
-  socket "/worker", ForgeWeb.WorkerSocket, websocket: true, longpoll: false
+  # Workers dial in here. `x_headers` carries the `authorization` header the worker
+  # authenticates with; it is not in the URL on purpose. See docs/design/worker-channel.md.
+  socket "/worker", ForgeWeb.WorkerSocket,
+    websocket: [connect_info: [:x_headers]],
+    longpoll: false
 
   socket "/live", Phoenix.LiveView.Socket,
     websocket: [connect_info: [session: @session_options]],

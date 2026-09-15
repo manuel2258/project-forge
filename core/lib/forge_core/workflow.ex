@@ -6,6 +6,42 @@ defmodule ForgeCore.Workflow do
   this module only holds the data and answers questions about it.
   """
 
+  # The grammar an agent is handed when it is asked to write or change a workflow, embedded from
+  # the design note that defines it rather than copied. One source: a second copy would drift
+  # from the validator the first time either changed, and the copy is what the agent would read.
+  @grammar_path Path.join(__DIR__, "../../../docs/design/workflow-grammar-v1.md")
+  @external_resource @grammar_path
+  @grammar File.read!(@grammar_path)
+
+  @platform_path Path.join(:code.priv_dir(:forge_core), "platform.md")
+  @external_resource @platform_path
+  @platform File.read!(@platform_path)
+
+  @doc """
+  The workflow grammar, as a document to hand to an agent.
+
+  A conversation asked to bootstrap a project has to write `.forge/workflow.yml`, and nothing in
+  a project's own repository says what that file may contain. This is what the validator accepts,
+  which is the only answer worth giving.
+  """
+  @spec grammar() :: String.t()
+  def grammar, do: @grammar
+
+  @doc """
+  What the platform is, for an agent that needs to know what becomes of its output.
+
+  Written to `$FORGE_JOB/platform/` for every job and every conversation, and **named in the
+  prompt rather than inlined into it**: an agent with file tools reads what it needs, and a
+  preamble that grew to hold all of this would be paid for on every turn by every job that never
+  had a question about the machinery.
+  """
+  @spec platform_overview() :: String.t()
+  def platform_overview, do: @platform
+
+  @doc "The files written to `$FORGE_JOB/platform/`, as `{name, content}`."
+  @spec platform_docs() :: [{String.t(), String.t()}]
+  def platform_docs, do: [{"platform.md", @platform}, {"workflow-grammar.md", @grammar}]
+
   alias ForgeCore.Workflow.{Limits, State, Transition}
 
   @engine_outcomes ~w(did_not_converge budget_exhausted error cancelled)

@@ -8,8 +8,9 @@ defmodule ForgeWeb.JobLive do
   alias Forge.{Artifacts, Events, Jobs, Tickets}
   alias ForgeWeb.{Format, Indicators}
 
-  # Newest first, 50 at a time, and never tailed: there is deliberately no live transcript in
-  # this product. See docs/design/ui.md.
+  # Newest first, 50 at a time. A finished job's stream is read backwards from its outcome, not
+  # watched forwards — see docs/design/ui.md § Motion and structure, which now permits live
+  # output where someone is waiting for it and still does not want it here.
   @page 50
 
   @impl true
@@ -125,7 +126,14 @@ defmodule ForgeWeb.JobLive do
             <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
               {stream_heading(@job, @events)}
             </h2>
-            <ol class="mt-3 flex flex-col" id="job-events">
+            <%!-- Scrolls inside itself rather than growing the page, and deliberately without
+                  the conversation's pin-to-bottom: this stream is newest first, so what arrives
+                  appears at the top, where the reader already is. Pinning it to the bottom would
+                  scroll away from the newest entry to reach the oldest. --%>
+            <ol
+              class="mt-3 flex max-h-[60vh] flex-col overflow-y-auto overscroll-contain"
+              id="job-events"
+            >
               <%!-- Two rows narrow, one row wide. The type column is 196px because the longest
                     type in the product, `artifact.version_written`, is 24 mono characters and
                     a column narrower than its content does not clip — it overlaps the next one,

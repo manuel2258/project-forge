@@ -16,16 +16,13 @@ defmodule ForgeWeb.ReviewLive do
   import ForgeWeb.Indicators
   import ForgeWeb.Operator.Components
 
-  alias Forge.{Artifacts, Events, Git, Merge, Projects, Tickets}
+  alias Forge.{Artifacts, Events, Merge, Projects, Tickets}
   alias ForgeCore.Workflow
-  alias ForgeWeb.{Format, Markdown}
+  alias ForgeWeb.{Diff, Format, Markdown}
   alias ForgeWeb.Operator.Actions
   alias ForgeWeb.Operator.Board
 
   # Beyond this the patch is offered per file instead. A page nobody can read is not a review.
-  @max_patch_bytes 512 * 1024
-  @max_patch_files 60
-
   @impl true
   def mount(%{"project" => name, "number" => number}, _session, socket) do
     {ticket, project} = Tickets.fetch!(name, number)
@@ -58,34 +55,10 @@ defmodule ForgeWeb.ReviewLive do
   # The map of the change is never truncated; the patch under it may be.
   defp diff(_project, _ticket, nil), do: nil
 
-  defp diff(project, ticket, %{blob_uri: "git:" <> head}) do
-    repo = Projects.repo_path(project)
-
-    with {:ok, stat} <- Git.diff_stat(repo, ticket.base_commit, head),
-         {:ok, patch} <- Git.diff(repo, ticket.base_commit, head) do
-      %{
-        head: head,
-        base: ticket.base_commit,
-        files: stat,
-        added: total(stat, 1),
-        removed: total(stat, 2),
-        patch: patch,
-        inline: byte_size(patch) <= @max_patch_bytes and length(stat) <= @max_patch_files,
-        bytes: byte_size(patch)
-      }
-    else
-      {:error, reason} -> %{error: reason}
-    end
-  end
+  defp diff(project, ticket, %{blob_uri: "git:" <> head}),
+    do: Diff.build(Projects.repo_path(project), ticket.base_commit, head)
 
   defp diff(_project, _ticket, %{blob_uri: other}), do: %{error: {:not_a_commit, other}}
-
-  defp total(stat, index) do
-    stat
-    |> Enum.map(&elem(&1, index))
-    |> Enum.filter(&is_integer/1)
-    |> Enum.sum()
-  end
 
   # The chain the change was built from, in the order it was written. The last document is the
   # verification report in every workflow that has one; naming it by convention would hard-code a
@@ -167,7 +140,7 @@ defmodule ForgeWeb.ReviewLive do
 
       <div :if={@changeset} class="mt-8 flex flex-col gap-10 lg:flex-row lg:gap-0">
         <div class="lg:min-w-0 lg:flex-1 lg:pr-8">
-          <.diff_section diff={@diff} />
+          <Diff.section diff={@diff} id="review-diff" />
 
           <section :if={@documents != []} class="mt-8 border-t border-base-300 pt-5">
             <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
@@ -263,48 +236,6 @@ defmodule ForgeWeb.ReviewLive do
     """
   end
 
-  attr :diff, :map, required: true
-
-  defp diff_section(assigns) do
-    ~H"""
-    <section id="review-diff">
-      <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">The diff</h2>
-
-      <p :if={@diff[:error]} class="mt-3 text-sm/[1.55] text-error">
-        The change cannot be read from the repository: {inspect(@diff[:error])}
-      </p>
-
-      <div :if={@diff[:files] == []} class="mt-3 text-sm/[1.55] opacity-70">
-        The branch changes nothing against its base.
-      </div>
-
-      <table :if={@diff[:files] not in [nil, []]} class="mt-3 w-full text-[12.5px]">
-        <tbody>
-          <tr :for={{path, added, removed} <- @diff.files} class="border-b border-base-300/60">
-            <td class="py-1.5 font-mono break-all">{path}</td>
-            <td class="w-24 py-1.5 text-right font-mono opacity-60">
-              {count(added, "+")} {count(removed, "−")}
-            </td>
-          </tr>
-        </tbody>
-      </table>
-
-      <pre
-        :if={@diff[:inline] && @diff[:patch] not in [nil, ""]}
-        class="mt-4 overflow-x-auto border border-base-300 p-3 font-mono text-[12.5px] leading-[1.5]"
-      ><code>{@diff.patch}</code></pre>
-
-      <p :if={@diff[:files] not in [nil, []] and @diff[:inline] == false} class="mt-4 text-sm/[1.55]">
-        This change is {bytes(@diff.bytes)} across {length(@diff.files)} files, too much to read on
-        one page. Read it with <span class="font-mono text-[12.5px]">git diff {short(@diff.base)}..{short(@diff.head)}</span>.
-      </p>
-    </section>
-    """
-  end
-
-  defp count(:binary, _sign), do: "binary"
-  defp count(number, sign), do: "#{sign}#{number}"
-
   defp short(nil), do: "—"
   defp short(sha), do: String.slice(sha, 0, 12)
 
@@ -313,10 +244,6 @@ defmodule ForgeWeb.ReviewLive do
 
   defp lines_label(%{added: added, removed: removed}), do: "+#{added} −#{removed}"
   defp lines_label(_diff), do: "—"
-
-  defp bytes(count) when count >= 1_048_576, do: "#{Float.round(count / 1_048_576, 1)} MB"
-  defp bytes(count) when count >= 1024, do: "#{div(count, 1024)} KB"
-  defp bytes(count), do: "#{count} bytes"
 
   defp usage_pct(ticket, workflow) do
     cap = workflow.limits.ticket_cost

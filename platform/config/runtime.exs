@@ -160,8 +160,13 @@ if config_env() != :test do
          )
 end
 
-# The worker reaches the platform over the network, not over loopback, and dev binds to
-# 127.0.0.1. FORGE_HTTP_IP is what the endpoint binds to when something has to reach it.
+# The worker reaches the platform over the network, not over loopback, and both dev and prod bind
+# to 127.0.0.1. FORGE_HTTP_IP is what the endpoint binds to when something else has to reach it.
+#
+# Widening this is a security decision, not a convenience: `force_ssl` trusts `x-forwarded-proto`,
+# so every address this listens on is an address from which that header can be forged. Set it to
+# the one interface the workers are on, never 0.0.0.0, and firewall the port — docs/deploy.md
+# § Behind a proxy.
 if ip = System.get_env("FORGE_HTTP_IP") do
   case :inet.parse_address(String.to_charlist(ip)) do
     {:ok, address} -> config :forge, ForgeWeb.Endpoint, http: [ip: address]

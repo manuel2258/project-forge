@@ -13,6 +13,9 @@ defmodule Forge.Projects.Project do
     # The warm starting point a worker snapshots a job's worktree from, or nil when nobody has
     # published one. See docs/design/worker-tier.md § Volumes and the seed.
     field :seed_id, :string
+    # What this project's work runs on when a state does not say. Nil means the machine's, which
+    # is the platform-wide setting — `docs/design/workflow-grammar-v1.md` § Model.
+    field :model, :string
 
     has_many :tickets, Forge.Tickets.Ticket
 
@@ -21,11 +24,24 @@ defmodule Forge.Projects.Project do
 
   def changeset(project, attrs) do
     project
-    |> cast(attrs, [:name, :repo_path, :default_branch, :seed_id])
+    |> cast(attrs, [:name, :repo_path, :default_branch, :seed_id, :model])
     |> validate_required([:name, :repo_path, :default_branch])
     |> validate_format(:name, ~r/^[a-z0-9][a-z0-9_-]*$/,
       message: "lowercase letters, digits, - or _"
     )
+    # Not checked against a list of models: names change faster than the platform, and a
+    # validator that knew them would refuse a model released last week. Emptiness is the only
+    # thing that is certainly wrong — it would read as "set" and resolve to nothing.
+    |> update_change(:model, &blank_to_nil/1)
     |> unique_constraint(:name)
+  end
+
+  defp blank_to_nil(nil), do: nil
+
+  defp blank_to_nil(model) do
+    case String.trim(model) do
+      "" -> nil
+      trimmed -> trimmed
+    end
   end
 end

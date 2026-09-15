@@ -52,9 +52,14 @@ defmodule Forge.Spend do
     Decimal.add(day_total(), budgeted_live())
   end
 
+  # Workflow jobs only, and explicitly rather than by accident: a conversation has no spec and so
+  # no budget to commit against the day. What it has spent is already in `day_total/0`, because
+  # a conversation records its cost per turn instead of once at the end — it does not have an
+  # end until a person says so, and a cap that cannot see a job running all afternoon is not a
+  # cap. See `docs/design/conversations.md` § Spend.
   defp budgeted_live do
     from(j in Job,
-      where: j.status in [:pending, :running],
+      where: j.status in [:pending, :running] and j.kind == :workflow,
       select: j.spec
     )
     |> Repo.all()
@@ -105,6 +110,17 @@ defmodule Forge.Spend do
       true ->
         :ok
     end
+  end
+
+  @doc """
+  Whether anything may start now on the day's allowance alone.
+
+  This is `gate/2` without the ticket half, for work that has no ticket allowance and no workflow
+  to read one from. A conversation is the only such work, and the daily cap is its only ceiling.
+  """
+  @spec day_gate() :: :ok | {:pause, String.t()}
+  def day_gate do
+    if paused?(), do: {:pause, "daily spend cap reached"}, else: :ok
   end
 
   @doc "Whether the node is paused on the daily cap."

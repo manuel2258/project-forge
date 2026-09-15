@@ -15,7 +15,7 @@ defmodule ForgeCore.Workflow.Parser do
   alias ForgeCore.Workflow.{Budget, Limits, State, Transition, Validator}
 
   @top_keys ~w(version initial states transitions limits)
-  @state_keys ~w(prompt env inputs produces outcomes budget on_enter)
+  @state_keys ~w(prompt env model inputs produces outcomes budget on_enter)
   @transition_keys ~w(from to when approve max)
   @budget_keys ~w(turns cost)
   @limit_keys ~w(ticket_cost)
@@ -123,11 +123,13 @@ defmodule ForgeCore.Workflow.Parser do
     {outcomes, e5} = string_list(definition, "outcomes", path)
     {budget, e6} = budget(definition, path)
     {on_enter, e7} = on_enter(definition, path)
+    {model, e8} = optional_string(definition, "model", path)
 
     state = %State{
       name: name,
       prompt: prompt,
       env: env,
+      model: model,
       inputs: inputs || [],
       produces: produces || [],
       outcomes: outcomes,
@@ -135,7 +137,9 @@ defmodule ForgeCore.Workflow.Parser do
       on_enter: on_enter
     }
 
-    {state, unknown_keys(definition, @state_keys, path) ++ e1 ++ e2 ++ e3 ++ e4 ++ e5 ++ e6 ++ e7}
+    {state,
+     unknown_keys(definition, @state_keys, path) ++
+       e1 ++ e2 ++ e3 ++ e4 ++ e5 ++ e6 ++ e7 ++ e8}
   end
 
   defp state(name, _definition) do

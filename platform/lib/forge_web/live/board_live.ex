@@ -51,12 +51,6 @@ defmodule ForgeWeb.BoardLive do
         <%!-- Neutral, and only here and on the ticket: a pause is resolved by the clock, so it
               never enters the queue. See docs/design/capacity.md. --%>
         <.paused :if={@paused} reason="spend" />
-        <.link
-          navigate={~p"/projects/new"}
-          class="ml-auto flex min-h-[46px] items-center text-sm text-primary hover:underline"
-        >
-          New project ›
-        </.link>
       </div>
       <p :if={@boards == []} class="mt-4 text-sm opacity-60">
         No projects yet.
@@ -74,12 +68,6 @@ defmodule ForgeWeb.BoardLive do
           <span :if={board.waiting > 0} class="font-mono text-[12.5px] text-accent">
             {board.waiting} waiting on you
           </span>
-          <.link
-            navigate={~p"/tickets/new?project=#{board.project.name}"}
-            class="ml-auto flex min-h-[46px] items-center text-sm text-primary hover:underline"
-          >
-            New ticket ›
-          </.link>
         </header>
 
         <div class="flex gap-px overflow-x-auto bg-base-300">

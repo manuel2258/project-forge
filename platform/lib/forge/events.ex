@@ -73,6 +73,26 @@ defmodule Forge.Events do
   @spec subscribe() :: :ok | {:error, term()}
   def subscribe, do: Phoenix.PubSub.subscribe(Forge.PubSub, @topic)
 
+  @doc """
+  Tells a page watching one job that an event arrived, with the event itself.
+
+  Per job rather than on the global topic, deliberately: `CLAUDE.md` says a handler subscribed to
+  a global topic filters before it does any work, and a page appending live output would be woken
+  by every event on the node. Per-job, that filtering is the subscription — a page is only sent
+  what it is showing. The event travels with the message so the page appends instead of
+  reloading, which is what makes output arrive as it is produced.
+  """
+  @spec notify_job(String.t(), Event.t()) :: :ok
+  def notify_job(job_id, %Event{} = event) do
+    Phoenix.PubSub.broadcast(Forge.PubSub, job_topic(job_id), {:job_event, job_id, event})
+  end
+
+  @doc "Subscribes the caller to `{:job_event, job_id, event}` for one job."
+  @spec subscribe_job(String.t()) :: :ok | {:error, term()}
+  def subscribe_job(job_id), do: Phoenix.PubSub.subscribe(Forge.PubSub, job_topic(job_id))
+
+  defp job_topic(job_id), do: "job:" <> job_id
+
   @doc "A one-line, bounded rendering of an event's payload for lists and logs."
   @spec summary(Event.t()) :: String.t()
   def summary(%Event{type: "job.harness.text", payload: %{"text" => text}}),
@@ -89,6 +109,13 @@ defmodule Forge.Events do
 
   def summary(%Event{type: "job.harness.started", payload: p}),
     do: "#{p["model"]} · session #{p["session_id"]}"
+
+  # Without this a message renders as an inspected map, which is how a conversation's own words
+  # would read in the timeline and the queue.
+  def summary(%Event{type: "chat.message", payload: %{"text" => text}}),
+    do: String.slice(text, 0, 200)
+
+  def summary(%Event{type: "chat.turn", payload: %{"turn" => turn}}), do: "turn #{turn}"
 
   def summary(%Event{payload: payload}) when map_size(payload) == 0, do: ""
 

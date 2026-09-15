@@ -53,4 +53,46 @@ defmodule Forge.GitTest do
     refute File.exists?(worktree)
     assert {:ok, [_sha]} = Git.commits_since(repo, base, "ticket/1")
   end
+
+  describe "ensure_initial_commit/2" do
+    # A bare repository has no commits, so its default branch is unborn — and everything starts
+    # from it: a ticket's base, a conversation's branch, a merge's destination. Nothing outside
+    # can fix that either, because `pre-receive` lets only the platform's merge write the
+    # default branch, so there is no push an operator could make.
+    test "a fresh repository gets an empty commit on its default branch" do
+      repo = Path.join(tmp_dir("bare"), "new.git")
+      :ok = Git.init_bare(repo)
+      refute Git.branch_exists?(repo, "main")
+
+      assert :ok = Git.ensure_initial_commit(repo, "main")
+
+      assert {:ok, sha} = Git.resolve(repo, "refs/heads/main")
+      assert String.length(sha) >= 40
+
+      # Empty, and a root: nothing to conflict with whatever is pushed on top of it.
+      assert {:ok, ""} = Git.run(repo, ["ls-tree", "--name-only", sha])
+      assert {:ok, parents} = Git.run(repo, ["rev-list", "--parents", "-n", "1", sha])
+      assert String.trim(parents) == sha
+    end
+
+    test "a repository that already has the branch is left exactly as it was" do
+      repo = seeded_repo()
+      {:ok, before} = Git.resolve(repo, "refs/heads/main")
+
+      assert :ok = Git.ensure_initial_commit(repo, "main")
+
+      assert {:ok, ^before} = Git.resolve(repo, "refs/heads/main")
+    end
+
+    # The whole point: a branch can be forked from it, which is what a conversation and a ticket
+    # both do on a project nobody has pushed to yet.
+    test "a branch can be made from it" do
+      repo = Path.join(tmp_dir("bare"), "new.git")
+      :ok = Git.init_bare(repo)
+      :ok = Git.ensure_initial_commit(repo, "main")
+
+      assert :ok = Git.create_branch(repo, "chat/x", "refs/heads/main")
+      assert Git.branch_exists?(repo, "chat/x")
+    end
+  end
 end

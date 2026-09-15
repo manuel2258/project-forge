@@ -14,7 +14,17 @@ defmodule ForgeCore.Workflow.State do
   @actions [:merge]
 
   @enforce_keys [:name]
-  defstruct [:name, :prompt, :env, :budget, :outcomes, inputs: [], produces: [], on_enter: []]
+  defstruct [
+    :name,
+    :prompt,
+    :env,
+    :model,
+    :budget,
+    :outcomes,
+    inputs: [],
+    produces: [],
+    on_enter: []
+  ]
 
   @type action :: :merge
 
@@ -22,6 +32,10 @@ defmodule ForgeCore.Workflow.State do
           name: String.t(),
           prompt: String.t() | nil,
           env: String.t() | nil,
+          # What this state's job runs on. Nil means the project's, then the machine's — see
+          # `docs/design/workflow-grammar-v1.md` § Model for why it is per state and why its
+          # value is not validated against a list.
+          model: String.t() | nil,
           budget: Budget.t() | nil,
           inputs: [String.t()],
           produces: [String.t()],

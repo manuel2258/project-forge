@@ -92,10 +92,47 @@ config :phoenix_live_view,
   # the attribute set on all root tags. Used for Phoenix.LiveView.ColocatedCSS.
   root_tag_attribute: "phx-r"
 
-# Configure esbuild (the version is required)
+# Both asset tools come from `flake.nix` (`MIX_ESBUILD_PATH`, `MIX_TAILWIND_PATH`), and both
+# libraries still want a `version` — they compare it with the binary and warn when it differs.
+#
+# **Asked of the binary rather than written down beside it.** A literal here is a second copy of
+# a number the flake already fixes, and it goes stale the moment nixpkgs moves: both of these
+# were stale, and the warning they printed on every boot said to run `mix tailwind.install`,
+# which downloads a *different* binary and defeats the pin the flake exists to hold. This is not
+# loosening a pinned version — the pin is the flake, and this reads it rather than guessing.
+#
+# The fallback is for a checkout with no devshell, where the library downloads its own binary and
+# the version is then the only thing saying which.
+version = fn
+  nil, _args, default ->
+    default
+
+  path, args, default ->
+    # Rescued, not merely matched: the variable can point at a Nix store path that has since
+    # been collected, and `System.cmd` raises on a missing executable. A stale path must degrade
+    # to the literal, never take the whole configuration down with it.
+    try do
+      case System.cmd(path, args, stderr_to_stdout: true) do
+        {out, 0} ->
+          case Regex.run(~r/(\d+\.\d+\.\d+)/, out) do
+            [_match, found] -> found
+            nil -> default
+          end
+
+        _other ->
+          default
+      end
+    rescue
+      _error -> default
+    end
+end
+
+esbuild_path = System.get_env("MIX_ESBUILD_PATH")
+tailwind_path = System.get_env("MIX_TAILWIND_PATH")
+
 config :esbuild,
-  version: "0.25.4",
-  path: System.get_env("MIX_ESBUILD_PATH"),
+  version: version.(esbuild_path, ["--version"], "0.25.4"),
+  path: esbuild_path,
   forge: [
     args:
       ~w(js/app.js --bundle --target=es2022 --outdir=../priv/static/assets/js --external:/fonts/* --external:/images/* --alias:@=.),
@@ -103,10 +140,11 @@ config :esbuild,
     env: %{"NODE_PATH" => [Path.expand("../deps", __DIR__), Mix.Project.build_path()]}
   ]
 
-# Configure tailwind (the version is required)
+# `tailwindcss --version` is not a flag it has; the banner it prints before its help is where the
+# version is, and it exits 0.
 config :tailwind,
-  version: "4.3.0",
-  path: System.get_env("MIX_TAILWIND_PATH"),
+  version: version.(tailwind_path, ["--help"], "4.3.0"),
+  path: tailwind_path,
   forge: [
     args: ~w(
       --input=assets/css/app.css

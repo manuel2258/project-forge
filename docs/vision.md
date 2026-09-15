@@ -279,7 +279,10 @@ view** gives the familiar swimlane-per-state overview. **Merge approval** shows 
 alongside what the platform uniquely knows: the verification report, the chain of documents
 the change was built from, the questions answered along the way, and total cost.
 
-There is no live transcript. Watching agents work is how a review budget disappears.
+Watching agents work is how a review budget disappears — so nothing in the product invites it.
+That is about *unattended* work: a feed of agents grinding through tickets spends attention on
+nothing. It is not an argument against live output when the operator is the one waiting, which is
+why a conversation streams its reply.
 
 Reliability is the differentiator: message state visible, sends retried, answers composed
 offline and synced. The current failure — a message that vanishes silently — must be

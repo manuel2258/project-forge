@@ -11,7 +11,7 @@ defmodule ForgeWeb.WorkerChannel do
 
   use Phoenix.Channel
 
-  alias Forge.{Jobs, Workers}
+  alias Forge.{Conversations, Jobs, Workers}
   alias ForgeCore.Job.{Event, Result}
 
   require Logger
@@ -58,10 +58,18 @@ defmodule ForgeWeb.WorkerChannel do
     {:noreply, socket}
   end
 
+  # A conversation is spoken to while it runs. `Forge.Conversations` sends these; the channel
+  # only carries them, as it carries an assignment.
+  def handle_info({message, %{"job_id" => _id} = payload}, socket)
+      when message in ["message", "interrupt", "close"] do
+    push(socket, message, payload)
+    {:noreply, socket}
+  end
+
   @impl true
   def handle_in("ready", payload, socket) do
     worker = Workers.get!(socket.assigns.worker_id)
-    {:ok, _worker} = Workers.ready(worker, payload["memory_budget"] || 0)
+    {:ok, _worker} = Workers.ready(worker, payload["memory_budget"] || 0, payload["harness"])
     {:reply, :ok, socket}
   end
 
@@ -85,8 +93,15 @@ defmodule ForgeWeb.WorkerChannel do
     ack(record(job_id, Result.from_map(result)), socket)
   end
 
+  # Acked after the transaction commits, like a result, because it carries the turn's cost and
+  # the cost is what the daily cap is computed from. Idempotent on `(job_id, turn)`: the worker
+  # re-sends until it is acked, so the platform has to be able to hear the same turn twice.
+  def handle_in("turn", %{"job_id" => job_id} = payload, socket) do
+    ack(record_turn(job_id, payload), socket)
+  end
+
   def handle_in("hibernated", %{"job_id" => job_id} = payload, socket) do
-    ack(Jobs.hibernate(job_id, payload["commit"], payload["reason"]), socket)
+    ack(hibernate(job_id, payload), socket)
   end
 
   def handle_in("failed", %{"job_id" => job_id} = payload, socket) do
@@ -112,6 +127,26 @@ defmodule ForgeWeb.WorkerChannel do
       {:ok, _job} -> :ok
       {:error, :already_recorded} -> :ok
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp record_turn(job_id, payload) do
+    case Jobs.get!(job_id) do
+      %{kind: :chat} = chat -> Conversations.record_turn(chat, payload)
+      %{} -> {:error, :not_a_conversation}
+    end
+  end
+
+  # A conversation ending is not a job hibernating: a job resumes from its branch and its
+  # manifest, a conversation waits for a person. They arrive on the same message because from
+  # the worker's side both are "it stopped without a result".
+  defp hibernate(job_id, payload) do
+    case Jobs.get!(job_id) do
+      %{kind: :chat} = chat ->
+        Conversations.ended(chat, payload["commit"], payload["reason"])
+
+      %{} ->
+        Jobs.hibernate(job_id, payload["commit"], payload["reason"])
     end
   end
 

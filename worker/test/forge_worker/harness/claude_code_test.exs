@@ -41,6 +41,68 @@ defmodule ForgeWorker.Harness.ClaudeCodeTest do
       assert {"ANTHROPIC_API_KEY", false} in env
       assert {"CLAUDE_CODE_OAUTH_TOKEN", false} in env
     end
+
+    # A conversation has no turn ceiling — it ends when a person stops talking — and no state to
+    # take a cost ceiling from, so the caller passes what is left of the day instead.
+    test "streaming mode takes messages on stdin and drops the turn ceiling" do
+      {_exe, args, _env} =
+        ClaudeCode.command(spec(), "/jobs/j", mode: :streaming, max_cost: 1.5)
+
+      assert args ==
+               ~w(-p --output-format stream-json --verbose --input-format stream-json
+                  --replay-user-messages --max-budget-usd 1.50
+                  --permission-mode bypassPermissions)
+
+      refute "--max-turns" in args
+    end
+
+    test "a streaming invocation with nothing left of the day still has to say so" do
+      {_exe, args, _env} = ClaudeCode.command(spec(), "/jobs/j", mode: :streaming)
+
+      # No ceiling passed means no flag, not an unbounded one asserted as bounded. The caller
+      # deciding there is nothing left is what refuses the turn; see § Spend.
+      refute "--max-budget-usd" in args
+    end
+  end
+
+  describe "writing to a running harness" do
+    test "a message is one JSON line in the shape the harness reads" do
+      assert %{"type" => "user", "message" => %{"role" => "user", "content" => content}} =
+               ClaudeCode.encode_message("hello") |> IO.iodata_to_binary() |> Jason.decode!()
+
+      assert content == [%{"type" => "text", "text" => "hello"}]
+
+      assert ClaudeCode.encode_message("hello")
+             |> IO.iodata_to_binary()
+             |> String.ends_with?("\n")
+    end
+
+    test "an interrupt carries the id its acknowledgement comes back with" do
+      assert %{"type" => "control_request", "request_id" => "forge-2", "request" => request} =
+               ClaudeCode.encode_interrupt("forge-2") |> IO.iodata_to_binary() |> Jason.decode!()
+
+      assert request == %{"subtype" => "interrupt"}
+    end
+
+    # Under --replay-user-messages the harness echoes a message when it takes it, which for one
+    # sent mid-turn is after the current turn's result. That echo is the only evidence of
+    # delivery there is, and it used to parse to nothing at all.
+    test "the echo of a user message is delivery, not a tool result" do
+      assert [%{type: "delivered", payload: %{text: "a question"}}] =
+               ClaudeCode.parse_line(
+                 ~s({"type":"user","message":{"role":"user","content":[{"type":"text","text":"a question"}]}})
+               )
+    end
+
+    test "an interrupt is acknowledged with the id that asked" do
+      assert [%{type: "control", payload: payload}] =
+               ClaudeCode.parse_line(
+                 ~s({"type":"control_response","response":{"subtype":"success","request_id":"forge-2","response":{"still_queued":[]}}})
+               )
+
+      assert payload.request_id == "forge-2"
+      assert payload.subtype == "success"
+    end
   end
 
   describe "parse_line/1" do
@@ -130,12 +192,112 @@ defmodule ForgeWorker.Harness.ClaudeCodeTest do
     end
   end
 
+  describe "probe/1" do
+    # The models a credential may use cannot be got from the CLI — 2.1.220 has no models
+    # subcommand and `--model` rejects a name only once a turn is under way — so the driver asks
+    # the API, which is also what makes this free. See docs/design/worker-channel.md § What a
+    # worker offers.
+    test "reports the models the credential may use, and the harness running them" do
+      offer =
+        ClaudeCode.probe(
+          executable: fake_executable(),
+          credential: {:oauth, "tok"},
+          req_options: [plug: &models_plug(&1, self())]
+        )
+
+      assert offer.driver == "claude_code"
+      assert offer.version == "9.9.9"
+      assert offer.login == :ok
+
+      assert offer.models == [
+               %{id: "claude-opus-5", name: "Claude Opus 5"},
+               # A model the API named without a display name is still offerable; its id stands
+               # in, because a missing label is not a missing model.
+               %{id: "claude-haiku-4-5-20251001", name: "claude-haiku-4-5-20251001"}
+             ]
+
+      assert_received {:probed, headers}
+      assert {"authorization", "Bearer tok"} in headers
+      assert {"anthropic-beta", "oauth-2025-04-20"} in headers
+    end
+
+    # A subscription token is a bearer token and an API key is an `x-api-key`; sending either as
+    # the other is a 401, which is the whole reason the two are not one clause.
+    test "an api key authenticates as an api key" do
+      ClaudeCode.probe(
+        executable: fake_executable(),
+        credential: {:api_key, "sk-1"},
+        req_options: [plug: &models_plug(&1, self())]
+      )
+
+      assert_received {:probed, headers}
+      assert {"x-api-key", "sk-1"} in headers
+      refute Enum.any?(headers, fn {name, _value} -> name == "authorization" end)
+    end
+
+    # The point of the probe: a machine minted without a working credential is visibly not
+    # logged in at `ready`, rather than silently failing every job it is given.
+    test "a refused credential is reported as a bad login, not as no models" do
+      offer =
+        ClaudeCode.probe(
+          executable: fake_executable(),
+          credential: {:oauth, "stale"},
+          req_options: [plug: &Plug.Conn.send_resp(&1, 401, ~s({"error":"nope"}))]
+        )
+
+      assert offer.login == :invalid
+      assert offer.models == []
+    end
+
+    # Never `:invalid`: an unreachable API says nothing about the credential, and a worker that
+    # reported one as the other would send an operator looking for a login problem it does not
+    # have.
+    test "an unreachable api is unknown rather than refused" do
+      offer =
+        ClaudeCode.probe(
+          executable: fake_executable(),
+          credential: {:oauth, "tok"},
+          req_options: [plug: &Req.Test.transport_error(&1, :econnrefused)]
+        )
+
+      assert offer.login == :unknown
+      assert offer.models == []
+    end
+
+    # A worker that cannot describe itself is still a worker that can run work, so every one of
+    # these answers rather than raising.
+    test "no credential and a missing binary still answer" do
+      offer = ClaudeCode.probe(executable: "/nonexistent/claude")
+
+      assert offer.version == nil
+      assert offer.login == :unknown
+      assert offer.models == []
+      assert offer.aliases == ~w(opus sonnet haiku fable)
+    end
+  end
+
+  defp models_plug(conn, test) do
+    send(test, {:probed, conn.req_headers})
+
+    Req.Test.json(conn, %{
+      "data" => [
+        %{"id" => "claude-opus-5", "display_name" => "Claude Opus 5"},
+        %{"id" => "claude-haiku-4-5-20251001"},
+        %{"display_name" => "a row with no id at all"}
+      ]
+    })
+  end
+
   test "declares its capabilities" do
     assert ClaudeCode.capabilities() == %{
              resume: true,
              permission_prompting: false,
              budget_turns: true,
-             budget_usd: true
+             budget_usd: true,
+             # Measured, not assumed: `measure/lib/streaming.sh` drives the real harness and
+             # asserts it. A runner asked for a conversation refuses a driver without this
+             # rather than starting one that can never be spoken to.
+             streaming_input: true
            }
   end
 end

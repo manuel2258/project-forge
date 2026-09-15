@@ -64,9 +64,15 @@ These decisions are settled. They are not to be reopened.
 
 - A mobile-first web application; a native client is possible later. The API is the product surface.
 - The home screen is a queue, not a dashboard: blocking questions, transition approvals, experiment requests, promotion decisions and review-ready tickets in one ordered list, answerable in sequence.
-- Push notification for blocking questions; everything else digested.
+- Push notification for blocking questions and for a conversation's completed replies; everything
+  else digested. *The conversation half widens an earlier decision: a reply to a question you
+  asked is the same shape of thing as an answer you are owed. See `docs/design/conversations.md`
+  § In the queue, and on the phone.*
 - Additional views: ticket timeline, job view showing the pinned input manifest, board, and merge approval showing the diff alongside the verification report, the documents the change was built from, the questions answered, and total cost.
-- There is no live transcript view.
+- Live output is shown where the operator is waiting for it — a conversation's reply, and a
+  running job's stream — and nowhere else. *Reverses an earlier decision ("there is no live
+  transcript view"), which generalised a true point about unattended work into a ban on live
+  output as such. `docs/design/ui.md` § Motion and structure carries the distinction.*
 - Message delivery must be visibly reliable: message state shown, sends retried, answers composed offline and synced. A silently dropped message must be impossible.
 
 ## Security and users

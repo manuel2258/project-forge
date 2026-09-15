@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# The end-to-end check for conversations: a real platform, a real worker, a real harness, and a
+# whole conversation driven from open to merged.
+#
+# `bin/check` proves the code runs. This proves a conversation works — which is a different
+# question, and the one this repository gets wrong more often. It cannot be part of the gate for
+# the same reason `bin/measure` cannot: it needs a node, a machine and a credential that costs
+# money.
+#
+# The assertions are in `mix forge.e2e.chat`, where the database is. This owns what surrounds it:
+# the preconditions, the platform, and saying plainly what could not be checked.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+# The measurement harness's logging, reused rather than written again: `section`, `info`, `die`
+# and the precondition helpers are the same job here. It expects the repository root to be
+# exported before it is sourced, which is how `bin/measure` calls it too.
+FORGE_M_ROOT=$(pwd)
+export FORGE_M_ROOT
+# shellcheck source=measure/lib/common.sh
+. measure/lib/common.sh
+
+usage() {
+  cat << 'EOF'
+usage: bin/e2e-chat PROJECT [--keep]
+
+  PROJECT   the project to hold the conversation in; it must already exist
+  --keep    leave the conversation open at the end instead of closing it
+
+Expects, and says so rather than guessing:
+  - a platform running as a named node, started like
+        elixir --sname forge --cookie forge-e2e -S mix phx.server
+    and reachable at FORGE_E2E_PLATFORM_URL (default http://localhost:4000)
+  - a worker connected to it, with a free slice
+  - CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY in the environment for that worker
+
+The node name matters and is not ceremony. Sending to a conversation reaches its worker through
+the registry of the node doing the sending, so a driver in a node of its own would write every
+message to the log and deliver none of them — and it would look like a conversation that stopped
+replying. The whole run happens inside the live node; this only drives it.
+
+  FORGE_E2E_NODE     default forge@<hostname -s>
+  FORGE_E2E_COOKIE   default forge-e2e
+
+It spends real money: a conversation of eight or so turns against a real model.
+EOF
+}
+
+project=""
+keep=""
+
+while [ $# -gt 0 ]; do
+  case $1 in
+    --keep)
+      keep="--keep"
+      shift
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    -*) die "unknown option $1" ;;
+    *)
+      project=$1
+      shift
+      ;;
+  esac
+done
+
+[ -n "$project" ] || {
+  usage
+  die "which project?"
+}
+
+platform_url=${FORGE_E2E_PLATFORM_URL:-http://localhost:4000}
+node=${FORGE_E2E_NODE:-forge@$(hostname -s)}
+cookie=${FORGE_E2E_COOKIE:-forge-e2e}
+
+section "preconditions"
+
+have mix || fail_add "mix is not on PATH"
+have git || fail_add "git is not on PATH"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$platform_url/users/log-in" || echo 000)
+[ "$code" = 200 ] || fail_add "no platform at $platform_url (got $code); start it first"
+
+[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}${ANTHROPIC_API_KEY:-}" ] ||
+  fail_add "no CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY; the worker cannot run a harness"
+
+fail_report
+
+info "platform $platform_url, node $node, project $project"
+
+# Whether a worker is connected is the platform's to answer, so it is asked in the same place
+# every other fact is: the task refuses with a reason rather than hanging for five minutes.
+section "the conversation"
+
+if (cd platform && elixir --sname "e2e-driver-$$" --cookie "$cookie" \
+  -S mix forge.e2e.chat "$project" --node "$node" $keep); then
+  printf '\n'
+  info "the conversation works end to end"
+else
+  printf '\n'
+  die "the end-to-end check failed; the assertion above says what and why"
+fi
+
+# Stated rather than skipped, because a check that quietly omits something is worse than one that
+# names what it cannot reach.
+cat << 'EOF'
+
+  Not checked here, and not checkable without eyes: whether the streamed reply *looks* live in a
+  browser, and whether the page is pleasant to use. What stands in for the first is the assertion
+  that the text events arrive separated in time and before the turn ends, plus the LiveView test
+  that the page re-renders on each — which prove the mechanism and not the impression.
+EOF

@@ -17,7 +17,7 @@ defmodule ForgeWorker.Link do
 
   alias ForgeCore.Job.Result
   alias ForgeWorker.{Config, Store}
-  alias ForgeWorker.Job.{Dir, Runner, Seed, Workspace}
+  alias ForgeWorker.Job.{Conversation, Dir, Runner, Seed, Workspace}
 
   require Logger
 
@@ -41,6 +41,7 @@ defmodule ForgeWorker.Link do
       opts
       |> Keyword.drop([:worker_id, :root])
       |> Keyword.put_new_lazy(:uri, &Config.socket_uri/0)
+      |> Keyword.put_new_lazy(:headers, &Config.socket_headers/0)
 
     socket =
       new_socket()
@@ -73,7 +74,8 @@ defmodule ForgeWorker.Link do
     push(socket, socket.assigns.topic, "ready", %{
       "memory_budget" => Config.memory_budget(),
       "seeds" => Seed.present(socket.assigns.root),
-      "root" => socket.assigns.root
+      "root" => socket.assigns.root,
+      "harness" => harness_offer()
     })
 
     :timer.send_interval(@heartbeat_ms, self(), :heartbeat)
@@ -103,6 +105,24 @@ defmodule ForgeWorker.Link do
     end
 
     {:ok, socket}
+  end
+
+  # A conversation is spoken to while it runs, which no workflow job ever is. Each of these is
+  # forwarded to the process holding that chat and does nothing at all for a job.
+  def handle_message(_topic, "message", %{"job_id" => job_id} = payload, socket) do
+    with_conversation(socket, job_id, "message", fn pid ->
+      Conversation.send_message(pid, payload["message_id"], payload["text"])
+    end)
+  end
+
+  def handle_message(_topic, "interrupt", %{"job_id" => job_id}, socket) do
+    with_conversation(socket, job_id, "interrupt", &Conversation.interrupt/1)
+  end
+
+  def handle_message(_topic, "close", %{"job_id" => job_id} = payload, socket) do
+    with_conversation(socket, job_id, "close", fn pid ->
+      Conversation.close(pid, payload["reason"] || "closed")
+    end)
   end
 
   def handle_message(_topic, "drain", _payload, socket) do
@@ -142,6 +162,12 @@ defmodule ForgeWorker.Link do
     })
 
     {:noreply, socket}
+  end
+
+  # Acked like a terminal message, and keyed by the turn as well as the job, because there is
+  # one of these per turn rather than one per job.
+  def handle_info({:chat_turn, job_id, index, payload}, socket) do
+    {:noreply, send_acked(socket, {job_id, "turn", index}, "turn", payload)}
   end
 
   def handle_info({:terminal, job_id, message, payload}, socket) do
@@ -194,6 +220,34 @@ defmodule ForgeWorker.Link do
 
   # -- running one job ----------------------------------------------------------------------
 
+  defp start_job(socket, %{"kind" => "chat"} = assignment) do
+    link = self()
+
+    case DynamicSupervisor.start_child(
+           ForgeWorker.Job.Supervisor,
+           {Conversation, assignment: assignment, link: link, root: socket.assigns.root}
+         ) do
+      {:ok, pid} ->
+        put_in(socket.assigns.jobs[assignment["job_id"]], %{
+          task: pid,
+          runner: nil,
+          attempt: 1,
+          kind: :chat
+        })
+
+      {:error, reason} ->
+        Logger.error("could not start chat #{assignment["job_id"]}: #{inspect(reason)}")
+
+        send(
+          link,
+          {:terminal, assignment["job_id"], "failed",
+           %{"job_id" => assignment["job_id"], "reason" => inspect(reason)}}
+        )
+
+        socket
+    end
+  end
+
   defp start_job(socket, assignment) do
     link = self()
     root = socket.assigns.root
@@ -206,8 +260,18 @@ defmodule ForgeWorker.Link do
     put_in(socket.assigns.jobs[assignment["job_id"]], %{
       task: task,
       runner: nil,
-      attempt: assignment["spec"]["attempt"]
+      attempt: assignment["spec"]["attempt"],
+      kind: :workflow
     })
+  end
+
+  defp with_conversation(socket, job_id, message, fun) do
+    case Conversation.whereis(job_id) do
+      pid when is_pid(pid) -> fun.(pid)
+      nil -> Logger.info("asked to #{message} #{job_id}, which is not a chat running here")
+    end
+
+    {:ok, socket}
   end
 
   @doc false
@@ -291,6 +355,7 @@ defmodule ForgeWorker.Link do
     harness_opts =
       Application.get_env(:forge_worker, :harness_opts, [])
       |> Keyword.merge(resume_opts(assignment))
+      |> put_model(spec)
 
     slice = assignment["slice"] || %{}
 
@@ -323,6 +388,16 @@ defmodule ForgeWorker.Link do
     do: [resume_session: session]
 
   defp resume_opts(_assignment), do: []
+
+  # The spec's model wins over the machine's, and a spec that names none leaves the machine's
+  # alone. The platform resolved it — a state's, then the project's — because it knows the state
+  # and the project and this machine knows neither; `FORGE_CLAUDE_MODEL` is what is left when
+  # nobody upstream had an opinion.
+  @spec put_model(keyword(), ForgeCore.Job.Spec.t()) :: keyword()
+  defp put_model(opts, %ForgeCore.Job.Spec{model: model}) when is_binary(model),
+    do: Keyword.put(opts, :model, model)
+
+  defp put_model(opts, _spec), do: opts
 
   # Long enough that a job an operator is still thinking about survives, short enough that a
   # machine running for months does not keep every run it ever made. A week.
@@ -371,6 +446,39 @@ defmodule ForgeWorker.Link do
   # The application version says almost nothing here — every dev-phase release is 0.1.0 — so the
   # build is named by the store path's hash, which is what actually changes when `bin/worker-update`
   # ships one. On anything that is not a Nix store path this degrades to the version alone.
+  # What this machine can run, asked of the harness at join rather than declared by the platform
+  # (`docs/design/worker-channel.md` § What a worker offers). It is asked here and not at boot so
+  # that a rotated credential or a replaced binary is picked up on the next connection, and it
+  # never prevents `ready`: a machine that cannot describe itself can still take work.
+  defp harness_offer do
+    harness = Application.get_env(:forge_worker, :harness, ForgeWorker.Harness.ClaudeCode)
+    opts = Application.get_env(:forge_worker, :harness_opts, [])
+
+    offer = harness.probe(opts)
+
+    Logger.info(
+      "harness #{offer.name} #{offer.version || "?"}: login #{offer.login}, " <>
+        "#{length(offer.models)} models"
+    )
+
+    offer
+    |> Map.put(:capabilities, harness.capabilities())
+    |> Map.new(fn {key, value} -> {Atom.to_string(key), encode_offer(value)} end)
+  rescue
+    error ->
+      Logger.warning("could not probe the harness: #{inspect(error)}")
+      %{"login" => "unknown", "models" => []}
+  end
+
+  defp encode_offer(value) when is_atom(value) and not is_boolean(value) and not is_nil(value),
+    do: Atom.to_string(value)
+
+  defp encode_offer(%{} = map) when not is_struct(map),
+    do: Map.new(map, fn {key, value} -> {to_string(key), encode_offer(value)} end)
+
+  defp encode_offer(list) when is_list(list), do: Enum.map(list, &encode_offer/1)
+  defp encode_offer(value), do: value
+
   defp version do
     vsn =
       case :application.get_key(:forge_worker, :vsn) do
@@ -408,9 +516,14 @@ defmodule ForgeWorker.Link do
     end)
   end
 
-  defp send_terminal(socket, job_id, message, payload) do
-    key = {job_id, message}
+  defp send_terminal(socket, job_id, message, payload),
+    do: send_acked(socket, {job_id, message}, message, payload)
 
+  # The key is the caller's, because a job sends exactly one terminal message and a conversation
+  # sends a `turn` per turn. Keyed by `{job_id, message}` alone, two unacked turns for one chat
+  # would collide and one would be dropped for ever — taking its cost with it, which is the one
+  # thing the daily cap is computed from.
+  defp send_acked(socket, key, message, payload) do
     case push(socket, socket.assigns.topic, message, payload) do
       {:ok, ref} ->
         socket
@@ -424,9 +537,8 @@ defmodule ForgeWorker.Link do
   end
 
   defp resend_unacked(socket) do
-    Enum.reduce(socket.assigns.unacked, socket, fn {{job_id, _message}, {message, payload}},
-                                                   socket ->
-      send_terminal(socket, job_id, message, payload)
+    Enum.reduce(socket.assigns.unacked, socket, fn {key, {message, payload}}, socket ->
+      send_acked(socket, key, message, payload)
     end)
   end
 

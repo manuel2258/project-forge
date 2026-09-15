@@ -7,6 +7,9 @@ milestone live in `docs/design/`; code follows them, and a change of mind update
 `docs/design/ui.md` is the standard for every operator surface and `docs/design/capacity.md` for
 how consumption is modelled and drawn. Read both before changing anything the operator sees.
 
+`docs/design/conversations.md` is the standard for chats — the work that does not fit a workflow
+state. It is the newest and least settled note; its § Open lists what is deliberately undecided.
+
 ## Layout
 
 Three Mix projects joined by path dependencies. Not an umbrella.

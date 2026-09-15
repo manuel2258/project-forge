@@ -106,6 +106,7 @@ defmodule ForgeWeb.WorkersLive do
               <th class="py-2 pr-3 font-normal">Status</th>
               <th class="py-2 pr-3 font-normal">Channel</th>
               <th class="py-2 pr-3 font-normal">Capacity</th>
+              <th class="py-2 pr-3 font-normal">Harness</th>
               <th class="py-2 pr-3 font-normal">Running</th>
               <th class="py-2 font-normal">Last seen</th>
             </tr>
@@ -152,6 +153,28 @@ defmodule ForgeWeb.WorkersLive do
                 <div>{gib(row.worker.memory_budget)}</div>
                 <div :if={row.slices} class="text-[11px] opacity-50">
                   {row.slices} {if row.slices == 1, do: "slice", else: "slices"}
+                </div>
+              </td>
+
+              <%!-- What the machine said at `ready`, not what the platform assumes. A worker that
+                    joined before it reported this, or whose probe could not reach anything, shows
+                    a dash and still takes work — see docs/design/worker-channel.md § What a
+                    worker offers. The login line appears only when it is a problem, because a
+                    machine that is logged in is the case nobody needs told about. --%>
+              <td class="py-3 pr-3 font-mono">
+                <span :if={is_nil(row.worker.harness)} class="opacity-40">—</span>
+                <div :if={row.worker.harness}>
+                  {row.worker.harness["name"] || row.worker.harness["driver"]}
+                  <span class="opacity-50">{row.worker.harness["version"]}</span>
+                </div>
+                <div :if={row.worker.harness} class="text-[11px] opacity-50">
+                  {length(row.worker.harness["models"] || [])} models
+                </div>
+                <div
+                  :if={row.worker.harness && row.worker.harness["login"] not in [nil, "ok"]}
+                  class="text-[11px] text-error"
+                >
+                  login {row.worker.harness["login"]}
                 </div>
               </td>
 

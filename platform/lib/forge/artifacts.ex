@@ -15,6 +15,16 @@ defmodule Forge.Artifacts do
 
   @type author :: Events.actor()
 
+  @typedoc """
+  What an artifact belongs to: a ticket, or a conversation.
+
+  A bare id means `{:ticket, id}`, which is what a bare id has meant since the product had
+  artifacts at all — the ticket is still the scope almost everything here is about. It is one
+  model with a shorthand, not two: every path below resolves to a scope before it touches a row,
+  and the database has the matching CHECK.
+  """
+  @type scope :: {:ticket, String.t()} | {:job, String.t()} | String.t()
+
   # -- writing versions ---------------------------------------------------------------------
 
   @doc """
@@ -27,17 +37,19 @@ defmodule Forge.Artifacts do
   @spec put_version(
           Multi.t(),
           term(),
-          String.t(),
+          scope(),
           String.t(),
           :document | :blob | :presentation,
           author(),
           map()
         ) ::
           Multi.t()
-  def put_version(multi, key, ticket_id, name, kind, author, attrs) do
+  def put_version(multi, key, scope, name, kind, author, attrs) do
+    scope = scope(scope)
+
     multi
     |> Multi.run({key, :artifact}, fn repo, _ ->
-      get_or_create_artifact(repo, ticket_id, name, kind)
+      get_or_create_artifact(repo, scope, name, kind)
     end)
     |> Multi.run({key, :parsed}, fn _repo, _ ->
       if Map.get(attrs, :parse, true), do: parse_if_document(kind, attrs), else: {:ok, nil}
@@ -72,19 +84,41 @@ defmodule Forge.Artifacts do
       version = changes[{key, :version}]
 
       %{
-        ticket_id: ticket_id,
-        job_id: job_id(author),
+        ticket_id: ticket_of(scope),
+        job_id: job_id(author) || job_of(scope),
         payload: %{"artifact" => name, "version" => version.version, "version_id" => version.id}
       }
     end)
   end
 
+  defp scope(id) when is_binary(id), do: {:ticket, id}
+  defp scope({kind, _id} = scope) when kind in [:ticket, :job], do: scope
+
+  # One head per scope rather than a nil-valued comparison: `a.ticket_id == ^nil` compiles to
+  # `= NULL`, which matches nothing, so every lookup on the chat side would miss and create a
+  # second artifact of the same name — until the unique index refused it.
+  defp scope_query({:ticket, id}, name),
+    do: from(a in Artifact, where: a.ticket_id == ^id and a.name == ^name)
+
+  defp scope_query({:job, id}, name),
+    do: from(a in Artifact, where: a.job_id == ^id and a.name == ^name)
+
+  defp ticket_of({:ticket, id}), do: id
+  defp ticket_of({:job, _id}), do: nil
+
+  defp job_of({:job, id}), do: id
+  defp job_of({:ticket, _id}), do: nil
+
+  # The columns a row of this scope carries. Exactly one is set, which the CHECK also says.
+  defp scope_attrs({:ticket, id}), do: %{ticket_id: id, job_id: nil}
+  defp scope_attrs({:job, id}), do: %{ticket_id: nil, job_id: id}
+
   @doc "Records one version in its own transaction."
-  @spec record_version(String.t(), String.t(), :document | :blob | :presentation, author(), map()) ::
+  @spec record_version(scope(), String.t(), :document | :blob | :presentation, author(), map()) ::
           {:ok, Version.t()} | {:error, term()}
-  def record_version(ticket_id, name, kind, author, attrs) do
+  def record_version(scope, name, kind, author, attrs) do
     Multi.new()
-    |> put_version(:write, ticket_id, name, kind, author, attrs)
+    |> put_version(:write, scope, name, kind, author, attrs)
     |> Repo.transaction()
     |> case do
       {:ok, changes} -> {:ok, changes[{:write, :version}]}
@@ -92,12 +126,11 @@ defmodule Forge.Artifacts do
     end
   end
 
-  defp get_or_create_artifact(repo, ticket_id, name, kind) do
-    case repo.one(from a in Artifact, where: a.ticket_id == ^ticket_id and a.name == ^name) do
+  defp get_or_create_artifact(repo, scope, name, kind) do
+    case repo.one(scope_query(scope, name)) do
       nil ->
-        repo.insert(
-          Artifact.changeset(%Artifact{}, %{ticket_id: ticket_id, name: name, kind: kind})
-        )
+        attrs = scope |> scope_attrs() |> Map.merge(%{name: name, kind: kind})
+        repo.insert(Artifact.changeset(%Artifact{}, attrs))
 
       %Artifact{kind: ^kind} = artifact ->
         {:ok, artifact}
@@ -147,6 +180,53 @@ defmodule Forge.Artifacts do
       from v in Version,
         join: a in assoc(v, :artifact),
         where: a.ticket_id == ^ticket_id and a.name == ^name,
+        order_by: [desc: v.version],
+        limit: 1
+    )
+  end
+
+  @doc """
+  The latest version of every document on a ticket, with its name, newest artifact first.
+
+  This is the context a conversation about a ticket opens with: the same documents the ticket's
+  next job would be handed, at the versions it would see. Documents only — a blob is in the store
+  and a changeset is a commit, and neither is something to inline into a prompt.
+  """
+  @spec latest_documents(String.t()) :: [
+          %{name: String.t(), version: pos_integer(), content: String.t()}
+        ]
+  def latest_documents(ticket_id) do
+    latest =
+      from v in Version,
+        group_by: v.artifact_id,
+        select: %{artifact_id: v.artifact_id, version: max(v.version)}
+
+    Repo.all(
+      from v in Version,
+        join: a in assoc(v, :artifact),
+        join: l in subquery(latest),
+        on: l.artifact_id == v.artifact_id and l.version == v.version,
+        where: a.ticket_id == ^ticket_id and a.kind == :document and not is_nil(v.content),
+        # `artifact_versions` has no `updated_at` — a version is immutable, so its schema says
+        # `updated_at: false`. Ordering by one compiled fine and failed at the database, on the
+        # only path that reaches this: a ticket chat being assigned.
+        order_by: [desc: v.inserted_at, asc: a.name],
+        select: %{name: a.name, version: v.version, content: v.content}
+    )
+  end
+
+  @doc "A conversation's own artifacts, by name."
+  @spec list_for_job(String.t()) :: [Artifact.t()]
+  def list_for_job(job_id),
+    do: Repo.all(from a in Artifact, where: a.job_id == ^job_id, order_by: a.name)
+
+  @doc "The latest version of one of a conversation's artifacts."
+  @spec latest_for_job(String.t(), String.t()) :: Version.t() | nil
+  def latest_for_job(job_id, name) do
+    Repo.one(
+      from v in Version,
+        join: a in assoc(v, :artifact),
+        where: a.job_id == ^job_id and a.name == ^name,
         order_by: [desc: v.version],
         limit: 1
     )

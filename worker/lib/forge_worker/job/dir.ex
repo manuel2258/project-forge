@@ -43,6 +43,7 @@ defmodule ForgeWorker.Job.Dir do
     File.mkdir_p!(out)
     File.mkdir_p!(home_dir(job_dir))
     File.write!(Path.join(job_dir, "spec.json"), Spec.to_json(spec))
+    write_platform_docs(job_dir)
 
     Enum.each(spec.inputs, fn input ->
       path = Path.join(inputs, input.name)
@@ -51,6 +52,22 @@ defmodule ForgeWorker.Job.Dir do
     end)
 
     job_dir
+  end
+
+  # What the platform is and what a workflow may contain, for every job and every conversation.
+  # On disk rather than in the prompt: the prompt names the folder, so an agent reads it when the
+  # machinery is the question and pays nothing for it when it is not. Rewritten every time, so a
+  # resumed run gets the current documents rather than the ones its first attempt was given.
+  defp write_platform_docs(job_dir) do
+    dir = Path.join(job_dir, "platform")
+    File.rm_rf!(dir)
+    File.mkdir_p!(dir)
+
+    Enum.each(ForgeCore.Workflow.platform_docs(), fn {name, content} ->
+      path = Path.join(dir, name)
+      File.write!(path, content)
+      File.chmod!(path, 0o444)
+    end)
   end
 
   @doc """

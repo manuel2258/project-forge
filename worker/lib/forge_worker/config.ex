@@ -21,15 +21,32 @@ defmodule ForgeWorker.Config do
   @spec platform_url() :: String.t() | nil
   def platform_url, do: get(:platform_url, "FORGE_PLATFORM_URL")
 
-  @doc "The websocket URI, with this worker's credentials as connect params."
+  @doc """
+  The websocket URI. Carries `worker_id` and no credential.
+
+  The token goes in a header (`socket_headers/0`) and never in the URL: a URL is recorded by
+  every proxy, access log and tracing span on the path, and this token is long lived and grants
+  the channel for the life of the machine. See `docs/design/worker-channel.md` § Authentication.
+  """
   @spec socket_uri() :: String.t()
   def socket_uri do
     uri = URI.parse(platform_url())
     scheme = if uri.scheme == "https", do: "wss", else: "ws"
-    query = URI.encode_query(%{"worker_id" => worker_id(), "token" => token()})
+    query = URI.encode_query(%{"worker_id" => worker_id()})
 
     %URI{uri | scheme: scheme, path: "/worker/websocket", query: query} |> URI.to_string()
   end
+
+  @doc """
+  The credential, as the headers the websocket handshake carries.
+
+  `x-forge-worker-token` rather than `authorization`, because Phoenix's socket transport passes
+  only `x-` prefixed headers through to `connect/3` — `:x_headers` in the endpoint's
+  `connect_info` is literally "headers with an x- prefix". The store, which is an ordinary HTTP
+  request and not a socket handshake, uses `Authorization: Bearer`.
+  """
+  @spec socket_headers() :: [{String.t(), String.t()}]
+  def socket_headers, do: [{"x-forge-worker-token", token() || ""}]
 
   @doc "Where job directories and worktrees live on this machine."
   @spec root() :: String.t()

@@ -38,11 +38,21 @@ defmodule ForgeWeb.CreateLiveTest do
 
       assert Projects.by_name(name)
 
-      # Not a redirect to the board: the repository is empty and the operator needs the URL.
+      # Not a redirect to the board: the project has no workflow and the operator needs to be
+      # told what to do about it.
       assert html =~ "is registered"
-      assert html =~ "git clone"
-      assert html =~ "/git/#{name}.git"
       assert html =~ ".forge/workflow.yml"
+
+      # The primary action is a conversation, because it is the only route that works. A
+      # credential writes one branch and never the default one, so the page cannot honestly
+      # tell anyone to push a workflow — which is what it used to say.
+      assert html =~ "/chats/new?project=#{name}"
+      assert html =~ "Set it up in a chat"
+
+      # The clone URL is still here, for working by hand, with the credential a click away.
+      assert html =~ "/git/#{name}.git"
+      assert html =~ ~s(data-target="clone-url")
+      assert html =~ "/projects/#{name}/settings"
     end
 
     test "a duplicate name is refused in place", %{conn: conn} do
@@ -63,6 +73,47 @@ defmodule ForgeWeb.CreateLiveTest do
   end
 
   describe "a ticket" do
+    test "reached from a project does not ask which project", %{conn: conn} do
+      {:ok, project} =
+        Projects.register(%{
+          name: "fixed-#{System.unique_integer([:positive])}",
+          repo_path: seeded_repo()
+        })
+
+      {:ok, view, html} = live(conn, ~p"/tickets/new?project=#{project.name}")
+
+      # Stated, not asked — and the way back names where you came from.
+      refute has_element?(view, "select[name='ticket[project]']")
+      assert has_element?(view, "input[type=hidden][name='ticket[project]']")
+      assert html =~ ~s(href="/projects/#{project.name}")
+    end
+
+    test "the bare route still offers the choice", %{conn: conn} do
+      {:ok, _project} =
+        Projects.register(%{
+          name: "choice-#{System.unique_integer([:positive])}",
+          repo_path: seeded_repo()
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/tickets/new")
+
+      assert has_element?(view, "select[name='ticket[project]']")
+    end
+
+    test "a project named in the address that does not exist falls back to the choice", %{
+      conn: conn
+    } do
+      {:ok, _project} =
+        Projects.register(%{
+          name: "real-#{System.unique_integer([:positive])}",
+          repo_path: seeded_repo()
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/tickets/new?project=no-such-project")
+
+      assert has_element?(view, "select[name='ticket[project]']")
+    end
+
     test "is admitted and lands on its own page", %{conn: conn} do
       {:ok, project} =
         Projects.register(%{
@@ -212,6 +263,32 @@ defmodule ForgeWeb.CreateLiveTest do
 
       assert html =~ "unapproved"
     end
+  end
+
+  test "new project is a top-bar action, and new ticket belongs to a project", %{
+    conn: conn,
+    user: user
+  } do
+    {:ok, project} =
+      Projects.register(%{
+        name: "placed-#{System.unique_integer([:positive])}",
+        repo_path: seeded_repo()
+      })
+
+    {:ok, _ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
+
+    # The top bar carries New project on every page; the board and the queue carry neither.
+    {:ok, board, board_html} = live(conn, ~p"/board")
+    assert has_element?(board, ~s(header a[href="/projects/new"]))
+    refute board_html =~ "New ticket"
+
+    {:ok, queue, queue_html} = live(conn, ~p"/")
+    assert has_element?(queue, ~s(header a[href="/projects/new"]))
+    refute queue_html =~ "New ticket"
+
+    # The project page is the one place a ticket is offered.
+    {:ok, page, _html} = live(conn, ~p"/projects/#{project.name}")
+    assert has_element?(page, ~s(a[href="/tickets/new?project=#{project.name}"]))
   end
 
   test "both pages require a logged-in operator" do

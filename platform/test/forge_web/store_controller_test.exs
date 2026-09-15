@@ -6,6 +6,10 @@ defmodule ForgeWeb.StoreControllerTest do
   alias Forge.Storage
   alias Forge.Storage.Token
 
+  # In a header, never the query string: a URL reaches every proxy log between the worker and
+  # the platform. See docs/design/storage.md § The token is a header.
+  defp with_token(conn, token), do: put_req_header(conn, "authorization", "Bearer " <> token)
+
   setup do
     dir = Path.join(System.tmp_dir!(), "forge-store-http-#{System.unique_integer([:positive])}")
     previous = Application.get_env(:forge, Storage, [])
@@ -24,7 +28,7 @@ defmodule ForgeWeb.StoreControllerTest do
       key = "job/j1/transcript-1.jsonl"
       {:ok, _info} = Storage.put(key, "{\"type\":\"started\"}")
 
-      conn = get(conn, ~p"/store/#{key}?token=#{Token.sign(:get, key)}")
+      conn = get(with_token(conn, Token.sign(:get, key)), ~p"/store/#{key}")
 
       assert response(conn, 200) == "{\"type\":\"started\"}"
       assert get_resp_header(conn, "content-type") == ["application/octet-stream"]
@@ -35,7 +39,10 @@ defmodule ForgeWeb.StoreControllerTest do
       {:ok, _info} = Storage.put("job/j2/own.jsonl", "mine")
 
       conn =
-        get(conn, ~p"/store/job/j1/secret.jsonl?token=#{Token.sign(:get, "job/j2/own.jsonl")}")
+        get(
+          with_token(conn, Token.sign(:get, "job/j2/own.jsonl")),
+          ~p"/store/job/j1/secret.jsonl"
+        )
 
       assert %{"error" => %{"reason" => "wrong_key"}} = json_response(conn, 403)
     end
@@ -44,7 +51,7 @@ defmodule ForgeWeb.StoreControllerTest do
       key = "job/j1/transcript-1.jsonl"
       {:ok, _info} = Storage.put(key, "x")
 
-      conn = get(conn, ~p"/store/#{key}?token=#{Token.sign(:put, key)}")
+      conn = get(with_token(conn, Token.sign(:put, key)), ~p"/store/#{key}")
 
       assert %{"error" => %{"reason" => "wrong_key"}} = json_response(conn, 403)
     end
@@ -53,11 +60,28 @@ defmodule ForgeWeb.StoreControllerTest do
       key = "job/j1/transcript-1.jsonl"
       {:ok, _info} = Storage.put(key, "x")
 
-      assert %{"error" => %{"reason" => "invalid_token"}} =
+      # No header at all, a header that is not a Bearer, and a Bearer that is not a token.
+      assert %{"error" => %{"reason" => "missing_token"}} =
                conn |> get(~p"/store/#{key}") |> json_response(401)
 
+      assert %{"error" => %{"reason" => "missing_token"}} =
+               conn
+               |> put_req_header("authorization", Token.sign(:get, key))
+               |> get(~p"/store/#{key}")
+               |> json_response(401)
+
       assert %{"error" => %{"reason" => "invalid_token"}} =
-               conn |> get(~p"/store/#{key}?token=nonsense") |> json_response(401)
+               conn |> with_token("nonsense") |> get(~p"/store/#{key}") |> json_response(401)
+    end
+
+    # The shape this replaced. A token in the URL is a token in every proxy log on the path, so
+    # it is not merely deprecated — it does not authenticate. docs/design/storage.md.
+    test "a token in the query string does not authenticate", %{conn: conn} do
+      key = "job/j1/transcript-1.jsonl"
+      {:ok, _info} = Storage.put(key, "x")
+
+      assert %{"error" => %{"reason" => "missing_token"}} =
+               conn |> get(~p"/store/#{key}?token=#{Token.sign(:get, key)}") |> json_response(401)
     end
 
     test "refuses an expired token", %{conn: conn} do
@@ -69,7 +93,7 @@ defmodule ForgeWeb.StoreControllerTest do
       Application.put_env(:forge, Storage, Keyword.put(previous, :token_max_age, 0))
       on_exit(fn -> Application.put_env(:forge, Storage, previous) end)
 
-      conn = get(conn, ~p"/store/#{key}?token=#{token}")
+      conn = get(with_token(conn, token), ~p"/store/#{key}")
 
       assert %{"error" => %{"reason" => "expired_token"}} = json_response(conn, 401)
     end
@@ -77,7 +101,7 @@ defmodule ForgeWeb.StoreControllerTest do
     test "says not_found for a key the store does not have", %{conn: conn} do
       key = "job/j1/missing.jsonl"
 
-      conn = get(conn, ~p"/store/#{key}?token=#{Token.sign(:get, key)}")
+      conn = get(with_token(conn, Token.sign(:get, key)), ~p"/store/#{key}")
 
       assert %{"error" => %{"reason" => "not_found"}} = json_response(conn, 404)
     end
@@ -85,7 +109,7 @@ defmodule ForgeWeb.StoreControllerTest do
     # Even a validly signed token does not make a malformed key readable: the store checks the
     # key itself, after the token says the caller may ask about it.
     test "refuses a key that is not a key", %{conn: conn} do
-      conn = get(conn, ~p"/store/job/J1/x?token=#{Token.sign(:get, "job/J1/x")}")
+      conn = get(with_token(conn, Token.sign(:get, "job/J1/x")), ~p"/store/job/J1/x")
 
       assert %{"error" => %{"reason" => "invalid_key"}} = json_response(conn, 400)
     end
@@ -98,7 +122,8 @@ defmodule ForgeWeb.StoreControllerTest do
       conn =
         conn
         |> put_req_header("content-type", "application/octet-stream")
-        |> put(~p"/store/#{key}?token=#{Token.sign(:put, key)}", "written by the worker")
+        |> with_token(Token.sign(:put, key))
+        |> put(~p"/store/#{key}", "written by the worker")
 
       assert %{"key" => ^key, "size" => 21, "hash" => hash} = json_response(conn, 200)
       assert hash == Storage.hash("written by the worker")
@@ -112,7 +137,8 @@ defmodule ForgeWeb.StoreControllerTest do
       conn =
         conn
         |> put_req_header("content-type", "application/octet-stream")
-        |> put(~p"/store/#{key}?token=#{Token.sign(:put, key)}", "second")
+        |> with_token(Token.sign(:put, key))
+        |> put(~p"/store/#{key}", "second")
 
       assert %{"error" => %{"reason" => "exists"}} = json_response(conn, 409)
       assert {:ok, "first"} = Storage.get(key)
@@ -124,7 +150,8 @@ defmodule ForgeWeb.StoreControllerTest do
       conn =
         conn
         |> put_req_header("content-type", "application/octet-stream")
-        |> put(~p"/store/#{key}?token=#{Token.sign(:get, key)}", "nope")
+        |> with_token(Token.sign(:get, key))
+        |> put(~p"/store/#{key}", "nope")
 
       assert %{"error" => %{"reason" => "wrong_key"}} = json_response(conn, 403)
       assert {:error, :not_found} = Storage.get(key)
@@ -139,7 +166,8 @@ defmodule ForgeWeb.StoreControllerTest do
       conn =
         conn
         |> put_req_header("content-type", "application/octet-stream")
-        |> put(~p"/store/#{key}?token=#{Token.sign(:put, key)}", String.duplicate("x", 64))
+        |> with_token(Token.sign(:put, key))
+        |> put(~p"/store/#{key}", String.duplicate("x", 64))
 
       assert %{"error" => %{"reason" => "too_large"}} = json_response(conn, 413)
       assert {:error, :not_found} = Storage.get(key)

@@ -13,8 +13,10 @@ defmodule ForgeWeb.Api.TicketController do
     json(conn, %{id: user.id, email: user.email, role: user.role})
   end
 
+  defp project_name(ticket), do: Projects.get!(ticket.project_id).name
+
   def queue(conn, _params) do
-    items = Enum.map(Queue.items(), &Render.queue_item(&1, project_name(&1.ticket)))
+    items = Enum.map(Queue.items(), &Render.queue_item(&1, &1.project.name))
     json(conn, %{items: items})
   end
 
@@ -166,5 +168,4 @@ defmodule ForgeWeb.Api.TicketController do
 
   defp user(conn), do: conn.assigns.current_scope.user
   defp actor(conn), do: {:user, user(conn).id}
-  defp project_name(ticket), do: Projects.get!(ticket.project_id).name
 end

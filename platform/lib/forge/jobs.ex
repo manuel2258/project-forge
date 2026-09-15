@@ -13,7 +13,21 @@ defmodule Forge.Jobs do
   import Ecto.Query, only: [from: 2]
 
   alias Ecto.Multi
-  alias Forge.{Artifacts, Engine, Events, Git, Projects, Repo, Spend, Storage, Tickets, Workers}
+
+  alias Forge.{
+    Artifacts,
+    Conversations,
+    Engine,
+    Events,
+    Git,
+    Projects,
+    Repo,
+    Spend,
+    Storage,
+    Tickets,
+    Workers
+  }
+
   alias Forge.Git.{Tokens, Url}
   alias Forge.Jobs.Job
   alias Forge.Tickets.Ticket
@@ -32,10 +46,16 @@ defmodule Forge.Jobs do
   def put_create(multi, key, %Ticket{} = ticket, %Workflow{} = workflow, state_name) do
     multi
     |> Multi.run(key, fn repo, _ ->
-      with {:ok, spec} <- build_spec(repo, ticket, workflow, state_name) do
+      with {:ok, spec} <- build_spec(repo, ticket, workflow, state_name),
+           # The one place a workflow spec is built, and so the one place the keys the struct
+           # can no longer enforce are checked. A spec that reaches the worker incomplete is a
+           # job that fails on the machine, after a credential has been minted and a slice made.
+           :ok <- Spec.validate(spec) do
         repo.insert(
           Job.create_changeset(%Job{id: spec.job_id}, %{
+            kind: :workflow,
             ticket_id: ticket.id,
+            project_id: ticket.project_id,
             state: state_name,
             attempt: spec.attempt,
             spec: spec |> Spec.to_json() |> Jason.decode!()
@@ -71,6 +91,7 @@ defmodule Forge.Jobs do
          prompt: prompt,
          prompt_path: state.prompt,
          env: state.env,
+         model: state.model,
          commit: ticket.workflow_commit,
          branch: ticket.branch,
          budget: %{turns: state.budget.turns, cost: state.budget.cost},
@@ -126,17 +147,58 @@ defmodule Forge.Jobs do
   @spec get!(String.t()) :: Job.t()
   def get!(id), do: Repo.get!(Job, id)
 
-  @spec for_ticket(String.t()) :: [Job.t()]
-  def for_ticket(ticket_id),
-    do: Repo.all(from j in Job, where: j.ticket_id == ^ticket_id, order_by: j.inserted_at)
+  @doc """
+  A ticket's workflow jobs, oldest first — the ticket's timeline.
 
-  @doc "Pending jobs on active tickets, oldest first."
+  Conversations about the ticket are excluded, and that is the point: every reader of this walks
+  the workflow. The timeline chunks by state, so a chat would draw as a visit to a state named
+  nothing; the CLI renders a state per row; the operator looks here for a job waiting on a
+  question. Conversations are `chats_for_ticket/1`, which is a different list because it is a
+  different thing.
+  """
+  @spec for_ticket(String.t()) :: [Job.t()]
+  def for_ticket(ticket_id) do
+    Repo.all(
+      from j in Job,
+        where: j.ticket_id == ^ticket_id and j.kind == :workflow,
+        order_by: j.inserted_at
+    )
+  end
+
+  @doc "Conversations about a ticket, newest first."
+  @spec chats_for_ticket(String.t()) :: [Job.t()]
+  def chats_for_ticket(ticket_id) do
+    Repo.all(
+      from j in Job,
+        where: j.ticket_id == ^ticket_id and j.kind == :chat,
+        order_by: [desc: j.inserted_at]
+    )
+  end
+
+  @doc "Conversations belonging to a project, newest first. Includes its tickets' chats."
+  @spec chats_for_project(String.t()) :: [Job.t()]
+  def chats_for_project(project_id) do
+    Repo.all(
+      from j in Job,
+        where: j.project_id == ^project_id and j.kind == :chat,
+        order_by: [desc: j.inserted_at]
+    )
+  end
+
+  @doc """
+  Pending work, oldest first: jobs on active tickets, and conversations.
+
+  The join is a left join because a project chat has no ticket, and an inner join would have
+  dropped it from the queue without saying so — the conversation would sit pending for ever and
+  nothing anywhere would report a problem. A chat is not filtered by a ticket's status either:
+  a chat about a stuck ticket is the conversation you most want to be able to have.
+  """
   @spec pending(pos_integer()) :: [Job.t()]
   def pending(limit \\ 10) do
     Repo.all(
       from j in Job,
-        join: t in assoc(j, :ticket),
-        where: j.status == :pending and t.status == :active,
+        left_join: t in assoc(j, :ticket),
+        where: j.status == :pending and (j.kind == :chat or t.status == :active),
         order_by: j.inserted_at,
         limit: ^limit
     )
@@ -171,13 +233,16 @@ defmodule Forge.Jobs do
   """
   @spec assign(Job.t(), Worker.t()) :: {:ok, Job.t()} | {:error, term()}
   def assign(%Job{} = job, %Worker{} = worker) do
-    ticket = Tickets.get!(job.ticket_id)
-    project = Projects.get!(ticket.project_id)
+    # A workflow job reaches its project through its ticket; a chat has a project of its own and
+    # may have no ticket at all. `Tickets.get!(nil)` raises, so the nil is answered here rather
+    # than by a crash in the scheduler.
+    ticket = job.ticket_id && Tickets.get!(job.ticket_id)
+    project = Projects.get!(job.project_id)
 
     # Both caps are asked here, as they were when the runner was in-process: this is still the
     # one place every billed invocation passes. A ticket over its allowance is stuck before a
     # machine is spoken to, not after.
-    with :ok <- spend_gate(ticket),
+    with :ok <- spend_gate(job, ticket),
          {:ok, token, _row} <- Tokens.issue_for_job(job, ticket, project),
          {:ok, started} <- mark_started(job, worker),
          :ok <- Workers.push(worker.id, {:assign, assignment(started, ticket, project, token)}) do
@@ -194,8 +259,8 @@ defmodule Forge.Jobs do
   end
 
   @doc "What the worker is told when a job is assigned. See `docs/design/worker-channel.md`."
-  @spec assignment(Job.t(), Ticket.t(), Forge.Projects.Project.t(), String.t()) :: map()
-  def assignment(%Job{} = job, %Ticket{} = ticket, project, git_token) do
+  @spec assignment(Job.t(), Ticket.t() | nil, Forge.Projects.Project.t(), String.t()) :: map()
+  def assignment(%Job{} = job, ticket, project, git_token) do
     # Per assignment, not per job: a resumed run uploads its own transcript, and the store
     # refuses to overwrite one that is already there.
     nonce = Base.url_encode64(:crypto.strong_rand_bytes(6), padding: false) |> String.downcase()
@@ -203,12 +268,13 @@ defmodule Forge.Jobs do
 
     %{
       "job_id" => job.id,
+      "kind" => Atom.to_string(job.kind),
       "spec" => job |> runtime_spec(ticket) |> Spec.to_json() |> Jason.decode!(),
       "git" => %{
-        "url" => Url.for(project),
+        "url" => Url.for_worker(project),
         "token" => git_token,
-        "branch" => ticket.branch,
-        "base" => ticket.base_commit
+        "branch" => branch(job, ticket),
+        "base" => ticket && ticket.base_commit
       },
       "store" => %{
         "transcript_key" => transcript,
@@ -222,7 +288,43 @@ defmodule Forge.Jobs do
       "resume_session" => job.harness_session_id,
       "wall_clock_ms" => config(:wall_clock_ms, :timer.hours(1))
     }
+    |> Map.merge(chat_assignment(job))
   end
+
+  # What only a conversation carries. `max_cost_usd` is what is left of the day, passed to the
+  # harness as its per-turn ceiling: a chat has no state to take a budget from, and the daily cap
+  # is the only one there is (`docs/design/conversations.md` § Spend).
+  defp chat_assignment(%Job{kind: :chat} = job) do
+    %{
+      "idle_ms" => config(:chat_idle_ms, :timer.minutes(30)),
+      "max_cost_usd" => remaining_today(),
+      "wall_clock_ms" => config(:chat_wall_clock_ms, :timer.hours(24)),
+      # What already ran on this ticket. Metadata inline because it is small; transcripts as a
+      # key and a token, because they are not (`Conversations.history/1`).
+      "history" => job.ticket_id |> ticket_of() |> Conversations.history()
+    }
+  end
+
+  defp chat_assignment(%Job{}), do: %{}
+
+  defp ticket_of(nil), do: nil
+  defp ticket_of(ticket_id), do: Tickets.get!(ticket_id)
+
+  defp remaining_today do
+    case Spend.day_remaining() do
+      :unlimited -> nil
+      remaining -> Decimal.to_float(remaining)
+    end
+  end
+
+  # A conversation's branch is its own, never the ticket's: a chat writing the ticket's ref would
+  # race the jobs that own it and muddy what the changeset means (§ Commits).
+  defp branch(%Job{kind: :chat} = job, _ticket), do: chat_branch(job)
+  defp branch(%Job{}, %Ticket{} = ticket), do: ticket.branch
+
+  @doc "The branch a conversation's work goes to."
+  @spec chat_branch(Job.t()) :: String.t()
+  def chat_branch(%Job{id: id}), do: "chat/" <> id
 
   # The warm starting point the worker snapshots this job's worktree from, with a token to
   # fetch it. A project nobody has published a seed for gets nil and the worker clones, which
@@ -241,6 +343,23 @@ defmodule Forge.Jobs do
   # is where both caps are asked rather than in the scheduler alone. A ticket over its own
   # allowance is stuck, which also takes it out of `pending/1` and stops the scheduler retrying it
   # every tick; the daily cap only pauses, and the ticket stays active and out of the queue.
+  # A conversation has no ticket allowance and no workflow to take one from: the note says the
+  # daily cap is its only ceiling, and this is where that is true rather than merely intended.
+  # Each turn is also invoked with what is left of the day — see `Conversations` — so the cap
+  # binds during the conversation as well as before it.
+  defp spend_gate(%Job{kind: :chat}, _ticket) do
+    case Spend.day_gate() do
+      :ok ->
+        :ok
+
+      {:pause, reason} ->
+        Events.append("spend.paused", :system, %{payload: %{"reason" => reason}})
+        {:error, {:spend_paused, :day}}
+    end
+  end
+
+  defp spend_gate(_job, %Ticket{} = ticket), do: spend_gate(ticket)
+
   defp spend_gate(%Ticket{} = ticket) do
     case Spend.gate(ticket, Tickets.workflow(ticket)) do
       :ok ->
@@ -264,8 +383,34 @@ defmodule Forge.Jobs do
   # answered are passed so the worker does not wait on them again, and the cost budget is lowered
   # to whatever cap binds first. That last one is what stops a runaway job mid-flight: the figure
   # reaches the harness as its own budget, and the harness stops itself.
+  # A conversation's spec is synthesised at assignment and never stored — the precedent is right
+  # below, where a workflow job's assignment spec is already not the row's. What it carries is
+  # what a chat actually has: where its work goes, and the context it was opened with.
+  defp runtime_spec(%Job{kind: :chat} = job, ticket) do
+    spec = %Spec{
+      job_id: job.id,
+      kind: :chat,
+      branch: chat_branch(job),
+      ticket: ticket && %{number: ticket.number, title: ticket.title},
+      commit: ticket && ticket.base_commit,
+      prompt: opening_prompt(job),
+      inputs: chat_inputs(ticket),
+      preamble_hash: ForgeCore.Prompt.chat_preamble_hash(),
+      model: model_for(job),
+      produces: [],
+      outcomes: []
+    }
+
+    :ok = Spec.validate(spec)
+    spec
+  end
+
   defp runtime_spec(%Job{} = job, %Ticket{id: ticket_id} = ticket) do
-    spec = %{spec(job) | answered_keys: Artifacts.answered_keys(ticket_id)}
+    # The model is resolved here rather than frozen into the stored spec at creation. The spec
+    # carries what the *state* declared, which is pinned with the workflow and right to keep;
+    # the project's default is not pinned, and a job created a week before it ran should use the
+    # project's answer now rather than the one it had then.
+    spec = %{spec(job) | answered_keys: Artifacts.answered_keys(ticket_id), model: model_for(job)}
     spec = lower_budget(spec, job, ticket)
 
     case Artifacts.latest(ticket_id, Workflow.answers_artifact()) do
@@ -281,6 +426,50 @@ defmodule Forge.Jobs do
 
         %{spec | inputs: spec.inputs ++ [answers]}
     end
+  end
+
+  @doc """
+  What this job runs on: the most specific thing that says so.
+
+  A state's model, then the project's, then nil — and nil is not "no model", it is the machine's,
+  which is the platform-wide setting the worker was built with. A conversation has no state, so
+  the first link is the model it was opened with.
+
+  Resolved here and carried in the spec, so the worker is told rather than deciding: the platform
+  knows the state and the project, and a machine knows neither.
+  """
+  @spec model_for(Job.t()) :: String.t() | nil
+  def model_for(%Job{kind: :chat} = job), do: job.model || project_model(job.project_id)
+
+  def model_for(%Job{} = job), do: spec(job).model || project_model(job.project_id)
+
+  defp project_model(nil), do: nil
+
+  defp project_model(project_id) do
+    Repo.one(from p in Projects.Project, where: p.id == ^project_id, select: p.model)
+  end
+
+  # The message that opened the conversation, which the worker delivers as the first turn. It is
+  # read from the log rather than stored on the row, because the log is already the conversation
+  # (§ Shape) and a copy on the row would be a second one.
+  defp opening_prompt(%Job{id: job_id}) do
+    Repo.one(
+      from e in Forge.Events.Event,
+        where: e.job_id == ^job_id and e.type == "chat.message",
+        order_by: e.seq,
+        limit: 1,
+        select: fragment("? ->> 'text'", e.payload)
+    ) || "Hello."
+  end
+
+  # The same inputs the ticket's next job would get, which is the point of a ticket chat: it is
+  # for asking about, or fixing, the work in flight (§ Context).
+  defp chat_inputs(nil), do: []
+
+  defp chat_inputs(%Ticket{id: ticket_id}) do
+    ticket_id
+    |> Artifacts.latest_documents()
+    |> Enum.map(&%Input{name: &1.name, version: &1.version, content: &1.content})
   end
 
   # The job row's `spec` is written once and never rewritten — the invariant holds for what was
@@ -320,7 +509,8 @@ defmodule Forge.Jobs do
            job_id: job_id,
            payload: json_safe(payload)
          }) do
-      {:ok, _} ->
+      {:ok, event} ->
+        Events.notify_job(job_id, event)
         :ok
 
       {:error, changeset} ->
@@ -374,9 +564,13 @@ defmodule Forge.Jobs do
   @spec complete(String.t(), Result.t()) :: {:ok, Job.t()} | {:error, :already_recorded | term()}
   def complete(job_id, %Result{} = result) do
     job = get!(job_id)
-    ticket = Tickets.get!(job.ticket_id)
+    ticket = job.ticket_id && Tickets.get!(job.ticket_id)
 
     cond do
+      # A conversation never sends one: it ends by hibernating, because it has no outcome to
+      # report. One arriving anyway is a worker the platform does not understand, and recording
+      # it would run the whole workflow follow-up over a job with no state to leave.
+      job.kind == :chat -> {:error, :not_a_workflow_job}
       # The worker re-sends a result until it is acked, so the platform has to be able to
       # hear the same one twice. Keyed by the job: a job is recorded once.
       job.status == :finished -> {:error, :already_recorded}
@@ -475,29 +669,43 @@ defmodule Forge.Jobs do
   @spec fail(String.t(), term()) :: {:ok, Job.t()} | {:error, term()}
   def fail(job_id, reason) do
     job = get!(job_id)
-    ticket = Tickets.get!(job.ticket_id)
-    attrs = %{status: :finished, outcome: :error, finished_at: DateTime.utc_now(:second)}
+    ticket = job.ticket_id && Tickets.get!(job.ticket_id)
+    attrs = fail_attrs(job)
 
     Multi.new()
     |> Multi.update(:job, Job.progress_changeset(job, attrs))
     |> Events.log(:event, "job.finished", :system, %{
-      ticket_id: ticket.id,
+      ticket_id: job.ticket_id,
       job_id: job.id,
-      payload: %{"outcome" => "error", "reason" => inspect(reason)}
+      payload: %{"outcome" => attrs[:outcome], "reason" => inspect(reason)}
     })
     |> Repo.transaction()
     |> case do
       {:ok, %{job: job}} ->
         Tokens.revoke_for_job(job.id)
         Workers.release(job.worker_id)
-        follow_up(ticket, job, %Result{status: :finished, outcome: :error})
-        Events.notify(ticket.id)
+        # A conversation has no engine to continue: it failed, and a person decides what next.
+        # On the kind, not on "does it have a ticket" — a *ticket* chat has one, so that guard
+        # sent every failed ticket chat into `Engine.after_job`, which has no state to move from
+        # and logs `job.orphaned`. The note names this as the failure mode to guard against; the
+        # comment here was right and the condition under it was not.
+        if job.kind == :workflow and ticket do
+          follow_up(ticket, job, %Result{status: :finished, outcome: :error})
+        end
+
+        Events.notify(job.ticket_id)
         {:ok, job}
 
       {:error, step, reason, _} ->
         {:error, {step, reason}}
     end
   end
+
+  defp fail_attrs(%Job{kind: :chat}),
+    do: %{status: :finished, finished_at: DateTime.utc_now(:second)}
+
+  defp fail_attrs(%Job{}),
+    do: %{status: :finished, outcome: :error, finished_at: DateTime.utc_now(:second)}
 
   defp put_documents(multi, ticket, job, %Result{documents: documents}) do
     Enum.reduce(documents, multi, fn {name, document}, multi ->
@@ -635,7 +843,7 @@ defmodule Forge.Jobs do
     job = get!(job_id)
 
     Multi.new()
-    |> Multi.update(:job, Job.progress_changeset(job, %{status: :pending}))
+    |> Multi.update(:job, Job.progress_changeset(job, %{status: interrupted_status(job)}))
     |> Events.log(:event, "job.interrupted", :system, %{
       ticket_id: job.ticket_id,
       job_id: job.id,
@@ -657,7 +865,15 @@ defmodule Forge.Jobs do
   def running_on(worker_id),
     do: Repo.all(from j in Job, where: j.worker_id == ^worker_id and j.status == :running)
 
-  @doc "On boot: jobs left `running` by a previous node are re-queued. Their spec still holds."
+  @doc """
+  On boot: work left `running` by a previous node is dealt with. A job is re-queued — its spec
+  still holds and nothing is watching it. A conversation is **not**: it goes dormant.
+
+  Re-queueing a chat would mean every platform restart silently starting conversations nobody is
+  in, each taking a slice and spending the day's allowance on a greeting nobody reads. A chat has
+  a person in it, and the person decides when it resumes — `docs/design/conversations.md`
+  § Lifetime.
+  """
   @spec recover() :: non_neg_integer()
   def recover do
     jobs = Repo.all(from j in Job, where: j.status == :running)
@@ -665,7 +881,7 @@ defmodule Forge.Jobs do
     Enum.each(jobs, fn job ->
       {:ok, _} =
         Multi.new()
-        |> Multi.update(:job, Job.progress_changeset(job, %{status: :pending}))
+        |> Multi.update(:job, Job.progress_changeset(job, %{status: interrupted_status(job)}))
         |> Events.log(:event, "job.interrupted", :system, %{
           ticket_id: job.ticket_id,
           job_id: job.id
@@ -677,6 +893,17 @@ defmodule Forge.Jobs do
 
     length(jobs)
   end
+
+  @doc """
+  What a running job becomes when the run under it is gone: pending for a job, dormant for a
+  conversation.
+
+  `:hibernated` already means "stopped without an outcome" and is already excluded from
+  `Workers.promised/1`, so a dormant chat neither schedules itself nor counts against a worker.
+  """
+  @spec interrupted_status(Job.t()) :: :pending | :hibernated
+  def interrupted_status(%Job{kind: :chat}), do: :hibernated
+  def interrupted_status(%Job{}), do: :pending
 
   # -- filesystem -----------------------------------------------------------------------------
 

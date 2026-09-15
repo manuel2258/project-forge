@@ -251,6 +251,28 @@ defmodule ForgeWeb.GitHttpTest do
     end
   end
 
+  describe "what the CGI said" do
+    # A git client decides from the status line and nothing else: a fetch that reads 200 is a
+    # fetch that succeeded, whatever the body turns out to be. `git http-backend` writes its own
+    # `Status:` header into the CGI response and the endpoint has to carry it through — losing it
+    # turns every failure into a success carrying a truncated or empty packfile, which the client
+    # then reports as a corrupt repository rather than as the refusal it was.
+    #
+    # The failure used here is a project whose rows exist and whose bytes do not, because that is
+    # the one the CGI answers itself rather than the plug in front of it. The plug's own 404s are
+    # sent by `send_resp` and never go near this.
+    test "a failure keeps the status git http-backend gave it", %{project: project} do
+      {:ok, token, _row} = Tokens.issue(project)
+      advertisement = Url.with_token(project, token) <> "/info/refs?service=git-upload-pack"
+
+      assert status(advertisement) == 200
+
+      File.rm_rf!(Projects.repo_path(project))
+
+      assert status(advertisement) == 404
+    end
+  end
+
   # -- helpers ---------------------------------------------------------------------------------
 
   defp clone!(project, token, branch \\ "main") do
@@ -298,6 +320,12 @@ defmodule ForgeWeb.GitHttpTest do
 
   defp curl(url) do
     System.cmd("curl", ["-sS", "--fail-with-body", url], stderr_to_stdout: true)
+  end
+
+  # The status line alone, discarding the body: what a git client reads first.
+  defp status(url) do
+    {code, 0} = System.cmd("curl", ["-sS", "-o", "/dev/null", "-w", "%{http_code}", url])
+    String.to_integer(code)
   end
 
   defp git(dir, args, env \\ []) do

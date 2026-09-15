@@ -216,9 +216,30 @@ defmodule ForgeWorker.Harness.ClaudeCodeTest do
                %{id: "claude-haiku-4-5-20251001", name: "claude-haiku-4-5-20251001"}
              ]
 
-      assert_received {:probed, headers}
-      assert {"authorization", "Bearer tok"} in headers
-      assert {"anthropic-beta", "oauth-2025-04-20"} in headers
+      assert_received {:probed, conn}
+      assert {"authorization", "Bearer tok"} in conn.req_headers
+      assert {"anthropic-beta", "oauth-2025-04-20"} in conn.req_headers
+    end
+
+    # The request itself, none of which was asserted anywhere: the test plug answers whatever
+    # it is asked, so a probe pointed at the wrong host or the wrong path went on reporting
+    # models. `anthropic-version` is not optional decoration — the real API refuses a request
+    # without it, which would make every worker in the fleet report `login: unknown` while this
+    # suite stayed green, and § What a worker offers is the note that says the login check is
+    # the point. `limit=100` is what makes one request enough to list an account's models.
+    test "the probe asks the documented endpoint, with the version header the API requires" do
+      ClaudeCode.probe(
+        executable: fake_executable(),
+        credential: {:oauth, "tok"},
+        req_options: [plug: &models_plug(&1, self())]
+      )
+
+      assert_received {:probed, conn}
+      assert conn.method == "GET"
+      assert conn.host == "api.anthropic.com"
+      assert conn.request_path == "/v1/models"
+      assert conn.query_string == "limit=100"
+      assert {"anthropic-version", "2023-06-01"} in conn.req_headers
     end
 
     # A subscription token is a bearer token and an API key is an `x-api-key`; sending either as
@@ -230,23 +251,31 @@ defmodule ForgeWorker.Harness.ClaudeCodeTest do
         req_options: [plug: &models_plug(&1, self())]
       )
 
-      assert_received {:probed, headers}
-      assert {"x-api-key", "sk-1"} in headers
-      refute Enum.any?(headers, fn {name, _value} -> name == "authorization" end)
+      assert_received {:probed, conn}
+      assert {"x-api-key", "sk-1"} in conn.req_headers
+      refute Enum.any?(conn.req_headers, fn {name, _value} -> name == "authorization" end)
     end
 
     # The point of the probe: a machine minted without a working credential is visibly not
     # logged in at `ready`, rather than silently failing every job it is given.
-    test "a refused credential is reported as a bad login, not as no models" do
-      offer =
-        ClaudeCode.probe(
-          executable: fake_executable(),
-          credential: {:oauth, "stale"},
-          req_options: [plug: &Plug.Conn.send_resp(&1, 401, ~s({"error":"nope"}))]
-        )
+    #
+    # Both statuses, because the API uses both and they mean the same thing here: 401 for a
+    # credential it does not recognise, 403 for one it recognises and will not serve — a
+    # revoked subscription token, a key whose account is disabled. A driver that knew only
+    # about 401 would report the second as `:unknown`, which reads as a network blip and sends
+    # an operator looking for a problem the machine does not have.
+    for status <- [401, 403] do
+      test "a credential refused with #{status} is a bad login, not no models" do
+        offer =
+          ClaudeCode.probe(
+            executable: fake_executable(),
+            credential: {:oauth, "stale"},
+            req_options: [plug: &Plug.Conn.send_resp(&1, unquote(status), ~s({"error":"nope"}))]
+          )
 
-      assert offer.login == :invalid
-      assert offer.models == []
+        assert offer.login == :invalid
+        assert offer.models == []
+      end
     end
 
     # Never `:invalid`: an unreachable API says nothing about the credential, and a worker that
@@ -277,7 +306,7 @@ defmodule ForgeWorker.Harness.ClaudeCodeTest do
   end
 
   defp models_plug(conn, test) do
-    send(test, {:probed, conn.req_headers})
+    send(test, {:probed, conn})
 
     Req.Test.json(conn, %{
       "data" => [

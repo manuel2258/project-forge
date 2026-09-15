@@ -76,13 +76,13 @@ Platform → worker:
 |---|---|---|
 | `assign` | spec JSON, slice limits, git endpoint + per-job token + branch, transcript key + token, seed key + token, `resume_session`, wall clock | Run this job. |
 | `cancel` | `job_id`, reason | Stop it. The worker still sends a terminal message. |
-| `drain` | — | Take no new work; reply when the last job ends. Precedes idle destroy. |
+| `drain` | — | Take no new work. Precedes idle destroy. |
 
 Worker → platform:
 
 | Message | Payload | Acked |
 |---|---|---|
-| `ready` | `memory_budget`, `seeds`, `harness`, timings | no |
+| `ready` | `memory_budget`, `seeds`, `root`, `harness` | no |
 | `heartbeat` | running job ids | no |
 | `event` | `job_id`, normalised harness event | no |
 | `result` | `job_id`, `attempt`, `ForgeCore.Job.Result` as JSON | yes |
@@ -257,8 +257,13 @@ already has the framework for.
 - **One channel carries both control and data.** A large `result` blocks events behind it on the
   same socket. Transcripts already go to the store rather than over the channel, which is what
   keeps results small; if they stop being small, they follow the transcript.
-- **`drain` has no deadline.** A job that will not finish keeps a worker alive past its idle
-  period. The wall clock in the runner is the backstop, and it is a long one.
+- **`drain` is one-way, and has no deadline.** The row above used to say the worker replies when
+  its last job ends. It does not, and nothing waits for one: `handle_message/4` sets `draining`
+  and returns, `WorkerChannel` pushes and moves on. Draining is therefore advisory — the sweep
+  that follows it is timed, not triggered. A job that will not finish keeps a worker alive past
+  its idle period, and the wall clock in the runner is the backstop, which is a long one. If
+  idle destroy ever needs to be prompt rather than eventual, the reply is what to build, and
+  `send_acked/4` is the machinery it would use.
 - **The model is not a scheduling requirement.** A job naming a model goes to whichever worker
   the memory gate offers, and nothing checks that *that* worker reported it. Harmless while the
   fleet is homogeneous — workers from one provider driver share an image and a credential, so

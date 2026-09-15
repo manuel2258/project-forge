@@ -9,7 +9,19 @@ defmodule ForgeCore.MixProject do
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
-      aliases: aliases()
+      aliases: aliases(),
+      # The floor, not a target. `CLAUDE.md` § Coverage: raise it when the real figure rises,
+      # never lower it without a human saying so. Nested under `:summary` because that is where
+      # `mix test --cover` reads it; a top-level `:threshold` is silently ignored and leaves the
+      # default 90 in force.
+      #
+      # Test support is ignored so the figure is about production code. `test/support` is on
+      # `elixirc_paths` in this env, and a fixture module is exercised by definition — counting it
+      # lifts the percentage without anything being better tested.
+      test_coverage: [
+        summary: [threshold: 97],
+        ignore_modules: [ForgeCore.Fixtures]
+      ]
     ]
   end
 
@@ -36,13 +48,16 @@ defmodule ForgeCore.MixProject do
     ]
   end
 
+  # `test --cover` and not `test`: the threshold in `project/0` is a ratchet, and a ratchet that
+  # is not part of the gate is a number nobody reads. See `CLAUDE.md` § Coverage for the rule
+  # about which way it may move.
   defp aliases do
     [
       check: [
         "compile --warnings-as-errors",
         "format --check-formatted",
         "credo --strict",
-        "test"
+        "test --cover"
       ]
     ]
   end

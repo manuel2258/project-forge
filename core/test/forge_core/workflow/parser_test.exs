@@ -79,6 +79,34 @@ defmodule ForgeCore.Workflow.ParserTest do
       assert [%Error{path: "states.planning.prompt"}] = errors
     end
 
+    # A human state has no prompt, and the check must not be asked about `nil`. Both callbacks
+    # above answer `true` for anything, `nil` included, so the `State.job?/1` filter that keeps
+    # human states out was invisible to them. The platform supplies a real "does this path exist
+    # at the pinned commit" function: handed `nil` it would either raise during admission or
+    # report `states.merged.prompt: file nil does not exist` for a state that has no prompt file
+    # by design.
+    test "the prompt check is never asked about a state that has no prompt", %{yaml: yaml} do
+      asked = :ets.new(:asked, [:public, :bag])
+
+      assert {:ok, _workflow} =
+               Parser.parse(yaml,
+                 prompt_exists: fn path ->
+                   :ets.insert(asked, {:path, path})
+                   true
+                 end
+               )
+
+      paths = Enum.map(:ets.lookup(asked, :path), &elem(&1, 1))
+
+      refute Enum.empty?(paths)
+      refute nil in paths
+      assert Enum.all?(paths, &is_binary/1)
+
+      # `merged` and `review_ready` are the example's human states; neither has a prompt file to
+      # look for.
+      assert paths == Enum.filter(paths, &String.starts_with?(&1, "agents/"))
+    end
+
     test "parse!/2 raises with every error listed" do
       assert_raise ArgumentError, ~r/initial: is required.*version: is required/s, fn ->
         Parser.parse!("states: {a: {}}\ntransitions: []\nlimits: {ticket_cost: 1}\n")
@@ -133,9 +161,69 @@ defmodule ForgeCore.Workflow.ParserTest do
              ]
     end
 
+    # The test above feeds only a wrong *type*, so the sign half of "non-negative" and the sign
+    # half of "positive" were never exercised. A negative cost budget reaches the harness as
+    # `--max-budget-usd -5`, and a negative `ticket_cost` makes `Engine.within_ticket_budget?/2`
+    # false for every ticket from its very first job — the ticket sticks before any work is done.
+    test "budget numbers must have the right sign, not merely the right type", %{map: map} do
+      map = put_in(map, ["states", "refining", "budget"], %{"turns" => -1, "cost" => -5})
+
+      assert messages(map) == [
+               {"states.refining.budget.cost", "must be a non-negative number"},
+               {"states.refining.budget.turns", "must be a positive integer"}
+             ]
+    end
+
+    test "a ticket allowance must not be negative", %{map: map} do
+      assert messages(Map.put(map, "limits", %{"ticket_cost" => -1})) == [
+               {"limits.ticket_cost", "must be a non-negative number"}
+             ]
+    end
+
+    # Zero is a real allowance — "this state may spend nothing" — and must not be swept up with
+    # the negatives it sits next to.
+    test "zero is an allowance, not an error", %{map: map} do
+      map = put_in(map, ["states", "refining", "budget", "cost"], 0)
+
+      assert {:ok, workflow} = Parser.from_map(map)
+      assert workflow.states["refining"].budget.cost == 0
+    end
+
     test "lists must hold non-empty strings", %{map: map} do
       map = put_in(map, ["states", "refining", "inputs"], ["ticket", 3])
       assert messages(map) == [{"states.refining.inputs", "must be a list of non-empty strings"}]
+    end
+
+    # Same shape as the budget case: the existing test feeds a number, so the emptiness check
+    # never runs. An empty outcome name would make a transition matchable by a job that declared
+    # nothing, and an empty input name resolves to the job directory itself.
+    test "an empty string in a list is not a string", %{map: map} do
+      map = put_in(map, ["states", "refining", "inputs"], ["ticket", ""])
+
+      assert messages(map) == [{"states.refining.inputs", "must be a list of non-empty strings"}]
+    end
+
+    # `required_string` and `optional_string` both fold emptiness into their type check, and
+    # neither half had a test. `prompt: ""` is the sharp one: it turns a human state into a job
+    # state with no prompt file, which the validator then cannot check the existence of.
+    test "a required string may not be empty", %{map: map} do
+      assert messages(Map.put(map, "initial", ""))
+             |> Enum.member?({"initial", "must be a non-empty string"})
+    end
+
+    test "an optional string, where present, may not be empty", %{map: map} do
+      assert messages(put_in(map, ["states", "refining", "prompt"], "")) == [
+               {"states.refining.prompt", "must be a non-empty string"}
+             ]
+    end
+
+    # `docs/design/workflow-grammar-v1.md` § Model states the rule outright: "`model`, where
+    # present, is a non-empty string". The grammar deliberately does not check the name against
+    # any list, so emptiness is the only thing it does check — and it was unchecked.
+    test "a model, where present, may not be empty", %{map: map} do
+      assert messages(put_in(map, ["states", "refining", "model"], "")) == [
+               {"states.refining.model", "must be a non-empty string"}
+             ]
     end
 
     test "limits are required", %{map: map} do
@@ -317,6 +405,30 @@ defmodule ForgeCore.Workflow.ParserTest do
               "artifact name \"../report.md\" must be a single path segment: letters, digits, . _ -"} in messages(
                map
              )
+    end
+
+    # `.` and `..` are rejected because the format demands a leading alphanumeric, not because
+    # they are listed anywhere — the `name not in [".", ".."]` conjunct beside the regex can
+    # never fire. That makes this the only thing holding the traversal line: if the format is
+    # ever widened to allow a leading dot (for a dotfile artifact, say), these names become legal
+    # and an artifact called `..` is a write to the job directory's parent.
+    test "a name that is only dots is refused, whatever the format is widened to", %{map: map} do
+      for name <- [".", "..", "...", ".hidden"] do
+        map = put_in(map, ["states", "verifying", "produces"], [name])
+
+        assert {"states.verifying",
+                "artifact name #{inspect(name)} must be a single path segment: letters, digits, . _ -"} in messages(
+                 map
+               ),
+               "#{inspect(name)} was accepted as an artifact name"
+      end
+    end
+
+    test "a name may hold a dot without being one", %{map: map} do
+      map = put_in(map, ["states", "verifying", "produces"], ["report.v2.md"])
+
+      assert {:ok, workflow} = Parser.from_map(map)
+      assert workflow.states["verifying"].produces == ["report.v2.md"]
     end
 
     test "every state must be reachable from initial", %{map: map} do

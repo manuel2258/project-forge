@@ -151,7 +151,10 @@ defmodule ForgeWeb.CreateLiveTest do
       {:ok, view, html} = live(conn, ~p"/tickets/new?project=#{project.name}")
 
       assert html =~ "Not ready for a ticket"
-      assert html =~ ".forge/workflow.yml"
+      # The sentence and not the filename. `ForgeWeb.Operator.Admission` has two clauses for a
+      # project that cannot take a ticket and both name `.forge/workflow.yml`, so the filename
+      # on its own holds whichever of them fired — and they say different things to do next.
+      assert html =~ "there is no .forge/workflow.yml on its default branch"
 
       # The attribute, not the string: `disabled:opacity-40` is in the button's class list on
       # every render, so `html =~ "disabled"` would pass however the control behaved.

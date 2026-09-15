@@ -10,7 +10,6 @@ defmodule Forge.QueueChatTest do
   use Forge.DataCase, async: false
 
   import Forge.AccountsFixtures
-  import Forge.ForgeFixtures
   import Forge.GitFixtures
 
   alias Forge.{Conversations, Jobs, Projects, Push, Queue, Tickets}

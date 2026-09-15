@@ -41,7 +41,6 @@ defmodule ForgeWeb.ReviewLive do
       ticket: ticket,
       workflow: workflow,
       changeset: changeset,
-      approved: changeset && Artifacts.approved?(changeset),
       merged: Merge.merged?(ticket),
       diff: diff(project, ticket, changeset),
       documents: documents(ticket),

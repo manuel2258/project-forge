@@ -158,6 +158,12 @@ defmodule Forge.Git.Http do
     end
   end
 
+  # `git http-backend` enables `receive-pack` only when `REMOTE_USER` is set, so being non-empty
+  # is the whole of what this has to be. The two prefixes are for a person reading a log, and
+  # nothing in this product reads them back: the audit trail uses `actor/1`, which reads the
+  # token's `job_id` directly, and neither the hooks nor the worker look at `REMOTE_USER` at all.
+  # Changing a prefix is therefore cosmetic — no test can distinguish them, and that is correct
+  # rather than a gap.
   defp remote_user(%Token{job_id: nil, id: id}), do: "forge-token-" <> id
   defp remote_user(%Token{job_id: job_id}), do: "forge-job-" <> job_id
 

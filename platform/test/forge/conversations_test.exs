@@ -9,7 +9,6 @@ defmodule Forge.ConversationsTest do
 
   use Forge.DataCase, async: false
 
-  import Forge.ForgeFixtures
   import Forge.GitFixtures
 
   alias Forge.{Conversations, Events, Git, Jobs, Projects, Spend, Tickets}
@@ -263,6 +262,81 @@ defmodule Forge.ConversationsTest do
       {:ok, _} = Conversations.record_turn(chat, turn(1, 0.01))
 
       assert [%{role: :user}, %{role: :assistant, text: "done"}] = Conversations.messages(chat.id)
+    end
+  end
+
+  describe "summaries" do
+    # `waiting` is what paints a row with the accent, and `docs/design/ui.md` is explicit that the
+    # accent means exactly one thing: a human is being waited on. A live conversation whose last
+    # line is the person's own is waiting on the *machine*, not on them — dropping the
+    # `match?({:agent, _}, last)` half of the test leaves every live conversation accented, and
+    # the product's one colour stops meaning anything.
+    test "waiting is the agent having spoken last, not merely being live", %{project: project} do
+      {:ok, chat} = Conversations.open(project, "what is this repository?")
+
+      assert [summary] = Conversations.summaries(project_id: project.id)
+      assert summary.live
+      assert summary.said == {:user, "what is this repository?"}
+      refute summary.waiting
+
+      text(chat, "It is a workflow engine.")
+
+      assert [summary] = Conversations.summaries(project_id: project.id)
+      assert summary.said == {:agent, "It is a workflow engine."}
+      assert summary.waiting
+    end
+
+    # And the other half of the `and`: a conversation that has stopped cannot be waiting on
+    # anyone, however it ended, because there is nothing left to say anything to.
+    test "a finished conversation is not waiting even if the agent spoke last", %{
+      project: project
+    } do
+      {:ok, chat} = Conversations.open(project, "hello")
+      text(chat, "goodbye")
+      {:ok, _closed} = Conversations.ended(chat, nil, "closed")
+
+      assert [summary] = Conversations.summaries(project_id: project.id)
+      assert summary.said == {:agent, "goodbye"}
+      refute summary.live
+      refute summary.waiting
+    end
+
+    # The second half of "live ones first and newest within that". A list that only grows is only
+    # usable if the thing you were just doing is at the top of it, so the order is the feature
+    # rather than a presentation detail, and nothing rendered it before this.
+    test "conversations of the same liveness come newest first", %{project: project} do
+      {:ok, first_opened} = Conversations.open(project, "the older one")
+      {:ok, second_opened} = Conversations.open(project, "the newer one")
+
+      Repo.update_all(from(j in Jobs.Job, where: j.id == ^first_opened.id),
+        set: [inserted_at: DateTime.add(DateTime.utc_now(:second), -3600, :second)]
+      )
+
+      assert [newer, older] = Conversations.summaries(project_id: project.id)
+      assert newer.chat.id == second_opened.id
+      assert older.chat.id == first_opened.id
+    end
+
+    # The first half, and the half that was wrong. `summaries/1` promises "live ones first and
+    # newest within that" and `ForgeWeb.ChatsLive` repeats it — "Live first is what keeps it
+    # useful: that is the one costing something and holding a machine". The sort key was `not
+    # live` under a descending sorter, so `true` — a *finished* chat — came first.
+    #
+    # It hid because the two keys usually agree: the live conversation is normally also the
+    # newest, so the second key put it on top regardless. They disagree exactly when you come
+    # back to a machine you left running, which is the case the page exists for.
+    test "a live conversation sorts above a newer finished one", %{project: project} do
+      {:ok, older_live} = Conversations.open(project, "older, still running")
+      {:ok, newer} = Conversations.open(project, "newer, already closed")
+      {:ok, _closed} = Conversations.ended(newer, nil, "closed")
+
+      Repo.update_all(from(j in Jobs.Job, where: j.id == ^older_live.id),
+        set: [inserted_at: DateTime.add(DateTime.utc_now(:second), -3600, :second)]
+      )
+
+      assert [first, second] = Conversations.summaries(project_id: project.id)
+      assert first.chat.id == older_live.id
+      assert second.chat.id == newer.id
     end
   end
 

@@ -181,6 +181,14 @@ Where nobody is waiting, nothing streams. The board does not animate, the queue 
 rearrange itself under a thumb, and a finished job's stream is paged, newest first, headed by its
 completion state and entry count.
 
+**The stream shows what the job did, not what the harness said about itself.** Claude Code turns
+every `system` message into a `notice` event, and `thinking_tokens` alone can outnumber
+everything else a job produced: the page becomes a telemetry feed with the work buried in it,
+which is the activity feed this section exists to refuse. Those events are recorded — the event
+log is the record and nothing may quietly drop what a job did — and hidden behind a control that
+says how many there are. Recorded and not drawn is the rule; dropping them would be a different
+and worse decision.
+
 **Why this used to be forbidden, and why it is not.** The rule was "no live transcript, no
 streaming log, no activity feed — nothing that invites watching agents work", from `vision.md`'s
 *"watching agents work is how a review budget disappears"*. That is a true observation about

@@ -10,6 +10,12 @@ defmodule ForgeCore.Workflow.Validator do
 
   # Artifact and state names are single path segments: they become file and directory
   # names in the job directory and must never escape it.
+  #
+  # The leading-alphanumeric requirement is the whole of that guard, and `.`, `..` and every
+  # other all-dots name are refused by it rather than by any list — there is one defence here,
+  # not two. Widening this to allow a leading dot would therefore make `..` a legal artifact
+  # name and a write to the job directory's parent; the names test in `parser_test.exs` is what
+  # would notice.
   @name_format ~r/^[A-Za-z0-9][A-Za-z0-9._-]*$/
 
   @spec validate(Workflow.t(), keyword()) :: [Error.t()]
@@ -56,7 +62,7 @@ defmodule ForgeCore.Workflow.Validator do
     end)
   end
 
-  defp valid_name?(name), do: Regex.match?(@name_format, name) and name not in [".", ".."]
+  defp valid_name?(name), do: Regex.match?(@name_format, name)
 
   defp initial(%Workflow{initial: initial} = workflow) do
     case Workflow.state(workflow, initial) do
@@ -199,6 +205,11 @@ defmodule ForgeCore.Workflow.Validator do
       producers == [] ->
         Error.new(Error.join(path, index), "#{inspect(name)} is not produced by any state")
 
+      # `any?` and `all?` cannot differ here: an artifact with more than one producer is already
+      # an error of its own ("is produced by more than one state"), so `producers` is a list of
+      # one by the time a workflow is valid. A mutation sweep flagged this as unprotected — it is
+      # an equivalent mutant, not a missing test, and the only way to tell the two apart would be
+      # a workflow the grammar refuses for a different reason.
       not Enum.any?(producers, &MapSet.member?(producers_before, &1)) ->
         Error.new(
           Error.join(path, index),

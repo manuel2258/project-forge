@@ -1,3 +1,57 @@
+defmodule ForgeWorker.LinkTest.RaisingHarness do
+  @moduledoc """
+  A driver whose probe blows up instead of answering. `ClaudeCode.probe/1` swallows its own
+  failures — a missing binary, an unreachable API — so it is the one thing that cannot reach
+  the rescue in `Link.harness_offer/0`, which is what the rescue is for.
+  """
+
+  @behaviour ForgeWorker.Harness
+
+  @impl true
+  def capabilities, do: %{resume: true, streaming_input: true}
+
+  @impl true
+  def command(_spec, _job_dir, _opts), do: {"/bin/true", [], []}
+
+  @impl true
+  def parse_line(_line), do: []
+
+  @impl true
+  def encode_message(text), do: [text, "\n"]
+
+  @impl true
+  def encode_interrupt(id), do: [id, "\n"]
+
+  @impl true
+  def probe(_opts), do: raise("this driver cannot describe itself")
+end
+
+defmodule ForgeWorker.LinkTest.RecordingSlice do
+  @moduledoc """
+  `Slice.Direct`, plus a note to the test of what it was asked to confine.
+
+  The interesting part of that note is how the environment was split. A plain value becomes
+  `--setenv=NAME=VALUE` on the `systemd-run` command line and an assignment in the wrapper
+  shell's own argv; a secret is carried across by name only. That split is the difference
+  between a push credential the job's unprivileged user cannot see and one it can read out of
+  `/proc/*/cmdline` — `docs/design/worker-tier.md` § The job slice.
+  """
+
+  @behaviour ForgeWorker.Slice
+
+  @impl ForgeWorker.Slice
+  def prepare(opts) do
+    if test = Application.get_env(:forge_worker, :slice_reporter), do: send(test, {:slice, opts})
+    ForgeWorker.Slice.Direct.prepare(opts)
+  end
+
+  @impl ForgeWorker.Slice
+  defdelegate wrap(executable, args, context), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate cleanup(context), to: ForgeWorker.Slice.Direct
+end
+
 defmodule ForgeWorker.LinkTest do
   @moduledoc """
   The worker's end of the protocol, against a simulated platform: what it says on joining,
@@ -9,6 +63,7 @@ defmodule ForgeWorker.LinkTest do
   import ForgeWorker.Fixtures
 
   alias ForgeWorker.Link
+  alias ForgeWorker.LinkTest.{RaisingHarness, RecordingSlice}
 
   @topic "worker:w-1"
 
@@ -60,6 +115,10 @@ defmodule ForgeWorker.LinkTest do
       Application.delete_env(:forge_worker, :harness_opts)
       Application.delete_env(:forge_worker, :platform_url)
       Application.delete_env(:forge_worker, :extra_env)
+      Application.delete_env(:forge_worker, :harness)
+      Application.delete_env(:forge_worker, :heartbeat_ms)
+      Application.delete_env(:forge_worker, :slice)
+      Application.delete_env(:forge_worker, :slice_reporter)
     end)
 
     client =
@@ -136,6 +195,40 @@ defmodule ForgeWorker.LinkTest do
     assert_push(@topic, "ready", %{"memory_budget" => ^budget})
   end
 
+  # `seeds` and `root` are the rest of the self-report and both were asserted only as an empty
+  # list on a machine that had nothing — which an omitted key matches just as well. The seeds
+  # are what make a worker worth reusing for a project (docs/design/worker-channel.md § Topic),
+  # and they are reported twice, in `join` and again in `ready`, because the two are minutes
+  # apart on a real machine and a rejoin re-reads them.
+  test "join and ready both name the seeds this machine holds, and where they live", context do
+    %{client: client, root: root} = context
+    key = "seed/demo/sha256-abc"
+    File.mkdir_p!(ForgeWorker.Job.Seed.path(root, key))
+
+    connect_and_assert_join(client, @topic, %{"seeds" => [^key], "root" => ^root}, :ok)
+    assert_push(@topic, "ready", %{"seeds" => [^key], "root" => ^root})
+  end
+
+  # `last_seen_at` is written by every heartbeat, and a worker the platform has not heard from
+  # within `worker_timeout_ms` has its jobs re-queued, its machine destroyed and its row marked
+  # `destroyed` — docs/design/worker-channel.md § When the machine goes away. Nothing in this
+  # suite had ever seen one sent, so a worker that stopped heartbeating would have been swept
+  # mid-job with the suite green. The interval is shortened for the test; see `Link.heartbeat_ms/0`.
+  test "it heartbeats on its own, saying what it is running", context do
+    %{client: client, origin: origin} = context
+    Application.put_env(:forge_worker, :heartbeat_ms, 100)
+
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    job = assignment(origin, scenario: "hang")
+    job_id = job["job_id"]
+    push(client, @topic, "assign", job)
+
+    {%{"running" => running}, _events} = take_push("heartbeat")
+    assert running == [%{"job_id" => job_id, "attempt" => 1}]
+  end
+
   # `ready` is the message that says what this machine can offer, and until now it said only how
   # much memory. The harness and the models its credential may use are the rest of that answer —
   # the platform holds no credential and so can only be told. See docs/design/worker-channel.md
@@ -174,6 +267,26 @@ defmodule ForgeWorker.LinkTest do
       credential: {:oauth, "tok"},
       req_options: [plug: &Req.Test.transport_error(&1, :econnrefused)]
     )
+
+    connect_and_assert_join(client, @topic, %{}, :ok)
+
+    assert_push(@topic, "ready", %{"harness" => harness})
+    assert harness["login"] == "unknown"
+    assert harness["models"] == []
+
+    # A version nobody could read is `nil` on the wire and not the string "nil": the offer is
+    # encoded by walking it and turning atoms into strings, and `nil` is an atom. The platform
+    # renders this figure straight onto the workers page, where "nil" would read as a version.
+    assert harness["version"] == nil
+  end
+
+  # The rescue around the whole of `harness_offer/0`, which neither test above reaches:
+  # `ClaudeCode.probe/1` swallows its own failures, so only a driver that genuinely raises —
+  # a new one, a bad option, a bug — gets there. § What a worker offers: a probe that fails
+  # never prevents `ready`, because refusing to go ready turns one bad answer into a machine
+  # that takes no work at all.
+  test "a harness whose probe raises does not stop this machine going ready", %{client: client} do
+    Application.put_env(:forge_worker, :harness, RaisingHarness)
 
     connect_and_assert_join(client, @topic, %{}, :ok)
 
@@ -249,6 +362,80 @@ defmodule ForgeWorker.LinkTest do
     wait_until(fn -> Link.unacked(client) == [] end)
   end
 
+  # The other half of § Delivery, and the one that is easy to lose: a terminal message the
+  # socket would not take is *kept*, not dropped. A worker outlives its connection by design —
+  # the platform is redeployed, the machine's network blips — and the result is the whole
+  # record of what a billed run produced. Dropping it here loses the job's outcome silently;
+  # what the platform then sees is a job that runs for ever until the rejoin reconciliation
+  # re-queues it and pays for it twice.
+  test "a result produced while the platform is away is delivered on the next join", context do
+    %{client: client, origin: origin} = context
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    job = assignment(origin)
+    job_id = job["job_id"]
+    push(client, @topic, "assign", job)
+    disconnect(client, :closed)
+
+    # The job runs to its end against a socket that is not there: its events go nowhere and
+    # the result has nowhere to go but the unacked map.
+    wait_until(fn -> Link.unacked(client) == [{job_id, "result"}] end, 300)
+
+    accept_connect(client)
+    assert_join(@topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    {%{"job_id" => ^job_id, "result" => result}, _events} = take_push("result")
+    assert result["status"] == "finished"
+  end
+
+  # And a message that *was* pushed and never answered is pushed again. The platform acks only
+  # after the transaction recording the result commits, so a platform that died in between has
+  # not recorded it — the worker's copy is the only one left, and every rejoin offers it again.
+  test "an unacked result is sent again after the connection comes back", context do
+    %{client: client, origin: origin} = context
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    job = assignment(origin)
+    job_id = job["job_id"]
+    push(client, @topic, "assign", job)
+    {%{"job_id" => ^job_id}, _events} = take_push("result")
+    assert Link.unacked(client) == [{job_id, "result"}]
+
+    disconnect(client, :closed)
+    accept_connect(client)
+    assert_join(@topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    {%{"job_id" => ^job_id}, _events} = take_push("result")
+  end
+
+  # A channel the platform closed under us — a redeploy, a restart, a row it no longer believes
+  # in — is not the end of this worker. Slipstream's default for this callback is to stop, which
+  # on a `restart: :permanent` release means losing every unacked result this machine is holding;
+  # rejoining is also what re-runs the reconciliation § Reconnection describes.
+  test "a channel the platform closed is rejoined rather than fatal", %{client: client} do
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    send(client, topic_closed(@topic))
+
+    # Slipstream backs a rejoin off — the first attempt is 100ms out — so this waits longer
+    # than the default assertion timeout.
+    assert_join(@topic, %{}, :ok, 2_000)
+    assert_push(@topic, "ready", %{})
+    assert Process.alive?(client)
+  end
+
+  # `Slipstream.SocketTest` can emulate a dropped connection but not a channel closed under a
+  # live one, so the event is built by hand. The tuple is Slipstream's own `event/1` signature.
+  defp topic_closed(topic) do
+    {:__slipstream_event__,
+     %Slipstream.Events.TopicJoinClosed{topic: topic, reason: :closed_by_platform}}
+  end
+
   test "a job already running is not started twice", context do
     %{client: client, origin: origin} = context
     connect_and_assert_join(client, @topic, %{}, :ok)
@@ -316,6 +503,35 @@ defmodule ForgeWorker.LinkTest do
     args = File.read!(Path.join([root, "jobs", spec["job_id"], "fake-args.txt"]))
     assert args =~ "--model the-specs"
     refute args =~ "the-machines"
+  end
+
+  # The agent gets the worker's own push credential, because it works in a real clone and may
+  # fetch and push on its own. It is marked `{:secret, _}` at two independent places — here and
+  # in `Conversation.git_env/1` — and this is the first of them.
+  #
+  # What the mark buys is the route the value takes. A plain value becomes an assignment in the
+  # wrapper shell's argv and a `--setenv=NAME=VALUE` on `systemd-run`'s command line, both of
+  # which the unprivileged user the job runs as can read straight out of `/proc/*/cmdline`. A
+  # secret crosses by name only and its value goes over systemd's own bus. See
+  # docs/design/worker-tier.md § The job slice.
+  test "the push credential reaches the job as a secret, never as an argument", context do
+    %{client: client, origin: origin} = context
+    Application.put_env(:forge_worker, :slice, RecordingSlice)
+    Application.put_env(:forge_worker, :slice_reporter, self())
+
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    job = put_in(assignment(origin), ["git", "token"], "push-secret")
+    push(client, @topic, "assign", job)
+    {%{"result" => _result}, _events} = take_push("result")
+
+    assert_receive {:slice, slice}
+    assert "FORGE_GIT_TOKEN" in slice.secret_names
+
+    refute Enum.any?(slice.env, fn {name, value} ->
+             name == "FORGE_GIT_TOKEN" or value == "push-secret"
+           end)
   end
 
   test "a job that cannot be prepared is reported as failed, not forgotten", context do
@@ -388,6 +604,13 @@ defmodule ForgeWorker.LinkTest do
       {%{"turn" => 2, "harness" => harness}, seen} = take_push("turn")
       assert harness["subtype"] == "success"
 
+      # The cost of the turn, which is the one number the platform's daily cap is computed
+      # from: a turn that reported none is a turn that spends nothing as far as the ceiling is
+      # concerned, so a conversation could run all day against a cap it never moved. Cumulative
+      # across the session on the real harness, which is what the fake reproduces — two turns
+      # of a hundredth each.
+      assert harness["cost_usd"] == 0.02
+
       # The message reached the harness, and the delivery says which message it was. The
       # harness echoes the text and not the id, so this correlation is the worker's own.
       # Payload keys are atoms here: in test mode the push is not serialised, and over a real
@@ -426,6 +649,111 @@ defmodule ForgeWorker.LinkTest do
       # Neither was acked: `assert_push` reads them off the socket without replying.
       wait_until(fn -> length(Link.unacked(client)) == 2 end)
       assert Enum.sort(Link.unacked(client)) == [{job_id, "turn", 1}, {job_id, "turn", 2}]
+    end
+
+    # An interrupted turn reports `error_during_execution` with a null result — exactly what a
+    # genuine execution error reports. Only this worker knows it was asked to stop, so only it
+    # can say so, and it says so in the turn it sends the platform. Left to the harness's own
+    # payload, an operator's own Stop renders in their conversation as the harness having
+    # failed. docs/design/conversations.md § Turns. The runner's own labelling is tested; that
+    # the label survives into what crosses the channel was not.
+    test "a turn the operator stopped is reported as interrupted, not as a failure", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin, env: [{"FAKE_TURN_SECONDS", "5"}])
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      # An ordinary turn says so too, which is what makes the flag worth reading.
+      {%{"turn" => 1, "interrupted" => false}, _} = take_push("turn")
+
+      push(client, @topic, "message", %{
+        "job_id" => job_id,
+        "message_id" => "m-2",
+        "text" => "SLOW please"
+      })
+
+      # Both arrive as casts on the conversation in the order they were sent, so the interrupt
+      # is written after the message and cuts the turn that message starts.
+      push(client, @topic, "interrupt", %{"job_id" => job_id})
+
+      {%{"turn" => 2, "interrupted" => true, "harness" => harness}, _} = take_push("turn")
+
+      # The harness still calls it an error. That is the point: the two are distinguished here
+      # and nowhere else.
+      assert harness["subtype"] == "error_during_execution"
+      assert harness["is_error"] == true
+    end
+
+    # What is left of the day, decided by the platform and passed through to the harness, which
+    # refuses the turn at the ceiling rather than the worker refusing it afterwards.
+    # docs/design/conversations.md § Spend has the cap enforced twice — by the harness, per
+    # turn, and by the node once the day is gone. A conversation that dropped this on the floor
+    # enforces it once, after the fact, which is the half that cannot stop a turn.
+    test "the day's remaining allowance becomes the harness's ceiling", context do
+      %{client: client, origin: origin, root: root} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin) |> Map.put("max_cost_usd", 1.5)
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      assert File.read!(Path.join([root, "jobs", job_id, "fake-args.txt"])) =~
+               "--max-budget-usd 1.50"
+    end
+
+    # The transcript leaves the machine and the result carries the *key*, not the bytes. A
+    # conversation that hibernated without one is one the platform can show nothing for — and
+    # unlike a workflow job, whose path asserts this, the conversation copied the shape without
+    # the assertion.
+    test "the transcript goes to the store and the result carries its key", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin)
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      push(client, @topic, "close", %{"job_id" => job_id, "reason" => "done"})
+      {%{"result" => result}, _} = take_push("hibernated")
+
+      assert result["transcript"] == "job/j1/transcript-1.jsonl"
+
+      # And it is really there, under the key the platform minted a token for.
+      assert_receive {:uploaded, "/store/job/j1/transcript-1.jsonl", ["Bearer put-token"], _query,
+                      body}
+
+      assert body =~ "\"type\":"
+    end
+
+    # The second of the two places the push credential is marked `{:secret, _}`. A conversation
+    # takes its own route to the runner — `Conversation.runner_opts/1`, not `Link.start_runner/4`
+    # — so the workflow test above proves nothing about it, and CLAUDE.md § Rules says to fix
+    # the class rather than the instance.
+    test "the push credential reaches a chat as a secret, never as an argument", context do
+      %{client: client, origin: origin} = context
+      Application.put_env(:forge_worker, :slice, RecordingSlice)
+      Application.put_env(:forge_worker, :slice_reporter, self())
+
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = put_in(chat(origin), ["git", "token"], "push-secret")
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      assert_receive {:slice, slice}
+      assert "FORGE_GIT_TOKEN" in slice.secret_names
+
+      refute Enum.any?(slice.env, fn {name, value} ->
+               name == "FORGE_GIT_TOKEN" or value == "push-secret"
+             end)
     end
 
     test "closing ends it and gives the machine back", context do
@@ -577,6 +905,38 @@ defmodule ForgeWorker.LinkTest do
       refute File.exists?(Path.join(root, "escaped"))
       # And the conversation still ran: bad context is not a reason to refuse to talk.
       assert File.dir?(Path.join([root, "jobs", job_id]))
+    end
+
+    # The boundary, which `"../../escaped"` does not reach: that one leaves the job directory
+    # by so much that even a weakened guard refuses it, so it proves only that *something* is
+    # checked. A sibling that shares the folder's name as a prefix is what separates the two
+    # readings — `history-evil` starts with `history` and is not inside it — and a guard
+    # written as a prefix test on the string rather than on the path would take it. CLAUDE.md
+    # § Rules is about this exact check.
+    test "a history folder beside the folder, sharing its name, is refused too", context do
+      %{client: client, origin: origin, root: root} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job =
+        chat(origin)
+        |> Map.put("history", [
+          %{"dir" => "../history-evil", "metadata" => "a sibling, not a child"},
+          %{"dir" => "/etc/forge", "metadata" => "somewhere else entirely"}
+        ])
+
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      job_dir = Path.join([root, "jobs", job_id])
+      refute File.exists?(Path.join(job_dir, "history-evil"))
+
+      # An absolute name is not refused but neutralised: `Path.join/2` drops the leading slash,
+      # so it lands inside the folder rather than at the root of the machine. Written down
+      # because the guard reads as though it refused one, and what it does is this.
+      refute File.exists?("/etc/forge")
+      assert File.exists?(Path.join([job_dir, "history", "etc", "forge", "job.md"]))
     end
 
     test "going idle closes it without anyone asking", context do

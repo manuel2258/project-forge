@@ -31,8 +31,8 @@ bin/check
 ```
 
 It lints the shell (shellcheck, shfmt) and runs `mix check` in every project: compile with
-warnings as errors, format check, Credo strict, tests. A commit that does not pass the gate
-is not made.
+warnings as errors, format check, Credo strict, tests with coverage. A commit that does not pass
+the gate is not made.
 
 `platform/priv/git-hooks/` holds the generated git hooks; the gate lints them with the rest of the
 shell.
@@ -40,6 +40,51 @@ shell.
 `measure/` holds the measurement harness (`bin/measure`, `docs/design/measurement-harness.md`).
 The gate lints it but cannot run it: it needs btrfs, systemd and Nix on the operator's
 machine. `bin/measure selftest` is what stands in for a test run.
+
+## Coverage
+
+`mix check` runs `test --cover` against a threshold set per project in `mix.exs`
+(`test_coverage: [summary: [threshold: N]]` — nested under `:summary`, because a top-level
+`:threshold` is silently ignored and leaves Elixir's default of 90 in force).
+
+**The threshold is a floor and a ratchet.**
+
+- **Raise it whenever the real figure has risen.** If the suite covers 91% and the floor says 83,
+  the floor is not doing anything. Move it up to the whole percent below the measured figure as
+  part of the same commit that raised the coverage.
+- **Never lower it.** Not to make a commit pass, not because something was hard to test, not
+  "temporarily". A change that drops coverage below the floor is a change that needs a test.
+- **Lowering it requires a human to say so explicitly, for that change.** Not an agent's judgement
+  that the code is untestable, and not a note in a commit message. If the floor seems wrong, stop
+  and ask.
+
+What the floor catches is the whole class of *nothing tests this at all* — a module, a LiveView, a
+context with no test file. It says nothing about whether the tests that exist can fail, which is
+what § Testing below is for.
+
+## Testing
+
+Tests are part of the implementation, not a step after it. A change that adds behaviour and no
+test is not finished, and neither is one whose tests pass against the broken version.
+
+- **Write the test with the code, in the same commit.** A commit that adds a rule and leaves
+  testing it for later is a commit claiming something nothing checks.
+- **Watch every new test fail before you keep it.** Break the code it covers — flip the
+  comparison, drop the clause, return the wrong default — run the test, see it fail, put the code
+  back. A test nobody has seen fail is not a test; it is a claim. This is the single highest-yield
+  habit in this repository, and skipping it is how a suite reaches hundreds of green tests that
+  defend nothing.
+- **Mutate the guard, not the happy path.** The assertion that matters is the one that fails when
+  the rule is removed. Authorisation, scoping, ordering, redaction and "must never" rules all
+  deserve a mutation aimed squarely at them.
+- **When a mutation cannot be caught, say so where it lives.** Some mutations change nothing
+  observable — a `@spec`, a log line, a guard whose condition a caller already guarantees, a
+  defence against behaviour the current dependency no longer exhibits. Write a comment at that
+  code saying it is an equivalent mutant and why, so the next person does not write a test that
+  cannot fail. **Never invent a test to cover one**: a test that passes against the broken code
+  is worse than no test, because it claims cover it does not give.
+- **A new test file is not a substitute for a failing mutation.** Coverage counts lines executed.
+  Only a mutation says whether anything would notice them changing.
 
 ## Reviewing
 

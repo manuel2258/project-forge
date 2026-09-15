@@ -184,6 +184,16 @@ defmodule ForgeWorker.Checkout do
     end
   end
 
-  # git echoes the remote URL in its errors, and a caller may have put the token in one.
+  # git echoes the remote URL in its errors, and a caller may have put the token in one. The
+  # error becomes the job's failure reason, crosses the channel and is written to the platform's
+  # event log, so a credential that reaches here is recorded permanently.
+  #
+  # Defence in depth, and deliberately untested: git 2.55 already strips the userinfo from the
+  # URL it prints, and no failure that could be produced — refused connection, unresolvable host,
+  # rejected port, unknown protocol, over http and ssh — puts the credential in the output at
+  # all. A mutation sweep flagged this line as unprotected; it is an equivalent mutant against
+  # this git, not a missing test, and writing one would mean asserting a string git never emits.
+  # Kept because older git did echo credentials and the cost of being wrong here is a token in a
+  # log for ever.
   defp redact(out), do: String.replace(out, ~r{//[^/@\s]+@}, "//")
 end

@@ -18,9 +18,18 @@ defmodule ForgeWeb.Operator.Admission do
   @doc """
   The reason, as a clause that completes "this project cannot take a ticket: …".
 
-  An empty repository fails before the workflow is looked for — `{:unknown_ref, branch}`, not a
-  missing file — and that is the state a project is in the moment it is created, so it is the
-  sentence an operator arriving from `/projects/new` is most likely to meet.
+  A repository whose default branch does not exist fails before the workflow is looked for —
+  `{:unknown_ref, branch}`, not a missing file — because there is no commit to look in.
+
+  That used to be the state a project was in the moment it was created, and this note used to say
+  so. It is not any more: `Projects.register/1` gives the default branch an empty root commit, so
+  a freshly created project has a branch and no `.forge/workflow.yml`, and the sentence an
+  operator arriving from `/projects/new` actually meets is `{:no_workflow_file, path}`.
+  `{:unknown_ref, _}` is now reached only when the branch is deleted from the repository
+  afterwards, which nothing in the product does.
+
+  Both sentences mention `.forge/workflow.yml`, which is why asserting on that substring alone
+  cannot tell them apart — the tests assert the whole sentence.
   """
   @spec explain(term()) :: String.t()
   def explain({:unknown_ref, branch}),

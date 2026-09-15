@@ -13,7 +13,7 @@ defmodule ForgeWeb.ProjectLiveTest do
   import Phoenix.LiveViewTest
   import Forge.GitFixtures
 
-  alias Forge.{Projects, Tickets}
+  alias Forge.{Conversations, Projects, Tickets}
 
   setup :register_and_log_in_user
 
@@ -110,8 +110,31 @@ defmodule ForgeWeb.ProjectLiveTest do
 
     assert html =~ "No tickets yet"
     # Registered but with nothing pushed: it cannot take a ticket, and the page says which.
+    # The whole sentence, not the filename: `ForgeWeb.Operator.Admission` has two clauses for
+    # this and both name `.forge/workflow.yml`, so the filename alone holds whichever fired.
     assert html =~ "cannot take a ticket"
-    assert html =~ ".forge/workflow.yml"
+    assert html =~ "there is no .forge/workflow.yml on its default branch"
+  end
+
+  # The other clause, which is a different fact and not a different wording of the same one: a
+  # branch with no workflow file on it is a repository waiting for one commit, while a branch that
+  # does not exist is a repository the platform cannot find its footing in at all. Told the wrong
+  # one, an operator spends the afternoon pushing a file onto a branch that is not there.
+  test "a project whose default branch is missing is told that, not that a file is", %{
+    conn: conn,
+    project: project
+  } do
+    {:ok, _out} =
+      Forge.Git.run(Projects.repo_path(project), [
+        "update-ref",
+        "-d",
+        "refs/heads/#{project.default_branch}"
+      ])
+
+    {:ok, _view, html} = live(conn, ~p"/projects/#{project.name}")
+
+    assert html =~ "nothing has been pushed to its #{project.default_branch} branch yet"
+    refute html =~ "there is no .forge/workflow.yml on its default branch"
   end
 
   test "it reloads when a ticket changes", %{conn: conn, project: project} do
@@ -121,6 +144,23 @@ defmodule ForgeWeb.ProjectLiveTest do
     {:ok, _ticket} = Tickets.admit(project, %{title: "Arrived later"}, :system)
 
     assert render(view) =~ "Arrived later"
+  end
+
+  # `/chats` and this page share one row component, and it takes `project={false}` here. That attr
+  # exists for this page alone: the name is already the heading and already the URL, so repeating
+  # it on every row is noise on the one surface where it tells you nothing. Nothing page-wide can
+  # see the difference — the name is in the heading either way — so both halves are scoped to the
+  # row, and the second half is what stops the attr being "fixed" by always hiding the name.
+  test "a chat row names its project only where that is news", %{conn: conn, project: project} do
+    {:ok, chat} = Conversations.open(project, "about the parser")
+    row = ~s(a[href="/chats/#{chat.id}"])
+
+    {:ok, own_page, _html} = live(conn, ~p"/projects/#{project.name}")
+    assert own_page |> element(row) |> render() =~ "about the parser"
+    refute own_page |> element(row) |> render() =~ project.name
+
+    {:ok, all_chats, _html} = live(conn, ~p"/chats")
+    assert all_chats |> element(row) |> render() =~ project.name
   end
 
   test "an unknown project is a 404", %{conn: conn} do

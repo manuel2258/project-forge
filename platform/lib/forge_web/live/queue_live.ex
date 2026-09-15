@@ -85,6 +85,11 @@ defmodule ForgeWeb.QueueLive do
 
   # A blocking question has halted a job; a non-blocking one has not, and must never compete
   # with work that is actually waiting.
+  #
+  # `Forge.Queue.questions/1` is where that is enforced — it filters on `blocking` before an item
+  # is built, so this list cannot hold a non-blocking question and the check below is always
+  # true. Kept as a statement of the rule at the point it is relied on, not as a second defence:
+  # no test can tell it from `is_list/1`, and the rule is tested one layer up, where it is real.
   defp actionable?(%{kind: :questions} = item), do: Enum.any?(item.questions, & &1.blocking)
   defp actionable?(_item), do: true
 

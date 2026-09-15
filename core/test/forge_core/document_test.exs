@@ -70,6 +70,52 @@ defmodule ForgeCore.DocumentTest do
                  "---\r\noutcome: done\r\n---\r\n```question\r\nkey: a\r\ntext: t\r\nassumption: x\r\n```\r\n"
                )
     end
+
+    # CommonMark's rule is that a closing fence is *at least as long* as the opening one. The
+    # cases above vary whitespace, indentation, a BOM and line endings but never the tick count,
+    # so `>= width` and `== width` were indistinguishable. An agent that opens with three ticks
+    # and closes with four is writing valid Markdown; under `==` the block reads as unclosed and
+    # the whole document fails to parse, which fails the whole job.
+    test "a closing fence may be longer than the one that opened the block" do
+      assert {:ok, %Document{questions: [%Question{key: "a"}]}} =
+               Document.parse("```question\nkey: a\ntext: t\nblocking: true\n````\n")
+    end
+
+    test "a closing fence may not be shorter" do
+      assert {:error, [%Error{message: "block starting at line 1 is not closed"}]} =
+               Document.parse("````question\nkey: a\ntext: t\nblocking: true\n```\n")
+    end
+  end
+
+  # `docs/design/conversations.md` § Questions makes this a standard: "The flag is ignored for
+  # chats — `Document.parse(text, blocking: :always)`". In a conversation the turn has ended and
+  # the agent is waiting whichever way the flag was written, so there is no "instead" for an
+  # assumption to describe. The option existed and no test passed it, which meant the rule that
+  # a chat's questions are all blocking rested on nothing.
+  describe "a conversation's questions" do
+    test "are blocking whatever the flag said, and need no assumption" do
+      text = "```question\nkey: a\ntext: t\nblocking: false\n```\n"
+
+      # Without the option this is an error: a non-blocking question must say what it proceeded
+      # with. Failing the parse would take the question down with the message it arrived in.
+      assert messages(text) == [
+               {"question[0].assumption", "is required on a non-blocking question"}
+             ]
+
+      assert {:ok, %Document{questions: [question]}} = Document.parse(text, blocking: :always)
+      assert question.blocking
+      assert question.assumption == nil
+    end
+
+    # Ignored rather than refused, and for the stated reason: refusing it fails the whole message
+    # and the question vanishes rather than being shown without its one-tap answers.
+    test "an assumption written anyway is ignored, not refused" do
+      text = "```question\nkey: a\ntext: t\nblocking: false\nassumption: I guessed\n```\n"
+
+      assert {:ok, %Document{questions: [question]}} = Document.parse(text, blocking: :always)
+      assert question.blocking
+      assert question.assumption == nil
+    end
   end
 
   describe "documents without front matter or questions" do
@@ -166,6 +212,60 @@ defmodule ForgeCore.DocumentTest do
                {"question[0].key", "\"a\" is used by more than one question"},
                {"question[1].key", "\"a\" is used by more than one question"}
              ]
+    end
+
+    # The "every field is checked" case above feeds `key: Bad Key`, where the *space* is what
+    # fails the regex — so the lowercase half of the rule was never exercised. Question keys are
+    # the identity `Outcome.blocking_questions/2` matches `answered_keys` against: if `Storage`
+    # and `storage` were both legal, an answered question would stop resolving and the job would
+    # park for ever on a question a person had already answered.
+    test "a key is lowercase, and that is a rule of its own" do
+      assert messages("```question\nkey: Storage\ntext: t\nblocking: true\n```\n") == [
+               {"question[0].key", "must be lowercase letters, digits, - or _"}
+             ]
+    end
+
+    test "a key may hold digits, dashes and underscores" do
+      assert {:ok, document} =
+               Document.parse("```question\nkey: a_b-9\ntext: t\nblocking: true\n```\n")
+
+      assert [%{key: "a_b-9"}] = document.questions
+    end
+
+    # Emptiness is folded into each field's type check, and no test fed an empty string to any of
+    # them. A question with `text: ""` is drawn as an answer row with no question in it, and
+    # `options: []` is a row of buttons with no labels — both things the operator cannot act on.
+    test "a field that is present may not be empty" do
+      yaml = """
+      ```question
+      key: a
+      text: ""
+      anchor: ""
+      options: []
+      blocking: true
+      ```
+      """
+
+      assert messages(yaml) == [
+               {"question[0].anchor", "must be a non-empty string"},
+               {"question[0].options", "must be a non-empty list of strings"},
+               {"question[0].text", "must be a non-empty string"}
+             ]
+    end
+
+    test "an option may not be an empty string" do
+      yaml = "```question\nkey: a\ntext: t\noptions: [\"\", b]\nblocking: true\n```\n"
+
+      assert messages(yaml) == [
+               {"question[0].options", "must be a non-empty list of strings"}
+             ]
+    end
+
+    # The non-blocking branch has its own emptiness check, reached only when `blocking` is false.
+    test "an assumption may not be empty" do
+      yaml = "```question\nkey: a\ntext: t\nassumption: \"\"\n```\n"
+
+      assert messages(yaml) == [{"question[0].assumption", "must be a non-empty string"}]
     end
 
     test "errors from several blocks are all reported" do

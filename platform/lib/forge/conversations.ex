@@ -523,7 +523,11 @@ defmodule Forge.Conversations do
         said: last
       }
     end)
-    |> Enum.sort_by(&{not &1.live, &1.chat.inserted_at}, fn a, b -> a >= b end)
+    # Live first, newest within that. The sorter is descending, so both keys are the ones that
+    # sort *high*: `live` rather than `not live`, and the later timestamp. It read `not live`
+    # before, which put finished conversations on top — invisible while the live one was also
+    # the newest, and wrong exactly when you came back to a machine you had left running.
+    |> Enum.sort_by(&{&1.live, &1.chat.inserted_at}, fn a, b -> a >= b end)
   end
 
   defp by_id(_schema, []), do: %{}

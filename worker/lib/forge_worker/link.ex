@@ -23,6 +23,10 @@ defmodule ForgeWorker.Link do
 
   @heartbeat_ms :timer.seconds(20)
 
+  # Twenty seconds against `worker_timeout_ms` on the platform, and far too long for a test to
+  # wait out. Overridable only so that the suite can watch one arrive; nothing configures it.
+  defp heartbeat_ms, do: Application.get_env(:forge_worker, :heartbeat_ms, @heartbeat_ms)
+
   def start_link(opts), do: Slipstream.start_link(__MODULE__, opts, name: __MODULE__)
 
   @doc "What this worker is running, as the join payload reports it."
@@ -78,7 +82,7 @@ defmodule ForgeWorker.Link do
       "harness" => harness_offer()
     })
 
-    :timer.send_interval(@heartbeat_ms, self(), :heartbeat)
+    :timer.send_interval(heartbeat_ms(), self(), :heartbeat)
     {:ok, resend_unacked(socket)}
   end
 

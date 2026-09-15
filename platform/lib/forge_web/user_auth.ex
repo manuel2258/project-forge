@@ -142,6 +142,17 @@ defmodule ForgeWeb.UserAuth do
   #       |> put_session(:preferred_locale, preferred_locale)
   #     end
   #
+  # `renew: true` is an equivalent mutant under this endpoint's session store, and deliberately
+  # kept anyway. `ForgeWeb.Endpoint` sets `store: :cookie`, and `Plug.Session.COOKIE` ignores the
+  # session id entirely — the cookie value *is* the session — so `:renew` and `:write` emit a
+  # byte-identical cookie for identical contents. There is no server-side id to regenerate, and
+  # an attacker's planted cookie can never become authenticated because the victim's new signed
+  # value goes only to the victim.
+  #
+  # What actually defends the login here is `clear_session/1` and `delete_csrf_token/0`, both of
+  # which are tested. Flipping this flag therefore changes nothing a test could see; it stays
+  # because a move to a server-side store would make it load-bearing again on the same day the
+  # store changed, and nothing else would notice.
   defp renew_session(conn, _user) do
     delete_csrf_token()
 

@@ -4,6 +4,13 @@ defmodule ForgeCore.Job.ResultTest do
   alias ForgeCore.Document
   alias ForgeCore.Job.Result
 
+  # Every question field is populated deliberately. The moduledoc claims the round trip is
+  # lossless — "a result that survived a round trip must record exactly as the one that did not"
+  # — and a fixture whose `anchor`, `default` and `assumption` were all nil proved that claim
+  # with nil on both sides of the `==`. `anchor` is what puts a question next to the passage it
+  # concerns, `default` is the pre-selected one-tap answer, and `assumption` is the record of
+  # what a non-blocking question proceeded with; all three could vanish between the worker and
+  # the platform with the suite green.
   defp result do
     document =
       Document.parse!("""
@@ -15,8 +22,16 @@ defmodule ForgeCore.Job.ResultTest do
       ```question
       key: backend
       text: Which store?
+      anchor: "## Storage"
       options: [a, b]
+      default: a
       blocking: true
+      ```
+
+      ```question
+      key: cache
+      text: Cache the reads?
+      assumption: proceeding without a cache
       ```
       """)
 
@@ -54,10 +69,19 @@ defmodule ForgeCore.Job.ResultTest do
     result = %{result() | status: :waiting, outcome: nil, declared_outcome: nil}
     round_tripped = result |> Result.to_map() |> Jason.encode!() |> Jason.decode!()
 
-    assert %Result{status: :waiting, questions: [question]} = Result.from_map(round_tripped)
-    assert question.key == "backend"
-    assert question.blocking
-    assert question.options == ["a", "b"]
+    assert %Result{status: :waiting, questions: [blocking, proceeded]} =
+             Result.from_map(round_tripped)
+
+    assert blocking.key == "backend"
+    assert blocking.blocking
+    assert blocking.options == ["a", "b"]
+
+    # The three fields the fixture used to leave nil at both ends of the `==`, named one by one
+    # so that losing any of them is a failure with that field's name on it.
+    assert blocking.anchor == "## Storage"
+    assert blocking.default == "a"
+    assert proceeded.assumption == "proceeding without a cache"
+    refute proceeded.blocking
   end
 
   test "refuses a status or an outcome it does not know" do
@@ -66,6 +90,22 @@ defmodule ForgeCore.Job.ResultTest do
     assert_raise ArgumentError, fn ->
       Result.from_map(%{"status" => "finished", "outcome" => "vibes"})
     end
+  end
+
+  # A worker sends only what it has. Every collection field defaults to an empty collection
+  # rather than to nil, because the platform folds over all of them — `missing` and `undeclared`
+  # are rendered into the job's outcome, and `nil` there is a crash rather than an empty list.
+  # The `|| []` guaranteeing it survived a mutation sweep: no test had built a result from a map
+  # that left them out, which is exactly what a minimal failure result looks like.
+  test "a result that omits its collections gives back empty ones, not nils" do
+    result = Result.from_map(%{"status" => "finished", "outcome" => "error"})
+
+    assert result.questions == []
+    assert result.documents == %{}
+    assert result.invalid == %{}
+    assert result.missing == []
+    assert result.undeclared == []
+    assert result.harness == %{}
   end
 
   test "accepts atom keys, so an in-process result needs no encoding" do

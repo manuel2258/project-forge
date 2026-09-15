@@ -206,6 +206,33 @@ defmodule ForgeWeb.OperatorLiveTest do
     assert render(view) =~ "rejected; now in refining"
   end
 
+  # The symptom as an operator met it on the dev node: reject, and the card stays. The decision
+  # had been answered, but `pending_transition` was only ever cleared on the approved path, so
+  # the page kept offering the same approve-or-reject and the chooser behind
+  # `!@ticket.pending_transition` could never appear — there was no way forward from the page at
+  # all. Asserted through the surface that showed it, not just on the row.
+  test "rejecting closes the card and offers the choice instead", %{
+    conn: conn,
+    user: user,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
+    scenario("success", "refinement.md")
+    run_pending(ticket.id)
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+    assert has_element?(view, "#approval-#{ticket.id}")
+
+    view |> form("#approval-#{ticket.id} form") |> render_submit(%{"decision" => "rejected"})
+
+    refute has_element?(view, "#approval-#{ticket.id}")
+
+    # And what replaces it is the thing the design says rejection hands over: the transitions
+    # out of the state the ticket stayed in.
+    assert has_element?(view, "#hoisted-decision [phx-value-to='planning']")
+    assert Tickets.get!(ticket.id).status == :stuck
+  end
+
   test "the job page shows the pinned manifest and harness events", %{
     conn: conn,
     user: user,
@@ -227,6 +254,41 @@ defmodule ForgeWeb.OperatorLiveTest do
     assert html =~ "Refine the ticket into a crisp problem statement."
     assert html =~ "fake-model · session sess-42"
     assert html =~ "Reading the plan."
+  end
+
+  # Claude Code turns every `system` message into a `notice`, and `thinking_tokens` alone
+  # outnumbered everything else in the stream on the dev node — the page became a telemetry feed
+  # with the work buried in it, which is the "streaming log … nothing that invites watching agents
+  # work" `docs/design/ui.md` rules out. They are still recorded: the event log is the record, and
+  # the toggle is for the one time someone is debugging the harness itself.
+  test "the job stream hides the harness's own telemetry until asked", %{
+    conn: conn,
+    user: user,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    scenario("success", "refinement.md")
+    job = run_pending(ticket.id)
+
+    # Recorded through the path the channel uses, with the type the wire actually carries:
+    # `ForgeWorker.Job.Runner` prefixes the driver's bare `notice` with `job.harness.`.
+    :ok =
+      Forge.Jobs.record_harness_event(job.id, %{
+        type: "job.harness.notice",
+        payload: %{"subtype" => "thinking_tokens", "raw" => %{"tokens" => 128}}
+      })
+
+    {:ok, view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/jobs/#{job.id}")
+
+    refute html =~ "thinking_tokens"
+    assert html =~ "Show 1 harness notices"
+    # The work itself is still there — this hides telemetry, not the stream.
+    assert html =~ "Reading the plan."
+
+    shown = render_click(view, "notices")
+
+    assert shown =~ "thinking_tokens"
+    assert shown =~ "Hide 1 harness notices"
   end
 
   test "the board groups tickets by state in workflow order", %{

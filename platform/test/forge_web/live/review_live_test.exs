@@ -77,6 +77,37 @@ defmodule ForgeWeb.ReviewLiveTest do
     assert html =~ "No job has produced a changeset"
   end
 
+  # The page marks each document with whether it was approved, and that mark is the operator's
+  # only record on this page that a person signed the chain off rather than an agent writing it.
+  # Nothing asserted it: the existing test checks that `report.md` is listed, which it is whether
+  # the mark is there, missing or on the wrong document. Placement matters as much as presence —
+  # `docs/design/ui.md` § Semantics that must not be lost — so the mark is looked for inside the
+  # row of the document it belongs to, with the other document beside it left unmarked.
+  test "a document is marked approved only once somebody has approved it", context do
+    %{conn: conn, project: project, ticket: ticket, scope: scope} = context
+    sha = commit_on_branch(context, "score.ex", "def persist, do: :ok")
+    changeset!(ticket, sha)
+
+    {:ok, refinement} =
+      Artifacts.record_version(ticket.id, "refinement.md", :document, :system, %{
+        content: "---\noutcome: done\n---\n# Refinement\n"
+      })
+
+    {:ok, _report} =
+      Artifacts.record_version(ticket.id, "report.md", :document, :system, %{
+        content: "---\noutcome: done\n---\n# Report\n"
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+    refute has_element?(view, ~s([id="review-doc-refinement.md"] .text-success))
+
+    approve!(refinement, scope.user)
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+    assert has_element?(view, ~s([id="review-doc-refinement.md"] .text-success), "approved")
+    refute has_element?(view, ~s([id="review-doc-report.md"] .text-success))
+  end
+
   test "the queue links to it only for an approval that pins the changeset", context do
     %{conn: conn, ticket: ticket} = context
     sha = commit_on_branch(context, "score.ex", "def persist, do: :ok")
@@ -118,6 +149,23 @@ defmodule ForgeWeb.ReviewLiveTest do
       Artifacts.record_version(ticket.id, "changeset", :blob, :system, %{
         blob_uri: "git:" <> sha
       })
+
+    :ok
+  end
+
+  # An operator's decision on one document version, as `Forge.Engine` records one.
+  defp approve!(version, user) do
+    {:ok, _changes} =
+      Ecto.Multi.new()
+      |> Artifacts.put_approval(
+        :approval,
+        version,
+        user.id,
+        :approved,
+        %{"from" => "refining", "to" => "planning"},
+        "reads right"
+      )
+      |> Forge.Repo.transaction()
 
     :ok
   end

@@ -20,8 +20,11 @@ custom classes must fully style the input
 
 ### Testing
 
-These are written down because every one of them was learned from a defect that reached `main`'s
-doorstep with a green suite.
+The rules that hold everywhere — write the test with the code, watch every new test fail under a
+mutation before keeping it, comment an equivalent mutant rather than inventing a test for it, and
+the coverage ratchet — are `CLAUDE.md` § Testing and § Coverage. What follows is what is specific
+to Phoenix and LiveView here, and every one of them was learned from a defect that reached
+`main`'s doorstep with a green suite.
 
 **Watch a new test fail before trusting it.** Break the line it covers, run it, see red, restore.
 This is the only thing that catches an assertion which cannot fail, and there is no substitute

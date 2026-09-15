@@ -58,6 +58,42 @@ defmodule Forge.EventsTest do
              errors_on(Event.changeset(%Event{}, %{type: "a.b", actor: %{"kind" => "ghost"}}))
   end
 
+  describe "summary/1" do
+    # The clause order is the whole design of this function: the typed clauses render the events
+    # a reader actually follows, the empty-payload clause keeps a bare event from rendering as
+    # `%{}`, and the general clause is the fallback that inspects whatever is left. Nothing else
+    # in the platform calls it, so `Forge.CLI`'s event log is the only place a wrong clause shows,
+    # and there it reads as an event that says nothing rather than as an error.
+
+    test "an event with nothing to say says nothing" do
+      assert Events.summary(%Event{type: "ticket.noted", payload: %{}}) == ""
+    end
+
+    test "an event with a payload says what is in it" do
+      summary = Events.summary(%Event{type: "job.interrupted", payload: %{"reason" => "drained"}})
+
+      assert summary =~ "reason="
+      assert summary =~ "drained"
+    end
+
+    # A conversation's own words. Without the `chat.message` clause they would reach the log as
+    # an inspected map — the line a person typed, rendered as data. See
+    # `docs/design/conversations.md`.
+    test "a chat message is the text, and a chat turn is its number" do
+      assert Events.summary(%Event{type: "chat.message", payload: %{"text" => "are you there?"}}) ==
+               "are you there?"
+
+      assert Events.summary(%Event{type: "chat.turn", payload: %{"turn" => 3}}) == "turn 3"
+    end
+
+    test "a long message is bounded rather than filling the line" do
+      text = String.duplicate("x", 500)
+
+      assert Events.summary(%Event{type: "chat.message", payload: %{"text" => text}}) ==
+               String.duplicate("x", 200)
+    end
+  end
+
   test "events can never be updated or deleted" do
     {:ok, event} = Events.append("ticket.noted", :system)
 

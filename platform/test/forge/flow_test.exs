@@ -235,7 +235,7 @@ defmodule Forge.FlowTest do
     assert Jobs.pending() == []
   end
 
-  test "rejecting keeps the ticket pending; a stale job's result is orphaned", %{
+  test "rejecting hands the ticket back to the operator; a stale job's result is orphaned", %{
     project: project,
     user: user,
     worker: worker
@@ -246,18 +246,26 @@ defmodule Forge.FlowTest do
 
     {:ok, rejected} = Engine.decide(ticket, user.id, :rejected, "not yet")
     assert rejected.state == "refining"
-    assert rejected.pending_transition["to"] == "planning"
+
+    # `docs/design/workflow-grammar-v1.md` § Approval: rejection keeps the ticket in `from` and
+    # the operator chooses what happens next. The decision is therefore *finished* — it stopped
+    # being pending the moment it was answered. Leaving it pending was a real defect on the dev
+    # node: the card never closed, the queue offered the same approve-or-reject again, and the
+    # chooser that sentence promises stayed hidden behind `!@ticket.pending_transition`.
+    assert rejected.pending_transition == nil
+    assert rejected.status == :stuck
 
     assert [%{decision: :rejected}] =
              Artifacts.approvals(Artifacts.latest(ticket.id, "refinement.md").id)
 
-    # the operator edits and approves the new version
+    # What the sentence lists the operator doing: edit the artifact, which creates a new version,
+    # and take the transition by hand — which records the approvals against that new version.
     {:ok, v2} =
       Artifacts.record_version(ticket.id, "refinement.md", :document, {:user, user.id}, %{
         content: "---\noutcome: done\n---\nBetter.\n"
       })
 
-    {:ok, ticket} = Engine.decide(rejected, user.id, :approved, nil)
+    {:ok, ticket} = Engine.choose(rejected, user.id, "planning")
     assert ticket.state == "planning"
     assert [%{decision: :approved}] = Artifacts.approvals(v2.id)
 
@@ -300,6 +308,56 @@ defmodule Forge.FlowTest do
     assert job.outcome == :converged
   end
 
+  # The other side of that rule, and the expensive one to get wrong. "Never got going" is four
+  # conditions at once — it was a resume, it finished, nothing killed it, and no `started` event
+  # named a model — and an ordinary failure satisfies some of them. A failure that is re-queued
+  # as a fresh run instead of recorded loses the attempt, the transcript and the reason, and the
+  # job runs again on the same input until the ticket's allowance is gone, with nothing in the
+  # timeline to say why. Only `job.resume_failed` would be there, and only a resume may write it.
+  test "a first run that fails is recorded, not re-queued as a fresh one", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    job = only_pending(ticket)
+    assert job.harness_session_id == nil
+
+    # The same shape a lost resume has — finished, not killed, no model, outcome `:error` — on a
+    # job that was never resumed. Three of the four conditions hold; the run is still a failure.
+    {:ok, job} = run(job, worker, "no_start", "refinement.md")
+
+    assert job.status == :finished
+    assert job.outcome == :error
+    refute "job.resume_failed" in event_types(ticket)
+  end
+
+  test "a resume whose harness did get going is recorded, however it ended", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+
+    {:ok, job} =
+      Repo.update(
+        Job.progress_changeset(only_pending(ticket), %{
+          status: :pending,
+          harness_session_id: "live-session"
+        })
+      )
+
+    # It resumed, it reported a model, and then it failed by writing nothing. That is a run to
+    # record — the session was found, so running it again from scratch would throw away a turn
+    # the agent really took.
+    {:ok, job} = run(job, worker, "nothing", "refinement.md")
+
+    assert job.status == :finished
+    assert job.outcome == :error
+    assert job.harness_session_id == "sess-42"
+    refute "job.resume_failed" in event_types(ticket)
+  end
+
   test "the scheduler hands pending jobs to a worker with room, and holds the rest",
        %{project: project, user: user} = context do
     # A worker with room for exactly one slice, so the second ticket has nowhere to go until
@@ -331,6 +389,48 @@ defmodule Forge.FlowTest do
     # With the slice free again, the one that waited goes out.
     assert Forge.Jobs.Scheduler.tick() == 1
     assert job_status(waiting) == :running
+  end
+
+  # `Forge.Jobs.Scheduler` states the rule in a comment on the line: "Nothing to run is the only
+  # moment a machine may be destroyed for being idle." The sweep runs at the top of a pass, before
+  # a single job is handed out, so sweeping unconditionally destroys the very machine the pass was
+  # about to use — and with `max_workers: 1` that is not a slow queue but a queue that never moves:
+  # create a machine, wait for it to boot, destroy it before it is given anything, repeat.
+  #
+  # "Idle" here is the machine having had nothing to do for the period, which a machine that has
+  # just finished one job and has another waiting behind it is, for the moment between them.
+  test "a machine with work waiting is not destroyed for having been idle", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    Forge.Provider.Fake.watch()
+    previous = Application.get_env(:forge, Forge.Workers, [])
+    on_exit(fn -> Application.put_env(:forge, Forge.Workers, previous) end)
+
+    Application.put_env(
+      :forge,
+      Forge.Workers,
+      Keyword.merge(previous, idle_period_ms: 60_000, max_workers: 1)
+    )
+
+    # The machine has been sitting there long enough to qualify; the clock is moved rather than
+    # waited on.
+    :ok = Forge.Workers.release(worker.id)
+
+    {:ok, _worker} =
+      Forge.Workers.update(Forge.Workers.get!(worker.id), %{
+        idle_since: DateTime.add(DateTime.utc_now(:second), -120)
+      })
+
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
+    start_supervised!(Forge.Jobs.Scheduler)
+
+    assert Forge.Jobs.Scheduler.tick() == 1
+
+    refute_receive {:provider_destroy, _id}
+    assert Forge.Workers.get!(worker.id).status != :destroyed
+    assert Jobs.get!(only_job(ticket).id).worker_id == worker.id
   end
 
   test "a job assigned to a worker that has gone away stays pending", %{

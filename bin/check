@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Quality gate for the whole repository. Runs in every Mix project:
-#   compile --warnings-as-errors, format --check-formatted, credo --strict, test
+#   compile --warnings-as-errors, format --check-formatted, credo --strict, test --cover
+#
+# The coverage threshold lives in each project's mix.exs and is a floor that only moves up.
+# CLAUDE.md § Coverage has the rule; lowering it is a human's call, not an agent's.
 # and lints the measurement harness, which the gate cannot run (it needs btrfs, systemd
 # and Nix on the operator's machine), so static analysis is all it will ever get.
 set -euo pipefail

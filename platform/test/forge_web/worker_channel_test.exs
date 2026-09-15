@@ -9,7 +9,7 @@ defmodule ForgeWeb.WorkerChannelTest do
 
   import Forge.GitFixtures
 
-  alias Forge.{Events, Jobs, Projects, Tickets, Workers}
+  alias Forge.{Conversations, Events, Jobs, Projects, Tickets, Workers}
   alias ForgeCore.Job.Result
   alias ForgeWeb.{WorkerChannel, WorkerSocket}
 
@@ -37,6 +37,12 @@ defmodule ForgeWeb.WorkerChannelTest do
     |> connect_worker(token)
     |> subscribe_and_join(WorkerChannel, "worker:#{worker.id}", payload)
   end
+
+  # A join that declares the conversation, because the machine really is running it: a join that
+  # did not would be reconciled as a lost job and the chat would go dormant before a word could
+  # be sent to it.
+  defp join_with_chat(worker, token, chat),
+    do: join_worker(worker, token, %{"running" => [%{"job_id" => chat.id, "attempt" => 1}]})
 
   defp wait_until(fun, attempts \\ 100) do
     cond do
@@ -260,6 +266,60 @@ defmodule ForgeWeb.WorkerChannelTest do
 
       ref = push(socket, "nonsense", %{})
       assert_reply ref, :error, %{reason: "unknown_message"}
+    end
+  end
+
+  describe "speaking to a conversation" do
+    setup :ticket_with_job
+
+    # A chat that is running on this worker: the arrangement every message below assumes, and
+    # the one `Forge.Conversations` reads back out of the row before it sends anything.
+    setup %{project: project, worker: worker} do
+      chat =
+        %{project: project}
+        |> Forge.ForgeFixtures.chat_fixture()
+        |> Jobs.Job.progress_changeset(%{status: :running, worker_id: worker.id})
+        |> Forge.Repo.update!()
+
+      %{chat: chat}
+    end
+
+    # `Forge.ConversationsTest` registers the test process itself as the worker's connection, so
+    # what it proves is that `Conversations` sends the right tuple — the channel's own
+    # `handle_info` clause is never run there, and a chat on a real machine would go silent with
+    # the whole conversations suite green. This is the other half: the tuple arriving at a joined
+    # channel and leaving it as a push. See `docs/design/conversations.md` § Talking to a run and
+    # `docs/design/worker-channel.md`.
+    test "a message reaches the machine as a push", %{worker: w, token: t, chat: chat} do
+      {:ok, _reply, _socket} = join_with_chat(w, t, chat)
+
+      {:ok, _event} = Conversations.send(chat, "are you there?")
+
+      chat_id = chat.id
+      assert_push "message", %{"job_id" => ^chat_id, "text" => "are you there?"} = payload
+      assert payload["message_id"]
+    end
+
+    test "an interrupt reaches the machine as a push", %{worker: w, token: t, chat: chat} do
+      {:ok, _reply, _socket} = join_with_chat(w, t, chat)
+
+      :ok = Conversations.stop(chat)
+
+      chat_id = chat.id
+      assert_push "interrupt", %{"job_id" => ^chat_id}
+    end
+
+    test "a close reaches the machine as a push, with its reason", %{
+      worker: w,
+      token: t,
+      chat: chat
+    } do
+      {:ok, _reply, _socket} = join_with_chat(w, t, chat)
+
+      :ok = Conversations.close(chat, "operator closed it")
+
+      chat_id = chat.id
+      assert_push "close", %{"job_id" => ^chat_id, "reason" => "operator closed it"}
     end
   end
 

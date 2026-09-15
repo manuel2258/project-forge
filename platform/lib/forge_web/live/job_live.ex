@@ -24,7 +24,9 @@ defmodule ForgeWeb.JobLive do
     if connected?(socket), do: Events.subscribe()
 
     {:ok,
-     socket |> assign(project: project, ticket: ticket, job_id: job.id, shown: @page) |> load()}
+     socket
+     |> assign(project: project, ticket: ticket, job_id: job.id, shown: @page, notices: false)
+     |> load()}
   end
 
   defp load(%{assigns: %{job_id: job_id, ticket: ticket, project: project}} = socket) do
@@ -51,6 +53,28 @@ defmodule ForgeWeb.JobLive do
   @impl true
   def handle_event("more", _params, socket),
     do: {:noreply, update(socket, :shown, &(&1 + @page))}
+
+  def handle_event("notices", _params, socket),
+    do: {:noreply, update(socket, :notices, &(not &1))}
+
+  # What the harness says about itself rather than about the work: Claude Code turns every
+  # `system` message into one of these, and `thinking_tokens` alone can outnumber everything else
+  # in a job. They are recorded, because the event log is the record and nothing may quietly drop
+  # what a job did; they are not drawn, because a stream that is mostly telemetry is the
+  # "streaming log, no activity feed — nothing that invites watching agents work" that
+  # `docs/design/ui.md` § Motion rules out.
+  #
+  # One type and not a guessed list: a notice is the harness's own chatter by definition, and
+  # every other type is something that happened to the ticket.
+  @telemetry ["job.harness.notice"]
+
+  # Newest first, which is the order the stream is drawn in either way.
+  defp stream(events, true), do: Enum.reverse(events)
+
+  defp stream(events, false),
+    do: events |> Enum.reject(&(&1.type in @telemetry)) |> Enum.reverse()
+
+  defp telemetry_count(events), do: Enum.count(events, &(&1.type in @telemetry))
 
   # A run that has ended says so; one still going says how far it has got. Neither tails.
   defp stream_heading(%{status: :finished}, events),
@@ -139,7 +163,7 @@ defmodule ForgeWeb.JobLive do
                     a column narrower than its content does not clip — it overlaps the next one,
                     which is what a vertical screen showed. --%>
               <li
-                :for={event <- Enum.take(Enum.reverse(@events), @shown)}
+                :for={event <- Enum.take(stream(@events, @notices), @shown)}
                 class="grid grid-cols-[64px_1fr] gap-x-2 border-b border-base-300/60 py-1.5 font-mono text-[12.5px] sm:grid-cols-[64px_196px_1fr]"
               >
                 <span class="opacity-50">{Calendar.strftime(event.inserted_at, "%H:%M:%S")}</span>
@@ -155,14 +179,28 @@ defmodule ForgeWeb.JobLive do
                 </span>
               </li>
             </ol>
-            <button
-              :if={length(@events) > @shown}
-              type="button"
-              phx-click="more"
-              class="mt-3 min-h-[46px] rounded-field border border-base-300 px-4 text-sm hover:border-base-content/30"
-            >
-              Load 50 more
-            </button>
+            <div class="mt-3 flex flex-wrap items-center gap-2">
+              <button
+                :if={length(stream(@events, @notices)) > @shown}
+                type="button"
+                phx-click="more"
+                class="min-h-[46px] rounded-field border border-base-300 px-4 text-sm hover:border-base-content/30"
+              >
+                Load 50 more
+              </button>
+
+              <%!-- Only when there is something behind it. A job whose harness said nothing about
+                    itself should not carry a control that reveals nothing. --%>
+              <button
+                :if={telemetry_count(@events) > 0}
+                type="button"
+                phx-click="notices"
+                id="job-notices"
+                class="min-h-[46px] rounded-field px-4 text-sm opacity-60 hover:opacity-100"
+              >
+                {if @notices, do: "Hide", else: "Show"} {telemetry_count(@events)} harness notices
+              </button>
+            </div>
           </section>
         </div>
 

@@ -141,9 +141,19 @@ how many times a transition may fire for one ticket; exceeding it also sticks th
 **Approval.** `approve` lists artifact names. The transition is not taken automatically; it
 enters the queue as a decision, and the operator approves or rejects the latest version of
 each listed artifact. A transition a person takes by hand records the same approvals as
-part of the choice. Approval attaches to those exact versions. Rejection keeps the ticket in
-`from` and the operator chooses what happens next, including editing the artifact (which
-creates a new version) and approving that.
+part of the choice. Approval attaches to those exact versions.
+
+**Rejection keeps the ticket in `from` and hands the choice back.** The rejection is recorded
+against the versions it refused, the decision stops being pending, and the ticket becomes
+*stuck* — the same engine flag an unmatched outcome raises, and the one both surfaces read to
+offer the transitions out of the state. The operator then chooses what happens next, including
+editing the artifact (which creates a new version) and taking the transition by hand, which
+records the approvals against that new version.
+
+Clearing the pending decision is the part that matters, and it was missing: a rejection that
+left it pending left the ticket saying "waiting for you to choose" while the queue and the ticket
+page both still drew the approve-or-reject card, because each of them checks `pending_transition`
+before anything else. There was no way forward from the page at all.
 
 **Merging.** A state declaring `on_enter: merge` merges the `changeset` the ticket's approval
 pinned, not whatever the branch head happens to be. The merge is checked before the transition is

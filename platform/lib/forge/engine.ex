@@ -170,12 +170,19 @@ defmodule Forge.Engine do
     })
   end
 
+  # `pending_transition: nil` is part of being stuck, not an extra. A stuck ticket is one waiting
+  # for a person to choose, and both surfaces that offer the choice hide it while a pending
+  # transition is set — the queue shows the approve/reject card instead (`Queue.ticket_items/1`
+  # matches on `pending_transition` first) and the ticket page's chooser is behind
+  # `!@ticket.pending_transition`. Leaving it set is a ticket that says "waiting for you to
+  # choose" and offers nothing to choose from.
   defp put_stuck(multi, ticket, reason) do
     multi
     |> Tickets.put_progress(:ticket, ticket, %{
       state: ticket.state,
       status: :stuck,
-      cost_usd: ticket.cost_usd
+      cost_usd: ticket.cost_usd,
+      pending_transition: nil
     })
     |> Events.log(:stuck_event, "ticket.stuck", :system, %{
       ticket_id: ticket.id,
@@ -310,8 +317,17 @@ defmodule Forge.Engine do
         :approved ->
           put_transition(multi, ticket, workflow, transition, outcome, {:user, user_id})
 
+        # `docs/design/workflow-grammar-v1.md` § Approval: "Rejection keeps the ticket in `from`
+        # and the operator chooses what happens next, including editing the artifact (which
+        # creates a new version) and approving that."
+        #
+        # Keeping it in `from` was the whole of what this did, and that left the decision itself
+        # pending for ever: the card never closed, the queue kept offering the same approve or
+        # reject, and the chooser the sentence promises stayed hidden behind it. `:stuck` is the
+        # status that already means "waiting for you to choose", and it is what the operator
+        # needs to be in to do any of the things that sentence lists.
         :rejected ->
-          multi
+          put_stuck(multi, ticket, "approval rejected")
       end
 
     multi

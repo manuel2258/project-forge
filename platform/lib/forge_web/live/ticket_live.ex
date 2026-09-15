@@ -273,7 +273,7 @@ defmodule ForgeWeb.TicketLive do
                 <div class="doc">{entry.html}</div>
                 <.link
                   href={
-                    ~p"/tickets/#{@project.name}/#{@ticket.number}/artifacts/#{entry.artifact.name}/#{entry.latest.version}"
+                    ~p"/tickets/#{@project.name}/#{@ticket.number}/artifacts/#{entry.latest.version}/#{entry.artifact.name}"
                   }
                   class="mt-3 flex min-h-[46px] items-center font-mono text-[12.5px] text-primary hover:underline"
                 >
@@ -350,7 +350,7 @@ defmodule ForgeWeb.TicketLive do
     <.link
       :if={@entry.latest}
       href={
-        ~p"/tickets/#{@project}/#{@number}/artifacts/#{@entry.artifact.name}/#{@entry.latest.version}"
+        ~p"/tickets/#{@project}/#{@number}/artifacts/#{@entry.latest.version}/#{@entry.artifact.name}"
       }
       class={[
         "inline-flex min-h-[46px] items-center gap-1.5 rounded-field px-2 py-1 font-mono text-[12.5px] hover:bg-base-200",

@@ -159,7 +159,7 @@ defmodule ForgeWeb.ReviewLive do
                 <div class="doc">{doc.html}</div>
                 <.link
                   href={
-                    ~p"/tickets/#{@project.name}/#{@ticket.number}/artifacts/#{doc.name}/#{doc.version.version}"
+                    ~p"/tickets/#{@project.name}/#{@ticket.number}/artifacts/#{doc.version.version}/#{doc.name}"
                   }
                   class="mt-3 flex min-h-[46px] items-center font-mono text-[12.5px] text-primary hover:underline"
                 >
@@ -193,7 +193,7 @@ defmodule ForgeWeb.ReviewLive do
                   {entry.question.key} ·
                   <.link
                     href={
-                      ~p"/tickets/#{@project.name}/#{@ticket.number}/artifacts/#{entry.artifact}/#{entry.version}"
+                      ~p"/tickets/#{@project.name}/#{@ticket.number}/artifacts/#{entry.version}/#{entry.artifact}"
                     }
                     class="hover:opacity-100"
                   >

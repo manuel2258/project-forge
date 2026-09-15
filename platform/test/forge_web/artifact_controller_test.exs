@@ -60,7 +60,7 @@ defmodule ForgeWeb.ArtifactControllerTest do
   test "requires a logged-in operator", %{project: project, user: user} do
     ticket = admitted(project, user)
 
-    conn = get(build_conn(), ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/ticket/1")
+    conn = get(build_conn(), ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/1/ticket")
 
     assert redirected_to(conn) == ~p"/users/log-in"
   end
@@ -73,7 +73,7 @@ defmodule ForgeWeb.ArtifactControllerTest do
     ticket = admitted(project, user)
     write(ticket, "plan.md", "---\noutcome: done\n---\n# Plan\n\nDo the thing.\n", user)
 
-    conn = get(conn, ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/plan.md/1")
+    conn = get(conn, ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/1/plan.md")
 
     assert response(conn, 200) == "---\noutcome: done\n---\n# Plan\n\nDo the thing.\n"
     assert get_resp_header(conn, "content-type") == ["text/plain; charset=utf-8"]
@@ -93,15 +93,38 @@ defmodule ForgeWeb.ArtifactControllerTest do
     write(ticket, "plan.md", "# first\n", user)
     write(ticket, "plan.md", "# second\n", user)
 
-    assert get(conn, ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/plan.md/1")
+    assert get(conn, ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/1/plan.md")
            |> response(200) == "# first\n"
 
-    assert get(conn, ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/plan.md/2")
+    assert get(conn, ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/2/plan.md")
            |> response(200) == "# second\n"
 
     # There is no versionless form: it would have to mean "latest", and the product never
     # resolves that for you. See docs/design/ui.md § Addressable artifact versions.
     assert get(conn, "/tickets/#{project.name}/#{ticket.number}/artifacts/plan.md").status == 404
+  end
+
+  # The version goes before the name so the address ends in the artifact's own file name. With
+  # the name first the last segment was the version — `…/artifacts/index.html/1` — and everything
+  # that decides by extension saw a file called `1`: the browser rendering it, the name a `Save
+  # as` offers, anything following the link.
+  test "the address ends in the artifact's file name, extension and all", %{
+    conn: conn,
+    project: project,
+    user: user
+  } do
+    ticket = admitted(project, user)
+    write(ticket, "index.html", "<h1>built</h1>\n", user)
+
+    path = ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/1/index.html"
+
+    assert String.ends_with?(path, "/index.html")
+    assert response(get(conn, path), 200) == "<h1>built</h1>\n"
+
+    # And still never served as something the browser will lay out, whatever the name says.
+    conn = get(conn, path)
+    assert get_resp_header(conn, "content-type") == ["text/plain; charset=utf-8"]
+    assert get_resp_header(conn, "x-content-type-options") == ["nosniff"]
   end
 
   test "a blob comes out of the store", %{conn: conn, project: project, user: user} do
@@ -114,7 +137,7 @@ defmodule ForgeWeb.ArtifactControllerTest do
     conn =
       get(
         conn,
-        ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/transcript-planning-1.jsonl/1"
+        ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/1/transcript-planning-1.jsonl"
       )
 
     assert response(conn, 200) == ~s({"type":"result"}\n)
@@ -129,7 +152,7 @@ defmodule ForgeWeb.ArtifactControllerTest do
 
     write_blob(ticket, "changeset", "git:" <> String.duplicate("a", 40), user)
 
-    conn = get(conn, ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/changeset/1")
+    conn = get(conn, ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/1/changeset")
 
     assert redirected_to(conn) == ~p"/tickets/#{project.name}/#{ticket.number}/review"
   end
@@ -147,7 +170,7 @@ defmodule ForgeWeb.ArtifactControllerTest do
     write_blob(ticket, "transcript-old.jsonl", "file://" <> path, user)
 
     conn =
-      get(conn, ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/transcript-old.jsonl/1")
+      get(conn, ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/1/transcript-old.jsonl")
 
     assert response(conn, 200) == "from before the store existed\n"
   end
@@ -163,7 +186,7 @@ defmodule ForgeWeb.ArtifactControllerTest do
 
     write_blob(ticket, "sneaky.txt", "file://" <> outside, user)
 
-    conn = get(conn, ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/sneaky.txt/1")
+    conn = get(conn, ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/1/sneaky.txt")
 
     assert conn.status == 404
     refute conn.resp_body =~ "sk-ant-nope"
@@ -180,8 +203,8 @@ defmodule ForgeWeb.ArtifactControllerTest do
     conn =
       get(
         conn,
-        "/tickets/#{project.name}/#{ticket.number}/artifacts/" <>
-          URI.encode(~s(plan";filename="evil.html), &URI.char_unreserved?/1) <> "/1"
+        "/tickets/#{project.name}/#{ticket.number}/artifacts/1/" <>
+          URI.encode(~s(plan";filename="evil.html), &URI.char_unreserved?/1)
       )
 
     assert [disposition] = get_resp_header(conn, "content-disposition")
@@ -200,8 +223,8 @@ defmodule ForgeWeb.ArtifactControllerTest do
     conn =
       get(
         conn,
-        "/tickets/#{project.name}/#{ticket.number}/artifacts/" <>
-          URI.encode("plan\nX-Injected: 1", &URI.char_unreserved?/1) <> "/1"
+        "/tickets/#{project.name}/#{ticket.number}/artifacts/1/" <>
+          URI.encode("plan\nX-Injected: 1", &URI.char_unreserved?/1)
       )
 
     assert conn.status == 200
@@ -212,13 +235,13 @@ defmodule ForgeWeb.ArtifactControllerTest do
     ticket = admitted(project, user)
     write(ticket, "plan.md", "# only one\n", user)
 
-    assert get(conn, ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/ghost.md/1").status ==
+    assert get(conn, ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/1/ghost.md").status ==
              404
 
-    assert get(conn, ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/plan.md/9").status ==
+    assert get(conn, ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/9/plan.md").status ==
              404
 
-    assert get(conn, ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/plan.md/nope").status ==
+    assert get(conn, ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/nope/plan.md").status ==
              404
   end
 end

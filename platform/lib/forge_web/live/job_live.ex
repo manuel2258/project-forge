@@ -272,7 +272,7 @@ defmodule ForgeWeb.JobLive do
             <li :for={{artifact, version} <- @written}>
               <.link
                 href={
-                  ~p"/tickets/#{@project.name}/#{@ticket.number}/artifacts/#{artifact.name}/#{version.version}"
+                  ~p"/tickets/#{@project.name}/#{@ticket.number}/artifacts/#{version.version}/#{artifact.name}"
                 }
                 class="flex min-h-[46px] items-center gap-2 border-b border-base-300/60 font-mono text-[12.5px] hover:bg-base-200"
               >

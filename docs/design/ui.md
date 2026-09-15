@@ -391,9 +391,16 @@ that is not the product's own writing, and the ground is what says so.
 
 ## Addressable artifact versions
 
-`…/artifacts/:name/:version` serves the exact bytes of one version, to an authenticated operator.
+`…/artifacts/:version/:name` serves the exact bytes of one version, to an authenticated operator.
 It is what every artifact name in the product links to: chips on the ticket, the produced list on
 a job, transcripts, the review page's documents and answers, the queue item's footer.
+
+**The version comes first so the address ends in the file name.** It read `…/:name/:version`
+until an artifact called `index.html` made the problem obvious: the last segment was `1`, so
+every consumer that decides by extension — the browser, a `Save as` dialog, anything following
+the link — saw a file with no extension at all. Putting the version in front keeps the artifact's
+own name, extension included, as the last thing in the URL, and the address still identifies a
+version rather than a name.
 
 **There is no versionless form.** `…/artifacts/:name` would have to mean "latest", and the word
 appears nowhere in this product for the same reason approval attaches to a version and not to a

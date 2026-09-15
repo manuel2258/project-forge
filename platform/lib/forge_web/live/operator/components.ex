@@ -363,7 +363,7 @@ defmodule ForgeWeb.Operator.Components do
             docs/design/ui.md § Addressable artifact versions. --%>
       <.link
         :if={@artifact}
-        href={~p"/tickets/#{@project}/#{@ticket.number}/artifacts/#{@artifact}/#{@version}"}
+        href={~p"/tickets/#{@project}/#{@ticket.number}/artifacts/#{@version}/#{@artifact}"}
         class="hover:opacity-100"
       >
         {@artifact} v{@version}

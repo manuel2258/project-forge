@@ -48,7 +48,12 @@ defmodule ForgeWeb.Router do
 
     # Not a LiveView: this serves bytes, and every artifact name in the product links to it.
     # See docs/design/ui.md § Addressable artifact versions.
-    get "/tickets/:project/:number/artifacts/:name/:version", ArtifactController, :show
+    #
+    # The version comes *before* the name so that the address ends in the artifact's own file
+    # name, extension included. With the name first the last segment was the version — the URL
+    # read `…/index.html/1`, and everything downstream that decides by extension (the browser
+    # saving it, a `Save as` dialog, anything following the link) saw a file called `1`.
+    get "/tickets/:project/:number/artifacts/:version/:name", ArtifactController, :show
   end
 
   scope "/api/v1", ForgeWeb.Api do

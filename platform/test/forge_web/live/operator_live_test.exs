@@ -85,9 +85,10 @@ defmodule ForgeWeb.OperatorLiveTest do
 
     assert html =~ "Declares"
     assert html =~ "Wrote"
-    # What the run actually produced, linked to its exact version.
+    # What the run actually produced, linked to its exact version. The version comes before the
+    # name so the address still ends in the artifact's own file name, extension included.
     assert html =~ "refinement.md"
-    assert html =~ ~s(/artifacts/refinement.md/1)
+    assert html =~ ~s(/artifacts/1/refinement.md)
     refute html =~ "not written"
   end
 

@@ -101,6 +101,31 @@ defmodule Forge.ForgeFixtures do
     |> with_status(status)
   end
 
+  @doc """
+  A proposal: a job-scoped document under the reserved name prefix, at version 1.
+
+  `file` is the name the agent gave it; the stored artifact carries the prefix, which is what
+  says a job-scoped artifact is a proposal at all.
+  """
+  def proposal_fixture(attrs \\ %{}) do
+    job = Map.get_lazy(attrs, :job, fn -> job_fixture() end)
+    file = Map.get(attrs, :file, "score-table.md")
+    title = Map.get(attrs, :title, "Extract the score table")
+    body = Map.get(attrs, :body, "The plan assumes a module that is not there.")
+    content = Map.get(attrs, :content, "# #{title}\n\n#{body}")
+
+    {:ok, version} =
+      Forge.Artifacts.record_version(
+        {:job, job.id},
+        ForgeCore.Workflow.proposal_artifact(file),
+        :document,
+        {:job, job.id},
+        %{content: content, parse: false}
+      )
+
+    version
+  end
+
   def artifact_fixture(attrs \\ %{}) do
     ticket = Map.get_lazy(attrs, :ticket, fn -> ticket_fixture() end)
 

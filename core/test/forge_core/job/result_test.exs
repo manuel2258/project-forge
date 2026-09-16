@@ -1,7 +1,7 @@
 defmodule ForgeCore.Job.ResultTest do
   use ExUnit.Case, async: true
 
-  alias ForgeCore.Document
+  alias ForgeCore.{Document, Proposal}
   alias ForgeCore.Job.Result
 
   # Every question field is populated deliberately. The moduledoc claims the round trip is
@@ -50,6 +50,13 @@ defmodule ForgeCore.Job.ResultTest do
       invalid: %{},
       missing: [],
       undeclared: ["notes.md"],
+      proposals: %{"score-table.md" => Proposal.parse!("# Extract the score table\n\nWhy.")},
+      invalid_proposals: %{
+        "half.md" => %{
+          "reason" => "title: must begin with a level-one heading (# Title)",
+          "raw" => "no heading here\n"
+        }
+      },
       harness: %{"session_id" => "sess-42", "cost_usd" => 0.0421, "turns" => 3}
     }
   end
@@ -63,6 +70,15 @@ defmodule ForgeCore.Job.ResultTest do
              |> Jason.encode!()
              |> Jason.decode!()
              |> Result.from_map()
+  end
+
+  # The wire is JSON, so what `to_map/1` emits must already be keyed the way it will arrive.
+  # A struct passed through `Map.from_struct/1` is keyed by atoms before encoding and by strings
+  # after, and a reader on the worker side of an in-process send sees the first.
+  test "sends proposals keyed as they will arrive" do
+    assert %{"proposals" => %{"score-table.md" => proposal}} = Result.to_map(result())
+
+    assert Map.keys(proposal) |> Enum.sort() == ["body", "raw", "title"]
   end
 
   test "carries a waiting result's questions" do

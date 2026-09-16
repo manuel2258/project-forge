@@ -21,6 +21,10 @@ machine is yours until the conversation ends or goes idle.
   `job.md` says what it was, what it declared, what the engine concluded, what it wrote and what
   it cost. `transcript.jsonl` is everything that job's agent did, one JSON object per line.
   These are large; read them when you need to know why something was done, not by default.
+- `$FORGE_JOB/tickets/` — the project's tickets. `index.md` is one line each, plus any open
+  proposals; a numbered file holds that ticket's body. Read-only, and a snapshot taken when
+  this conversation opened.
+- `$FORGE_JOB/out/proposals/<name>.md` — ticket proposals; see below.
 - `$FORGE_JOB/spec.json` — the specification this conversation was started with.
 - `$FORGE_JOB/platform/platform.md` — how the platform around you works: tickets, states, jobs,
   artifacts and versions, approvals, branches and merging. Read it when what becomes of your
@@ -60,6 +64,21 @@ options: [local-file, sqlite]
   and waits, because the turn has ended and you are waiting either way.
 
 The answer arrives as the person's next message.
+
+## Proposing a ticket
+
+Asked to file something, or noticing work that deserves its own ticket, write one file per
+proposal in `$FORGE_JOB/out/proposals/`: an H1 that is the title, then the body. No front
+matter, no `question` blocks — if you have a question, ask it in your reply, where the person
+can answer it.
+
+A proposal is a suggestion. The person accepts it and the platform admits it as a ticket, or
+they decline it; nothing runs either way until they say so. Read `tickets/index.md` first, so
+you do not propose what is already there — it lists open proposals as well as tickets. Say in
+your reply what you proposed, because the file on its own is easy to miss.
+
+Proposals are recorded at the end of each turn, so writing one is enough — there is no goodbye
+to save it for, and you will not get one.
 
 ## How this ends
 

@@ -81,6 +81,48 @@ defmodule Forge.ConversationsTest do
       %{chat: chat}
     end
 
+    # A conversation never calls `Jobs.complete/2` — it has no outcome and no result — so if a
+    # turn did not carry its proposals, nothing would ever record one and the chat preamble
+    # would be promising something that does not happen.
+    test "a conversation's proposals are recorded, turn by turn", %{chat: chat, project: project} do
+      one = %{
+        "score-table.md" => %{
+          "title" => "Extract the score table",
+          "body" => "Why.",
+          "raw" => "# Extract the score table\n\nWhy."
+        }
+      }
+
+      {:ok, chat} = Conversations.record_turn(chat, turn_with_proposals(1, one))
+
+      assert [%{version: version}] = Forge.Proposals.open(project.id)
+      assert version.content =~ "Extract the score table"
+
+      # `out/proposals/` accumulates, so the same file is reported again next turn. It must not
+      # become a second version, or deciding it once would not be deciding it.
+      {:ok, _chat} = Conversations.record_turn(chat, turn_with_proposals(2, one))
+
+      assert [%{version: %{id: still}}] = Forge.Proposals.open(project.id)
+      assert still == version.id
+    end
+
+    test "a proposal the platform could not read is recorded as unreadable, not dropped", %{
+      chat: chat
+    } do
+      {:ok, chat} =
+        Conversations.record_turn(
+          chat,
+          turn_with_proposals(1, %{}, %{
+            "half.md" => %{"reason" => "no heading", "raw" => "prose\n"}
+          })
+        )
+
+      assert [event] =
+               chat.id |> Events.for_job() |> Enum.filter(&(&1.type == "proposal.unreadable"))
+
+      assert event.payload["reasons"]["half.md"] == "no heading"
+    end
+
     # The harness reports total_cost_usd cumulatively across the session and num_turns per turn —
     # measured by `bin/measure streaming`. Adding the cost, as a job's is added, would count turn
     # one's in every later turn: by turn five the conversation reports several times what it
@@ -426,6 +468,12 @@ defmodule Forge.ConversationsTest do
 
       assert length(Conversations.messages(chat.id)) == 2
     end
+  end
+
+  defp turn_with_proposals(index, proposals, invalid \\ %{}) do
+    index
+    |> turn(0.01)
+    |> Map.merge(%{"proposals" => proposals, "invalid_proposals" => invalid})
   end
 
   defp turn(index, cost) do

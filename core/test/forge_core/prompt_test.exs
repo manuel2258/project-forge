@@ -47,6 +47,65 @@ defmodule ForgeCore.PromptTest do
     assert manifest =~ "- Turns: 40\n- Cost: 2.0 USD"
   end
 
+  # Both affordances are files, and a file an agent is never told about is a file it never
+  # opens. These are the four things it has to know: where to read, where to write, that a
+  # proposal is a suggestion rather than a ticket, and that the format has no front matter —
+  # which the parser refuses, so an agent that guesses wrong loses the proposal.
+  describe "what the preamble says about proposing and reading" do
+    test "a job is told where the other tickets are and what is not in them" do
+      flat = Prompt.preamble() |> String.replace("\n", " ")
+
+      assert flat =~ "$FORGE_JOB/tickets/"
+      assert flat =~ "index.md"
+      assert flat =~ "snapshot"
+      assert flat =~ "not yours to read"
+    end
+
+    test "a job is told how to propose, and that it is a suggestion" do
+      flat = Prompt.preamble() |> String.replace("\n", " ")
+
+      assert flat =~ "$FORGE_JOB/out/proposals/"
+      assert flat =~ "No front matter"
+      assert flat =~ "suggestion, not a ticket"
+    end
+
+    # The preamble tells a job that an undeclared file in `out/` ends it with `error`. That is
+    # true and `proposals/` is the exception, so the rule has to name it — otherwise the
+    # preamble forbids in one paragraph what it asks for in the next.
+    test "the undeclared-output rule names the one directory it does not cover" do
+      [rule] =
+        Prompt.preamble()
+        |> String.split("\n\n")
+        |> Enum.filter(&(&1 =~ "undeclared file ends the job"))
+
+      assert rule =~ "proposals/"
+    end
+
+    test "a conversation is told the same two things, in its own words" do
+      preamble = Prompt.chat_preamble()
+      # Wrapped prose, so the sentences are matched with the line breaks taken out. A test that
+      # matched the raw text would pass or fail on where the paragraph happened to wrap.
+      flat = String.replace(preamble, "\n", " ")
+
+      assert preamble =~ "$FORGE_JOB/tickets/"
+      assert preamble =~ "$FORGE_JOB/out/proposals/"
+      assert flat =~ "No front matter"
+
+      # It has a person in it, so a question belongs in the reply rather than in the file.
+      assert flat =~ "ask it in your reply"
+    end
+
+    # The preamble said proposals were recorded "when the conversation ends". They are recorded
+    # at the end of each turn — and the sentence argued against itself, because its own reason
+    # was that there is no goodbye to save them for. Nothing checked the timing claim.
+    test "a conversation is told when its proposals are recorded, and it is per turn" do
+      flat = Prompt.chat_preamble() |> String.replace("\n", " ")
+
+      assert flat =~ "recorded at the end of each turn"
+      refute flat =~ "recorded when the conversation ends"
+    end
+  end
+
   # The whole of the chat path was unexercised: nothing called `chat_preamble/0`,
   # `chat_manifest/2` or `compose/2` on a chat spec. The module's own docstring spends nine lines
   # saying that handing a conversation the job preamble "was not economy; it was telling the

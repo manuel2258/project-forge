@@ -181,4 +181,105 @@ defmodule ForgeWeb.ProjectLiveTest do
     {:ok, _view, page} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
     assert page =~ ~s(href="/projects/#{project.name}")
   end
+
+  describe "ticket proposals" do
+    setup %{project: project} do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+      [job | _] = Forge.Jobs.for_ticket(ticket.id)
+
+      version =
+        Forge.ForgeFixtures.proposal_fixture(%{
+          job: job,
+          title: "Extract the score table",
+          body: "The plan assumes a module that is not there."
+        })
+
+      %{ticket: ticket, version: version}
+    end
+
+    test "are listed with what they say and where they came from", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      {:ok, _view, html} = live(conn, ~p"/projects/#{project.name}")
+
+      assert html =~ "Extract the score table"
+      assert html =~ "The plan assumes a module that is not there."
+      assert html =~ "ticket #{ticket.number}"
+      assert html =~ "Accept as a ticket"
+      assert html =~ "Decline"
+    end
+
+    test "accepting one admits a ticket and stops listing it", %{
+      conn: conn,
+      project: project,
+      version: version
+    } do
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}")
+
+      # Dispatched rather than submitted through the form: the decision is carried by the
+      # button's own value, which `form/3` cannot set. The markup that offers both buttons is
+      # asserted in the test above.
+      html =
+        render_submit(view, "decide_proposal", %{
+          "version_id" => version.id,
+          "decision" => "accepted"
+        })
+
+      assert html =~ "Admitted as ticket"
+      refute html =~ "Accept as a ticket"
+
+      assert Enum.any?(Tickets.list(project), &(&1.title == "Extract the score table"))
+    end
+
+    test "declining one records it and stops listing it", %{
+      conn: conn,
+      project: project,
+      version: version
+    } do
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}")
+
+      html =
+        render_submit(view, "decide_proposal", %{
+          "version_id" => version.id,
+          "decision" => "declined",
+          "comment" => "out of scope"
+        })
+
+      assert html =~ "Declined."
+      refute html =~ "Extract the score table"
+      refute Enum.any?(Tickets.list(project), &(&1.title == "Extract the score table"))
+    end
+
+    # A page rendered minutes ago offers a button the context will refuse — the same trap
+    # `conversations.md` names for a conversation that has stopped. The refusal has to be
+    # legible rather than a crash or a silent no-op.
+    test "deciding one that someone already decided says so", %{
+      conn: conn,
+      project: project,
+      user: user,
+      version: version
+    } do
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}")
+
+      {:ok, _} = Forge.Proposals.decline(version.id, user.id, nil)
+
+      html =
+        render_submit(view, "decide_proposal", %{
+          "version_id" => version.id,
+          "decision" => "accepted"
+        })
+
+      assert html =~ "already decided"
+    end
+
+    # Nothing else in the product admits a ticket the operator did not type, so the page has to
+    # say that accepting is what starts work — otherwise it reads as filing, not as spending.
+    test "says plainly that nothing runs until one is accepted", %{conn: conn, project: project} do
+      {:ok, _view, html} = live(conn, ~p"/projects/#{project.name}")
+
+      assert html =~ "Nothing runs until you accept one."
+    end
+  end
 end

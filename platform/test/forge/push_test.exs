@@ -141,4 +141,51 @@ defmodule Forge.PushTest do
     assert opts[:topic] == "digest"
     assert opts[:ttl] == 43_200
   end
+
+  # A proposal is not a queue item — it blocks nothing — so this is the one place a person is
+  # told about one without opening a project page. Without it a proposal nobody looks at is a
+  # proposal nobody decides, and the backlog an agent reads keeps offering it back for ever.
+  test "the digest counts open proposals, and says they are not waiting on you", %{user: user} do
+    {:ok, _} = Push.subscribe(user, browser_subscription("https://push.example/a"))
+
+    version = proposal_fixture()
+
+    assert :ok = Push.digest()
+    Push.flush()
+
+    # "proposed", not "waiting on you": the queue's promise is that you can reach the end of it,
+    # and a proposal was never in it.
+    assert_receive {:push, "https://push.example/a",
+                    %{"title" => "forge: 1 proposed", "body" => "1 proposed"}, _opts}
+
+    {:ok, _} = Forge.Proposals.decline(version.id, user.id, nil)
+
+    assert :empty = Push.digest()
+  end
+
+  test "a queue item and a proposal are counted separately in one digest", %{user: user} do
+    {:ok, _} = Push.subscribe(user, browser_subscription("https://push.example/a"))
+
+    ticket = ticket_fixture()
+
+    {:ok, _} =
+      Repo.update(
+        Forge.Tickets.Ticket.progress_changeset(ticket, %{
+          state: ticket.state,
+          status: :stuck,
+          cost_usd: ticket.cost_usd
+        })
+      )
+
+    proposal_fixture()
+
+    assert :ok = Push.digest()
+    Push.flush()
+
+    assert_receive {:push, "https://push.example/a",
+                    %{"title" => "forge: 1 waiting on you", "body" => body}, _opts}
+
+    assert body =~ "1 stuck"
+    assert body =~ "1 proposed"
+  end
 end

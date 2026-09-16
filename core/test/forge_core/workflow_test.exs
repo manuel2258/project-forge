@@ -13,6 +13,37 @@ defmodule ForgeCore.WorkflowTest do
 
   alias ForgeCore.Workflow
 
+  describe "the names ticket proposals reserve" do
+    # The prefix is the discriminator: a job-scoped artifact is a proposal because its name
+    # carries it, and nothing else says so. `proposal_artifact/1` and `proposal?/1` moving apart
+    # would mean proposals written under one name and looked for under another, which shows up
+    # as no proposals at all rather than as an error.
+    test "a stored proposal is recognised as one" do
+      assert Workflow.proposal_artifact("score-table.md") |> Workflow.proposal?()
+    end
+
+    test "the agent's own filename survives the prefixing" do
+      assert Workflow.proposal_artifact("score-table.md") =~ "score-table.md"
+    end
+
+    test "an ordinary artifact name is not a proposal" do
+      refute Workflow.proposal?("plan.md")
+      refute Workflow.proposal?(Workflow.ticket_artifact())
+      refute Workflow.proposal?(Workflow.changeset_artifact())
+    end
+
+    # Both are path segments the platform writes into a job directory, so a name that collided
+    # with something already there would overwrite it.
+    test "the two directories are distinct single path segments" do
+      for dir <- [Workflow.proposals_dir(), Workflow.tickets_dir()] do
+        assert dir != ""
+        refute String.contains?(dir, "/")
+      end
+
+      refute Workflow.proposals_dir() == Workflow.tickets_dir()
+    end
+  end
+
   describe "the documents handed to an agent" do
     test "the grammar is the design note itself, not a copy of it" do
       grammar = Workflow.grammar()

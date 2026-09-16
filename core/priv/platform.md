@@ -35,6 +35,21 @@ the question is about. A blocking question stops the job until a person answers;
 one states the assumption the job proceeded with and carries on. The answers a person gives come
 back to later jobs as `answers.md`.
 
+## Ticket proposals
+
+Any job and any conversation may say a ticket should exist. None may create one: a proposal is a
+document you write to `$FORGE_JOB/out/proposals/`, and a person accepts or declines it. Accepting
+admits it as an ordinary ticket, pinning the project's workflow **at that moment** rather than
+when it was proposed.
+
+This is the same rule as everywhere else here — your write scope is your own ticket, and beyond
+it you can only speak. It is also why proposing is free: nothing you write starts work, spends
+money or takes a machine.
+
+An accepted proposal becomes a ticket; a declined one is recorded as declined, so the next job
+does not propose it again. Both appear in `$FORGE_JOB/tickets/`, which is the project's tickets
+and its open proposals as a snapshot taken when your job started.
+
 ## Branches and merging
 
 A ticket has one branch, `ticket/<number>`. Every job of that ticket commits to it, so the work of

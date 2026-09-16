@@ -49,6 +49,9 @@ defmodule ForgeCore.Workflow do
   @ticket "ticket"
   @changeset "changeset"
   @answers "answers.md"
+  @proposals "proposals"
+  @proposal_prefix "proposal-"
+  @tickets_dir "tickets"
 
   @enforce_keys [:initial, :states, :transitions, :limits]
   defstruct version: 1, initial: nil, states: %{}, transitions: [], limits: nil
@@ -81,6 +84,35 @@ defmodule ForgeCore.Workflow do
 
   @doc "Platform-managed document holding answers; never declared in a workflow."
   def answers_artifact, do: @answers
+
+  @doc """
+  The reserved subdirectory of `out/` an agent writes ticket proposals into.
+
+  A directory rather than a reserved filename, because a job may propose more than one thing and
+  the alternative is a naming scheme inside a single file. See `docs/design/ticket-proposals.md`
+  § The files.
+  """
+  def proposals_dir, do: @proposals
+
+  @doc """
+  The artifact name a proposal written as `out/proposals/<file>` is stored under.
+
+  Prefixed rather than bare, because the prefix is what says a job-scoped artifact is a
+  proposal. The agent's own filename is kept after it: it is the only place the agent gets to
+  say what a proposal is about in a word, and the title says it in a sentence.
+  """
+  @spec proposal_artifact(artifact_name()) :: artifact_name()
+  def proposal_artifact(file), do: @proposal_prefix <> file
+
+  @doc "Whether an artifact name is a proposal's, i.e. carries the reserved prefix."
+  @spec proposal?(artifact_name()) :: boolean()
+  def proposal?(name), do: String.starts_with?(name, @proposal_prefix)
+
+  @doc """
+  The directory of `$FORGE_JOB` holding the project's tickets, for a job that wants to know
+  what else exists. See `docs/design/ticket-proposals.md` § Reading the backlog.
+  """
+  def tickets_dir, do: @tickets_dir
 
   @doc "Whether an artifact name denotes a document rather than the changeset."
   @spec document?(artifact_name()) :: boolean()

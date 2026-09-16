@@ -24,6 +24,32 @@ defmodule Forge.Tickets do
   """
   @spec admit(Project.t(), map(), Events.actor()) :: {:ok, Ticket.t()} | {:error, term()}
   def admit(%Project{} = project, attrs, actor \\ :system) do
+    with {:ok, prepared} <- prepare_admission(project) do
+      Multi.new()
+      |> put_admit(prepared, project, attrs, actor)
+      |> Repo.transaction()
+      |> case do
+        {:ok, %{ticket: ticket}} ->
+          Events.notify(ticket.id)
+          {:ok, ticket}
+
+        {:error, step, reason, _changes} ->
+          {:error, {step, reason}}
+      end
+    end
+  end
+
+  @doc """
+  Everything `put_admit/5` needs from the repository, read before any transaction opens.
+
+  Split out so a caller that admits a ticket *as part of something else* can compose the
+  admission into its own `Ecto.Multi` — `Forge.Proposals.accept/3` does, because accepting a
+  proposal and recording the decision have to commit together or not at all. Kept outside the
+  transaction so `admit/3`'s error shape is unchanged: a workflow that does not parse still
+  comes back as `{:error, [%ForgeCore.Error{}]}` rather than as a failed Multi step.
+  """
+  @spec prepare_admission(Project.t()) :: {:ok, map()} | {:error, term()}
+  def prepare_admission(%Project{} = project) do
     repo = Projects.repo_path(project)
 
     with {:ok, base} <- Git.resolve(repo, project.default_branch),
@@ -31,12 +57,22 @@ defmodule Forge.Tickets do
          {:ok, workflow} <-
            Parser.parse(yaml, prompt_exists: &Git.exists?(repo, base, ".forge/" <> &1)),
          {:ok, yaml_map} <- YamlElixir.read_from_string(yaml) do
-      insert(project, repo, workflow, yaml_map, base, attrs, actor)
+      {:ok, %{repo: repo, base: base, workflow: workflow, yaml_map: yaml_map}}
     end
   end
 
-  defp insert(project, repo, workflow, yaml_map, base, attrs, actor) do
-    Multi.new()
+  @doc """
+  Adds the steps that admit a ticket to `multi`, under `:number`, `:ticket`, `:admitted`,
+  `{:ticket_doc, _}`, `{:first_job, _}` and `:branch`.
+
+  The caller transacts. `admit/3` is the ordinary caller and does nothing else; a caller with
+  more to do in the same transaction adds its own steps around these.
+  """
+  @spec put_admit(Multi.t(), map(), Project.t(), map(), Events.actor()) :: Multi.t()
+  def put_admit(multi, prepared, %Project{} = project, attrs, actor) do
+    %{repo: repo, base: base, workflow: workflow, yaml_map: yaml_map} = prepared
+
+    multi
     |> Multi.run(:number, fn repo_, _ ->
       # Serialises admissions per project so two never take the same number.
       repo_.one!(from p in Project, where: p.id == ^project.id, lock: "FOR UPDATE")
@@ -79,15 +115,6 @@ defmodule Forge.Tickets do
         {:error, reason} -> {:error, reason}
       end
     end)
-    |> Repo.transaction()
-    |> case do
-      {:ok, %{ticket: ticket}} ->
-        Events.notify(ticket.id)
-        {:ok, ticket}
-
-      {:error, step, reason, _} ->
-        {:error, {step, reason}}
-    end
   end
 
   @doc """

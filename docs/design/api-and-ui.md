@@ -13,9 +13,19 @@ LiveView pages, and the Mix tasks. None of the three holds logic of its own.
 - `decide(ticket, user, :approved | :rejected, comment)` — decides the pending transition.
 - `transition(ticket, user, to, opts)` — takes a declared transition by hand.
 - `edit(ticket, user, name, content)` — writes a new version of a document.
+- `accept_proposal(version_id, user, comment)` — admits a ticket proposal as a ticket.
+- `decline_proposal(version_id, user, comment)` — records that it will not be.
 
-Each returns `{:ok, ticket}` or `{:error, reason}` and, on success, notifies subscribers of
-the ticket so open pages refresh.
+The first four return `{:ok, ticket}` or `{:error, reason}` and, on success, notify subscribers
+of the ticket so open pages refresh.
+
+The two proposal operations break that shape, and it is worth saying exactly how rather than
+leaving it to be found. They take no ticket, because a proposal belongs to the job that wrote it
+and a project chat's has no ticket anywhere near it. `accept_proposal/3` returns the ticket it
+*made* rather than one it was about, and notifies that ticket and the proposal's origin;
+`decline_proposal/3` returns `{:ok, %Forge.Proposals.Decision{}}`. Neither notifies anything for
+a project chat's proposal, which has no ticket to notify — an open project page does not refresh
+on that decision and is reloaded.
 
 ## JSON API
 
@@ -40,6 +50,14 @@ and audited like any other.
 | `POST /tickets/:project/:number/answers` | `{key, choice, text}` |
 | `POST /tickets/:project/:number/approve` | `{decision, comment}` |
 | `POST /tickets/:project/:number/transition` | `{to, outcome, comment}` |
+| `GET /projects/:project/proposals` | Open ticket proposals on the project |
+| `POST /proposals/:version_id/accept` | `{comment}`; answers with the ticket it admitted |
+| `POST /proposals/:version_id/decline` | `{comment}` |
+
+A proposal is named by the **version** id, never the artifact's. A decision attaches to an exact
+version, so an API that named the artifact would let a client accept text nobody had read. There
+is no endpoint that edits a proposal: `POST /tickets/:project/:number/artifacts/:name` writes at
+ticket scope and a proposal is scoped to its job.
 
 Responses are plain JSON objects; errors are `{"error": {"reason": ..., "detail": ...}}`
 with 400, 401, 404, 409 or 422. No envelope, no HATEOAS, no versioning beyond the path.
@@ -59,6 +77,15 @@ flow; public registration is disabled, users are created from the command line.
 - `/tickets/:project/:number/jobs/:id` — the pinned manifest and the harness events.
 - `/board` — tickets by state per project.
 
+`/projects/:name` grows a Proposals section when the project has open ones: what each says, the
+ticket or conversation it came from, and Accept and Decline. `/tickets/:project/:number` names
+what that ticket's own jobs proposed in its rail and links to the project page, so the affordance
+that commits exists in one place rather than two.
+
+**Proposals are never queue items.** The queue is what will not move until a person acts, and a
+proposal blocks nothing — no job waits on it and no ticket is stuck behind it. They are counted
+in the daily digest instead. See `design/ticket-proposals.md` § Where it surfaces.
+
 Pages subscribe to their ticket (or all tickets for the queue and board) and reload when an
 operation completes anywhere, including from the API or a running job.
 
@@ -67,8 +94,9 @@ operation completes anywhere, including from the API or a running job.
 Web Push through the browser's push service, with VAPID keys the operator generates once.
 A subscription is stored per browser endpoint for the logged-in user. Blocking questions are
 pushed as they appear, tagged per question so a re-ask replaces rather than stacks. Everything
-else waits for one digest push a day at a configured UTC hour, sent only when the queue is
-not empty. Subscriptions the push service reports gone are deleted. The service worker shows
+else waits for one digest push a day at a configured UTC hour, sent when the queue is not empty
+or the project has open ticket proposals — which are counted separately in it, because they are
+not waiting on anyone. Subscriptions the push service reports gone are deleted. The service worker shows
 the notification and opens the ticket page on tap.
 
 ## Message state

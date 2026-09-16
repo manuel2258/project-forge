@@ -547,6 +547,46 @@ defmodule ForgeWorker.LinkTest do
     assert reason =~ "there-is-no-repository"
   end
 
+  # The backlog and the proposals are the two halves of the same path, so they are proved
+  # together: what the platform sent reaches the agent as files, and what the agent wrote
+  # comes back over the channel as a result.
+  test "the backlog reaches the agent and its proposals come back", context do
+    %{client: client, origin: origin, root: root} = context
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    job =
+      origin
+      |> assignment(scenario: "proposes")
+      |> Map.put("backlog", %{
+        "index" => "| 7 | verifying | active | Fix the leaderboard |\n",
+        "tickets" => [
+          %{"file" => "7.md", "content" => "# Fix the leaderboard\n\nIt sorts up.\n"}
+        ]
+      })
+
+    push(client, @topic, "assign", job)
+    {%{"result" => result}, _} = take_push("result")
+
+    # The *spec's* id, not the assignment's: `Dir.prepare/3` names the directory after it, and
+    # the fixture gives the two different values. Looking under the assignment's id finds an
+    # empty path and proves nothing — the trap the chat fixture above already records.
+    job_dir = Path.join([root, "jobs", job["spec"]["job_id"]])
+    assert File.read!(Path.join([job_dir, "tickets", "7.md"])) =~ "It sorts up."
+    assert File.read!(Path.join(job_dir, "fake-backlog.txt")) =~ "Fix the leaderboard"
+
+    assert %{"proposals" => proposals, "invalid_proposals" => invalid} = result
+    assert proposals["score-table.md"]["title"] == "Extract the score table"
+    assert invalid["half.md"]["reason"] =~ "level-one heading"
+    assert invalid["half.md"]["raw"] =~ "no heading"
+
+    # The job's own outcome is untouched by either: a proposal is not in `produces`, and a
+    # malformed one must not cost a finished job its result.
+    assert result["outcome"] == "converged"
+    assert result["declared_outcome"] == "done"
+    assert result["undeclared"] == []
+  end
+
   describe "a conversation" do
     defp chat(origin, opts \\ []) do
       job_id = Keyword.get(opts, :job_id, uuid())
@@ -860,6 +900,30 @@ defmodule ForgeWorker.LinkTest do
       assert_receive {:terminal, ^job_id, "failed", %{"reason" => reason}}, 5_000
       assert reason =~ "Error"
       assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 5_000
+    end
+
+    # A conversation has no result and never calls `Jobs.complete/2`, so a proposal it wrote
+    # reaches the platform on the turn or not at all. `out/` is not committed either, which is
+    # why it cannot wait for the conversation to close: an idle timeout nobody is present for
+    # would take it with the machine.
+    test "a proposal written during a turn goes out with that turn", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin)
+      push(client, @topic, "assign", job)
+      {_first, _} = take_push("turn")
+
+      push(client, @topic, "message", %{
+        "job_id" => job["job_id"],
+        "message_id" => "m-2",
+        "text" => "PROPOSE a follow-up"
+      })
+
+      {%{"turn" => 2, "proposals" => proposals}, _} = take_push("turn")
+
+      assert proposals["score-table.md"]["title"] == "Extract the score table"
     end
 
     # The folder is what a ticket chat is told to read, so it has to be there before the first

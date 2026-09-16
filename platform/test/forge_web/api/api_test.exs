@@ -313,4 +313,86 @@ defmodule ForgeWeb.ApiTest do
     assert %{"tickets" => [%{"ref" => ^ref}]} =
              conn |> get(~p"/api/v1/tickets?project=#{name}") |> json_response(200)
   end
+
+  describe "ticket proposals" do
+    setup %{project: project} do
+      ticket = Forge.ForgeFixtures.ticket_fixture(%{project: project, number: 1})
+      job = Forge.ForgeFixtures.job_fixture(%{ticket: ticket})
+      version = Forge.ForgeFixtures.proposal_fixture(%{job: job})
+
+      %{version: version, job: job}
+    end
+
+    test "lists what is open on a project", %{conn: conn, project: project, version: version} do
+      id = version.id
+
+      assert %{"proposals" => [proposal]} =
+               conn |> get(~p"/api/v1/projects/#{project.name}/proposals") |> json_response(200)
+
+      assert %{
+               "version_id" => ^id,
+               "title" => "Extract the score table",
+               "readable" => true,
+               "file" => "proposal-score-table.md"
+             } = proposal
+    end
+
+    test "accepting one answers with the ticket it made", %{
+      conn: conn,
+      project: project,
+      version: version
+    } do
+      assert %{"number" => number, "title" => "Extract the score table"} =
+               conn
+               |> post(~p"/api/v1/proposals/#{version.id}/accept", %{comment: "yes"})
+               |> json_response(200)
+
+      assert %{"ticket" => %{"number" => ^number, "title" => "Extract the score table"}} =
+               conn |> get(~p"/api/v1/tickets/#{project.name}/#{number}") |> json_response(200)
+    end
+
+    test "declining one records it and stops listing it", %{
+      conn: conn,
+      project: project,
+      version: version
+    } do
+      assert %{"decision" => "declined"} =
+               conn
+               |> post(~p"/api/v1/proposals/#{version.id}/decline", %{comment: "out of scope"})
+               |> json_response(200)
+
+      assert %{"proposals" => []} =
+               conn |> get(~p"/api/v1/projects/#{project.name}/proposals") |> json_response(200)
+    end
+
+    # Deciding twice is a client mistake with an answer, not a platform fault. Answering it with
+    # 500 is the shape of failure `docs/open-questions.md` § Message reliability records.
+    test "deciding twice is a conflict, not a 500", %{conn: conn, version: version} do
+      conn |> post(~p"/api/v1/proposals/#{version.id}/decline", %{}) |> json_response(200)
+
+      assert %{"error" => %{"reason" => "already_decided"}} =
+               conn |> post(~p"/api/v1/proposals/#{version.id}/accept", %{}) |> json_response(409)
+    end
+
+    test "accepting one a person edited into nonsense is answerable, not a 500", %{
+      conn: conn,
+      job: job
+    } do
+      version = Forge.ForgeFixtures.proposal_fixture(%{job: job, file: "b.md", content: "no h1"})
+
+      assert %{"error" => %{"reason" => "invalid_proposal", "detail" => detail}} =
+               conn
+               |> post(~p"/api/v1/proposals/#{version.id}/accept", %{})
+               |> json_response(422)
+
+      assert detail =~ "level-one heading"
+    end
+
+    test "a proposal that is not there is a 404", %{conn: conn} do
+      assert %{"error" => %{"reason" => "not_found"}} =
+               conn
+               |> post(~p"/api/v1/proposals/#{Ecto.UUID.generate()}/accept", %{})
+               |> json_response(404)
+    end
+  end
 end

@@ -16,7 +16,7 @@ defmodule ForgeWeb.ProjectLive do
   import ForgeWeb.Indicators
   import ForgeWeb.Operator.Components
 
-  alias Forge.{Conversations, Events, Projects, Tickets}
+  alias Forge.{Conversations, Events, Operator, Projects, Proposals, Tickets}
   alias Forge.Git.Url
   alias ForgeCore.Workflow
   alias ForgeWeb.Format
@@ -52,10 +52,66 @@ defmodule ForgeWeb.ProjectLive do
       # The board is the workflow, and a conversation is not on it — it has no state to be in.
       # Without this a chat is a thing you can start from this page and then cannot find from it.
       chats: Conversations.summaries(project_id: project.id),
+      proposals: open_proposals(project),
       paused: Forge.Spend.paused?(),
       now: DateTime.utc_now()
     )
   end
+
+  # Flattened here rather than in the component, so the component takes a list of plain maps and
+  # can be rendered from a test without a database.
+  defp open_proposals(project) do
+    numbers = Map.new(Tickets.list(project), &{&1.id, &1.number})
+
+    Enum.map(Proposals.open(project.id), fn found ->
+      {title, body, readable} =
+        case ForgeCore.Proposal.parse(found.version.content || "") do
+          {:ok, proposal} -> {proposal.title, proposal.body, true}
+          {:error, errors} -> {nil, ForgeCore.Error.format(errors), false}
+        end
+
+      %{
+        version_id: found.version.id,
+        file: found.artifact.name,
+        title: title,
+        body: body,
+        readable: readable,
+        project: project.name,
+        ticket_number: Map.get(numbers, found.job.ticket_id)
+      }
+    end)
+  end
+
+  @impl true
+  def handle_event(
+        "decide_proposal",
+        %{"version_id" => id, "decision" => decision} = params,
+        socket
+      ) do
+    user = socket.assigns.current_scope.user
+    comment = params["comment"]
+
+    result =
+      case decision do
+        "accepted" -> Operator.accept_proposal(id, user, comment)
+        "declined" -> Operator.decline_proposal(id, user, comment)
+      end
+
+    case result do
+      {:ok, %Forge.Tickets.Ticket{number: number}} ->
+        {:noreply, socket |> put_flash(:info, "Admitted as ticket #{number}.") |> load()}
+
+      {:ok, _decision} ->
+        {:noreply, socket |> put_flash(:info, "Declined.") |> load()}
+
+      {:error, reason} ->
+        {:noreply, socket |> put_flash(:error, explain(reason)) |> load()}
+    end
+  end
+
+  defp explain(:already_decided), do: "Someone has already decided that one."
+  defp explain({:invalid_proposal, errors}), do: ForgeCore.Error.format(errors)
+  defp explain(reason), do: "Could not be recorded: #{inspect(reason)}"
 
   # Only this project's tickets. `load/1` shells out to git several times — the workflow, each
   # state's prompt, the mirror — so reloading on every ticket in the system would spend that on
@@ -205,6 +261,20 @@ defmodule ForgeWeb.ProjectLive do
             </tbody>
           </table>
 
+          <section :if={@proposals != []} class="mt-10">
+            <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
+              Proposals ({length(@proposals)})
+            </h2>
+
+            <p class="mt-2 text-[12.5px]/[1.5] opacity-60">
+              Work a job or a conversation said should exist. Nothing runs until you accept one.
+            </p>
+
+            <div class="mt-3">
+              <.proposals proposals={@proposals} />
+            </div>
+          </section>
+
           <section class="mt-10">
             <div class="flex flex-wrap items-baseline justify-between gap-3">
               <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
@@ -236,6 +306,7 @@ defmodule ForgeWeb.ProjectLive do
               {(@project.seed_id && String.slice(@project.seed_id, 0, 16)) || "none"}
             </.fact>
             <.fact label="tickets">{length(@tickets)}</.fact>
+            <.fact :if={@proposals != []} label="proposals">{length(@proposals)}</.fact>
             <.fact label="spent">{Format.windows(@spent) || "—"}</.fact>
           </dl>
 

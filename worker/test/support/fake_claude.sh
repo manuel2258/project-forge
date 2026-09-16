@@ -98,6 +98,16 @@ case "${FAKE_SCENARIO:-success}" in
         git commit --quiet -m "turn $turns" >&2
       fi
 
+      # A conversation filing a ticket. Written once and left there, because `out/` is not
+      # cleared between turns — which is the case the platform's record-by-content rule is for.
+      case "$text" in
+        *PROPOSE*)
+          mkdir -p "$out/proposals"
+          printf -- '# Extract the score table\n\nThe person asked for this to be filed.\n' \
+            > "$out/proposals/score-table.md"
+          ;;
+      esac
+
       emit "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"reply to $(json_escape "$text")\"}]}}"
       # Cumulative, as measured. A platform that adds this per turn over-counts every turn but
       # the first, and the number stays plausible while it does.
@@ -160,6 +170,18 @@ case "${FAKE_SCENARIO:-success}" in
     emit 'this is not json'
     emit '{"type":"weird_thing","x":1}'
     exit 1
+    ;;
+  proposes)
+    # A job that did its own work and also said a ticket should exist. One proposal that reads
+    # and one that does not, because the malformed one must not cost the job its outcome.
+    printf -- '---\noutcome: done\n---\n# Plan\n\nDo the thing.\n' > "$doc"
+    mkdir -p "$out/proposals"
+    printf -- '# Extract the score table\n\nThe plan assumes a module that is not there.\n' \
+      > "$out/proposals/score-table.md"
+    printf -- 'no heading, so this one cannot be read\n' > "$out/proposals/half.md"
+    # Proof the agent could read the backlog it was handed, recorded where a test can see it.
+    cat "$FORGE_JOB/tickets/index.md" > "$FORGE_JOB/fake-backlog.txt" 2> /dev/null || true
+    emit "$result_success"
     ;;
   undeclared)
     printf -- '---\noutcome: done\n---\n# Plan\n' > "$doc"

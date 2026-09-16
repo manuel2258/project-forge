@@ -65,6 +65,22 @@ defmodule ForgeWeb.Api.FallbackController do
         "pass outcome: one of #{Enum.join(outcomes, ", ")}"
       )
 
+  def call(conn, {:error, :already_decided}),
+    do:
+      error(
+        conn,
+        :conflict,
+        "already_decided",
+        "this version of the proposal has been accepted or declined"
+      )
+
+  # A proposal a person edited into something with no title. It is the client's mistake and
+  # answerable, not a platform fault — `docs/open-questions.md` § Message reliability records
+  # answering these with 500 as the shape of failure worth avoiding. Tagged rather than a bare
+  # list of errors, which the clause above already answers as a workflow that does not parse.
+  def call(conn, {:error, {:invalid_proposal, errors}}),
+    do: error(conn, :unprocessable_entity, "invalid_proposal", ForgeCore.Error.format(errors))
+
   def call(conn, {:error, :not_found}), do: error(conn, :not_found, "not_found", nil)
 
   def call(conn, {:error, {:bad_request, detail}}),

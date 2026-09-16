@@ -28,6 +28,12 @@ defmodule Forge.Artifacts.Artifact do
     artifact
     |> cast(attrs, [:ticket_id, :job_id, :name, :kind])
     |> validate_required([:name, :kind])
+    # In bytes, and for every artifact rather than only the proposals that exposed it. The
+    # column is `varchar(255)`, which counts characters, so a multibyte name can satisfy the
+    # column and still be unwritable as a file. Without this the database answers with a raise,
+    # and the callers that write artifacts do so inside a transaction recording something else —
+    # per CLAUDE.md, the class rather than the instance.
+    |> validate_length(:name, max: 255, count: :bytes)
     |> validate_one_scope()
     |> foreign_key_constraint(:ticket_id)
     |> foreign_key_constraint(:job_id)

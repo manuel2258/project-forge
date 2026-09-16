@@ -373,6 +373,7 @@ defmodule ForgeWorker.Link do
       },
       sink: fn event -> send(link, {:event, job_id, event}) end,
       harness_opts: harness_opts,
+      backlog: assignment["backlog"],
       wall_clock_ms: assignment["wall_clock_ms"] || :timer.hours(1),
       nix_env: Application.get_env(:forge_worker, :nix_env, true),
       extra_env: Application.get_env(:forge_worker, :extra_env, []) ++ git_env(assignment)

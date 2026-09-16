@@ -97,6 +97,32 @@ defmodule ForgeWeb.Api.Render do
     }
   end
 
+  @doc """
+  One ticket proposal: what it says, who wrote it, and the version id every decision names.
+
+  `version_id` rather than the artifact's id, because a decision attaches to an exact version —
+  editing the title before accepting it is a new version with no decision, and an API that named
+  the artifact would let a client accept text nobody had looked at.
+  """
+  def proposal(%{artifact: artifact, version: version} = found) do
+    {title, body} =
+      case ForgeCore.Proposal.parse(version.content || "") do
+        {:ok, proposal} -> {proposal.title, proposal.body}
+        {:error, errors} -> {nil, ForgeCore.Error.format(errors)}
+      end
+
+    %{
+      version_id: version.id,
+      file: artifact.name,
+      title: title,
+      body: body,
+      readable: title != nil,
+      job_id: artifact.job_id,
+      ticket_number: found[:ticket_number],
+      proposed_at: version.inserted_at
+    }
+  end
+
   def event(%Event{} = e) do
     %{
       seq: e.seq,

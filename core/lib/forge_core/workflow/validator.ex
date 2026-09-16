@@ -199,6 +199,9 @@ defmodule ForgeCore.Workflow.Validator do
       name == Workflow.answers_artifact() ->
         Error.new(Error.join(path, index), "answers.md is platform-managed and never declared")
 
+      reserved_proposal?(name) ->
+        Error.new(Error.join(path, index), reserved_proposal_message(name))
+
       name == Workflow.ticket_artifact() ->
         nil
 
@@ -234,6 +237,9 @@ defmodule ForgeCore.Workflow.Validator do
       name in [Workflow.ticket_artifact(), Workflow.answers_artifact()] ->
         Error.new(Error.join(path, index), "#{inspect(name)} is reserved and cannot be produced")
 
+      reserved_proposal?(name) ->
+        Error.new(Error.join(path, index), reserved_proposal_message(name))
+
       name == Workflow.changeset_artifact() ->
         nil
 
@@ -249,6 +255,17 @@ defmodule ForgeCore.Workflow.Validator do
   end
 
   defp reserved_prefix?(name), do: String.ends_with?(name, "/*")
+
+  # Two reserved shapes, one rule: `proposals` is the subdirectory of `out/` an agent writes
+  # proposals into, and `proposal-*` is what the platform stores them under. A workflow naming
+  # either would collide with a file or a row it does not own.
+  defp reserved_proposal?(name) do
+    name == Workflow.proposals_dir() or Workflow.proposal?(name)
+  end
+
+  defp reserved_proposal_message(name) do
+    "#{inspect(name)} is reserved for ticket proposals"
+  end
 
   defp outcome_declarations(%Workflow{states: states}) do
     Enum.flat_map(states, fn {name, state} ->

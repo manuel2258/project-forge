@@ -322,6 +322,78 @@ defmodule ForgeWeb.Operator.Components do
   defp approve_label(pairs), do: "Approve #{length(pairs)} versions"
 
   @doc """
+  Open ticket proposals, each with the two things a person can do about it.
+
+  Not a queue item, and that is the decision rather than an omission: the queue is for what will
+  not move until someone acts, and a proposal blocks nothing — no job waits on it and no ticket
+  is stuck behind it (`docs/design/ticket-proposals.md` § Where it surfaces). Eighteen jobs
+  proposing two each is how the queue's promise that you can reach the end of it stops being
+  true, and it would be spent on the one class of item that could have waited.
+
+  `Accept` carries the verb and the `›`, like every affordance that commits; `Decline` is the
+  quiet one beside it, as `Reject` is on an approval.
+  """
+  attr :proposals, :list, required: true
+
+  def proposals(assigns) do
+    ~H"""
+    <div :for={p <- @proposals} class="border-b border-base-300/60 py-[18px]">
+      <div class="flex items-baseline gap-2">
+        <h3 class="text-sm font-medium">{p.title || "Could not be read"}</h3>
+        <span class="font-mono text-[11px] opacity-50">{p.file}</span>
+      </div>
+
+      <p class="mt-1 text-[12.5px]/[1.5] opacity-70 whitespace-pre-line">{p.body}</p>
+
+      <p class="mt-1 font-mono text-[11px] opacity-50">
+        proposed by
+        <.link
+          :if={p.ticket_number}
+          navigate={~p"/tickets/#{p.project}/#{p.ticket_number}"}
+          class="hover:underline"
+        >
+          ticket {p.ticket_number}
+        </.link>
+        <span :if={is_nil(p.ticket_number)}>a conversation</span>
+      </p>
+
+      <form phx-submit="decide_proposal" class="mt-3 flex flex-col gap-2">
+        <input type="hidden" name="version_id" value={p.version_id} />
+        <input
+          type="text"
+          name="comment"
+          placeholder="comment (optional)"
+          class="h-12 w-full rounded-field border border-base-300 bg-transparent px-3 text-sm placeholder:opacity-40 focus:outline-none focus:border-base-content/40"
+        />
+        <button
+          :if={p.readable}
+          type="submit"
+          name="decision"
+          value="accepted"
+          phx-disable-with="Admitting…"
+          class="flex h-[52px] w-full items-center justify-between gap-3 rounded-field border border-base-300 bg-base-200 px-4 text-left hover:border-base-content/30"
+        >
+          <span class="text-sm font-medium">Accept as a ticket</span>
+          <span aria-hidden="true" class="opacity-40">›</span>
+        </button>
+        <p :if={not p.readable} class="text-[12.5px] opacity-60">
+          This cannot be read as a proposal, so it cannot be admitted. Decline it.
+        </p>
+        <button
+          type="submit"
+          name="decision"
+          value="declined"
+          phx-disable-with="Sending…"
+          class="flex h-12 w-full items-center px-4 text-left text-sm opacity-60 hover:opacity-100"
+        >
+          Decline
+        </button>
+      </form>
+    </div>
+    """
+  end
+
+  @doc """
   The transitions a person may take. Each carries a verb: `Move to planning ›`, never `→ planning`.
   """
   attr :ticket, :map, required: true

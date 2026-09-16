@@ -16,11 +16,13 @@ defmodule Forge.Jobs do
 
   alias Forge.{
     Artifacts,
+    Backlog,
     Conversations,
     Engine,
     Events,
     Git,
     Projects,
+    Proposals,
     Repo,
     Spend,
     Storage,
@@ -245,8 +247,10 @@ defmodule Forge.Jobs do
     with :ok <- spend_gate(job, ticket),
          {:ok, token, _row} <- Tokens.issue_for_job(job, ticket, project),
          {:ok, started} <- mark_started(job, worker),
-         :ok <- Workers.push(worker.id, {:assign, assignment(started, ticket, project, token)}) do
+         assignment = assignment(started, ticket, project, token),
+         :ok <- Workers.push(worker.id, {:assign, assignment}) do
       {:ok, _worker} = Workers.busy(worker)
+      log_backlog(started, assignment)
       {:ok, started}
     else
       {:error, reason} ->
@@ -257,6 +261,25 @@ defmodule Forge.Jobs do
         {:error, reason}
     end
   end
+
+  # The backlog is the one thing a job is handed that is not an artifact version, so "what was
+  # this built on?" is answered by the hash rather than by a manifest entry: the snapshot is
+  # reproducible from the log, which is what keeps `docs/decisions.md`'s promise intact for it.
+  defp log_backlog(%Job{} = job, %{"backlog" => %{} = backlog}) do
+    Events.append("job.backlog", :system, %{
+      ticket_id: job.ticket_id,
+      job_id: job.id,
+      payload: %{
+        "hash" => backlog["hash"],
+        "tickets" => length(backlog["tickets"] || []),
+        "proposals" => length(backlog["proposals"] || [])
+      }
+    })
+
+    :ok
+  end
+
+  defp log_backlog(%Job{}, _assignment), do: :ok
 
   @doc "What the worker is told when a job is assigned. See `docs/design/worker-channel.md`."
   @spec assignment(Job.t(), Ticket.t() | nil, Forge.Projects.Project.t(), String.t()) :: map()
@@ -280,6 +303,9 @@ defmodule Forge.Jobs do
         "transcript_key" => transcript,
         "transcript_token" => Storage.Token.sign(:put, transcript)
       },
+      # Every job, workflow and chat alike, with no grammar key: an unread file costs nothing
+      # (`docs/design/ticket-proposals.md` § Reading the backlog).
+      "backlog" => Backlog.compose(project),
       "seed" => seed(project),
       "slice" => %{
         "memory_max" => Workers.slice_bytes(),
@@ -632,6 +658,7 @@ defmodule Forge.Jobs do
   defp record(job, ticket, result) do
     Multi.new()
     |> put_documents(ticket, job, result)
+    |> put_proposals(job, result)
     |> put_transcript(ticket, job, result)
     |> put_changeset(ticket, job, result)
     |> Multi.update(:job, Job.progress_changeset(job, progress_attrs(job, result)))
@@ -706,6 +733,15 @@ defmodule Forge.Jobs do
 
   defp fail_attrs(%Job{}),
     do: %{status: :finished, outcome: :error, finished_at: DateTime.utc_now(:second)}
+
+  # Only for a run that ended. A waiting job's `out/proposals/` is still there when it resumes
+  # and would be collected again, so recording now would put the same proposal in as a second
+  # version of itself for every question the job stopped on.
+  defp put_proposals(multi, job, %Result{status: :finished} = result) do
+    Proposals.put_from_result(multi, job, result.proposals, result.invalid_proposals)
+  end
+
+  defp put_proposals(multi, _job, %Result{}), do: multi
 
   defp put_documents(multi, ticket, job, %Result{documents: documents}) do
     Enum.reduce(documents, multi, fn {name, document}, multi ->

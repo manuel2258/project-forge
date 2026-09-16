@@ -19,6 +19,8 @@ defmodule ForgeWorker.Job.Runner do
       implementation, which is `Slice.Direct` unless the image says otherwise.
     * `:slice_opts` - the ceiling and share for this job, from the assignment.
     * `:extra_env` - additional `{name, value}` pairs for the process environment.
+    * `:backlog` - the project's tickets, as the platform composed them at assignment. Written
+      to `tickets/` in the job directory; see `ForgeWorker.Job.Dir.prepare/3`.
 
   The harness process gets a clean environment: an allowlist of the worker's own variables
   (PATH, locale, proxies, Nix settings), a private HOME inside the job directory, what the
@@ -106,7 +108,13 @@ defmodule ForgeWorker.Job.Runner do
     # A session to resume is what makes this a continuation of an earlier attempt rather than
     # a fresh one, and so what decides whether `out/` is kept or cleared.
     resume? = Keyword.get(Keyword.get(opts, :harness_opts, []), :resume_session) != nil
-    job_dir = Dir.prepare(Keyword.fetch!(opts, :root), spec, resume: resume?)
+
+    job_dir =
+      Dir.prepare(Keyword.fetch!(opts, :root), spec,
+        resume: resume?,
+        backlog: Keyword.get(opts, :backlog)
+      )
+
     File.write!(Dir.prompt_path(job_dir), Prompt.compose(spec, job_dir))
     transcript_path = Dir.new_transcript_path(job_dir)
 
@@ -507,6 +515,8 @@ defmodule ForgeWorker.Job.Runner do
       invalid: collected.invalid,
       missing: collected.missing,
       undeclared: collected.undeclared,
+      proposals: collected.proposals,
+      invalid_proposals: collected.invalid_proposals,
       harness: harness_summary(started, finished, state.exit_status)
     }
 

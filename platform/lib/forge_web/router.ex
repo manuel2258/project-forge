@@ -69,6 +69,9 @@ defmodule ForgeWeb.Router do
     post "/tickets/:project/:number/answers", TicketController, :answer
     post "/tickets/:project/:number/approve", TicketController, :approve
     post "/tickets/:project/:number/transition", TicketController, :transition
+    get "/projects/:project/proposals", TicketController, :proposals
+    post "/proposals/:version_id/accept", TicketController, :accept_proposal
+    post "/proposals/:version_id/decline", TicketController, :decline_proposal
   end
 
   # The worker's door to the blob store. No session and no pipeline: the short-lived token in

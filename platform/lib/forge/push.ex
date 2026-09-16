@@ -12,6 +12,7 @@ defmodule Forge.Push do
   alias Forge.Accounts.User
   alias Forge.Jobs.Job
   alias Forge.Projects
+  alias Forge.Proposals
   alias Forge.Push.Subscription
   alias Forge.Queue
   alias Forge.Repo
@@ -109,23 +110,28 @@ defmodule Forge.Push do
     )
   end
 
-  @doc "Pushes one summary of the queue, if it is not empty."
+  @doc """
+  Pushes one summary of the queue, if there is anything to say.
+
+  Open ticket proposals are counted here and nowhere else. They are not queue items — a
+  proposal blocks nothing, and `docs/decisions.md` puts everything that is not a blocking
+  question in the digest — but a proposal nobody is ever told about is a proposal nobody
+  decides, and the backlog an agent reads keeps offering it back.
+  """
   @spec digest() :: :ok | :empty
   def digest do
-    case Queue.items() do
-      [] ->
+    items = Queue.items()
+    proposals = Proposals.open_count()
+
+    case {items, proposals} do
+      {[], 0} ->
         :empty
 
-      items ->
-        counts =
-          items
-          |> Enum.frequencies_by(& &1.kind)
-          |> Enum.map_join(", ", fn {k, n} -> "#{n} #{k}" end)
-
+      {items, proposals} ->
         deliver(
           %{
-            title: "forge: #{length(items)} waiting on you",
-            body: counts,
+            title: digest_title(length(items), proposals),
+            body: digest_body(items, proposals),
             url: "/",
             tag: "digest"
           },
@@ -133,6 +139,23 @@ defmodule Forge.Push do
           topic: "digest"
         )
     end
+  end
+
+  # The title says what is *waiting*, which proposals are not. A count that folded them in would
+  # make the queue's promise — reach the end and be done — read as broken by things that never
+  # belonged to it.
+  defp digest_title(0, proposals), do: "forge: #{proposals} proposed"
+  defp digest_title(waiting, _proposals), do: "forge: #{waiting} waiting on you"
+
+  defp digest_body(items, proposals) do
+    counts =
+      items
+      |> Enum.frequencies_by(& &1.kind)
+      |> Enum.map(fn {k, n} -> "#{n} #{k}" end)
+
+    counts = if proposals > 0, do: counts ++ ["#{proposals} proposed"], else: counts
+
+    Enum.join(counts, ", ")
   end
 
   @doc "Waits for in-flight deliveries to finish. For tests."

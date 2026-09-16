@@ -17,6 +17,14 @@ These decisions are settled. They are not to be reopened.
 - Sub-structure within a state (fan-out and join) is declared as named, reusable blocks.
 - An agent may spawn children only from an explicitly permitted set — bounded choice.
 - A subagent is an ordinary job: same specification, isolation, artifacts and record.
+- **Any job and any conversation may propose a ticket; none may create one.** A proposal is a
+  document a person accepts or declines, and accepting calls the ordinary admission, pinning the
+  workflow at that moment rather than when it was proposed. An agent's write scope is its own
+  ticket; beyond it, it can only speak. See `design/ticket-proposals.md`.
+- **Every job is handed the project's tickets and its open proposals**, as a snapshot composed
+  when the job is assigned with its hash recorded. It is the one input that is not pinned to a
+  version, because a generated index has no version to pin. Bodies only: another ticket's
+  artifacts are pinned to jobs that are not this one.
 
 ## Jobs
 
@@ -73,6 +81,8 @@ These decisions are settled. They are not to be reopened.
   running job's stream — and nowhere else. *Reverses an earlier decision ("there is no live
   transcript view"), which generalised a true point about unattended work into a ban on live
   output as such. `docs/design/ui.md` § Motion and structure carries the distinction.*
+- Ticket proposals are digested, never queued: the queue is what will not move until a person
+  acts, and a proposal blocks nothing.
 - Message delivery must be visibly reliable: message state shown, sends retried, answers composed offline and synced. A silently dropped message must be impossible.
 
 ## Security and users

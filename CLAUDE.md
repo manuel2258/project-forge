@@ -8,7 +8,11 @@ milestone live in `docs/design/`; code follows them, and a change of mind update
 how consumption is modelled and drawn. Read both before changing anything the operator sees.
 
 `docs/design/conversations.md` is the standard for chats — the work that does not fit a workflow
-state. It is the newest and least settled note; its § Open lists what is deliberately undecided.
+state.
+
+`docs/design/ticket-proposals.md` is the standard for what an agent may say about the project
+itself: any job may propose a ticket, no job may write one, and every job is handed the project's
+tickets to read. It is the newest note.
 
 ## Layout
 

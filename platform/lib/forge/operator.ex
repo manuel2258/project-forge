@@ -10,6 +10,7 @@ defmodule Forge.Operator do
   alias Forge.Engine
   alias Forge.Events
   alias Forge.Jobs
+  alias Forge.Proposals
   alias Forge.Tickets
   alias Forge.Tickets.Ticket
 
@@ -73,6 +74,43 @@ defmodule Forge.Operator do
              content: content
            }) do
       notify(ticket)
+    end
+  end
+
+  @doc """
+  Accepts a ticket proposal, admitting it as a ticket.
+
+  Unlike every other operation here it does not return the ticket it was about — it returns the
+  ticket it *made*, which is a different one. A proposal belongs to the job that wrote it rather
+  than to a ticket, and a project chat's proposal has no ticket anywhere near it.
+  """
+  @spec accept_proposal(String.t(), User.t(), String.t() | nil) ::
+          {:ok, Ticket.t()} | {:error, term()}
+  def accept_proposal(version_id, %User{} = user, comment \\ nil) do
+    with {:ok, %Ticket{} = ticket} <- Proposals.accept(version_id, user.id, comment) do
+      # Both: the ticket the proposal came out of has a page that lists it, and the ticket it
+      # became has one of its own that nobody is looking at yet.
+      notify_origin(version_id)
+      notify(ticket)
+    end
+  end
+
+  @doc "Declines a ticket proposal. Recorded, so the next job does not propose it again."
+  @spec decline_proposal(String.t(), User.t(), String.t() | nil) ::
+          {:ok, Forge.Proposals.Decision.t()} | {:error, term()}
+  def decline_proposal(version_id, %User{} = user, comment \\ nil) do
+    with {:ok, decision} <- Proposals.decline(version_id, user.id, comment) do
+      notify_origin(version_id)
+      {:ok, decision}
+    end
+  end
+
+  # A proposal's page is its origin ticket's, when it has one. A project chat's has none, and
+  # nothing needs telling.
+  defp notify_origin(version_id) do
+    case Proposals.get(version_id) do
+      %{job: %{ticket_id: ticket_id}} when is_binary(ticket_id) -> Events.notify(ticket_id)
+      _other -> :ok
     end
   end
 

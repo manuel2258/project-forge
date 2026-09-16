@@ -214,6 +214,7 @@ defmodule ForgeWorker.Job.Conversation do
       sink: fn event -> send(me, {:harness_event, event}) end,
       slice_opts: %{memory_max: slice["memory_max"], cpu_weight: slice["cpu_weight"]},
       harness_opts: harness_opts,
+      backlog: assignment["backlog"],
       # A conversation is bounded by going idle, not by the clock: a chat someone is still in
       # is not a runaway. The wall clock stays as a backstop, far out.
       wall_clock_ms: assignment["wall_clock_ms"] || :timer.hours(24),
@@ -290,6 +291,12 @@ defmodule ForgeWorker.Job.Conversation do
   def handle_info({:turn, _job_id, index, event}, state) do
     head = commit_turn(state, index)
 
+    # Every turn, not at the end. `out/` is never committed, so a proposal reported only when
+    # the conversation closes is a proposal a lost machine takes with it — and a conversation
+    # can be closed by an idle timeout nobody is present for. The platform records by content,
+    # so re-reporting the same file every turn costs nothing.
+    proposals = Dir.proposals(job_dir(state))
+
     send(
       state.link,
       {:chat_turn, state.job_id, index,
@@ -298,6 +305,11 @@ defmodule ForgeWorker.Job.Conversation do
          "turn" => index,
          "commit" => head,
          "interrupted" => event.payload[:interrupted] == true,
+         "proposals" =>
+           Map.new(proposals.proposals, fn {file, p} ->
+             {file, %{"title" => p.title, "body" => p.body, "raw" => p.raw}}
+           end),
+         "invalid_proposals" => proposals.invalid_proposals,
          "harness" => turn_summary(event)
        }}
     )

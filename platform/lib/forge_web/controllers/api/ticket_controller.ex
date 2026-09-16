@@ -1,12 +1,21 @@
 defmodule ForgeWeb.Api.TicketController do
   use ForgeWeb, :controller
 
-  alias Forge.{Artifacts, Events, Jobs, Operator, Projects, Queue, Tickets}
+  alias Forge.{Artifacts, Events, Jobs, Operator, Projects, Proposals, Queue, Tickets}
   alias ForgeWeb.Api.Render
 
   action_fallback ForgeWeb.Api.FallbackController
 
-  plug :load_ticket when action not in [:index, :create, :queue, :me]
+  plug :load_ticket
+       when action not in [
+              :index,
+              :create,
+              :queue,
+              :me,
+              :proposals,
+              :accept_proposal,
+              :decline_proposal
+            ]
 
   def me(conn, _params) do
     user = conn.assigns.current_scope.user
@@ -150,6 +159,26 @@ defmodule ForgeWeb.Api.TicketController do
 
     with {:ok, ticket} <- Operator.transition(conn.assigns.ticket, user(conn), to, opts) do
       json(conn, Render.ticket(ticket, conn.assigns.project.name))
+    end
+  end
+
+  # Open proposals are per project, not per ticket: a project chat's proposal has no ticket, and
+  # the operator's question is "what has been suggested here", not "what did ticket 12 suggest".
+  def proposals(conn, %{"project" => name}) do
+    with %{} = project <- Projects.by_name(name) || {:error, :not_found} do
+      json(conn, %{proposals: Enum.map(Proposals.open(project.id), &Render.proposal/1)})
+    end
+  end
+
+  def accept_proposal(conn, %{"version_id" => version_id} = params) do
+    with {:ok, ticket} <- Operator.accept_proposal(version_id, user(conn), params["comment"]) do
+      json(conn, Render.ticket(ticket, project_name(ticket)))
+    end
+  end
+
+  def decline_proposal(conn, %{"version_id" => version_id} = params) do
+    with {:ok, decision} <- Operator.decline_proposal(version_id, user(conn), params["comment"]) do
+      json(conn, %{version_id: decision.artifact_version_id, decision: "declined"})
     end
   end
 

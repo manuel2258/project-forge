@@ -50,6 +50,13 @@ themselves versioned, attributed artifacts; this row is the queryable index.
 `comment`, `transition` (`{from, to}`), `inserted_at`. Approval attaches to a version. A
 newer version has no approval until it gets one.
 
+**proposal_decision** — `artifact_version_id` (unique), `user_id`, `ticket_id` (set exactly
+when accepted), `decision` (`accepted | declined`), `comment`. A person's decision on one ticket
+proposal. Deliberately **not** an `approval`: `approvals.transition` is required because an
+approval authorises an edge in the statechart and the engine reads it against a ticket's
+`pending_transition`, and a proposal has no edge — what it authorises is admission. See
+`design/ticket-proposals.md` § Deciding.
+
 **event** — `seq` (bigserial), `ticket_id`, `job_id` (both nullable), `actor`
 (`system`, `{user, id}` or `{job, id}`), `type` (dotted, e.g. `ticket.admitted`,
 `job.started`, `job.harness.tool_use`, `question.answered`, `transition.taken`),

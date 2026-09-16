@@ -314,6 +314,19 @@ defmodule ForgeCore.Workflow.ParserTest do
                messages(map)
     end
 
+    test "the names ticket proposals use are reserved, produced or consumed", %{map: map} do
+      map =
+        map
+        |> put_in(["states", "verifying", "produces"], ["report.md", "proposals"])
+        |> put_in(["states", "planning", "inputs"], ["ticket", "proposal-score-table.md"])
+
+      assert messages(map) == [
+               {"states.planning.inputs[1]",
+                "\"proposal-score-table.md\" is reserved for ticket proposals"},
+               {"states.verifying.produces[1]", "\"proposals\" is reserved for ticket proposals"}
+             ]
+    end
+
     test "declared outcomes are non-empty, unique, not engine outcomes, and carried by a document",
          %{map: map} do
       map =

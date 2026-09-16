@@ -17,10 +17,11 @@ defmodule Forge.Conversations do
   import Ecto.Query, only: [from: 2, where: 3]
 
   alias Ecto.Multi
-  alias Forge.{Events, Git, Jobs, Projects, Repo, Tickets, Workers}
+  alias Forge.{Events, Git, Jobs, Projects, Proposals, Repo, Tickets, Workers}
   alias Forge.Events.Event
   alias Forge.Git.Tokens
   alias Forge.Jobs.Job
+  alias ForgeCore.Proposal
 
   require Logger
 
@@ -235,6 +236,7 @@ defmodule Forge.Conversations do
     harness = payload["harness"] || %{}
 
     Multi.new()
+    |> put_proposals(chat, payload)
     |> Multi.update(
       :job,
       Job.progress_changeset(chat, %{
@@ -268,6 +270,19 @@ defmodule Forge.Conversations do
       {:error, step, reason, _changes} ->
         {:error, {step, reason}}
     end
+  end
+
+  # A conversation proposes like any job, and its proposals arrive with the turn rather than
+  # with a result: there is no result, because a conversation has no outcome and never calls
+  # `Jobs.complete/2`. Recording is idempotent by content, so the same file reported on every
+  # turn is stored once (`Forge.Proposals.put_from_result/4`).
+  defp put_proposals(multi, chat, payload) do
+    proposals =
+      Map.new(payload["proposals"] || %{}, fn {file, map} ->
+        {file, %Proposal{title: map["title"], body: map["body"], raw: map["raw"]}}
+      end)
+
+    Proposals.put_from_result(multi, chat, proposals, payload["invalid_proposals"] || %{})
   end
 
   defp push_reply(chat) do

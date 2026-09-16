@@ -13,7 +13,7 @@ defmodule ForgeWeb.TicketLive do
   import ForgeWeb.Indicators
   import ForgeWeb.Operator.Components
 
-  alias Forge.{Artifacts, Events, Jobs, Spend, Tickets}
+  alias Forge.{Artifacts, Events, Jobs, Proposals, Spend, Tickets}
   alias ForgeCore.Workflow
   alias ForgeWeb.{Format, Indicators, Markdown}
   alias ForgeWeb.Operator.Actions
@@ -66,11 +66,22 @@ defmodule ForgeWeb.TicketLive do
         ticket.status in [:active, :stuck] and
           not Workflow.State.job?(Workflow.state(workflow, ticket.state)),
       approve: approve_versions(ticket),
+      proposals: Proposals.open_for_ticket(ticket.id),
       reviewable: reviewable?(ticket, workflow),
       paused: ticket.status == :active and Spend.paused?(),
       until_midnight: until_midnight(),
       now: DateTime.utc_now()
     )
+  end
+
+  # The rail names what this ticket's jobs proposed and sends the decision to the project page,
+  # where every proposal on the project is in one place. Deciding here too would put the same
+  # affordance in two places, and one of them would be the one you did not open.
+  defp proposal_title(version) do
+    case ForgeCore.Proposal.parse(version.content || "") do
+      {:ok, proposal} -> proposal.title
+      {:error, _errors} -> "(could not be read)"
+    end
   end
 
   # One step per state visit, in the order the jobs ran. A state the ticket reached without a
@@ -303,6 +314,24 @@ defmodule ForgeWeb.TicketLive do
             <.fact label="workflow">{String.slice(@ticket.workflow_commit || "", 0, 12)}</.fact>
             <.fact label="admitted">{Format.ago(@ticket.inserted_at, @now)} ago</.fact>
           </dl>
+
+          <h2
+            :if={@proposals != []}
+            class="mt-6 font-mono text-[11px] tracking-[.14em] uppercase opacity-60"
+          >
+            Proposed here
+          </h2>
+          <ul :if={@proposals != []} class="mt-3 flex flex-col gap-2 text-[12.5px]">
+            <li :for={p <- @proposals} class="opacity-70">{proposal_title(p.version)}</li>
+          </ul>
+          <p :if={@proposals != []} class="mt-2 text-[12.5px] opacity-50">
+            Waiting on you, on <.link
+              navigate={~p"/projects/#{@project.name}"}
+              class="hover:underline"
+            >
+              the project page
+            </.link>.
+          </p>
 
           <h2 class="mt-6 font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Artifacts</h2>
           <div class="mt-3 flex flex-wrap gap-2">

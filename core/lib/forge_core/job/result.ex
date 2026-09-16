@@ -15,6 +15,7 @@ defmodule ForgeCore.Job.Result do
 
   alias ForgeCore.Document
   alias ForgeCore.Document.Question
+  alias ForgeCore.Proposal
 
   @enforce_keys [:status]
   defstruct [
@@ -32,6 +33,19 @@ defmodule ForgeCore.Job.Result do
     invalid: %{},
     missing: [],
     undeclared: [],
+    # Ticket proposals the run wrote to `out/proposals/`, keyed by filename, and the ones that
+    # could not be read, keyed the same way with the reason already formatted as text. Both are
+    # reported because neither fails the job: a proposal is not in `produces` and carries no
+    # outcome, so a malformed one is kept and shown rather than dropped or turned into an
+    # `error`. See `docs/design/ticket-proposals.md` § Malformed degrades, never drops.
+    #
+    # `%{"reason" => text, "raw" => text | nil}` per file. The reason is formatted rather than a
+    # list of `ForgeCore.Error` structs, unlike `invalid` above, because it is shown to the
+    # person deciding what to do with the proposal rather than read in a log — and `raw` is what
+    # the agent actually wrote, which the platform keeps as a version so that a proposal it
+    # cannot read is still a proposal a person can see and decline.
+    proposals: %{},
+    invalid_proposals: %{},
     harness: %{}
   ]
 
@@ -50,6 +64,8 @@ defmodule ForgeCore.Job.Result do
           invalid: %{String.t() => term()},
           missing: [String.t()],
           undeclared: [String.t()],
+          proposals: %{String.t() => Proposal.t()},
+          invalid_proposals: %{String.t() => %{String.t() => String.t() | nil}},
           harness: map()
         }
 
@@ -71,6 +87,9 @@ defmodule ForgeCore.Job.Result do
       "invalid" => Map.new(result.invalid, fn {name, why} -> {name, inspect(why)} end),
       "missing" => result.missing,
       "undeclared" => result.undeclared,
+      "proposals" =>
+        Map.new(result.proposals, fn {name, proposal} -> {name, proposal_to_map(proposal)} end),
+      "invalid_proposals" => result.invalid_proposals,
       "harness" => result.harness
     }
   end
@@ -96,6 +115,9 @@ defmodule ForgeCore.Job.Result do
       invalid: get.(:invalid) || %{},
       missing: get.(:missing) || [],
       undeclared: get.(:undeclared) || [],
+      proposals:
+        Map.new(get.(:proposals) || %{}, fn {name, p} -> {name, proposal_from_map(p)} end),
+      invalid_proposals: get.(:invalid_proposals) || %{},
       harness: get.(:harness) || %{}
     }
   end
@@ -141,6 +163,20 @@ defmodule ForgeCore.Job.Result do
       questions: Enum.map(get.(:questions) || [], &question_from_map/1),
       raw: get.(:raw) || ""
     }
+  end
+
+  # String keys spelled out, like `doc_to_map/1` above and unlike `Map.from_struct/1`. The wire
+  # is JSON, so a struct's atom keys arrive as strings on the far side: a caller reading the
+  # payload before it has been encoded sees different keys from one reading it after, and only
+  # one of the two has a test. `from_map/1` accepts either, so this is about what is *sent*.
+  defp proposal_to_map(%Proposal{} = proposal) do
+    %{"title" => proposal.title, "body" => proposal.body, "raw" => proposal.raw}
+  end
+
+  defp proposal_from_map(map) do
+    get = fn key -> Map.get(map, to_string(key), Map.get(map, key)) end
+
+    %Proposal{title: get.(:title), body: get.(:body), raw: get.(:raw)}
   end
 
   defp question_to_map(%Question{} = question), do: Map.from_struct(question)

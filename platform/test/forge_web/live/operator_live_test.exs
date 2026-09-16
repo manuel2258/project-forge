@@ -106,6 +106,28 @@ defmodule ForgeWeb.OperatorLiveTest do
     assert html =~ "not written"
   end
 
+  # The rail names what this ticket's jobs proposed and sends the decision to the project page,
+  # so a proposal has one place to be decided rather than two. Without the naming half, a ticket
+  # whose refinement raised three follow-ups shows no trace of them anywhere near it.
+  test "a ticket page names what its jobs proposed, and sends the decision elsewhere", %{
+    conn: conn,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+    [job | _] = Jobs.for_ticket(ticket.id)
+
+    Forge.ForgeFixtures.proposal_fixture(%{job: job, title: "Extract the score table"})
+
+    {:ok, _view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+
+    assert html =~ "Proposed here"
+    assert html =~ "Extract the score table"
+
+    # Named, not decided: the affordance that commits lives on the project page.
+    refute html =~ "Accept as a ticket"
+    assert html =~ ~s(href="/projects/#{project.name}")
+  end
+
   test "pages require login", %{project: _project} do
     conn = build_conn()
     assert {:error, {:redirect, %{to: "/users/log-in"}}} = live(conn, ~p"/")

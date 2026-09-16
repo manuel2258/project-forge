@@ -534,6 +534,30 @@ defmodule ForgeWorker.LinkTest do
            end)
   end
 
+  # The promotion is wired after the push and before the worktree goes, and the order is the
+  # whole of what makes it safe: promote before `commit_and_push` and the template holds the
+  # agent's own commits and its untracked files, which the next job would inherit into a tree
+  # that is deliberately not cleaned. See docs/design/worker-tier.md § The ticket volume.
+  test "a finished run leaves the ticket a clean template for its next job", context do
+    %{client: client, origin: origin, root: root} = context
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    job = assignment(origin)
+    job_id = job["job_id"]
+    push(client, @topic, "assign", job)
+
+    {%{"job_id" => ^job_id}, _events} = take_push("result")
+
+    template = Path.join([root, "volumes", "ticket", "1"])
+    assert File.dir?(template)
+    assert git!(template, ["status", "--porcelain"]) == ""
+    assert git!(template, ["show", "HEAD:CHANGED.md"]) =~ "by the agent"
+
+    # And the worktree it came from is still thrown away: the template is a copy, not a reprieve.
+    refute File.exists?(ForgeWorker.Job.Workspace.dir(job, root))
+  end
+
   test "a job that cannot be prepared is reported as failed, not forgotten", context do
     %{client: client} = context
     connect_and_assert_join(client, @topic, %{}, :ok)

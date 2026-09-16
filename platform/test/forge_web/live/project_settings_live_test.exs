@@ -81,6 +81,45 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
     assert html =~ "refs/heads/#{ticket.branch}"
   end
 
+  test "a default-branch token is offered, named after the branch, and scoped to it", %{
+    conn: conn,
+    project: project
+  } do
+    {:ok, view, html} = live(conn, ~p"/projects/#{project.name}/settings")
+
+    # Named after the branch rather than "the default branch", because which branch it is is the
+    # thing the operator is choosing — `docs/design/ui.md` § Project settings.
+    assert html =~ "write main, the default branch"
+
+    html = issue(view, %{"scope" => "default", "minutes" => "30"})
+
+    assert [token] = Tokens.list(project)
+    assert token.write
+    assert token.ref == "refs/heads/main"
+    assert is_nil(token.ticket_id)
+    assert is_nil(token.job_id)
+    assert html =~ "refs/heads/main"
+  end
+
+  # The page may mint three shapes and only three. A job's is the engine's, and the ref a job
+  # would be given is the one this page can never ask for.
+  test "the page mints nothing wider than the branch chosen", %{
+    conn: conn,
+    project: project,
+    user: user
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+
+    issue(view, %{"scope" => "default", "minutes" => "30"})
+    issue(view, %{"scope" => "write", "ticket" => to_string(ticket.number), "minutes" => "30"})
+    issue(view, %{"scope" => "read", "minutes" => "30"})
+
+    refs = project |> Tokens.list() |> Enum.map(& &1.ref) |> Enum.sort()
+    assert refs == [nil, "refs/heads/main", "refs/heads/" <> ticket.branch]
+    assert Enum.all?(Tokens.list(project), &is_nil(&1.job_id))
+  end
+
   test "a write token with no ticket chosen is refused, not issued", %{
     conn: conn,
     project: project

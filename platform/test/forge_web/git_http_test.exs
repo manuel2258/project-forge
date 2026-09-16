@@ -109,7 +109,7 @@ defmodule ForgeWeb.GitHttpTest do
       assert {:ok, ^before} = Git.resolve(bare, "refs/heads/ticket/2")
     end
 
-    test "the default branch is refused, however the credential is scoped", %{
+    test "the default branch is refused to a job's credential, however it is scoped", %{
       project: project,
       bare: bare,
       main: main
@@ -120,8 +120,56 @@ defmodule ForgeWeb.GitHttpTest do
 
       assert {out, code} = push(dir, project, token, "HEAD:refs/heads/main")
       assert code != 0
-      assert out =~ "main is written by the platform's merge only"
+      assert out =~ "main is written by the platform's merge, or by a credential minted for it"
       assert {:ok, ^main} = Git.resolve(bare, "refs/heads/main")
+    end
+
+    test "a credential minted for the default branch may write it", %{
+      project: project,
+      bare: bare
+    } do
+      {:ok, token, _row} = Tokens.issue(project, ref: Tokens.default_ref(project), write: true)
+      dir = clone!(project, token, "main")
+      sha = commit!(dir, ".forge/workflow.yml", "states: {}")
+
+      assert {_out, 0} = push(dir, project, token, "HEAD:refs/heads/main")
+      assert {:ok, ^sha} = Git.resolve(bare, "refs/heads/main")
+    end
+
+    # The clause the operator's token shares with the platform's own merge. A token that could
+    # rewrite the default branch would be able to orphan an approved changeset, which is the one
+    # thing `refs/forge/approved/<n>` exists to make impossible.
+    test "the default branch stays fast-forward, for a minted credential too", %{
+      project: project,
+      bare: bare
+    } do
+      {:ok, token, _row} = Tokens.issue(project, ref: Tokens.default_ref(project), write: true)
+      dir = clone!(project, token, "main")
+      commit!(dir, "work.txt", "first")
+      assert {_out, 0} = push(dir, project, token, "HEAD:refs/heads/main")
+      {:ok, pushed} = Git.resolve(bare, "refs/heads/main")
+
+      {:ok, _out} = Git.run(dir, ["reset", "--quiet", "--hard", "HEAD~1"])
+      commit!(dir, "work.txt", "rewritten")
+
+      assert {out, code} = force_push(dir, project, token, "HEAD:refs/heads/main")
+      assert code != 0
+      assert out =~ "main must be fast-forward"
+      assert {:ok, ^pushed} = Git.resolve(bare, "refs/heads/main")
+    end
+
+    # The scope check and the naming rule are separate clauses, and a default-branch credential
+    # passes neither for someone else's branch.
+    test "a default-branch credential reaches nothing else", %{project: project, bare: bare} do
+      {:ok, token, _row} = Tokens.issue(project, ref: Tokens.default_ref(project), write: true)
+      dir = clone!(project, token, "main")
+      commit!(dir, "work.txt", "done")
+      {:ok, before} = Git.resolve(bare, "refs/heads/ticket/1")
+
+      assert {out, code} = push(dir, project, token, "HEAD:refs/heads/ticket/1")
+      assert code != 0
+      assert out =~ "this credential may write refs/heads/main only"
+      assert {:ok, ^before} = Git.resolve(bare, "refs/heads/ticket/1")
     end
 
     test "a branch that is not a ticket's is refused", %{project: project} do
@@ -246,7 +294,7 @@ defmodule ForgeWeb.GitHttpTest do
 
       assert {out, code} = push(dir, project, token, "HEAD:refs/heads/main")
       assert code != 0
-      assert out =~ "main is written by the platform's merge only"
+      assert out =~ "main is written by the platform's merge, or by a credential minted for it"
       assert {:ok, ^main} = Git.resolve(bare, "refs/heads/main")
     end
   end

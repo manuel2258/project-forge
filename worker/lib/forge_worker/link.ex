@@ -326,6 +326,12 @@ defmodule ForgeWorker.Link do
       {:ok, head} = Workspace.commit_and_push(assignment, worktree, commit_message(assignment))
       terminal = {:ok, result |> upload_transcript(assignment) |> terminal(head)}
 
+      # What this run compiled is kept as the ticket's template, so its next job starts here
+      # rather than at the project's seed. After the push, never before: that is what leaves the
+      # tree holding nothing but the checkout and its ignored build output. See
+      # docs/design/worker-tier.md § The ticket volume.
+      Workspace.promote(assignment, root, worktree)
+
       # Only once everything that had to leave the machine has left it. A worktree is a
       # snapshot of the seed and the next attempt takes a fresh one; keeping this one would
       # keep every job this machine ever ran.
@@ -337,6 +343,10 @@ defmodule ForgeWorker.Link do
       # machine that never dies accumulates.
       swept = Dir.sweep(Path.join(root, "jobs"), job_retention_ms())
       if swept > 0, do: Logger.info("swept #{swept} job director(ies) past their retention")
+
+      # Ticket volumes go the same way and for the same reason. Nothing here is told that a
+      # ticket merged, so age is what there is.
+      Workspace.sweep(root, ticket_volume_retention_ms())
 
       terminal
     end
@@ -408,6 +418,12 @@ defmodule ForgeWorker.Link do
   # machine running for months does not keep every run it ever made. A week.
   defp job_retention_ms,
     do: Application.get_env(:forge_worker, :job_retention_ms, 7 * 24 * 60 * 60 * 1000)
+
+  # Shorter than a job directory's, because a ticket volume is a warm build directory rather than
+  # a few files: two days covers a ticket blocked on a question overnight and does not keep one
+  # per ticket this machine ever touched.
+  defp ticket_volume_retention_ms,
+    do: Application.get_env(:forge_worker, :ticket_volume_retention_ms, 2 * 24 * 60 * 60 * 1000)
 
   defp commit_message(assignment) do
     spec = assignment["spec"]

@@ -252,10 +252,19 @@ defmodule ForgeWorker.Job.Runner do
   # flight is allowed to finish, which signalling would cut short. BEAM cannot do that itself:
   # `:erlang` offers `port_close/1` and no half-close, so closing stdin would close stdout with
   # it and lose the last turn's output. The relay supplies the EOF instead — it forwards every
-  # line and exits on the sentinel, which the child sees as the pipe closing. `fflush` is what
-  # keeps it a relay rather than a buffer.
+  # line and exits on the sentinel, which the child sees as the pipe closing.
+  #
+  # **The relay is the shell's own `read` loop, and that is not a style choice.** It was
+  # `awk '{print; fflush()}'`, which is correct only where `awk` is gawk: `fflush` unbuffers
+  # awk's *output*, and mawk — Debian's and Ubuntu's default — buffers its *input*, holding the
+  # first message until 4 KiB arrive or the pipe closes. A conversation then answers nothing and
+  # the machine looks hung. `read` is required to consume no more than one line from a pipe, so
+  # a shell loop cannot have that bug on any POSIX shell; it also spares the slice a process.
   defp wrapper(secrets, :streaming) do
-    relay = "awk '/^" <> @close_sentinel <> "$/{exit} {print; fflush()}'"
+    relay =
+      ~s(while IFS= read -r line; do ) <>
+        ~s([ "$line" = "#{@close_sentinel}" ] && exit 0; ) <>
+        ~s(printf '%s\\n' "$line"; done)
 
     ~s(stderr="$2"; shift 2; ) <>
       relay <> ~s( | exec /usr/bin/env -i #{forwarded(secrets)} "$@" 2>"$stderr")

@@ -90,7 +90,8 @@ defmodule Forge.Release do
   Prints a clone URL carrying a short-lived git credential, once.
 
   Without a ticket number the token may only read. With one it may also write that ticket's
-  branch, and nothing else. See `docs/design/git-hosting.md`.
+  branch, and nothing else. With `:default` it may write the project's default branch — the shape
+  a repository is seeded with, fast-forward only. See `docs/design/git-hosting.md`.
   """
   def git_token(name, ticket_number \\ nil) do
     with_app(fn ->
@@ -106,6 +107,9 @@ defmodule Forge.Release do
       case ticket_number do
         nil ->
           []
+
+        :default ->
+          [ref: Forge.Git.Tokens.default_ref(project), write: true]
 
         number ->
           ticket = Forge.Tickets.get_by_number!(project, number)

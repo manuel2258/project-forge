@@ -28,6 +28,9 @@ defmodule Forge.Git.Tokens do
   Issues a token for `project`. Returns the secret, which is never recoverable afterwards.
 
   Options: `:ticket_id`, `:job_id`, `:ref` (required when writing), `:write`, `:ttl_minutes`.
+
+  What a `:ref` may name is `Forge.Git.Token`'s to say, and it is said against this project's
+  default branch: the operator's default-branch token is mintable here and a job's is not.
   """
   @spec issue(Project.t(), keyword()) :: {:ok, String.t(), Token.t()} | {:error, term()}
   def issue(%Project{} = project, opts \\ []) do
@@ -44,10 +47,21 @@ defmodule Forge.Git.Tokens do
       expires_at: DateTime.add(DateTime.utc_now(:second), ttl * 60, :second)
     }
 
-    with {:ok, token} <- Repo.insert(Token.create_changeset(%Token{}, attrs)) do
+    with {:ok, token} <-
+           Repo.insert(Token.create_changeset(%Token{}, attrs, project.default_branch)) do
       {:ok, Base.url_encode64(secret, padding: false), token}
     end
   end
+
+  @doc """
+  The ref an operator's default-branch token is minted for: the one shape that may write what
+  every job builds on, and the reason there is no SSH route into a repository.
+
+  Fast-forward only, because `priv/git-hooks/pre-receive` says so of every writer of that branch,
+  the platform's own merge included. No job is issued it — `Forge.Git.Token` refuses.
+  """
+  @spec default_ref(Project.t()) :: String.t()
+  def default_ref(%Project{default_branch: branch}), do: "refs/heads/" <> branch
 
   @doc """
   Issues the write token a job works with: scoped to the project, the ticket and its branch.

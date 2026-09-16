@@ -252,6 +252,181 @@ defmodule ForgeWorker.Job.WorkspaceTest do
     end
   end
 
+  describe "ticket volumes" do
+    # What the agent leaves behind: a commit, and a build directory git was told to ignore.
+    defp run!(job, root, message) do
+      {:ok, dir} = Workspace.prepare(job, root)
+      File.write!(Path.join(dir, ".gitignore"), "build/\n")
+      File.mkdir_p!(Path.join(dir, "build"))
+      File.write!(Path.join(dir, "build/warm.o"), message)
+      File.write!(Path.join(dir, "NOTES.md"), message)
+      {:ok, _head} = Workspace.commit_and_push(job, dir, message)
+      :ok = Workspace.promote(job, root, dir)
+      :ok = Workspace.discard(job, root)
+      dir
+    end
+
+    test "a ticket's next job starts where its last one left off", context do
+      %{origin: origin, root: root} = context
+      run!(assignment(origin, job_id: uuid()), root, "first")
+
+      assert {:ok, second} = Workspace.prepare(assignment(origin, job_id: uuid()), root)
+
+      # The ignored build output the seed mechanism exists to carry, now carried between two
+      # jobs of one ticket rather than only out of the project's seed.
+      assert File.read!(Path.join(second, "build/warm.o")) == "first"
+
+      # And it is this branch at the head the platform has, exactly as a cold start would be.
+      assert git!(second, ["rev-parse", "--abbrev-ref", "HEAD"]) |> String.trim() == "ticket/1"
+      assert File.read!(Path.join(second, "NOTES.md")) == "first"
+    end
+
+    test "each job's own work reaches the next one through the template", context do
+      %{origin: origin, root: root} = context
+      run!(assignment(origin, job_id: uuid()), root, "first")
+      run!(assignment(origin, job_id: uuid()), root, "second")
+
+      assert {:ok, third} = Workspace.prepare(assignment(origin, job_id: uuid()), root)
+      assert File.read!(Path.join(third, "build/warm.o")) == "second"
+    end
+
+    # The promotion happens after the push, and this is what that buys: `add -A` has already
+    # staged everything untracked that is not ignored, so the template holds no file a later run
+    # could inherit and mistake for its own work. Promote before the push and this is dirty.
+    test "the template carries nothing but the checkout and its ignored output", context do
+      %{origin: origin, root: root} = context
+      job = assignment(origin, job_id: uuid())
+      run!(job, root, "first")
+
+      template = Workspace.template(job, root)
+      assert git!(template, ["status", "--porcelain"]) == ""
+      assert File.read!(Path.join(template, "build/warm.o")) == "first"
+    end
+
+    test "a promotion that fails leaves the ticket the template it had", context do
+      %{origin: origin, root: root} = context
+      job = assignment(origin, job_id: uuid())
+      run!(job, root, "first")
+      template = Workspace.template(job, root)
+
+      assert :ok = Workspace.promote(job, root, Path.join(root, "no-such-worktree"))
+
+      assert File.read!(Path.join(template, "build/warm.o")) == "first"
+      assert Path.wildcard(template <> ".promoting.*") == []
+    end
+
+    test "a conversation gets none: it keeps one worktree for its whole life", context do
+      %{origin: origin, root: root} = context
+      branch = "chat/" <> uuid()
+      git!(nil, ["-C", origin, "branch", branch, "main"])
+      chat = put_in(assignment(origin), ["git", "branch"], branch)
+
+      assert Workspace.template(chat, root) == nil
+      {:ok, dir} = Workspace.prepare(chat, root)
+      assert :ok = Workspace.promote(chat, root, dir)
+      assert Path.wildcard(Path.join([root, "volumes", "*", "*"])) == []
+    end
+
+    # The branch becomes a path. The platform builds it and `pre-receive` enforces its shape, so
+    # this is belt and braces — and it is the belt that would be missing if either ever slipped.
+    test "a branch that is not a ticket's is never turned into a path", context do
+      %{origin: origin, root: root} = context
+
+      for branch <- ["ticket/../../etc", "ticket/1/../2", "tickets/1", "ticket/", "ticket/1x"] do
+        job = put_in(assignment(origin), ["git", "branch"], branch)
+        assert Workspace.template(job, root) == nil, "#{branch} was made into a path"
+      end
+
+      assert Workspace.template(put_in(assignment(origin), ["git", "branch"], nil), root) == nil
+    end
+
+    test "a ticket volume nothing has used lately is swept, and a fresh one is kept", context do
+      %{origin: origin, root: root} = context
+      stale = assignment(origin, job_id: uuid())
+      run!(stale, root, "first")
+      stale_path = Workspace.template(stale, root)
+
+      fresh = put_in(assignment(origin, job_id: uuid()), ["git", "branch"], "ticket/2")
+      git!(nil, ["-C", origin, "branch", "ticket/2", "main"])
+      run!(fresh, root, "second")
+      fresh_path = Workspace.template(fresh, root)
+
+      # Three days ago, against a two-day retention.
+      File.touch!(stale_path, System.os_time(:second) - 3 * 24 * 60 * 60)
+
+      assert Workspace.sweep(root, 2 * 24 * 60 * 60 * 1000) == 1
+
+      refute File.exists?(stale_path)
+      assert File.dir?(fresh_path)
+    end
+
+    # The seed note says a seed was cloned from wherever it was built, which is not necessarily
+    # where this job fetches from, so the remote is set rather than trusted. A volume with no
+    # remote at all is the same case with nothing to set.
+    test "a template with no origin still becomes this job's checkout", context do
+      %{origin: origin, root: root} = context
+      job = assignment(origin, job_id: uuid())
+      run!(job, root, "first")
+
+      git!(Workspace.template(job, root), ["remote", "remove", "origin"])
+
+      assert {:ok, second} = Workspace.prepare(assignment(origin, job_id: uuid()), root)
+      assert File.read!(Path.join(second, "build/warm.o")) == "first"
+      assert git!(second, ["remote", "get-url", "origin"]) |> String.trim() == origin
+    end
+
+    # A warm start is what makes a job fast, not what makes it correct. A volume that cannot
+    # become this branch is thrown away and the job takes the colder path rather than failing,
+    # which is the same rule the seed has.
+    test "a template that cannot become the branch is dropped, not fatal", context do
+      %{origin: origin, root: root} = context
+      job = assignment(origin, job_id: uuid())
+      template = Workspace.template(job, root)
+
+      # Not a repository, and not empty either: `git clone` into it fails as well, so the only
+      # way out is to remove it and start over.
+      File.mkdir_p!(template)
+      File.write!(Path.join(template, "junk.txt"), "not a checkout\n")
+
+      assert {:ok, dir} = Workspace.prepare(job, root)
+      assert File.read!(Path.join(dir, "README.md")) == "# Game\n"
+      refute File.exists?(Path.join(dir, "junk.txt"))
+    end
+
+    # A volume's age has to mean "when this ticket last ran", and the tree's own mtime does not:
+    # a snapshot carries the mtime of what it came from, and a worktree's root only changes when
+    # an entry is added or removed at its top level — not when a job edits a file two directories
+    # down. Without the touch this volume is swept minutes after the job that filled it.
+    test "a ticket that ran just now survives, however old its files are", context do
+      %{origin: origin, root: root} = context
+      job = assignment(origin, job_id: uuid())
+
+      {:ok, dir} = Workspace.prepare(job, root)
+      File.write!(Path.join(dir, "NOTES.md"), "first")
+      {:ok, _head} = Workspace.commit_and_push(job, dir, "first")
+      File.touch!(dir, System.os_time(:second) - 3 * 24 * 60 * 60)
+      :ok = Workspace.promote(job, root, dir)
+
+      assert Workspace.sweep(root, 2 * 24 * 60 * 60 * 1000) == 0
+      assert File.dir?(Workspace.template(job, root))
+    end
+
+    # A promotion stages into a sibling of the volume it is replacing. Sweeping one would delete
+    # a finishing job's copy out from under it, which is the seed's `.fetching.` rule again.
+    test "a promotion in flight is never swept", context do
+      %{origin: origin, root: root} = context
+      job = assignment(origin, job_id: uuid())
+      run!(job, root, "first")
+
+      in_flight = Workspace.template(job, root) <> ".promoting.abcdef"
+      File.mkdir_p!(in_flight)
+      File.touch!(in_flight, System.os_time(:second) - 3 * 24 * 60 * 60)
+
+      assert Workspace.sweep(root, 2 * 24 * 60 * 60 * 1000) == 0
+      assert File.dir?(in_flight)
+    end
+  end
+
   test "the credential never lands in the repository", %{origin: origin, root: root} do
     job = put_in(assignment(origin), ["git", "token"], "secret-token")
     {:ok, dir} = Workspace.prepare(job, root)

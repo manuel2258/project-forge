@@ -16,10 +16,43 @@ defmodule ForgeWorker.Job.RunnerTest.RecordingSlice do
   def cleanup(_context), do: :ok
 end
 
+defmodule ForgeWorker.Job.RunnerTest.WrapReportingSlice do
+  @moduledoc "Reports the command it was asked to confine, and runs it unchanged."
+
+  @behaviour ForgeWorker.Slice
+
+  @impl ForgeWorker.Slice
+  def prepare(opts), do: {:ok, opts}
+
+  @impl ForgeWorker.Slice
+  def wrap(executable, args, context) do
+    send(context.reply_to, {:wrapped, executable, args})
+    {executable, args}
+  end
+
+  @impl ForgeWorker.Slice
+  def cleanup(_context), do: :ok
+end
+
+defmodule ForgeWorker.Job.RunnerTest.RefusingSlice do
+  @moduledoc "A slice that cannot be made: no such user, no cgroup, a systemd that said no."
+
+  @behaviour ForgeWorker.Slice
+
+  @impl ForgeWorker.Slice
+  def prepare(_opts), do: {:error, :no_such_user}
+
+  @impl ForgeWorker.Slice
+  def wrap(executable, args, _context), do: {executable, args}
+
+  @impl ForgeWorker.Slice
+  def cleanup(_context), do: :ok
+end
+
 defmodule ForgeWorker.Job.RunnerTest do
   use ExUnit.Case, async: true
 
-  alias ForgeWorker.Job.RunnerTest.RecordingSlice
+  alias ForgeWorker.Job.RunnerTest.{RecordingSlice, RefusingSlice, WrapReportingSlice}
 
   import ForgeWorker.Fixtures
 
@@ -279,6 +312,45 @@ defmodule ForgeWorker.Job.RunnerTest do
 
     assert result.killed == :operator
     assert result.outcome == :cancelled
+  end
+
+  # `docs/decisions.md`: the environment is entered through `nix develop` on the project's own
+  # flake, and the spec names which one. Nothing asserted the command that produces, so a
+  # machine with `nix_env` on could have been running the harness outside the environment its
+  # build needs and the job would only have failed later, in the build.
+  test "with nix_env the harness runs inside the project's environment", context do
+    run(context, "success",
+      nix_env: true,
+      slice: WrapReportingSlice,
+      slice_opts: %{reply_to: self()}
+    )
+
+    assert_receive {:wrapped, "nix", ["develop", ".#implement", "--command" | rest]}
+    assert [executable | _flags] = rest
+    assert executable == fake_executable()
+  end
+
+  test "without it the harness is run as it is", context do
+    run(context, "success", slice: WrapReportingSlice, slice_opts: %{reply_to: self()})
+
+    assert_receive {:wrapped, executable, _args}
+    assert executable == fake_executable()
+  end
+
+  # A slice that cannot be made is a job that cannot run. The alternative — starting the
+  # harness anyway — is an agent running unconfined as the worker's own user, which is the one
+  # thing the slice exists to prevent, so this concludes with nothing started.
+  test "a slice that cannot be made ends the job rather than running unconfined", context do
+    pid = run(context, "success", slice: RefusingSlice)
+
+    assert {:ok, result} = Runner.await(pid)
+    assert result.outcome == :error
+
+    # Nothing ran: no harness event, no exit status, and the document the state declared is
+    # missing rather than invalid.
+    assert events() == []
+    assert result.exit_status == nil
+    assert result.missing == ["plan.md"]
   end
 
   test "the runner exits after the job ends", context do

@@ -163,7 +163,7 @@ so the repository's own hooks run.
 
 This is a second route into the default branch, which the `pre-receive` hook exists to keep
 singular, so it is worth being exact: both routes are the platform's own merge, both are guarded
-by the same hook with `FORGE_INTERNAL`, and neither lets a client write the default branch. What
+by the same hook with `FORGE_INTERNAL`, and neither lets a job write the default branch. What
 differs is what authorises it — a ticket's approved changeset version, or an operator pressing
 merge on a diff they are looking at. It is one implementation with two callers, not two: the
 ticket's functions and the chat's both build the same plan — repository, destination, source, the

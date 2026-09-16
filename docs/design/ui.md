@@ -283,12 +283,16 @@ the operator has never seen. Instead:
 
 - Creating a project ends on what to do next, not on a redirect: **a conversation that writes the
   workflow**, offered as the primary action, with the clone URL beneath it for working by hand.
-- **It used to say to clone the repository and push a `.forge/workflow.yml`, and that was not
-  possible.** `pre-receive` accepts a write to the default branch from the platform's own merge
-  and nothing else, and a credential is scoped to one branch which is never that one. There was
-  no push that would have been accepted. Work reaches the default branch one way — a branch, read
-  and merged — and bootstrapping is not an exception to it, which is why a conversation is the
-  answer rather than a special case in the hook.
+- **It used to say to clone the repository and push a `.forge/workflow.yml`, and at the time that
+  was not possible.** `pre-receive` accepted a write to the default branch from the platform's own
+  merge and nothing else, and every credential was scoped to one branch which was never that one.
+  There was no push that would have been accepted. Work still reaches the default branch that
+  way — a branch, read and merged — and bootstrapping a *workflow* is not an exception to it,
+  which is why a conversation is the primary action here rather than a special case in the hook.
+- **Importing a repository that already exists is the exception**, because there is no branch to
+  merge and no conversation that can produce one. That is what the default-branch token above is
+  for, and the create view says so beneath the clone URL rather than sending the operator to a
+  terminal to find out. See `git-hosting.md` § The default-branch token, and what it costs.
 - The ticket form resolves the chosen project's workflow *before* the operator types anything,
   and says plainly when there is none. A form that accepts a title and a body and then rejects
   them for a reason in a third place is the failure being avoided.
@@ -335,6 +339,10 @@ way to get the credential for either.
 worker token and the operator's API tokens, so the row afterwards can say what a token may do
 and when it was last used but never what it is. The one-time display is the same shape as the
 create view's clone URL: the moment it is useful is the moment it is on screen.
+
+The form offers three scopes and no more: read the whole project, write one ticket's branch, or
+write the default branch — the last named after the branch itself, because it is the one that
+reaches what every job builds on, and a scope worth choosing on purpose.
 
 What a row shows is its *capability*, not its identity: the ref it may write, or that it may only
 read; when it expires; when it was last used; and whether a job holds it. A token minted for a

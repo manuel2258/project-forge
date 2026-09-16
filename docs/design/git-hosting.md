@@ -98,8 +98,10 @@ its lifetime is a job rather than "until revoked" — so it is its own table, `g
 the mechanics are borrowed from `Forge.Accounts.UserToken`: 32 random bytes, handed out once as
 url-safe base64, stored as a sha256 hash, looked up by hash so no secret is ever string-compared.
 
-- **Scope.** A project, a capability (`read` or `write`), and for a write token exactly one ref,
-  `refs/heads/ticket/<n>`.
+- **Scope.** A project, a capability (`read` or `write`), and for a write token exactly one ref:
+  `refs/heads/ticket/<n>` for a ticket's job, `refs/heads/chat/<uuid>` for a conversation, or the
+  project's own default branch for the token an operator mints by hand (§ Issuing a token). A job
+  is never issued the third.
 - **Lifetime.** Absolute `expires_at`, the job's wall clock plus a margin. Absolute rather than
   computed from `inserted_at`, because a waiting job may legitimately need a longer one.
 - **Issuance.** `Forge.Jobs.assign/2`, immediately before the job is handed to a worker — the
@@ -140,9 +142,11 @@ of truth that the hook, which is the enforcement point, cannot read.
 
 - A ref is never deleted.
 - Only branches are written.
-- The default branch is written only when `FORGE_INTERNAL=1`, and only fast-forward. So the
-  default branch is fast-forward-only by construction, and no credential that reaches the network
-  can move it.
+- The default branch is written only with authority over it, and only fast-forward. Authority is
+  either `FORGE_INTERNAL=1`, which the platform's own merge sets and the CGI strips from every
+  request it serves, or a credential whose `FORGE_ALLOWED_REF` *is* the default branch — the shape
+  § Issuing a token describes and only an operator can mint. So the default branch is
+  fast-forward-only by construction, and no credential a job holds can move it.
 - Any other branch must be exactly the credential's `FORGE_ALLOWED_REF`, and must be
   `refs/heads/ticket/<number>`. One branch per ticket, enforced rather than assumed.
 - A push with no `FORGE_ALLOWED_REF` and no `FORGE_INTERNAL` writes nothing.
@@ -255,8 +259,13 @@ in this one module, which is what keeps the credential's handling in one place.
 
 ## Not built, and named so the absence is a decision
 
-- **SSH.** The operator reaches a repository over SSH to the host, as `deploy.md` describes. Jobs
-  use HTTP. An SSH front end with the same token model is not in the PoC.
+- **SSH.** Cut, not pending. `deploy.md` described the operator pushing over SSH to the host, and
+  that could never have worked: `nix/module.nix` gives `forge` no shell and no authorised keys, and
+  even with both, `pre-receive` refuses a push carrying no authority over the default branch. sshd
+  does not forward the environment, and accepting a client-supplied `FORGE_INTERNAL` would hand the
+  network the one thing the hook exists to withhold. The default-branch token above replaces it, so
+  every route into a repository is now the platform's own endpoint with a token it minted. An SSH
+  front end with the same token model is still not in the PoC.
 - **Sideband progress on a clone** — see the CGI limit above.
 - **Mirroring more than a push hook** is on the PoC's cut list; there is no reconciliation, no
   retry queue and no mirror health surface.
@@ -267,10 +276,41 @@ in this one module, which is what keeps the credential's handling in one place.
 clone this, push a workflow — unfollowable without a terminal. `/projects/:name/settings` issues
 them too, over `Forge.Git.Tokens.issue/2`, which is the same call the task makes.
 
-The UI may issue exactly two shapes, because they are the two an operator has a use for: a
-**read** token for the whole project, and a **write** token scoped to one ticket's branch. It
-cannot mint a job-scoped token — those belong to a job, are issued by the engine as part of an
-assignment, and are revoked when it ends.
+The UI may issue exactly three shapes, because they are the three an operator has a use for: a
+**read** token for the whole project, a **write** token scoped to one ticket's branch, and a
+**write** token scoped to the project's default branch. It cannot mint a job-scoped token — those
+belong to a job, are issued by the engine as part of an assignment, and are revoked when it ends.
 
 Revocation from the UI is refused for a token a job holds, for the same reason: revoking it
 mid-run fails that job, and nothing would record why.
+
+### The default-branch token, and what it costs
+
+The third shape exists for one case that has no other route: **importing a repository that already
+exists**. A registered project holds a single empty commit (`Forge.Git.ensure_initial_commit/2`),
+and putting a project's history into it is not a ticket, not a conversation and not a merge — there
+is no branch to review, and the thing being imported is the base every branch would be cut from.
+`deploy.md` used to answer this with SSH to the host, and § Not built says why that was never an
+answer.
+
+Changing a `.forge/workflow.yml` afterwards is *not* that case: `ForgeWeb.ProjectNewLive` already
+routes it through a conversation on its own branch, merged like everything else, and that stays the
+way to do it. The token makes it possible to do by hand; it does not become the recommended path,
+and no page offers it as one.
+
+It is a real weakening and worth stating as one. The property used to be *no credential that
+reaches the network can move the default branch*. It is now *no credential a job holds can move
+it, and one minted for it can, fast-forward only*. What keeps the change bounded:
+
+- **It is a separate mint, never a widening of an existing one.** `Tokens.issue_for_job/3` mints
+  a ticket's branch or a conversation's and nothing else, so no job credential can acquire this
+  scope, and a leaked one still cannot reach the default branch.
+- **Fast-forward only, in the hook.** The clause is shared with the platform's own merge, so a
+  token cannot rewrite history the merge could not.
+- **The same TTL and the same audit as every other token.** It expires, it is revocable from the
+  page that minted it, and the row records what it could do and when it was last used.
+- **Minting it is a deliberate choice of a third option**, in a dropdown that names the branch.
+
+What it does not defend against is an operator's own token, taken while live, fast-forwarding the
+default branch — which is the same authority the operator has by pressing merge, bounded by the
+token's lifetime rather than the session's.

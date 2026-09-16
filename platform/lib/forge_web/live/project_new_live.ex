@@ -6,11 +6,13 @@ defmodule ForgeWeb.ProjectNewLive do
   exists. Redirecting to the board here would leave that to be discovered later as a parse error
   naming a file nobody has seen. So the view has a second state: what to do about it.
 
-  **It used to say "clone it and push a workflow", which the product refuses to do.**
-  `pre-receive` accepts a write to the default branch from the platform's own merge and from
-  nothing else, and a credential is scoped to exactly one branch that is never that one. There
-  was no push an operator could have made. The way in is a conversation: it writes the workflow
-  on its own branch and a person merges it, which is the same route every other change takes.
+  **It used to say "clone it and push a workflow", which at the time the product refused to do.**
+  `pre-receive` accepts a write to the default branch from the platform's own merge and from a
+  credential minted for exactly that branch, and from nothing else — a job's names its own branch.
+  The way in for a new project is still a conversation: it writes the workflow on its own branch
+  and a person merges it, which is the same route every other change takes. An existing repository
+  is the case no branch and no conversation can serve, and the default-branch token in settings is
+  what serves it.
 
   See `docs/design/ui.md` § Creating things.
   """
@@ -82,11 +84,11 @@ defmodule ForgeWeb.ProjectNewLive do
           in the repository, with the prompts it names under <code class="font-mono text-[12.5px]">.forge/</code>.
         </p>
 
-        <%!-- The way in, and the only one that reaches the default branch: a conversation writes
-              the workflow on its own branch and you merge it. Nothing may push to
-              {@created.default_branch} — `pre-receive` accepts the platform's own merge and
-              nothing else — so "clone it and push a workflow", which this page used to say, was
-              an instruction the product refuses to carry out. --%>
+        <%!-- The way in for an empty project: a conversation writes the workflow on its own
+              branch and you merge it. "Clone it and push a workflow", which this page used to
+              say, was an instruction nothing could carry out — a credential named one branch and
+              it was never {@created.default_branch}. Importing a repository that already exists
+              is the one case that needs the branch itself, and settings mints the credential. --%>
         <div class="mt-6">
           <.link
             navigate={~p"/chats/new?project=#{@created.name}"}
@@ -111,8 +113,8 @@ defmodule ForgeWeb.ProjectNewLive do
           >
             issue one in settings ›
           </.link>
-          . A credential writes one branch, never {@created.default_branch}, so work arrives the
-          same way: a branch, reviewed and merged.
+          . A credential writes one branch. For work, that is a branch you merge; for importing a
+          repository that already exists, settings mints one scoped to {@created.default_branch} itself, fast-forward only.
         </p>
 
         <div class="mt-8 flex flex-col gap-2">
@@ -133,7 +135,8 @@ defmodule ForgeWeb.ProjectNewLive do
         <h1 class="mt-4 text-2xl font-semibold -tracking-[.025em]">New project</h1>
         <p class="mt-2 text-sm/[1.55] opacity-70">
           The platform hosts the repository. It is created empty, and work reaches its default
-          branch one way: a branch, reviewed and merged.
+          branch by being merged there — or, for a repository that already exists, by an import
+          pushed with a credential minted for that branch.
         </p>
 
         <.form

@@ -5,10 +5,11 @@ defmodule ForgeWorker.Job.Workspace do
   store survives, so the work is committed and pushed before anything is reported and the tree
   is then thrown away.
 
-  A worktree is a snapshot of the project's seed where there is one, and a clone where there is
-  not (`docs/design/worker-tier.md` § Volumes and the seed). Both end in the same place — the
-  ticket branch at the head the platform has — and the difference is whether the build directory
-  beside it is already warm.
+  A worktree is a snapshot of the ticket's own volume where this machine has one, of the project's
+  seed where it does not, and a clone where there is neither (`docs/design/worker-tier.md`
+  § Volumes and the seed, § The ticket volume). All three end in the same place — the ticket
+  branch at the head the platform has — and the difference is only how warm the build directory
+  beside it is.
 
   **The git is `ForgeWorker.Checkout`'s, all of it.** This module owns the volume, the seed and
   the order things happen in; every `git` invocation on this machine is in that one module, which
@@ -22,6 +23,12 @@ defmodule ForgeWorker.Job.Workspace do
   require Logger
 
   @type assignment :: map()
+
+  # The branch becomes a path, so it is matched rather than trusted: the platform built it and the
+  # repository's `pre-receive` enforces the same shape, but a guard that takes the platform's word
+  # for it is not a guard. Conversations are deliberately absent — `chat/<uuid>` keeps one
+  # worktree for the whole of its life, so it already holds its own warmth.
+  @ticket_branch ~r{^ticket/\d+$}
 
   @doc """
   Prepares the worktree for an assignment and returns its path.
@@ -40,8 +47,59 @@ defmodule ForgeWorker.Job.Workspace do
     if File.dir?(dir) do
       with :ok <- Checkout.ensure(checkout_opts(assignment, dir, [])), do: {:ok, dir}
     else
-      from_seed(assignment, root, dir) || clone(assignment, dir)
+      from_template(assignment, root, dir) || from_seed(assignment, root, dir) ||
+        clone(assignment, dir)
     end
+  end
+
+  @doc """
+  Keeps the finished worktree as this ticket's template, so the ticket's next job starts where
+  this one left off rather than where the project's seed was published.
+
+  **Only after the run committed and pushed**, which is what makes the template safe to snapshot
+  from without cleaning: `Checkout.squash/3` stages everything with `add -A`, so what is left
+  beside the checkout is the ignored build output and nothing a later run could mistake for its
+  own work. A run that ended before that keeps the template the ticket already had.
+
+  Best effort throughout. This is a cache: a promotion that fails costs the next job a colder
+  start and nothing else, so it warns and returns `:ok`.
+  """
+  @spec promote(assignment(), String.t(), String.t()) :: :ok
+  def promote(assignment, root, dir) do
+    case template(assignment, root) do
+      nil -> :ok
+      path -> replace(path, dir)
+    end
+  end
+
+  @doc """
+  Removes ticket volumes older than `older_than_ms`, returning how many went.
+
+  Nothing tells this machine that a ticket was merged or abandoned — the platform sends `assign`,
+  `cancel` and `drain` — so age is what there is. Called where the job directories are swept, for
+  the same reason: the end of a job is already a moment spent on the filesystem.
+  """
+  @spec sweep(String.t(), non_neg_integer()) :: non_neg_integer()
+  def sweep(root, older_than_ms) do
+    cutoff = System.os_time(:second) - div(older_than_ms, 1000)
+
+    [root, "volumes", "ticket", "*"]
+    |> Path.join()
+    |> Path.wildcard()
+    |> Enum.count(&remove_if_stale(&1, cutoff))
+  end
+
+  @doc """
+  Where this ticket's warm template lives on this machine, or `nil` for a branch that does not get
+  one.
+  """
+  @spec template(assignment(), String.t()) :: String.t() | nil
+  def template(assignment, root) do
+    branch = get_in(assignment, ["git", "branch"])
+
+    if is_binary(branch) and Regex.match?(@ticket_branch, branch),
+      do: Path.join([root, "volumes", branch]),
+      else: nil
   end
 
   @doc """
@@ -81,26 +139,79 @@ defmodule ForgeWorker.Job.Workspace do
   @spec dir(assignment(), String.t()) :: String.t()
   def dir(assignment, root), do: Path.join([root, "worktrees", assignment["job_id"]])
 
-  # A snapshot of the project's seed, pointed at this job's branch and deliberately not cleaned:
-  # see `Checkout.ensure/1`'s `clean:` for what cleaning a fresh snapshot would take with it.
+  defp from_template(assignment, root, dir) do
+    path = template(assignment, root)
+
+    if is_binary(path) and File.dir?(path),
+      do: from_volume(assignment, path, dir, "ticket volume")
+  end
+
   defp from_seed(assignment, root, dir) do
+    case Seed.ensure(assignment, root) do
+      seed when is_binary(seed) -> from_volume(assignment, seed, dir, "seed")
+      nil -> nil
+    end
+  end
+
+  # A snapshot of `source` — the ticket's template or the project's seed — pointed at this job's
+  # branch and deliberately not cleaned: see `Checkout.ensure/1`'s `clean:` for what cleaning a
+  # fresh snapshot would take with it.
+  defp from_volume(assignment, source, dir, what) do
     git = assignment["git"]
 
-    with seed when is_binary(seed) <- Seed.ensure(assignment, root),
-         :ok <- Volume.impl().snapshot(seed, dir),
+    with :ok <- Volume.impl().snapshot(source, dir),
          :ok <- Checkout.remote(dir, git["url"]),
          :ok <- Checkout.ensure(checkout_opts(assignment, dir, clean: false)) do
       {:ok, dir}
     else
-      nil ->
-        nil
-
       {:error, reason} ->
-        # The seed is what makes a job fast, not what makes it correct: a snapshot that will
-        # not become this branch is thrown away and the job clones.
-        Logger.warning("could not use the seed for #{dir} (#{inspect(reason)}); cloning")
+        # A warm start is what makes a job fast, not what makes it correct: a snapshot that will
+        # not become this branch is thrown away and the caller falls back to a colder start.
+        Logger.warning("could not use the #{what} for #{dir} (#{inspect(reason)})")
         Volume.impl().delete(dir)
         nil
+    end
+  end
+
+  # Into a sibling first, so a promotion that fails leaves the template the ticket already had
+  # rather than none at all. The touch is what `sweep/2` reads: a snapshot carries the mtime of
+  # the tree it came from, which says when the worktree's root last changed rather than when this
+  # ticket last ran.
+  defp replace(path, dir) do
+    volume = Volume.impl()
+    staging = path <> ".promoting." <> Base.url_encode64(:crypto.strong_rand_bytes(6))
+
+    with :ok <- volume.snapshot(dir, staging),
+         :ok <- volume.delete(path),
+         :ok <- File.rename(staging, path) do
+      File.touch!(path)
+      :ok
+    else
+      {:error, reason} ->
+        Logger.warning("could not keep #{dir} as #{path} (#{inspect(reason)})")
+        volume.delete(staging)
+        :ok
+    end
+  end
+
+  # A promotion in flight is a sibling of the volume it is replacing, and sweeping one would
+  # delete a finishing job's copy out from under it.
+  defp remove_if_stale(path, cutoff) do
+    with false <- String.contains?(Path.basename(path), ".promoting."),
+         true <- File.dir?(path),
+         {:ok, %File.Stat{mtime: mtime}} <- File.stat(path, time: :posix),
+         true <- mtime < cutoff do
+      case Volume.impl().delete(path) do
+        :ok ->
+          Logger.info("swept ticket volume #{Path.basename(path)}")
+          true
+
+        {:error, reason} ->
+          Logger.warning("could not sweep #{path}: #{inspect(reason)}")
+          false
+      end
+    else
+      _other -> false
     end
   end
 

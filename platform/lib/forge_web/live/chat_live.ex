@@ -108,6 +108,8 @@ defmodule ForgeWeb.ChatLive do
   # The second route into the default branch. Both routes are the platform's own merge and both
   # are guarded by the same `pre-receive` with FORGE_INTERNAL; what differs is what authorised
   # it — an approved changeset version, or an operator pressing merge on a diff they can see.
+  # An operator's own default-branch token is a third route and not one of these two: it is a
+  # push, guarded by the same hook's fast-forward rule (`docs/design/git-hosting.md`).
   def handle_event("merge", _params, socket) do
     case Merge.perform_chat(socket.assigns.chat, socket.assigns.current_scope.user) do
       {:ok, _result} ->

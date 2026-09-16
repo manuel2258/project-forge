@@ -1,9 +1,10 @@
 defmodule Forge.Storage do
   @moduledoc """
   Bytes the database does not hold: artifact blobs and worker seeds. One behaviour, one
-  implementation in the PoC (a directory on this host, `Forge.Storage.Local`); the
-  S3-compatible one arrives in the closing step behind the same callbacks. See
-  `docs/design/storage.md`.
+  implementation (a directory on this host, `Forge.Storage.Local`). A second, S3-compatible one
+  would go behind the same callbacks; it is not scheduled, and `docs/design/storage.md`
+  § What would move this to S3 says what would change that. The behaviour is what keeps the
+  option cheap rather than what promises to use it.
 
   Both a byte form and a path form exist deliberately: a transcript is small and wants
   `get/1`, a seed is hundreds of megabytes and must never pass through a binary. There is

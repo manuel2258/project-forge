@@ -123,8 +123,9 @@ if config_env() != :test do
            harness_opts: harness_opts
          )
 
-  # The store lives beside the rest of the platform's data unless it is told otherwise; the
-  # S3 implementation in the closing step replaces the implementation, not the path.
+  # The store lives beside the rest of the platform's data unless it is told otherwise. A
+  # second implementation would replace the implementation, not this path — see
+  # docs/design/storage.md § What would move this to S3, which is also why there isn't one.
   config :forge, Forge.Storage,
     dir: System.get_env("FORGE_STORE_DIR") || Path.join(data_dir, "store")
 
@@ -218,15 +219,16 @@ if config_env() == :prod do
 
   config :forge, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
+  # **No `:http` key here, deliberately.** The binding is `config/prod.exs`'s — loopback — and
+  # `FORGE_HTTP_IP` above is the one thing that widens it. The generated line set
+  # `ip: {0, 0, 0, 0, 0, 0, 0, 0}` at this point, and because runtime.exs is read after prod.exs
+  # and `Config` deep-merges keyword lists, it silently won: every release bound every interface,
+  # the loopback binding prod.exs calls load-bearing was dead, and so was FORGE_HTTP_IP. That
+  # matters because `force_ssl` decides it is on TLS by believing `x-forwarded-proto`, so an
+  # address the proxy does not own is an address that can assert it. See docs/deploy.md
+  # § Behind a proxy, and `Forge.RuntimeConfigTest`.
   config :forge, ForgeWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
-    http: [
-      # Enable IPv6 and bind on all interfaces.
-      # Set it to  {0, 0, 0, 0, 0, 0, 0, 1} for local network only access.
-      # See the documentation on https://bandit.hexdocs.pm/Bandit.html#t:options/0
-      # for details about using IPv6 vs IPv4 and loopback vs public addresses.
-      ip: {0, 0, 0, 0, 0, 0, 0, 0}
-    ],
     secret_key_base: secret_key_base
 
   # ## SSL Support

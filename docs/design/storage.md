@@ -2,9 +2,9 @@
 
 Scope: the behaviour that holds bytes the database does not — artifact blobs and worker seeds —
 and its one PoC implementation, a directory on the platform host served over HTTP by the
-platform. The S3-compatible implementation is the closing step's, behind the same behaviour;
-nothing above the behaviour may learn which one is installed. `docs/decisions.md` settles this
-much; what follows is the shape.
+platform. A second, S3-compatible implementation would go behind the same behaviour; nothing
+above the behaviour may learn which one is installed, and § What would move this to S3 says why
+writing one is not scheduled. `docs/decisions.md` settles this much; what follows is the shape.
 
 Two things force a behaviour now rather than later. The worker stops sharing a filesystem with
 the platform in milestone 3, so `file:///…/transcript-1.jsonl` stops being a thing the platform
@@ -107,13 +107,32 @@ and the store is not the place to discover that a job ran twice.
 - No fsync. This is a PoC on the operator's machine; a power cut loses the last transcript and
   the ticket's documents are in Postgres.
 
-## What the closing step needs from this
+## What would move this to S3
 
-The S3 implementation replaces one module and a config key. It gets `{:file, path}` for the seed
-and streams it, gets bytes for a transcript, computes the same hash, and mints its own tokens —
-except that it does not, because tokens are the platform's (`Forge.Storage.Token` is not a
-callback). A provider that can sign URLs is welcome to; the platform still serves the operator's
-blobs itself.
+**Durability is not it, and that is the change of mind.** This note and the plan both said the
+closing step would swap in an S3 implementation "so seeds and blobs survive the platform host".
+A bucket does not deliver that on its own: `artifact_version.blob_uri` is the only mapping from a
+key to what it means, and § Keys makes keys opaque on purpose, so a store that outlives its
+database is bytes with no names. Of the three things a host holds that must survive it — Postgres,
+the bare repositories, the store — this is the most replaceable: a seed is a warm build directory
+a job can rebuild, and a transcript is history rather than state the platform runs on. The
+repositories have the mirror; Postgres has nothing; one backup covers all three. So the answer to
+"it does not survive the host" is a backup, and `docs/decisions.md` records that.
+
+Two things would change it, and both are measurable rather than arguable:
+
+- **The host's disk becomes the binding constraint.** § Open says nothing deletes a transcript or
+  an old seed, and seeds are hundreds of megabytes per project. Local means the ceiling is the
+  host's disk, so the number to watch is the store's size against it. Retention is the cheaper
+  answer first; a bucket is the answer when retention is not enough.
+- **The store has to outlive the host it sits on** — a platform that is rebuilt, containerised or
+  moved often enough that restoring a directory from a backup is the thing that hurts.
+
+When one of them bites, the implementation replaces one module and a config key. It gets
+`{:file, path}` for the seed and streams it, gets bytes for a transcript, computes the same hash,
+and mints its own tokens — except that it does not, because tokens are the platform's
+(`Forge.Storage.Token` is not a callback). A provider that can sign URLs is welcome to; the
+platform still serves the operator's blobs itself.
 
 What would break it, and therefore what this note forbids: a `path/1` callback, a caller that
 `File.exists?`es a key, a key with a scheme in it, and any assumption that `put` is atomic across

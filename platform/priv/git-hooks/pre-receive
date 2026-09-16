@@ -26,8 +26,14 @@ while read -r old new ref; do
     *) deny "only branches may be written, not $ref" ;;
   esac
 
+  # The default branch takes two writers and no others: the platform's own merge, and a
+  # credential an operator minted for exactly this ref. A job's credential names its own branch,
+  # so it lands in the clause below and is refused there. Fast-forward binds both writers --
+  # a token may not rewrite history the merge could not.
   if [ "$ref" = "refs/heads/$default" ]; then
-    [ "$internal" = "1" ] || deny "$default is written by the platform's merge only"
+    if [ "$internal" != "1" ] && [ "$allowed" != "$ref" ]; then
+      deny "$default is written by the platform's merge, or by a credential minted for it"
+    fi
     if [ "$old" != "$zero" ] && ! git merge-base --is-ancestor "$old" "$new"; then
       deny "$default must be fast-forward"
     fi

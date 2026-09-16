@@ -50,10 +50,11 @@ The PoC is done when all of the following hold:
 - btrfs subvolumes and snapshots for copy-on-write worktrees and build directories.
 - A local VM driver (QEMU, booting the NixOS worker image) as the provider behind the
   driver for the whole PoC. Hetzner arrives in the closing step, as a second driver.
-- A storage behaviour for blobs and worker seeds with one implementation for the PoC: a
-  directory on the platform host, served over HTTP by the platform. No S3 client and no
-  MinIO in the PoC; the S3-compatible implementation (Hetzner Object Storage) is the closing
-  step's, behind the same behaviour.
+- A storage behaviour for blobs and worker seeds with one implementation: a directory on the
+  platform host, served over HTTP by the platform. No S3 client and no MinIO. The behaviour
+  exists so a second implementation is a module and a config key rather than a rewrite — which
+  is what lets the decision to write one wait for a reason. `decisions.md` records why the
+  closing step does not carry it.
 
 Deferred to the start of the relevant milestone: workflow grammar subset, question block
 syntax, Claude Code event schema, Claude Code permission mode inside the slice, push
@@ -219,8 +220,14 @@ After the PoC has concluded on evidence, and only then:
 - The platform on a host with the NixOS module, TLS in front, secrets outside the store.
 - The Hetzner driver as the second provider implementation; the cloud's own machine creation
   time added to measurement 4.
-- The S3 implementation of the storage behaviour (Hetzner Object Storage) as the durable
-  layer for seeds and blobs, so they survive the platform host.
+- **Backups, off the host, on a schedule.** Three things on the host must survive it: Postgres,
+  the bare repositories and the store. The repositories have the mirror already; the other two
+  have nothing. This is what "survive the platform host" actually needs — *not* the S3
+  implementation of the storage behaviour, which this step used to carry and no longer does.
+  A bucket makes the least valuable of the three durable and leaves the record itself on one
+  disk, and a blob whose row is gone is bytes with no name: keys are opaque by design
+  (`design/storage.md` § Keys). See `decisions.md`, and `design/storage.md` § What would move
+  this to S3 for what would change the answer.
 - The phone: push subscribed on the real origin, one blocking question answered from the
   lock screen, message state observed on a phone network.
 - The real project moved onto the host; the mirror pointed at its external home.

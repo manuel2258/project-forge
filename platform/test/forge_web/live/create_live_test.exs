@@ -43,9 +43,10 @@ defmodule ForgeWeb.CreateLiveTest do
       assert html =~ "is registered"
       assert html =~ ".forge/workflow.yml"
 
-      # The primary action is a conversation, because it is the only route that works. A
-      # credential writes one branch and never the default one, so the page cannot honestly
-      # tell anyone to push a workflow — which is what it used to say.
+      # The primary action is a conversation: an empty project has no branch to merge and no
+      # history to import, and telling anyone to "push a workflow" is what this page used to say
+      # and nothing could carry out. The default-branch credential that now exists is for
+      # importing a repository, which is not this.
       assert html =~ "/chats/new?project=#{name}"
       assert html =~ "Set it up in a chat"
 

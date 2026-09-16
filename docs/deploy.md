@@ -70,23 +70,31 @@ their sessions. Projects registered through the API get their repository under
 `/var/lib/forge/repos/<name>.git`; only the command line may point a project at another path.
 
 Push your project into the bare repository, with `.forge/workflow.yml` and the prompts under
-`.forge/agents/` on the default branch. The repository is served over the platform's own smart
-HTTP endpoint as well as over SSH to the host; both reach the same bare repository:
+`.forge/agents/` on the default branch. **There is one route in, the platform's own smart HTTP
+endpoint, and one kind of credential, a token the platform minted.** There is no SSH: the service
+user has no shell, and the repository's `pre-receive` hook refuses a push that carries no
+authority over the ref it names, however it arrived (`design/git-hosting.md` § Not built).
+
+Tokens are issued from `/projects/<name>/settings` once you can log in, and from the command line
+before that:
 
 ```
-git remote add forge forge@forge.example.org:/var/lib/forge/repos/game.git
+forge-admin eval 'Forge.Release.git_token("game")'            # read only
+forge-admin eval 'Forge.Release.git_token("game", 12)'        # and may write ticket/12
+forge-admin eval 'Forge.Release.git_token("game", :default)'  # and may write the default branch
+```
+
+Each prints a clone URL with the token in it, once. Seed the repository with the third:
+
+```
+git remote add forge 'https://forge:TOKEN@forge.example.org/git/game.git'
 git push forge main
 ```
 
-The default branch is written by SSH and by the platform's merge only. A credential handed out
-for the HTTP endpoint is scoped to one ticket branch, and the repository's own `pre-receive` hook
-refuses everything else — including a credential trying to move the default branch. A short-lived
-one for a clone or a look is printed by:
-
-```
-forge-admin eval 'Forge.Release.git_token("game")'          # read only
-forge-admin eval 'Forge.Release.git_token("game", 12)'      # and may write ticket/12
-```
+The default branch takes exactly two writers: the platform's own merge, and a credential minted
+for that branch by hand. It is fast-forward only for both. Every other credential — a job's
+included — is scoped to one ticket or chat branch and is refused the default branch by the hook,
+so a job cannot reach what it builds on.
 
 Point the repository at a mirror so the host is never the only copy of the project. The default
 branch is what mirrors; `--refs` widens it:
@@ -160,11 +168,9 @@ Those workers reach the platform over the network rather than over loopback, so 
 port to `127.0.0.1` as above is only right when nothing else needs it. Widening it is the
 security decision § Behind a proxy describes, unchanged by the container.
 
-**Repositories are reached over HTTP, not SSH.** § First run offers both routes into a bare
-repository; only one of them survives here, because the repositories are inside the volume and
-there is no sshd in the image. Use the platform's own smart HTTP endpoint with a credential from
-`Forge.Release.git_token/1`, which is the route `design/git-hosting.md` describes and the one the
-`pre-receive` hook guards either way.
+**Repositories are reached the same way as under the module**: the platform's own smart HTTP
+endpoint, with a credential from `Forge.Release.git_token/1,2`. Nothing about the container
+changes this — there was never a second route — and the `pre-receive` hook guards it either way.
 
 **It runs as uid 1000, not root.** A *named* volume takes the ownership the image declares at
 that path, so the command above needs nothing extra. A **bind mount keeps the host's ownership**
@@ -246,8 +252,15 @@ platform host no longer runs agent code. What neither mode yet has:
 - **The module does not configure the worker tier.** The image path, the OVMF firmware, KVM
   access and the tier's numbers are environment variables today; there are no module options for
   them yet.
-- **Blobs and seeds live on this host** — the storage behaviour has one local implementation, so
-  they do not survive it.
+- **Nothing is backed up, and three things here do not survive this host.** Postgres, the bare
+  repositories under `repos/`, and the store under `data/store/`. The repositories have a mirror
+  if you set one; the other two have nothing, and the database is what gives a blob its name. A
+  dump of Postgres plus those two directories, taken off the host on a schedule, is the whole of
+  what is missing — and it is missing, not merely undocumented. Object storage for the store is
+  *not* the answer to this and is not planned: `design/storage.md` § What would move this to S3.
+- **The store only grows.** Nothing deletes a transcript or a superseded seed, so the host's disk
+  is the ceiling — a number to watch on a real host, where a seed is hundreds of megabytes per
+  project.
 - **Rotating the agent credential reaches no existing machine.** A worker keeps the credential
   it was created with (issue #16).
 - **Magic-link login does not work**: the mailer has no production adapter, so password login is

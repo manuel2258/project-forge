@@ -119,8 +119,23 @@ defmodule ForgeWeb.ProjectSettingsLive do
     end
   end
 
-  # Exactly two shapes, because they are the two an operator has a use for. A job-scoped token
-  # is the engine's to mint — see docs/design/git-hosting.md § Issuing a token.
+  # Exactly three shapes, because they are the three an operator has a use for. A job-scoped
+  # token is the engine's to mint — see docs/design/git-hosting.md § Issuing a token.
+  #
+  # The default branch is the one that reaches what every job builds on, so it is its own choice
+  # in the dropdown rather than a ref typed into a box: what may be minted is the project's own
+  # default branch and nothing else, and `Forge.Git.Token` refuses anything wider anyway.
+  defp scope(assigns, %{"scope" => "default"} = params) do
+    with {:ok, minutes} <- minutes(params) do
+      {:ok,
+       [
+         ref: Tokens.default_ref(assigns.project),
+         write: true,
+         ttl_minutes: minutes
+       ]}
+    end
+  end
+
   defp scope(assigns, %{"scope" => "write"} = params) do
     with {:ok, minutes} <- minutes(params),
          %{} = ticket <- Enum.find(assigns.tickets, &(to_string(&1.number) == params["ticket"])) do
@@ -201,8 +216,19 @@ defmodule ForgeWeb.ProjectSettingsLive do
             field={@form[:scope]}
             type="select"
             label="May"
-            options={[{"read every branch", "read"}, {"write one ticket's branch", "write"}]}
+            options={[
+              {"read every branch", "read"},
+              {"write one ticket's branch", "write"},
+              {"write #{@project.default_branch}, the default branch", "default"}
+            ]}
           />
+
+          <p :if={@form[:scope].value == "default"} class="text-sm/[1.55] opacity-70">
+            This is what a repository is seeded with and what a
+            <code class="font-mono text-[12.5px]">.forge/workflow.yml</code>
+            is changed with. It is fast-forward only, like the platform's own merge, and every
+            other credential — a job's included — is refused that branch.
+          </p>
 
           <.input
             :if={@form[:scope].value == "write"}

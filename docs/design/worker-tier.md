@@ -337,10 +337,69 @@ directory the seed exists to carry. A fresh snapshot has nothing to inherit, so 
 the branch; a worktree that survived a previous run is cleaned. Relying on the build directory
 being in `.gitignore` would work for most projects and fail silently for the rest.
 
-**Which seed is current is the database's.** `projects.seed_id` holds it, set by
-`mix forge.seed.publish PROJECT DIRECTORY`, which archives the directory, names it by the
-archive's own hash and uploads it. The store has no listing and is not getting one
-(`docs/design/storage.md` § The behaviour), so nothing can discover the current seed by looking.
+### The ticket volume: warmth between a ticket's own jobs
+
+The seed makes a job's *first* build fast. It did nothing for the second, and a ticket is several
+jobs: implement compiles the ticket's changes into a snapshot, the snapshot is deleted when the
+job ends, and verify snapshots the same cold seed and compiles them again. The worktree is keyed
+by job id, so nothing carried between them.
+
+**So a ticket gets a volume of its own, and it is a seed one level down.** `volumes/ticket/<n>` on
+the machine, made by snapshotting the project's seed on the ticket's first job here, and replaced
+by a snapshot of the finished worktree when a run ends. The next job for that ticket snapshots the
+ticket volume instead of the project seed, and starts warm for the code this ticket has been
+writing rather than the code the seed was published at.
+
+Every rule above survives, because the ticket volume is a *template* and never a worktree a job
+runs in:
+
+- **A job's worktree is still per job and still disposable.** It is snapshotted from the template,
+  and deleted when the run ends, exactly as before.
+- **A fresh snapshot is still not cleaned, and a reused worktree still is.** The template is only
+  ever a snapshot source, so `clean: false` keeps meaning "this tree has nothing a dead run left".
+- **The template's HEAD does not matter.** `Checkout.reset/3` does `checkout -B <branch>
+  FETCH_HEAD` before `reset --hard`, for the seed's sake — a seed is on whatever commit it was
+  built at — and that repoints a ticket volume sitting on the last job's commit just as well.
+
+**Promotion happens only after the run committed and pushed**, and that is what makes the template
+safe to snapshot without cleaning. `Checkout.squash/3` does `reset --soft origin/<branch>` then
+`add -A`, so after a successful run every untracked file that was not ignored has been committed,
+and what is left beside the checkout is the ignored build output the whole mechanism is for. A run
+that failed before it pushed keeps its worktree's untracked debris, and promoting that would hand
+the next job exactly the inheritance the clean rule exists to prevent. So a failed run promotes
+nothing and the ticket keeps the template it had.
+
+**Only ticket branches.** A conversation holds one worktree for the whole of its life
+(`ForgeWorker.Job.Conversation` prepares once and discards at close), so it already keeps its own
+warmth and a template would be a second copy of it. The branch name becomes a path here, so it is
+matched against `ticket/<number>` before it is used as one rather than trusted because the
+platform sent it — the same reason `Forge.Storage.Key` validates a key the platform built.
+
+**It is machine-local, and nothing announces it.** No upload, no new channel message, and nothing
+tells a machine that a ticket merged or was abandoned — the platform's messages are `assign`,
+`cancel` and `drain`. So a ticket volume is swept by age like the job directories beside it,
+defaulting to two days: long enough to cover a ticket blocked on a question overnight, short
+enough that a machine which never dies is not holding a volume per ticket it ever touched. The
+exclusive bytes are what that ticket's builds wrote, which M2 measured and which is the number
+that matters on a real host.
+
+**On `Volume.Copy` promotion is a full `cp -a`.** On the image it is a btrfs snapshot and costs
+nothing; on a machine without btrfs — a development machine, a container — each promotion copies
+the tree. Correct either way, and slow in the place that is already slow.
+
+What this deliberately does not do is move warmth *between* tickets. When a ticket merges, its
+volume is the best possible starting point for the next ticket on that machine, and promoting it
+to be the project's local base is the obvious next step — and a separate one, because it needs a
+merge signal the channel does not carry today. Publishing a new project seed from it is the step
+after that, and it is not free: the store is content-addressed per whole archive, so it costs a
+full seed upload per merge and a full download on every machine that later wants it. Both wait for
+the idle period's own question to be answered, because how often a machine is destroyed is what
+decides whether local warmth is worth keeping at all.
+
+**Which seed is current is the database's.** `projects.seed_id` holds it, set by `mix
+forge.seed.publish PROJECT DIRECTORY`, which archives the directory, names it by the archive's own
+hash and uploads it. The store has no listing and is not getting one (`docs/design/storage.md` §
+The behaviour), so nothing can discover the current seed by looking.
 
 ## Git
 
@@ -444,16 +503,22 @@ Two things it will need that do not exist, and both get harder the longer they w
 
 ## What a machine that never dies accumulates
 
-Three things grew without bound and nobody noticed, because until a worker could be permanent
-the machine's own destruction collected them. Each now has a rule, and the rules are retention
-rather than lifecycle on purpose: a worker cannot always tell whether a job will be resumed,
-and a sweep that only has to know an age is a sweep that cannot get that wrong.
+Four things grow without bound, because until a worker could be permanent the machine's own
+destruction collected them. Each has a rule, and the rules are retention rather than lifecycle on
+purpose: a worker cannot always tell whether a job will be resumed, and a sweep that only has to
+know an age is a sweep that cannot get that wrong.
 
 - **Job directories.** `<root>/jobs/<job_id>` holds the prompt, stderr, the transcripts and the
   agent's private `HOME` — which is where Claude Code keeps the session a resume needs, so it
   cannot simply go when the job ends. Directories untouched for `job_retention_ms` are removed
   when a job finishes, which is a moment the worker is already doing filesystem work. A crash
   leaves nothing behind that the next job's sweep will not collect.
+- **Ticket volumes.** `<root>/volumes/ticket/<n>`, one per ticket this machine has run a job for
+  (§ The ticket volume). Swept at the same moment as the job directories, at
+  `ticket_volume_retention_ms` — two days by default, shorter than a job directory's week because
+  a volume is a warm build directory rather than a few files. The exclusive bytes are what that
+  ticket's builds wrote, which is the figure M2 measured and the one that matters on a real host.
+  Nothing tells this machine that a ticket merged, so there is no lifecycle here to use instead.
 - **Seeds.** A worker keeps one seed per project and fetches a new one when the project's
   `seed_id` moves; the old one used to stay for ever at a few hundred megabytes a time. Fetching
   a seed now removes the others under `seed/<project>/`. A running job holding a snapshot of the

@@ -22,6 +22,7 @@ defmodule ForgeWeb.TicketLive do
   @impl true
   def mount(%{"project" => name, "number" => number}, _session, socket) do
     {ticket, project} = Tickets.fetch!(name, number)
+    ForgeWeb.Access.project_scope!(socket.assigns.current_scope, project)
     if connected?(socket), do: Events.subscribe()
 
     {:ok, socket |> assign(project: project, ticket_id: ticket.id) |> load()}

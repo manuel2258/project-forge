@@ -13,7 +13,7 @@ defmodule ForgeWeb.ReviewLiveTest do
 
   setup :register_and_log_in_user
 
-  setup %{scope: scope} do
+  setup %{scope: scope, user: user} do
     data_dir = tmp_dir("review-data")
     config = Application.get_env(:forge, Forge.Jobs)
     Application.put_env(:forge, Forge.Jobs, Keyword.put(config, :data_dir, data_dir))
@@ -22,7 +22,8 @@ defmodule ForgeWeb.ReviewLiveTest do
     bare = seeded_repo()
     name = "review#{System.unique_integer([:positive])}"
 
-    {:ok, project} = Projects.register(%{name: name, repo_path: bare, default_branch: "main"})
+    {:ok, project} =
+      Projects.register(%{name: name, repo_path: bare, default_branch: "main"}, user)
 
     {:ok, ticket} =
       Tickets.admit(project, %{title: "Persist scores", body: "do it"}, {:user, scope.user.id})

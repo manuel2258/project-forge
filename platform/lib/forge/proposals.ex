@@ -217,6 +217,22 @@ defmodule Forge.Proposals do
   @spec open_count() :: non_neg_integer()
   def open_count, do: Repo.aggregate(from([v] in open_query(), select: v.id), :count)
 
+  @doc """
+  How many proposals are open across the projects this user is a member of.
+
+  The digest is assembled per reader, so its proposal count has to be too: a number that counts
+  projects the reader cannot open is a number they cannot act on.
+  """
+  @spec open_count(Forge.Accounts.User.t()) :: non_neg_integer()
+  def open_count(%Forge.Accounts.User{} = user) do
+    project_ids = Enum.map(Forge.Projects.list(user), & &1.id)
+
+    Repo.aggregate(
+      from([v, _a, j] in open_query(), where: j.project_id in ^project_ids, select: v.id),
+      :count
+    )
+  end
+
   @doc "Open proposals made by the jobs of one ticket, which is where its page shows them."
   @spec open_for_ticket(String.t()) :: [%{artifact: Artifact.t(), version: Version.t()}]
   def open_for_ticket(ticket_id) do

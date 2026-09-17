@@ -22,7 +22,7 @@ defmodule Forge.MixProject do
       # `elixirc_paths` in this env, and a case template or a fixture module is exercised by
       # definition — counting them lifts the percentage without anything being better tested.
       test_coverage: [
-        summary: [threshold: 81],
+        summary: [threshold: 82],
         ignore_modules: [
           Forge.AccountsFixtures,
           Forge.DataCase,

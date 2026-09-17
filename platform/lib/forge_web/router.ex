@@ -27,9 +27,9 @@ defmodule ForgeWeb.Router do
   end
 
   scope "/", ForgeWeb do
-    pipe_through [:browser, :require_authenticated_user]
+    pipe_through [:browser, :require_authenticated_user, :require_approved_user]
 
-    live_session :operator, on_mount: [{ForgeWeb.UserAuth, :require_authenticated}] do
+    live_session :operator, on_mount: [{ForgeWeb.UserAuth, :require_approved}] do
       live "/", QueueLive
       live "/board", BoardLive
       live "/workers", WorkersLive
@@ -49,6 +49,26 @@ defmodule ForgeWeb.Router do
     # Not a LiveView: this serves bytes, and every artifact name in the product links to it.
     # See docs/design/ui.md § Addressable artifact versions.
     get "/tickets/:project/:number/artifacts/:name/:version", ArtifactController, :show
+  end
+
+  # Account governance, and the only thing `node_admin` unlocks. Not under the operator scope:
+  # a node admin is not a member of any project and this page shows none.
+  scope "/", ForgeWeb do
+    pipe_through [:browser, :require_authenticated_user, :require_approved_user]
+
+    live_session :node_admin, on_mount: [{ForgeWeb.UserAuth, :require_node_admin}] do
+      live "/accounts", AccountsLive
+    end
+  end
+
+  # A pending account is authenticated but not approved, so it is the one page behind
+  # `require_authenticated_user` that must not also require approval.
+  scope "/", ForgeWeb do
+    pipe_through [:browser, :require_authenticated_user]
+
+    live_session :pending, on_mount: [{ForgeWeb.UserAuth, :require_authenticated}] do
+      live "/users/pending", UserLive.Pending
+    end
   end
 
   scope "/api/v1", ForgeWeb.Api do
@@ -108,10 +128,10 @@ defmodule ForgeWeb.Router do
   ## Authentication routes
 
   scope "/", ForgeWeb do
-    pipe_through [:browser, :require_authenticated_user]
+    pipe_through [:browser, :require_authenticated_user, :require_approved_user]
 
     live_session :require_authenticated_user,
-      on_mount: [{ForgeWeb.UserAuth, :require_authenticated}] do
+      on_mount: [{ForgeWeb.UserAuth, :require_approved}] do
       live "/users/settings", UserLive.Settings, :edit
       live "/users/settings/confirm-email/:token", UserLive.Settings, :confirm_email
     end

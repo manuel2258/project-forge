@@ -6,7 +6,7 @@ defmodule Forge.FlowTest do
 
   use Forge.DataCase, async: false
 
-  import Forge.AccountsFixtures
+  import Forge.ForgeFixtures
   import Forge.GitFixtures
 
   alias Forge.{Artifacts, Engine, Events, FakeWorker, Jobs, Projects, Queue, Tickets}
@@ -16,9 +16,9 @@ defmodule Forge.FlowTest do
     repo = seeded_repo()
 
     {:ok, project} =
-      Projects.register(%{name: "game-#{System.unique_integer([:positive])}", repo_path: repo})
+      register_owned!(%{name: "game-#{System.unique_integer([:positive])}", repo_path: repo})
 
-    user = user_fixture()
+    user = member_fixture(project)
 
     data_dir = tmp_dir("data")
     original = Application.get_env(:forge, Forge.Jobs)
@@ -85,7 +85,7 @@ defmodule Forge.FlowTest do
       })
 
     {:ok, project} =
-      Projects.register(%{name: "broken-#{System.unique_integer([:positive])}", repo_path: repo})
+      register_owned!(%{name: "broken-#{System.unique_integer([:positive])}", repo_path: repo})
 
     assert {:error, [%ForgeCore.Error{} | _]} =
              Tickets.admit(project, %{title: "x"}, {:user, user.id})
@@ -547,7 +547,7 @@ defmodule Forge.FlowTest do
       })
 
     {:ok, project} =
-      Projects.register(%{name: "dup-#{System.unique_integer([:positive])}", repo_path: repo})
+      register_owned!(%{name: "dup-#{System.unique_integer([:positive])}", repo_path: repo})
 
     {:ok, ticket} = Tickets.admit(project, %{title: "two edges, one target"}, {:user, user.id})
 

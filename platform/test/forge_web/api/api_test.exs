@@ -14,10 +14,13 @@ defmodule ForgeWeb.ApiTest do
     conn = put_req_header(conn, "authorization", "Bearer " <> token)
 
     {:ok, project} =
-      Projects.register(%{
-        name: "api-#{System.unique_integer([:positive])}",
-        repo_path: seeded_repo()
-      })
+      Projects.register(
+        %{
+          name: "api-#{System.unique_integer([:positive])}",
+          repo_path: seeded_repo()
+        },
+        user
+      )
 
     data_dir = tmp_dir("data")
     original = Application.get_env(:forge, Forge.Jobs)
@@ -64,12 +67,18 @@ defmodule ForgeWeb.ApiTest do
 
   # The same admission call, one branch along: a repository that was pushed but carries no
   # `.forge/workflow.yml` is the client's next step, not a platform fault.
-  test "admitting against a repository with no workflow file is a client error", %{conn: conn} do
+  test "admitting against a repository with no workflow file is a client error", %{
+    conn: conn,
+    user: user
+  } do
     {:ok, %{name: name}} =
-      Projects.register(%{
-        name: "bare-#{System.unique_integer([:positive])}",
-        repo_path: seeded_repo(%{".forge/workflow.yml" => nil})
-      })
+      Projects.register(
+        %{
+          name: "bare-#{System.unique_integer([:positive])}",
+          repo_path: seeded_repo(%{".forge/workflow.yml" => nil})
+        },
+        user
+      )
 
     response =
       conn
@@ -115,12 +124,18 @@ defmodule ForgeWeb.ApiTest do
   # and nothing outside the platform may write it — so the ref resolves and the operator is told
   # the thing that is actually wrong: there is no workflow. A git-level ref error was a true
   # statement about the wrong layer.
-  test "admitting against a repository with no workflow is a client error", %{conn: conn} do
+  test "admitting against a repository with no workflow is a client error", %{
+    conn: conn,
+    user: user
+  } do
     {:ok, %{name: name}} =
-      Projects.register(%{
-        name: "empty-#{System.unique_integer([:positive])}",
-        repo_path: Path.join(tmp_dir("empty"), "project.git")
-      })
+      Projects.register(
+        %{
+          name: "empty-#{System.unique_integer([:positive])}",
+          repo_path: Path.join(tmp_dir("empty"), "project.git")
+        },
+        user
+      )
 
     response =
       conn

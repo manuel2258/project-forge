@@ -12,12 +12,36 @@ defmodule ForgeWeb.Markdown do
   def to_html(nil), do: Phoenix.HTML.raw("")
 
   def to_html(markdown) when is_binary(markdown) do
-    state = markdown |> strip_front_matter() |> Md.parse()
+    text = strip_front_matter(markdown)
 
-    %{state | ast: Enum.map(state.ast, &escape_inline_code(&1, nil))}
-    |> Md.generate(format: :none)
-    |> HtmlSanitizeEx.markdown_html()
-    |> Phoenix.HTML.raw()
+    try do
+      state = Md.parse(text)
+
+      %{state | ast: Enum.map(state.ast, &escape_inline_code(&1, nil))}
+      |> Md.generate(format: :none)
+      |> HtmlSanitizeEx.markdown_html()
+      |> Phoenix.HTML.raw()
+    rescue
+      # The renderer is a dependency and its parser raises on markdown people actually write:
+      # `md` 0.13.1 dies on reference links (`[a][1]`) and on footnotes (`[^1]`), which is what
+      # a citation-heavy verification report is made of. Every call site renders at mount, so
+      # one such document used to make the ticket, review and chat pages raise for ever — an
+      # agent could deny the operator the surfaces where merges are approved and money is spent,
+      # by writing an ordinary footnote.
+      #
+      # Degrading is the right answer rather than a parser fix: the content is agent-written and
+      # unbounded, so the next construct that raises should cost legibility and not the page.
+      # The fallback escapes, so it is not a way around the sanitiser either.
+      _error -> plain(text)
+    end
+  end
+
+  # Escaped, with paragraphs kept, and nothing else. Deliberately not a second parser.
+  defp plain(text) do
+    text
+    |> String.split(~r/\r?\n/)
+    |> Enum.map_join("<br>", &(&1 |> Plug.HTML.html_escape_to_iodata() |> IO.iodata_to_binary()))
+    |> then(&Phoenix.HTML.raw("<p>" <> &1 <> "</p>"))
   end
 
   @doc "The Markdown without its leading YAML front matter, whether or not it parses."

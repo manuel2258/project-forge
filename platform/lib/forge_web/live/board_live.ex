@@ -25,7 +25,7 @@ defmodule ForgeWeb.BoardLive do
 
   defp load(socket) do
     boards =
-      for project <- Projects.list() do
+      for project <- Projects.list(socket.assigns.current_scope.user) do
         tickets = Tickets.list(project)
 
         %{

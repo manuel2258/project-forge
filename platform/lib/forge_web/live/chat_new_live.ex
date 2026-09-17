@@ -14,11 +14,11 @@ defmodule ForgeWeb.ChatNewLive do
 
   use ForgeWeb, :live_view
 
-  alias Forge.{Conversations, Projects, Tickets, Workers}
+  alias Forge.{Operator, Tickets, Workers}
 
   @impl true
   def mount(%{"project" => name} = params, _session, socket) do
-    project = Projects.by_name(name) || raise Ecto.NoResultsError, queryable: Projects.Project
+    {project, _scope} = ForgeWeb.Access.project_by_name!(socket.assigns.current_scope, name)
     ticket = ticket(project, params["ticket"])
 
     {:ok,
@@ -61,9 +61,11 @@ defmodule ForgeWeb.ChatNewLive do
 
   defp open(socket, text, model) do
     %{project: project, ticket: ticket} = socket.assigns
-    actor = {:user, socket.assigns.current_scope.user.id}
 
-    case Conversations.open(project, text, ticket: ticket, actor: actor, model: model) do
+    case Operator.open_chat(project, socket.assigns.current_scope.user, text,
+           ticket: ticket,
+           model: model
+         ) do
       {:ok, chat} ->
         {:noreply, push_navigate(socket, to: ~p"/chats/#{chat.id}")}
 

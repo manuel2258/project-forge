@@ -1,6 +1,6 @@
 defmodule ForgeWeb.ChatsLive do
   @moduledoc """
-  Every conversation on the node, live ones first.
+  Every conversation in the projects you are in, live ones first.
 
   This is for finding one again — the one about the parser last week, the one still running that
   you closed the tab on. It is not a queue: a conversation that needs you is already in the
@@ -22,7 +22,7 @@ defmodule ForgeWeb.ChatsLive do
   end
 
   defp load(socket) do
-    summaries = Conversations.summaries()
+    summaries = Conversations.summaries(for: socket.assigns.current_scope.user)
 
     assign(socket,
       summaries: summaries,

@@ -20,6 +20,49 @@ defmodule Forge.ForgeFixtures do
     Repo.insert!(Forge.Projects.Project.changeset(%Forge.Projects.Project{}, attrs))
   end
 
+  @doc """
+  Registers a project owned by a freshly made user.
+
+  For the many setups that need a project and do not care who owns it. `Projects.register/2`
+  refuses a nil owner, because a project with no members is invisible to everyone — so a test
+  that wants a *specific* owner passes one and does not come here.
+  """
+  def register_owned!(attrs) do
+    {:ok, project} = Forge.Projects.register(attrs, Forge.AccountsFixtures.user_fixture())
+    {:ok, project}
+  end
+
+  @doc """
+  Joins a user to a project, admin by default.
+
+  Explicit on purpose. A fixture that quietly made every user a member of every project would
+  make a read-scoping leak invisible in exactly the tests written to catch one.
+  """
+  def join!(project, user, role \\ :admin) do
+    Repo.insert!(
+      Forge.Projects.Member.changeset(%Forge.Projects.Member{}, %{
+        project_id: project.id,
+        user_id: user.id,
+        role: role
+      })
+    )
+
+    project
+  end
+
+  @doc "Joins a user to the project a ticket belongs to."
+  def join_ticket!(ticket, user, role \\ :admin) do
+    join!(Forge.Projects.get!(ticket.project_id), user, role)
+    ticket
+  end
+
+  @doc "An approved user who is already a member of `project`."
+  def member_fixture(project, role \\ :admin) do
+    user = Forge.AccountsFixtures.user_fixture()
+    join!(project, user, role)
+    user
+  end
+
   def ticket_fixture(attrs \\ %{}) do
     project = Map.get_lazy(attrs, :project, fn -> project_fixture() end)
 

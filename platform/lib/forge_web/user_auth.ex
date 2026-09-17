@@ -6,7 +6,7 @@ defmodule ForgeWeb.UserAuth do
   import Phoenix.Controller
 
   alias Forge.Accounts
-  alias Forge.Accounts.Scope
+  alias Forge.Accounts.{Scope, User}
 
   # Make the remember me cookie valid for 14 days. This should match
   # the session validity setting in UserToken.
@@ -228,6 +228,30 @@ defmodule ForgeWeb.UserAuth do
     {:cont, mount_current_scope(socket, session)}
   end
 
+  def on_mount(:require_approved, params, session, socket) do
+    case on_mount(:require_authenticated, params, session, socket) do
+      {:cont, socket} ->
+        if User.active?(socket.assigns.current_scope.user),
+          do: {:cont, socket},
+          else: {:halt, Phoenix.LiveView.redirect(socket, to: ~p"/users/pending")}
+
+      halted ->
+        halted
+    end
+  end
+
+  def on_mount(:require_node_admin, params, session, socket) do
+    case on_mount(:require_approved, params, session, socket) do
+      {:cont, socket} ->
+        if socket.assigns.current_scope.user.node_admin,
+          do: {:cont, socket},
+          else: {:halt, Phoenix.LiveView.redirect(socket, to: ~p"/")}
+
+      halted ->
+        halted
+    end
+  end
+
   def on_mount(:require_authenticated, _params, session, socket) do
     socket = mount_current_scope(socket, session)
 
@@ -289,6 +313,20 @@ defmodule ForgeWeb.UserAuth do
       |> maybe_store_return_to()
       |> redirect(to: ~p"/users/log-in")
       |> halt()
+    end
+  end
+
+  @doc """
+  Sends a pending account to the page that says so.
+
+  Approval is the perimeter — `docs/design/identity.md` § Approval — and this is where it is
+  enforced for the browser. It runs after `require_authenticated_user/2`, so the user is there.
+  """
+  def require_approved_user(conn, _opts) do
+    if User.active?(conn.assigns.current_scope.user) do
+      conn
+    else
+      conn |> redirect(to: ~p"/users/pending") |> halt()
     end
   end
 

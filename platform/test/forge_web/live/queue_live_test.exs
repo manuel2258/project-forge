@@ -21,12 +21,15 @@ defmodule ForgeWeb.QueueLiveTest do
 
   setup :register_and_log_in_user
 
-  setup do
+  setup %{user: user} do
     {:ok, project} =
-      Projects.register(%{
-        name: "queue-#{System.unique_integer([:positive])}",
-        repo_path: seeded_repo()
-      })
+      Projects.register(
+        %{
+          name: "queue-#{System.unique_integer([:positive])}",
+          repo_path: seeded_repo()
+        },
+        user
+      )
 
     %{project: project}
   end

@@ -16,7 +16,7 @@ defmodule ForgeWeb.QueueLive do
 
   import ForgeWeb.Operator.Components
 
-  alias Forge.{Artifacts, Conversations, Events, Push, Queue, Tickets}
+  alias Forge.{Artifacts, Conversations, Events, Operator, Push, Queue, Tickets}
   alias ForgeCore.Workflow
   alias ForgeWeb.Format
   alias ForgeWeb.Operator.Actions
@@ -34,7 +34,7 @@ defmodule ForgeWeb.QueueLive do
 
   defp load(socket) do
     items =
-      Queue.items()
+      Queue.items(socket.assigns.current_scope.user)
       |> Enum.map(&Map.put(&1, :project, &1.project.name))
       |> group()
       |> Enum.map(&decorate/1)
@@ -124,7 +124,12 @@ defmodule ForgeWeb.QueueLive do
   # Answering from the queue sends the choice as the next message, exactly as answering from the
   # conversation does. Nothing is written to `answers`: the transcript is already the record.
   def handle_event("chat:answer", %{"chat" => id, "choice" => choice}, socket) do
-    case Conversations.send(Conversations.get!(id), choice) do
+    # The id comes off the wire, so the guard has to resolve it: `Operator.send_chat/4` takes
+    # the chat's own project and refuses a non-member. This handler was the hole a review found —
+    # the queue correctly hid the item, and hiding it was the only thing stopping anyone.
+    chat = Conversations.get!(id)
+
+    case Operator.send_chat(chat, socket.assigns.current_scope.user, choice) do
       {:ok, _event} ->
         {:noreply, load(socket)}
 
@@ -135,6 +140,11 @@ defmodule ForgeWeb.QueueLive do
          socket
          |> put_flash(:error, "That conversation stopped before the answer reached it.")
          |> load()}
+
+      # Not reachable from a page that rendered honestly — the queue never listed it. Handled
+      # rather than left to crash, because the refusal is the point and a crash loses it.
+      {:error, :forbidden} ->
+        {:noreply, socket |> put_flash(:error, "That conversation is not yours.") |> load()}
     end
   end
 

@@ -54,8 +54,9 @@ as the password; hooks enforce one branch per ticket and mirror the default bran
 And as Mix tasks that write rows:
 
 ```
-mix forge.user.add you@example.com 'a long password'
-mix forge.project.add game /srv/git/game.git      # bare repo; push your project to it
+mix forge.user.add you@example.com 'a long password' --node-admin   # the first account
+mix forge.project.add game /srv/git/game.git      # bare repo; you administer it
+mix forge.project.add game /srv/git/game.git --owner you@example.com   # when several admins exist
 mix forge.project.mirror game /srv/git/game-mirror.git   # one machine is never the only copy
 mix forge.git.token game --ticket 1               # a clone URL with a short-lived credential
 mix forge.admit game "Persist the high score table" --body-file ticket.md

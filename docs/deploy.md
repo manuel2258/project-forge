@@ -64,8 +64,15 @@ forge-admin eval 'Forge.Release.create_token("you@example.org", "laptop")'
 forge-admin eval 'Forge.Release.register_project("game", "/var/lib/forge/repos/game.git")'
 ```
 
-`Forge.Release` also has `list_tokens(email)`, `revoke_token(email, name)` and
-`generate_vapid_keys()`. Changing a user's password revokes their API tokens along with
+A project is administered by whoever registers it. `register_project/4` takes the owner's
+address as a fourth argument; without one it resolves to the node's only admin and refuses when
+there is more than one, because a project with no members is invisible to everyone — including
+a node admin — and the only repair is SQL. See `design/identity.md` § Projects and members.
+
+`Forge.Release` also has `add_member(project, email, role)` — the repair path for a project
+whose admins have all gone, since there is then nobody the product's own membership page could
+act through — `approve_user(email)` for the first account on a node, `list_tokens(email)`,
+`revoke_token(email, name)` and `generate_vapid_keys()`. Changing a user's password revokes their API tokens along with
 their sessions. Projects registered through the API get their repository under
 `/var/lib/forge/repos/<name>.git`; only the command line may point a project at another path.
 

@@ -16,12 +16,15 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
 
   setup :register_and_log_in_user
 
-  setup do
+  setup %{user: user} do
     {:ok, project} =
-      Projects.register(%{
-        name: "settings-#{System.unique_integer([:positive])}",
-        repo_path: seeded_repo()
-      })
+      Projects.register(
+        %{
+          name: "settings-#{System.unique_integer([:positive])}",
+          repo_path: seeded_repo()
+        },
+        user
+      )
 
     %{project: project}
   end

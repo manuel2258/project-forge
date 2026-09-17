@@ -18,7 +18,7 @@ defmodule Forge.ModelTest do
 
   setup do
     {:ok, project} =
-      Projects.register(%{
+      register_owned!(%{
         name: "model-#{System.unique_integer([:positive])}",
         repo_path: seeded_repo()
       })

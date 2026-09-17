@@ -66,16 +66,35 @@ defmodule Forge.Release do
     end)
   end
 
-  @doc "Registers a project; the bare repository is created if missing."
-  def register_project(name, repo_path, default_branch \\ "main") do
+  @doc """
+  Registers a project; the bare repository is created if missing.
+
+  `owner_email` names who administers it. Omitted, it resolves to the node's only admin, and
+  refuses when there is more than one — a project with no members is invisible to everyone and
+  repairable only with SQL, so guessing is worse than asking.
+  """
+  def register_project(name, repo_path, default_branch \\ "main", owner_email \\ nil) do
     with_app(fn ->
-      case Forge.Projects.register(%{
-             name: name,
-             repo_path: repo_path,
-             default_branch: default_branch
-           }) do
-        {:ok, project} ->
-          IO.puts("registered #{project.name} at #{Forge.Projects.repo_path(project)}")
+      with {:ok, owner} <- Forge.Accounts.owner_for(owner_email),
+           {:ok, project} <-
+             Forge.Projects.register(
+               %{name: name, repo_path: repo_path, default_branch: default_branch},
+               owner
+             ) do
+        IO.puts(
+          "registered #{project.name} at #{Forge.Projects.repo_path(project)}, owned by #{owner.email}"
+        )
+      else
+        {:error, :ambiguous_owner} ->
+          fail("more than one node admin: pass the owner address as the fourth argument")
+
+        {:error, :no_owner} ->
+          fail(
+            "no node admin exists: create one with `mix forge.user.add EMAIL PASSWORD --node-admin`"
+          )
+
+        {:error, :unknown_user} ->
+          fail("unknown user #{owner_email}")
 
         {:error, %Ecto.Changeset{} = changeset} ->
           fail(inspect(changeset.errors))
@@ -84,6 +103,50 @@ defmodule Forge.Release do
           fail(inspect(reason))
       end
     end)
+  end
+
+  @doc """
+  Adds a member to a project, from the host.
+
+  The repair path for a project whose admins are all gone: there is nobody left holding
+  `:manage` for the product's own membership page to act through.
+  """
+  def add_member(project_name, email, role \\ "member") do
+    with_app(fn ->
+      project = Forge.Projects.by_name(project_name)
+      user = Forge.Accounts.get_user_by_email(email)
+
+      cond do
+        is_nil(project) -> fail("unknown project #{project_name}")
+        is_nil(user) -> fail("unknown user #{email}")
+        role not in ["admin", "member"] -> fail("role must be admin or member")
+        true -> grant(project, user, role)
+      end
+    end)
+  end
+
+  defp grant(project, user, role) do
+    case Forge.Projects.grant_member(project, user, String.to_existing_atom(role)) do
+      {:ok, _member} -> IO.puts("#{user.email} is now #{role} of #{project.name}")
+      {:error, reason} -> fail(inspect(reason))
+    end
+  end
+
+  @doc "Approves a pending account from the host, which is how the first one gets in."
+  def approve_user(email) do
+    with_app(fn ->
+      case Forge.Accounts.get_user_by_email(email) do
+        nil -> fail("unknown user #{email}")
+        user -> approve(user)
+      end
+    end)
+  end
+
+  defp approve(user) do
+    case Forge.Accounts.approve_user(user, :host) do
+      {:ok, user} -> IO.puts("approved #{user.email}")
+      {:error, reason} -> fail(inspect(reason))
+    end
   end
 
   @doc """

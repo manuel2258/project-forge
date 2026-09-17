@@ -11,7 +11,7 @@ defmodule Forge.DemoTest do
 
   use Forge.DataCase, async: false
 
-  import Forge.AccountsFixtures
+  import Forge.ForgeFixtures
   import Forge.GitFixtures
 
   alias Forge.{
@@ -38,7 +38,7 @@ defmodule Forge.DemoTest do
     :ok = Git.init_bare(mirror)
 
     name = "demo#{System.unique_integer([:positive])}"
-    {:ok, project} = Projects.register(%{name: name, repo_path: bare, default_branch: "main"})
+    {:ok, project} = register_owned!(%{name: name, repo_path: bare, default_branch: "main"})
     :ok = Projects.set_mirror(project, mirror)
 
     # One worker, connected, with room for anything: the tier is milestone 3's and is tested
@@ -47,7 +47,7 @@ defmodule Forge.DemoTest do
       project: project,
       bare: bare,
       mirror: mirror,
-      user: user_fixture(),
+      user: member_fixture(project),
       worker: FakeWorker.connect()
     }
   end

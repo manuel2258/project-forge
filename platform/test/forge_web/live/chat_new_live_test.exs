@@ -15,12 +15,15 @@ defmodule ForgeWeb.ChatNewLiveTest do
 
   setup :register_and_log_in_user
 
-  setup do
+  setup %{user: user} do
     {:ok, project} =
-      Projects.register(%{
-        name: "new-chat-#{System.unique_integer([:positive])}",
-        repo_path: seeded_repo()
-      })
+      Projects.register(
+        %{
+          name: "new-chat-#{System.unique_integer([:positive])}",
+          repo_path: seeded_repo()
+        },
+        user
+      )
 
     %{project: project}
   end

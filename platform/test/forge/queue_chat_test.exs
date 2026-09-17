@@ -9,7 +9,7 @@ defmodule Forge.QueueChatTest do
 
   use Forge.DataCase, async: false
 
-  import Forge.AccountsFixtures
+  import Forge.ForgeFixtures
   import Forge.GitFixtures
 
   alias Forge.{Conversations, Jobs, Projects, Push, Queue, Tickets}
@@ -19,13 +19,13 @@ defmodule Forge.QueueChatTest do
     TestSender.watch()
 
     {:ok, project} =
-      Projects.register(%{
+      register_owned!(%{
         name: "queue-#{System.unique_integer([:positive])}",
         repo_path: seeded_repo()
       })
 
     {:ok, chat} = Conversations.open(project, "what is this?")
-    %{project: project, chat: chat, user: user_fixture()}
+    %{project: project, chat: chat, user: member_fixture(project)}
   end
 
   defp reply(chat, text) do

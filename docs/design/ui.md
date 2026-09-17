@@ -138,6 +138,8 @@ measure; each route sets its own:
 | `/projects/new` | 26rem | A short form. Same frame as log-in, for the same reason. |
 | `/tickets/new` | 34rem | The body is prose and needs the queue's measure, not a form field's. |
 | `/users/log-in`, `/users/settings` | 26rem | Same shell, same type, same buttons. They must not read as a different product. |
+| `/accounts` | 48rem | Two lists of addresses with a row of decisions each, so the settings page's measure and for its reason: the row is what has to fit. |
+| `/users/pending` | 34rem | A sentence and one button. The queue's measure because it is a single column of prose, and the only route that draws the layout **without its nav** — every link in it leads somewhere this account is redirected away from. |
 
 Navigation is a fixed bottom bar on a phone (56px plus safe-area inset, each item a full-height
 tap target, Queue carrying the only badge in the product) and a hairline-ruled top row on a
@@ -146,6 +148,12 @@ a third item when `/tickets` exists, and not before. **The laptop row carries Wo
 well, and the phone bar does not** — the phone is where decisions are answered and a machine is
 never a decision. Nothing on `/workers` waits on a human, which is also why nothing on it is
 accent.
+
+**Accounts is not in either.** It is one link beside the address in the laptop header, shown
+only to a node admin, because account governance is not a place work happens and most accounts
+never reach it. It needs *a* link all the same: it is the only surface the approval perimeter
+has, and without one nobody can discover that somebody is waiting. See
+`design/identity.md` § Approval.
 
 **Chats is on the laptop row for a different reason, and it is worth separating them.** A
 conversation *does* wait on a human — but when it does it is already in the queue, with its

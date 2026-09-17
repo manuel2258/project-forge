@@ -12,7 +12,14 @@ state.
 
 `docs/design/ticket-proposals.md` is the standard for what an agent may say about the project
 itself: any job may propose a ticket, no job may write one, and every job is handed the project's
-tickets to read. It is the newest note.
+tickets to read.
+
+`docs/design/identity.md` is the standard for who a user is, which projects they reach, and whose
+credential funds the work. Its first step is built: approval, `node_admin`, project membership,
+read scoping, and a guard on every human write. Credentials, worker ownership and OIDC are not,
+and the note says in what order they come. Its § Sequencing records what an independent review
+found in the first attempt, which is worth reading before writing the next guard. It is the
+newest note.
 
 ## Layout
 

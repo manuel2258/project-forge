@@ -19,6 +19,68 @@ defmodule Forge.ReleaseTest do
     assert {:ok, <<_::binary-size(32)>>} = Base.url_decode64(private, padding: false)
   end
 
+  # The deploy path. `docs/deploy.md` names these three, and a project registered without an
+  # owner is invisible to everyone — so what is asserted is the membership row, not the output.
+  test "register_project gives the project to the named owner" do
+    owner = Forge.AccountsFixtures.user_fixture()
+    name = "rel-#{System.unique_integer([:positive])}"
+
+    capture_io(fn ->
+      Release.register_project(
+        name,
+        Path.join(System.tmp_dir!(), "#{name}.git"),
+        "main",
+        owner.email
+      )
+    end)
+
+    project = Forge.Projects.by_name(name)
+    assert Forge.Projects.role(project, owner) == :admin
+  end
+
+  test "register_project with no address falls to the node's only admin" do
+    admin = Forge.AccountsFixtures.node_admin_fixture()
+    name = "rel-#{System.unique_integer([:positive])}"
+
+    capture_io(fn ->
+      Release.register_project(name, Path.join(System.tmp_dir!(), "#{name}.git"))
+    end)
+
+    assert Forge.Projects.role(Forge.Projects.by_name(name), admin) == :admin
+  end
+
+  test "add_member repairs a project whose admins are gone" do
+    owner = Forge.AccountsFixtures.user_fixture()
+    name = "rel-#{System.unique_integer([:positive])}"
+
+    capture_io(fn ->
+      Release.register_project(
+        name,
+        Path.join(System.tmp_dir!(), "#{name}.git"),
+        "main",
+        owner.email
+      )
+    end)
+
+    project = Forge.Projects.by_name(name)
+
+    Forge.Repo.delete_all(from(m in Forge.Projects.Member, where: m.project_id == ^project.id))
+
+    rescuer = Forge.AccountsFixtures.user_fixture()
+    output = capture_io(fn -> Release.add_member(name, rescuer.email, "admin") end)
+
+    assert output =~ rescuer.email
+    assert Forge.Projects.role(project, rescuer) == :admin
+  end
+
+  test "approve_user lets the first account in, with no node admin to approve it" do
+    pending = Forge.AccountsFixtures.pending_user_fixture()
+
+    capture_io(fn -> Release.approve_user(pending.email) end)
+
+    assert Accounts.User.active?(Accounts.get_user!(pending.id))
+  end
+
   test "migrate is idempotent on a migrated database" do
     assert :ok = Release.migrate()
   end

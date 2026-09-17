@@ -10,13 +10,27 @@ defmodule Forge.Accounts.User do
     field :hashed_password, :string, redact: true
     field :confirmed_at, :utc_datetime
     field :authenticated_at, :utc_datetime, virtual: true
-    # Single operator today; the other roles are reserved so team use is an expansion.
-    field :role, Ecto.Enum,
-      values: [:operator, :approver, :promoter, :spender],
-      default: :operator
+    # Account governance, and nothing else: approve, suspend, promote. A node admin is not a
+    # member of any project and reads none. See `docs/design/identity.md` § node_admin.
+    field :node_admin, :boolean, default: false
+    field :approved_at, :utc_datetime
+    field :suspended_at, :utc_datetime
 
     timestamps(type: :utc_datetime)
   end
+
+  @doc """
+  Whether the account may act at all.
+
+  Approval is the perimeter — a first login creates a pending account and a node admin decides.
+  Suspension is the reverse, and outranks approval: a suspended account stays approved so that
+  reinstating it is one field, and must still be refused.
+  """
+  @spec active?(t()) :: boolean()
+  def active?(%__MODULE__{approved_at: approved, suspended_at: suspended}),
+    do: not is_nil(approved) and is_nil(suspended)
+
+  @type t :: %__MODULE__{}
 
   @doc """
   A user changeset for registering or changing the email.

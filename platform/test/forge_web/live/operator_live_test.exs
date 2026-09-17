@@ -10,12 +10,15 @@ defmodule ForgeWeb.OperatorLiveTest do
 
   setup :register_and_log_in_user
 
-  setup do
+  setup %{user: user} do
     {:ok, project} =
-      Projects.register(%{
-        name: "ui-#{System.unique_integer([:positive])}",
-        repo_path: seeded_repo()
-      })
+      Projects.register(
+        %{
+          name: "ui-#{System.unique_integer([:positive])}",
+          repo_path: seeded_repo()
+        },
+        user
+      )
 
     data_dir = tmp_dir("data")
     original = Application.get_env(:forge, Forge.Jobs)

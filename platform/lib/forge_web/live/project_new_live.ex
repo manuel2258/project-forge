@@ -42,7 +42,7 @@ defmodule ForgeWeb.ProjectNewLive do
     branch = String.trim(params["default_branch"] || "")
     branch = if branch == "", do: "main", else: branch
 
-    case Projects.register_named(name, branch) do
+    case Projects.register_named(name, branch, socket.assigns.current_scope.user) do
       {:ok, project} ->
         {:noreply, assign(socket, created: project, clone_url: Url.for(project))}
 

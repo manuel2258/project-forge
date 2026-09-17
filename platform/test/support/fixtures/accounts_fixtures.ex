@@ -27,7 +27,18 @@ defmodule Forge.AccountsFixtures do
     user
   end
 
+  @doc """
+  A confirmed and **approved** user, which is what almost every test wants.
+
+  Approval is the perimeter (`docs/design/identity.md` § Approval), so a user who has merely
+  logged in reaches nothing. Tests about the gate itself want `pending_user_fixture/1`.
+  """
   def user_fixture(attrs \\ %{}) do
+    attrs |> pending_user_fixture() |> approve()
+  end
+
+  @doc "A confirmed user whom no node admin has approved: it can log in and reach nothing."
+  def pending_user_fixture(attrs \\ %{}) do
     user = unconfirmed_user_fixture(attrs)
 
     token =
@@ -39,6 +50,21 @@ defmodule Forge.AccountsFixtures do
       Accounts.login_user_by_magic_link(token)
 
     user
+  end
+
+  @doc "Approves a user without needing a second one to do the approving."
+  def approve(user) do
+    user
+    |> Ecto.Changeset.change(approved_at: DateTime.utc_now(:second))
+    |> Forge.Repo.update!()
+  end
+
+  @doc "An approved user who may govern accounts."
+  def node_admin_fixture(attrs \\ %{}) do
+    attrs
+    |> user_fixture()
+    |> Ecto.Changeset.change(node_admin: true)
+    |> Forge.Repo.update!()
   end
 
   def user_scope_fixture do

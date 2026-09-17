@@ -4,9 +4,10 @@ defmodule Forge.Projects do
   import Ecto.Query, only: [from: 2]
 
   alias Ecto.Multi
+  alias Forge.Accounts.User
   alias Forge.{Events, Git, Repo}
   alias Forge.Git.Hooks
-  alias Forge.Projects.Project
+  alias Forge.Projects.{Member, Project}
 
   require Logger
 
@@ -15,8 +16,16 @@ defmodule Forge.Projects do
   an existing one is used as is, so a repository can be imported by pushing to it first. The
   hooks that enforce the branch discipline are installed either way.
   """
-  @spec register(map()) :: {:ok, Project.t()} | {:error, Ecto.Changeset.t() | term()}
-  def register(attrs) do
+  @spec register(map(), User.t() | nil) ::
+          {:ok, Project.t()} | {:error, Ecto.Changeset.t() | term()}
+  def register(attrs, owner \\ nil)
+
+  # Refused rather than allowed to produce a project with no members: such a project is invisible
+  # to every user including a node admin, and the only repair is SQL. The command line resolves
+  # an owner with `Accounts.owner_for/1` before it gets here.
+  def register(_attrs, nil), do: {:error, :no_owner}
+
+  def register(attrs, %User{} = owner) do
     changeset = Project.changeset(%Project{}, attrs)
 
     with {:ok, project} <- Ecto.Changeset.apply_action(changeset, :insert),
@@ -33,8 +42,12 @@ defmodule Forge.Projects do
            Git.ensure_initial_commit(Path.expand(project.repo_path), project.default_branch) do
       Multi.new()
       |> Multi.insert(:project, changeset)
-      |> Events.log(:event, "project.registered", :system, fn %{project: project} ->
-        %{payload: %{"project_id" => project.id, "name" => project.name}}
+      |> own(owner)
+      |> Events.log(:event, "project.registered", actor(owner), fn %{project: project} ->
+        %{
+          project_id: project.id,
+          payload: %{"project_id" => project.id, "name" => project.name}
+        }
       end)
       |> Repo.transaction()
       |> case do
@@ -44,14 +57,205 @@ defmodule Forge.Projects do
     end
   end
 
+  # Whoever registers a project administers it — `docs/design/identity.md` § Projects and
+  # members. There is no ownerless path any more: `register/2` refuses one.
+  defp own(multi, %User{} = owner) do
+    Multi.insert(multi, :member, fn %{project: project} ->
+      Member.changeset(%Member{}, %{
+        project_id: project.id,
+        user_id: owner.id,
+        role: :admin
+      })
+    end)
+  end
+
+  defp actor(%User{id: id}), do: {:user, id}
+
+  @doc """
+  Adds a member with no capability check, for the host.
+
+  This is the repair path and deliberately not `put_member/4`: a project whose admins are all
+  gone has nobody holding `:manage` to act through, so a function that required one could not
+  fix the state it exists to fix. Reachable only from a shell, which is past every gate.
+  """
+  @spec grant_member(Project.t(), User.t(), Member.role()) :: {:ok, Member.t()} | {:error, term()}
+  def grant_member(%Project{} = project, %User{} = user, role) when role in [:admin, :member] do
+    %Member{}
+    |> Member.changeset(%{project_id: project.id, user_id: user.id, role: role})
+    |> Repo.insert(
+      on_conflict: {:replace, [:role, :updated_at]},
+      conflict_target: [:project_id, :user_id]
+    )
+  end
+
   @spec get!(String.t()) :: Project.t()
   def get!(id), do: Repo.get!(Project, id)
 
   @spec by_name(String.t()) :: Project.t() | nil
   def by_name(name), do: Repo.one(from p in Project, where: p.name == ^name)
 
+  @doc """
+  Every project. Node-wide, so nothing an operator sees may call it — see `list/1`.
+  """
   @spec list() :: [Project.t()]
   def list, do: Repo.all(from p in Project, order_by: p.name)
+
+  @doc """
+  The projects this user is a member of, which is the only list a person is ever shown.
+
+  A non-member does not see a project: not its name, not its tickets, not that it exists
+  (`docs/design/identity.md` § Projects and members).
+  """
+  @spec list(User.t()) :: [Project.t()]
+  def list(%User{id: user_id}) do
+    Repo.all(
+      from p in Project,
+        join: m in Member,
+        on: m.project_id == p.id,
+        where: m.user_id == ^user_id,
+        order_by: p.name
+    )
+  end
+
+  ## Membership
+
+  @doc "The role this user holds on this project, or nil for a non-member."
+  @spec role(Project.t(), User.t()) :: Member.role() | nil
+  def role(%Project{id: project_id}, %User{id: user_id}) do
+    Repo.one(
+      from m in Member,
+        where: m.project_id == ^project_id and m.user_id == ^user_id,
+        select: m.role
+    )
+  end
+
+  @doc """
+  Whether this user may reach this project's work.
+
+  Asks the capability rather than testing for any role at all. This is the JSON API's only read
+  guard, so hard-coding "a membership row grants read" here is the capability seam failing at
+  the one call site it was built for: splitting `:use` later would leave every ticket endpoint
+  granting read to a role that no longer carries it.
+  """
+  @spec member?(Project.t(), User.t()) :: boolean()
+  def member?(%Project{} = project, %User{} = user) do
+    Forge.Access.can?(
+      Forge.Accounts.Scope.for_project(Forge.Accounts.Scope.for_user(user), project),
+      :use
+    )
+  end
+
+  @doc "The memberships of a project, admins first then by when they joined."
+  @spec members(Project.t()) :: [Member.t()]
+  def members(%Project{id: project_id}) do
+    Repo.all(
+      from m in Member,
+        where: m.project_id == ^project_id,
+        order_by: [asc: m.inserted_at],
+        preload: [:user]
+    )
+    |> Enum.sort_by(&{rank(&1.role), &1.inserted_at})
+  end
+
+  # Explicit, because `order_by: [asc: m.role]` sorted the stored strings and "admins first" was
+  # true only because 'admin' < 'member' in the alphabet. A third role would reorder the page
+  # silently.
+  defp rank(:admin), do: 0
+  defp rank(:member), do: 1
+
+  @doc """
+  Adds or changes a member.
+
+  There are no invitations: the user already exists, because approval is what made them exist
+  (`docs/design/identity.md` § Projects and members). `by` is the acting admin, recorded as the
+  event's actor.
+  """
+  @spec put_member(Project.t(), User.t(), Member.role(), User.t()) ::
+          {:ok, Member.t()} | {:error, term()}
+  def put_member(%Project{} = project, %User{} = user, role, %User{} = by)
+      when role in [:admin, :member] do
+    cond do
+      manageable(project, by) != :ok ->
+        {:error, :forbidden}
+
+      # Demotion is removal by another name: a project whose last admin becomes a member has
+      # nobody who can make one again, and `remove_member/3` refuses exactly this.
+      role != :admin and last_admin?(project, user) ->
+        {:error, :last_admin}
+
+      true ->
+        set_member(project, user, role, by)
+    end
+  end
+
+  defp set_member(project, user, role, by) do
+    changeset =
+      Member.changeset(%Member{}, %{project_id: project.id, user_id: user.id, role: role})
+
+    Multi.new()
+    |> Multi.insert(:member, changeset,
+      on_conflict: {:replace, [:role, :updated_at]},
+      conflict_target: [:project_id, :user_id]
+    )
+    |> Events.log(:event, "project.member_set", {:user, by.id}, %{
+      project_id: project.id,
+      payload: %{"project_id" => project.id, "user_id" => user.id, "role" => to_string(role)}
+    })
+    |> Repo.transaction()
+    |> case do
+      {:ok, %{member: member}} -> {:ok, member}
+      {:error, _step, reason, _changes} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Removes a member.
+
+  Removing the last admin is refused: a project with none has no one who can add one, and the
+  membership page would be the thing that locked itself.
+  """
+  @spec remove_member(Project.t(), User.t(), User.t()) :: :ok | {:error, term()}
+  def remove_member(%Project{} = project, %User{} = user, %User{} = by) do
+    cond do
+      manageable(project, by) != :ok ->
+        {:error, :forbidden}
+
+      last_admin?(project, user) ->
+        {:error, :last_admin}
+
+      true ->
+        Multi.new()
+        |> Multi.delete_all(
+          :member,
+          from(m in Member, where: m.project_id == ^project.id and m.user_id == ^user.id)
+        )
+        |> Events.log(:event, "project.member_removed", {:user, by.id}, %{
+          project_id: project.id,
+          payload: %{"project_id" => project.id, "user_id" => user.id}
+        })
+        |> Repo.transaction()
+        |> case do
+          {:ok, _changes} -> :ok
+          {:error, _step, reason, _changes} -> {:error, reason}
+        end
+    end
+  end
+
+  # Membership is what `:manage` means, so changing it is guarded the same way the settings are.
+  # Here rather than only in the page: a LiveView that hides the form is cosmetics, and this is
+  # the thing an event sent by hand still has to get past.
+  defp manageable(%Project{} = project, %User{} = by) do
+    scope = Forge.Accounts.Scope.for_project(Forge.Accounts.Scope.for_user(by), project)
+    Forge.Access.ensure(scope, :manage)
+  end
+
+  defp last_admin?(%Project{id: project_id}, %User{id: user_id}) do
+    role(%Project{id: project_id}, %User{id: user_id}) == :admin and
+      not Repo.exists?(
+        from m in Member,
+          where: m.project_id == ^project_id and m.role == :admin and m.user_id != ^user_id
+      )
+  end
 
   @doc "Changes a registered project. `mix forge.seed.publish` uses it to move the seed on."
   @spec update(Project.t(), map()) :: {:ok, Project.t()} | {:error, Ecto.Changeset.t()}
@@ -162,14 +366,14 @@ defmodule Forge.Projects do
   end
 
   @doc "Registers a project whose bare repository is `<repos_dir>/<name>.git`."
-  @spec register_named(String.t() | nil, String.t()) ::
+  @spec register_named(String.t() | nil, String.t(), User.t() | nil) ::
           {:ok, Project.t()} | {:error, Ecto.Changeset.t() | term()}
-  def register_named(name, default_branch) do
+  def register_named(name, default_branch, owner \\ nil) do
     # The name is validated by the changeset before anything touches the filesystem, so a
     # path-like name never becomes a path.
     repo_path = if is_binary(name), do: Path.join(repos_dir(), name <> ".git")
 
-    case register(%{name: name, repo_path: repo_path, default_branch: default_branch}) do
+    case register(%{name: name, repo_path: repo_path, default_branch: default_branch}, owner) do
       # Here the path is derived from the name rather than given, so it is blank only because
       # the name was. Reporting it would name a field the caller never sent.
       {:error, %Ecto.Changeset{} = changeset} ->

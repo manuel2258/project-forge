@@ -8,54 +8,26 @@ defmodule Forge.Git do
   @type repo :: String.t()
   @type sha :: String.t()
 
-  @doc "Creates a bare repository at `path` unless one exists."
+  @doc """
+  Creates a bare repository at `path` unless one exists.
+
+  It installs no hooks. There is exactly one `pre-receive` in this product — the generated one
+  in `Forge.Git.Hooks`, which `Projects.register/2` installs on the next line and `ensure_hooks/0`
+  re-asserts at boot — and a second implementation here was a weaker copy of a security control:
+  it checked only the ref scope, with no default-branch guard, no internal marker and no delete
+  guard. Nothing served it, because registration overwrote it immediately. A hostile review
+  still called it out, and rightly: two implementations of a rule is one waiting to be picked up
+  by a refactor as though it were the rule.
+  """
   @spec init_bare(String.t()) :: :ok | {:error, term()}
   def init_bare(path) do
     if File.exists?(Path.join(path, "HEAD")) do
-      install_hooks(path)
+      :ok
     else
       File.mkdir_p!(path)
 
-      with {:ok, _} <- run(path, ["init", "--bare", "--quiet"]) do
-        install_hooks(path)
-      end
+      with {:ok, _output} <- run(path, ["init", "--bare", "--quiet"]), do: :ok
     end
-  end
-
-  # A job's push may touch exactly one ref: the branch its token names, which the platform
-  # puts in the environment when it runs `git http-backend`. The check is a hook because only
-  # git knows what a push contains; a plug would have to parse the pack to find out.
-  #
-  # An empty variable allows the push. Nothing but the platform's git endpoint sets it, so an
-  # empty one means this is not a job pushing — it is the operator, on this machine, with the
-  # repository's path, and `docs/decisions.md` leaves them SSH and the command line.
-  @pre_receive """
-  #!/bin/sh
-  # Installed by forge. See Forge.Git.install_hooks/1.
-  allowed="${FORGE_ALLOWED_REF:-}"
-  [ -z "$allowed" ] && exit 0
-  status=0
-  while read -r _old _new ref; do
-    if [ "$ref" != "$allowed" ]; then
-      echo "forge: this credential may only update $allowed, not $ref" >&2
-      status=1
-    fi
-  done
-  exit $status
-  """
-
-  @doc "Installs the hooks the platform relies on. Idempotent, and safe on an existing repo."
-  @spec install_hooks(repo()) :: :ok
-  def install_hooks(repo) do
-    path = Path.join([repo, "hooks", "pre-receive"])
-    File.mkdir_p!(Path.dirname(path))
-
-    unless File.read(path) == {:ok, @pre_receive} do
-      File.write!(path, @pre_receive)
-      File.chmod!(path, 0o755)
-    end
-
-    :ok
   end
 
   @doc """

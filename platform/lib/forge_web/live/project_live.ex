@@ -25,7 +25,7 @@ defmodule ForgeWeb.ProjectLive do
 
   @impl true
   def mount(%{"name" => name}, _session, socket) do
-    project = Projects.by_name(name) || raise Ecto.NoResultsError, queryable: Projects.Project
+    {project, _scope} = ForgeWeb.Access.project_by_name!(socket.assigns.current_scope, name)
     if connected?(socket), do: Events.subscribe()
 
     {:ok, socket |> assign(project_id: project.id, page_title: project.name) |> load()}

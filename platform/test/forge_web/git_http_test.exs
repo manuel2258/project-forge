@@ -10,6 +10,8 @@ defmodule ForgeWeb.GitHttpTest do
 
   use Forge.DataCase, async: false
 
+  import Forge.ForgeFixtures
+
   import Forge.GitFixtures
 
   alias Forge.Git
@@ -21,7 +23,7 @@ defmodule ForgeWeb.GitHttpTest do
     name = "demo#{System.unique_integer([:positive])}"
 
     {:ok, project} =
-      Projects.register(%{name: name, repo_path: bare, default_branch: "main"})
+      register_owned!(%{name: name, repo_path: bare, default_branch: "main"})
 
     {:ok, main} = Git.resolve(bare, "refs/heads/main")
     :ok = Git.create_branch(bare, "ticket/1", main)
@@ -68,7 +70,7 @@ defmodule ForgeWeb.GitHttpTest do
       name = "other#{System.unique_integer([:positive])}"
 
       {:ok, other} =
-        Projects.register(%{name: name, repo_path: other_bare, default_branch: "main"})
+        register_owned!(%{name: name, repo_path: other_bare, default_branch: "main"})
 
       {:ok, token, _row} = Tokens.issue(other, ref: "refs/heads/ticket/1", write: true)
 

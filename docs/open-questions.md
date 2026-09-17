@@ -2,7 +2,15 @@
 
 These questions are open. They have not been answered and no recommendation is recorded.
 
-- Which credential funds execution. Subscription authentication is individual-use; metered API billing is not. This decides whether team use is real. Settled for the PoC: the operator's subscription token, by decision; the comparison is not run. Open for team use.
+- ~~Which credential funds execution.~~ **Answered structurally.** A credential is owned by a
+  user and is either a subscription token or an API key; a worker carries one, and its owner
+  assigns the worker to projects they are a member of. Team use is real because each person
+  brings their own, so subscription authentication's individual-use constraint is respected
+  rather than worked around. Settled for the PoC as before: one operator, one subscription token
+  from the environment. See `design/identity.md` § Credentials and `decisions.md` § Security and
+  users. **Residual, narrower than the original:** a worker assigned to two projects runs other
+  people's jobs on its owner's subscription credential. That does not arise until a second person
+  exists on a node, and is undecided.
 - How structured questions are represented in a document.
 - The idle period before a worker is destroyed.
 - Branch granularity: one branch per job, or one per ticket with rebasing on conflict.

@@ -3,6 +3,11 @@ defmodule Forge.Events.Event do
   One entry in the append-only event log. `seq` is the global order. `actor` is
   `%{"kind" => "system" | "user" | "job", "id" => id | nil}`. `type` is dotted, e.g.
   `ticket.admitted`, `job.harness.tool_use`, `transition.taken`.
+
+  `project_id` is denormalised rather than reached through the ticket or the job, because both
+  are nullable and a node-wide event has neither. It is what makes "the events I may read" one
+  indexed query — `docs/design/identity.md` § Read scoping is the half that leaks. Null means
+  node-wide, which only a node admin reads.
   """
 
   use Ecto.Schema
@@ -15,6 +20,7 @@ defmodule Forge.Events.Event do
     field :type, :string
     field :payload, :map, default: %{}
 
+    belongs_to :project, Forge.Projects.Project
     belongs_to :ticket, Forge.Tickets.Ticket
     belongs_to :job, Forge.Jobs.Job
 
@@ -23,12 +29,13 @@ defmodule Forge.Events.Event do
 
   def changeset(event, attrs) do
     event
-    |> cast(attrs, [:ticket_id, :job_id, :actor, :type, :payload])
+    |> cast(attrs, [:project_id, :ticket_id, :job_id, :actor, :type, :payload])
     |> validate_required([:actor, :type, :payload])
     |> validate_format(:type, ~r/^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/,
       message: "must be dotted, e.g. ticket.admitted"
     )
     |> validate_actor()
+    |> foreign_key_constraint(:project_id)
     |> foreign_key_constraint(:ticket_id)
     |> foreign_key_constraint(:job_id)
   end

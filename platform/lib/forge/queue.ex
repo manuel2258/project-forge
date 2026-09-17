@@ -5,10 +5,11 @@ defmodule Forge.Queue do
   state that has a way forward.
   """
 
-  import Ecto.Query, only: [from: 2]
+  import Ecto.Query, only: [from: 2, dynamic: 1, dynamic: 2]
 
   require Logger
 
+  alias Forge.Accounts.User
   alias Forge.{Artifacts, Conversations, Projects, Repo, Tickets}
   alias Forge.Artifacts.Question
   alias Forge.Jobs.Job
@@ -30,25 +31,68 @@ defmodule Forge.Queue do
           detail: map()
         }
 
+  @doc """
+  Everything on the node waiting on a person. Node-wide, so no operator surface calls it:
+  the queue a person is shown is `items/1`.
+  """
   @spec items() :: [item()]
-  def items do
-    tickets =
-      Repo.all(from t in Ticket, where: t.status in [:active, :stuck], order_by: t.inserted_at)
+  def items, do: build(nil)
 
-    (questions(tickets) ++ Enum.flat_map(tickets, &ticket_items/1) ++ chats())
+  @doc """
+  The queue as one user sees it: the union over the projects they are a member of.
+
+  This is the read that leaks most easily — refusing a mutation is easy to get right, and a
+  list that quietly includes one extra project looks exactly like a working queue. See
+  `docs/design/identity.md` § Read scoping is the half that leaks.
+  """
+  @spec items(User.t()) :: [item()]
+  def items(%User{} = user), do: build(Enum.map(Projects.list(user), & &1.id))
+
+  defp build(project_ids) do
+    tickets =
+      Repo.all(
+        from t in Ticket,
+          # Equivalent mutant, but not for the reason first written here. The original comment
+          # said `ticket_items/1` reaches `review_item/2` for any other status; it does not —
+          # the `pending_transition` clause matches first and checks neither status nor
+          # terminality, so a `:done` ticket carrying one would appear as an approval.
+          #
+          # What actually makes this redundant is an invariant in the engine:
+          # `put_pending_approval/4` always writes `status: :active`, `put_transition/6` always
+          # clears `pending_transition`, and nothing writes `:cancelled` at all — so the pair
+          # that would distinguish them cannot be produced. This stays as a narrowing of the
+          # rows loaded, and a fourth `ticket_items/1` clause would need this read again.
+          #
+          # The rule a test can fail on is "a finished ticket is not in the queue", in
+          # `scoping_test.exs`.
+          where: t.status in [:active, :stuck],
+          where: ^visible(project_ids),
+          order_by: t.inserted_at
+      )
+
+    (questions(tickets) ++ Enum.flat_map(tickets, &ticket_items/1) ++ chats(project_ids))
     |> Enum.sort_by(& &1.since, DateTime)
   end
+
+  # `true` rather than a missing clause, so that the scoped and unscoped reads run the same
+  # query shape and a mistake in one cannot pass because the other took a different path.
+  defp visible(nil), do: dynamic(true)
+  defp visible(project_ids), do: dynamic([t], t.project_id in ^project_ids)
 
   # A conversation waiting on a person is literally what the queue is for: something that will
   # not move until someone acts. It is in the queue only while it is waiting — a chat mid-reply
   # is not waiting on you, it is working (`docs/design/conversations.md` § In the queue).
-  defp chats do
+  defp chats(project_ids) do
     Repo.all(
       from j in Job,
-        where: j.kind == :chat and j.status in ^Conversations.live_statuses()
+        where: j.kind == :chat and j.status in ^Conversations.live_statuses(),
+        where: ^visible_chat(project_ids)
     )
     |> Enum.flat_map(&chat_item/1)
   end
+
+  defp visible_chat(nil), do: dynamic(true)
+  defp visible_chat(project_ids), do: dynamic([j], j.project_id in ^project_ids)
 
   defp chat_item(%Job{} = chat) do
     case Conversations.messages(chat.id) do

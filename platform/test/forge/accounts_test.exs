@@ -257,6 +257,34 @@ defmodule Forge.AccountsTest do
       %{user: user_fixture()}
     end
 
+    test "are listed for their own user only, and only api tokens", %{user: user} do
+      stranger = user_fixture()
+      Accounts.create_api_token(user, "mine")
+      Accounts.create_api_token(stranger, "theirs")
+      # A session token for the same user: the listing is scoped by context as well as by user.
+      Accounts.generate_user_session_token(user)
+
+      names = Enum.map(Accounts.list_api_tokens(user), & &1.name)
+
+      assert names == ["mine"]
+    end
+
+    test "are listed in a stable order when two share a second", %{user: user} do
+      # The tie-break on name is there because timestamps are second-resolution. Without it the
+      # order is whatever Postgres returns, and the listing reshuffles between page loads.
+      Accounts.create_api_token(user, "zebra")
+      Accounts.create_api_token(user, "aardvark")
+
+      same_second =
+        Forge.Repo.update_all(
+          Ecto.Query.from(t in Accounts.UserToken, where: t.context == "api"),
+          set: [inserted_at: ~U[2026-01-01 00:00:00Z]]
+        )
+
+      assert {2, _} = same_second
+      assert Enum.map(Accounts.list_api_tokens(user), & &1.name) == ["aardvark", "zebra"]
+    end
+
     test "are listed by name, revoked by name and deleted with the password", %{user: user} do
       laptop = Accounts.create_api_token(user, "laptop")
       phone = Accounts.create_api_token(user, "phone")

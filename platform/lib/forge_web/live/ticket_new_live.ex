@@ -10,12 +10,12 @@ defmodule ForgeWeb.TicketNewLive do
 
   use ForgeWeb, :live_view
 
-  alias Forge.{Projects, Tickets}
+  alias Forge.{Operator, Projects, Tickets}
   alias ForgeWeb.Operator.Admission
 
   @impl true
   def mount(params, _session, socket) do
-    projects = Projects.list()
+    projects = Projects.list(socket.assigns.current_scope.user)
     named = params["project"]
     chosen = named || with([first | _rest] <- projects, do: first.name)
 
@@ -72,7 +72,7 @@ defmodule ForgeWeb.TicketNewLive do
     project = socket.assigns.project
     attrs = %{title: title, body: String.trim(params["body"] || "")}
 
-    case Tickets.admit(project, attrs, {:user, socket.assigns.current_scope.user.id}) do
+    case Operator.admit(project, socket.assigns.current_scope.user, attrs) do
       {:ok, ticket} ->
         {:noreply,
          socket

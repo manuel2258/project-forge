@@ -8,6 +8,8 @@ defmodule Forge.ProjectsTest do
 
   use Forge.DataCase, async: false
 
+  import Forge.ForgeFixtures
+
   import Forge.GitFixtures
 
   alias Forge.{Git, Projects}
@@ -16,7 +18,7 @@ defmodule Forge.ProjectsTest do
     repo = Path.join(tmp_dir("bare"), "new.git")
 
     {:ok, project} =
-      Projects.register(%{name: "new-#{System.unique_integer([:positive])}", repo_path: repo})
+      register_owned!(%{name: "new-#{System.unique_integer([:positive])}", repo_path: repo})
 
     assert Git.branch_exists?(repo, project.default_branch)
   end
@@ -29,7 +31,7 @@ defmodule Forge.ProjectsTest do
     repo = Path.join(tmp_dir("bare"), "old.git")
 
     {:ok, project} =
-      Projects.register(%{name: "old-#{System.unique_integer([:positive])}", repo_path: repo})
+      register_owned!(%{name: "old-#{System.unique_integer([:positive])}", repo_path: repo})
 
     # Exactly what a project registered before this change looks like: hooks, a HEAD, no commit.
     {:ok, _out} = Git.run(repo, ["update-ref", "-d", "refs/heads/#{project.default_branch}"])
@@ -45,7 +47,7 @@ defmodule Forge.ProjectsTest do
     {:ok, before} = Git.resolve(repo, "refs/heads/main")
 
     {:ok, _project} =
-      Projects.register(%{name: "seeded-#{System.unique_integer([:positive])}", repo_path: repo})
+      register_owned!(%{name: "seeded-#{System.unique_integer([:positive])}", repo_path: repo})
 
     assert Projects.ensure_hooks() >= 1
     assert {:ok, ^before} = Git.resolve(repo, "refs/heads/main")

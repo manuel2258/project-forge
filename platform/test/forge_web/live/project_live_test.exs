@@ -17,17 +17,20 @@ defmodule ForgeWeb.ProjectLiveTest do
 
   setup :register_and_log_in_user
 
-  setup do
+  setup %{user: user} do
     repos = tmp_dir("repos")
     original = Application.get_env(:forge, Forge.Jobs)
     Application.put_env(:forge, Forge.Jobs, Keyword.put(original, :repos_dir, repos))
     on_exit(fn -> Application.put_env(:forge, Forge.Jobs, original) end)
 
     {:ok, project} =
-      Projects.register(%{
-        name: "proj-#{System.unique_integer([:positive])}",
-        repo_path: seeded_repo()
-      })
+      Projects.register(
+        %{
+          name: "proj-#{System.unique_integer([:positive])}",
+          repo_path: seeded_repo()
+        },
+        user
+      )
 
     %{project: project}
   end
@@ -103,8 +106,9 @@ defmodule ForgeWeb.ProjectLiveTest do
     end
   end
 
-  test "an empty project says so rather than drawing an empty board", %{conn: conn} do
-    {:ok, project} = Projects.register_named("bare-#{System.unique_integer([:positive])}", "main")
+  test "an empty project says so rather than drawing an empty board", %{conn: conn, user: user} do
+    {:ok, project} =
+      Projects.register_named("bare-#{System.unique_integer([:positive])}", "main", user)
 
     {:ok, _view, html} = live(conn, ~p"/projects/#{project.name}")
 

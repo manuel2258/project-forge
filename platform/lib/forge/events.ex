@@ -13,15 +13,23 @@ defmodule Forge.Events do
   @type actor :: :system | {:user, String.t()} | {:job, String.t()}
 
   @doc """
-  Adds an event insert to `multi` under `name`. `attrs` may hold `:ticket_id`, `:job_id`
-  and `:payload`; `payload` may also be a function of the multi's changes so far, for
+  Adds an event insert to `multi` under `name`. `attrs` may hold `:project_id`, `:ticket_id`,
+  `:job_id` and `:payload`; `payload` may also be a function of the multi's changes so far, for
   events that reference rows inserted earlier in the same transaction.
+
+  `project_id` is filled in from the ticket or the job when the caller does not pass it, so
+  reads can be scoped to membership without thirty call sites having to remember. A caller with
+  neither is a node-wide event and stays null.
   """
   @spec log(Multi.t(), atom(), String.t(), actor(), map() | (map() -> map())) :: Multi.t()
   def log(%Multi{} = multi, name, type, actor, attrs \\ %{}) do
     Multi.insert(multi, name, fn changes ->
       attrs = if is_function(attrs, 1), do: attrs.(changes), else: attrs
-      Event.changeset(%Event{}, Map.merge(attrs, %{type: type, actor: encode_actor(actor)}))
+
+      Event.changeset(
+        %Event{},
+        attrs |> with_project() |> Map.merge(%{type: type, actor: encode_actor(actor)})
+      )
     end)
   end
 
@@ -29,8 +37,34 @@ defmodule Forge.Events do
   @spec append(String.t(), actor(), map()) :: {:ok, Event.t()} | {:error, Ecto.Changeset.t()}
   def append(type, actor, attrs \\ %{}) do
     %Event{}
-    |> Event.changeset(Map.merge(attrs, %{type: type, actor: encode_actor(actor)}))
+    |> Event.changeset(
+      attrs
+      |> with_project()
+      |> Map.merge(%{type: type, actor: encode_actor(actor)})
+    )
     |> Repo.insert()
+  end
+
+  # Derived once, here, rather than at every call site. Both lookups run inside the caller's
+  # transaction, so a ticket or job inserted earlier in the same multi is already visible.
+  defp with_project(attrs) do
+    case {project_key(attrs), attrs[:ticket_id] || attrs["ticket_id"],
+          attrs[:job_id] || attrs["job_id"]} do
+      {nil, ticket_id, _job_id} when is_binary(ticket_id) ->
+        Map.put(attrs, :project_id, lookup(Forge.Tickets.Ticket, ticket_id))
+
+      {nil, _ticket_id, job_id} when is_binary(job_id) ->
+        Map.put(attrs, :project_id, lookup(Forge.Jobs.Job, job_id))
+
+      _already_set_or_node_wide ->
+        attrs
+    end
+  end
+
+  defp project_key(attrs), do: attrs[:project_id] || attrs["project_id"]
+
+  defp lookup(schema, id) do
+    Repo.one(from r in schema, where: r.id == ^id, select: r.project_id)
   end
 
   @spec for_ticket(String.t()) :: [Event.t()]
@@ -44,18 +78,18 @@ defmodule Forge.Events do
   end
 
   @doc """
-  The newest events of a project, across its tickets, newest first.
+  The newest events of a project, newest first.
 
-  Events carry a `ticket_id` and not a `project_id`, so this joins. `project.registered` has
-  neither and so is not here — the project page is showing what has happened since.
+  This reads the denormalised `project_id` rather than joining through the ticket. The join was
+  what made a project's own events — `project.registered`, a membership change — unreachable,
+  because they have no ticket; and once reads are scoped to membership, an event nothing can
+  attribute to a project is an event nothing can decide the visibility of.
   """
   @spec for_project(String.t(), pos_integer()) :: [Event.t()]
   def for_project(project_id, limit) do
     Repo.all(
       from e in Event,
-        join: t in Forge.Tickets.Ticket,
-        on: t.id == e.ticket_id,
-        where: t.project_id == ^project_id,
+        where: e.project_id == ^project_id,
         order_by: [desc: e.seq],
         limit: ^limit
     )

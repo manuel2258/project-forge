@@ -17,8 +17,15 @@ defmodule Forge.Accounts.Scope do
   """
 
   alias Forge.Accounts.User
+  alias Forge.Projects.Project
 
-  defstruct user: nil
+  defstruct user: nil, project: nil, role: nil
+
+  @type t :: %__MODULE__{
+          user: User.t() | nil,
+          project: Project.t() | nil,
+          role: Forge.Projects.Member.role() | nil
+        }
 
   @doc """
   Creates a scope for the given user.
@@ -30,4 +37,16 @@ defmodule Forge.Accounts.Scope do
   end
 
   def for_user(nil), do: nil
+
+  @doc """
+  Resolves the scope against a project, carrying the role the user holds there.
+
+  `role` is nil for a non-member, and `Forge.Access` answers false to every capability for such
+  a scope. Authorisation is therefore the same question as "did this resolve", which is what
+  keeps a missing membership from reading as an unrestricted one.
+  """
+  @spec for_project(t(), Project.t()) :: t()
+  def for_project(%__MODULE__{user: %User{} = user} = scope, %Project{} = project) do
+    %{scope | project: project, role: Forge.Projects.role(project, user)}
+  end
 end

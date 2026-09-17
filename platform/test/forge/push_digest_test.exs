@@ -31,7 +31,8 @@ defmodule Forge.Push.DigestTest do
       })
 
     # Something in the queue, or the digest is `:empty` and sends nothing whatever the guard does.
-    ticket = ticket_fixture()
+    # The digest is assembled per reader now, so the reader has to be in the ticket's project.
+    ticket = ticket_fixture() |> join_ticket!(user)
 
     {:ok, _ticket} =
       Repo.update(

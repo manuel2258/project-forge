@@ -7,6 +7,8 @@ defmodule Forge.SpendTest do
 
   use Forge.DataCase, async: false
 
+  import Forge.ForgeFixtures
+
   import Forge.AccountsFixtures
   import Forge.GitFixtures
 
@@ -157,7 +159,7 @@ defmodule Forge.SpendTest do
     bare = seeded_repo(%{".forge/workflow.yml" => workflow})
     name = "spend#{System.unique_integer([:positive])}"
 
-    {:ok, project} = Projects.register(%{name: name, repo_path: bare, default_branch: "main"})
+    {:ok, project} = register_owned!(%{name: name, repo_path: bare, default_branch: "main"})
     {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
     ticket
   end

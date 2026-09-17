@@ -9,7 +9,7 @@ defmodule Forge.CLITest do
 
   test "resolves tickets, shows them and renders the queue" do
     {:ok, project} =
-      Projects.register(%{
+      register_owned!(%{
         name: "cli-#{System.unique_integer([:positive])}",
         repo_path: seeded_repo()
       })

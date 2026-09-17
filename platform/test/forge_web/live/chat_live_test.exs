@@ -17,12 +17,15 @@ defmodule ForgeWeb.ChatLiveTest do
 
   setup :register_and_log_in_user
 
-  setup do
+  setup %{user: user} do
     {:ok, project} =
-      Projects.register(%{
-        name: "chat-#{System.unique_integer([:positive])}",
-        repo_path: seeded_repo()
-      })
+      Projects.register(
+        %{
+          name: "chat-#{System.unique_integer([:positive])}",
+          repo_path: seeded_repo()
+        },
+        user
+      )
 
     {:ok, chat} = Conversations.open(project, "what is this repository?")
     %{project: project, chat: chat}

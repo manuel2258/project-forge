@@ -6,6 +6,7 @@ defmodule Forge.MergeTest do
 
   use Forge.DataCase, async: false
 
+  import Forge.ForgeFixtures
   import Forge.AccountsFixtures
   import Forge.GitFixtures
 
@@ -24,10 +25,11 @@ defmodule Forge.MergeTest do
     name = "merge#{System.unique_integer([:positive])}"
 
     {:ok, project} =
-      Projects.register(%{name: name, repo_path: bare, default_branch: "main"})
+      register_owned!(%{name: name, repo_path: bare, default_branch: "main"})
 
     :ok = Projects.set_mirror(project, mirror)
     user = user_fixture()
+    join!(project, user)
 
     {:ok, ticket} =
       Tickets.admit(project, %{title: "Persist scores", body: "do it"}, {:user, user.id})

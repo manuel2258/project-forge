@@ -6,6 +6,8 @@ defmodule Forge.WorkersTest do
 
   use Forge.DataCase, async: false
 
+  import Forge.ForgeFixtures
+
   alias Forge.{Provider, Workers}
 
   setup do
@@ -184,7 +186,7 @@ defmodule Forge.WorkersTest do
       configure(worker_timeout_ms: 60_000)
 
       {:ok, project} =
-        Forge.Projects.register(%{
+        register_owned!(%{
           name: "perm-#{System.unique_integer([:positive])}",
           repo_path: Forge.GitFixtures.seeded_repo()
         })
@@ -227,7 +229,7 @@ defmodule Forge.WorkersTest do
 
     test "a worker with a job on it is not idle" do
       {:ok, project} =
-        Forge.Projects.register(%{
+        register_owned!(%{
           name: "idle-#{System.unique_integer([:positive])}",
           repo_path: Forge.GitFixtures.seeded_repo()
         })

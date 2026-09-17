@@ -9,13 +9,15 @@ defmodule Forge.ConversationsTest do
 
   use Forge.DataCase, async: false
 
+  import Forge.ForgeFixtures
+
   import Forge.GitFixtures
 
   alias Forge.{Conversations, Events, Git, Jobs, Projects, Spend, Tickets}
 
   setup do
     {:ok, project} =
-      Projects.register(%{
+      register_owned!(%{
         name: "chat-#{System.unique_integer([:positive])}",
         repo_path: seeded_repo()
       })
@@ -59,7 +61,7 @@ defmodule Forge.ConversationsTest do
     # Registering a project now puts an empty commit there, which is what everything starts from.
     test "a chat can be started on a project nobody has pushed to" do
       {:ok, empty} =
-        Projects.register(%{
+        register_owned!(%{
           name: "empty-#{System.unique_integer([:positive])}",
           repo_path: Path.join(Forge.GitFixtures.tmp_dir("bare"), "empty.git")
         })

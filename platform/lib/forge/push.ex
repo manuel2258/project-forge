@@ -60,6 +60,30 @@ defmodule Forge.Push do
   @spec subscriptions() :: [Subscription.t()]
   def subscriptions, do: Repo.all(from s in Subscription, order_by: s.inserted_at)
 
+  @doc """
+  The subscriptions of the people who are members of `project_id`.
+
+  A blocking question is pushed to the phones that can answer it and no others — the push fan-out
+  is a read like any other, and it was the one that leaked to every device on the node.
+  See `docs/design/identity.md` § Read scoping is the half that leaks.
+  """
+  @spec subscriptions(String.t()) :: [Subscription.t()]
+  def subscriptions(project_id) when is_binary(project_id) do
+    Repo.all(
+      from s in Subscription,
+        join: m in Forge.Projects.Member,
+        on: m.user_id == s.user_id,
+        join: u in Forge.Accounts.User,
+        on: u.id == s.user_id,
+        where: m.project_id == ^project_id,
+        # Suspension refuses sessions and tokens; a device that keeps receiving blocking
+        # questions for projects the account can no longer open is the same access by another
+        # route. See `docs/design/identity.md` § Approval.
+        where: not is_nil(u.approved_at) and is_nil(u.suspended_at),
+        order_by: s.inserted_at
+    )
+  end
+
   @doc "Pushes one blocking question to every subscription."
   @spec blocking_question(Ticket.t(), map()) :: :ok
   def blocking_question(%Ticket{} = ticket, question) do
@@ -76,7 +100,8 @@ defmodule Forge.Push do
       },
       ttl: 86_400,
       urgency: :high,
-      topic: topic(tag)
+      topic: topic(tag),
+      to: project.id
     )
   end
 
@@ -106,7 +131,8 @@ defmodule Forge.Push do
       },
       ttl: 86_400,
       urgency: :high,
-      topic: topic(tag)
+      topic: topic(tag),
+      to: project.id
     )
   end
 
@@ -120,8 +146,26 @@ defmodule Forge.Push do
   """
   @spec digest() :: :ok | :empty
   def digest do
-    items = Queue.items()
-    proposals = Proposals.open_count()
+    Repo.all(
+      from s in Subscription,
+        join: u in Forge.Accounts.User,
+        on: u.id == s.user_id,
+        where: not is_nil(u.approved_at) and is_nil(u.suspended_at),
+        distinct: true,
+        select: s.user_id
+    )
+    |> Enum.map(&Forge.Accounts.get_user!/1)
+    |> Enum.map(&digest_for/1)
+    |> Enum.any?(&(&1 == :ok))
+    |> if(do: :ok, else: :empty)
+  end
+
+  # One digest per reader, over their own projects. A single node-wide summary would tell
+  # everybody how many decisions are open somewhere they cannot go, which is both a leak and a
+  # number nobody can act on.
+  defp digest_for(user) do
+    items = Queue.items(user)
+    proposals = Proposals.open_count(user)
 
     case {items, proposals} do
       {[], 0} ->
@@ -136,9 +180,14 @@ defmodule Forge.Push do
             tag: "digest"
           },
           ttl: 43_200,
-          topic: "digest"
+          topic: "digest",
+          subscriptions: for_user(user)
         )
     end
+  end
+
+  defp for_user(%User{id: user_id}) do
+    Repo.all(from s in Subscription, where: s.user_id == ^user_id, order_by: s.inserted_at)
   end
 
   # The title says what is *waiting*, which proposals are not. A count that folded them in would
@@ -179,7 +228,15 @@ defmodule Forge.Push do
   defp deliver(payload, opts) do
     if enabled?() do
       json = Jason.encode!(payload)
-      subscriptions = subscriptions()
+
+      # `:to` is a project: only its members' devices. Without it this is a node-wide message —
+      # the digest, which is assembled per reader elsewhere, and the flush in the test helper.
+      subscriptions =
+        cond do
+          given = Keyword.get(opts, :subscriptions) -> given
+          project_id = Keyword.get(opts, :to) -> subscriptions(project_id)
+          true -> subscriptions()
+        end
 
       {:ok, _pid} =
         Task.Supervisor.start_child(Forge.TaskSupervisor, fn ->

@@ -72,7 +72,7 @@ defmodule Forge.PushTest do
     {:ok, _} = Push.subscribe(user, browser_subscription("https://push.example/broken"))
     {:ok, _} = Push.subscribe(user, browser_subscription("https://push.example/raises"))
     {:ok, _} = Push.subscribe(user, browser_subscription("https://push.example/b"))
-    ticket = ticket_fixture()
+    ticket = ticket_fixture() |> join_ticket!(user)
 
     log =
       capture_log(fn ->
@@ -120,7 +120,7 @@ defmodule Forge.PushTest do
     Push.flush()
     refute_receive {:push, _, _, _}
 
-    ticket = ticket_fixture()
+    ticket = ticket_fixture() |> join_ticket!(user)
 
     {:ok, _} =
       Repo.update(
@@ -142,13 +142,99 @@ defmodule Forge.PushTest do
     assert opts[:ttl] == 43_200
   end
 
+  test "the digest is sent when one reader has something, even if another has nothing", %{
+    user: user
+  } do
+    # `any?` and not `all?`: two people subscribe, one has a queue and one does not. Answering
+    # `:empty` because somebody's queue was empty would silence the person who had work waiting.
+    idle = user_fixture()
+    {:ok, _} = Push.subscribe(user, browser_subscription("https://push.example/busy"))
+    {:ok, _} = Push.subscribe(idle, browser_subscription("https://push.example/idle"))
+
+    ticket = ticket_fixture() |> join_ticket!(user)
+
+    {:ok, _} =
+      Repo.update(
+        Forge.Tickets.Ticket.progress_changeset(ticket, %{
+          state: ticket.state,
+          status: :stuck,
+          cost_usd: ticket.cost_usd
+        })
+      )
+
+    assert :ok = Push.digest()
+    Push.flush()
+
+    assert_receive {:push, "https://push.example/busy", _payload, _opts}
+    refute_receive {:push, "https://push.example/idle", _payload, _opts}
+  end
+
+  test "a suspended member's device stops receiving", %{user: user} do
+    admin = node_admin_fixture()
+    ticket = ticket_fixture() |> join_ticket!(user)
+    suspended = member_fixture(Forge.Projects.get!(ticket.project_id), :member)
+
+    {:ok, _} = Push.subscribe(user, browser_subscription("https://push.example/active"))
+    {:ok, _} = Push.subscribe(suspended, browser_subscription("https://push.example/suspended"))
+    {:ok, _} = Forge.Accounts.suspend_user(suspended, admin)
+
+    assert :ok = Push.blocking_question(ticket, %{key: "backend", text: "Which backend?"})
+    Push.flush()
+
+    # Suspension refuses sessions and tokens. A phone that keeps buzzing with questions about a
+    # project the account can no longer open is the same access wearing a different hat.
+    assert_receive {:push, "https://push.example/active", _payload, _opts}
+    refute_receive {:push, "https://push.example/suspended", _payload, _opts}
+  end
+
+  test "unsubscribing removes your own device and nobody else's" do
+    mine = user_fixture()
+    theirs = user_fixture()
+    endpoint = "https://push.example/shared-endpoint"
+
+    {:ok, _} = Push.subscribe(mine, browser_subscription(endpoint))
+    {:ok, _} = Push.subscribe(theirs, browser_subscription(endpoint))
+
+    :ok = Push.unsubscribe(mine, endpoint)
+
+    # Two people can hold the same endpoint string, and the delete matches on user *and*
+    # endpoint. Matching on either would let one person unsubscribe another's phone.
+    endpoints = Enum.map(Push.subscriptions(), &{&1.user_id, &1.endpoint})
+    refute {mine.id, endpoint} in endpoints
+    assert {theirs.id, endpoint} in endpoints
+  end
+
+  # The fan-out is a read like any other, and it was the one that reached every device on the
+  # node. A blocking question goes to the phones that can answer it: a person who is not in the
+  # project cannot open the ticket the notification links to.
+  test "a blocking question reaches members only", %{user: user} do
+    ticket = ticket_fixture() |> join_ticket!(user)
+
+    # A member of *another* project, not a member of nothing. An outsider with no membership at
+    # all is excluded by the join itself, so the project filter could be deleted and this test
+    # would still pass — which is exactly what a mutation run found.
+    outsider = member_fixture(project_fixture(), :admin)
+
+    {:ok, _} = Push.subscribe(user, browser_subscription("https://push.example/member"))
+    {:ok, _} = Push.subscribe(outsider, browser_subscription("https://push.example/outsider"))
+
+    assert :ok = Push.blocking_question(ticket, %{key: "backend", text: "Which backend?"})
+    Push.flush()
+
+    assert_receive {:push, "https://push.example/member", _payload, _opts}
+    refute_receive {:push, "https://push.example/outsider", _payload, _opts}
+  end
+
   # A proposal is not a queue item — it blocks nothing — so this is the one place a person is
   # told about one without opening a project page. Without it a proposal nobody looks at is a
   # proposal nobody decides, and the backlog an agent reads keeps offering it back for ever.
   test "the digest counts open proposals, and says they are not waiting on you", %{user: user} do
     {:ok, _} = Push.subscribe(user, browser_subscription("https://push.example/a"))
 
-    version = proposal_fixture()
+    # The digest counts a reader's own projects, so the proposal has to be in one of them.
+    job = job_fixture()
+    join!(Forge.Projects.get!(job.project_id), user)
+    version = proposal_fixture(%{job: job})
 
     assert :ok = Push.digest()
     Push.flush()
@@ -166,7 +252,7 @@ defmodule Forge.PushTest do
   test "a queue item and a proposal are counted separately in one digest", %{user: user} do
     {:ok, _} = Push.subscribe(user, browser_subscription("https://push.example/a"))
 
-    ticket = ticket_fixture()
+    ticket = ticket_fixture() |> join_ticket!(user)
 
     {:ok, _} =
       Repo.update(
@@ -177,7 +263,7 @@ defmodule Forge.PushTest do
         })
       )
 
-    proposal_fixture()
+    proposal_fixture(%{job: job_fixture(%{ticket: ticket})})
 
     assert :ok = Push.digest()
     Push.flush()

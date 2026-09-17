@@ -81,8 +81,11 @@ defmodule ForgeWeb.WorkerChannel do
   # Best-effort, and unacked: a lost event costs a line in the timeline, never a decision.
   # The platform records the gap rather than pretending there was none.
   def handle_in("event", %{"job_id" => job_id} = payload, socket) do
-    case Event.from_map(payload["event"] || %{}) do
-      {:ok, event} -> Jobs.record_harness_event(job_id, event)
+    with :ok <- owns(socket, job_id),
+         {:ok, event} <- Event.from_map(payload["event"] || %{}) do
+      Jobs.record_harness_event(job_id, event)
+    else
+      {:error, :not_your_job} -> :ok
       :error -> Logger.warning("worker sent an event with no type for job #{job_id}")
     end
 
@@ -90,22 +93,25 @@ defmodule ForgeWeb.WorkerChannel do
   end
 
   def handle_in("result", %{"job_id" => job_id, "result" => result}, socket) do
-    ack(record(job_id, Result.from_map(result)), socket)
+    ack(with(:ok <- owns(socket, job_id), do: record(job_id, Result.from_map(result))), socket)
   end
 
   # Acked after the transaction commits, like a result, because it carries the turn's cost and
   # the cost is what the daily cap is computed from. Idempotent on `(job_id, turn)`: the worker
   # re-sends until it is acked, so the platform has to be able to hear the same turn twice.
   def handle_in("turn", %{"job_id" => job_id} = payload, socket) do
-    ack(record_turn(job_id, payload), socket)
+    ack(with(:ok <- owns(socket, job_id), do: record_turn(job_id, payload)), socket)
   end
 
   def handle_in("hibernated", %{"job_id" => job_id} = payload, socket) do
-    ack(hibernate(job_id, payload), socket)
+    ack(with(:ok <- owns(socket, job_id), do: hibernate(job_id, payload)), socket)
   end
 
   def handle_in("failed", %{"job_id" => job_id} = payload, socket) do
-    ack(Jobs.fail(job_id, {:worker, payload["reason"]}), socket)
+    ack(
+      with(:ok <- owns(socket, job_id), do: Jobs.fail(job_id, {:worker, payload["reason"]})),
+      socket
+    )
   end
 
   def handle_in(message, _payload, socket) do
@@ -147,6 +153,24 @@ defmodule ForgeWeb.WorkerChannel do
 
       %{} ->
         Jobs.hibernate(job_id, payload["commit"], payload["reason"])
+    end
+  end
+
+  # The socket says which worker this is; nothing said the job was that worker's. Every write
+  # above addresses a job by an id off the wire, so each one asks. Without this a single worker
+  # token finishes, fails, hibernates or writes artifacts into *any* job on the node, and forges
+  # events into any project's timeline — which is exactly the blast radius
+  # `docs/design/worker-channel.md` § Topic promises a leaked token does not have.
+  defp owns(socket, job_id) do
+    mine = socket.assigns.worker_id
+
+    case Jobs.get(job_id) do
+      %{worker_id: ^mine} ->
+        :ok
+
+      _not_ours ->
+        Logger.warning("worker #{mine} addressed job #{inspect(job_id)}, which is not its own")
+        {:error, :not_your_job}
     end
   end
 

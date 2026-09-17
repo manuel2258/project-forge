@@ -4,9 +4,10 @@ defmodule Forge.Accounts do
   """
 
   import Ecto.Query, warn: false
-  alias Forge.Repo
 
+  alias Ecto.Multi
   alias Forge.Accounts.{User, UserNotifier, UserToken}
+  alias Forge.{Events, Repo}
 
   ## Database getters
 
@@ -38,6 +39,13 @@ defmodule Forge.Accounts do
       nil
 
   """
+  # Equivalent mutant *for authentication*, which is the only thing this decides: relaxing the
+  # guard to `or` never authenticates anyone, because a non-binary password reaches
+  # `User.valid_password?/2` and its second clause answers false after a dummy hash. It does
+  # change which failure a non-binary argument produces — `FunctionClauseError` becomes nil, or
+  # an `ArgumentError`, or a cast error, depending on which argument it was. No caller passes
+  # one: every one is a form that sends strings. The first version of this comment claimed the
+  # mutant changed nothing observable at all, which was wider than the truth.
   def get_user_by_email_and_password(email, password)
       when is_binary(email) and is_binary(password) do
     user = Repo.get_by(User, email: email)
@@ -59,6 +67,19 @@ defmodule Forge.Accounts do
 
   """
   def get_user!(id), do: Repo.get!(User, id)
+
+  @doc """
+  Gets a user, or nil.
+
+  For ids that came off the wire: a page holding a client-supplied id must not raise for one
+  that is well-formed and unknown.
+  """
+  @spec get_user(String.t()) :: User.t() | nil
+  def get_user(id) do
+    Repo.get(User, id)
+  rescue
+    Ecto.Query.CastError -> nil
+  end
 
   ## User registration
 
@@ -181,9 +202,14 @@ defmodule Forge.Accounts do
 
   @doc "The user behind an encoded API token, or nil."
   def get_user_by_api_token(token) when is_binary(token) do
-    case UserToken.verify_api_token_query(token) do
-      {:ok, query} -> Repo.one(query)
-      :error -> nil
+    with {:ok, query} <- UserToken.verify_api_token_query(token),
+         %User{} = user <- Repo.one(query),
+         # The API has no holding page to show a pending account, so it refuses one outright.
+         # A session is gentler (see `get_user_by_session_token/1`); a token is not.
+         true <- User.active?(user) do
+      user
+    else
+      _ -> nil
     end
   end
 
@@ -211,17 +237,139 @@ defmodule Forge.Accounts do
   end
 
   @doc """
-  Creates a confirmed operator with a password, for the command line. Registration through
-  the browser is disabled; this is how users come to exist.
+  Creates a confirmed, approved operator with a password, for the command line.
+
+  This is the bootstrap: a node admin has to exist before anyone can be approved, and the first
+  one cannot approve itself. Pass `node_admin: true` to seed one. An account made here is
+  approved outright — the approval gate is for accounts that arrive through a login page, and
+  whoever has a shell on the machine is past every gate there is.
   """
-  def create_operator(email, password) do
+  @spec create_operator(String.t(), String.t(), keyword()) ::
+          {:ok, User.t()} | {:error, Ecto.Changeset.t()}
+  def create_operator(email, password, opts \\ []) do
     Repo.transact(fn ->
       with {:ok, user} <- register_user(%{email: email}),
            {:ok, user} <- user |> User.confirm_changeset() |> Repo.update(),
            {:ok, {user, _}} <- update_user_password(user, %{password: password}) do
-        {:ok, user}
+        user
+        |> Ecto.Changeset.change(
+          approved_at: DateTime.utc_now(:second),
+          node_admin: Keyword.get(opts, :node_admin, false)
+        )
+        |> Repo.update()
       end
     end)
+  end
+
+  ## Account governance
+
+  @doc """
+  The user a host-side command should act as, from an optional address.
+
+  With an address, that user. Without one, the node's only admin — the single-operator case,
+  which is every PoC node, where naming yourself on each command is friction for no decision.
+  With more than one it refuses rather than guessing, because the answer decides who can reach
+  a project afterwards.
+  """
+  @spec owner_for(String.t() | nil) ::
+          {:ok, User.t()} | {:error, :unknown_user | :ambiguous_owner | :no_owner}
+  def owner_for(email) when is_binary(email) do
+    case get_user_by_email(email) do
+      nil -> {:error, :unknown_user}
+      user -> {:ok, user}
+    end
+  end
+
+  def owner_for(nil) do
+    case Repo.all(from u in User, where: u.node_admin == true, limit: 2) do
+      [user] -> {:ok, user}
+      [] -> {:error, :no_owner}
+      _many -> {:error, :ambiguous_owner}
+    end
+  end
+
+  @doc "Every user, oldest first. The node admin's accounts page."
+  @spec list_users() :: [User.t()]
+  def list_users, do: Repo.all(from u in User, order_by: u.inserted_at)
+
+  @doc "Accounts waiting on a node admin, oldest first."
+  @spec list_pending_users() :: [User.t()]
+  def list_pending_users do
+    Repo.all(
+      from u in User,
+        where: is_nil(u.approved_at) and is_nil(u.suspended_at),
+        order_by: u.inserted_at
+    )
+  end
+
+  @doc """
+  Approves a pending account. Approval is the perimeter: everything behind it is permissive,
+  so this is the decision that matters and it is audited like any other mutation.
+  """
+  @spec approve_user(User.t(), User.t() | :host) :: {:ok, User.t()} | {:error, term()}
+  def approve_user(%User{} = user, by),
+    do: govern(user, by, "user.approved", approved_at: DateTime.utc_now(:second))
+
+  @doc """
+  Suspends an account. Sessions and API tokens are refused from the next request.
+
+  `approved_at` is deliberately left alone: reinstating is then one field rather than a second
+  decision, and `User.active?/1` is what refuses the account meanwhile.
+  """
+  @spec suspend_user(User.t(), User.t()) :: {:ok, User.t()} | {:error, term()}
+  def suspend_user(%User{} = user, %User{} = by),
+    do: govern(user, by, "user.suspended", suspended_at: DateTime.utc_now(:second))
+
+  @doc "Lifts a suspension."
+  @spec reinstate_user(User.t(), User.t()) :: {:ok, User.t()} | {:error, term()}
+  def reinstate_user(%User{} = user, %User{} = by),
+    do: govern(user, by, "user.reinstated", suspended_at: nil)
+
+  @doc """
+  Grants or revokes the node admin flag.
+
+  Revoking the last node admin is refused. It is the only account that can approve anyone, so a
+  node with none is a node nobody can ever join again, and the fix would be a shell and a SQL
+  statement.
+  """
+  @spec set_node_admin(User.t(), User.t(), boolean()) :: {:ok, User.t()} | {:error, term()}
+  def set_node_admin(%User{} = user, %User{} = by, true),
+    do: govern(user, by, "user.node_admin_granted", node_admin: true)
+
+  def set_node_admin(%User{} = user, %User{} = by, false) do
+    if last_node_admin?(user),
+      do: {:error, :last_node_admin},
+      else: govern(user, by, "user.node_admin_revoked", node_admin: false)
+  end
+
+  defp last_node_admin?(%User{id: id}) do
+    not Repo.exists?(from u in User, where: u.node_admin == true and u.id != ^id)
+  end
+
+  # The actor is checked here and not only at the router. `/accounts` sits behind
+  # `on_mount(:require_node_admin)`, but a page is not a guard — the identical shape was found
+  # open in `Forge.Projects.put_member/4`, where the page was the only thing refusing.
+  defp govern(%User{}, %User{node_admin: false}, _type, _changes), do: {:error, :forbidden}
+
+  # `:host` is the command line, which is past every gate there is and is the only way the first
+  # node admin's account can be approved — nobody exists yet who could approve it.
+  defp govern(%User{} = user, :host, type, changes),
+    do: apply_governance(user, :system, type, changes)
+
+  defp govern(%User{} = user, %User{} = by, type, changes),
+    do: apply_governance(user, {:user, by.id}, type, changes)
+
+  defp apply_governance(%User{} = user, actor, type, changes) do
+    Multi.new()
+    |> Multi.update(:user, Ecto.Changeset.change(user, changes))
+    |> Events.log(:event, type, actor, fn %{user: user} ->
+      %{payload: %{"user_id" => user.id, "email" => user.email}}
+    end)
+    |> Repo.transaction()
+    |> case do
+      {:ok, %{user: user}} -> {:ok, user}
+      {:error, _step, reason, _changes} -> {:error, reason}
+    end
   end
 
   ## Session
@@ -242,7 +390,14 @@ defmodule Forge.Accounts do
   """
   def get_user_by_session_token(token) do
     {:ok, query} = UserToken.verify_session_token_query(token)
-    Repo.one(query)
+
+    # A *pending* account keeps its session on purpose: it has somewhere to be, the page that
+    # says it is waiting, and `ForgeWeb.UserAuth.require_approved_user/2` is what sends it
+    # there. A *suspended* one has nowhere to be, so its session stops resolving here.
+    case Repo.one(query) do
+      {%User{suspended_at: %DateTime{}}, _authenticated_at} -> nil
+      other -> other
+    end
   end
 
   @doc """

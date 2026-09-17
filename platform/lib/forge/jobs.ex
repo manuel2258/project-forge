@@ -150,6 +150,19 @@ defmodule Forge.Jobs do
   def get!(id), do: Repo.get!(Job, id)
 
   @doc """
+  Gets a job, or nil.
+
+  For ids that arrive from a worker: a message addressing a job that does not exist, or an id
+  that is not a UUID at all, is a refusal rather than a crash on the channel.
+  """
+  @spec get(String.t()) :: Job.t() | nil
+  def get(id) do
+    Repo.get(Job, id)
+  rescue
+    Ecto.Query.CastError -> nil
+  end
+
+  @doc """
   A ticket's workflow jobs, oldest first — the ticket's timeline.
 
   Conversations about the ticket are excluded, and that is the point: every reader of this walks

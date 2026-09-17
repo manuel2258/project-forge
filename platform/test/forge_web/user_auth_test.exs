@@ -267,6 +267,39 @@ defmodule ForgeWeb.UserAuthTest do
       assert updated_socket.assigns.current_scope.user.id == user.id
     end
 
+    # The socket join does not pass through the plug pipeline, so `require_approved_user/2` being
+    # correct says nothing about this. A review found the pair tested in one direction only: the
+    # plug had a test, this had none, and neutering it left the whole suite green.
+    test "require_approved halts a pending account", %{conn: conn} do
+      user = Forge.AccountsFixtures.pending_user_fixture()
+
+      session =
+        conn
+        |> put_session(:user_token, Accounts.generate_user_session_token(user))
+        |> get_session()
+
+      socket = %LiveView.Socket{
+        endpoint: ForgeWeb.Endpoint,
+        assigns: %{__changed__: %{}, flash: %{}}
+      }
+
+      assert {:halt, _socket} = UserAuth.on_mount(:require_approved, %{}, session, socket)
+    end
+
+    test "require_approved continues for an approved account", %{conn: conn} do
+      user = Forge.AccountsFixtures.user_fixture()
+
+      session =
+        conn
+        |> put_session(:user_token, Accounts.generate_user_session_token(user))
+        |> get_session()
+
+      assert {:cont, socket} =
+               UserAuth.on_mount(:require_approved, %{}, session, %LiveView.Socket{})
+
+      assert socket.assigns.current_scope.user.id == user.id
+    end
+
     test "redirects to login page if there isn't a valid user_token", %{conn: conn} do
       user_token = "invalid_token"
       session = conn |> put_session(:user_token, user_token) |> get_session()

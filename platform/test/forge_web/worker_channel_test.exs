@@ -7,6 +7,8 @@ defmodule ForgeWeb.WorkerChannelTest do
 
   use ForgeWeb.ChannelCase, async: false
 
+  import Forge.ForgeFixtures
+
   import Forge.GitFixtures
 
   alias Forge.{Conversations, Events, Jobs, Projects, Tickets, Workers}
@@ -25,6 +27,93 @@ defmodule ForgeWeb.WorkerChannelTest do
     on_exit(fn -> Application.put_env(:forge, Forge.Storage, store) end)
 
     %{worker: worker, token: token}
+  end
+
+  # A worker addresses a job by id in every write it sends. The socket says which worker it is;
+  # nothing said the job was that worker's. See `docs/design/worker-channel.md` § Topic: the
+  # blast radius of a leaked worker token is meant to stop at that worker's own jobs.
+  describe "a worker may only write its own jobs" do
+    setup %{worker: worker, token: token} do
+      {:ok, victim_worker, _t} = Workers.create(%{provider: "local"})
+      job = job_fixture()
+
+      {:ok, job} =
+        job
+        |> Jobs.Job.progress_changeset(%{status: :running, worker_id: victim_worker.id})
+        |> Forge.Repo.update()
+
+      {:ok, _reply, socket} = join_worker(worker, token)
+      %{socket: socket, victim_job: job, victim_worker: victim_worker}
+    end
+
+    test "failing another worker's job is refused", %{socket: socket, victim_job: job} do
+      ref = push(socket, "failed", %{"job_id" => job.id, "reason" => "pwned"})
+      assert_reply ref, :error, %{reason: _}
+
+      assert Jobs.get!(job.id).status == :running
+    end
+
+    test "completing another worker's job is refused", %{socket: socket, victim_job: job} do
+      ref =
+        push(socket, "result", %{
+          "job_id" => job.id,
+          "result" => %{"outcome" => "converged", "documents" => %{"plan.md" => "theirs now"}}
+        })
+
+      assert_reply ref, :error, %{reason: _}
+
+      assert Jobs.get!(job.id).status == :running
+      assert Forge.Artifacts.versions(job.ticket_id, "plan.md") == []
+    end
+
+    test "hibernating another worker's job is refused", %{socket: socket, victim_job: job} do
+      ref = push(socket, "hibernated", %{"job_id" => job.id})
+      assert_reply ref, :error, %{reason: _}
+
+      assert Jobs.get!(job.id).status == :running
+    end
+
+    test "an event for another worker's job is not recorded", %{socket: socket, victim_job: job} do
+      # Unacked and best-effort, so the assertion is on the log rather than the reply: a forged
+      # `type` lands in the victim's project timeline, attributed to their job.
+      push(socket, "event", %{
+        "job_id" => job.id,
+        "event" => %{"type" => "job.finished", "payload" => %{"forged" => true}}
+      })
+
+      Process.sleep(200)
+
+      refute Enum.any?(Events.for_job(job.id), &(&1.payload["forged"] == true))
+    end
+
+    test "a turn for another worker's conversation is refused", %{socket: socket} do
+      {:ok, other_worker, _t} = Workers.create(%{provider: "local"})
+      chat = chat_fixture(%{status: :running})
+
+      {:ok, chat} =
+        chat
+        |> Jobs.Job.progress_changeset(%{status: :running, worker_id: other_worker.id})
+        |> Forge.Repo.update()
+
+      ref = push(socket, "turn", %{"job_id" => chat.id, "turn" => 1, "cost_usd" => 1_000_000.0})
+      assert_reply ref, :error, %{reason: _}
+
+      assert Decimal.equal?(Jobs.get!(chat.id).cost_usd, Decimal.new(0))
+    end
+
+    test "its own job it may still write", %{socket: socket, worker: worker} do
+      job = job_fixture()
+
+      {:ok, job} =
+        job
+        |> Jobs.Job.progress_changeset(%{status: :running, worker_id: worker.id})
+        |> Forge.Repo.update()
+
+      ref = push(socket, "failed", %{"job_id" => job.id, "reason" => "genuinely failed"})
+      assert_reply ref, :ok, _
+
+      assert Jobs.get!(job.id).status == :finished
+    end
   end
 
   defp connect_worker(worker, token) do
@@ -54,7 +143,7 @@ defmodule ForgeWeb.WorkerChannelTest do
 
   defp ticket_with_job(_context) do
     {:ok, project} =
-      Projects.register(%{
+      register_owned!(%{
         name: "chan-#{System.unique_integer([:positive])}",
         repo_path: seeded_repo()
       })
@@ -118,6 +207,7 @@ defmodule ForgeWeb.WorkerChannelTest do
 
   describe "messages" do
     setup :ticket_with_job
+    setup :assigned_to_worker
 
     test "ready records what the machine has to give out", %{worker: worker, token: token} do
       {:ok, _reply, socket} = join_worker(worker, token)
@@ -321,6 +411,18 @@ defmodule ForgeWeb.WorkerChannelTest do
       chat_id = chat.id
       assert_push "close", %{"job_id" => ^chat_id, "reason" => "operator closed it"}
     end
+  end
+
+  # Reporting on a job means the scheduler assigned it first, and the channel refuses a job that
+  # is not the caller's. The rejoin block deliberately does not use this: it builds its own
+  # assignment state, which is what reconciliation is about.
+  defp assigned_to_worker(%{worker: worker, job: job}) do
+    job =
+      job
+      |> Jobs.Job.progress_changeset(%{status: :running, worker_id: worker.id})
+      |> Forge.Repo.update!()
+
+    %{job: job}
   end
 
   describe "rejoining" do

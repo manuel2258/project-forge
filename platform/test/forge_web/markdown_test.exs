@@ -33,4 +33,33 @@ defmodule ForgeWeb.MarkdownTest do
     out = html("[click](javascript:alert(1))\n")
     refute out =~ "javascript:"
   end
+
+  describe "markdown the renderer cannot parse" do
+    # `md` 0.13.1 raises on reference links and footnotes — ordinary constructs a
+    # citation-heavy verification report uses. Every call site renders at mount, so one such
+    # document made the ticket, review and chat pages raise for ever: an agent could deny the
+    # operator the exact surfaces where merges are approved and money is spent.
+    #
+    # The renderer degrades to escaped plain text rather than taking the page with it.
+    test "a reference link degrades instead of raising" do
+      html = html("[a][1]\n\n[1]: https://example.com")
+
+      assert html =~ "example.com"
+      refute html =~ "<script"
+    end
+
+    test "a footnote degrades instead of raising" do
+      html = html("A claim.[^1]\n\n[^1]: the evidence")
+
+      assert html =~ "the evidence"
+    end
+
+    test "the fallback still escapes, so unparseable markdown is not an XSS hole" do
+      # A footnote forces the fallback; the script tag rides along in the same document.
+      html = html("A claim.[^1]\n\n[^1]: note\n\n<script>alert(1)</script>")
+
+      refute html =~ "<script>"
+      assert html =~ "&lt;script&gt;"
+    end
+  end
 end

@@ -22,7 +22,7 @@ defmodule Forge.ProposalsTest do
 
   defp registered_project do
     {:ok, project} =
-      Projects.register(%{
+      register_owned!(%{
         name: "game-#{System.unique_integer([:positive])}",
         repo_path: seeded_repo()
       })
@@ -505,6 +505,36 @@ defmodule Forge.ProposalsTest do
       {:ok, _changes} = record(job, %{wide => proposal("Wide")})
 
       assert Artifacts.list_for_job(job.id) == []
+    end
+
+    test "re-recording sees only this job's own proposals, not another job's" do
+      # `stored_proposals/1` matches on job *and* the reserved prefix. Matching on either would
+      # let one job's proposal count as already-stored for another, so the second job would
+      # silently record nothing. Nothing distinguished the two until a mutation run said so.
+      first = job_fixture()
+      second = job_fixture()
+
+      {:ok, _} = record(first, %{"shared.md" => proposal("Theirs")})
+      {:ok, _} = record(second, %{"shared.md" => proposal("Theirs")})
+
+      assert Enum.map(Artifacts.list_for_job(first.id), & &1.name) == ["proposal-shared.md"]
+      assert Enum.map(Artifacts.list_for_job(second.id), & &1.name) == ["proposal-shared.md"]
+    end
+
+    test "a name that exactly fills the limit is stored, one byte more is not" do
+      # The boundary, both sides. `<=` and `<` behave identically everywhere except here, and a
+      # mutation run found that nothing distinguished them: every existing case was far from 255.
+      prefix = byte_size("proposal-")
+      exact = String.duplicate("a", 255 - prefix)
+      over = String.duplicate("a", 256 - prefix)
+
+      job = job_fixture()
+      {:ok, _changes} = record(job, %{exact => proposal("At the limit")})
+      assert Enum.map(Artifacts.list_for_job(job.id), & &1.name) == ["proposal-" <> exact]
+
+      other = job_fixture()
+      {:ok, _changes} = record(other, %{over => proposal("One byte over")})
+      assert Artifacts.list_for_job(other.id) == []
     end
 
     test "says so in the event, rather than dropping it in silence" do

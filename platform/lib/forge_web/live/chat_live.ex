@@ -18,13 +18,14 @@ defmodule ForgeWeb.ChatLive do
   import ForgeWeb.Indicators
   import ForgeWeb.Operator.Components
 
-  alias Forge.{Artifacts, Conversations, Events, Git, Jobs, Merge, Projects}
+  alias Forge.{Artifacts, Conversations, Events, Git, Jobs, Merge, Operator, Projects}
   alias ForgeWeb.{Diff, Format, Markdown}
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
     chat = Conversations.get!(id)
     %{project: project, ticket: ticket} = Conversations.context(chat)
+    ForgeWeb.Access.project_scope!(socket.assigns.current_scope, project)
 
     if connected?(socket) do
       Events.subscribe_job(chat.id)
@@ -96,12 +97,12 @@ defmodule ForgeWeb.ChatLive do
   def handle_event("force", %{"text" => text}, socket), do: say(socket, text, force: true)
 
   def handle_event("stop", _params, socket) do
-    :ok = Conversations.stop(socket.assigns.chat)
+    :ok = Operator.stop_chat(socket.assigns.chat, socket.assigns.current_scope.user)
     {:noreply, socket}
   end
 
   def handle_event("close", _params, socket) do
-    :ok = Conversations.close(socket.assigns.chat)
+    :ok = Operator.close_chat(socket.assigns.chat, socket.assigns.current_scope.user)
     {:noreply, socket}
   end
 
@@ -111,7 +112,7 @@ defmodule ForgeWeb.ChatLive do
   # An operator's own default-branch token is a third route and not one of these two: it is a
   # push, guarded by the same hook's fast-forward rule (`docs/design/git-hosting.md`).
   def handle_event("merge", _params, socket) do
-    case Merge.perform_chat(socket.assigns.chat, socket.assigns.current_scope.user) do
+    case Operator.merge_chat(socket.assigns.chat, socket.assigns.current_scope.user) do
       {:ok, _result} ->
         {:noreply, socket |> put_flash(:info, "Merged.") |> load()}
 
@@ -124,7 +125,7 @@ defmodule ForgeWeb.ChatLive do
   end
 
   def handle_event("reopen", _params, socket) do
-    {:ok, _chat} = Conversations.reopen(socket.assigns.chat)
+    {:ok, _chat} = Operator.reopen_chat(socket.assigns.chat, socket.assigns.current_scope.user)
     {:noreply, load(socket)}
   end
 
@@ -148,7 +149,7 @@ defmodule ForgeWeb.ChatLive do
   # is what swaps the send box for the reopen button, so the page stops offering what it cannot
   # do rather than only saying so.
   defp deliver(socket, text, opts) do
-    case Conversations.send(socket.assigns.chat, text, opts) do
+    case Operator.send_chat(socket.assigns.chat, socket.assigns.current_scope.user, text, opts) do
       {:ok, _event} ->
         {:noreply, socket |> assign(draft: "") |> load()}
 

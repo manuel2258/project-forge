@@ -16,6 +16,7 @@ defmodule ForgeWeb.JobLive do
   @impl true
   def mount(%{"project" => name, "number" => number, "job_id" => job_id}, _session, socket) do
     {ticket, project} = Tickets.fetch!(name, number)
+    ForgeWeb.Access.project_scope!(socket.assigns.current_scope, project)
 
     job =
       Enum.find(Jobs.for_ticket(ticket.id), &(&1.id == job_id)) ||

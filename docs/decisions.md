@@ -89,6 +89,47 @@ These decisions are settled. They are not to be reopened.
 
 - Proportionate and well designed: sessions, second factor available but not mandatory, all mutations audited into the event log, provider tokens confined to the orchestrator, short-lived scoped credentials per job, spend caps.
 - Single operator today, but users and roles are in the data model from the start so team use is an expansion rather than a rewrite.
+- **Authentication is local accounts and OIDC, both first class.** More than one issuer may be
+  configured. A local account is also the recovery path: a self-hosted platform whose only door
+  is an external IdP is bricked by a bad redirect URI.
+- **An OIDC login provisions a user on the spot** — no prior row, no invitation, no linking
+  step. Identity is `(issuer, subject)`, never email; the same person arriving through two
+  issuers is two users, deliberately.
+- **A first login creates a pending account, local and OIDC alike, that a node admin approves.**
+  Approval is the perimeter, which is what lets everything behind it be permissive.
+- **`node_admin` is account governance and nothing else**: approve, suspend, promote. Seeded on
+  the host. It grants no access to any project. It is the only global role.
+- **Authorization is per project.** `project_member` with two roles: `admin` (settings, delete,
+  membership) and `member` (everything else the product does). Any approved user may register a
+  project and becomes its admin. There are no invitations — an admin adds an existing user.
+- **No authorisation decision compares a role name**, it asks for a capability, so splitting the
+  two roles later changes one function rather than every call site. Counting admins and ordering
+  them for display do read the name; neither decides access.
+- **Every human write is guarded in a context, never by the page that calls it.** `Forge.Operator`
+  holds the ticket, conversation and project-settings actions; `Forge.Projects` holds the
+  membership ones, because they are about that table. A hidden button is not a guard, and the
+  mutation that tests one of these rules deletes the check in the context.
+- **Forge never reads an IdP claim to decide access.** Membership derived from a claim is revoked
+  only at the next login, and a role changed at the IdP is a change to who can spend money here
+  that leaves no trace in the event log.
+- **Reads are membership-scoped**, not only mutations: queue (page and API), board, project and
+  ticket lists, `/tickets/new`, artifacts, conversations — both the list and the page — push
+  fan-out, and the event log, which gains a `project_id` because it could not otherwise answer
+  the question. A suspended account receives no push.
+- **A project always has an owner.** `Projects.register/2` refuses a nil one rather than creating
+  a project with no members, which is invisible to everyone including node admins. The command
+  line resolves one with `Accounts.owner_for/1` and `Forge.Release.add_member/3` is the repair
+  path, since a project with no admins has nobody for the product's own page to act through.
+- **A user owns credentials; a credential is a subscription token or an API key**, one type
+  covering both because the harness already takes that union. This answers which credential funds
+  execution for team use: each person brings their own, so individual-use licensing is respected.
+- **A credential's daily limit is tracked, not enforced.** The ticket allowance and the node-wide
+  daily cap are untouched and keep enforcing.
+- **A user owns workers; a worker carries one credential; its owner assigns it to projects they
+  are a member of.** A project admin cannot reach for someone else's machine, because assigning
+  it spends its owner's credential. A job runs only on a worker assigned to its project.
+
+See `design/identity.md`.
 
 ## Harnesses
 

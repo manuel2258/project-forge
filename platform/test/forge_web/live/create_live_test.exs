@@ -17,7 +17,7 @@ defmodule ForgeWeb.CreateLiveTest do
 
   setup :register_and_log_in_user
 
-  setup do
+  setup %{user: user} do
     repos = tmp_dir("repos")
     original = Application.get_env(:forge, Forge.Jobs)
     Application.put_env(:forge, Forge.Jobs, Keyword.put(original, :repos_dir, repos))
@@ -26,7 +26,7 @@ defmodule ForgeWeb.CreateLiveTest do
   end
 
   describe "a project" do
-    test "is registered, and then says what has to happen next", %{conn: conn} do
+    test "is registered, and then says what has to happen next", %{conn: conn, user: user} do
       {:ok, view, _html} = live(conn, ~p"/projects/new")
 
       name = "made-#{System.unique_integer([:positive])}"
@@ -56,8 +56,8 @@ defmodule ForgeWeb.CreateLiveTest do
       assert html =~ "/projects/#{name}/settings"
     end
 
-    test "a duplicate name is refused in place", %{conn: conn} do
-      {:ok, project} = Projects.register(%{name: "taken", repo_path: seeded_repo()})
+    test "a duplicate name is refused in place", %{conn: conn, user: user} do
+      {:ok, project} = Projects.register(%{name: "taken", repo_path: seeded_repo()}, user)
 
       {:ok, view, _html} = live(conn, ~p"/projects/new")
 
@@ -74,12 +74,15 @@ defmodule ForgeWeb.CreateLiveTest do
   end
 
   describe "a ticket" do
-    test "reached from a project does not ask which project", %{conn: conn} do
+    test "reached from a project does not ask which project", %{conn: conn, user: user} do
       {:ok, project} =
-        Projects.register(%{
-          name: "fixed-#{System.unique_integer([:positive])}",
-          repo_path: seeded_repo()
-        })
+        Projects.register(
+          %{
+            name: "fixed-#{System.unique_integer([:positive])}",
+            repo_path: seeded_repo()
+          },
+          user
+        )
 
       {:ok, view, html} = live(conn, ~p"/tickets/new?project=#{project.name}")
 
@@ -89,12 +92,15 @@ defmodule ForgeWeb.CreateLiveTest do
       assert html =~ ~s(href="/projects/#{project.name}")
     end
 
-    test "the bare route still offers the choice", %{conn: conn} do
+    test "the bare route still offers the choice", %{conn: conn, user: user} do
       {:ok, _project} =
-        Projects.register(%{
-          name: "choice-#{System.unique_integer([:positive])}",
-          repo_path: seeded_repo()
-        })
+        Projects.register(
+          %{
+            name: "choice-#{System.unique_integer([:positive])}",
+            repo_path: seeded_repo()
+          },
+          user
+        )
 
       {:ok, view, _html} = live(conn, ~p"/tickets/new")
 
@@ -102,25 +108,32 @@ defmodule ForgeWeb.CreateLiveTest do
     end
 
     test "a project named in the address that does not exist falls back to the choice", %{
-      conn: conn
+      conn: conn,
+      user: user
     } do
       {:ok, _project} =
-        Projects.register(%{
-          name: "real-#{System.unique_integer([:positive])}",
-          repo_path: seeded_repo()
-        })
+        Projects.register(
+          %{
+            name: "real-#{System.unique_integer([:positive])}",
+            repo_path: seeded_repo()
+          },
+          user
+        )
 
       {:ok, view, _html} = live(conn, ~p"/tickets/new?project=no-such-project")
 
       assert has_element?(view, "select[name='ticket[project]']")
     end
 
-    test "is admitted and lands on its own page", %{conn: conn} do
+    test "is admitted and lands on its own page", %{conn: conn, user: user} do
       {:ok, project} =
-        Projects.register(%{
-          name: "ready-#{System.unique_integer([:positive])}",
-          repo_path: seeded_repo()
-        })
+        Projects.register(
+          %{
+            name: "ready-#{System.unique_integer([:positive])}",
+            repo_path: seeded_repo()
+          },
+          user
+        )
 
       {:ok, view, html} = live(conn, ~p"/tickets/new?project=#{project.name}")
 
@@ -144,10 +157,10 @@ defmodule ForgeWeb.CreateLiveTest do
       assert to == "/tickets/#{project.name}/#{ticket.number}"
     end
 
-    test "a project with no workflow says so before a title is typed", %{conn: conn} do
+    test "a project with no workflow says so before a title is typed", %{conn: conn, user: user} do
       # Exactly what `/projects/new` has just made: registered, and empty.
       {:ok, project} =
-        Projects.register_named("empty-#{System.unique_integer([:positive])}", "main")
+        Projects.register_named("empty-#{System.unique_integer([:positive])}", "main", user)
 
       {:ok, view, html} = live(conn, ~p"/tickets/new?project=#{project.name}")
 
@@ -162,12 +175,15 @@ defmodule ForgeWeb.CreateLiveTest do
       assert has_element?(view, "#ticket-form button[type=submit][disabled]")
     end
 
-    test "and is offered when the project is ready", %{conn: conn} do
+    test "and is offered when the project is ready", %{conn: conn, user: user} do
       {:ok, project} =
-        Projects.register(%{
-          name: "offered-#{System.unique_integer([:positive])}",
-          repo_path: seeded_repo()
-        })
+        Projects.register(
+          %{
+            name: "offered-#{System.unique_integer([:positive])}",
+            repo_path: seeded_repo()
+          },
+          user
+        )
 
       {:ok, view, _html} = live(conn, ~p"/tickets/new?project=#{project.name}")
 
@@ -175,12 +191,15 @@ defmodule ForgeWeb.CreateLiveTest do
       assert has_element?(view, "#ticket-form button[type=submit]")
     end
 
-    test "a title is required", %{conn: conn} do
+    test "a title is required", %{conn: conn, user: user} do
       {:ok, project} =
-        Projects.register(%{
-          name: "titled-#{System.unique_integer([:positive])}",
-          repo_path: seeded_repo()
-        })
+        Projects.register(
+          %{
+            name: "titled-#{System.unique_integer([:positive])}",
+            repo_path: seeded_repo()
+          },
+          user
+        )
 
       {:ok, view, _html} = live(conn, ~p"/tickets/new?project=#{project.name}")
 
@@ -195,7 +214,7 @@ defmodule ForgeWeb.CreateLiveTest do
       assert Tickets.list(project) == []
     end
 
-    test "with no projects at all it points at making one", %{conn: conn} do
+    test "with no projects at all it points at making one", %{conn: conn, user: user} do
       {:ok, _view, html} = live(conn, ~p"/tickets/new")
 
       assert html =~ "no projects yet"
@@ -230,14 +249,17 @@ defmodule ForgeWeb.CreateLiveTest do
     # whole suite — the bug was re-introducible with nothing noticing.
     test "a workflow that approves nothing marks nothing unapproved", %{conn: conn, user: user} do
       {:ok, project} =
-        Projects.register(%{
-          name: "noappr-#{System.unique_integer([:positive])}",
-          repo_path:
-            seeded_repo(%{
-              ".forge/workflow.yml" => no_approvals_workflow(),
-              ".forge/agents/loop.md" => "Do it.\n"
-            })
-        })
+        Projects.register(
+          %{
+            name: "noappr-#{System.unique_integer([:positive])}",
+            repo_path:
+              seeded_repo(%{
+                ".forge/workflow.yml" => no_approvals_workflow(),
+                ".forge/agents/loop.md" => "Do it.\n"
+              })
+          },
+          user
+        )
 
       {:ok, ticket} = Tickets.admit(project, %{title: "Nothing to approve"}, {:user, user.id})
 
@@ -251,10 +273,13 @@ defmodule ForgeWeb.CreateLiveTest do
 
     test "a workflow that does approve still marks it", %{conn: conn, user: user} do
       {:ok, project} =
-        Projects.register(%{
-          name: "appr-#{System.unique_integer([:positive])}",
-          repo_path: seeded_repo()
-        })
+        Projects.register(
+          %{
+            name: "appr-#{System.unique_integer([:positive])}",
+            repo_path: seeded_repo()
+          },
+          user
+        )
 
       {:ok, ticket} = Tickets.admit(project, %{title: "Something to approve"}, {:user, user.id})
 
@@ -274,10 +299,13 @@ defmodule ForgeWeb.CreateLiveTest do
     user: user
   } do
     {:ok, project} =
-      Projects.register(%{
-        name: "placed-#{System.unique_integer([:positive])}",
-        repo_path: seeded_repo()
-      })
+      Projects.register(
+        %{
+          name: "placed-#{System.unique_integer([:positive])}",
+          repo_path: seeded_repo()
+        },
+        user
+      )
 
     {:ok, _ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
 

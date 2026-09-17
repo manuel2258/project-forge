@@ -19,32 +19,39 @@ defmodule ForgeWeb.Api.TicketController do
 
   def me(conn, _params) do
     user = conn.assigns.current_scope.user
-    json(conn, %{id: user.id, email: user.email, role: user.role})
+    json(conn, %{id: user.id, email: user.email, node_admin: user.node_admin})
   end
 
   defp project_name(ticket), do: Projects.get!(ticket.project_id).name
 
   def queue(conn, _params) do
-    items = Enum.map(Queue.items(), &Render.queue_item(&1, &1.project.name))
+    items =
+      conn.assigns.current_scope.user
+      |> Queue.items()
+      |> Enum.map(&Render.queue_item(&1, &1.project.name))
+
     json(conn, %{items: items})
   end
 
   def index(conn, %{"project" => name}) do
-    case Projects.by_name(name) do
-      nil ->
-        {:error, :not_found}
-
-      project ->
-        json(conn, %{tickets: Enum.map(Tickets.list(project), &Render.ticket(&1, project.name))})
+    with %{} = project <- find_project(conn, name) do
+      json(conn, %{tickets: Enum.map(Tickets.list(project), &Render.ticket(&1, project.name))})
     end
   end
 
   def index(conn, _params) do
-    json(conn, %{tickets: Enum.map(Tickets.list(), &Render.ticket(&1, project_name(&1)))})
+    tickets =
+      conn
+      |> scoped_projects()
+      |> Enum.flat_map(fn project ->
+        Enum.map(Tickets.list(project), &Render.ticket(&1, project.name))
+      end)
+
+    json(conn, %{tickets: tickets})
   end
 
   def create(conn, %{"project" => name} = params) do
-    with %{} = project <- Projects.by_name(name) || {:error, :not_found},
+    with %{} = project <- find_project(conn, name),
          {:ok, ticket} <-
            Tickets.admit(
              project,
@@ -165,7 +172,7 @@ defmodule ForgeWeb.Api.TicketController do
   # Open proposals are per project, not per ticket: a project chat's proposal has no ticket, and
   # the operator's question is "what has been suggested here", not "what did ticket 12 suggest".
   def proposals(conn, %{"project" => name}) do
-    with %{} = project <- Projects.by_name(name) || {:error, :not_found} do
+    with %{} = project <- find_project(conn, name) do
       json(conn, %{proposals: Enum.map(Proposals.open(project.id), &Render.proposal/1)})
     end
   end
@@ -183,15 +190,36 @@ defmodule ForgeWeb.Api.TicketController do
   end
 
   defp load_ticket(%{params: %{"project" => name, "number" => number}} = conn, _opts) do
+    # A ticket in a project the caller is not a member of answers 404, not 403. Not a member and
+    # does not exist are the same answer — `docs/design/identity.md` § Projects and members.
     case Tickets.fetch(name, number) do
       {:ok, ticket, project} ->
-        conn |> assign(:project, project) |> assign(:ticket, ticket)
+        if member?(conn, project),
+          do: conn |> assign(:project, project) |> assign(:ticket, ticket),
+          else: missing(conn, name, number)
 
       :error ->
-        conn
-        |> put_status(:not_found)
-        |> json(%{error: %{reason: "not_found", detail: "no ticket #{name}##{number}"}})
-        |> halt()
+        missing(conn, name, number)
+    end
+  end
+
+  defp missing(conn, name, number) do
+    conn
+    |> put_status(:not_found)
+    |> json(%{error: %{reason: "not_found", detail: "no ticket #{name}##{number}"}})
+    |> halt()
+  end
+
+  defp member?(conn, project),
+    do: Projects.member?(project, conn.assigns.current_scope.user)
+
+  # The caller's own projects, never the node's. Every list below goes through one of these.
+  defp scoped_projects(conn), do: Projects.list(conn.assigns.current_scope.user)
+
+  defp find_project(conn, name) do
+    case Enum.find(scoped_projects(conn), &(&1.name == name)) do
+      nil -> {:error, :not_found}
+      project -> project
     end
   end
 

@@ -16,12 +16,12 @@ defmodule ForgeWeb.ProjectSettingsLive do
   import ForgeWeb.Operator.Components
 
   alias Forge.Git.{Tokens, Url}
-  alias Forge.{Projects, Tickets, Workers}
+  alias Forge.{Operator, Projects, Tickets, Workers}
   alias ForgeWeb.Format
 
   @impl true
   def mount(%{"name" => name}, _session, socket) do
-    project = Projects.by_name(name) || raise Ecto.NoResultsError, queryable: Projects.Project
+    {project, scope} = ForgeWeb.Access.project_by_name!(socket.assigns.current_scope, name)
 
     {:ok,
      socket
@@ -32,7 +32,11 @@ defmodule ForgeWeb.ProjectSettingsLive do
        # never in the URL: both outlive the moment it is useful.
        issued: nil,
        show_spent: false,
-       error: nil
+       error: nil,
+       member_error: nil,
+       # Whether this page may change who is in the project. The section is hidden without it,
+       # and `Forge.Projects` refuses without it, which is the half that matters.
+       manage: Forge.Access.can?(scope, :manage)
      )
      |> assign(form: to_form(%{"scope" => "read", "ticket" => "", "minutes" => "90"}, as: :token))
      |> load()}
@@ -48,6 +52,7 @@ defmodule ForgeWeb.ProjectSettingsLive do
       tokens: Enum.map(tokens, &decorate(&1, now)),
       live_count: Enum.count(tokens, &Tokens.live?(&1, now)),
       tickets: Tickets.list(project),
+      members: Projects.members(project),
       mirror: Projects.mirror(project),
       clone_url: Url.for(project),
       now: now
@@ -74,14 +79,17 @@ defmodule ForgeWeb.ProjectSettingsLive do
   end
 
   def handle_event("issue", %{"token" => params}, socket) do
-    case scope(socket.assigns, params) do
-      {:ok, opts} ->
-        {:ok, secret, token} = Tokens.issue(socket.assigns.project, opts)
-
-        {:noreply,
-         socket
-         |> assign(issued: %{url: Url.with_token(socket.assigns.project, secret), token: token})
-         |> load()}
+    with {:ok, opts} <- scope(socket.assigns, params),
+         {:ok, secret, token} <-
+           Operator.issue_token(socket.assigns.project, socket.assigns.current_scope.user, opts) do
+      {:noreply,
+       socket
+       |> assign(issued: %{url: Url.with_token(socket.assigns.project, secret), token: token})
+       |> load()}
+    else
+      # The form is hidden from a member; this is what refuses the event sent by hand.
+      {:error, :forbidden} ->
+        {:noreply, assign(socket, error: "Only an administrator can do that.")}
 
       {:error, message} ->
         {:noreply, assign(socket, form: to_form(params, as: :token), error: message)}
@@ -89,7 +97,7 @@ defmodule ForgeWeb.ProjectSettingsLive do
   end
 
   def handle_event("model", %{"project" => %{"model" => model}}, socket) do
-    case Projects.set_model(socket.assigns.project, model) do
+    case Operator.set_model(socket.assigns.project, socket.assigns.current_scope.user, model) do
       {:ok, project} ->
         {:noreply, socket |> assign(project: project) |> put_flash(:info, "Saved.") |> load()}
 
@@ -100,11 +108,47 @@ defmodule ForgeWeb.ProjectSettingsLive do
 
   def handle_event("dismiss", _params, socket), do: {:noreply, assign(socket, issued: nil)}
 
+  def handle_event("add-member", %{"member" => %{"email" => email, "role" => role}}, socket)
+      when role in ["admin", "member"] do
+    %{project: project, current_scope: scope} = socket.assigns
+
+    case Forge.Accounts.get_user_by_email(String.trim(email)) do
+      nil ->
+        # Not "invited": there are no invitations, and an address nobody has approved is not a
+        # person this node knows about yet. Saying so is the whole answer.
+        {:noreply, assign(socket, member_error: "No approved account for that address.")}
+
+      user ->
+        member(socket, fn ->
+          Projects.put_member(project, user, String.to_existing_atom(role), scope.user)
+        end)
+    end
+  end
+
+  # A role off the wire that is any other existing atom reached `put_member/4`'s `when` and
+  # raised; one that is not an atom at all raised in `to_existing_atom`. Both crash the page.
+  def handle_event("add-member", %{"member" => _params}, socket),
+    do: {:noreply, assign(socket, member_error: "Pick a role.")}
+
+  def handle_event("remove-member", %{"id" => id}, socket) do
+    %{project: project, current_scope: scope} = socket.assigns
+
+    # `get_user!/1` on an id off the wire raises for any well-formed-but-unknown UUID.
+    case Forge.Accounts.get_user(id) do
+      nil -> {:noreply, assign(socket, member_error: "No such account.")}
+      user -> member(socket, fn -> Projects.remove_member(project, user, scope.user) end)
+    end
+  end
+
   def handle_event("toggle-spent", _params, socket),
     do: {:noreply, update(socket, :show_spent, &(not &1))}
 
   def handle_event("revoke", %{"id" => id}, socket) do
-    case Tokens.revoke(id) do
+    # Through `Operator`, not `Tokens.revoke/1`: the id is the whole request, so the guard has to
+    # both require `:manage` and resolve the token *inside this project*. A bare `Repo.get` let
+    # any member revoke an admin's credential, and any project's admin revoke any token on the
+    # node given its UUID. `issue` and `model` were routed here and this one was missed.
+    case Operator.revoke_token(socket.assigns.project, socket.assigns.current_scope.user, id) do
       {:ok, _token} ->
         {:noreply, socket |> assign(error: nil) |> load()}
 
@@ -114,8 +158,21 @@ defmodule ForgeWeb.ProjectSettingsLive do
            error: "that token belongs to a running job; the engine revokes it when the job ends"
          )}
 
-      {:error, :not_found} ->
+      {:error, reason} when reason in [:not_found, :forbidden] ->
         {:noreply, load(socket)}
+    end
+  end
+
+  defp member(socket, fun) do
+    case fun.() do
+      {:error, :last_admin} ->
+        {:noreply, assign(socket, member_error: "A project keeps at least one administrator.")}
+
+      {:error, _reason} ->
+        {:noreply, assign(socket, member_error: "That did not work.")}
+
+      _ok ->
+        {:noreply, socket |> assign(member_error: nil) |> load()}
     end
   end
 
@@ -198,7 +255,7 @@ defmodule ForgeWeb.ProjectSettingsLive do
         </button>
       </section>
 
-      <section class="mt-8">
+      <section :if={@manage} class="mt-8">
         <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Issue a token</h2>
         <p class="mt-2 text-sm/[1.55] opacity-70">
           For <span class="font-mono text-[12.5px] break-all">{@clone_url}</span>. The username is
@@ -256,7 +313,9 @@ defmodule ForgeWeb.ProjectSettingsLive do
         </.form>
       </section>
 
-      <section class="mt-10">
+      <%!-- Credentials are the admin's, both halves. The list is not merely a readout: it names
+            every token's id, which is the whole input the revoke button needs. --%>
+      <section :if={@manage} class="mt-10">
         <div class="flex flex-wrap items-baseline justify-between gap-3">
           <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
             Tokens · {@live_count} live
@@ -316,6 +375,48 @@ defmodule ForgeWeb.ProjectSettingsLive do
             </tr>
           </tbody>
         </table>
+      </section>
+
+      <section :if={@manage} class="mt-10">
+        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">People</h2>
+
+        <p class="mt-2 text-sm/[1.55] opacity-60">
+          Everyone here can run the work. Administrators can also change these settings and this
+          list.
+        </p>
+
+        <ul class="mt-3 divide-y divide-base-300 border-y border-base-300">
+          <li :for={member <- @members} class="flex flex-wrap items-center gap-3 py-3">
+            <span class="font-mono text-[13px]">{member.user.email}</span>
+            <span class="font-mono text-[11.5px] opacity-60">{member.role}</span>
+            <button
+              phx-click="remove-member"
+              phx-value-id={member.user.id}
+              class="ml-auto min-h-[46px] rounded-field border border-base-300 px-3 text-sm hover:border-base-content/30"
+            >
+              Remove
+            </button>
+          </li>
+        </ul>
+
+        <.form
+          for={to_form(%{"email" => "", "role" => "member"}, as: :member)}
+          phx-submit="add-member"
+          class="mt-4 flex flex-wrap items-end gap-3"
+        >
+          <.input field={to_form(%{}, as: :member)[:email]} type="email" label="Address" />
+          <.input
+            field={to_form(%{"role" => "member"}, as: :member)[:role]}
+            type="select"
+            label="Role"
+            options={[{"member", "member"}, {"admin", "admin"}]}
+          />
+          <button class="min-h-[46px] rounded-field border border-base-300 px-3 text-sm hover:border-base-content/30">
+            Add
+          </button>
+        </.form>
+
+        <p :if={@member_error} class="mt-2 text-sm text-error">{@member_error}</p>
       </section>
 
       <section class="mt-10">

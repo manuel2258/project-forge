@@ -498,7 +498,9 @@ defmodule Forge.Conversations do
   @doc """
   Conversations for a list, live ones first and newest within that.
 
-  `:project_id` narrows it to one project; without it this is every conversation on the node.
+  `:project_id` narrows it to one project; `:for` narrows it to the projects one user is a member
+  of, which is what every operator surface passes. Without either this is every conversation on
+  the node, and only the command line may ask for that.
 
   Live first because that is the one costing something and holding a machine. The rest are a
   record — a conversation is kept for ever, so this list only grows, and what it is for is
@@ -507,12 +509,22 @@ defmodule Forge.Conversations do
   @spec summaries(keyword()) :: [summary()]
   def summaries(opts \\ []) do
     chats =
-      case Keyword.get(opts, :project_id) do
-        nil -> Repo.all(from j in Job, where: j.kind == :chat, order_by: [desc: j.inserted_at])
-        id -> Jobs.chats_for_project(id)
+      cond do
+        id = Keyword.get(opts, :project_id) -> Jobs.chats_for_project(id)
+        user = Keyword.get(opts, :for) -> for_user(user)
+        true -> Repo.all(node_wide())
       end
 
     decorate(chats)
+  end
+
+  defp node_wide, do: from(j in Job, where: j.kind == :chat, order_by: [desc: j.inserted_at])
+
+  # A row carries the project's name and the last thing the agent said, so an unscoped list is a
+  # transcript leak and not only a name one. See `docs/design/identity.md` § Read scoping.
+  defp for_user(%Forge.Accounts.User{} = user) do
+    project_ids = Enum.map(Forge.Projects.list(user), & &1.id)
+    Repo.all(from j in node_wide(), where: j.project_id in ^project_ids)
   end
 
   defp decorate([]), do: []

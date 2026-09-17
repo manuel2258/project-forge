@@ -35,6 +35,11 @@ defmodule ForgeWeb.Layouts do
     doc: "max width of the content column, or nil for the full viewport. See docs/design/ui.md."
 
   attr :active, :atom, default: nil, doc: "which nav item is the current page"
+
+  attr :nav, :boolean,
+    default: true,
+    doc: "false for a page a pending account may see, whose nav leads nowhere it may go"
+
   attr :queue_count, :integer, default: nil, doc: "decisions waiting, shown as the queue badge"
 
   slot :inner_block, required: true
@@ -43,7 +48,7 @@ defmodule ForgeWeb.Layouts do
     ~H"""
     <header class="hidden sm:flex items-center gap-6 border-b border-base-300 px-6 lg:px-[30px] h-14">
       <.link navigate={~p"/"} class="font-semibold -tracking-[.02em]">forge</.link>
-      <nav class="flex items-center gap-5 text-sm">
+      <nav :if={@nav} class="flex items-center gap-5 text-sm">
         <.nav_link navigate={~p"/"} active={@active == :queue} count={@queue_count}>Queue</.nav_link>
         <.nav_link navigate={~p"/board"} active={@active == :board}>Board</.nav_link>
         <%!-- Laptop only, and deliberately: the phone is where decisions are answered and a
@@ -59,13 +64,24 @@ defmodule ForgeWeb.Layouts do
               always made for a project and lives on that project's page. See docs/design/ui.md
               § Creating things. --%>
         <.link
-          :if={@current_scope}
+          :if={@current_scope && @nav}
           navigate={~p"/projects/new"}
           class="flex min-h-[46px] items-center rounded-field border border-base-300 px-3 text-sm hover:border-base-content/30"
         >
           New project
         </.link>
         <.theme_toggle />
+        <%!-- Account governance, and the only thing `node_admin` unlocks. Beside the address
+              rather than in the nav: it is not a place work happens, and most accounts never
+              see it at all. Without it the perimeter's only surface is a URL you have to know,
+              and nobody can discover that someone is waiting. --%>
+        <.link
+          :if={@current_scope && @current_scope.user.node_admin}
+          navigate={~p"/accounts"}
+          class="link link-hover text-sm opacity-70"
+        >
+          Accounts
+        </.link>
         <div :if={@current_scope} class="flex items-center gap-3 text-sm">
           <.link navigate={~p"/users/settings"} class="link link-hover opacity-70">
             {@current_scope.user.email}
@@ -89,10 +105,13 @@ defmodule ForgeWeb.Layouts do
       </div>
     </main>
 
-    <nav class={[
-      "sm:hidden fixed inset-x-0 bottom-0 z-20 grid grid-cols-2",
-      "border-t border-base-300 bg-base-100 pb-[env(safe-area-inset-bottom)]"
-    ]}>
+    <nav
+      :if={@nav}
+      class={[
+        "sm:hidden fixed inset-x-0 bottom-0 z-20 grid grid-cols-2",
+        "border-t border-base-300 bg-base-100 pb-[env(safe-area-inset-bottom)]"
+      ]}
+    >
       <.bar_link navigate={~p"/"} active={@active == :queue} count={@queue_count}>Queue</.bar_link>
       <.bar_link navigate={~p"/board"} active={@active == :board}>Board</.bar_link>
     </nav>

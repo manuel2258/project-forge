@@ -17,7 +17,8 @@ defmodule ForgeWeb.ArtifactController do
   alias Forge.{Artifacts, Tickets}
 
   def show(conn, %{"project" => name, "number" => number, "name" => artifact} = params) do
-    {ticket, _project} = Tickets.fetch!(name, number)
+    {ticket, project} = Tickets.fetch!(name, number)
+    ForgeWeb.Access.project_scope!(conn.assigns.current_scope, project)
 
     with {:ok, version} <- version(ticket.id, artifact, params["version"]),
          {:ok, bytes} <- Artifacts.content(version) do

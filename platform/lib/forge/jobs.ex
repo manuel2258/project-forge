@@ -53,6 +53,8 @@ defmodule Forge.Jobs do
            # can no longer enforce are checked. A spec that reaches the worker incomplete is a
            # job that fails on the machine, after a credential has been minted and a slice made.
            :ok <- Spec.validate(spec) do
+        resources = resources(workflow, state_name)
+
         repo.insert(
           Job.create_changeset(%Job{id: spec.job_id}, %{
             kind: :workflow,
@@ -60,7 +62,9 @@ defmodule Forge.Jobs do
             project_id: ticket.project_id,
             state: state_name,
             attempt: spec.attempt,
-            spec: spec |> Spec.to_json() |> Jason.decode!()
+            spec: spec |> Spec.to_json() |> Jason.decode!(),
+            memory_max: resources.memory,
+            cores: resources.cores
           })
         )
       end
@@ -75,6 +79,41 @@ defmodule Forge.Jobs do
       }
     end)
   end
+
+  @doc """
+  What a job in `state_name` is admitted with: the workflow's chain, then the platform's.
+
+  `ForgeCore.Workflow.resources/2` walks the part `forge_core` can see — the state's
+  declaration, then the workflow's `defaults` — and leaves a field nil when nobody said, because
+  core has no configuration to read the last link from. This is that last link
+  (`docs/design/provisioning.md` § What a job asks for).
+
+  **The resolved figures live on the job row and nowhere else.** Putting them in `spec` as well
+  would be two copies of one decision that can disagree, and the row is the one the scheduler
+  sums. The assignment carries them to the worker from the row.
+  """
+  @spec resources(Workflow.t(), String.t()) :: %{memory: pos_integer(), cores: pos_integer()}
+  def resources(%Workflow{} = workflow, state_name) do
+    declared = Workflow.resources(workflow, state_name)
+
+    %{
+      memory: declared.memory || Workers.slice_bytes(),
+      cores: declared.cpu || Workers.default_cores()
+    }
+  end
+
+  @doc """
+  What a job with no workflow behind it is admitted with — a chat, which declares nothing.
+
+  **Its own number, and not the build slice it used to borrow.** `Workers.chat_slice_bytes/0`
+  says why; the short of it is that `resources` is a workflow state's grammar, a chat has no
+  state, and inheriting a cold build's peak reserved a machine's worth of memory to run an
+  agent that talks. Cores stay `default_cores/0`: the gate counts whole cores, and what a unit
+  actually runs at is `CPUWeight`, which is a share rather than a quota.
+  """
+  @spec default_resources() :: %{memory: pos_integer(), cores: pos_integer()}
+  def default_resources,
+    do: %{memory: Workers.chat_slice_bytes(), cores: Workers.default_cores()}
 
   defp build_spec(repo, %Ticket{} = ticket, %Workflow{} = workflow, state_name) do
     %State{} = state = Workflow.state(workflow, state_name)
@@ -320,8 +359,13 @@ defmodule Forge.Jobs do
       # (`docs/design/ticket-proposals.md` § Reading the backlog).
       "backlog" => Backlog.compose(project),
       "seed" => seed(project),
+      # The job's own figures, from the row it was admitted with, rather than one number for
+      # every job (`docs/design/provisioning.md` § What a job asks for). `cpu_weight` stays a
+      # constant and is not `cores`: the slice gets a proportional *share*, never a quota, so a
+      # command with the machine to itself uses all of it — `cores` is what the gate reserved,
+      # which is a different question from what the unit is allowed to run at.
       "slice" => %{
-        "memory_max" => Workers.slice_bytes(),
+        "memory_max" => job.memory_max || Workers.slice_bytes(),
         "cpu_weight" => Workers.config(:cpu_weight, 100)
       },
       "resume_session" => job.harness_session_id,

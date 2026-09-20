@@ -186,9 +186,13 @@ defmodule ForgeWorker.Slice.Systemd do
   defp limit(_name, nil), do: []
   defp limit(name, value), do: ["--property=#{name}=#{value}"]
 
-  # Systemd and useradd both have opinions about length; a job id's first segment is unique
-  # enough on one machine and short enough for both.
-  defp short(job_id), do: job_id |> String.split("-") |> hd() |> String.slice(0, 8)
+  # Systemd and useradd both cap a user name at 31 characters. `"forge-job-"` is 10, so this
+  # takes 16 hex characters of the id (dashes stripped) for a 26-character name: 64 bits of
+  # entropy, where the first segment's 8 hex gave 32 and two concurrent jobs colliding on it
+  # shared a Unix user — and `create_user/1` reads "already exists" as success, so the collision
+  # was silent and one job's cleanup pulled the other's files and user out from under it. At 64
+  # bits a collision is not a thing that happens on one machine, so the reuse branch is safe.
+  defp short(job_id), do: job_id |> String.replace("-", "") |> String.slice(0, 16)
 
   defp create_user(user) do
     args = ["--system", "--no-create-home", "--shell", "/sbin/nologin", user]

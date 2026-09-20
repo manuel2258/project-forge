@@ -22,6 +22,14 @@ defmodule Forge.Jobs.Job do
     field :state, :string
     field :attempt, :integer
     field :spec, :map
+    # What the scheduler gates on, resolved once at creation from the workflow's chain and the
+    # platform's defaults (`docs/design/provisioning.md` § What a job asks for). Denormalised out
+    # of `spec` because `Workers.promised/1` sums them across a worker's jobs on every pass, and
+    # written once like `spec` for the same reason: what a job was admitted as does not change
+    # under it. Nullable in the database for rows that predate the column; required here, because
+    # a job with no figures is one the gate cannot place.
+    field :memory_max, :integer
+    field :cores, :integer
     field :status, Ecto.Enum, values: @statuses, default: :pending
     field :outcome, Ecto.Enum, values: @outcomes
     field :declared_outcome, :string
@@ -66,11 +74,15 @@ defmodule Forge.Jobs.Job do
       :parent_job_id,
       :spec,
       :worker_id,
-      :model
+      :model,
+      :memory_max,
+      :cores
     ])
-    |> validate_required([:kind, :project_id, :attempt])
+    |> validate_required([:kind, :project_id, :attempt, :memory_max, :cores])
     |> validate_shape()
     |> validate_number(:attempt, greater_than: 0)
+    |> validate_number(:memory_max, greater_than: 0)
+    |> validate_number(:cores, greater_than: 0)
     |> foreign_key_constraint(:ticket_id)
     |> foreign_key_constraint(:project_id)
     |> foreign_key_constraint(:parent_job_id)

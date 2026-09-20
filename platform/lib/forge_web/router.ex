@@ -33,6 +33,7 @@ defmodule ForgeWeb.Router do
       live "/", QueueLive
       live "/board", BoardLive
       live "/workers", WorkersLive
+      live "/templates", TemplatesLive
       # Before /tickets/:project/:number, or "new" is read as a project name.
       live "/projects/new", ProjectNewLive
       live "/projects/:name", ProjectLive

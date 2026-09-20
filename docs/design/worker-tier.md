@@ -46,6 +46,13 @@ token, is scheduled by the same memory gate, runs the same slices, and counts ag
 platform made. Setting `max_workers` to 0 and provisioning by hand is the pure permanent model;
 leaving room above the permanent ones is a permanent worker with burst capacity.
 
+**`docs/design/provisioning.md` keeps this exactly as it is, and that is the point.** A worker
+template is a recipe for creating a machine, so a machine nobody created from one simply has a
+null `template_id` and its resources set by the operator rather than copied. No second concept
+appears for a machine the platform did not make — which is the choice `managed` already
+represents, and the reason `max_workers` moving onto a template does not change the sentence
+above: it is still how many machines of that shape exist.
+
 **"Everything else is the same" includes the harness credential**, and that is the part it is
 easy to get wrong. `mix forge.worker.new` prints the whole environment a machine needs, the
 credential included, because it stands in for the driver and the driver injects it — see below.
@@ -69,7 +76,18 @@ destroyed as before: it is cattle, and the platform can make another.
 
 ## The provider driver
 
-`Forge.Provider`, one implementation in the PoC:
+`Forge.Provider`, and the second implementation now exists — `Forge.Provider.Hetzner`, behind
+the same callbacks, resolved through the registry `docs/design/provisioning.md` § Where a
+machine comes from describes rather than through one configured module. **It has never spoken
+to Hetzner.** Every request is shaped against the published API and exercised through a seam,
+which is precisely the position § What the operator's machine settled warns about: in every
+case the tests against the fakes passed and the real thing did not. What it does settle is the
+boundary — nothing above `Forge.Provider.*` learned a Hetzner name for it to exist, and the
+identity route needed no change at all, because § How a machine learns what it is had already
+chosen Hetzner's metadata endpoint and the bytes are the same ones the local driver writes to a
+disk.
+
+The callbacks:
 
 ```
 @callback create(opts) :: {:ok, %{provider_id: String.t(), address: String.t()}} | {:error, term}
@@ -82,10 +100,22 @@ whole surface, and it matches what `docs/vision.md` says a provider is: create a
 it, and somewhere to put bytes. The bytes are `Forge.Storage`'s (`docs/design/storage.md`), not
 the driver's, which is why `create` and `destroy` are all that is left here.
 
+**`opts.size` used to be declared and read by nobody** — a `String.t()` on the type and a
+`machine_size` config key that reached `Provider.create/1` and stopped there, because one
+machine shape needs no name. `docs/design/provisioning.md` gave it a consumer: a worker
+template carries it and the driver maps it, so `"cpx32"` means something in exactly one module.
+Two callbacks joined the three above — `shapes/1`, the machine shapes a driver sells, and
+`credential_fields/0`, the shape of the secret that reaches its account — and `impl/0` became a
+registry, so the driver is resolved per machine from the row rather than per node from
+configuration. All of it is built.
+
 **Nothing above the driver knows the provider.** Not the scheduler, not the channel, not the
 worker. A module that pattern-matches on `"local"` outside `Forge.Provider.*` is the bug this
-callback set exists to prevent, and the Hetzner implementation in the closing step is the test of
-whether it worked.
+callback set exists to prevent, and the Hetzner implementation was the test of whether it
+worked. **It did.** Writing it added two callbacks to the behaviour and changed nothing above
+it; the one thing that had to move was the `KEY=VALUE` blob a machine is told about itself,
+which lived in `LocalVm` while there was one driver and is `Forge.Provider.MachineConfig` now.
+That is a shared detail finding its level, not a boundary leaking.
 
 `Forge.Provider.LocalVm` boots the NixOS worker image under QEMU: a copy-on-write overlay on the
 image so the base is never written, user-mode networking with no inbound ports, and a config disk
@@ -100,6 +130,18 @@ two things need it. M4 measures cold-start phases from outside the guest
 about to be destroyed has left its stderr on that machine and nowhere else. Both are the
 operator's own machine looking at its own VM. Neither is configured unless the operator does it,
 and the Hetzner implementation in the closing step is free to have no equivalent.
+
+**A driver that refuses is recorded on the row it refused.** `Workers.create_machine/1` inserts
+the row before it asks the driver, so a refusal happens with a row already in hand — and until
+`workers.last_error` existed, the driver's reason went back to the scheduler, which reads every
+error alike as *not right now* and offers the job again next pass. A node with no image
+configured therefore made a row, failed, swept it on the timeout and did it again for ever,
+looking idle on every surface the operator has. That is how it was found, on a real node.
+
+The row is left `creating` rather than destroyed, and that is deliberate: it holds its place
+against `max_workers`, which is what rate-limits the retry to one attempt per sweep instead of
+one per scheduling pass. § Managed and unmanaged already relies on the same fallback — a machine
+that never spoke is swept on `inserted_at` — so the cleanup path needed nothing new.
 
 `Forge.Provider.Fake` records calls and returns synthetic ids. It is what the platform's tests run
 against, and it is also the honest way to develop the platform on a machine that cannot boot a VM.
@@ -214,6 +256,12 @@ grammar has something to say about it. The executable does not: the platform's i
 platform's host, and the image has its own.
 
 ## Scheduling
+
+> **Superseded in part by `docs/design/provisioning.md`.** What is below is what runs: one slice
+> size for every job, a memory-only gate, and one `max_workers` for the node. That note replaces
+> the single number with resources declared per job, adds `kind` and cores as gate dimensions, and
+> moves `max_workers` and the idle period onto a worker template. It is unbuilt; this section
+> describes the code until it is, and the rule the gate exists to enforce does not change.
 
 `Forge.Jobs.Scheduler` stops counting jobs and starts measuring memory.
 
@@ -607,9 +655,24 @@ ticket.
 
 - **`slice_memory` is one number for every job.** A refine job and a build job get the same
   ceiling. Per-state slices belong in the workflow grammar, and there is no evidence yet that the
-  difference matters.
+  difference matters. **`docs/design/provisioning.md` is where this goes** — it was
+  `docs/design/commands.md` § Resources, which still holds the grammar half, and commands are what
+  made the single number cost something: a command declaring the same 2.2 GiB as a prose-refining
+  agent is the gate doing nothing. Unbuilt; the shape is settled.
+- **The 2 GiB reserve is traced to nothing.** `ForgeWorker.Config`'s `@reserve` is what a worker
+  holds back from `memory_budget` for the system and the Nix daemon, and unlike every other
+  constant here it has no measurement behind it, no comment, and no note. It is a fixed tax per
+  machine sitting on a slice boundary: on an 8 GiB machine roughly 700 MiB of it is the difference
+  between two slices and three. What it is really covering is the Nix daemon — the image sets no
+  `MemoryMax` on `nix-daemon.service`, so a build the daemon runs is charged outside every job's
+  slice — and how big that is depends on how much of a project's closure substitutes rather than
+  builds, which is also unmeasured. **Measure the idle footprint and the daemon's
+  `memory.peak` before moving it**, because the failure is asymmetric: too small a *slice*
+  OOM-kills one job with `CONSTRAINT_MEMCG`, and too small a *reserve* lets the global OOM killer
+  pick, which on this machine means the worker release.
 - **`max_workers` is 1 for the PoC.** Nothing in the scheduler assumes it; nothing has tested it
-  above 1 either.
+  above 1 either. `docs/design/provisioning.md` moves it onto a worker template, so every
+  per-template ceiling there is a generalisation of a number that has only ever held one value.
 - **Seed refresh has no schedule.** Someone runs the Mix task. How stale a seed may be before it
   costs more than it saves is a dogfooding question.
 - **A partitioned worker is destroyed, not waited for.** Correct while jobs are re-runnable and

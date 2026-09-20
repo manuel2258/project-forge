@@ -192,6 +192,129 @@ defmodule Forge.ProviderTest do
 
     assert_receive {:provider_create, %{worker_id: "w-2"}}
     assert :ok = Provider.Fake.destroy("fake-w-2")
-    assert_receive {:provider_destroy, "fake-w-2"}
+    assert_receive {:provider_destroy, "fake-w-2", _credential}
+  end
+
+  describe "what the local host is holding" do
+    setup do
+      dir = Path.join(System.tmp_dir!(), "forge-local-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf!(dir) end)
+
+      Application.put_env(
+        :forge,
+        Provider,
+        Keyword.put(Application.get_env(:forge, Provider), :dir, dir)
+      )
+
+      %{dir: dir}
+    end
+
+    # Reconciliation is not a Hetzner special case: a leak here is an overlay and a QEMU
+    # process a `destroy` did not finish removing. It costs disk rather than money, but it is
+    # the same question and the same panel answers it.
+    test "the machine directories are what it holds", %{dir: dir} do
+      File.mkdir_p!(Path.join([dir, "machines", "w-1"]))
+      File.mkdir_p!(Path.join([dir, "machines", "w-2"]))
+
+      assert {:ok, instances} = LocalVm.list(nil)
+      assert Enum.map(instances, & &1.provider_id) |> Enum.sort() == ["w-1", "w-2"]
+      assert Enum.all?(instances, &(&1.name =~ "forge-"))
+
+      # A directory with no pidfile is a machine that was made and never booted.
+      assert Enum.all?(instances, &(&1.status == "pending"))
+    end
+
+    # No directory is no machines, not an error: nothing has been created on this host yet, and
+    # a panel that errored on a fresh node would report a problem where there is none.
+    test "a host that has created nothing holds nothing", %{dir: dir} do
+      refute File.dir?(Path.join(dir, "machines"))
+      assert {:ok, []} = LocalVm.list(nil)
+    end
+
+    test "the configured image is the one image it offers" do
+      assert {:ok, [image]} = LocalVm.images(nil)
+      assert image.id == "/var/lib/forge/worker.qcow2"
+      assert image.name == "worker.qcow2"
+    end
+
+    # A node with no image cannot make a machine, and the form should offer nothing rather than
+    # an entry that would fail at create.
+    test "a host with no image offers none" do
+      Application.put_env(
+        :forge,
+        Provider,
+        Keyword.delete(Application.get_env(:forge, Provider), :image)
+      )
+
+      assert {:ok, []} = LocalVm.images(nil)
+    end
+  end
+
+  describe "the driver registry" do
+    test "a name resolves to the module configured for it" do
+      assert {:ok, Provider.Fake} = Provider.driver("fake")
+      assert {:ok, LocalVm} = Provider.driver("local")
+    end
+
+    test "nothing named is the default" do
+      assert Provider.driver(nil) == Provider.driver(Provider.default())
+    end
+
+    # **Never the default**, and this is the assertion worth having: a worker row naming a
+    # provider this node no longer has configured is a machine nothing can destroy, and quietly
+    # reaching for whichever driver *is* configured would ask it to destroy an id that means
+    # something else entirely there.
+    # A name no node will ever configure, rather than one that happens not to be configured
+    # here: this test used `"hetzner"` until there was a Hetzner driver, at which point it
+    # started asserting that a real provider was unknown.
+    test "a name nothing is configured for is an error, not a fallback" do
+      assert {:error, {:unknown_provider, "nowhere"}} = Provider.driver("nowhere")
+      assert {:error, {:unknown_provider, "nowhere"}} = Provider.destroy("nowhere", "srv-1")
+      assert {:error, {:unknown_provider, "nowhere"}} = Provider.shapes("nowhere")
+
+      assert {:error, {:unknown_provider, "nowhere"}} =
+               Provider.create(%{
+                 provider: "nowhere",
+                 worker_id: "w-1",
+                 token: "t",
+                 platform_url: "http://x"
+               })
+    end
+
+    test "names lists every provider this node can speak to" do
+      assert Provider.names() == ["fake", "hetzner", "local"]
+    end
+
+    test "a call reaches the driver its name selects, not the default" do
+      Provider.Fake.watch()
+
+      assert :ok = Provider.destroy("fake", "fake-w-9")
+      assert_receive {:provider_destroy, "fake-w-9", _credential}
+
+      # The local driver is not the default here, and reaching it is what proves the name is
+      # doing the selecting rather than the configuration.
+      assert {:ok, :gone} = Provider.status("local", "not-a-machine")
+    end
+  end
+
+  describe "shapes" do
+    test "the local driver sells exactly what the operator configured it to be" do
+      assert {:ok, [shape]} = Provider.shapes("local")
+      assert shape.cores == 2
+      assert shape.memory == 4096 * 1024 * 1024
+
+      # Nil rather than a name: there is no vendor catalogue to name anything from, and
+      # `opts.size` would have nothing to read it back into.
+      assert shape.size == nil
+    end
+
+    test "a driver is asked with the credential it was given" do
+      Provider.Fake.watch()
+
+      assert {:ok, shapes} = Provider.shapes("fake", %{"token" => "secret"})
+      assert_receive {:provider_shapes, %{"token" => "secret"}}
+      assert Enum.map(shapes, & &1.size) == ["small", "large"]
+    end
   end
 end

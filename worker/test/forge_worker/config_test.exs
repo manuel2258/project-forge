@@ -144,6 +144,83 @@ defmodule ForgeWorker.ConfigTest do
   end
 
   # The environment is the fallback, so a key has to be gone from both places to be gone. The
+  describe "cores" do
+    setup do
+      previous = Application.get_env(:forge_worker, :cores)
+
+      on_exit(fn ->
+        restore(:cores, previous)
+        System.delete_env("FORGE_CORES")
+      end)
+
+      Application.delete_env(:forge_worker, :cores)
+      System.delete_env("FORGE_CORES")
+      :ok
+    end
+
+    test "is what the operator configured" do
+      Application.put_env(:forge_worker, :cores, 4)
+      assert Config.cores() == 4
+    end
+
+    # Same trap as the budget: the environment carries strings and the gate compares numbers,
+    # so a machine configured this way would offer "4" and be compared against an integer.
+    test "read from the environment is a number, not the string it arrived as" do
+      System.put_env("FORGE_CORES", "4")
+      assert Config.cores() == 4
+    end
+
+    test "with nobody saying, it is what the VM was actually given" do
+      assert Config.cores() == :erlang.system_info(:logical_processors_online)
+      assert Config.cores() > 0
+    end
+  end
+
+  describe "the kinds a worker accepts" do
+    setup do
+      previous = Application.get_env(:forge_worker, :accepts)
+
+      on_exit(fn ->
+        restore(:accepts, previous)
+        System.delete_env("FORGE_ACCEPTS")
+      end)
+
+      Application.delete_env(:forge_worker, :accepts)
+      System.delete_env("FORGE_ACCEPTS")
+      :ok
+    end
+
+    # Nil and not a list of everything: the platform reads "said nothing" as "takes anything",
+    # and a worker that enumerated the kinds it knew would refuse one added in a migration it
+    # has not been rebuilt for.
+    test "with nobody saying, it is nothing rather than a list" do
+      assert Config.accepts() == nil
+    end
+
+    test "is a comma-separated list, because the config disk has no room for structure" do
+      System.put_env("FORGE_ACCEPTS", "command")
+      assert Config.accepts() == ["command"]
+
+      System.put_env("FORGE_ACCEPTS", "workflow,chat")
+      assert Config.accepts() == ["workflow", "chat"]
+    end
+
+    test "tolerates the spacing a person types" do
+      System.put_env("FORGE_ACCEPTS", " workflow , chat ")
+      assert Config.accepts() == ["workflow", "chat"]
+    end
+
+    # An empty or comma-only value is somebody who meant to say nothing, and reading it as a
+    # list of no kinds would be a machine that takes no work at all — silently, and only on the
+    # machine that was misconfigured.
+    test "a value with nothing in it is nobody saying" do
+      for written <- ["", "   ", ",", " , , "] do
+        System.put_env("FORGE_ACCEPTS", written)
+        assert Config.accepts() == nil, "#{inspect(written)} should be nobody saying"
+      end
+    end
+  end
+
   # suite runs this module synchronously, which is what makes touching the OS environment safe.
   defp without(key, env, fun) do
     app_value = Application.get_env(:forge_worker, key)

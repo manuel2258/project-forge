@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+# Puts the forge worker image into a Hetzner project, as a snapshot a template can name.
+#
+# Hetzner Cloud has no image upload. The only way in is to boot a server into rescue mode,
+# write the image onto its disk, snapshot the server and throw the server away — which is what
+# `docs/design/worker-tier.md` § Updating a worker describes and what this does in one command.
+#
+# The server is created, used and deleted here. It costs a few minutes of one machine's hourly
+# rate; the snapshot it leaves costs a snapshot's monthly rate, which for a 1.8 GiB image is
+# cents. Nothing else is left behind.
+set -euo pipefail
+
+usage() {
+  cat << 'USAGE'
+usage: bin/hetzner-image [--image PATH] [--type TYPE] [--location LOC] [--name NAME]
+                         [--ssh-key NAME] [--wait SECONDS]
+
+  --image     qcow2 to write. Default: result/forge-worker.qcow2 from `nix build .#worker-image`
+              Converted to raw in $TMPDIR first, so that much free space is needed there.
+  --type      server type to rescue-boot on. Default: cx23
+  --location  where to make it. Default: fsn1
+  --name      the snapshot's description. Default: forge-worker-<date>
+  --ssh-key   name of a key already in the Hetzner project. Default: the first one listed
+  --wait      seconds to wait for rescue to answer. Default: 300
+
+Needs HCLOUD_TOKEN in the environment, and an ssh key already in the Hetzner project.
+USAGE
+}
+
+image="result/forge-worker.qcow2"
+type="cx23"
+location="fsn1"
+name="forge-worker-$(date -u +%Y%m%d-%H%M%S)"
+key=""
+wait_seconds=300
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --image)
+      image="$2"
+      shift 2
+      ;;
+    --type)
+      type="$2"
+      shift 2
+      ;;
+    --location)
+      location="$2"
+      shift 2
+      ;;
+    --name)
+      name="$2"
+      shift 2
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+[ -n "${HCLOUD_TOKEN:-}" ] || {
+  echo "HCLOUD_TOKEN is not set" >&2
+  exit 1
+}
+[ -f "$image" ] || {
+  echo "no image at $image — run: nix build .#worker-image" >&2
+  exit 1
+}
+command -v hcloud > /dev/null || {
+  echo "hcloud is not on PATH" >&2
+  exit 1
+}
+
+# **`qemu-img` cannot write to a pipe.** Given `-` it creates a file called `-`, and given
+# `/dev/stdout` it produces nothing at all — both silently, both exit 0. The first version of
+# this script piped `qemu-img convert -O raw "$image" -` into ssh, which wrote a 3.9 GB file
+# into the working directory, sent zero bytes to the rescue box and snapshotted an untouched
+# Debian disk while reporting success. So the conversion goes to a real file and the transfer
+# is checked afterwards.
+raw="$(mktemp -t forge-worker-raw.XXXXXX)"
+server="forge-image-builder-$$"
+
+# **A rescue system regenerates its host key on every boot, so there is nothing to pin.**
+# `accept-new` records the key on the first run and then refuses every later one, because it
+# permits new hosts and not *changed* ones — so this worked exactly once per IP and then hung
+# for ever with the reason sent to /dev/null. Hetzner reuses addresses, so the second run is
+# usually the one that breaks.
+#
+# Not laxity: `CLAUDE.md` asks that a guard use the same model as the thing it guards, and a
+# pinned host key models a machine with a stable identity. This one is made by us through the
+# API thirty seconds earlier, written to, and destroyed at the end of the script. What is sent
+# over it is a public NixOS image, and what comes back is checked against the bytes we sent.
+ssh_opts=(
+  -o StrictHostKeyChecking=no
+  -o UserKnownHostsFile=/dev/null
+  -o LogLevel=ERROR
+  -o ConnectTimeout=5
+  -o BatchMode=yes
+)
+
+cleanup() {
+  rm -f "$raw"
+  # **The server goes whatever happened.** A rescue box left running is a machine billing by
+  # the hour for nothing, which is exactly the leak the workers page exists to catch.
+  if hcloud server describe "$server" > /dev/null 2>&1; then
+    echo "removing $server"
+    hcloud server delete "$server" > /dev/null
+  fi
+}
+trap cleanup EXIT INT TERM
+
+echo "creating $server ($type, $location)"
+hcloud server create --name "$server" --type "$type" --image debian-12 \
+  --location "$location" --start-after-create=false > /dev/null
+
+# **Named, not guessed.** This took the project's first key silently, so a project with no key
+# got `--ssh-key ""` — rescue then accepts only the root password, which this script captures
+# and never uses, and the wait below hung for ever with nothing said. A project with somebody
+# else's key first failed the same way.
+if [ -z "${key:-}" ]; then
+  key="$(hcloud ssh-key list -o noheader -o columns=name | head -n1)"
+fi
+
+if [ -z "$key" ]; then
+  echo "this Hetzner project has no ssh key, so rescue would let nobody in" >&2
+  echo "add one with: hcloud ssh-key create --name NAME --public-key-from-file ~/.ssh/id_ed25519.pub" >&2
+  exit 1
+fi
+
+echo "booting it into rescue with ssh key '$key'"
+password="$(hcloud server enable-rescue "$server" --ssh-key "$key" | awk '/Root password/ {print $NF}')"
+hcloud server poweron "$server"
+
+ip="$(hcloud server ip "$server")"
+echo "waiting for rescue on $ip (up to ${wait_seconds}s)"
+
+# **Bounded, and it keeps the reason.** The first version looped for ever with ssh's stderr sent
+# to /dev/null, so a wrong key, a changed host key and a machine that never booted were one
+# indistinguishable silent hang. Whatever ssh last said is what gets printed when time runs out.
+deadline=$(($(date +%s) + wait_seconds))
+ssh_error=""
+
+until ssh_error="$(ssh "${ssh_opts[@]}" "root@$ip" true 2>&1)"; do
+  if [ "$(date +%s)" -ge "$deadline" ]; then
+    echo "rescue did not answer on $ip within ${wait_seconds}s" >&2
+    echo "  ssh said: ${ssh_error:-<nothing>}" >&2
+    echo "  the root password for this rescue session was: ${password:-<none captured>}" >&2
+    exit 1
+  fi
+  sleep 5
+done
+
+echo "converting $image to raw"
+qemu-img convert -O raw "$image" "$raw"
+bytes="$(stat -c %s "$raw")"
+echo "writing $bytes bytes to /dev/sda"
+dd if="$raw" bs=4M status=progress | ssh "${ssh_opts[@]}" "root@$ip" "dd of=/dev/sda bs=4M"
+ssh "${ssh_opts[@]}" "root@$ip" sync
+
+# **The check the first version did not have.** A transfer that moved nothing looks exactly
+# like one that worked — the snapshot is taken either way, and the failure only shows up as a
+# machine that boots the wrong operating system and never dials home. Comparing the bytes that
+# should be on the disk with the bytes that are is the only thing that tells them apart.
+echo "verifying what landed on the disk"
+here="$(dd if="$raw" bs=1M count=64 2> /dev/null | sha256sum | cut -d" " -f1)"
+there="$(ssh "${ssh_opts[@]}" "root@$ip" \
+  "dd if=/dev/sda bs=1M count=64 2>/dev/null | sha256sum | cut -d' ' -f1")"
+
+if [ "$here" != "$there" ]; then
+  echo "the disk does not hold the image that was sent — refusing to snapshot" >&2
+  echo "  expected $here" >&2
+  echo "  found    $there" >&2
+  exit 1
+fi
+
+echo "powering off"
+hcloud server poweroff "$server"
+until [ "$(hcloud server describe "$server" -o format='{{.Status}}')" = "off" ]; do sleep 3; done
+
+echo "snapshotting as $name"
+hcloud server create-image --type snapshot --description "$name" "$server" > /dev/null
+
+echo
+echo "done. The snapshot is listed on /templates as $name."
+echo "Password for the rescue session, had you needed it: ${password:-<none captured>}"

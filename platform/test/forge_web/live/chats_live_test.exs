@@ -169,6 +169,59 @@ defmodule ForgeWeb.ChatsLiveTest do
     assert render(view) =~ "No conversations yet"
   end
 
+  # The page every other create affordance is reached from cannot reach this one: a conversation
+  # is always about a project and this page is all of them, so the link goes to the bare route
+  # that asks which (`docs/design/ui.md` § Creating things).
+  test "a conversation can be started from here", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/chats")
+
+    assert has_element?(view, ~s(header a[href="/chats/new"]))
+  end
+
+  # A live row is a machine running, and until this existed the only way to stop one was to open
+  # it first. The control is beside the row rather than inside it, because the row navigates
+  # (`docs/design/ui.md` § The affordance rule).
+  test "a live conversation is ended from its row", %{conn: conn, user: user} do
+    {:ok, chat} = Conversations.open(project("parser", user), "about the parser")
+
+    {:ok, view, _html} = live(conn, ~p"/chats")
+
+    refute has_element?(view, ~s(ol li a[href="/chats/#{chat.id}"] button))
+    view |> element(~s(ol li button[phx-value-id="#{chat.id}"])) |> render_click()
+
+    assert Jobs.get(chat.id).status == :finished
+  end
+
+  # An ended one is not a machine and has nothing to stop.
+  test "a conversation that has already ended offers no way to end it", %{conn: conn, user: user} do
+    {:ok, chat} = Conversations.open(project("parser", user), "about the parser")
+    {:ok, _chat} = Conversations.ended(chat, nil, "closed")
+
+    {:ok, view, _html} = live(conn, ~p"/chats")
+
+    assert has_element?(view, row(chat))
+    refute has_element?(view, ~s(ol li button[phx-value-id="#{chat.id}"]))
+  end
+
+  # The id arrives from the client, so seeing your own list is not what decides this: the chat
+  # the id names has to be one you may act on (`docs/design/identity.md` § Sequencing).
+  test "ending a conversation in a project the reader is not in is refused", %{
+    conn: conn,
+    user: user
+  } do
+    {:ok, mine} = Conversations.open(project("mine", user), "about my parser")
+    theirs = project("theirs", Forge.AccountsFixtures.user_fixture())
+    {:ok, secret} = Conversations.open(theirs, "not yours")
+
+    {:ok, view, _html} = live(conn, ~p"/chats")
+
+    view
+    |> element(~s(ol li button[phx-value-id="#{mine.id}"]))
+    |> render_click(%{"id" => secret.id})
+
+    assert Jobs.get(secret.id).status == :pending
+  end
+
   test "it requires a logged-in operator" do
     assert {:error, {:redirect, %{to: "/users/log-in"}}} = live(build_conn(), ~p"/chats")
   end

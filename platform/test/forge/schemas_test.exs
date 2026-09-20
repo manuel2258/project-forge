@@ -45,7 +45,9 @@ defmodule Forge.SchemasTest do
           project_id: job.project_id,
           state: job.state,
           attempt: 1,
-          spec: %{}
+          spec: %{},
+          memory_max: Forge.Jobs.default_resources().memory,
+          cores: Forge.Jobs.default_resources().cores
         })
 
       assert {:error, changeset} = Repo.insert(changeset)

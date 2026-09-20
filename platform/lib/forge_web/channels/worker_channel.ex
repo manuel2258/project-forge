@@ -69,7 +69,7 @@ defmodule ForgeWeb.WorkerChannel do
   @impl true
   def handle_in("ready", payload, socket) do
     worker = Workers.get!(socket.assigns.worker_id)
-    {:ok, _worker} = Workers.ready(worker, payload["memory_budget"] || 0, payload["harness"])
+    {:ok, _worker} = Workers.ready(worker, payload)
     {:reply, :ok, socket}
   end
 

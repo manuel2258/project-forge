@@ -18,8 +18,16 @@ tickets to read.
 credential funds the work. Its first step is built: approval, `node_admin`, project membership,
 read scoping, and a guard on every human write. Credentials, worker ownership and OIDC are not,
 and the note says in what order they come. Its § Sequencing records what an independent review
-found in the first attempt, which is worth reading before writing the next guard. It is the
-newest note.
+found in the first attempt, which is worth reading before writing the next guard.
+
+`docs/design/provisioning.md` is the standard for what a job asks for and where a machine comes
+from: resources declared per job, a gate on kind as well as memory and cores, worker templates as
+a recipe the platform creates from, per-user provider credentials, and a driver registry in place
+of one global provider. It supersedes the single `slice_bytes` gate in
+`docs/design/worker-tier.md` § Scheduling and is read together with `docs/design/commands.md`,
+which holds the grammar half. **It is built**, apart from `resources` on a *command*, which
+waits for commands to be a job kind. The Hetzner driver exists and has never spoken to Hetzner.
+It is the newest note.
 
 ## Layout
 

@@ -14,10 +14,19 @@ defmodule Forge.CliOwnershipTest do
 
   import Forge.AccountsFixtures
 
+  import Forge.GitFixtures
+
   alias Forge.{Accounts, Projects}
 
+  # `Projects.register/2` creates the bare repository, so the path has to be one this process
+  # may write. It used to be `/srv/git/x.git`, which made these tests pass only on a machine
+  # where that directory happened to exist and be writable — everywhere else they failed in
+  # `File.mkdir_p!` before reaching the ownership rule they are about.
   defp attrs(label),
-    do: %{name: "#{label}-#{System.unique_integer([:positive])}", repo_path: "/srv/git/x.git"}
+    do: %{
+      name: "#{label}-#{System.unique_integer([:positive])}",
+      repo_path: Path.join(tmp_dir("cli-owner"), "x.git")
+    }
 
   describe "Projects.register/2 with no owner" do
     test "is refused rather than making an unreachable project" do

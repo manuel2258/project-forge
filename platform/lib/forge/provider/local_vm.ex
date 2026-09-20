@@ -20,6 +20,7 @@ defmodule Forge.Provider.LocalVm do
   @behaviour Forge.Provider
 
   alias Forge.Provider
+  alias Forge.Provider.MachineConfig
 
   # The contract with the image: a filesystem with this label holding this file. See
   # `docs/design/worker-tier.md` § How a machine learns what it is.
@@ -49,7 +50,7 @@ defmodule Forge.Provider.LocalVm do
   end
 
   @impl Provider
-  def destroy(provider_id) do
+  def destroy(provider_id, _credential \\ nil) do
     dir = machine_dir(provider_id)
 
     case pid(dir) do
@@ -62,7 +63,7 @@ defmodule Forge.Provider.LocalVm do
   end
 
   @impl Provider
-  def status(provider_id) do
+  def status(provider_id, _credential \\ nil) do
     dir = machine_dir(provider_id)
 
     cond do
@@ -72,6 +73,78 @@ defmodule Forge.Provider.LocalVm do
       true -> {:ok, :gone}
     end
   end
+
+  @doc """
+  The one shape this driver sells: whatever the operator configured the VM to be.
+
+  There is no catalogue to fetch, because there is no vendor — a local machine is as big as
+  `FORGE_WORKER_CPUS` and `FORGE_WORKER_MEMORY_MB` say and no bigger. The `size` is nil rather
+  than a name, since nothing here would read one back
+  (`docs/design/provisioning.md` § Where a machine comes from).
+
+  It is reported all the same, rather than left unimplemented, so the template UI has something
+  to offer for the local provider and one code path serves both. A driver that answered nothing
+  would need a special case somewhere, and the special case is what the behaviour exists to
+  avoid.
+  """
+  @impl Provider
+  def shapes(_credential) do
+    {:ok,
+     [
+       %{
+         size: nil,
+         memory: Provider.config(:memory_mb, 4096) * 1024 * 1024,
+         cores: Provider.config(:cpus, 2),
+         price_hourly: nil
+       }
+     ]}
+  end
+
+  @doc """
+  The machines this host is holding, read from the directories `create/1` makes.
+
+  Implemented rather than stubbed so reconciliation is not a Hetzner special case: a leak here
+  is an overlay and a QEMU process left behind by a `destroy` that did not finish, and it costs
+  disk rather than money — but it is the same question and the same panel answers it.
+  """
+  @impl Provider
+  def list(_credential) do
+    case File.ls(machines_dir()) do
+      {:ok, ids} -> {:ok, Enum.map(ids, &local_instance/1)}
+      # No directory is no machines, not an error: nothing has been created on this host yet.
+      {:error, :enoent} -> {:ok, []}
+      {:error, reason} -> {:error, {:local, reason}}
+    end
+  end
+
+  defp local_instance(id) do
+    {:ok, state} = status(id)
+    %{provider_id: id, name: "forge-" <> id, status: to_string(state), created_at: nil}
+  end
+
+  @doc """
+  The one image this host boots, which is whatever the operator pointed it at.
+
+  There is no catalogue and no upload: `FORGE_WORKER_IMAGE` is a path on this machine that
+  `nix build .#worker-image` produced. Reported all the same so the template form has something
+  to offer for the local provider and one code path serves both.
+  """
+  @impl Provider
+  def images(_credential) do
+    case image() do
+      {:ok, path} -> {:ok, [%{id: path, name: Path.basename(path), status: "available"}]}
+      {:error, _reason} -> {:ok, []}
+    end
+  end
+
+  @doc """
+  No credential: a machine on this host is made by this host, and there is no account to reach.
+
+  An empty list rather than an unimplemented callback, so the form for a local template simply
+  has no secret to ask for instead of the page needing to know which providers are special.
+  """
+  @impl Provider
+  def credential_fields, do: []
 
   @doc """
   The QEMU invocation for a machine. Public because it is the part of this driver that can be
@@ -127,26 +200,13 @@ defmodule Forge.Provider.LocalVm do
   defp hostfwd(port), do: ",hostfwd=tcp:127.0.0.1:#{port}-:22"
 
   @doc """
-  What a machine is told about itself: one file of `KEY=VALUE` lines, which becomes
-  `/etc/forge-worker.env` in the guest. The token is in it; the image is not.
+  What this machine is told about itself, on its config disk.
 
-  The same bytes go on the local config disk and, on a provider, into the server's user data —
-  the image reads whichever is there (`docs/design/worker-tier.md` § How a machine learns what
-  it is), so a driver has nothing to format and nothing to parse.
+  `Forge.Provider.MachineConfig` holds the lines every driver produces; this adds the one that
+  is only ever local.
   """
   @spec config_blob(Provider.opts()) :: String.t()
-  def config_blob(opts) do
-    lines =
-      [
-        "FORGE_WORKER_ID=#{opts.worker_id}",
-        "FORGE_WORKER_TOKEN=#{opts.token}",
-        "FORGE_PLATFORM_URL=#{opts.platform_url}"
-      ] ++
-        for({name, value} <- Map.get(opts, :harness_env, []), do: "#{name}=#{value}") ++
-        ssh_key_line(config(:ssh_key))
-
-    Enum.map_join(lines, "\n", & &1) <> "\n"
-  end
+  def config_blob(opts), do: MachineConfig.blob(opts, ssh_key_line(config(:ssh_key)))
 
   # The ssh door travels in the same file rather than by a mechanism of its own; the config unit
   # takes it out again before the release ever sees it.
@@ -291,7 +351,8 @@ defmodule Forge.Provider.LocalVm do
     :ok
   end
 
-  defp machine_dir(worker_id), do: Path.join([root(), "machines", worker_id])
+  defp machine_dir(worker_id), do: Path.join(machines_dir(), worker_id)
+  defp machines_dir, do: Path.join(root(), "machines")
 
   defp root, do: config(:dir) || Path.join(Forge.Jobs.data_dir(), "provider")
 

@@ -50,7 +50,7 @@ defmodule Mix.Tasks.Forge.Worker.New do
     # Unmanaged, always: this command exists because somebody is provisioning the machine
     # themselves, and a machine the platform did not create is not the platform's to destroy.
     # It is skipped by both sweeps; see docs/design/worker-tier.md § Managed and unmanaged.
-    case Workers.create(%{provider: Forge.Provider.name(), managed: false}) do
+    case Workers.create(%{provider: Forge.Provider.default(), managed: false}) do
       {:ok, worker, token} ->
         emit(Enum.join(assignments(worker, token, project), "\n"), Keyword.get(opts, :out))
 

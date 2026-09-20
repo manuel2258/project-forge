@@ -22,6 +22,12 @@ config :forge, ForgeWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 4000],
   check_origin: false,
   code_reloader: true,
+  # **`forge_core` as well, because the reloader's default is this project alone.** Core is a
+  # path dependency, so editing it and reloading the page left the node running whatever core
+  # was compiled when it started: a function added to core and called from a LiveView came back
+  # as `UndefinedFunctionError` against a module whose source plainly has it, which reads as a
+  # broken build rather than as a stale one. Reported against a running node.
+  reloadable_apps: [:forge_core, :forge],
   debug_errors: true,
   secret_key_base: "r0qUCzHCpPAqkt9dMaWgRGbe2KFqwohmHaijcaOhY0CbPkInnynbpsAV0yAr8Jgh",
   watchers: [

@@ -185,8 +185,11 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
     {:ok, worker, _token} = Workers.create(%{provider: "fake"})
 
     {:ok, _worker} =
-      Workers.ready(worker, 8_000, %{
-        "models" => [%{"id" => "claude-sonnet-5", "name" => "Claude Sonnet 5"}]
+      Workers.ready(worker, %{
+        "memory_budget" => 8_000,
+        "harness" => %{
+          "models" => [%{"id" => "claude-sonnet-5", "name" => "Claude Sonnet 5"}]
+        }
       })
 
     {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
@@ -208,7 +211,9 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
   } do
     {:ok, project} = Projects.set_model(project, "a-model-no-worker-has")
     {:ok, worker, _token} = Workers.create(%{provider: "fake"})
-    {:ok, _worker} = Workers.ready(worker, 8_000, %{"aliases" => ["opus"]})
+
+    {:ok, _worker} =
+      Workers.ready(worker, %{"memory_budget" => 8_000, "harness" => %{"aliases" => ["opus"]}})
 
     {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
 

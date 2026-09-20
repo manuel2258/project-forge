@@ -33,6 +33,25 @@ from before 2010.
 tails above — never from the raw request — so `GIT_PROJECT_ROOT` cannot be traversed to a sibling
 repository.
 
+## How a repository comes into being
+
+`Forge.Projects.register/2` reserves the name in the database **before** it touches the
+filesystem. The `unique_constraint` on `name` is the authority on who owns a repository path, so
+a registration for a name that already exists fails at the insert and the git steps — `init_bare`,
+the hooks, `symbolic-ref HEAD`, the initial commit — never run. Without this ordering a second
+caller, a member of nothing, could register an existing project's name and, before the uniqueness
+check rejected them, rewrite that project's `HEAD` and `forge.defaultBranch` (desyncing the
+default-branch guard § The per-job token depends on) and leave its clones empty. The guard is the
+**name, not the directory**: a directory that already exists is imported as is (push first, then
+register), which is why the check cannot simply refuse a pre-existing path. The git work runs last
+and inside the transaction, so a failure rolls the row back and removes only a directory this
+registration created — never an imported one.
+
+`default_branch` is validated on the way in (`Forge.Projects.Project.changeset/2`), because it
+reaches `git config forge.defaultBranch`, `symbolic-ref HEAD` and the pre-receive hook: an
+unvalidated value such as `-rf`, `../evil` or one with a space either poisons the repository or
+fails deep inside git as a 500.
+
 ## Why `git http-backend`
 
 `git http-backend` is the smart protocol. Reimplementing `upload-pack` and `receive-pack` in

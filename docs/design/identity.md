@@ -247,6 +247,30 @@ usable requires that a cap has stopped a runaway job, and `open-questions.md` re
 has. Removing those to make room for an unenforced credential limit would un-meet a criterion
 that is already met. The new concept starts as tracking; the old caps keep working.
 
+### A provider credential is a second thing, not a second kind
+
+`credential` above funds *inference*. Creating machines is funded too, and by a different secret:
+a Hetzner token, or whatever the next provider wants. `docs/design/provisioning.md` § Whose
+account puts it in its own table —
+
+```
+provider_credentials
+  user_id, name,
+  provider   "hetzner" | "local" | ...
+  secret     encrypted map, shape owned by the driver
+```
+
+— rather than as a third `kind` here, and the reason is the sentence this section already
+committed to: *a credential's spend is a query over the jobs that used it*, which is what
+`jobs.credential_id` exists to make true. **Machine spend is not a query over jobs.** It is hours
+times a rate and it accrues with nothing running. One table would make every existing spend query
+carry a filter to stay correct, and would leave `daily_limit_usd` meaning two different things on
+one row.
+
+The secret is a map because providers disagree about how many fields they need — one token, a key
+pair, a service-account document — and the driver validates its own shape on save. A new provider
+is then a module and a config line, not a migration.
+
 ## Workers
 
 **A worker is owned by a user and carries one credential.** `workers` gains `user_id` and
@@ -267,6 +291,15 @@ an exhausted allowance, and the queue says so.
 rewritten, like `spec`. That is what makes spend per credential a query rather than a running
 total somebody has to maintain.
 
+**A worker template is owned and assigned the same way.** `docs/design/provisioning.md` adds a
+recipe the platform creates machines from, and it inherits this section whole: a template belongs
+to a user, carries their provider credential, and reaches a project through `project_template` —
+`project_id`, `template_id` — which only its owner may create and only for a project they are a
+member of. The paragraph above holds with one noun changed. *A project admin cannot reach for
+someone else's template, because creating from it spends its owner's credential and the money
+stays with whoever spends it.* It was true of a machine's inference bill; it is true of its hourly
+one for the same reason, and the residual below widens the same way.
+
 ### The residual
 
 A worker assigned to two projects runs jobs authored by other people on its owner's
@@ -274,6 +307,11 @@ subscription credential. That is the individual-use constraint returning through
 and this note does not answer it — it is narrower than the original question, and it does not
 arise until a second person exists on a node. Recorded in `open-questions.md` rather than
 decided here.
+
+**A template assigned to two projects does the same for the hourly bill**, and it is worse in one
+respect: a machine created for another project's work bills its owner while it idles towards
+destruction, having run nothing of theirs at all. Same answer, same reason — not decided here,
+and it does not arise until a second person exists on a node.
 
 ## Deliberately not here
 
@@ -369,6 +407,11 @@ Two results of the audit worth keeping:
    then turned out to be the untested one. And `Projects.put_member/4` checked nothing about its
    caller — the page hid the form, and hiding it was the only thing stopping anyone.
 2. **With the worker tier's next pass.** `credential`, worker ownership, `project_worker`,
-   `jobs.credential_id`, per-credential spend tracking.
+   `jobs.credential_id`, per-credential spend tracking. **And, since that pass turned out to be
+   `docs/design/provisioning.md`:** `provider_credentials`, `worker_templates`,
+   `project_template`, and the provider registry that lets a credential name which driver it is
+   for. The two halves are one migration — a template is unusable without a provider credential to
+   create from, and a provider credential is pointless without a template — so they land together
+   or not at all.
 3. **Closing step, on a real origin.** OIDC: configured providers, the `identity` table,
    provisioning on first login.

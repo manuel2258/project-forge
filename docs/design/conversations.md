@@ -97,6 +97,32 @@ Tool calls and the rest of the harness stream stay in the log beside them, unpro
 conversation is what a person said and what they were told, and the rest is available without
 being in the way.
 
+## What it asks for
+
+A conversation is the one job kind with nothing to declare: `resources` is a workflow state's
+grammar (`commands.md` § Resources) and a chat has no state, so it fell off the end of the
+resolution chain onto the platform's default. That default is now an agent's figure rather than a
+cold build's (`provisioning.md` § What a job asks for), and **the person opening the conversation
+may say instead**.
+
+- **Memory and cores, on the create view, both optional.** Blank is the platform's own figure,
+  which is what the placeholder shows. Memory is parsed by `ForgeCore.Workflow.Resources`, so
+  `4GiB` means here exactly what it means in a workflow and on the templates page.
+- **A figure that is not one is refused where it was typed, never replaced.** Starting a
+  conversation on the default because `2 gigs` did not parse is the silent substitution
+  `CLAUDE.md` names: a guard that quietly succeeds is not a guard. The context refuses a
+  non-positive number for the same reason, for callers that are not the form.
+- **Fixed for the life of the process, like the model.** Both are read when the harness starts,
+  so a conversation that wants different ones is one you end and open again. Changing them on a
+  running conversation is possible — the slice is a systemd unit and systemd will change a live
+  unit's `MemoryMax` — and is not built; what it would need is a gate check against the worker's
+  remaining budget and a verb on the wire.
+
+**This is what makes a small machine usable.** The figures are what `Provisioning.holds?/2`
+compares against a template, so a conversation that will compile something says so before it is
+placed, and one that will not is no longer refused by a 2 GiB machine for a number it never
+needed.
+
 ## Context
 
 **A project chat** gets a worktree of the project's default branch at its head. It sees the
@@ -219,6 +245,13 @@ its ticket, because that is the work it is about.
   refuses is the trap `CLAUDE.md` names: a guard must use the same model as the operation it
   guards. What the reply *asked* stays legible either way — it is in the transcript, which is
   where it was said.
+- **Ending one is something the platform can do alone.** `live?/1` counts `:pending`, so a
+  conversation waiting for a worker is one every surface offers to end — and every other message
+  to a conversation is a push, which for a chat with no `worker_id` logs that it was not
+  delivered and returns `:ok`. Closing through that path left the row pending for ever with
+  nothing said: on a running node, three conversations the gate could never place could also
+  never be got rid of. So `close/2` records the ending itself when there is nobody to tell,
+  which is what the worker's report would have caused anyway.
 - **Kept for ever. The branch is deleted, the conversation is not.** An earlier draft said
   deleted after 30 days; that was reconsidered, and it was also not possible — `events` carries a
   `BEFORE UPDATE OR DELETE` trigger (`20260911201847_create_events.exs`) and `events.job_id` is

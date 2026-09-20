@@ -22,7 +22,7 @@ defmodule Forge.MixProject do
       # `elixirc_paths` in this env, and a case template or a fixture module is exercised by
       # definition — counting them lifts the percentage without anything being better tested.
       test_coverage: [
-        summary: [threshold: 82],
+        summary: [threshold: 83],
         ignore_modules: [
           Forge.AccountsFixtures,
           Forge.DataCase,
@@ -63,6 +63,9 @@ defmodule Forge.MixProject do
   defp deps do
     [
       {:pbkdf2_elixir, "~> 2.0"},
+      # Declared rather than inherited: it was already in the tree behind `web_push_elixir`,
+      # and `Forge.Provider.Hetzner` is the first thing here to depend on it directly.
+      {:req, "~> 0.7"},
       {:swoosh, "~> 1.19"},
       {:md, "~> 0.13"},
       {:html_sanitize_ex, "~> 1.4"},

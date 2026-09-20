@@ -70,17 +70,22 @@ defmodule ForgeWeb.Conversations do
   attr :project, :boolean, default: true, doc: "name the project; false on a project's own page"
   attr :empty, :string, default: "No conversations yet."
 
+  attr :ending, :string,
+    default: nil,
+    doc: "event to send to end a live conversation from the row; no control without it"
+
   def list(assigns) do
     ~H"""
     <p :if={@summaries == []} class="mt-3 text-sm opacity-60">{@empty}</p>
 
     <ol :if={@summaries != []} class="mt-3 flex flex-col">
-      <li :for={summary <- @summaries} class="border-t border-base-300">
-        <%!-- The whole row is the target: it goes to one place and does nothing else, so there
-              is no second gesture inside it to compete with. --%>
+      <li :for={summary <- @summaries} class="flex items-start gap-4 border-t border-base-300">
+        <%!-- The row goes to one place, and the control that ends the conversation is beside it
+              rather than inside it: `ui.md` § The affordance rule — a navigation target never
+              encloses something that commits, or reading and ending become one gesture. --%>
         <.link
           navigate={~p"/chats/#{summary.chat.id}"}
-          class="flex flex-col gap-[6px] py-[15px] hover:opacity-100"
+          class="flex min-w-0 flex-1 flex-col gap-[6px] py-[15px] hover:opacity-100"
         >
           <div class="flex items-start justify-between gap-4">
             <div class="flex flex-wrap items-center gap-2 font-mono text-[11px] tracking-[.14em] uppercase opacity-70">
@@ -108,6 +113,20 @@ defmodule ForgeWeb.Conversations do
             ) || "—"}
           </div>
         </.link>
+
+        <%!-- Only a live one, and worded as the conversation's own page words it: a
+              conversation cannot be deleted at all (`conversations.md` § Lifetime), so the
+              affordance a list can offer is the one that stops it costing something. --%>
+        <button
+          :if={@ending && summary.live}
+          type="button"
+          phx-click={@ending}
+          phx-value-id={summary.chat.id}
+          data-confirm="End this conversation? The last turn finishes first, and the machine is released."
+          class="mt-[15px] min-h-[46px] shrink-0 text-sm text-primary hover:underline"
+        >
+          End
+        </button>
       </li>
     </ol>
     """

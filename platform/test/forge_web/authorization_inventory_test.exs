@@ -32,6 +32,9 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     "/" => :member,
     "/board" => :member,
     "/workers" => :approved,
+    # Own credentials and own templates only; the assignment actions below are what reach a
+    # project, and those are guarded by membership in `Forge.Provisioning`.
+    "/templates" => :self,
     "/projects/new" => :approved,
     "/projects/:name" => :member,
     "/projects/:name/settings" => :member,
@@ -114,6 +117,9 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"chat_live.ex", "draft"} => :local,
     {"chat_new_live.ex", "open"} => :member,
     {"chat_new_live.ex", "validate"} => :local,
+    # The id is the client's, so the chat is read and then authorised: being able to see the
+    # list is not being able to end a row named by an id somebody supplied.
+    {"chats_live.ex", "end-chat"} => :member,
     {"job_live.ex", "more"} => :local,
     {"job_live.ex", "notices"} => :local,
     {"project_new_live.ex", "create"} => :approved,
@@ -133,6 +139,30 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"ticket_new_live.ex", "create"} => :member,
     {"ticket_new_live.ex", "validate"} => :local,
     {"workers_live.ex", "toggle-destroyed"} => :local,
+    {"workers_live.ex", "edit"} => :local,
+    {"workers_live.ex", "cancel-edit"} => :local,
+    # Sets what a machine offers the gate. A worker is node-level and has no owner yet
+    # (`docs/design/identity.md` § Workers is unbuilt), so `:approved` is what guards it — and
+    # a machine the platform *made* is refused here whatever id arrives, because it is replaced
+    # rather than corrected.
+    {"workers_live.ex", "save"} => :approved,
+    {"templates_live.ex", "add-credential"} => :self,
+    {"templates_live.ex", "delete-credential"} => :self,
+    {"templates_live.ex", "add-template"} => :self,
+    {"templates_live.ex", "delete-template"} => :self,
+    # Own templates only, and each reads the row scoped to the caller before touching it — the
+    # id is the client's in all three.
+    {"templates_live.ex", "edit-template"} => :self,
+    {"templates_live.ex", "save-template"} => :self,
+    {"templates_live.ex", "enable-template"} => :self,
+    # Closes a form. Nothing on the server changes but what this page is showing.
+    {"templates_live.ex", "cancel-edit"} => :local,
+    {"templates_live.ex", "credential-provider"} => :local,
+    {"templates_live.ex", "template-provider"} => :local,
+    # Both reach a project, and both are refused unless the caller owns the template *and* is a
+    # member of that project — `docs/design/provisioning.md` § Whose account.
+    {"templates_live.ex", "assign"} => :member,
+    {"templates_live.ex", "unassign"} => :member,
     {"user_live/confirmation.ex", "submit"} => :public,
     {"user_live/login.ex", "submit_magic"} => :public,
     {"user_live/login.ex", "submit_password"} => :public,

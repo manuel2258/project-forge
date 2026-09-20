@@ -391,6 +391,170 @@ defmodule Forge.FlowTest do
     assert job_status(waiting) == :running
   end
 
+  # The scheduler gates on what the *job* was admitted with, not on one number for every job
+  # (`docs/design/provisioning.md` § What a job asks for). With `slice_bytes` small and the job's
+  # own ceiling large, a memory-only gate reading the constant would happily place it.
+  test "a job is gated on its own figures, not on the configured slice", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    Registry.unregister(Forge.Workers.Registry, worker.id)
+    previous = Application.get_env(:forge, Forge.Workers, [])
+    on_exit(fn -> Application.put_env(:forge, Forge.Workers, previous) end)
+
+    Application.put_env(
+      :forge,
+      Forge.Workers,
+      Keyword.merge(previous, slice_bytes: 1_000, max_workers: 0)
+    )
+
+    FakeWorker.connect(memory_budget: 4_000, cores: 4)
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    start_supervised!(Forge.Jobs.Scheduler)
+
+    job = only_job(ticket)
+
+    # Admitted under the small slice, it fits.
+    assert Forge.Jobs.Scheduler.tick() == 1
+    assert Jobs.get!(job.id).status == :running
+
+    # The same job asking for more than the machine has does not, however small the constant is.
+    {:ok, _} =
+      Jobs.get!(job.id)
+      |> Ecto.Changeset.change(%{status: :pending, memory_max: 9_000, worker_id: nil})
+      |> Forge.Repo.update()
+
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert Jobs.get!(job.id).status == :pending
+
+    # And the same for cores, which is the dimension the scheduler could most easily pass as a
+    # constant without any test noticing: the machine has four and the job wants five.
+    {:ok, _} =
+      Jobs.get!(job.id)
+      |> Ecto.Changeset.change(%{memory_max: 1_000, cores: 5})
+      |> Forge.Repo.update()
+
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert Jobs.get!(job.id).status == :pending
+
+    {:ok, _} = Jobs.get!(job.id) |> Ecto.Changeset.change(%{cores: 4}) |> Forge.Repo.update()
+
+    assert Forge.Jobs.Scheduler.tick() == 1
+    assert Jobs.get!(job.id).status == :running
+  end
+
+  # The distinction `docs/design/provisioning.md` § The gate insists on, end to end. A job no
+  # assigned template could *ever* hold is not a queue — it is a ticket that sticks with the
+  # reason, through the mechanism an exhausted allowance already uses. Queued instead, it would
+  # wait for ever against capacity that will never exist, and look healthy while doing it.
+  test "a job no assigned template could ever hold sticks its ticket", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    # **Destroyed, not merely unregistered.** A machine that exists and could take this once it
+    # is free is a queue rather than a wall, however out of touch it is right now — a row that
+    # has not been swept yet may still come back. Unregistering left a 64 GiB row standing, so
+    # the job had somewhere to wait and the ticket rightly did not stick.
+    Registry.unregister(Forge.Workers.Registry, worker.id)
+    :ok = Forge.Workers.destroy(worker)
+
+    {:ok, template} =
+      Forge.Provisioning.create_template(user, %{
+        name: "small",
+        provider: "fake",
+        memory: 1_000,
+        cores: 1,
+        max_workers: 1
+      })
+
+    {:ok, _} = Forge.Provisioning.assign(user, template.id, project.id)
+
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    start_supervised!(Forge.Jobs.Scheduler)
+    job = only_job(ticket)
+
+    {:ok, _} =
+      Jobs.get!(job.id) |> Ecto.Changeset.change(%{memory_max: 99_000}) |> Forge.Repo.update()
+
+    assert Forge.Jobs.Scheduler.tick() == 0
+
+    assert Tickets.get!(ticket.id).status == :stuck
+    assert "ticket.stuck" in event_types(ticket)
+
+    # The reason lives on the event, which is where an exhausted allowance puts its own, and is
+    # what the operator reads on the timeline rather than a bare status.
+    assert %{"reason" => reason} =
+             Forge.Events.for_ticket(ticket.id)
+             |> Enum.find(&(&1.type == "ticket.stuck"))
+             |> Map.fetch!(:payload)
+
+    assert reason =~ "template"
+  end
+
+  # The same path reached by a **project chat**, which has no ticket to stick. Unguarded this
+  # is not a wrong answer but a crash — `Tickets.get!(nil)` inside the scheduling pass — and
+  # `init/1` explains what a crashed scheduler costs: every live conversation on the node goes
+  # dormant, because the restart recovers the node.
+  test "a chat that no template can hold leaves the scheduler standing", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    Registry.unregister(Forge.Workers.Registry, worker.id)
+
+    {:ok, template} =
+      Forge.Provisioning.create_template(user, %{
+        name: "tiny",
+        provider: "fake",
+        memory: 1,
+        cores: 1,
+        max_workers: 1
+      })
+
+    {:ok, _} = Forge.Provisioning.assign(user, template.id, project.id)
+    {:ok, chat} = Forge.Conversations.open(project, "hello")
+    start_supervised!(Forge.Jobs.Scheduler)
+
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert Jobs.get!(chat.id).status == :pending
+
+    # Still alive, and still able to answer — which is the whole assertion.
+    assert Forge.Jobs.Scheduler.tick() == 0
+  end
+
+  # A job that has run before still points at the machine that ran it, and that machine may
+  # still hold its worktree and its harness session
+  # (`docs/design/provisioning.md` § Affinity on resume). The scheduler has to *pass* the
+  # preference; testing `assignable/2` alone leaves the wiring unchecked, which it was.
+  test "a job that has run before goes back to the machine that ran it", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    Registry.unregister(Forge.Workers.Registry, worker.id)
+
+    # Oldest first is what the gate falls back to, so `first` is what it would pick blind.
+    first = FakeWorker.connect()
+    second = FakeWorker.connect()
+    refute first.id == second.id
+
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    start_supervised!(Forge.Jobs.Scheduler)
+    job = only_job(ticket)
+
+    # It ran on the second machine and came back to the queue still naming it — which is what
+    # `requeue/2` leaves behind, since it changes the status and not the worker.
+    {:ok, _} =
+      Jobs.get!(job.id)
+      |> Ecto.Changeset.change(%{worker_id: second.id})
+      |> Forge.Repo.update()
+
+    assert Forge.Jobs.Scheduler.tick() == 1
+    assert Jobs.get!(job.id).worker_id == second.id
+  end
+
   # `Forge.Jobs.Scheduler` states the rule in a comment on the line: "Nothing to run is the only
   # moment a machine may be destroyed for being idle." The sweep runs at the top of a pass, before
   # a single job is handed out, so sweeping unconditionally destroys the very machine the pass was
@@ -428,7 +592,7 @@ defmodule Forge.FlowTest do
 
     assert Forge.Jobs.Scheduler.tick() == 1
 
-    refute_receive {:provider_destroy, _id}
+    refute_receive {:provider_destroy, _id, _credential}
     assert Forge.Workers.get!(worker.id).status != :destroyed
     assert Jobs.get!(only_job(ticket).id).worker_id == worker.id
   end

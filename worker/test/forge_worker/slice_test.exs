@@ -34,9 +34,9 @@ defmodule ForgeWorker.SliceTest do
       {:ok, context} = prepared(%{job_id: @job, worktree: "/w", memory_max: nil, cpu_weight: nil})
       flags = Systemd.flags(context)
 
-      assert "--uid=forge-job-d7cf4946" in flags
+      assert "--uid=forge-job-d7cf49460e0d177c" in flags
       assert "--property=WorkingDirectory=/w" in flags
-      assert "--unit=forge-job-d7cf4946" in flags
+      assert "--unit=forge-job-d7cf49460e0d177c" in flags
       # A limit nobody set is not a limit of zero.
       refute Enum.any?(flags, &String.starts_with?(&1, "--property=MemoryMax"))
     end
@@ -54,7 +54,21 @@ defmodule ForgeWorker.SliceTest do
 
     test "the unit and the user are the same short name, so a stuck one is findable" do
       assert Systemd.unit_name(@job) == Systemd.user_name(@job)
-      assert Systemd.unit_name(@job) == "forge-job-d7cf4946"
+      assert Systemd.unit_name(@job) == "forge-job-d7cf49460e0d177c"
+    end
+
+    # The name carries 16 hex characters of the id, not the 8 of its first segment: at 8, two
+    # concurrent jobs colliding there shared a Unix user — and `create_user/1` reads "already
+    # exists" as success, so the collision was silent and one job's cleanup deleted the other's
+    # user and files. Mutate `short/1` back to the first segment and this fails.
+    test "distinct ids that share a first segment get distinct users" do
+      a = "d7cf4946-0e0d-177c-11c8-f66c8966e9f0"
+      b = "d7cf4946-aaaa-4bbb-8ccc-ddddeeeeffff"
+      assert Systemd.user_name(a) != Systemd.user_name(b)
+    end
+
+    test "the user name stays within the 31-character limit useradd enforces" do
+      assert byte_size(Systemd.user_name("d7cf4946-0e0d-177c-11c8-f66c8966e9f0")) <= 31
     end
 
     test "carries the runner's environment across, and a secret by name only" do

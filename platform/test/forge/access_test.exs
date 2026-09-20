@@ -11,6 +11,7 @@ defmodule Forge.AccessTest do
 
   import Forge.AccountsFixtures
   import Forge.ForgeFixtures
+  import Forge.GitFixtures
 
   alias Forge.Access
   alias Forge.Accounts.Scope
@@ -76,9 +77,14 @@ defmodule Forge.AccessTest do
     test "registering a project makes the registrant its admin" do
       user = user_fixture()
 
+      # A writable path, because `register/2` creates the bare repository here rather than
+      # only recording it; see the note in `Forge.CliOwnershipTest`.
       {:ok, project} =
         Projects.register(
-          %{name: "own-#{System.unique_integer([:positive])}", repo_path: "/srv/git/x.git"},
+          %{
+            name: "own-#{System.unique_integer([:positive])}",
+            repo_path: Path.join(tmp_dir("access"), "x.git")
+          },
           user
         )
 

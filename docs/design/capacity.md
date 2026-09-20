@@ -149,3 +149,11 @@ genuinely exhausted.
 - **Whether dollars survive anywhere.** The recommendation is that they leave every operator
   surface and stay in the API, the Mix tasks and the event log. A number the operator cannot act on
   is noise; capacity is one they can act on.
+- **Machine spend is a third kind of cost and this note has no place for it.** Everything here is
+  inference: a refilling window, and usage derived from `cost_usd`. `docs/design/provisioning.md`
+  adds an hourly bill for machines, which refills nothing, accrues with no job running, and is
+  bounded by a count — `max_workers` per template — rather than by money. It is also the one
+  figure an operator can act on immediately, which by this note's own test earns it a surface.
+  Two things are unsettled: whether it belongs beside window capacity or stays on the templates
+  page, and what to do about currency, since that note's first provider bills euros while every
+  figure here is dollars and nothing converts them.

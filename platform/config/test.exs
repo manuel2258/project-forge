@@ -51,7 +51,13 @@ config :forge, Forge.Jobs, data_dir: "tmp/test", run_jobs: false
 config :forge, Forge.Storage, dir: "tmp/test/store"
 
 # No machine is created in tests; the fake records what the platform asked for.
-config :forge, Forge.Provider, impl: Forge.Provider.Fake, name: "fake"
+config :forge, Forge.Provider,
+  drivers: %{
+    "fake" => Forge.Provider.Fake,
+    "local" => Forge.Provider.LocalVm,
+    "hetzner" => Forge.Provider.Hetzner
+  },
+  default: "fake"
 
 # Push goes to a test double; keys are set so the feature counts as enabled.
 config :forge, Forge.Push, sender: Forge.Push.TestSender

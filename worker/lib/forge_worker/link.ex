@@ -72,19 +72,42 @@ defmodule ForgeWorker.Link do
     # (`docs/design/worker-tier.md` § Updating a worker), so "which release is this machine
     # running" stopped being answerable from the image alone.
     Logger.info(
-      "joined #{topic} running #{version()}; ready with #{Config.memory_budget()} bytes"
+      "joined #{topic} running #{version()}; ready with #{Config.memory_budget()} bytes " <>
+        "and #{Config.cores() || "an unknown number of"} cores"
     )
 
-    push(socket, socket.assigns.topic, "ready", %{
-      "memory_budget" => Config.memory_budget(),
-      "seeds" => Seed.present(socket.assigns.root),
-      "root" => socket.assigns.root,
-      "harness" => harness_offer()
-    })
+    push(socket, socket.assigns.topic, "ready", ready_payload(socket))
 
     :timer.send_interval(heartbeat_ms(), self(), :heartbeat)
     {:ok, resend_unacked(socket)}
   end
+
+  @doc """
+  What this machine tells the platform about itself at `ready`.
+
+  **`cores` and `accepts` are left out rather than sent as null when the machine has nothing to
+  say.** The platform reads an absent key as *unknown* and does not gate on that dimension,
+  which is what a general-purpose worker means and what every worker meant before the keys
+  existed (`docs/design/provisioning.md` § What a worker offers). `memory_budget` is always
+  sent, because there not knowing is itself an instruction — see `ForgeWorker.Config.cores/0`.
+
+  Public because it is the part of joining that can be checked without a socket, in the same
+  spirit as `ForgeWorker.Slice.Systemd.flags/1`.
+  """
+  @spec ready_payload(Slipstream.Socket.t()) :: map()
+  def ready_payload(socket) do
+    %{
+      "memory_budget" => Config.memory_budget(),
+      "seeds" => Seed.present(socket.assigns.root),
+      "root" => socket.assigns.root,
+      "harness" => harness_offer()
+    }
+    |> put_unless_nil("cores", Config.cores())
+    |> put_unless_nil("accepts", Config.accepts())
+  end
+
+  defp put_unless_nil(payload, _key, nil), do: payload
+  defp put_unless_nil(payload, key, value), do: Map.put(payload, key, value)
 
   @impl Slipstream
   def handle_message(_topic, "assign", assignment, socket) do

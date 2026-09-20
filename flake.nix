@@ -128,6 +128,10 @@
                 # measure shell below.
                 pkgs.shellcheck
                 pkgs.shfmt
+                # `bin/hetzner-image` shells out to it. Hetzner Cloud has no image upload, so
+                # putting the worker image in a project means driving a rescue server through
+                # the CLI — see `docs/design/worker-tier.md` § Updating a worker.
+                pkgs.hcloud
               ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
                 pkgs.inotify-tools
                 # What `Forge.Provider.LocalVm` shells out to: QEMU boots the machine and

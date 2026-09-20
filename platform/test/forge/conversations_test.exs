@@ -35,6 +35,36 @@ defmodule Forge.ConversationsTest do
       assert Git.branch_exists?(Projects.repo_path(project), "chat/" <> chat.id)
     end
 
+    # A chat has no workflow state and so no `resources` to resolve, and for a while that meant
+    # it was admitted with `slice_bytes/0` — M3's *cold build* peak — to run an agent that
+    # talks. 2210 MiB put a 2 GiB machine out of reach of a conversation for no reason anybody
+    # had decided (`docs/design/provisioning.md` § What a job asks for).
+    test "a chat reserves an agent's memory and not a build's", %{project: project} do
+      assert {:ok, chat} = Conversations.open(project, "what is this repository?")
+
+      assert chat.memory_max == Forge.Workers.chat_slice_bytes()
+      assert chat.memory_max < Forge.Workers.slice_bytes()
+      # Cores stay whole, because the gate counts whole ones and `CPUWeight` — a share, not a
+      # quota — is what the unit actually runs at.
+      assert chat.cores == Forge.Workers.default_cores()
+    end
+
+    # And it is the node's to set, so an operator whose chats do more than talk can raise it
+    # without touching what a workflow job gets.
+    test "the chat's memory is what the node configures", %{project: project} do
+      previous = Application.get_env(:forge, Forge.Workers, [])
+      on_exit(fn -> Application.put_env(:forge, Forge.Workers, previous) end)
+
+      Application.put_env(
+        :forge,
+        Forge.Workers,
+        Keyword.put(previous, :chat_slice_bytes, 700 * 1024 * 1024)
+      )
+
+      assert {:ok, chat} = Conversations.open(project, "what is this repository?")
+      assert chat.memory_max == 700 * 1024 * 1024
+    end
+
     test "a ticket chat starts from the ticket's branch", %{project: project} do
       {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
 
@@ -180,7 +210,7 @@ defmodule Forge.ConversationsTest do
     } do
       {:ok, opened} = Conversations.open(project, "hello")
       {:ok, worker, _token} = Forge.Workers.create(%{provider: "fake"})
-      {:ok, worker} = Forge.Workers.ready(worker, 8_000_000_000)
+      {:ok, worker} = Forge.Workers.ready(worker, %{"memory_budget" => 8_000_000_000})
       # The test process stands in for the channel: `Workers.push/2` sends to whatever is
       # registered for that worker.
       :ok = Forge.Workers.connected(worker.id)
@@ -399,6 +429,20 @@ defmodule Forge.ConversationsTest do
       assert dormant.status == :hibernated
     end
 
+    # Found on a running node: three conversations the gate could never place sat `pending` for
+    # ever, and nothing could end them. `live?/1` counts `:pending`, so every surface offered to
+    # end them — and `close/2` was a push, which for a chat with no worker logs that it was not
+    # delivered and returns `:ok`. Closing has to be something the platform can do alone.
+    test "a conversation that never got a machine can still be ended", %{chat: chat} do
+      assert is_nil(chat.worker_id)
+      assert Conversations.live?(chat)
+
+      assert :ok = Conversations.close(chat)
+
+      assert Jobs.get(chat.id).status == :finished
+      refute Conversations.live?(Jobs.get(chat.id))
+    end
+
     # A workflow job's completion revokes its credential and gives the worker's memory back. A
     # conversation's ending has to do the same, or the machine stays busy for ever and takes no
     # more work — which is invisible until the next thing that never gets scheduled. The
@@ -406,7 +450,7 @@ defmodule Forge.ConversationsTest do
     # job happened to release the same worker.
     test "ending it gives the machine back and revokes its credential", %{chat: chat} do
       {:ok, worker, _token} = Forge.Workers.create(%{provider: "fake"})
-      {:ok, worker} = Forge.Workers.ready(worker, 8_000_000_000)
+      {:ok, worker} = Forge.Workers.ready(worker, %{"memory_budget" => 8_000_000_000})
       {:ok, worker} = Forge.Workers.busy(worker)
 
       {:ok, running} =

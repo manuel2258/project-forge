@@ -10,11 +10,20 @@ defmodule Forge.ForgeFixtures do
     map
   end
 
+  @doc """
+  A project row, inserted rather than registered: nothing creates the repository this names.
+
+  The path is deliberately one that does not exist — a test needing a real repository uses
+  `Forge.GitFixtures.seeded_repo/1` — but it is under the temporary directory rather than
+  `/srv/git`, so that a machine without `/srv` sees the same failure as one with it.
+  """
   def project_fixture(attrs \\ %{}) do
+    n = System.unique_integer([:positive])
+
     attrs =
       Enum.into(attrs, %{
-        name: "game-#{System.unique_integer([:positive])}",
-        repo_path: "/srv/git/game.git"
+        name: "game-#{n}",
+        repo_path: Path.join(System.tmp_dir!(), "forge-unregistered-#{n}.git")
       })
 
     Repo.insert!(Forge.Projects.Project.changeset(%Forge.Projects.Project{}, attrs))
@@ -96,7 +105,9 @@ defmodule Forge.ForgeFixtures do
         project_id: ticket.project_id,
         state: ticket.state,
         attempt: 1,
-        spec: %{"prompt" => "agents/refine.md"}
+        spec: %{"prompt" => "agents/refine.md"},
+        memory_max: Forge.Jobs.default_resources().memory,
+        cores: Forge.Jobs.default_resources().cores
       })
 
     %Forge.Jobs.Job{}
@@ -136,7 +147,13 @@ defmodule Forge.ForgeFixtures do
     attrs =
       attrs
       |> Map.drop([:project, :ticket])
-      |> Enum.into(%{kind: :chat, project_id: project.id, attempt: 1})
+      |> Enum.into(%{
+        kind: :chat,
+        project_id: project.id,
+        attempt: 1,
+        memory_max: Forge.Jobs.default_resources().memory,
+        cores: Forge.Jobs.default_resources().cores
+      })
 
     %Forge.Jobs.Job{}
     |> Forge.Jobs.Job.create_changeset(attrs)

@@ -7,11 +7,12 @@ defmodule ForgeWeb.Api.Render do
   alias Forge.Projects.Project
   alias Forge.Tickets.Ticket
 
+  # No `repo_path`: it is an absolute path on the platform's host and nothing outside the
+  # platform needs it — a worker reaches a repository by git URL, not by server-side path.
   def project(%Project{} = p) do
     %{
       id: p.id,
       name: p.name,
-      repo_path: p.repo_path,
       default_branch: p.default_branch,
       inserted_at: p.inserted_at
     }

@@ -4,6 +4,19 @@ Scope: the subset of the RFC sketch that milestone 1 executes. Blocks, fan-out, 
 experiments are not in v1 and are rejected by the validator if present, so nothing silently
 half-works.
 
+**Commands are specified here and not yet implemented.** § Commands, and the `commands`,
+`invoke`, `may_invoke` and `exit` keys in the example below, describe milestone 4. The validator
+does not accept them yet and rejects them as unknown keys, so a workflow written today must not
+use them. They are in this file rather than a separate one because this file is what the
+validator is written against and what an agent is handed; the note moves first and the parser
+follows, which is this repository's order.
+
+**`resources` and `defaults` are live**, on a state and at the top level. They arrived ahead of
+commands because they are what `docs/design/provisioning.md` gates on and neither needs a command
+to exist — a refine job and a build job wanting different ceilings is the same problem whether or
+not the build runs as a command. `resources` on a *command* waits for commands, and nothing else
+about § Resources changes when it lands. Everything else on this page is live.
+
 **This file is compiled into the release.** `ForgeCore.Workflow` reads it at compile time and
 serves it as `grammar/0` — a conversation asked to bootstrap a project is handed *this note*
 rather than a copy of it, because a copy would drift from the validator the first time either
@@ -23,6 +36,24 @@ pinned (see below).
 ```yaml
 version: 1
 initial: refining
+
+defaults:
+  resources: { memory: 2200MiB, cpu: 1 }
+
+commands:
+  build:
+    run: .forge/commands/build.sh
+    env: build
+    produces: build.log
+    timeout: 20m
+    resources: { memory: 4GiB, cpu: 4 }
+
+  test:
+    run: .forge/commands/test.sh
+    env: build
+    produces: test.log
+    timeout: 30m
+    resources: { memory: 6GiB, cpu: 8 }
 
 states:
   refining:
@@ -44,14 +75,23 @@ states:
     prompt: agents/implement.md
     env: implement
     model: opus                       # optional; falls back to the project's, then the machine's
+    may_invoke:
+      build: { max: 40 }
+      test: { max: 20, concurrent: 4 }
     inputs: [plan.md]
     produces: [implementation.md, changeset]   # notes on what was done, and the diff
     outcomes: [done, plan_invalid]
     budget: { turns: 200, cost: 10.00 }
 
+  checking:                           # a command state: no prompt, no agent, no budget
+    invoke: [build, [test, --all]]
+    exit: { 0: done, "*": checks_failed }
+
   verifying:
     prompt: agents/verify.md
     env: release
+    may_invoke:
+      test: { max: 10 }
     inputs: [plan.md, implementation.md, changeset]
     produces: [report.md]
     outcomes: [done, tests_failed]
@@ -64,8 +104,10 @@ states:
 transitions:
   - { from: refining,     to: planning,     approve: [refinement.md] }
   - { from: planning,     to: implementing }
-  - { from: implementing, to: verifying }
+  - { from: implementing, to: checking }
   - { from: implementing, to: planning,     when: plan_invalid }
+  - { from: checking,     to: verifying }
+  - { from: checking,     to: implementing, when: checks_failed, max: 3 }
   - { from: verifying,    to: review_ready }
   - { from: verifying,    to: implementing, when: tests_failed, max: 3 }
   - { from: review_ready, to: merged,       approve: [changeset] }
@@ -76,9 +118,11 @@ limits:
 
 ## Semantics
 
-**States** come in two kinds. A *job state* has a `prompt` and runs one job per entry. A
-*human state* has no prompt; the ticket waits there, holding no process, until a transition is
-taken by a human or by the engine. `initial` names the state a ticket enters at admission. A
+**States** come in three kinds. A *job state* has a `prompt` and runs one agent job per entry. A
+*command state* has `invoke` and runs the commands it names, with no agent and no prompt; its
+outcome comes from their exit statuses rather than from a document. A *human state* has neither;
+the ticket waits there, holding no process, until a transition is taken by a human or by the
+engine. `initial` names the state a ticket enters at admission. A
 state with no outgoing transitions is terminal.
 
 **A job is the state's ongoing activity, not its entry action.** The distinction is in the
@@ -130,7 +174,9 @@ declares. This is how "tests failed" differs from "ran out of budget" and both d
 
 **Waiting.** If a produced document contains an open blocking question, no outcome is
 evaluated and no transition is taken. The job waits for the answer and then resumes (see
-`job-prompt.md`). Only a job that ends without open blocking questions has an outcome.
+`job-prompt.md`). Only a job that ends without open blocking questions has an outcome. A job
+waiting on a command it invoked waits the same way and for the same reason — it is parked, holding
+no process — but nothing is asked of a person and the wait ends when the commands do.
 
 **Transitions.** `when` names an outcome and defaults to `done`. On job end the engine takes
 the single transition from the current state whose `when` matches the outcome. If none
@@ -161,7 +207,9 @@ taken, so a conflict refuses the approval and leaves the ticket where it was, wi
 intact; had it moved into a terminal `merged` first, there would be nowhere to go from there. It
 is idempotent, so entering the state twice merges once.
 
-**Budget.** `turns` and `cost` (USD) are per job and required on every job state. Reaching
+**Budget.** `turns` and `cost` (USD) are per job and required on every job state. A command state
+has neither — there is no inference to bound — and is bounded by each command's `timeout` instead;
+declaring `budget` on one is an error. Reaching
 either ends the job with `budget_exhausted`. `limits.ticket_cost` is required and caps the sum
 over all jobs of a ticket; reaching it sticks the ticket. Budgets are never modifiable by a
 job.
@@ -200,6 +248,85 @@ Parsing this file reaches no worker at all — `forge_core` has no network and n
 rule above is what the grammar checks, and it is unchanged. A workflow may name any model; only
 the form has a list.
 
+## Commands
+
+A **command** is a fixed script the project declares once and two callers run: a state that names
+it in `invoke`, and an agent whose state allows it in `may_invoke`. `docs/design/commands.md` is
+the note; this section is the grammar. **Not implemented yet** — see the head of this file.
+
+```yaml
+commands:
+  build:
+    run: .forge/commands/build.sh    # relative to the repository root, at the pinned commit
+    env: build                       # devShell, as on a state
+    produces: build.log              # one artifact: the command's combined output
+    timeout: 20m                     # required
+    resources: { memory: 4GiB, cpu: 4 }
+```
+
+**The script is read at the ticket's pinned base commit**, like this file, never from the branch a
+job is working on. Otherwise an agent that edits `build.sh` changes what `build` means for the
+state that is meant to judge it. A ticket that changes a command script sees the change only after
+it merges.
+
+**Arguments are freeform and carry no schema.** An invocation supplies a list of strings and the
+worker `exec`s the script with them as an argument vector — never a string given to a shell, so
+`--filter "foo bar"` cannot word-split. A state's `invoke` entry is either a command name or a
+list whose head is the name and whose tail is the arguments: `[test, --all]`. There is no
+parameter declaration to validate against, and the exact vector is recorded on the invocation
+because it is no longer derivable from this file.
+
+**`invoke` makes a command state.** It lists commands to run on entry, and the state has no
+`prompt`, `inputs`, `produces`, `outcomes`, `budget`, `model` or `may_invoke`. Commands in the
+list run concurrently and the state waits for all of them.
+
+**`exit` maps exit statuses to outcomes** and is required on a command state. Keys are integers or
+`"*"` for the default; the value is the outcome the transitions out are selected by. The status a
+state maps is the *first non-zero* status among its commands, or zero when all succeeded. A
+command state's declared outcomes are the values of its `exit` map, so `when:` on its edges is
+checked against them exactly as for a job state.
+
+**`may_invoke` grants a job state's agent the right to invoke**, with `max` invocations and
+`concurrent` in flight. It is the workflow half of `spec.permitted_children`: an allowlist
+resolved at job creation and carried on the spec. A breach is refused and reported to the agent,
+which is not a job failure — `commands.md` § Limits says why.
+
+**A job waiting on a command is parked**, always. It hibernates, its slice is released, and it
+resumes when every command it invoked has finished. There is no inline form and nothing in the
+grammar selects between them.
+
+## Resources
+
+```yaml
+defaults:
+  resources: { memory: 2200MiB, cpu: 1 }
+```
+
+`resources` is valid on a command, on a job state, and under `defaults`. **The state and
+`defaults` halves are implemented; the command half waits for commands** — see the head of this
+file. It is resolved nearest-first: the command's, then the state's, then `defaults`, then the
+platform's configured slice. `memory` is the slice's hard ceiling and what the scheduler's gate
+counts; `cpu` is how many cores the scheduler reserves when placing the job — **a reservation,
+not a quota**, because capping a slice would throw away the proportional CPU sharing
+`decisions.md` chose. There is no `disk` key. `commands.md` § Resources has the reasoning and the
+failure mode a declaration no machine can satisfy produces;
+`docs/design/provisioning.md` § The gate is what does the matching.
+
+**Each field is resolved on its own, and neither is required where it appears.** A state wanting
+more memory than the default writes `resources: { memory: 6GiB }` and keeps the default core
+count. Requiring both would mean restating a number to change its neighbour, which is most of
+what `defaults` exists to prevent.
+
+**Sizes are binary units or a bare count of bytes** — `B`, `KiB`, `MiB`, `GiB`, `TiB`, matched
+whatever their case, so `4gib` is `4GiB`. **The unit is optional and a bare number means bytes,
+written either way**: `512` and `"512"` are the same size. They were not — the unit was
+mandatory for a string, so a quoted number in YAML parsed differently from an unquoted one, and
+a form, where every field is a string, could not carry a plain byte count at all. That is how
+it was found: the templates page filled its own memory field with a figure it then refused. `4GB` is refused with a message naming `GiB`, rather
+than accepted as an approximation: the two differ by enough to matter to a ceiling whose job is to
+kill, and nobody sizing memory means the decimal one. Case-folding does not blur that — `mib` is
+still not `mb`.
+
 ## Pinning
 
 At admission the engine reads `.forge/workflow.yml` at the ticket's base commit, validates
@@ -209,26 +336,46 @@ file do not affect that ticket. Re-pinning is a human action and not in v1.
 ## Validation (rejects the file, never partially runs it)
 
 - `version` is `1`; `initial` names a job state; every state name is unique.
-- A job state has `prompt` and `budget`. A human state has no `prompt`, `env`, `inputs`,
-  `produces`, `outcomes`, `budget` or `model`; `on_enter` is the one key it may carry.
+- A job state has `prompt` and `budget`. A command state has `invoke` and `exit` and none of
+  `prompt`, `inputs`, `produces`, `outcomes`, `budget`, `model` or `may_invoke`. A human state has
+  none of those and no `invoke` either; `on_enter` is the one key it may carry.
 - `model`, where present, is a non-empty string. Its value is not checked against anything.
 - State and artifact names are single path segments: letters, digits, `.`, `_`, `-`.
 - Every `inputs` entry is `ticket` or produced by a state that can run before the consumer; every
 `produces` entry other than `changeset` is produced by exactly one state. `ticket` is never
 produced; `answers.md` is platform-managed and never declared.
-- A state declaring outcomes other than `done` produces at least one document.
+- A job state declaring outcomes other than `done` produces at least one document. A command
+  state does not, because its outcomes come from `exit`.
 - Every state is reachable from `initial` through transitions.
 - Every transition names existing states; for one `from`, `when` values are distinct.
-- `when` is an engine outcome or a declared outcome of `from`; `max` is a positive integer.
+- `when` is an engine outcome or a declared outcome of `from`; for a command state the declared
+  outcomes are the values of its `exit` map. `max` is a positive integer.
+- Every `invoke` and `may_invoke` entry names a command declared in `commands`. An `invoke` entry
+  is a name or a list whose head is a name; `may_invoke` values are maps of `max` and
+  `concurrent`, both positive integers.
+- Every command has `run` and `timeout`; `run` is a path under `.forge/` that exists at the pinned
+  commit, and `produces`, where present, is a single artifact name produced by no state and by no
+  other command.
+- `resources`, where present, is a mapping of `memory` (a byte size) and `cpu` (a positive
+  integer), each optional and each falling back through the chain on its own. Any other key is an
+  error, and `disk` is rejected with a message saying it is *reserved* rather than unknown, so it
+  does not read as a typo. `defaults`, where present, is a mapping whose only key is `resources`.
+- A command's `env`, where present, is subject to the same rule as a state's.
 - `approve` entries are produced by `from` or an earlier state.
 - Prompt files exist at the pinned commit.
 - Artifact names are fixed. The prefix form `name/*` is reserved for blob groups and is
   rejected in v1 with a message saying so.
 - Every `on_enter` entry is a known action (`merge` alone in v1); `on_enter` is absent from every
-  job state; at most one state in a workflow merges; `initial` does not merge; and a workflow that
+  job state and every command state; at most one state in a workflow merges; `initial` does not merge; and a workflow that
   merges has a state producing `changeset`.
 - Keys outside this grammar (`blocks`, `use`, `can_spawn`, `fanout`, `spawn_depth`,
   `child_budget`, `experiments`) are errors in v1.
+
+Two of these cannot be checked here and are the scheduler's at run time: whether any machine can
+satisfy a declared `resources`, and whether a command's script is executable. `forge_core` has no
+database and no network, so a validator that tried would be guessing about a fleet it cannot see.
+`commands.md` § Resources says what the scheduler does instead, and why queueing for ever is the
+wrong answer.
 
 ## Deferred, with the intended shape
 

@@ -12,7 +12,7 @@ defmodule Forge.Jobs.Scheduler do
 
   use GenServer
 
-  alias Forge.{Jobs, Projects, Workers}
+  alias Forge.{Engine, Jobs, Projects, Tickets, Workers}
 
   require Logger
 
@@ -51,7 +51,6 @@ defmodule Forge.Jobs.Scheduler do
   end
 
   defp assign_pending do
-    slice = Workers.slice_bytes()
     pending = Jobs.pending(Jobs.config(:max_pending_per_pass, 10))
 
     # First, before anything asks for capacity: a worker the platform cannot reach still counts
@@ -65,12 +64,73 @@ defmodule Forge.Jobs.Scheduler do
     if pending == [], do: Workers.sweep_idle()
 
     Enum.reduce(pending, 0, fn job, assigned ->
-      case Workers.provide(slice) do
-        {:ok, worker} -> assigned + assign(job, worker)
-        # Being created, or none allowed: the job waits and is offered again next pass.
-        {:error, _reason} -> assigned
+      case Workers.provide(demand(job), job.worker_id) do
+        {:ok, worker} ->
+          assigned + assign(job, worker)
+
+        # **No template can make this job a machine**, which is a different answer from "not
+        # right now" and must not be queued as one: the ticket sticks with the reason, through
+        # the mechanism an exhausted allowance already uses
+        # (`docs/design/provisioning.md` § The gate). A job queued for ever against capacity
+        # that will never exist is the failure this distinction prevents.
+        #
+        # Three of them, because what the operator does about each is different and a single
+        # sentence would send them at the wrong thing. Only `:at_capacity` below is a queue.
+        {:error, {:no_template, why}} ->
+          stick(job, why)
+          assigned
+
+        # Being created, none allowed, or none that will take this kind: the job waits and is
+        # offered again next pass, and the pass continues to the jobs behind it. A large job can
+        # therefore be jumped by small ones indefinitely, which
+        # `docs/design/provisioning.md` § The gate records rather than solves — the fix is an
+        # age-based reservation and the scheduler has no priority.
+        {:error, _reason} ->
+          assigned
       end
     end)
+  end
+
+  # A chat has no ticket to stick, and a chat that cannot be placed is a chat that stays
+  # dormant — visible as such on the page it was opened from.
+  defp stick(%{ticket_id: nil}, _why), do: :ok
+
+  defp stick(job, why) do
+    ticket = Tickets.get!(job.ticket_id)
+
+    if ticket.status == :active do
+      Logger.warning("#{why} for job #{job.id}; sticking ticket #{ticket.number}")
+      Engine.stick(ticket, reason(why))
+    end
+
+    :ok
+  end
+
+  # What the operator has to do about it, in the sentence they will read on the ticket.
+  defp reason(:none_assigned),
+    do:
+      "no worker template is assigned to this project, so there is nothing to make a machine from"
+
+  defp reason(:all_disabled),
+    do:
+      "every worker template assigned to this project is disabled after failing to make a machine"
+
+  defp reason(:none_fit),
+    do: "no worker template assigned to this project is big enough for this job"
+
+  # What this job was admitted with, resolved at creation and written on the row
+  # (`docs/design/provisioning.md` § What a job asks for). The fallbacks are for rows that
+  # predate the columns: they were admitted under the single slice and are placed under it.
+  #
+  # `project_id` rides along because creating a machine is a decision about *whose* templates
+  # may be used, which is a property of the project and not of the job's size.
+  defp demand(job) do
+    %{
+      kind: job.kind,
+      memory: job.memory_max || Workers.slice_bytes(),
+      cores: job.cores || Workers.default_cores(),
+      project_id: job.project_id
+    }
   end
 
   # A job that raises on its way to a worker is one job's problem. Left to crash the scheduler it

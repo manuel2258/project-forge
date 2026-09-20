@@ -37,7 +37,7 @@ defmodule ForgeWeb.WorkersLiveTest do
 
   test "a row that is ready but holds no channel says both", %{conn: conn} do
     w = worker()
-    {:ok, w} = Workers.ready(w, 6 * 1024 * 1024 * 1024)
+    {:ok, w} = Workers.ready(w, %{"memory_budget" => 6 * 1024 * 1024 * 1024})
 
     {:ok, _view, html} = live(conn, ~p"/workers")
 
@@ -56,11 +56,14 @@ defmodule ForgeWeb.WorkersLiveTest do
     w = worker()
 
     {:ok, _w} =
-      Workers.ready(w, 6 * 1024 * 1024 * 1024, %{
-        "name" => "Claude Code",
-        "version" => "2.1.220",
-        "login" => "invalid",
-        "models" => []
+      Workers.ready(w, %{
+        "memory_budget" => 6 * 1024 * 1024 * 1024,
+        "harness" => %{
+          "name" => "Claude Code",
+          "version" => "2.1.220",
+          "login" => "invalid",
+          "models" => []
+        }
       })
 
     {:ok, _view, html} = live(conn, ~p"/workers")
@@ -74,7 +77,7 @@ defmodule ForgeWeb.WorkersLiveTest do
   # worker: the column shows a dash rather than the page failing to render.
   test "a worker that reported no harness still renders", %{conn: conn} do
     w = worker()
-    {:ok, _w} = Workers.ready(w, 6 * 1024 * 1024 * 1024)
+    {:ok, _w} = Workers.ready(w, %{"memory_budget" => 6 * 1024 * 1024 * 1024})
 
     {:ok, _view, html} = live(conn, ~p"/workers")
 
@@ -84,7 +87,7 @@ defmodule ForgeWeb.WorkersLiveTest do
 
   test "a connected worker is shown as connected", %{conn: conn} do
     w = worker()
-    {:ok, _w} = Workers.ready(w, 6 * 1024 * 1024 * 1024)
+    {:ok, _w} = Workers.ready(w, %{"memory_budget" => 6 * 1024 * 1024 * 1024})
 
     # Registering is what a channel does when it joins; this process stands in for one.
     :ok = Workers.connected(w.id)
@@ -95,7 +98,10 @@ defmodule ForgeWeb.WorkersLiveTest do
     refute html =~ "not connected"
   end
 
-  test "capacity is shown as slices, which is what the scheduler decides on", %{conn: conn} do
+  # Capacity is two figures now, because the gate reads two. It used to be a count of identical
+  # slices, and every clause of that sentence stopped being true when a job could declare what
+  # it needs — see `docs/design/ui.md` § The workers page.
+  test "capacity is shown in both dimensions the gate reads", %{conn: conn} do
     # Merged, not replaced: replacing drops every other key and silently changes what the page
     # reads the first time one of them stops having a call-site default.
     current = Application.get_env(:forge, Workers, [])
@@ -107,12 +113,147 @@ defmodule ForgeWeb.WorkersLiveTest do
     )
 
     w = worker()
-    {:ok, _w} = Workers.ready(w, 6 * 1024 * 1024 * 1024)
+    {:ok, _w} = Workers.ready(w, %{"memory_budget" => 6 * 1024 * 1024 * 1024, "cores" => 8})
 
     {:ok, _view, html} = live(conn, ~p"/workers")
 
-    assert html =~ "6.0 GiB"
-    assert html =~ "3 slices"
+    assert html =~ "6.0 GiB of 6.0 GiB free"
+    assert html =~ "8 of 8 cores free"
+
+    # And nothing about a disagreement, because there is not one. A machine agreeing with its
+    # row is the ordinary case and must stay quiet, or the warning means nothing when it fires.
+    refute html =~ "reports"
+  end
+
+  # A machine that has never reported cores is not gated on them, so the page must not invent a
+  # figure — saying "0 of 0" would read as a machine that can hold nothing, which is the exact
+  # opposite of what the gate does with it.
+  test "a machine that has not reported cores says so rather than showing none", %{conn: conn} do
+    w = worker()
+    {:ok, _w} = Workers.ready(w, %{"memory_budget" => 6 * 1024 * 1024 * 1024})
+
+    {:ok, _view, html} = live(conn, ~p"/workers")
+
+    assert html =~ "cores not reported"
+    refute html =~ "0 of 0 cores"
+  end
+
+  # The row governs the gate, so a machine reporting less than its row is one the platform will
+  # overcommit — and the per-job ceiling cannot catch that, because what breaks is the sum.
+  # Silently resolving it either way is what this refuses to do.
+  test "a machine whose report disagrees with its row shows both", %{conn: conn} do
+    w = worker()
+    {:ok, w} = Workers.ready(w, %{"memory_budget" => 6 * 1024 * 1024 * 1024, "cores" => 8})
+    {:ok, w} = Workers.update(w, %{memory_budget: 2 * 1024 * 1024 * 1024, cores: 2})
+
+    {:ok, _} = Workers.ready(w, %{"memory_budget" => 6 * 1024 * 1024 * 1024, "cores" => 8})
+
+    {:ok, _view, html} = live(conn, ~p"/workers")
+
+    # The row is what the gate reads and what the page leads with.
+    assert html =~ "2.0 GiB of 2.0 GiB free"
+    assert html =~ "2 of 2 cores free"
+    # And what the machine says is shown beside it rather than thrown away.
+    assert html =~ "reports memory 6.0 GiB, cores 8"
+  end
+
+  # A machine that was never made is the row an operator most needs told about, and until this
+  # was drawn a driver refusing to create was invisible on every surface they have.
+  test "a row that never became a machine says why", %{conn: conn} do
+    w = worker()
+    {:ok, _} = Workers.update(w, %{last_error: "no Hetzner image configured"})
+
+    {:ok, _view, html} = live(conn, ~p"/workers")
+
+    assert html =~ "never made: no Hetzner image configured"
+  end
+
+  test "a row that did become a machine says nothing of the sort", %{conn: conn} do
+    w = worker()
+    {:ok, _} = Workers.ready(w, %{"memory_budget" => 8_000, "cores" => 4})
+
+    {:ok, _view, html} = live(conn, ~p"/workers")
+
+    refute html =~ "never made"
+  end
+
+  describe "setting what a permanent machine offers" do
+    # The edit the whole "row governs" rule exists to protect. Without a way to make one, the
+    # rule defends something nobody can do.
+    test "a permanent machine's figures are the operator's, and survive a reconnect", %{
+      conn: conn
+    } do
+      w = worker(%{managed: false})
+      {:ok, w} = Workers.ready(w, %{"memory_budget" => 6 * 1024 * 1024 * 1024, "cores" => 8})
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+
+      view |> element("a[phx-click=edit][phx-value-id=\"#{w.id}\"]") |> render_click()
+
+      html =
+        view
+        |> element("form[phx-submit=save]")
+        |> render_submit(%{
+          "worker_id" => w.id,
+          "memory" => "2GiB",
+          "cores" => "2",
+          "accepts_chat" => "true"
+        })
+
+      assert html =~ "2.0 GiB of 2.0 GiB free"
+      assert html =~ "2 of 2 cores free"
+      assert html =~ "takes chat"
+
+      # And the machine saying its original piece again does not undo it.
+      {:ok, _} = Workers.ready(Workers.get!(w.id), %{"memory_budget" => 6_000_000, "cores" => 8})
+
+      reloaded = Workers.get!(w.id)
+      assert reloaded.memory_budget == 2 * 1024 * 1024 * 1024
+      assert reloaded.cores == 2
+      assert reloaded.accepts == [:chat]
+    end
+
+    # A machine the platform made is replaced rather than corrected, so an edit would have a
+    # lifetime of one idle period. Refused on the server, not merely hidden — the id is off the
+    # wire and `identity.md` § Sequencing records what hiding a form is worth.
+    test "a managed machine is refused even when the id is supplied by hand", %{conn: conn} do
+      permanent = worker(%{managed: false})
+      managed = worker(%{managed: true})
+      {:ok, _} = Workers.ready(managed, %{"memory_budget" => 8_000, "cores" => 4})
+      {:ok, _} = Workers.ready(permanent, %{"memory_budget" => 8_000, "cores" => 4})
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+
+      view
+      |> element("a[phx-click=edit][phx-value-id=\"#{permanent.id}\"]")
+      |> render_click()
+
+      html =
+        view
+        |> element("form[phx-submit=save]")
+        |> render_submit(%{"worker_id" => managed.id, "memory" => "1GiB", "cores" => "1"})
+
+      assert html =~ "replaced, not edited"
+      assert Workers.get!(managed.id).memory_budget == 8_000
+    end
+
+    # Blank must not be read as "nothing said" here: this form *sets* what a machine offers,
+    # and an empty memory field would silently un-gate the machine it was meant to correct.
+    test "figures that are not figures are refused rather than stored", %{conn: conn} do
+      w = worker(%{managed: false})
+      {:ok, _} = Workers.ready(w, %{"memory_budget" => 8_000, "cores" => 4})
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+      view |> element("a[phx-click=edit][phx-value-id=\"#{w.id}\"]") |> render_click()
+
+      html =
+        view
+        |> element("form[phx-submit=save]")
+        |> render_submit(%{"worker_id" => w.id, "memory" => "", "cores" => ""})
+
+      assert html =~ "not figures a machine can have"
+      assert Workers.get!(w.id).memory_budget == 8_000
+    end
   end
 
   test "managed and permanent are distinguished", %{conn: conn} do

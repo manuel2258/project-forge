@@ -28,6 +28,16 @@ defmodule ForgeWeb.ChatNewLiveTest do
     %{project: project}
   end
 
+  defp project_of(owner) do
+    {:ok, project} =
+      Projects.register(
+        %{name: "theirs-#{System.unique_integer([:positive])}", repo_path: seeded_repo()},
+        owner
+      )
+
+    project
+  end
+
   test "the project page offers one, for the project", %{conn: conn, project: project} do
     {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}")
 
@@ -112,7 +122,7 @@ defmodule ForgeWeb.ChatNewLiveTest do
   describe "picking a model" do
     defp connected_worker(offer) do
       {:ok, worker, _token} = Workers.create(%{provider: "fake"})
-      {:ok, worker} = Workers.ready(worker, 8_000, offer)
+      {:ok, worker} = Workers.ready(worker, %{"memory_budget" => 8_000, "harness" => offer})
       worker
     end
 
@@ -173,6 +183,125 @@ defmodule ForgeWeb.ChatNewLiveTest do
 
       assert [chat] = Jobs.chats_for_project(project.id)
       assert chat.model == "not-offered-by-anyone"
+    end
+  end
+
+  describe "the bare route" do
+    # The chats page is every project at once and so has no project to carry. This is the one
+    # create view that has to ask, the same exception `/tickets/new` already is.
+    test "asks which project", %{conn: conn, project: project} do
+      {:ok, view, _html} = live(conn, ~p"/chats/new")
+
+      assert has_element?(view, ~s(select#chat_project))
+      assert has_element?(view, ~s(select#chat_project option[value="#{project.name}"]))
+    end
+
+    test "starts the conversation in the project that was chosen", %{conn: conn, user: user} do
+      {:ok, elsewhere} =
+        Projects.register(
+          %{name: "other-#{System.unique_integer([:positive])}", repo_path: seeded_repo()},
+          user
+        )
+
+      {:ok, view, _html} = live(conn, ~p"/chats/new")
+
+      view
+      |> form("#chat-form", %{"chat" => %{"project" => elsewhere.name}})
+      |> render_change()
+
+      assert {:error, {:live_redirect, _to}} =
+               view
+               |> form("#chat-form", %{
+                 "chat" => %{"project" => elsewhere.name, "text" => "about this one"}
+               })
+               |> render_submit()
+
+      assert [_chat] = Jobs.chats_for_project(elsewhere.id)
+    end
+
+    # The select offers only the projects you are in, so a name that is not in it is a project
+    # you cannot see — and the guard is `Operator.open_chat/4`, not the options.
+    test "a project the reader is not in cannot be chosen", %{conn: conn} do
+      theirs =
+        project_of(Forge.AccountsFixtures.user_fixture())
+
+      {:ok, view, _html} = live(conn, ~p"/chats/new")
+
+      refute has_element?(view, ~s(select#chat_project option[value="#{theirs.name}"]))
+
+      # Pushed rather than submitted through the form, because the form refuses an option it
+      # was never offered — which is the browser's protection and not the platform's. What has
+      # to hold is that a name off the wire does not become a conversation.
+      render_submit(view, "open", %{"chat" => %{"project" => theirs.name, "text" => "let me in"}})
+
+      assert Jobs.chats_for_project(theirs.id) == []
+    end
+  end
+
+  describe "what it asks for" do
+    # A chat had no way to say, so it took the platform's number whatever it was about — which
+    # is what put a conversation that compiles nothing on a build's slice
+    # (`docs/design/conversations.md` § What it asks for).
+    test "the figures typed are what the conversation is admitted with", %{
+      conn: conn,
+      project: project
+    } do
+      {:ok, view, _html} = live(conn, ~p"/chats/new?project=#{project.name}")
+
+      view
+      |> form("#chat-form", %{
+        "chat" => %{"text" => "build the release", "memory" => "4GiB", "cores" => "2"}
+      })
+      |> render_submit()
+
+      assert [chat] = Jobs.chats_for_project(project.id)
+      assert chat.memory_max == 4 * 1024 * 1024 * 1024
+      assert chat.cores == 2
+    end
+
+    test "saying nothing is the platform's own figures", %{conn: conn, project: project} do
+      {:ok, view, _html} = live(conn, ~p"/chats/new?project=#{project.name}")
+
+      view
+      |> form("#chat-form", %{"chat" => %{"text" => "just talking"}})
+      |> render_submit()
+
+      assert [chat] = Jobs.chats_for_project(project.id)
+      assert chat.memory_max == Jobs.default_resources().memory
+      assert chat.cores == Jobs.default_resources().cores
+    end
+
+    # Refused where it was typed, and not quietly turned into the default: a person who wrote
+    # `2 gigs` asked for something, and a conversation started on the default instead is the
+    # silent substitution the templates page was already fixed not to make.
+    test "a memory that is not a size is refused rather than replaced", %{
+      conn: conn,
+      project: project
+    } do
+      {:ok, view, _html} = live(conn, ~p"/chats/new?project=#{project.name}")
+
+      html =
+        view
+        |> form("#chat-form", %{"chat" => %{"text" => "hello", "memory" => "2 gigs"}})
+        |> render_submit()
+
+      assert html =~ "memory has to be a size"
+      assert Jobs.chats_for_project(project.id) == []
+    end
+
+    test "cores that are not a whole number above zero are refused", %{
+      conn: conn,
+      project: project
+    } do
+      {:ok, view, _html} = live(conn, ~p"/chats/new?project=#{project.name}")
+
+      html =
+        view
+        |> form("#chat-form", %{"chat" => %{"text" => "hello", "cores" => "0"}})
+        |> render_submit()
+
+      assert html =~ "cores has to be a whole number"
+      assert Jobs.chats_for_project(project.id) == []
     end
   end
 

@@ -50,13 +50,25 @@ config :forge, Forge.Storage,
 
 # Where machines come from. A local VM under QEMU for the PoC; Hetzner is the closing step's,
 # behind the same behaviour. See docs/design/worker-tier.md.
-config :forge, Forge.Provider, impl: Forge.Provider.LocalVm, name: "local"
+config :forge, Forge.Provider,
+  drivers: %{"local" => Forge.Provider.LocalVm, "hetzner" => Forge.Provider.Hetzner},
+  default: "local",
+  # Where Hetzner machines are made. Named rather than left to the driver's fallback, which was
+  # `fsn1` — a datacenter that currently sells no x86 server type at all, so every template made
+  # against it failed at create with `422: unsupported location for server type`. Nuremberg is
+  # the nearest one with stock. A snapshot is project-global, so an image made anywhere boots
+  # here; what is location-bound is which server types can be ordered.
+  location: "nbg1"
 
 # The worker tier's numbers. `slice_bytes` is M3's observed peak plus its margin and
 # `idle_period_ms` is a labelled guess until M4 runs, which it cannot until this milestone
 # exists. Both are the sample's, not the operator's: docs/measurements.md § M3.
 config :forge, Forge.Workers,
   slice_bytes: 2210 * 1024 * 1024,
+  # What a chat gets instead, because `slice_bytes` is a cold *build*'s peak and a chat is an
+  # agent that talks. A crude estimate of the harness process and what it shells out to, not a
+  # measurement — `Forge.Workers.chat_slice_bytes/0` says what it is made of and what it costs.
+  chat_slice_bytes: 1024 * 1024 * 1024,
   cpu_weight: 100,
   max_workers: 1,
   # M4: a machine goes from nothing to able to build in about 35 seconds (docs/measurements.md

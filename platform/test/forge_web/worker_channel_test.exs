@@ -255,7 +255,7 @@ defmodule ForgeWeb.WorkerChannelTest do
 
     test "an assignment reaches the socket", %{worker: worker, token: token, job: job} do
       {:ok, _reply, _socket} = join_worker(worker, token)
-      {:ok, worker} = Workers.ready(worker, 8_000_000_000)
+      {:ok, worker} = Workers.ready(worker, %{"memory_budget" => 8_000_000_000})
 
       {:ok, _job} = Jobs.assign(job, worker)
 
@@ -431,7 +431,7 @@ defmodule ForgeWeb.WorkerChannelTest do
     test "a job the worker no longer has goes back in the queue", context do
       %{worker: worker, token: token, job: job} = context
       {:ok, _reply, first} = join_worker(worker, token)
-      {:ok, worker} = Workers.ready(worker, 8_000_000_000)
+      {:ok, worker} = Workers.ready(worker, %{"memory_budget" => 8_000_000_000})
       {:ok, _job} = Jobs.assign(job, worker)
       assert Jobs.get!(job.id).status == :running
 

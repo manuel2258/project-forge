@@ -9,7 +9,7 @@ defmodule ForgeCore.Workflow.State do
   """
 
   alias ForgeCore.Workflow
-  alias ForgeCore.Workflow.Budget
+  alias ForgeCore.Workflow.{Budget, Resources}
 
   @actions [:merge]
 
@@ -21,6 +21,7 @@ defmodule ForgeCore.Workflow.State do
     :model,
     :budget,
     :outcomes,
+    :resources,
     inputs: [],
     produces: [],
     on_enter: []
@@ -40,6 +41,10 @@ defmodule ForgeCore.Workflow.State do
           inputs: [String.t()],
           produces: [String.t()],
           outcomes: [String.t()] | nil,
+          # What this state's job asks the scheduler for. Nil in either field means the
+          # workflow's defaults, then the platform's — `ForgeCore.Workflow.resources/2` walks
+          # the part of that chain this project can see.
+          resources: Resources.t() | nil,
           on_enter: [action()]
         }
 

@@ -12,6 +12,7 @@ defmodule ForgeCore.WorkflowTest do
   use ExUnit.Case, async: true
 
   alias ForgeCore.Workflow
+  alias ForgeCore.Workflow.{Defaults, Limits, Resources, State}
 
   describe "the names ticket proposals reserve" do
     # The prefix is the discriminator: a job-scoped artifact is a proposal because its name
@@ -82,6 +83,85 @@ defmodule ForgeCore.WorkflowTest do
       for {name, content} <- Workflow.platform_docs() do
         assert byte_size(content) > 0, "#{name} is empty"
       end
+    end
+  end
+
+  describe "humanize/1" do
+    # A form offering `8GiB` and filling itself with `8589934592` is a form arguing with its own
+    # label, and the number it writes is the one nobody would type.
+    test "the largest unit that divides exactly" do
+      assert Resources.humanize(8 * 1024 * 1024 * 1024) == "8GiB"
+      assert Resources.humanize(2 * 1024 * 1024) == "2MiB"
+      assert Resources.humanize(1024) == "1KiB"
+      assert Resources.humanize(512) == "512B"
+    end
+
+    # A figure no larger unit divides comes back in bytes rather than being rounded into a lie.
+    # `B` is what makes the function total, and it is why there is no fallback branch.
+    test "a size no larger unit divides keeps every byte" do
+      assert Resources.humanize(1_500_000_000) == "1500000000B"
+      assert Resources.parse_bytes(Resources.humanize(1_500_000_000)) == {:ok, 1_500_000_000}
+    end
+
+    # The round trip is the whole point: what this writes into a field must be something
+    # `parse_bytes/1` reads back as the same number.
+    test "whatever it writes, the parser reads back unchanged" do
+      for bytes <- [1, 512, 1024, 2_200 * 1024 * 1024, 8 * 1024 * 1024 * 1024, 1_500_000_000] do
+        assert Resources.parse_bytes(Resources.humanize(bytes)) == {:ok, bytes}
+      end
+    end
+  end
+
+  describe "resources/2" do
+    setup do
+      %{
+        workflow: %Workflow{
+          initial: "a",
+          transitions: [],
+          limits: %Limits{ticket_cost: 1},
+          defaults: %Defaults{resources: %Resources{memory: 100, cpu: 1}},
+          states: %{
+            "both" => %State{name: "both", resources: %Resources{memory: 900, cpu: 9}},
+            "memory_only" => %State{name: "memory_only", resources: %Resources{memory: 900}},
+            "cpu_only" => %State{name: "cpu_only", resources: %Resources{cpu: 9}},
+            "neither" => %State{name: "neither"},
+            "human" => %State{name: "human"}
+          }
+        }
+      }
+    end
+
+    test "the state wins where it declares", %{workflow: workflow} do
+      assert Workflow.resources(workflow, "both") == %Resources{memory: 900, cpu: 9}
+    end
+
+    # The half that is easy to get backwards. A merge of whole values would let the defaults
+    # overwrite what the state said, or let a state declaring one field blank the other.
+    test "each field falls back on its own", %{workflow: workflow} do
+      assert Workflow.resources(workflow, "memory_only") == %Resources{memory: 900, cpu: 1}
+      assert Workflow.resources(workflow, "cpu_only") == %Resources{memory: 100, cpu: 9}
+    end
+
+    test "a state declaring nothing takes the defaults whole", %{workflow: workflow} do
+      assert Workflow.resources(workflow, "neither") == %Resources{memory: 100, cpu: 1}
+    end
+
+    # Not an error and not a crash: a caller asking about a state that is gone — a workflow
+    # re-pinned under it, a name off a wire — gets what a state declaring nothing gets, and the
+    # platform supplies the rest either way.
+    test "a state that does not exist resolves to the defaults", %{workflow: workflow} do
+      assert Workflow.resources(workflow, "vanished") == %Resources{memory: 100, cpu: 1}
+    end
+
+    test "with no defaults either, both fields stay nil for the platform to fill" do
+      workflow = %Workflow{
+        initial: "a",
+        transitions: [],
+        limits: %Limits{ticket_cost: 1},
+        states: %{"a" => %State{name: "a"}}
+      }
+
+      assert Workflow.resources(workflow, "a") == %Resources{memory: nil, cpu: nil}
     end
   end
 end

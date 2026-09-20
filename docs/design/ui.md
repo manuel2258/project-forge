@@ -279,6 +279,20 @@ anyone.
 identifier, and the select appears only on the bare `/tickets/new` — a route nothing links to,
 kept so the address works and so the no-projects-at-all case still has somewhere to say so.
 
+**A conversation is the same shape, and its bare route *is* linked to.** `/chats/new` reached
+from a project or a ticket states which and asks nothing — there is not even a hidden field, the
+view holds it. The select appears on the bare route, which the chats page links to: that page is
+every conversation in every project you are in, so it is the one surface with no project to carry
+and the only place a create affordance has to ask. A conversation is still never started from
+nowhere; the asking moved to the one page that does not know.
+
+**A list row that navigates may still carry a control, beside it and never inside it.** The chats
+list ends a live conversation from its row, because a live row is a machine running and the
+alternative was opening it first. The row is the link and the control is its sibling, which is
+The affordance rule above applied rather than excepted. What a list may never offer is deleting a
+conversation: they are kept for ever (`conversations.md` § Lifetime), and the affordance that
+exists is the one that stops it costing something.
+
 A project and a ticket are made in the product. A **workflow is not**: it is
 `.forge/workflow.yml` in the project's own repository, read at the ticket's base commit and
 pinned at admission, so it versions with the code it governs and there is nothing for a form to
@@ -382,6 +396,26 @@ what exists.
 
 Nothing here is accent and nothing here is a decision. It is the one operator surface that is
 purely a readout.
+
+**`docs/design/provisioning.md` makes the page's own summary line false, and that is the part to
+design rather than patch.** It reads *"A job is scheduled against memory, not against a count: one
+slice is 2.2 GiB, and a machine takes as many as its budget holds"*, which is exactly right while
+every job and every machine is the same. With resources declared per job, cores on the gate and
+several machine shapes, there is no equally short true sentence, and `slices/1` — a budget divided
+by one constant — has nothing to divide by. Two consequences for this page:
+
+- A row's capacity becomes two bars, memory and cores, each showing promised against offered.
+  What a machine *is* stops being derivable from one number, so it has to be shown.
+- The page stops being purely a readout. A permanent worker's `accepts`, memory and cores are
+  operator-set and editable here (`provisioning.md` § What a worker offers, and who says so),
+  which is the first
+  decision this surface has ever carried. § The affordance rule governs it: an editable field on
+  the one page that has never had one must look editable.
+
+**And it gains a sibling.** Worker templates are a second list — the recipes machines are created
+from — and they carry `max_workers` and a price per hour, which makes them the first operator
+surface where a number is money that keeps accruing. § Creating things governs the form; the
+ceiling and the price belong on the same page, because raising one raises the other.
 
 ## Documents
 

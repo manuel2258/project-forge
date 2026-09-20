@@ -49,7 +49,12 @@ defmodule Forge.Conversations do
         # Chosen when it is opened, and only then: the model is fixed when the harness process
         # starts, so changing it later means a new process. A conversation that wants a different
         # one is a conversation you close and open again.
-        model: model(opts)
+        model: model(opts),
+        # A chat has no state and so no declaration to resolve — the grammar is a workflow's,
+        # and this is not one. So the person opening it says, and the platform's defaults are
+        # what they get when they do not (`docs/design/conversations.md` § What it asks for).
+        memory_max: resource(opts, :memory, Jobs.default_resources().memory),
+        cores: resource(opts, :cores, Jobs.default_resources().cores)
       })
     )
     |> Events.log(:opened, "chat.opened", actor, fn %{chat: chat} ->
@@ -98,6 +103,17 @@ defmodule Forge.Conversations do
     case Repo.get!(Job, id) do
       %Job{kind: :chat} = chat -> chat
       %Job{} -> raise Ecto.NoResultsError, queryable: Job
+    end
+  end
+
+  # Nothing said is the platform's default, and so is anything that is not a positive number.
+  # The form has already parsed and refused what a person typed; this is the second reader of
+  # the same value — a caller off the CLI, a future API — and a chat admitted with a zero or a
+  # negative would be a row the gate can never satisfy rather than a refusal anybody sees.
+  defp resource(opts, key, default) do
+    case Keyword.get(opts, key) do
+      value when is_integer(value) and value > 0 -> value
+      _other -> default
     end
   end
 
@@ -180,10 +196,22 @@ defmodule Forge.Conversations do
   @doc """
   Ends the conversation: the harness's stdin closes, the last turn finishes, and the machine is
   released. The transcript, the events and the branch stay.
+
+  **A conversation with no machine is ended here rather than asked to end itself.** `live?/1`
+  counts `:pending`, so a chat waiting for a worker is one the page offers to close — and every
+  other message to a conversation is a push, which for a chat with no `worker_id` logs that it
+  was not delivered and returns `:ok`. Closing through that path left the row pending for ever
+  with nothing said: a conversation the gate could never place could also never be got rid of.
+  So when there is nobody to tell, the platform records the ending itself, which is what the
+  worker's report would have caused anyway.
   """
-  @spec close(Job.t(), String.t()) :: :ok
-  def close(%Job{kind: :chat} = chat, reason \\ "closed"),
-    do: push(chat, "close", %{"job_id" => chat.id, "reason" => reason})
+  @spec close(Job.t(), String.t()) :: :ok | {:error, term()}
+  def close(%Job{kind: :chat} = chat, reason \\ "closed") do
+    case worker_of(chat) do
+      nil -> with {:ok, _chat} <- ended(chat, nil, reason), do: :ok
+      worker_id -> deliver(worker_id, chat.id, "close", %{"reason" => reason})
+    end
+  end
 
   # **The worker is read now, not taken from the struct the caller is holding.** A conversation
   # is opened before it has one and is spoken to afterwards, so any caller that kept the row it
@@ -191,8 +219,8 @@ defmodule Forge.Conversations do
   # the conversation. Trusting it means every message after the first is written to the log and
   # delivered to nobody, which reads exactly like a chat that stopped replying. Every unit test
   # passed through this, because none of them had a worker at all.
-  defp push(%Job{id: id}, message, payload) do
-    case Repo.one(from j in Job, where: j.id == ^id, select: j.worker_id) do
+  defp push(%Job{id: id} = chat, message, payload) do
+    case worker_of(chat) do
       nil ->
         Logger.info("chat #{id} has no worker; #{message} was not delivered")
         :ok
@@ -201,6 +229,10 @@ defmodule Forge.Conversations do
         deliver(worker_id, id, message, payload)
     end
   end
+
+  # Read now, never taken from the caller's struct, for the reason above.
+  defp worker_of(%Job{id: id}),
+    do: Repo.one(from j in Job, where: j.id == ^id, select: j.worker_id)
 
   defp deliver(worker_id, id, message, payload) do
     case Workers.push(worker_id, {message, Map.put(payload, "job_id", id)}) do

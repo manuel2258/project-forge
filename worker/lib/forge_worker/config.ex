@@ -80,6 +80,84 @@ defmodule ForgeWorker.Config do
     end
   end
 
+  @doc """
+  Cores this machine offers to jobs.
+
+  **No reserve, unlike memory, and that is a decision rather than an omission.** A core held
+  back is a core the busiest job on the machine cannot borrow, and the slice hands out
+  proportional CPU *shares* rather than quotas precisely so that an agent idle on inference
+  donates to whoever is compiling (`docs/decisions.md`). Holding one back for the system would
+  be the quota this design refused, paid on every machine whether or not anything is waiting.
+  `docs/design/provisioning.md` § Open records that this is unmeasured and says to measure
+  before moving it.
+
+  **A machine that cannot tell reports nil, not zero, and the two are opposite instructions.**
+  Nil means *unknown*: the platform does not gate it on cores at all
+  (`Forge.Workers.fits?/2`), which is what keeps every machine built before this field existed
+  taking work. Zero would mean *no capacity*, and a machine that merely could not count its own
+  processors would silently stop accepting anything.
+
+  This is the reverse of `memory_budget/0`, which reports zero for the same ignorance and means
+  it: overstating memory lets a build kill its neighbours, so not knowing is a reason to offer
+  nothing. Overstating cores costs contention, and stranding a machine costs all of it.
+  """
+  @spec cores() :: pos_integer() | nil
+  def cores do
+    case get(:cores, "FORGE_CORES") do
+      nil -> online_cores()
+      value when is_integer(value) -> value
+      value -> String.to_integer(value)
+    end
+  end
+
+  # `:erlang.system_info(:logical_processors_online)` is what the VM was actually given, which
+  # on a machine with an affinity mask is smaller than the socket's count and is the honest
+  # figure. It returns `:unknown` where the OS will not say.
+  #
+  # **This whole clause is an equivalent mutant under test and must not have one written for
+  # it** — the guard as well as the `:unknown` branch. A running VM always answers with a
+  # positive integer, so `> 0`, `>= 0` and `> 1` are indistinguishable here, and so is `and`
+  # read as `or`; a mutation pass confirmed all four survive. What the fallback must return is
+  # nil, for the reason in `cores/0` above. A test asserting any of it would have to fake the
+  # VM, and a test that passes against the broken version is worse than none.
+  defp online_cores do
+    case :erlang.system_info(:logical_processors_online) do
+      count when is_integer(count) and count > 0 -> count
+      _unknown -> nil
+    end
+  end
+
+  @doc """
+  The job kinds this machine will take, or nil for "anything".
+
+  `FORGE_ACCEPTS` is a comma-separated list — the same shape as everything else on the config
+  disk, which is `KEY=VALUE` lines and has no room for structure. Absent means the machine does
+  not restrict itself, which is what every worker did before this existed and what a
+  general-purpose machine still wants. A machine bought for one kind of work says so here, and
+  the platform will not send it anything else
+  (`docs/design/provisioning.md` § What a worker offers).
+
+  Names are passed through rather than checked: the platform knows which kinds exist and drops
+  the ones it does not recognise, and a worker that validated against its own list would refuse
+  a kind the platform gained in a migration it has not been rebuilt for.
+  """
+  @spec accepts() :: [String.t()] | nil
+  def accepts do
+    case get(:accepts, "FORGE_ACCEPTS") do
+      nil ->
+        nil
+
+      value when is_list(value) ->
+        value
+
+      value ->
+        case value |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == "")) do
+          [] -> nil
+          kinds -> kinds
+        end
+    end
+  end
+
   defp get(key, env) do
     case Application.get_env(:forge_worker, key) do
       nil -> System.get_env(env)

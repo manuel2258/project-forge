@@ -192,7 +192,57 @@ defmodule ForgeWorker.LinkTest do
     connect_and_assert_join(client, @topic, %{"running" => [], "memory_total" => budget}, :ok)
     assert budget > 0
 
-    assert_push(@topic, "ready", %{"memory_budget" => ^budget})
+    assert_push(@topic, "ready", %{"memory_budget" => ^budget, "cores" => cores})
+    assert cores > 0
+  end
+
+  describe "what ready says about the gate's other two dimensions" do
+    setup %{root: root} do
+      previous = {
+        Application.get_env(:forge_worker, :cores),
+        Application.get_env(:forge_worker, :accepts)
+      }
+
+      on_exit(fn ->
+        {cores, accepts} = previous
+        restore(:cores, cores)
+        restore(:accepts, accepts)
+      end)
+
+      Application.delete_env(:forge_worker, :cores)
+      Application.delete_env(:forge_worker, :accepts)
+      %{socket: Slipstream.Socket.assign(Slipstream.Socket.new(), %{root: root})}
+    end
+
+    defp restore(key, nil), do: Application.delete_env(:forge_worker, key)
+    defp restore(key, value), do: Application.put_env(:forge_worker, key, value)
+
+    test "a machine that restricts itself says so", %{socket: socket} do
+      Application.put_env(:forge_worker, :cores, 4)
+      Application.put_env(:forge_worker, :accepts, ["command"])
+
+      assert %{"cores" => 4, "accepts" => ["command"]} = Link.ready_payload(socket)
+    end
+
+    # The key is *absent*, not null. The platform reads a missing key as "takes anything" and a
+    # missing core count as "do not gate me on cores"; sending nulls would mean the same thing
+    # only as long as nobody wrote `Map.has_key?` on the other side.
+    test "a machine that restricts itself in neither way says neither", %{socket: socket} do
+      payload = Link.ready_payload(socket)
+
+      refute Map.has_key?(payload, "accepts")
+      assert Map.has_key?(payload, "cores")
+    end
+
+    # Memory is always sent, because there not knowing is itself an instruction: a worker that
+    # cannot measure its own memory offers nothing and the platform assigns it nothing. The two
+    # dimensions are deliberately not symmetric — see `ForgeWorker.Config.cores/0`.
+    test "memory is reported whatever it is", %{socket: socket} do
+      Application.put_env(:forge_worker, :memory_budget, 0)
+      on_exit(fn -> Application.delete_env(:forge_worker, :memory_budget) end)
+
+      assert %{"memory_budget" => 0} = Link.ready_payload(socket)
+    end
   end
 
   # `seeds` and `root` are the rest of the self-report and both were asserted only as an empty

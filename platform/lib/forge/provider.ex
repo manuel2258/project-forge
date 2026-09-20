@@ -1,12 +1,18 @@
 defmodule Forge.Provider do
   @moduledoc """
-  Where machines come from. One implementation in the PoC — a local VM under QEMU — and a
-  Hetzner one in the closing step, behind the same three callbacks. See
-  `docs/design/worker-tier.md` § The provider driver.
+  Where machines come from. A local VM under QEMU in the PoC, a Hetzner one after it, behind the
+  same callbacks. See `docs/design/worker-tier.md` § The provider driver and
+  `docs/design/provisioning.md` § Where a machine comes from.
 
   Nothing above this module knows the provider. A module outside `Forge.Provider.*` that
   matches on `"local"` is the bug these callbacks exist to prevent, and the second
   implementation is the test of whether it worked.
+
+  **The driver is resolved per machine, not per node.** It used to be one configured module,
+  which is what stood between this design and a fleet spanning two providers: a worker row
+  carries the provider it was made by, a worker template carries the provider its credential is
+  for, and the module is looked up from that name. Adding a provider is a line of config and a
+  module implementing the behaviour; no code here learns its name.
 
   The store is not here. `docs/vision.md` gives a provider three jobs — create a machine,
   destroy it, and somewhere to put bytes — and the third is `Forge.Storage`'s, behind its own
@@ -18,35 +24,199 @@ defmodule Forge.Provider do
   all — the credential above everything — which is the machine's rather than any job's and so
   is injected here rather than carried in an assignment; `docs/design/worker-tier.md` § The
   worker image says why.
+
+  `size` is opaque above the driver: the platform passes the string a template carried and never
+  reads it, which is what keeps `"cpx32"` from meaning anything outside the Hetzner driver.
+  `credential` is the account the machine is made in, and is nil for a provider that needs none.
   """
   @type opts :: %{
           required(:worker_id) => String.t(),
           required(:token) => String.t(),
           required(:platform_url) => String.t(),
           optional(:harness_env) => [{String.t(), String.t()}],
-          optional(:size) => String.t()
+          optional(:size) => String.t() | nil,
+          optional(:image) => String.t() | nil,
+          optional(:credential) => map() | nil
         }
 
   @type machine :: %{provider_id: String.t(), address: String.t() | nil}
 
+  @typedoc """
+  A machine this provider will sell, as the platform reads it.
+
+  `size` is the driver's own name for it and is passed back verbatim in `opts.size`. Everything
+  else is what the platform reasons about: `memory` and `cores` are what a template built on
+  this shape should expect a machine to offer, and the price is what the operator is shown.
+  """
+  @type shape :: %{
+          required(:size) => String.t(),
+          required(:memory) => pos_integer(),
+          required(:cores) => pos_integer(),
+          optional(:price_hourly) => Decimal.t() | nil,
+          optional(:currency) => String.t() | nil
+        }
+
   @callback create(opts()) :: {:ok, machine()} | {:error, term()}
-  @callback destroy(String.t()) :: :ok | {:error, term()}
-  @callback status(String.t()) :: {:ok, :pending | :running | :gone} | {:error, term()}
 
+  @doc """
+  Destroys the machine, in the account that pays for it.
+
+  **The credential is a parameter because ending a machine is as much an account operation as
+  making one**, and for a while it was not: `create` took the template's credential while
+  `destroy` reached for a node-wide token that per-user credentials had replaced. On a node
+  with no such token the Hetzner driver refused before sending anything, `Forge.Workers` threw
+  the refusal away, and the row was marked destroyed while the machine kept running and
+  billing — one leaked machine every sweep. See `docs/design/provisioning.md` § Whose account.
+  """
+  @callback destroy(String.t(), map() | nil) :: :ok | {:error, term()}
+
+  @doc "What the provider says about the machine, asked with the credential that made it."
+  @callback status(String.t(), map() | nil) ::
+              {:ok, :pending | :running | :gone} | {:error, term()}
+
+  @doc """
+  The machine shapes this provider offers, for the credential given.
+
+  A credential, because listing server types is an authenticated call on a real provider and
+  because what is on offer can differ per account. A driver that needs none ignores it.
+  """
+  @callback shapes(map() | nil) :: {:ok, [shape()]} | {:error, term()}
+
+  @typedoc """
+  A machine this provider currently holds, as the provider sees it.
+
+  Deliberately thin: this is for reconciling against `workers`, and the only field that has to
+  line up is `provider_id`. Everything else is for a person reading the row.
+  """
+  @type instance :: %{
+          required(:provider_id) => String.t(),
+          required(:name) => String.t() | nil,
+          required(:status) => String.t() | nil,
+          optional(:created_at) => String.t() | nil
+        }
+
+  @doc """
+  Every machine this credential's account holds that forge made.
+
+  **Only forge's own**, which each driver decides for itself — the Hetzner one asks for the
+  label it sets at create. Listing the operator's unrelated servers would turn a leak panel
+  into a list of things that are fine.
+
+  **A driver that paginates follows it to the end.** A truncated answer here reports *no
+  orphans* while billing for the ones on the next page, which is worse than no panel at all.
+  """
+  @callback list(map() | nil) :: {:ok, [instance()]} | {:error, term()}
+
+  @spec list(String.t(), map() | nil) :: {:ok, [instance()]} | {:error, term()}
+  def list(provider, credential \\ nil) do
+    with {:ok, driver} <- driver(provider), do: driver.list(credential)
+  end
+
+  @typedoc """
+  An image a machine can be made from, as the platform reads it.
+
+  `id` is opaque above the driver and is what a template stores and `opts.image` carries back.
+  Everything else is for a person choosing between them in a form.
+  """
+  @type image :: %{
+          required(:id) => String.t(),
+          required(:name) => String.t() | nil,
+          optional(:status) => String.t() | nil,
+          optional(:created) => String.t() | nil
+        }
+
+  @doc """
+  The images this credential can make a machine from.
+
+  **Hetzner has no image upload**, so what this lists are snapshots the operator has already
+  made by hand — boot a rescue server, write the disk, snapshot it, throw the server away
+  (`docs/design/worker-tier.md` § Updating a worker). The platform offers what is there and
+  never makes one.
+  """
+  @callback images(map() | nil) :: {:ok, [image()]} | {:error, term()}
+
+  @spec images(String.t(), map() | nil) :: {:ok, [image()]} | {:error, term()}
+  def images(provider, credential \\ nil) do
+    with {:ok, driver} <- driver(provider), do: driver.images(credential)
+  end
+
+  @doc """
+  The fields this provider's credential is made of, in the order a form should ask for them.
+
+  The secret is a map whose shape the driver owns
+  (`docs/design/provisioning.md` § Whose account), and a form has to know what to ask for —
+  one token for Hetzner, a key pair elsewhere. Declaring it here is what keeps that knowledge
+  in the driver rather than in a `case` in a LiveView, which is the same boundary `shapes/1`
+  draws for machine sizes.
+
+  An empty list means this provider needs no credential at all, which is the local driver.
+  """
+  @callback credential_fields() :: [%{key: String.t(), label: String.t()}]
+
+  @spec credential_fields(String.t()) :: [%{key: String.t(), label: String.t()}]
+  def credential_fields(provider) do
+    case driver(provider) do
+      {:ok, module} -> module.credential_fields()
+      {:error, _reason} -> []
+    end
+  end
+
+  @doc """
+  Creates a machine. The driver comes from `opts.provider`, or the default when it says nothing.
+  """
   @spec create(opts()) :: {:ok, machine()} | {:error, term()}
-  def create(opts), do: impl().create(opts)
+  def create(opts) do
+    with {:ok, driver} <- driver(Map.get(opts, :provider)), do: driver.create(opts)
+  end
 
-  @spec destroy(String.t()) :: :ok | {:error, term()}
-  def destroy(provider_id), do: impl().destroy(provider_id)
+  @spec destroy(String.t(), String.t(), map() | nil) :: :ok | {:error, term()}
+  def destroy(provider, provider_id, credential \\ nil) do
+    with {:ok, driver} <- driver(provider), do: driver.destroy(provider_id, credential)
+  end
 
-  @spec status(String.t()) :: {:ok, :pending | :running | :gone} | {:error, term()}
-  def status(provider_id), do: impl().status(provider_id)
+  @spec status(String.t(), String.t(), map() | nil) ::
+          {:ok, :pending | :running | :gone} | {:error, term()}
+  def status(provider, provider_id, credential \\ nil) do
+    with {:ok, driver} <- driver(provider), do: driver.status(provider_id, credential)
+  end
 
-  @doc "The name this implementation records on the worker row."
-  @spec name() :: String.t()
-  def name, do: config(:name, "local")
+  @spec shapes(String.t(), map() | nil) :: {:ok, [shape()]} | {:error, term()}
+  def shapes(provider, credential \\ nil) do
+    with {:ok, driver} <- driver(provider), do: driver.shapes(credential)
+  end
 
-  defp impl, do: config(:impl, Forge.Provider.LocalVm)
+  @doc """
+  The module that speaks for `provider`.
+
+  **An unknown name is an error and never the default.** A worker row naming a provider this
+  node no longer has configured is a machine nothing can destroy, and silently reaching for
+  whatever is configured instead would destroy somebody else's.
+  """
+  @spec driver(String.t() | nil) :: {:ok, module()} | {:error, {:unknown_provider, String.t()}}
+  def driver(nil), do: driver(default())
+
+  def driver(provider) when is_binary(provider) do
+    case Map.fetch(drivers(), provider) do
+      {:ok, module} -> {:ok, module}
+      :error -> {:error, {:unknown_provider, provider}}
+    end
+  end
+
+  @doc "Every provider name this node can speak to."
+  @spec names() :: [String.t()]
+  def names, do: drivers() |> Map.keys() |> Enum.sort()
+
+  @doc """
+  The provider a machine is made by when nothing names one.
+
+  A worker template names its own through its credential; this is what the platform falls back
+  to while there are no templates, and what `mix forge.worker.new` records for a machine the
+  operator built by hand.
+  """
+  @spec default() :: String.t()
+  def default, do: config(:default, "local")
+
+  defp drivers, do: config(:drivers, %{"local" => Forge.Provider.LocalVm})
 
   @doc false
   def config(key, default),

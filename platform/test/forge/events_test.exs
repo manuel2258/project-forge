@@ -38,7 +38,9 @@ defmodule Forge.EventsTest do
           project_id: ticket.project_id,
           state: "refining",
           attempt: 1,
-          spec: %{}
+          spec: %{},
+          memory_max: Forge.Jobs.default_resources().memory,
+          cores: Forge.Jobs.default_resources().cores
         })
       )
       |> Events.log(:event, "job.created", :system, fn %{job: job} ->

@@ -151,6 +151,8 @@ defmodule ForgeWeb.ApiTest do
     assert email == user.email
     assert %{"projects" => projects} = conn |> get(~p"/api/v1/projects") |> json_response(200)
     assert project.name in Enum.map(projects, & &1["name"])
+    # The absolute host path of the repository is never handed to a client.
+    refute Enum.any?(projects, &Map.has_key?(&1, "repo_path"))
   end
 
   test "accepts the bearer scheme in any case", %{conn: conn, user: user} do

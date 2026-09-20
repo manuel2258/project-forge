@@ -3,7 +3,7 @@ defmodule ForgeCore.Workflow.ParserTest do
 
   alias ForgeCore.Error
   alias ForgeCore.Workflow
-  alias ForgeCore.Workflow.{Budget, Parser, State, Transition}
+  alias ForgeCore.Workflow.{Budget, Defaults, Parser, Resources, State, Transition}
 
   @fixture Path.expand("../../fixtures/workflow_example.yml", __DIR__)
 
@@ -517,6 +517,156 @@ defmodule ForgeCore.Workflow.ParserTest do
       assert {"states.merged.on_enter", "merge needs a state that produces changeset"} in messages(
                map
              )
+    end
+  end
+
+  describe "resources" do
+    test "a state declares them and they reach the struct", %{map: map} do
+      map = put_in(map, ["states", "refining", "resources"], %{"memory" => "6GiB", "cpu" => 4})
+
+      assert {:ok, workflow} = Parser.from_map(map)
+      assert workflow.states["refining"].resources == %Resources{memory: 6_442_450_944, cpu: 4}
+    end
+
+    test "defaults carry them for the whole workflow", %{map: map} do
+      map = Map.put(map, "defaults", %{"resources" => %{"memory" => "2200MiB", "cpu" => 1}})
+
+      assert {:ok, workflow} = Parser.from_map(map)
+
+      assert workflow.defaults == %Defaults{
+               resources: %Resources{memory: 2_306_867_200, cpu: 1}
+             }
+    end
+
+    # Each field falls back on its own, which is the whole point of `defaults:`. A state that
+    # restated `cpu` to change `memory` would make the default worth half of what it claims.
+    test "a state may declare one field and leave the other", %{map: map} do
+      map = put_in(map, ["states", "refining", "resources"], %{"memory" => "6GiB"})
+
+      assert {:ok, workflow} = Parser.from_map(map)
+      assert workflow.states["refining"].resources == %Resources{memory: 6_442_450_944, cpu: nil}
+    end
+
+    # **A number written as a string is the same number.** It was not: `512` parsed and `"512"`
+    # did not, because the unit was mandatory — so a form, where every field is a string, could
+    # not carry a plain byte count, and the template page filled its own memory field with a
+    # value it then refused. Found by an operator, not by this suite.
+    test "a bare integer and the same digits as a string agree", %{map: map} do
+      for written <- [1, "1", 512, "512", 8_589_934_592, "8589934592"] do
+        map = put_in(map, ["states", "refining", "resources"], %{"memory" => written})
+        assert {:ok, workflow} = Parser.from_map(map)
+
+        expected = if is_binary(written), do: String.to_integer(written), else: written
+        assert workflow.states["refining"].resources.memory == expected
+      end
+    end
+
+    test "a bare integer is bytes, and every binary unit multiplies", %{map: map} do
+      for {written, bytes} <- [
+            # One byte is absurd and legal, and it is the boundary `> 0` is guarding: a mutation
+            # to `> 1` refuses it, and nothing noticed until a mutation pass said so.
+            {1, 1},
+            {512, 512},
+            {"512B", 512},
+            {"2KiB", 2048},
+            {"1MiB", 1_048_576},
+            {"1GiB", 1_073_741_824},
+            {"1TiB", 1_099_511_627_776}
+          ] do
+        map = put_in(map, ["states", "refining", "resources"], %{"memory" => written})
+        assert {:ok, workflow} = Parser.from_map(map)
+
+        assert workflow.states["refining"].resources.memory == bytes,
+               "#{inspect(written)} should be #{bytes} bytes"
+      end
+    end
+
+    # `4GB` is 7% smaller than `4GiB`. Accepting it as an approximation would silently shrink a
+    # ceiling whose job is to kill the job that crosses it, so it is refused by name.
+    test "a decimal unit is refused and the binary one is named", %{map: map} do
+      map = put_in(map, ["states", "refining", "resources"], %{"memory" => "4GB"})
+
+      assert messages(map) == [
+               {"states.refining.resources.memory", "must use a binary unit; did you mean GiB?"}
+             ]
+    end
+
+    # Case is not part of the distinction: `mib` is still not `mb` after downcasing, so
+    # refusing `4gib` would cost an operator a round trip and buy nothing.
+    test "a unit is matched whatever its case", %{map: map} do
+      for written <- ["4gib", "4GIB", "4GiB", "4Gib"] do
+        map = put_in(map, ["states", "refining", "resources"], %{"memory" => written})
+        assert {:ok, workflow} = Parser.from_map(map)
+
+        assert workflow.states["refining"].resources.memory == 4_294_967_296,
+               "#{inspect(written)} should be four gibibytes"
+      end
+    end
+
+    # `4XiB` is well-formed — digits then letters — so it reaches the unit lookup rather than
+    # failing the shape check, which is the only way that branch is ever taken.
+    test "a well-formed size with a unit that does not exist is refused", %{map: map} do
+      map = put_in(map, ["states", "refining", "resources"], %{"memory" => "4XiB"})
+
+      assert [{"states.refining.resources.memory", message}] = messages(map)
+      assert message =~ "must be a positive number of bytes or a size in"
+    end
+
+    test "a size that is not a size says what one looks like", %{map: map} do
+      for written <- ["", "GiB", "lots", "4 GiB please", 0, -1, 1.5, "0MiB", %{}] do
+        map = put_in(map, ["states", "refining", "resources"], %{"memory" => written})
+
+        assert [{"states.refining.resources.memory", message}] = messages(map),
+               "#{inspect(written)} should be one error"
+
+        assert message =~ "must be a positive number of bytes or a size in"
+      end
+    end
+
+    # Reserved, not unknown: `disk` is the obvious third dimension and nothing enforces one yet.
+    # "unknown key" would read as a typo and send somebody looking for the right spelling.
+    test "disk is reserved rather than unknown, and says so once", %{map: map} do
+      map =
+        put_in(map, ["states", "refining", "resources"], %{"memory" => "1GiB", "disk" => "5G"})
+
+      assert messages(map) == [{"states.refining.resources.disk", "is reserved"}]
+    end
+
+    test "any other key is unknown", %{map: map} do
+      map = put_in(map, ["states", "refining", "resources"], %{"gpu" => 1})
+
+      assert messages(map) == [{"states.refining.resources.gpu", "unknown key"}]
+    end
+
+    test "cpu must be a positive integer", %{map: map} do
+      for written <- [0, -1, 1.5, "4"] do
+        map = put_in(map, ["states", "refining", "resources"], %{"cpu" => written})
+
+        assert messages(map) == [{"states.refining.resources.cpu", "must be a positive integer"}],
+               "#{inspect(written)} should not be a core count"
+      end
+    end
+
+    test "resources must be a mapping, and defaults must be one too", %{map: map} do
+      assert messages(put_in(map, ["states", "refining", "resources"], "lots")) == [
+               {"states.refining.resources", "must be a mapping of memory and cpu"}
+             ]
+
+      assert messages(Map.put(map, "defaults", "lots")) == [{"defaults", "must be a mapping"}]
+    end
+
+    test "defaults holds nothing but resources", %{map: map} do
+      assert messages(Map.put(map, "defaults", %{"model" => "opus"})) == [
+               {"defaults.model", "unknown key"}
+             ]
+    end
+
+    # The grammar example declares none, and a workflow written before this key existed has to
+    # keep parsing: absent is not the same as zero, and the platform supplies what is missing.
+    test "declaring none leaves both levels nil", %{map: map} do
+      assert {:ok, workflow} = Parser.from_map(map)
+      assert workflow.defaults == nil
+      assert workflow.states["refining"].resources == nil
     end
   end
 

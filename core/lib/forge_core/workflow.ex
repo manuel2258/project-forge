@@ -42,7 +42,7 @@ defmodule ForgeCore.Workflow do
   @spec platform_docs() :: [{String.t(), String.t()}]
   def platform_docs, do: [{"platform.md", @platform}, {"workflow-grammar.md", @grammar}]
 
-  alias ForgeCore.Workflow.{Limits, State, Transition}
+  alias ForgeCore.Workflow.{Defaults, Limits, Resources, State, Transition}
 
   @engine_outcomes ~w(did_not_converge budget_exhausted error cancelled)
   @default_outcome "done"
@@ -54,7 +54,7 @@ defmodule ForgeCore.Workflow do
   @tickets_dir "tickets"
 
   @enforce_keys [:initial, :states, :transitions, :limits]
-  defstruct version: 1, initial: nil, states: %{}, transitions: [], limits: nil
+  defstruct version: 1, initial: nil, states: %{}, transitions: [], limits: nil, defaults: nil
 
   @type state_name :: String.t()
   @type artifact_name :: String.t()
@@ -65,7 +65,8 @@ defmodule ForgeCore.Workflow do
           initial: state_name(),
           states: %{state_name() => State.t()},
           transitions: [Transition.t()],
-          limits: Limits.t()
+          limits: Limits.t(),
+          defaults: Defaults.t() | nil
         }
 
   @doc "Outcomes every job may end with, whatever its state declares."
@@ -143,6 +144,30 @@ defmodule ForgeCore.Workflow do
   def producers(%__MODULE__{states: states}, artifact) do
     names = for {name, %State{produces: produces}} <- states, artifact in produces, do: name
     Enum.sort(names)
+  end
+
+  @doc """
+  What a job in `state_name` asks the scheduler for: the state's declaration, then the
+  workflow's defaults.
+
+  **Either field may still be nil**, and that is the contract rather than an oversight: the last
+  link of the chain is the platform's configured slice, and `forge_core` has no configuration to
+  read it from. A caller that needs a number supplies the last one
+  (`docs/design/provisioning.md` § What a job asks for).
+
+  A state that does not exist, or a human state that runs no job, resolves the same way as one
+  declaring nothing. Neither has a job to size, and returning the defaults costs the caller
+  nothing it would not already have to handle.
+  """
+  @spec resources(t(), state_name()) :: Resources.t()
+  def resources(%__MODULE__{defaults: defaults} = workflow, state_name) do
+    state =
+      case state(workflow, state_name) do
+        %State{resources: resources} -> resources
+        nil -> nil
+      end
+
+    Resources.resolve([state, defaults && defaults.resources])
   end
 
   @doc "Outcomes a job in `state_name` may end with: engine outcomes plus declared ones."

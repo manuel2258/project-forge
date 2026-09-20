@@ -15,6 +15,11 @@ defmodule Forge.Projects do
   Registers a project. The bare repository at `repo_path` is created if it does not exist;
   an existing one is used as is, so a repository can be imported by pushing to it first. The
   hooks that enforce the branch discipline are installed either way.
+
+  **The name is reserved before the repository is touched.** Registering a name that already
+  exists fails at the insert, before any git runs, so a registration can never rewrite another
+  project's HEAD, hooks or default branch — the guard is the name and not the directory, which is
+  what keeps the import-by-push path working. See `docs/design/git-hosting.md`.
   """
   @spec register(map(), User.t() | nil) ::
           {:ok, Project.t()} | {:error, Ecto.Changeset.t() | term()}
@@ -28,32 +33,52 @@ defmodule Forge.Projects do
   def register(attrs, %User{} = owner) do
     changeset = Project.changeset(%Project{}, attrs)
 
-    with {:ok, project} <- Ecto.Changeset.apply_action(changeset, :insert),
-         :ok <- Git.init_bare(Path.expand(project.repo_path)),
-         :ok <- Hooks.install(Path.expand(project.repo_path), project),
+    Multi.new()
+    # Reserve the name first: `unique_constraint(:name)` is the authority on who owns a repo
+    # path, so a second registration of an existing name fails here and `initialize_repo/1`
+    # below never runs against a repository that is not this row's own.
+    |> Multi.insert(:project, changeset)
+    |> own(owner)
+    |> Events.log(:event, "project.registered", actor(owner), fn %{project: project} ->
+      %{
+        project_id: project.id,
+        payload: %{"project_id" => project.id, "name" => project.name}
+      }
+    end)
+    # Git runs last and inside the transaction: if it fails, the row, the membership and the
+    # event all roll back, and `initialize_repo/1` removes any directory it created.
+    |> Multi.run(:repo, fn _repo, %{project: project} -> initialize_repo(project) end)
+    |> Repo.transaction()
+    |> case do
+      {:ok, %{project: project}} -> {:ok, project}
+      {:error, :project, changeset, _} -> {:error, changeset}
+      {:error, :repo, reason, _} -> {:error, reason}
+    end
+  end
+
+  # Creates the repository for a freshly reserved project. Called only after the name is this
+  # row's, so it can never touch another project's repository.
+  defp initialize_repo(%Project{} = project) do
+    path = Path.expand(project.repo_path)
+    we_made_it? = not File.exists?(path)
+
+    with :ok <- Git.init_bare(path),
+         :ok <- Hooks.install(path, project),
          # A bare repository `git init` made points HEAD at whatever git's default is, which a
          # worker's `clone --branch <default>` then cannot find. Harmless while the platform
          # cloned on its own disk; not harmless once the clone comes over the wire.
-         :ok <- Git.ensure_head(Path.expand(project.repo_path), project.default_branch),
+         :ok <- Git.ensure_head(path, project.default_branch),
          # And a commit on it. Everything the platform does starts from the default branch — a
          # ticket's base, a conversation's branch, a merge's destination — and `pre-receive`
          # lets nothing but the platform's own merge write it, so no push could create it.
-         :ok <-
-           Git.ensure_initial_commit(Path.expand(project.repo_path), project.default_branch) do
-      Multi.new()
-      |> Multi.insert(:project, changeset)
-      |> own(owner)
-      |> Events.log(:event, "project.registered", actor(owner), fn %{project: project} ->
-        %{
-          project_id: project.id,
-          payload: %{"project_id" => project.id, "name" => project.name}
-        }
-      end)
-      |> Repo.transaction()
-      |> case do
-        {:ok, %{project: project}} -> {:ok, project}
-        {:error, :project, changeset, _} -> {:error, changeset}
-      end
+         :ok <- Git.ensure_initial_commit(path, project.default_branch) do
+      {:ok, path}
+    else
+      {:error, reason} ->
+        # Remove only a directory this call created: an imported repository the caller pushed
+        # first is theirs, and a rollback must not delete it.
+        if we_made_it?, do: File.rm_rf(path)
+        {:error, reason}
     end
   end
 

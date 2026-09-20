@@ -103,6 +103,31 @@ worker has been told which project it is working on, and that is what an assignm
 `ready` carries a `harness` map beside the memory budget, and it is answered the same way: by
 asking the machine, not by the platform assuming.
 
+**It also carries the other two dimensions of the gate**, `cores` and `accepts`
+(`docs/design/provisioning.md` § What a worker offers):
+
+```json
+"memory_budget": 5939000000,
+"cores": 4,
+"accepts": ["command"]
+```
+
+Three things about them that the code depends on and a reader would not guess.
+
+- **`cores` and `accepts` are omitted, never null.** A machine with nothing to say leaves the key
+  out, and the platform reads an absent key as *unknown* rather than as zero or as an empty
+  list — which is what keeps every worker that predates these fields taking work. `memory_budget`
+  is always sent, because there not knowing is itself an instruction: a machine that cannot
+  measure its own memory offers nothing and is assigned nothing.
+- **The names in `accepts` are not checked by the worker.** It passes through whatever it was
+  configured with, and the platform drops the kinds it does not recognise. A worker validating
+  against its own list would refuse a kind the platform gained in a migration the machine has not
+  been rebuilt for — and the machine is the half that is replaced least often.
+- **What arrives fills a blank row and never overwrites a set one.** These are scheduling values
+  and the row is what the gate reads, so an operator's correction to a permanent worker survives
+  every reconnect. The report is kept verbatim in `workers.reported` so the two can be compared,
+  which is the same treatment `harness` gets and for the same reason.
+
 ```json
 "harness": {
   "driver": "claude_code",

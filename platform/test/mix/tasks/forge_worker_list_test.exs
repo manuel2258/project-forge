@@ -22,7 +22,7 @@ defmodule Mix.Tasks.Forge.Worker.ListTest do
     on_exit(fn -> Mix.shell(Mix.Shell.IO) end)
 
     {:ok, live, _token} = Workers.create(%{provider: "fake"})
-    {:ok, live} = Workers.ready(live, 8_000_000_000)
+    {:ok, live} = Workers.ready(live, %{"memory_budget" => 8_000_000_000})
 
     {:ok, gone, _token} = Workers.create(%{provider: "fake"})
     :ok = Workers.destroy(gone)

@@ -12,13 +12,20 @@ defmodule ForgeCore.Workflow.Parser do
 
   alias ForgeCore.Error
   alias ForgeCore.Workflow
-  alias ForgeCore.Workflow.{Budget, Limits, State, Transition, Validator}
+  alias ForgeCore.Workflow.{Budget, Defaults, Limits, Resources, State, Transition, Validator}
 
-  @top_keys ~w(version initial states transitions limits)
-  @state_keys ~w(prompt env model inputs produces outcomes budget on_enter)
+  @top_keys ~w(version initial states transitions limits defaults)
+  @state_keys ~w(prompt env model inputs produces outcomes budget on_enter resources)
   @transition_keys ~w(from to when approve max)
   @budget_keys ~w(turns cost)
   @limit_keys ~w(ticket_cost)
+  @defaults_keys ~w(resources)
+  @resources_keys ~w(memory cpu)
+
+  # Named here rather than left to `unknown_keys/3`, so the message says *why* the key is not
+  # allowed. `disk` is the obvious third dimension and there is nothing to enforce it with yet
+  # (`docs/design/commands.md` § Resources); "unknown key" would read as a typo.
+  @reserved_resources_keys ~w(disk)
 
   @type result :: {:ok, Workflow.t()} | {:error, [Error.t()]}
 
@@ -82,16 +89,33 @@ defmodule ForgeCore.Workflow.Parser do
     {states, e3} = states(map)
     {transitions, e4} = transitions(map)
     {limits, e5} = limits(map)
+    {defaults, e6} = defaults(map)
 
     workflow = %Workflow{
       version: version,
       initial: initial,
       states: states,
       transitions: transitions,
-      limits: limits
+      limits: limits,
+      defaults: defaults
     }
 
-    {workflow, unknown_keys(map, @top_keys, "") ++ e1 ++ e2 ++ e3 ++ e4 ++ e5}
+    {workflow, unknown_keys(map, @top_keys, "") ++ e1 ++ e2 ++ e3 ++ e4 ++ e5 ++ e6}
+  end
+
+  defp defaults(map) do
+    case Map.get(map, "defaults") do
+      nil ->
+        {nil, []}
+
+      defaults when is_map(defaults) ->
+        {resources, e1} = resources(defaults, "defaults")
+        errors = unknown_keys(defaults, @defaults_keys, "defaults") ++ e1
+        {if(errors == [], do: %Defaults{resources: resources}), errors}
+
+      _ ->
+        {nil, [Error.new("defaults", "must be a mapping")]}
+    end
   end
 
   defp version(map) do
@@ -124,6 +148,7 @@ defmodule ForgeCore.Workflow.Parser do
     {budget, e6} = budget(definition, path)
     {on_enter, e7} = on_enter(definition, path)
     {model, e8} = optional_string(definition, "model", path)
+    {resources, e9} = resources(definition, path)
 
     state = %State{
       name: name,
@@ -134,12 +159,13 @@ defmodule ForgeCore.Workflow.Parser do
       produces: produces || [],
       outcomes: outcomes,
       budget: budget,
+      resources: resources,
       on_enter: on_enter
     }
 
     {state,
      unknown_keys(definition, @state_keys, path) ++
-       e1 ++ e2 ++ e3 ++ e4 ++ e5 ++ e6 ++ e7 ++ e8}
+       e1 ++ e2 ++ e3 ++ e4 ++ e5 ++ e6 ++ e7 ++ e8 ++ e9}
   end
 
   defp state(name, _definition) do
@@ -190,6 +216,31 @@ defmodule ForgeCore.Workflow.Parser do
 
       _ ->
         {nil, [Error.new(budget_path, "must be a mapping with turns and cost")]}
+    end
+  end
+
+  # Both fields are optional, and that is what makes `defaults:` worth having: a state wanting
+  # more memory than the default should not have to restate the core count to get it.
+  # `ForgeCore.Workflow.resources/2` is where the chain is walked.
+  defp resources(definition, path) do
+    resources_path = Error.join(path, "resources")
+
+    case Map.get(definition, "resources") do
+      nil ->
+        {nil, []}
+
+      resources when is_map(resources) ->
+        {memory, e1} = bytes(resources, "memory", resources_path)
+        {cpu, e2} = positive_integer(resources, "cpu", resources_path, required: false)
+
+        errors =
+          unknown_keys(resources, @resources_keys ++ @reserved_resources_keys, resources_path) ++
+            reserved_keys(resources, @reserved_resources_keys, resources_path) ++ e1 ++ e2
+
+        {if(errors == [], do: %Resources{memory: memory, cpu: cpu}), errors}
+
+      _ ->
+        {nil, [Error.new(resources_path, "must be a mapping of memory and cpu")]}
     end
   end
 
@@ -259,6 +310,43 @@ defmodule ForgeCore.Workflow.Parser do
     |> Enum.reject(&(&1 in allowed))
     |> Enum.sort()
     |> Enum.map(&Error.new(Error.join(path, &1), "unknown key"))
+  end
+
+  defp reserved_keys(map, reserved, path) do
+    map
+    |> Map.keys()
+    |> Enum.map(&to_string/1)
+    |> Enum.filter(&(&1 in reserved))
+    |> Enum.sort()
+    |> Enum.map(&Error.new(Error.join(path, &1), "is reserved"))
+  end
+
+  defp bytes(map, key, path) do
+    case Map.get(map, key) do
+      nil ->
+        {nil, []}
+
+      value ->
+        case Resources.parse_bytes(value) do
+          {:ok, bytes} ->
+            {bytes, []}
+
+          # Named rather than lumped in with "must be a byte size": `4GB` is what somebody who
+          # meant `4GiB` writes, and the two differ by enough to matter to a memory ceiling.
+          {:error, {:decimal_unit, binary}} ->
+            {nil,
+             [Error.new(Error.join(path, key), "must use a binary unit; did you mean #{binary}?")]}
+
+          :error ->
+            {nil,
+             [
+               Error.new(
+                 Error.join(path, key),
+                 "must be a positive number of bytes or a size in #{Enum.join(Resources.units(), ", ")}"
+               )
+             ]}
+        end
+    end
   end
 
   defp required_string(map, key, path) do

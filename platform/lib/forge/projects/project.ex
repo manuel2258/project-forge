@@ -29,6 +29,23 @@ defmodule Forge.Projects.Project do
     |> validate_format(:name, ~r/^[a-z0-9][a-z0-9_-]*$/,
       message: "lowercase letters, digits, - or _"
     )
+    # A branch name reaches `git config forge.defaultBranch`, `symbolic-ref HEAD` and the
+    # pre-receive hook, so it is validated before any of them see it: without this a value like
+    # `-rf`, `../evil` or one with a space is accepted and poisons the repository's HEAD and its
+    # default-branch guard, or fails deep inside git as a 500. This is git's ref-name shape,
+    # conservatively: it allows `release/1.0` and rejects a leading `-`, `..`, `//`, a trailing
+    # `/` or `.lock`, and whitespace or shell metacharacters.
+    |> validate_format(:default_branch, ~r{^[A-Za-z0-9][A-Za-z0-9._/-]*$},
+      message: "must be a valid git branch name"
+    )
+    |> validate_change(:default_branch, fn :default_branch, branch ->
+      if String.contains?(branch, "..") or String.contains?(branch, "//") or
+           String.ends_with?(branch, "/") or String.ends_with?(branch, ".lock") do
+        [default_branch: "must be a valid git branch name"]
+      else
+        []
+      end
+    end)
     # Not checked against a list of models: names change faster than the platform, and a
     # validator that knew them would refuse a model released last week. Emptiness is the only
     # thing that is certainly wrong — it would read as "set" and resolve to nothing.

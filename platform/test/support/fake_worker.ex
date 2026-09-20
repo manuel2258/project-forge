@@ -17,6 +17,9 @@ defmodule Forge.FakeWorker do
   alias ForgeCore.Job.{Outcome, Result, Spec}
 
   @big_budget 64 * 1024 * 1024 * 1024
+  # Enough that the cores dimension never binds unless a test asks it to, in the same spirit as
+  # the budget above: a fake worker is scenery for tests that are about something else.
+  @cores 64
   @transcript ~s({"type":"system","subtype":"init","session_id":"sess-42"}\n)
   @harness %{
     "session_id" => "sess-42",
@@ -37,7 +40,13 @@ defmodule Forge.FakeWorker do
   @spec connect(keyword()) :: Forge.Workers.Worker.t()
   def connect(opts \\ []) do
     {:ok, worker, _token} = Workers.create(%{provider: "fake"})
-    {:ok, worker} = Workers.ready(worker, Keyword.get(opts, :memory_budget, @big_budget))
+
+    {:ok, worker} =
+      Workers.ready(worker, %{
+        "memory_budget" => Keyword.get(opts, :memory_budget, @big_budget),
+        "cores" => Keyword.get(opts, :cores, @cores)
+      })
+
     :ok = Workers.connected(worker.id)
     worker
   end

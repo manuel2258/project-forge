@@ -23,8 +23,11 @@
 # `dockerTools.buildLayeredImage` produces needs no `docker load` in between. It does spool the
 # decompressed archive through $TMPDIR, so that needs room for an uncompressed image.
 #
-# Credentials: `GHCR_TOKEN` (a personal access token with `write:packages`), with `GHCR_USER`
-# defaulting to the registry path's owner. Without it, whatever `skopeo login` already stored.
+# Credentials, in order: `GHCR_TOKEN` if it is set, else the GitHub CLI's own token if `gh` is
+# installed and logged in, else whatever `skopeo login` already stored. `GHCR_USER` defaults to
+# the registry path's owner. The `gh` step is why publishing needs no second secret: a login that
+# can already push to the repository carries `write:packages`, and asking an operator to mint a
+# PAT that duplicates a credential they have is how tokens end up pasted into shell history.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -116,14 +119,28 @@ trap 'rm -f "$digest_file" "$auth_file"' EXIT
 # gigabyte-and-a-quarter image is not a short window. `skopeo login --password-stdin` writes it
 # to a file this script owns and deletes on exit instead.
 #
-# With no `GHCR_TOKEN`, nothing is written and the empty auth file is passed anyway: skopeo then
-# falls back to whatever `skopeo login` already stored, which is the documented other way in.
+# `gh auth token` is tried second because it is the credential the operator already has: `gh`'s
+# own scopes include `write:packages`, so a machine that can push to the repository can push the
+# image. It is optional and stays optional — `gh` is not in the devshell, so `command -v` decides,
+# and a machine without it falls through to whatever `skopeo login` stored.
+token=${GHCR_TOKEN:-}
+
+if [ -z "$token" ] && command -v gh > /dev/null; then
+  token=$(gh auth token 2> /dev/null || true)
+  if [ -n "$token" ]; then say "using the gh CLI's token"; fi
+fi
+
 creds=()
-if [ -n "${GHCR_TOKEN:-}" ]; then
+if [ -n "$token" ]; then
   registry_host=${registry%%/*}
   user=${GHCR_USER:-$(echo "$registry" | cut -d/ -f2)}
   say "logging in to $registry_host as $user"
-  printf '%s' "$GHCR_TOKEN" |
+  # **Seeded with `{}` because skopeo reads this file before it writes it**, and `mktemp` leaves
+  # it empty — which is not JSON, and skopeo dies with `unexpected end of JSON input` rather than
+  # treating an empty file as no credentials. Found the hard way, after the git tag had been
+  # pushed and before the image had been.
+  printf '{}' > "$auth_file"
+  printf '%s' "$token" |
     skopeo login --username "$user" --password-stdin --authfile "$auth_file" "$registry_host"
   creds=(--dest-authfile "$auth_file")
 fi

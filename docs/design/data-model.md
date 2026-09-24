@@ -7,9 +7,9 @@ use and the worker tier are additions, not rewrites. All ids are UUIDs. Times ar
 
 **project** — `name`, `repo_path` (bare repository on the orchestrator; the API only ever
 sets `<repos_dir>/<name>.git`, an arbitrary path needs the command line), `default_branch`.
-The mirror is deliberately **not** a column: it lives in the repository's own `git config` under
-`forge.mirror`, because the `post-receive` hook is what pushes it and a hook can read only git
-config. See `design/git-hosting.md`.
+A mirror is deliberately **not** a column: it lives in the repository's own `git config` under
+`forge.mirror.<name>.url`, because the `post-receive` hook is what pushes it and a hook can read
+only git config. See `design/git-hosting.md`.
 
 **ticket** — `project_id`, `number` (per project, human-facing, allocated under a lock on
 the project row), `title`, `body`, `base_commit`, `branch` (`ticket/<number>`), `workflow`

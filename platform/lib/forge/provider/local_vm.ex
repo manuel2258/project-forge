@@ -87,14 +87,26 @@ defmodule Forge.Provider.LocalVm do
   would need a special case somewhere, and the special case is what the behaviour exists to
   avoid.
   """
+  # **One default per key, because there were two.** `shapes/1` advertised 4096 MiB and 2 cores
+  # while `command/4` booted the VM with 16384 and 4 — the same `:memory_mb` and `:cpus`, read
+  # through the same `Forge.Provider.config/2`, with different fallbacks a few hundred lines
+  # apart. `shapes/1` is what the template page offers an operator when they pick a machine size,
+  # so the node advertised a quarter of the memory it would actually demand of the host, and
+  # `docs/deploy.md` § Known limits told them to size the host from it.
+  #
+  # The VM's numbers win: the shape is a description of the machine that will be made, so when
+  # the two disagree it is the description that is wrong.
+  @default_memory_mb 16_384
+  @default_cpus 4
+
   @impl Provider
   def shapes(_credential) do
     {:ok,
      [
        %{
          size: nil,
-         memory: Provider.config(:memory_mb, 4096) * 1024 * 1024,
-         cores: Provider.config(:cpus, 2),
+         memory: Provider.config(:memory_mb, @default_memory_mb) * 1024 * 1024,
+         cores: Provider.config(:cpus, @default_cpus),
          price_hourly: nil
        }
      ]}
@@ -163,9 +175,9 @@ defmodule Forge.Provider.LocalVm do
        "-cpu",
        "host",
        "-smp",
-       to_string(config(:cpus, 4)),
+       to_string(config(:cpus, @default_cpus)),
        "-m",
-       to_string(config(:memory_mb, 16_384)),
+       to_string(config(:memory_mb, @default_memory_mb)),
        # Not `-nographic`, which QEMU refuses to combine with `-daemonize`: the console goes
        # to a file below, and nothing is meant to watch it interactively.
        "-display",

@@ -14,6 +14,45 @@ defmodule Forge.GitFixtures do
   end
 
   @doc """
+  A fresh repositories directory with a parent of its own, for a test that points `repos_dir` at
+  it.
+
+  Not `node_repos_dir()`: `Forge.Git.Credentials.dir/0` is a *sibling* of `repos_dir`, so a
+  repositories directory placed directly in the system temp directory puts every such test
+  file's mirror credentials in one shared `<tmp>/mirror-credentials` — which each of them removes
+  in its own `on_exit`. Nothing collides within a run, because the files that do this are all
+  `async: false` and ExUnit runs sync modules one at a time; two runs on one machine, or two
+  users sharing a box, are what this closes. The parent gives the credentials directory the same
+  isolation the repositories already had.
+  """
+  def node_repos_dir do
+    dir = Path.join(tmp_dir("node"), "repos")
+    File.mkdir_p!(dir)
+    dir
+  end
+
+  @doc """
+  A bare repository whose `main` starts exactly where `source`'s does, and nothing else: a
+  mirror destination in an end-to-end mirror test.
+
+  A mirror push is fast-forward only, on both ends — the far side's own `pre-receive` enforces it
+  too — so the destination needs a common ancestor with whatever `source` is about to push.
+  `seeded_repo/1` gives two independently-called destinations a common ancestor only by accident:
+  its root commit carries no explicit `GIT_AUTHOR_DATE`, so two calls collide only when they land
+  in the same wall-clock second. Copying `main` alone, rather than `git clone --bare`'s every
+  branch, is deliberate too: `ForgeWeb.GitHttpTest`'s `source` already has a `ticket/1` branch by
+  the time it calls this, and its test proving a ticket branch does *not* reach the mirror would
+  fail outright — not pass for the wrong reason — against a destination that already carries one
+  from the clone, never having exercised the mirror at all. Returns the new bare path.
+  """
+  def mirror_target(source) do
+    dest = Path.join(tmp_dir("mirror-target"), "target.git")
+    :ok = Git.init_bare(dest)
+    {:ok, _out} = Git.run(source, ["push", "--quiet", dest, "refs/heads/main:refs/heads/main"])
+    dest
+  end
+
+  @doc """
   A bare repository whose `main` holds `.forge/workflow.yml` (the grammar example), the four
   prompts it names, and a README. Returns the bare path.
 

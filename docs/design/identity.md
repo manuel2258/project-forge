@@ -48,6 +48,13 @@ a shell.
 arrives at the login page, picks a provider, comes back, and **a user is created on the spot**.
 No prior row, no invitation, no linking step.
 
+**The ID token's signing algorithm is configuration, not a constant.** `RS256` is the default
+and is what almost every issuer uses, but an issuer on `ES256` or `PS512` could not be used at
+all — `assent` compares the token's `alg` against one expected value and refuses anything else,
+so the node answered every login from such an issuer with the same "could not be completed" an
+unreachable issuer gets. `FORGE_OIDC_<ID>_ID_TOKEN_ALG` names it per provider. It is per
+provider and not per node because the algorithm is the issuer's choice, and a node may have two.
+
 Provisioning on first login is what makes the rest of this simple, and it moves one problem:
 if any identity the IdP will authenticate gets a row, the row cannot mean anything on its own.
 That is what § Approval is for.
@@ -73,6 +80,46 @@ believe. It costs a duplicate row and two approvals; it buys never having to dec
 `email_verified` claim from an arbitrary configured issuer is worth trusting with someone
 else's project access.
 
+### What the first implementation settled
+
+Five things the paragraphs above leave open, each of which has one safe answer and several
+tempting ones.
+
+**An address already in use is refused, never adopted.** `users.email` is unique *and* `citext`,
+so the comparison ignores case and `Admin@corp.com` does not get past an existing
+`admin@corp.com`. Nothing in `Forge.Accounts` downcases anything, and nothing should start: the
+guarantee is one mechanism in one place, and a second one in Elixir would be a second place for
+it to disagree. An issuer asserting an address some account already holds cannot be provisioned. The login fails and says
+so. Adopting the existing row instead is the attack this whole section exists to prevent: any
+issuer an operator has configured could then mint `sub: anything, email: <the node admin's>`
+and *be* them. The deliberate join is `Forge.Release.link_identity/3` on the host — one
+identity attached to one named account by somebody with a shell, which is past every gate there
+is anyway.
+
+**No `email` claim, no login.** The row needs an address and there is nothing sensible to
+invent. A provider whose scope does not yield one is misconfigured, and the message says which.
+It stays display-only: `(issuer, subject)` is what is looked up, always.
+
+**`state`, `nonce` and PKCE, in the session cookie, once.** The cookie is signed, `httpOnly` and
+`SameSite=Lax`, which is what lets it survive the top-level redirect back from the issuer and
+nothing else. All three are deleted when the callback reads them, so a replayed callback URL
+finds nothing to match against. PKCE is `S256` and is sent whether or not the issuer advertises
+it.
+
+**A passwordless account is not a lesser one.** `users.hashed_password` was already nullable, so
+an OIDC user simply has none: `User.valid_password?/2` answers false for them after a dummy hash
+like it does for an unknown address, and the magic link and the settings page both still work.
+That last part is the recovery path again — an account can give itself a password from
+`/users/settings` and stop depending on an issuer that might be retired.
+
+**The client is `assent`, not ours.** What an OIDC client actually is, past the redirect, is
+JWKS fetching, `kid` selection, signature verification, and the `alg`, `aud`, `azp`, `exp` and
+`nonce` rules. Every one of those is a line where a bug is an account takeover rather than a
+wrong answer, and this note's own § Sequencing is a record of guards that were sound in the
+place somebody looked. `Forge.Accounts.Oidc` is a wrapper: provider configuration in, a verified
+`(issuer, subject, email)` out, and the HTTP client is injectable so the tests drive the whole
+flow against an issuer they signed themselves.
+
 ## Approval
 
 **The first login creates a pending account, for local and OIDC alike.** A pending user can log
@@ -87,9 +134,28 @@ account may create projects freely (§ Projects and members), because getting ap
 step that means something.
 
 Suspension is the reverse and is how a person leaves: `users.suspended_at`, sessions and tokens
-refused. Users are never deleted — `answers`, `approvals` and `proposal_decisions` reference
-them with `on_delete: :restrict` precisely so that the record of who decided what cannot be
-erased by removing the decider.
+refused. **An account that has decided anything is never deleted** — `answers`, `approvals` and
+`proposal_decisions` reference users with `on_delete: :restrict` precisely so that the record of
+who decided what cannot be erased by removing the decider.
+
+**An account that has never been approved may be deleted, and that is the whole exception.**
+Suspending a squatter is not enough on its own: the row keeps the address, `users.email` is
+unique, and the person whose address it is can then never register — an issuer where anyone may
+type any address into their own profile can park a colleague's address on the node permanently,
+and § What the first implementation settled refuses to *adopt* such an address without freeing
+it. Refusal has to be able to undo itself.
+
+The line is approval rather than "has no rows", because approval is already the perimeter: a
+pending account reaches no project, answers no question and decides no proposal, so it is by
+construction outside the set the `restrict` references protect. Those references are also the
+enforcement and not merely the motivation — deletion attempts the delete and lets the database
+refuse it, rather than asking in Elixir whether the account has done anything and then deleting
+on the strength of the answer. A guard must use the same model as the operation it guards, and
+those are two models of "has this account acted" that can disagree under a race.
+
+A node admin does it, it is the one governance action that is not reversible, and it writes a
+`user.deleted` event naming the actor and the address freed — the record of the deletion outlives
+the row, which is the property `restrict` exists to protect for everything else.
 
 ### node_admin is account governance, and nothing else
 
@@ -356,8 +422,9 @@ What that comes to:
   listing the projects you are in.
 - **`node_admin`** is one page.
 - **`token`** is four: `/git`, `/store/*key`, and the two sockets. None of them carries a person.
-- **`public`** is the three login routes and the log-out, and nothing else. There is no
-  registration route: accounts are made on the host or by an OIDC login, and then approved.
+- **`public`** is the three login routes, the two OIDC ones and the log-out — plus `/health`,
+  which carries nothing and reads nothing. There is no registration route: accounts are made on
+  the host or by an OIDC login, and then approved.
 
 Two results of the audit worth keeping:
 
@@ -406,12 +473,19 @@ Two results of the audit worth keeping:
    test went through a LiveView route where `on_mount` caught it first; the socket-join direction
    then turned out to be the untested one. And `Projects.put_member/4` checked nothing about its
    caller — the page hid the form, and hiding it was the only thing stopping anyone.
-2. **With the worker tier's next pass.** `credential`, worker ownership, `project_worker`,
-   `jobs.credential_id`, per-credential spend tracking. **And, since that pass turned out to be
-   `docs/design/provisioning.md`:** `provider_credentials`, `worker_templates`,
-   `project_template`, and the provider registry that lets a credential name which driver it is
-   for. The two halves are one migration — a template is unusable without a provider credential to
-   create from, and a provider credential is pointless without a template — so they land together
-   or not at all.
-3. **Closing step, on a real origin.** OIDC: configured providers, the `identity` table,
-   provisioning on first login.
+2. **Half built.** `provider_credentials`, `worker_templates`, `project_template` and the
+   provider registry that lets a credential name which driver it is for all arrived with
+   `docs/design/provisioning.md`, which is where that pass turned out to live. Still to come:
+   `credential`, worker ownership, `project_worker`, `jobs.credential_id` and per-credential
+   spend tracking — the half that answers *whose* money funds a job, as opposed to *which
+   provider* a machine is made at.
+3. **Built, once there was a real origin to redirect to.** OIDC: providers configured from the
+   environment, the `identity` table, provisioning on first login, and § What the first
+   implementation settled above for the five questions the design left open.
+
+   **What it did not change, and that is the point.** Approval is untouched: an OIDC login makes
+   a pending account like any other, and a node admin still decides. Membership is untouched —
+   no claim, group or role from an issuer reaches a project (§ The IdP is not the authority).
+   Local accounts are untouched and remain the recovery path, which is why the host commands
+   still exist and why `Forge.Release.create_operator/3` seeding the first node admin is a
+   prerequisite for this rather than something it replaces.

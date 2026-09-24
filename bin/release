@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# Publishes the platform image: one command, from a clean checkout of `main` to a tag in the
+# registry that a deployment can pin by digest.
+#
+#   bin/release [--registry REF] [--skip-tag] [--dry-run]
+#
+# What it does, in order: refuse anything but a clean `main`, tag `v<version>` and push the tag,
+# build `.#platform-image`, copy it to the registry and print the digest.
+#
+# **The version comes from `VERSION` and from nowhere else.** `flake.nix` reads the same file for
+# the image tag and every `mix.exs` reads it for the release, so publishing twice from one commit
+# publishes the same tag twice — which is why the git tag comes first and a tag that already
+# points somewhere else stops the run. Bump `VERSION`, land it, then run this.
+#
+# There is deliberately no `--version`. There was, and it set the git tag and the registry tag
+# while `nix build` went on reading `VERSION` — so `--version 1.2.3` on a `0.1.1` tree pushed an
+# image labelled `0.1.1` to the registry tag `1.2.3`, under a git tag `v1.2.3` naming a commit
+# that says `0.1.1`. That is the exact "two different images claim one version" this file's own
+# header says it exists to prevent, reachable by a flag it offered.
+#
+# **No Docker daemon.** `nix build` writes a gzipped docker-archive tarball and `skopeo` copies it
+# straight to the registry; containers/image auto-decompresses a docker-archive, so the gzip
+# `dockerTools.buildLayeredImage` produces needs no `docker load` in between. It does spool the
+# decompressed archive through $TMPDIR, so that needs room for an uncompressed image.
+#
+# Credentials: `GHCR_TOKEN` (a personal access token with `write:packages`), with `GHCR_USER`
+# defaulting to the registry path's owner. Without it, whatever `skopeo login` already stored.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+registry="ghcr.io/manuel2258/forge"
+skip_tag=false
+dry_run=false
+
+usage() {
+  sed -n '2,20p' "$0" >&2
+  exit 64
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --registry)
+      registry="$2"
+      shift 2
+      ;;
+    --skip-tag)
+      skip_tag=true
+      shift
+      ;;
+    --dry-run)
+      dry_run=true
+      shift
+      ;;
+    *) usage ;;
+  esac
+done
+
+say() { printf '==> %s\n' "$1"; }
+die() {
+  printf 'bin/release: %s\n' "$1" >&2
+  exit 1
+}
+
+# The image output is gated on `stdenv.hostPlatform.isLinux` in flake.nix, because an image's
+# contents are Linux binaries: on darwin the attribute does not exist at all.
+[ "$(uname -s)" = "Linux" ] || die "the platform image builds on Linux only"
+
+command -v nix > /dev/null || die "nix is not on PATH; enter the devshell with \`nix develop\`"
+command -v skopeo > /dev/null || die "skopeo is not on PATH; enter the devshell with \`nix develop\`"
+
+version=$(cat VERSION)
+[ -n "$version" ] || die "VERSION is empty"
+tag="v$version"
+
+branch=$(git rev-parse --abbrev-ref HEAD)
+[ "$branch" = "main" ] || die "on $branch: a release is published from main (CLAUDE.md § Landing)"
+[ -z "$(git status --porcelain)" ] || die "the working tree is dirty; commit or stash first"
+
+head=$(git rev-parse HEAD)
+
+# A tag that already names this commit is a re-run and fine. One that names another commit is the
+# thing this exists to catch: two different images would otherwise claim one version.
+if existing=$(git rev-parse -q --verify "refs/tags/$tag^{commit}"); then
+  [ "$existing" = "$head" ] || die "$tag already points at $existing, not HEAD; bump VERSION"
+  say "$tag already points here"
+elif [ "$skip_tag" = true ]; then
+  say "no $tag, and --skip-tag says not to make one"
+elif [ "$dry_run" = true ]; then
+  # A dry run makes no tag. It used to create the local one and skip only the push, which meant
+  # "pushes nothing" was true of the registry and false of the repository, and a second dry run
+  # then took the "already points here" path and reported something the first run had caused.
+  say "would tag $tag"
+else
+  say "tagging $tag"
+  git tag -a "$tag" -m "forge $version"
+  git push origin "$tag"
+fi
+
+say "building .#platform-image"
+archive=$(nix build .#platform-image --no-link --print-out-paths | tail -1)
+echo "    $archive"
+
+destination="docker://$registry:$version"
+if [ "$dry_run" = true ]; then
+  say "would copy to $destination"
+  exit 0
+fi
+
+say "copying to $destination"
+digest_file=$(mktemp)
+auth_file=$(mktemp)
+trap 'rm -f "$digest_file" "$auth_file"' EXIT
+
+# **The token does not go in argv.** `--dest-creds "user:$GHCR_TOKEN"` put it in the process
+# table, readable by `ps` for every local user for as long as the copy ran — and a push of a
+# gigabyte-and-a-quarter image is not a short window. `skopeo login --password-stdin` writes it
+# to a file this script owns and deletes on exit instead.
+#
+# With no `GHCR_TOKEN`, nothing is written and the empty auth file is passed anyway: skopeo then
+# falls back to whatever `skopeo login` already stored, which is the documented other way in.
+creds=()
+if [ -n "${GHCR_TOKEN:-}" ]; then
+  registry_host=${registry%%/*}
+  user=${GHCR_USER:-$(echo "$registry" | cut -d/ -f2)}
+  say "logging in to $registry_host as $user"
+  printf '%s' "$GHCR_TOKEN" |
+    skopeo login --username "$user" --password-stdin --authfile "$auth_file" "$registry_host"
+  creds=(--dest-authfile "$auth_file")
+fi
+
+# `--insecure-policy` is about signature policy and nothing else: skopeo refuses to run at all
+# without a containers `policy.json`, which a devshell has no reason to have and NixOS only
+# installs with the container stack. Nothing here signs or verifies image signatures — what a
+# deployment pins is the digest printed below, which the registry cannot forge.
+skopeo --insecure-policy copy \
+  "${creds[@]}" --digestfile "$digest_file" "docker-archive:$archive" "$destination"
+
+say "published"
+printf '    %s@%s\n' "$registry" "$(cat "$digest_file")"

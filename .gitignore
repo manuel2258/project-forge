@@ -24,3 +24,6 @@ erl_crash.dump
 
 # Measurement harness scratch and results (docs/design/measurement-harness.md)
 .measure/
+
+# Subagent-driven-development scratch: ledgers, briefs and review packages.
+.superpowers/

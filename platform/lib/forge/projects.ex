@@ -6,8 +6,9 @@ defmodule Forge.Projects do
   alias Ecto.Multi
   alias Forge.Accounts.User
   alias Forge.{Events, Git, Repo}
+  alias Forge.Git.Credentials
   alias Forge.Git.Hooks
-  alias Forge.Projects.{Member, Project}
+  alias Forge.Projects.{Member, Mirror, Project}
 
   require Logger
 
@@ -355,27 +356,76 @@ defmodule Forge.Projects do
     end
   end
 
+  @doc "Every mirror this project pushes to, with what the hook last said about each."
+  @spec list_mirrors(Project.t()) :: [map()]
+  def list_mirrors(%Project{} = project), do: Hooks.list_mirrors(repo_path(project))
+
   @doc """
-  Points the project's repository at a mirror, or removes it when `url` is `nil`. The mirror is
-  repository configuration rather than a column: the `post-receive` hook is what pushes it, and
-  the hook can read only `git config`. See `docs/design/git-hosting.md`.
+  Creates or replaces one mirror. `opts` takes `:refs`, `:user` and `:token`, all optional.
+
+  **The guard is here and not on the page.** A mirror sends the project's history to a host this
+  node does not control, which is a decision for the project's own admins — and `put_member/4`
+  is the local precedent for why hiding a form is not a guard.
+
+  The URL is validated before it is stored *and* again by the hook before it is used, because a
+  config file is editable by anything that can reach the disk.
+
+  **Refuses `{:error, :repo_path_not_standard}` for a project whose repository is not at
+  `<repos_dir>/<name>.git`.** The hook derives its mirror-credential directory from its own
+  working directory and `Forge.Git.Credentials.path/2` derives it from `repos_dir/0` and the
+  project's name; the two agree only for a repository at that address. `register_named/3`
+  guarantees it, but `register/2` does not — `mix forge.project.add` and
+  `Forge.Release.register_project/4` both register an arbitrary path — and a project registered
+  that way would otherwise accept a token here, write it where `Credentials.path/2` says, and
+  have the hook look for it somewhere else entirely: an authenticated mirror that always fails
+  with "could not read Username … terminal prompts disabled", visible only as a `lastError`. A
+  loud refusal here is better than that silent one. See `Forge.Git.Credentials`.
   """
-  @spec set_mirror(Project.t(), String.t() | nil, String.t() | nil) :: :ok | {:error, term()}
-  def set_mirror(%Project{} = project, url, refs \\ nil) do
-    with :ok <- Hooks.set_mirror(repo_path(project), url, refs) do
-      Events.append("project.mirror_set", :system, %{
-        payload: %{"project" => project.name, "mirror" => url}
-      })
-      |> case do
-        {:ok, _event} -> :ok
-        {:error, reason} -> {:error, reason}
-      end
+  @spec put_mirror(Project.t(), User.t(), String.t(), String.t(), keyword()) ::
+          :ok | {:error, term()}
+  def put_mirror(%Project{} = project, %User{} = by, name, url, opts \\ []) do
+    with :ok <- manageable(project, by),
+         :ok <- standard_repo_path(project),
+         :ok <- Mirror.validate_name(name),
+         :ok <- Mirror.validate_url(url),
+         :ok <-
+           Hooks.put_mirror(repo_path(project), name, url, refs: opts[:refs], user: opts[:user]),
+         :ok <- Credentials.put(project, name, opts[:user], opts[:token], url) do
+      mirror_event("project.mirror_set", project, by, name)
     end
   end
 
-  @doc "The mirror the project's repository is configured with, or `nil`."
-  @spec mirror(Project.t()) :: String.t() | nil
-  def mirror(%Project{} = project), do: Hooks.mirror(repo_path(project))
+  # See the doc on `put_mirror/5` for what this protects and why it lives here rather than in
+  # `Forge.Git.Credentials` or the hook: it is the one call that both writes the credential
+  # (by name) and knows the project's actual `repo_path`, so it is the one place that can catch
+  # the mismatch before a token is written anywhere.
+  defp standard_repo_path(%Project{} = project) do
+    if repo_path(project) == Path.join(repos_dir(), project.name <> ".git") do
+      :ok
+    else
+      {:error, :repo_path_not_standard}
+    end
+  end
+
+  @doc "Removes one mirror, its recorded status, and its credential."
+  @spec delete_mirror(Project.t(), User.t(), String.t()) :: :ok | {:error, term()}
+  def delete_mirror(%Project{} = project, %User{} = by, name) do
+    with :ok <- manageable(project, by),
+         :ok <- Mirror.validate_name(name),
+         :ok <- Hooks.delete_mirror(repo_path(project), name),
+         :ok <- Credentials.delete(project, name) do
+      mirror_event("project.mirror_removed", project, by, name)
+    end
+  end
+
+  defp mirror_event(type, project, by, name) do
+    case Events.append(type, {:user, by.id}, %{
+           payload: %{"project" => project.name, "mirror" => name}
+         }) do
+      {:ok, _event} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   @doc """
   Where repositories registered by name live: `repos_dir` from the `Forge.Jobs` config, or

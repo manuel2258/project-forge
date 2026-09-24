@@ -22,13 +22,14 @@ defmodule Forge.Git.Hooks do
   @hooks ~w(pre-receive post-receive)
 
   @doc """
-  Writes both hooks into `repo_path` and copies `project`'s default branch onto the repository.
-  Idempotent, and it leaves the mirror configuration alone — that is `set_mirror/3`'s.
+  Writes both hooks into `repo_path`, copies `project`'s default branch onto the repository, and
+  migrates a scalar `forge.mirror` to the named mirror `default` if one is still there.
   """
   @spec install(String.t(), Project.t()) :: :ok | {:error, term()}
   def install(repo_path, %Project{default_branch: default}) do
     with :ok <- write_hooks(repo_path),
-         :ok <- config(repo_path, "forge.defaultBranch", default) do
+         :ok <- config(repo_path, "forge.defaultBranch", default),
+         :ok <- migrate_scalar(repo_path) do
       head(repo_path, default)
     end
   end
@@ -44,23 +45,107 @@ defmodule Forge.Git.Hooks do
   end
 
   @doc """
-  Points the repository's mirror at `url`, or removes it when `url` is `nil` or blank. `refs` is
-  the glob the mirror carries, defaulting to the default branch alone.
+  Every mirror this repository is configured with, by name, with what the hook last said about
+  each. `docs/design/git-hosting.md` § What the mirrors say about themselves.
+
+  **The URL is read back without its userinfo.** `put_mirror/4`'s caller refuses to store one
+  carrying a credential, but `migrate_scalar/1` deliberately carries an old scalar over
+  unmodified, and the old mechanism had no credential store — so `https://user:token@host/x.git`
+  is the likeliest thing a pre-mirrors node has configured. Stripping it here rather than in each
+  template makes "a mirror URL is safe to print" a property of the one read every surface goes
+  through. The stored value keeps its userinfo: the hook still needs it to push, and a migrated
+  mirror that works must go on working.
   """
-  @spec set_mirror(String.t(), String.t() | nil, String.t() | nil) :: :ok | {:error, term()}
-  def set_mirror(repo_path, url, refs \\ nil) do
-    with :ok <- config(repo_path, "forge.mirror", url) do
-      config(repo_path, "forge.mirrorRefs", refs)
+  @spec list_mirrors(String.t()) :: [map()]
+  def list_mirrors(repo_path) do
+    repo_path
+    |> names()
+    |> Enum.map(fn name ->
+      %{
+        name: name,
+        url: strip_userinfo(get(repo_path, "forge.mirror.#{name}.url")),
+        refs: get(repo_path, "forge.mirror.#{name}.refs"),
+        user: get(repo_path, "forge.mirror.#{name}.user"),
+        last_status: get(repo_path, "forge.mirror.#{name}.lastStatus"),
+        last_at: get(repo_path, "forge.mirror.#{name}.lastAt"),
+        last_error: get(repo_path, "forge.mirror.#{name}.lastError"),
+        last_ok_at: get(repo_path, "forge.mirror.#{name}.lastOkAt")
+      }
+    end)
+    |> Enum.sort_by(& &1.name)
+  end
+
+  @doc "Creates or replaces one mirror. `opts` takes `:refs` and `:user`, both optional."
+  @spec put_mirror(String.t(), String.t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def put_mirror(repo_path, name, url, opts \\ []) do
+    with :ok <- config(repo_path, "forge.mirror.#{name}.url", url),
+         :ok <- config(repo_path, "forge.mirror.#{name}.refs", opts[:refs]) do
+      config(repo_path, "forge.mirror.#{name}.user", opts[:user])
     end
   end
 
-  @doc "The mirror this repository is configured with, or `nil`."
-  @spec mirror(String.t()) :: String.t() | nil
-  def mirror(repo_path), do: get(repo_path, "forge.mirror")
+  @doc "Removes one mirror and everything the hook recorded about it."
+  @spec delete_mirror(String.t(), String.t()) :: :ok | {:error, term()}
+  def delete_mirror(repo_path, name) do
+    case Git.run(repo_path, ["config", "--local", "--remove-section", "forge.mirror.#{name}"]) do
+      {:ok, _out} -> :ok
+      # 128 is "no such section", which is the state the caller wanted anyway.
+      {:error, {128, _out}} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
-  @doc "The ref glob this repository mirrors, or `nil` when it is the default."
-  @spec mirror_refs(String.t()) :: String.t() | nil
-  def mirror_refs(repo_path), do: get(repo_path, "forge.mirrorRefs")
+  # `https://user:token@host/x` becomes `https://host/x`, and anything without a `scheme://user@`
+  # prefix is left alone — including the `git@host:path` an even older mirror may hold, which has
+  # no password half to leak and is not a URL this could take apart safely.
+  @userinfo ~r{\A([a-zA-Z][a-zA-Z0-9+.\-]*://)[^/@]*@}
+
+  defp strip_userinfo(nil), do: nil
+  defp strip_userinfo(url), do: String.replace(url, @userinfo, "\\1")
+
+  # `--local`, like the hook: a `forge.mirror.<name>.url` in the service user's own ~/.gitconfig
+  # would otherwise be listed as a mirror of every repository on the node, and could not be
+  # removed from the UI, because `delete_mirror/2` unsets `--local`.
+  defp names(repo_path) do
+    case Git.run(repo_path, [
+           "config",
+           "--local",
+           "--get-regexp",
+           ~S(^forge\.mirror\.[a-z0-9-]+\.url$)
+         ]) do
+      {:ok, out} ->
+        out
+        |> String.split("\n", trim: true)
+        |> Enum.map(fn line ->
+          line
+          |> String.split(" ", parts: 2)
+          |> hd()
+          |> String.replace_prefix("forge.mirror.", "")
+          |> String.replace_suffix(".url", "")
+        end)
+
+      {:error, _reason} ->
+        []
+    end
+  end
+
+  # **Runs on every boot, because there is no other moment every repository passes.** A node that
+  # upgrades has `forge.mirror` set and no named mirrors; it becomes the mirror called `default`.
+  # A URL the new rules refuse — an ssh remote, say — is carried over rather than dropped, so the
+  # hook can report it as failing and an operator can see that it stopped.
+  defp migrate_scalar(repo_path) do
+    with [] <- names(repo_path),
+         url when is_binary(url) <- get(repo_path, "forge.mirror") do
+      refs = get(repo_path, "forge.mirrorRefs")
+
+      with :ok <- put_mirror(repo_path, "default", url, refs: refs),
+           :ok <- unset(repo_path, "forge.mirror") do
+        unset(repo_path, "forge.mirrorRefs")
+      end
+    else
+      _already -> :ok
+    end
+  end
 
   defp write_hooks(repo_path) do
     dir = Path.join(repo_path, "hooks")
@@ -98,7 +183,7 @@ defmodule Forge.Git.Hooks do
   end
 
   defp get(repo_path, key) do
-    case Git.run(repo_path, ["config", "--get", key]) do
+    case Git.run(repo_path, ["config", "--local", "--get", key]) do
       {:ok, value} -> blank_to_nil(String.trim(value))
       {:error, _reason} -> nil
     end

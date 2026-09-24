@@ -1,38 +1,119 @@
 #!/usr/bin/env bash
 # Installed by forge (Forge.Git.Hooks) and rewritten on every boot. Do not edit here.
 #
-# The mirror, so one machine is never the only copy. Configured per repository:
+# The mirrors, so one machine is never the only copy. Configured per repository, one subsection
+# each, and written back to by this script:
 #
-#   forge.mirror      a URL or a path; empty means no mirror
-#   forge.mirrorRefs  a glob, default refs/heads/<default branch>
+#   forge.mirror.<name>.url         https:// or http://, and nothing else
+#   forge.mirror.<name>.refs        a glob, default refs/heads/<default branch>
+#   forge.mirror.<name>.lastStatus  ok | failed
+#   forge.mirror.<name>.lastAt      when that was
+#   forge.mirror.<name>.lastError   why, redacted and truncated
+#   forge.mirror.<name>.lastOkAt    when it last worked
 #
 # A mirror failure never fails the push: a durability copy that can block work is worse than no
-# copy. See docs/design/git-hosting.md.
+# copy. See docs/design/git-hosting.md § post-receive — the mirrors.
+#
+# No `set -e`: one mirror failing is not the next one's problem.
 set -uo pipefail
 
 zero=0000000000000000000000000000000000000000
+# `--local` on every read: forge's config is per-repository, and without it a `forge.mirror.*`
+# left in the service user's ~/.gitconfig would be enumerated and pushed to from every repository
+# on the node, with no way to remove it from the UI — `delete_mirror` unsets `--local`.
+default=$(git config --local --get forge.defaultBranch || echo main)
 
-mirror=$(git config --get forge.mirror || true)
-[ -n "$mirror" ] || exit 0
-
-default=$(git config --get forge.defaultBranch || echo main)
-pattern=$(git config --get forge.mirrorRefs || echo "refs/heads/$default")
-
-refs=""
+# The refs this push moved, as an array. git forbids a space or a glob character in a ref name,
+# but an array needs no such argument and leaves nothing to word splitting.
+pushed=()
 while read -r _old new ref; do
   [ "$new" = "$zero" ] && continue
-  # shellcheck disable=SC2254 # the pattern is a glob by design
-  case "$ref" in
-    $pattern) refs="$refs $ref" ;;
-  esac
+  pushed+=("$ref")
 done
-[ -n "$refs" ] || exit 0
+[ ${#pushed[@]} -gt 0 ] || exit 0
 
-# shellcheck disable=SC2086 # refs is a deliberate word list
-if git push --quiet "$mirror" $refs 2>&1; then
-  echo "forge: mirrored$refs to $mirror"
-else
-  echo "forge: mirror to $mirror FAILED; the push itself stands" >&2
-fi
+# The same rule `Forge.Git.Credentials.path/2` applies, in the other language: a sibling of the
+# repositories directory, a directory per project, one file per mirror inside it. The project's
+# own directory rather than a `<project>-<mirror>` filename because both names admit hyphens, so
+# the flat form is ambiguous and two projects could be handed each other's token. Change this and
+# the Elixir half together.
+repo=$(basename "$PWD" .git)
+credentials_dir="$(dirname "$PWD")/../mirror-credentials"
+
+now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# Load-bearing, not belt and braces: a URL migrated from the old scalar `forge.mirror` may carry
+# `https://user:token@host`, because that mechanism had no credential store and the URL was the
+# only way to authenticate one. `Forge.Git.Hooks.migrate_scalar/1` keeps such a URL so the mirror
+# reports as failing rather than vanishing, and a failing push echoes it back in `$out`, which
+# this rewrites before it is stored as `lastError`. A URL the new rules accepted carries no
+# userinfo; a migrated one can.
+redact() { sed -E 's#(https?://)[^/@]*@#\1***@#g'; }
+
+# https:// and http:// only. Not a local path, not ssh://, not git://, and above all not ext::,
+# which runs a command. docs/design/git-hosting.md § What a mirror URL may be.
+allowed() {
+  case "$1" in
+    -* | *::*) return 1 ;;
+    https://?* | http://?*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+fail() {
+  git config --local "forge.mirror.$1.lastStatus" failed
+  git config --local "forge.mirror.$1.lastAt" "$(now)"
+  git config --local "forge.mirror.$1.lastError" "$2"
+}
+
+while read -r key url; do
+  name=${key#forge.mirror.}
+  name=${name%.url}
+
+  pattern=$(git config --local --get "forge.mirror.$name.refs" || echo "refs/heads/$default")
+
+  refs=()
+  for ref in "${pushed[@]}"; do
+    # shellcheck disable=SC2254 # the pattern is a glob by design
+    case "$ref" in
+      $pattern) refs+=("$ref") ;;
+    esac
+  done
+  [ ${#refs[@]} -gt 0 ] || continue
+
+  if ! allowed "$url"; then
+    fail "$name" "not an http(s) URL"
+    echo "forge: mirror $name is not an http(s) URL; not pushed" >&2
+    continue
+  fi
+
+  # lowSpeedLimit/lowSpeedTime below: a stalled connection is aborted rather than held open
+  # indefinitely. No test can fail this — proving the timeout fires needs a host that accepts a
+  # connection and then stalls for 10s, which is a test harness of its own for one config line.
+  # Per CLAUDE.md § Testing this is left as a comment, not an assertion that the flags are merely
+  # present, which would pass against a build where they do nothing.
+  if out=$(GIT_TERMINAL_PROMPT=0 git \
+    -c "credential.helper=store --file=$credentials_dir/$repo/$name.credentials" \
+    -c protocol.allow=never \
+    -c protocol.https.allow=always \
+    -c protocol.http.allow=always \
+    -c http.followRedirects=false \
+    -c http.lowSpeedLimit=1000 \
+    -c http.lowSpeedTime=10 \
+    push --quiet --end-of-options "$url" "${refs[@]}" 2>&1); then
+    git config --local "forge.mirror.$name.lastStatus" ok
+    git config --local "forge.mirror.$name.lastAt" "$(now)"
+    git config --local "forge.mirror.$name.lastOkAt" "$(now)"
+    git config --local --unset "forge.mirror.$name.lastError" || true
+    # stderr, not stdout: the pushing client sees it through the sideband either way. It does
+    # *not* yet become a `git.hook.said` event for this or any push — `Forge.Git.Http.report/3`
+    # reads a file that a push never writes to, whatever fd this line uses. See
+    # `ForgeWeb.GitHttpTest` "a CGI-mediated push still relays the hook's report to the client".
+    echo "forge: mirrored ${refs[*]} to $name" >&2
+  else
+    fail "$name" "$(printf '%s' "$out" | redact | tr '\n' ' ' | cut -c1-500)"
+    echo "forge: mirror to $name FAILED; the push itself stands" >&2
+  fi
+done < <(git config --local --get-regexp '^forge\.mirror\.[a-z0-9-]+\.url$' || true)
 
 exit 0

@@ -283,8 +283,6 @@ defmodule Forge.WorkersTest do
     test "a project with none assigned makes nothing, and says which wall it hit", %{
       project: project
     } do
-      configure(max_workers: 1)
-
       assert {:error, {:no_template, :none_assigned}} =
                Workers.create_machine(demand(project_id: project.id))
 
@@ -295,8 +293,6 @@ defmodule Forge.WorkersTest do
     # A demand with no project cannot name a template either, and that path must not be the one
     # left that can still make a machine out of node configuration.
     test "a demand naming no project makes nothing" do
-      configure(max_workers: 1)
-
       assert {:error, {:no_template, :none_assigned}} = Workers.create_machine(demand(memory: 1))
       refute_receive {:provider_create, _opts}
     end
@@ -470,7 +466,6 @@ defmodule Forge.WorkersTest do
 
     test "the ceiling is the template's own, not the node's", context do
       %{user: user, project: project} = context
-      configure(max_workers: 99)
       assigned(user, project, %{max_workers: 1})
 
       assert {:error, :creating} = Workers.create_machine(demand(project_id: project.id))
@@ -692,7 +687,7 @@ defmodule Forge.WorkersTest do
     end
 
     test "offers the one it has rather than making another" do
-      configure(max_workers: 1, slice_bytes: 1_000)
+      configure(slice_bytes: 1_000)
       {:ok, worker, _token} = Workers.create(%{provider: "fake"})
       {:ok, worker} = Workers.ready(worker, %{"memory_budget" => 8_000, "cores" => 4})
       :ok = Workers.connected(worker.id)
@@ -830,7 +825,7 @@ defmodule Forge.WorkersTest do
     end
 
     test "a machine that never finished booting expires from when its row was made" do
-      configure(max_workers: 1, worker_timeout_ms: 60_000)
+      configure(worker_timeout_ms: 60_000)
       {:ok, worker, _token} = Workers.create(%{provider: "fake"})
       {:ok, worker} = Workers.update(worker, %{provider_id: "fake-2", status: :creating})
 

@@ -6,7 +6,7 @@ defmodule Forge.Accounts do
   import Ecto.Query, warn: false
 
   alias Ecto.Multi
-  alias Forge.Accounts.{User, UserNotifier, UserToken}
+  alias Forge.Accounts.{Identity, User, UserNotifier, UserToken}
   alias Forge.{Events, Repo}
 
   ## Database getters
@@ -261,6 +261,155 @@ defmodule Forge.Accounts do
     end)
   end
 
+  ## External identities
+
+  @doc """
+  The user behind an identity, or nil. The key is the pair and never the address.
+
+  `docs/design/identity.md` § Identity is `(issuer, subject)`, never email: a `subject` is stable
+  only within its issuer, and two issuers asserting one address say nothing about each other.
+  """
+  @spec get_user_by_identity(String.t(), String.t()) :: User.t() | nil
+  def get_user_by_identity(issuer, subject) when is_binary(issuer) and is_binary(subject) do
+    Repo.one(
+      from u in User,
+        join: i in Identity,
+        on: i.user_id == u.id,
+        where: i.issuer == ^issuer and i.subject == ^subject
+    )
+  end
+
+  @doc """
+  Turns a verified identity into the user it is, creating one on first login.
+
+  **A new account is pending**, exactly as a local first login would be — § Approval is the
+  perimeter and an issuer does not get to move it. `confirmed_at` is set because the issuer
+  asserted the address and there is no confirmation email to send; that is not approval and
+  grants nothing.
+
+  **An address another account already holds is refused rather than adopted.** That is the whole
+  of `{:error, :email_taken}` and it is the reason this cannot be a one-line upsert: adopting
+  would mean any configured issuer could mint a `sub` with a node admin's address and become
+  them. `link_identity/3` on the host is the deliberate join.
+  """
+  @spec log_in_with_identity(%{issuer: String.t(), subject: String.t(), email: String.t()}) ::
+          {:ok, User.t()} | {:error, :email_taken | Ecto.Changeset.t()}
+  def log_in_with_identity(%{issuer: issuer, subject: subject, email: email}) do
+    case Repo.get_by(Identity, issuer: issuer, subject: subject) do
+      %Identity{} = identity -> returning(identity, email)
+      nil -> provision(issuer, subject, email)
+    end
+  end
+
+  # A returning login refreshes what the issuer says now: the address is display-only, so it
+  # follows the claim rather than pinning the one the account was made with.
+  defp returning(%Identity{} = identity, email) do
+    {:ok, _identity} =
+      identity
+      |> Identity.changeset(%{email: email, last_login_at: DateTime.utc_now(:second)})
+      |> Repo.update()
+
+    {:ok, Repo.get!(User, identity.user_id)}
+  end
+
+  defp provision(issuer, subject, email) do
+    Repo.transact(fn ->
+      with {:ok, user} <- register_user(%{email: email}),
+           {:ok, user} <- user |> User.confirm_changeset() |> Repo.update(),
+           {:ok, _identity} <- insert_identity(user, issuer, subject, email) do
+        {:ok, user}
+      end
+    end)
+    |> case do
+      {:ok, user} -> {:ok, user}
+      {:error, %Ecto.Changeset{errors: errors} = changeset} -> provision_error(errors, changeset)
+    end
+  end
+
+  # An address already in use is the collision above and has its own answer; anything else is an
+  # ordinary invalid changeset and is reported as one.
+  #
+  # **Both spellings of "taken", because there are two.** `User.email_changeset/3` runs
+  # `unsafe_validate_unique`, which is what normally catches this and reports
+  # `validation: :unsafe_unique`; the database constraint behind it reports
+  # `constraint: :unique` and is what catches the race between that query and the insert.
+  # Reading only one of them makes the answer depend on timing — the rare path falling through
+  # to a changeset that no caller above has a message for.
+  defp provision_error(errors, changeset) do
+    case Keyword.get(errors, :email) do
+      {_message, opts} ->
+        if opts[:constraint] == :unique or opts[:validation] == :unsafe_unique,
+          do: {:error, :email_taken},
+          else: {:error, changeset}
+
+      nil ->
+        {:error, changeset}
+    end
+  end
+
+  defp insert_identity(%User{} = user, issuer, subject, email) do
+    %Identity{}
+    |> Identity.changeset(%{
+      user_id: user.id,
+      issuer: issuer,
+      subject: subject,
+      email: email,
+      last_login_at: DateTime.utc_now(:second)
+    })
+    |> Repo.insert()
+  end
+
+  @doc """
+  Attaches an identity to an account that already exists, from the host.
+
+  The one way an OIDC login and a local account become the same person. It is deliberately not
+  something a login can do — see `log_in_with_identity/1` — and deliberately available to
+  whoever has a shell, who is past every gate there is anyway.
+  """
+  @spec link_identity(User.t(), String.t(), String.t()) ::
+          {:ok, Identity.t()} | {:error, :already_linked | Ecto.Changeset.t()}
+  def link_identity(%User{} = user, issuer, subject) do
+    case Repo.get_by(Identity, issuer: issuer, subject: subject) do
+      %Identity{} -> {:error, :already_linked}
+      nil -> insert_identity(user, issuer, subject, user.email)
+    end
+  end
+
+  @doc "The identities an account logs in with, oldest first. The accounts page shows them."
+  @spec list_identities(User.t()) :: [Identity.t()]
+  def list_identities(%User{id: id}),
+    do: Repo.all(from i in Identity, where: i.user_id == ^id, order_by: i.inserted_at)
+
+  @doc """
+  The issuers each of those accounts logs in from, keyed by user id, in one query.
+
+  `ForgeWeb.AccountsLive` asked `list_identities/1` once per row, on mount and again after every
+  approve, suspend and promote — a node with fifty accounts ran fifty queries to draw one column,
+  four times over in a session. An account with no identity is present with an empty list, so the
+  caller can tell "made on this host" from "not loaded".
+  """
+  @spec issuers_by_user([User.t()]) :: %{Ecto.UUID.t() => [String.t()]}
+  def issuers_by_user(users) do
+    ids = Enum.map(users, & &1.id)
+
+    # **`where` is a bound on what is fetched, not on what is returned — an equivalent mutant.**
+    # Removing it changes no answer, because `Map.new(ids, ...)` below reads only the ids asked
+    # about and any extra rows are discarded. What it changes is that the node's every identity
+    # crosses the wire to draw one page. Do not write a test asserting the output differs: it
+    # does not, and such a test would pass against the unbounded query.
+    rows =
+      Repo.all(
+        from i in Identity,
+          where: i.user_id in ^ids,
+          order_by: i.inserted_at,
+          select: {i.user_id, i.issuer}
+      )
+
+    found = Enum.group_by(rows, &elem(&1, 0), &elem(&1, 1))
+
+    Map.new(ids, fn id -> {id, found |> Map.get(id, []) |> Enum.uniq()} end)
+  end
+
   ## Account governance
 
   @doc """
@@ -340,6 +489,57 @@ defmodule Forge.Accounts do
     if last_node_admin?(user),
       do: {:error, :last_node_admin},
       else: govern(user, by, "user.node_admin_revoked", node_admin: false)
+  end
+
+  @doc """
+  Deletes an account that has never been approved, freeing the address it holds.
+
+  **This is the one governance action that cannot be undone**, and the one exception to the rule
+  that users are never deleted (`docs/design/identity.md` § Approval). It exists because
+  suspending is not enough on its own: the row keeps the address, `users.email` is unique, and
+  an issuer where anyone may type any address into their own profile can otherwise park a
+  colleague's address on this node for ever. Refusing an account has to be able to undo itself.
+
+  **Never approved, rather than "has no rows".** Approval is already the perimeter — a pending
+  account reaches no project, answers no question and decides no proposal — so it is by
+  construction outside the set that `answers`, `approvals`, `proposal_decisions` and
+  `project_members` protect with `on_delete: :restrict`.
+
+  Those references are also the enforcement and not merely the reason. The delete is attempted
+  and the database refuses it if anything points at the row; nothing here asks in Elixir whether
+  the account has acted and then deletes on the strength of the answer. Those are two models of
+  the same question and they can disagree under a race, which is exactly what CLAUDE.md § Rules
+  means by a guard using the same model as the operation it guards.
+
+  The event outlives the row: `user.deleted` names the actor and the address freed, so the record
+  of the deletion survives even though the account does not.
+  """
+  @spec delete_unapproved_user(User.t(), User.t()) ::
+          {:ok, User.t()} | {:error, :forbidden | :approved | :has_history}
+  def delete_unapproved_user(%User{}, %User{node_admin: false}), do: {:error, :forbidden}
+
+  def delete_unapproved_user(%User{approved_at: %DateTime{}}, %User{}), do: {:error, :approved}
+
+  def delete_unapproved_user(%User{approved_at: nil} = user, %User{} = by) do
+    Multi.new()
+    |> Multi.delete(:user, user)
+    |> Events.log(:event, "user.deleted", {:user, by.id}, fn _changes ->
+      %{payload: %{"user_id" => user.id, "email" => user.email}}
+    end)
+    |> Repo.transaction()
+    |> case do
+      {:ok, _changes} -> {:ok, user}
+      {:error, _step, _reason, _changes} -> {:error, :has_history}
+    end
+  rescue
+    # **Rescued rather than enumerated.** A `restrict` reference that nothing has declared as a
+    # changeset constraint raises instead of returning, and the tables that hold one are
+    # `answers`, `approvals`, `proposal_decisions` and `project_members` today. Naming all four
+    # here as `foreign_key_constraint/3` calls would be a second copy of the schema, and the
+    # failure mode when somebody adds a fifth is this function raising through a LiveView rather
+    # than saying no — so the database is left to be the single authority on whether the row is
+    # referenced, and every answer it gives is one answer here.
+    _error in Ecto.ConstraintError -> {:error, :has_history}
   end
 
   defp last_node_admin?(%User{id: id}) do

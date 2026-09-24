@@ -5,7 +5,7 @@
 #
 # See docs/design/worker-tier.md § The worker image. The image pins nothing about any
 # particular project, and it is meant to boot unchanged on a provider later.
-{ workerPackage }:
+{ workerPackage, version }:
 { config, lib, pkgs, modulesPath, ... }:
 let
   root = "/var/lib/forge";
@@ -47,7 +47,8 @@ in
 
   system.stateVersion = "26.05";
   system.image.id = "forge-worker";
-  system.image.version = "0.1.0";
+  # The repository's one version, handed in by `flake.nix` from `VERSION`.
+  system.image.version = version;
 
   # -- the image ------------------------------------------------------------------------------
 

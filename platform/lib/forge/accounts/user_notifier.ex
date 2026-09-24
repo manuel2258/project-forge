@@ -10,7 +10,7 @@ defmodule Forge.Accounts.UserNotifier do
     email =
       new()
       |> to(recipient)
-      |> from({"Forge", "contact@example.com"})
+      |> from(from_address())
       |> subject(subject)
       |> text_body(body)
 
@@ -18,6 +18,15 @@ defmodule Forge.Accounts.UserNotifier do
       {:ok, email}
     end
   end
+
+  # Configuration rather than a literal, because the generated literal is `contact@example.com`
+  # and a relay refuses an address the node does not own. `config/config.exs` keeps the
+  # placeholder so development is unchanged; `FORGE_MAIL_FROM` replaces it on a release.
+  #
+  # `fetch_env!` and not `get_env/3` with the placeholder repeated as a default: `config.exs`
+  # always sets the key, so a default here is a second copy of the address that can never be
+  # reached and can silently disagree with the first.
+  defp from_address, do: Application.fetch_env!(:forge, :mail_from)
 
   @doc """
   Deliver instructions to update a user email.

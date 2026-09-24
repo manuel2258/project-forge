@@ -11,42 +11,101 @@ defmodule Forge.MergeTest do
   import Forge.GitFixtures
 
   alias Forge.{Artifacts, Engine, Events, Git, Merge, Operator, Projects, Tickets}
+  alias Forge.Git.Tokens
 
   setup do
     data_dir = tmp_dir("merge-data")
     config = Application.get_env(:forge, Forge.Jobs)
-    Application.put_env(:forge, Forge.Jobs, Keyword.put(config, :data_dir, data_dir))
-    on_exit(fn -> Application.put_env(:forge, Forge.Jobs, config) end)
+
+    # `repos_dir` too, not only `data_dir`: the mirror below is authenticated, and the hook
+    # derives its mirror-credential directory from its own working directory while
+    # `Forge.Git.Credentials.path/2` derives it from `Projects.repos_dir/0` — the two agree only
+    # when the project's repository actually lives under `repos_dir`, which `seeded_repo/1`'s
+    # fixture does not on its own (see the rename below). `node_repos_dir/0` rather than a fixed
+    # `System.tmp_dir/0` sibling: unique per test, so an interrupted run never leaves a stale
+    # `<name>.git` behind for the next run's `File.rename!` to collide with, and it is already
+    # under `System.tmp_dir/0` so the rename stays same-filesystem.
+    Application.put_env(
+      :forge,
+      Forge.Jobs,
+      Keyword.merge(config, data_dir: data_dir, repos_dir: node_repos_dir())
+    )
+
+    # Captured now, while the override above is live: `Credentials.dir/0` reads
+    # `Projects.repos_dir/0` when called, and an `on_exit` that restored the config first and
+    # read it after would compute the *original* `repos_dir` — deleting an empty directory
+    # nobody used while leaving the real credential files, mode 0600 and holding live git
+    # tokens, behind in the shared `mirror-credentials` directory forever.
+    credentials_dir = Forge.Git.Credentials.dir()
+
+    on_exit(fn ->
+      Application.put_env(:forge, Forge.Jobs, config)
+      File.rm_rf(credentials_dir)
+    end)
 
     bare = seeded_repo()
-    mirror = Path.join(tmp_dir("merge-mirror"), "mirror.git")
-    :ok = Git.init_bare(mirror)
-
     name = "merge#{System.unique_integer([:positive])}"
 
     {:ok, project} =
       register_owned!(%{name: name, repo_path: bare, default_branch: "main"})
 
-    :ok = Projects.set_mirror(project, mirror)
+    # Moved to `<repos_dir>/<name>.git`, the address a normal registration would have: see the
+    # comment on the config override above for why the credential path needs it.
+    real_bare = Path.join(Projects.repos_dir(), project.name <> ".git")
+    File.mkdir_p!(Path.dirname(real_bare))
+    File.rename!(bare, real_bare)
+
+    {:ok, project} =
+      project |> Forge.Projects.Project.changeset(%{repo_path: real_bare}) |> Repo.update()
+
+    bare = real_bare
+
+    # Mirrored over the platform's own git endpoint rather than to a local path, which the
+    # post-receive hook now refuses outright: a second registered project, reached the same way a
+    # job or the settings page would reach any mirror, with a default-branch write token minted
+    # for it. A clone of `bare`'s own current state, not an independently seeded repository: the
+    # mirror push is fast-forward only on both ends, and two unrelated histories are never a
+    # fast-forward of one another.
+    destination_bare = mirror_target(bare)
+
+    {:ok, destination} =
+      register_owned!(%{
+        name: "merge-mirror#{System.unique_integer([:positive])}",
+        repo_path: destination_bare,
+        default_branch: "main"
+      })
+
     user = user_fixture()
     join!(project, user)
+
+    {:ok, token, _row} = Tokens.issue(destination, ref: "refs/heads/main", write: true)
+
+    :ok =
+      Projects.put_mirror(
+        project,
+        user,
+        "backup",
+        "http://127.0.0.1:4002/git/#{destination.name}.git",
+        user: "forge",
+        token: token
+      )
 
     {:ok, ticket} =
       Tickets.admit(project, %{title: "Persist scores", body: "do it"}, {:user, user.id})
 
-    %{project: project, bare: bare, mirror: mirror, user: user, ticket: ticket}
+    %{project: project, bare: bare, destination: destination, user: user, ticket: ticket}
   end
 
   describe "perform/2" do
     test "puts the approved commit on the default branch and on the mirror", context do
-      %{ticket: ticket, bare: bare, mirror: mirror, user: user} = context
+      %{ticket: ticket, bare: bare, destination: destination, user: user} = context
       sha = commit_on_branch(context, "feature.txt", "the change")
       changeset!(ticket, sha)
 
       assert {:ok, %{sha: merged, already: false}} = Merge.perform(ticket, user)
       assert {:ok, ^merged} = Git.resolve(bare, "refs/heads/main")
       assert Git.ancestor?(bare, sha, merged)
-      assert {:ok, ^merged} = Git.resolve(mirror, "refs/heads/main")
+      assert {:ok, ^merged} = Git.resolve(Projects.repo_path(destination), "refs/heads/main")
     end
 
     test "records who approved in the commit itself", context do

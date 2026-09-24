@@ -8,6 +8,16 @@
 #
 # Built with the same `mixRelease` the NixOS module runs, so the two deployments differ in how
 # the release is delivered and in nothing else. See `docs/deploy.md` § In a container.
+#
+# **It provisions no machines, and nothing in here is what stops it.** A machine is made from a
+# worker template a node admin created and assigned to a project; a fresh node has none, so
+# `Forge.Workers.create_machine/1` answers `{:no_template, :none_assigned}` and `Jobs.Scheduler`
+# sticks the ticket with that reason. This image used to set `FORGE_MAX_WORKERS=0` and claim
+# that was the mechanism — the variable had had no reader since `max_workers` moved onto the
+# template (`docs/design/provisioning.md` § Lifecycle is per template), so the outcome was right
+# and the explanation was wrong. What keeps it true is *not creating a template*: the one driver
+# that could run from in here is Hetzner, and assigning a template that names it is how an
+# operator opts in. `Forge.Provider.LocalVm` cannot — a container cannot boot a VM.
 { pkgs, forge, version }:
 
 let
@@ -22,29 +32,13 @@ let
   uid = 1000;
   gid = 1000;
 
-  # Written out rather than taken from `dockerTools.fakeNss`, which provides `nobody` and not a
-  # named user. `git` reads the passwd entry when nothing states an identity, and a release's
-  # `RELEASE_TMP` and `HOME` both want a user that exists.
-  etc = pkgs.runCommand "forge-image-etc" { } ''
-    mkdir -p $out/etc
-    cat > $out/etc/passwd <<EOF
-    root:x:0:0:root:/root:/bin/sh
-    forge:x:${toString uid}:${toString gid}:forge:${dataDir}:/bin/sh
-    EOF
-    cat > $out/etc/group <<EOF
-    root:x:0:
-    forge:x:${toString gid}:
-    EOF
-    # Without this, glibc resolves no hosts at all in a container: the database is reached by
-    # name, and so is every mirror and push endpoint.
-    cat > $out/etc/nsswitch.conf <<EOF
-    hosts: files dns
-    EOF
-  '';
-
   # What the platform shells out to. `git` for repositories, worktrees and the http backend;
   # `bash` and coreutils because the hooks it installs are shell scripts with a
   # `#!/usr/bin/env bash` shebang — which is also why `usrBinEnv` is in `contents` below.
+  #
+  # **No ssh client ships.** The `post-receive` mirror was its only caller, and the mirror speaks
+  # https now (`docs/design/git-hosting.md` § What a mirror URL may be) — a mirror URL is not
+  # allowed to be `ssh://` or `git@host:` in the first place, so nothing here would ever run it.
   #
   # Not here, and each for a reason: `nix`, because the platform stopped running jobs in
   # milestone 3 and `nix develop` happens on the worker; Claude Code, because the platform
@@ -77,7 +71,6 @@ dockerTools.buildLayeredImage {
   contents = [
     entrypoint
     forge
-    etc
     dockerTools.usrBinEnv
     dockerTools.binSh
     dockerTools.caCertificates
@@ -88,6 +81,33 @@ dockerTools.buildLayeredImage {
     mkdir -p .${dataDir}/data .${dataDir}/repos .${dataDir}/tmp ./tmp
     chmod 1777 ./tmp
     chown -R ${toString uid}:${toString gid} .${dataDir}
+
+    # **Real files in the image root, not a store path in `contents`, and that is not style.**
+    # `contents` links a package in as *absolute symlinks into the store*, and `docker exec`
+    # resolves the container user by reading `/etc/passwd` from outside the container, through a
+    # resolver that refuses a symlink pointing out of the rootfs. Every `docker exec` then fails
+    # with `path escapes from parent`, at any `-u`, while the container itself runs perfectly —
+    # glibc inside follows the link without complaint. So the only thing it breaks is the
+    # documented way to run every one-off command (`docs/deploy.md` § In a container), which is
+    # also the only way to make the first node admin. Tested by running the image.
+    #
+    # Written out rather than taken from `dockerTools.fakeNss`, which provides `nobody` and not a
+    # named user. `git` reads the passwd entry when nothing states an identity, and a release's
+    # `RELEASE_TMP` and `HOME` both want a user that exists.
+    mkdir -p ./etc
+    cat > ./etc/passwd <<EOF
+    root:x:0:0:root:/root:/bin/sh
+    forge:x:${toString uid}:${toString gid}:forge:${dataDir}:/bin/sh
+    EOF
+    cat > ./etc/group <<EOF
+    root:x:0:
+    forge:x:${toString gid}:
+    EOF
+    # Without this, glibc resolves no hosts at all in a container: the database is reached by
+    # name, and so is every mirror and push endpoint.
+    cat > ./etc/nsswitch.conf <<EOF
+    hosts: files dns
+    EOF
   '';
   enableFakechroot = false;
 
@@ -118,14 +138,6 @@ dockerTools.buildLayeredImage {
 
       "FORGE_DATA_DIR=${dataDir}/data"
       "FORGE_REPOS_DIR=${dataDir}/repos"
-
-      # **The container provisions no machines.** `Forge.Provider.LocalVm` boots a VM under
-      # QEMU, which a container cannot do, so rather than ship a provider that fails at the
-      # first job this says the fleet is not the platform's to grow: `Workers.create_machine/0`
-      # refuses at capacity and never reaches the driver. Workers provisioned elsewhere still
-      # dial in and are still assigned — they are found before creation is ever considered.
-      # Raise it only with a provider that works from here.
-      "FORGE_MAX_WORKERS=0"
     ];
 
     Labels = {

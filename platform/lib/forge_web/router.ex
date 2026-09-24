@@ -103,6 +103,12 @@ defmodule ForgeWeb.Router do
     put "/*key", StoreController, :update
   end
 
+  # Liveness for a container runtime and a proxy. Forwarded from the router rather than mounted
+  # on the endpoint, though it needs nothing the router does: a way in that `Router.__routes__/0`
+  # cannot enumerate is a way in `AuthorizationInventoryTest` cannot make anybody classify, and
+  # this one is reachable with no credential at all. It is piped through nothing.
+  forward "/health", ForgeWeb.Plugs.Health
+
   # The platform's repositories, over git's own smart HTTP, with a per-job token as the Basic
   # auth password. See docs/design/worker-tier.md § Git.
   forward "/git", ForgeWeb.Plugs.GitHttp
@@ -151,5 +157,19 @@ defmodule ForgeWeb.Router do
 
     post "/users/log-in", UserSessionController, :create
     delete "/users/log-out", UserSessionController, :delete
+  end
+
+  # OIDC, both legs. No credential by definition: the first sends the browser to an issuer and
+  # the second is where it comes back, and everything the second decides it decides from the
+  # token rather than from who is asking. `docs/design/identity.md` § Authentication.
+  #
+  # `:browser` is what gives them the session that `state`, `nonce` and the PKCE verifier live
+  # in between the two. Both are GETs, so `protect_from_forgery` has nothing to check and the
+  # `state` parameter is what stands in for it.
+  scope "/auth", ForgeWeb do
+    pipe_through [:browser]
+
+    get "/oidc/:provider", OidcController, :request
+    get "/oidc/:provider/callback", OidcController, :callback
   end
 end

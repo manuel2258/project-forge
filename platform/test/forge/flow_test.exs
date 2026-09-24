@@ -406,7 +406,7 @@ defmodule Forge.FlowTest do
     Application.put_env(
       :forge,
       Forge.Workers,
-      Keyword.merge(previous, slice_bytes: 1_000, max_workers: 0)
+      Keyword.merge(previous, slice_bytes: 1_000)
     )
 
     FakeWorker.connect(memory_budget: 4_000, cores: 4)
@@ -558,7 +558,8 @@ defmodule Forge.FlowTest do
   # `Forge.Jobs.Scheduler` states the rule in a comment on the line: "Nothing to run is the only
   # moment a machine may be destroyed for being idle." The sweep runs at the top of a pass, before
   # a single job is handed out, so sweeping unconditionally destroys the very machine the pass was
-  # about to use — and with `max_workers: 1` that is not a slow queue but a queue that never moves:
+  # about to use — and with the template's `max_workers` of 1 that is not a slow queue but a queue
+  # that never moves:
   # create a machine, wait for it to boot, destroy it before it is given anything, repeat.
   #
   # "Idle" here is the machine having had nothing to do for the period, which a machine that has
@@ -575,7 +576,7 @@ defmodule Forge.FlowTest do
     Application.put_env(
       :forge,
       Forge.Workers,
-      Keyword.merge(previous, idle_period_ms: 60_000, max_workers: 1)
+      Keyword.merge(previous, idle_period_ms: 60_000)
     )
 
     # The machine has been sitting there long enough to qualify; the clock is moved rather than

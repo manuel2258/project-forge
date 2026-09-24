@@ -19,13 +19,23 @@ config :forge, ForgeWeb.Endpoint, cache_static_manifest: "priv/static/cache_mani
 config :forge, ForgeWeb.Endpoint, http: [ip: {127, 0, 0, 1}, port: 4000]
 
 # Force using SSL in production. This also sets the "strict-security-transport" header,
-# known as HSTS. If you have a health check endpoint, you may want to exclude it below.
-# Note `:force_ssl` is required to be set at compile-time.
+# known as HSTS.
+#
+# **Compile-time, which is why `docs/deploy.md` § Behind a proxy proposes nothing runtime-shaped
+# in its place.** Phoenix reads `:force_ssl` with `Application.compile_env/2`, so trusting a
+# named proxy instead of the `x-forwarded-proto` header would be a build-time decision, not a
+# variable an operator sets — see that section for what that costs a container.
+#
+# `/health` is excluded because a probe is the one request with no proxy in front of it to put
+# the header there: a container runtime asks the container's own address, over cleartext, and
+# reads the 301 a redirect would give as unhealthy. Excluding it costs nothing — it carries no
+# credential and answers `ok` to anyone (`ForgeWeb.Plugs.Health`). The hosts are the default,
+# restated because naming `:exclude` at all replaces it.
 config :forge, ForgeWeb.Endpoint,
   force_ssl: [
     rewrite_on: [:x_forwarded_proto],
     exclude: [
-      # paths: ["/health"],
+      paths: ["/health"],
       hosts: ["localhost", "127.0.0.1"]
     ]
   ]

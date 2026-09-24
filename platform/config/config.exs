@@ -70,7 +70,6 @@ config :forge, Forge.Workers,
   # measurement — `Forge.Workers.chat_slice_bytes/0` says what it is made of and what it costs.
   chat_slice_bytes: 1024 * 1024 * 1024,
   cpu_weight: 100,
-  max_workers: 1,
   # M4: a machine goes from nothing to able to build in about 35 seconds (docs/measurements.md
   # § M4), so being wrong about this costs 35 seconds, less than the operator's own round trip
   # to approve an artifact. Five minutes covers an approval gap without holding a machine
@@ -82,8 +81,15 @@ config :forge, Forge.Workers,
   # has not reported yet and is timed from when its row was made.
   worker_timeout_ms: 180_000
 
-# Mailer for account emails (magic links). Local adapter in dev; see runtime.exs for prod.
+# Mailer for account emails (magic links, email-change confirmation). The local adapter is a
+# mailbox in memory: it is what development wants, and it is what a release keeps until
+# FORGE_SMTP_HOST names a relay — see runtime.exs § Mail.
 config :forge, Forge.Mailer, adapter: Swoosh.Adapters.Local
+
+# Who account email comes from. A placeholder, and deliberately one: an address this node does
+# not own is refused by any relay worth using, so FORGE_MAIL_FROM is read beside the SMTP
+# settings and a node that sets one without the other has changed nothing.
+config :forge, :mail_from, {"Forge", "contact@example.com"}
 
 # Swoosh API client is only needed for adapters that talk HTTP.
 config :swoosh, :api_client, false

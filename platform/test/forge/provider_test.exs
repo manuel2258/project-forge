@@ -298,6 +298,10 @@ defmodule Forge.ProviderTest do
     end
   end
 
+  defp after_flag(argv, flag), do: argv |> Enum.drop_while(&(&1 != flag)) |> Enum.at(1)
+  defp megabytes_after(argv, flag), do: String.to_integer(after_flag(argv, flag)) * 1024 * 1024
+  defp cores_after(argv, flag), do: String.to_integer(after_flag(argv, flag))
+
   describe "shapes" do
     test "the local driver sells exactly what the operator configured it to be" do
       assert {:ok, [shape]} = Provider.shapes("local")
@@ -307,6 +311,32 @@ defmodule Forge.ProviderTest do
       # Nil rather than a name: there is no vendor catalogue to name anything from, and
       # `opts.size` would have nothing to read it back into.
       assert shape.size == nil
+    end
+
+    # **The unconfigured node, which is where the two used to disagree.** With `:cpus` and
+    # `:memory_mb` set — as the setup above sets them, and as any node with
+    # `FORGE_WORKER_MEMORY_MB` in its environment has them — `shapes/1` and `command/4` read the
+    # same value and agree no matter what the fallbacks say. Without them they fell back to two
+    # different numbers written a hundred lines apart: the catalogue offered 4 GiB and 2 cores
+    # while the VM was booted with `-m 16384 -smp 4`. An operator picking a machine size on the
+    # templates page was told a quarter of the memory the host would actually be asked for, and
+    # `docs/deploy.md` § Known limits sent them to that number to size the host.
+    #
+    # Asserted against the argv rather than against a literal, so the two cannot drift again.
+    test "the catalogue matches the VM on a node that configured neither" do
+      Application.put_env(
+        :forge,
+        Provider,
+        :forge |> Application.get_env(Provider, []) |> Keyword.drop([:cpus, :memory_mb])
+      )
+
+      assert {:ok, [shape]} = Provider.shapes("local")
+
+      {_qemu, argv} =
+        Forge.Provider.LocalVm.command("/tmp/forge-shape-test", "worker-1", "/dev/null")
+
+      assert shape.memory == megabytes_after(argv, "-m")
+      assert shape.cores == cores_after(argv, "-smp")
     end
 
     test "a driver is asked with the credential it was given" do

@@ -44,7 +44,7 @@ defmodule ForgeWeb.ProjectLive do
       # workflow has just changed these are different, and saying so is the point.
       current: Tickets.admissible(project),
       clone_url: Url.for(project),
-      mirror: Projects.mirror(project),
+      mirrors: Projects.list_mirrors(project),
       open: Enum.count(tickets, &(&1.status in [:active, :stuck])),
       waiting: Enum.count(tickets, &(&1.status == :stuck)),
       spent: Enum.reduce(tickets, Decimal.new(0), &Decimal.add(&2, &1.cost_usd)),
@@ -56,6 +56,19 @@ defmodule ForgeWeb.ProjectLive do
       paused: Forge.Spend.paused?(),
       now: DateTime.utc_now()
     )
+  end
+
+  # A fact row, not the table — the table is the settings page's. One mirror having stopped
+  # working is worth a word here because this is the page somebody actually opens;
+  # `docs/design/git-hosting.md` § What the mirrors say about themselves.
+  defp mirror_summary([]), do: "none"
+
+  defp mirror_summary(mirrors) do
+    mirrors
+    |> Enum.map_join(", ", fn
+      %{name: name, last_status: "failed"} -> "#{name} (failing)"
+      %{name: name} -> name
+    end)
   end
 
   # Flattened here rather than in the component, so the component takes a list of plain maps and
@@ -301,7 +314,7 @@ defmodule ForgeWeb.ProjectLive do
           <.copyable id="clone-url" value={@clone_url} label="Repository" />
           <dl class="mt-3 flex flex-col gap-2 text-[12.5px]">
             <.fact label="default branch">{@project.default_branch}</.fact>
-            <.fact label="mirror">{@mirror || "none"}</.fact>
+            <.fact label="mirror">{mirror_summary(@mirrors)}</.fact>
             <.fact label="worker seed">
               {(@project.seed_id && String.slice(@project.seed_id, 0, 16)) || "none"}
             </.fact>

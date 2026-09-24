@@ -3,6 +3,7 @@ defmodule Forge.ReleaseTest do
 
   import ExUnit.CaptureIO
   import Forge.ForgeFixtures
+  import Forge.GitFixtures
 
   alias Forge.{Accounts, Release}
   alias Forge.Git.Tokens
@@ -81,6 +82,20 @@ defmodule Forge.ReleaseTest do
     assert Accounts.User.active?(Accounts.get_user!(pending.id))
   end
 
+  # The join an OIDC login refuses to make. The refusal is `Forge.IdentityTest`'s; this is the
+  # host-side door, and it must reach `Accounts.link_identity/3` rather than reimplement it.
+  test "link_identity attaches an identity to an account that already exists" do
+    user = Forge.AccountsFixtures.user_fixture()
+
+    output =
+      capture_io(fn ->
+        Release.link_identity(user.email, "https://issuer.example.test", "sub-77")
+      end)
+
+    assert output =~ user.email
+    assert Accounts.get_user_by_identity("https://issuer.example.test", "sub-77").id == user.id
+  end
+
   test "migrate is idempotent on a migrated database" do
     assert :ok = Release.migrate()
   end
@@ -122,6 +137,36 @@ defmodule Forge.ReleaseTest do
     assert printed =~ "writes refs/heads/ticket/7"
   end
 
+  # **The first account on a container node.** `create_operator/2` made a plain user, and on a
+  # fresh node that is a dead end with no way out: `/accounts` is behind `require_node_admin` so
+  # nobody can approve a second account, `register_project/2` resolves its owner through
+  # `owner_for(nil)` and gets `:no_owner`, and the image turns distribution off so there is no
+  # `forge remote` to reach the repo another way. The opts have to reach `Accounts`.
+  test "create_operator seeds a node admin when told to" do
+    email = "admin#{System.unique_integer([:positive])}@example.com"
+
+    output =
+      capture_io(fn ->
+        Release.create_operator(email, "a sufficiently long password", node_admin: true)
+      end)
+
+    assert output =~ "created node admin #{email}"
+    assert Accounts.get_user_by_email(email).node_admin
+    assert {:ok, _admin} = Accounts.owner_for(nil)
+  end
+
+  # And the other half: the opts are what asks for it, so the ordinary call must still not.
+  # A `node_admin: true` default would hand the accounts page to every account made from the
+  # host, which is the same defect pointing the other way.
+  test "create_operator makes an ordinary user when it is not told to" do
+    email = "op#{System.unique_integer([:positive])}@example.com"
+
+    output = capture_io(fn -> Release.create_operator(email, "a sufficiently long password") end)
+
+    assert output =~ "created user #{email}"
+    refute Accounts.get_user_by_email(email).node_admin
+  end
+
   test "create_operator and create_token work against the repo" do
     email = "op#{System.unique_integer([:positive])}@example.com"
 
@@ -140,5 +185,65 @@ defmodule Forge.ReleaseTest do
     assert capture_io(fn -> Release.revoke_token(email, "phone") end) =~ "revoked 1 token"
     assert Accounts.get_user_by_api_token(token) == nil
     assert capture_io(fn -> Release.list_tokens(email) end) == ""
+  end
+
+  describe "mirrors" do
+    # `owner_for(nil)` resolves to the node's only admin, so the project has to be owned by one
+    # for `set_mirror/4` and `delete_mirror/2` — both host-side, with no logged-in user to be —
+    # to have an actor to record.
+    # `repos_dir` defaults to a single directory shared by the whole test environment, and
+    # `register_named/3` addresses a project by name alone — a counter that restarts at a low
+    # number on every `mix test` run. Without an override here, run N's project would leave its
+    # bare repository (and whatever mirrors this describe block set on it) behind for run N+1's
+    # same-named project to adopt. Pointing `repos_dir` at a fresh `node_repos_dir/0` per test avoids
+    # both the name reuse and the leak, the way `test/forge/projects_mirror_test.exs` does.
+    setup do
+      admin = Forge.AccountsFixtures.node_admin_fixture()
+      name = "rel-mirror-#{System.unique_integer([:positive])}"
+      jobs_config = Application.get_env(:forge, Forge.Jobs)
+
+      Application.put_env(
+        :forge,
+        Forge.Jobs,
+        Keyword.put(jobs_config, :repos_dir, node_repos_dir())
+      )
+
+      # Captured now, while the override above is live: an `on_exit` that restored the config
+      # first and read the credentials dir after would compute the *original* `repos_dir`.
+      credentials_dir = Forge.Git.Credentials.dir()
+
+      on_exit(fn ->
+        Application.put_env(:forge, Forge.Jobs, jobs_config)
+        File.rm_rf(credentials_dir)
+      end)
+
+      # `register_named/3`, not `register/2` with a fixture path: `put_mirror/5` refuses a
+      # project whose repository is not at `<repos_dir>/<name>.git`.
+      {:ok, project} = Forge.Projects.register_named(name, "main", admin)
+
+      %{project: project, name: name}
+    end
+
+    test "set_mirror creates one, with the node's only admin as the actor", %{
+      project: project,
+      name: name
+    } do
+      printed =
+        capture_io(fn -> Release.set_mirror(name, "github", "https://github.com/x/y.git") end)
+
+      assert [%{name: "github", url: "https://github.com/x/y.git"}] =
+               Forge.Projects.list_mirrors(project)
+
+      assert printed =~ "https://github.com/x/y.git"
+    end
+
+    test "delete_mirror removes one", %{project: project, name: name} do
+      capture_io(fn -> Release.set_mirror(name, "github", "https://github.com/x/y.git") end)
+
+      printed = capture_io(fn -> Release.delete_mirror(name, "github") end)
+
+      assert Forge.Projects.list_mirrors(project) == []
+      assert printed =~ "removed"
+    end
   end
 end

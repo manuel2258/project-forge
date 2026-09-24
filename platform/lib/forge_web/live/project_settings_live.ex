@@ -53,7 +53,7 @@ defmodule ForgeWeb.ProjectSettingsLive do
       live_count: Enum.count(tokens, &Tokens.live?(&1, now)),
       tickets: Tickets.list(project),
       members: Projects.members(project),
-      mirror: Projects.mirror(project),
+      mirrors: Projects.list_mirrors(project),
       clone_url: Url.for(project),
       now: now
     )
@@ -162,6 +162,63 @@ defmodule ForgeWeb.ProjectSettingsLive do
         {:noreply, load(socket)}
     end
   end
+
+  # The guard is `Projects.put_mirror/5`'s, not this handler's — see its moduledoc and
+  # `Forge.ProjectsMirrorTest`. This is what refuses the event when it is driven directly,
+  # bypassing the `:if={@manage}` section that hides the form from a member.
+  def handle_event("add-mirror", %{"mirror" => params}, socket) do
+    project = socket.assigns.project
+
+    opts = [
+      refs: blank_to_nil(params["refs"]),
+      user: blank_to_nil(params["user"]),
+      token: blank_to_nil(params["token"])
+    ]
+
+    case Projects.put_mirror(
+           project,
+           socket.assigns.current_scope.user,
+           params["name"],
+           params["url"],
+           opts
+         ) do
+      :ok -> {:noreply, socket |> put_flash(:info, "Mirror saved.") |> load()}
+      {:error, reason} -> {:noreply, put_flash(socket, :error, mirror_error(reason))}
+    end
+  end
+
+  def handle_event("remove-mirror", %{"name" => name}, socket) do
+    case Projects.delete_mirror(socket.assigns.project, socket.assigns.current_scope.user, name) do
+      :ok -> {:noreply, socket |> put_flash(:info, "Mirror removed.") |> load()}
+      {:error, reason} -> {:noreply, put_flash(socket, :error, mirror_error(reason))}
+    end
+  end
+
+  # Each reason names the rule it broke, because "invalid" sends an operator to read the source.
+  defp mirror_error(:scheme), do: "A mirror must be https:// or http://."
+  defp mirror_error(:transport_helper), do: "A mirror must be https:// or http://."
+  defp mirror_error(:option_like), do: "A mirror must be https:// or http://."
+  defp mirror_error(:credentials_in_url), do: "Put the token in its own field, not in the URL."
+  defp mirror_error(:no_host), do: "That URL names no host."
+  defp mirror_error(:invalid_name), do: "A name may use a-z, 0-9 and hyphens."
+  defp mirror_error(:forbidden), do: "Only a project admin may change mirrors."
+
+  # `put_mirror/5` refuses a project whose repository is not at `<repos_dir>/<name>.git`
+  # (`register/2` with an arbitrary path, not `register_named/3`): the credential this page
+  # would write and the path the hook derives it from disagree, and an authenticated mirror
+  # would fail every push with nothing louder than a `lastError`. Naming it here is the loud
+  # refusal instead. See `Forge.Projects.put_mirror/5`.
+  defp mirror_error(:repo_path_not_standard),
+    do:
+      "This project's repository is not at the standard path, so a mirror credential would " <>
+        "not be found by the push that needs it. It has to be re-registered at the standard " <>
+        "path before it can have a mirror."
+
+  defp mirror_error(_other), do: "That did not work."
+
+  defp blank_to_nil(nil), do: nil
+  defp blank_to_nil(""), do: nil
+  defp blank_to_nil(value), do: value
 
   defp member(socket, fun) do
     case fun.() do
@@ -446,11 +503,85 @@ defmodule ForgeWeb.ProjectSettingsLive do
         <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Repository</h2>
         <dl class="mt-3 flex flex-col gap-2 text-[12.5px]">
           <.fact label="default branch" value={@project.default_branch} />
-          <.fact label="mirror" value={@mirror || "none"} />
         </dl>
-        <p class="mt-3 text-sm/[1.55] opacity-60">
-          The mirror is set with <code class="font-mono text-[12.5px]">mix forge.project.mirror {@project.name} URL</code>.
+      </section>
+
+      <%!-- `docs/design/git-hosting.md` § What the mirrors say about themselves: this is where
+            they say it. The project page carries only whether one is failing; this is the
+            table, and the only place a mirror is set or removed. --%>
+      <section :if={@manage} class="mt-10">
+        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Mirrors</h2>
+        <p class="mt-2 text-sm/[1.55] opacity-70">
+          Every push to <span class="font-mono text-[12.5px]">{@project.default_branch}</span>
+          is pushed on to each of these too. <code class="font-mono text-[12.5px]">https://</code>
+          carries a token safely; <code class="font-mono text-[12.5px]">http://</code>
+          sends it in clear.
         </p>
+
+        <p :if={@mirrors == []} class="mt-3 text-sm opacity-60">
+          None yet. One added below appears here, with what the last push said.
+        </p>
+
+        <table :if={@mirrors != []} class="mt-3 w-full text-left text-[12.5px]">
+          <thead class="font-mono text-[11px] tracking-[.14em] uppercase opacity-50">
+            <tr class="border-b border-base-300">
+              <th class="py-2 pr-3 font-normal">Name</th>
+              <th class="py-2 pr-3 font-normal">URL</th>
+              <th class="py-2 pr-3 font-normal">Last push</th>
+              <th class="py-2 font-normal"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr :for={m <- @mirrors} class="border-b border-base-300/60 align-top">
+              <td class="py-3 pr-3 font-mono">{m.name}</td>
+              <td class="py-3 pr-3 font-mono break-all">{m.url}</td>
+              <td class="py-3 pr-3 font-mono">
+                <div>{m.last_status || "never pushed"}</div>
+                <div :if={m.last_at} class="text-[11px] opacity-50">{m.last_at}</div>
+                <div
+                  :if={m.last_status == "failed" and m.last_error}
+                  class="text-[11px] text-error"
+                >
+                  {m.last_error}
+                </div>
+                <div :if={m.last_ok_at} class="text-[11px] opacity-50">last ok {m.last_ok_at}</div>
+              </td>
+              <td class="py-3 text-right">
+                <button
+                  type="button"
+                  phx-click="remove-mirror"
+                  phx-value-name={m.name}
+                  data-confirm={"Remove the #{m.name} mirror? Nothing further is pushed there."}
+                  class="min-h-[46px] text-sm text-primary hover:underline"
+                >
+                  Remove
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <.form
+          :let={f}
+          for={to_form(%{}, as: :mirror)}
+          id="add-mirror"
+          phx-submit="add-mirror"
+          class="mt-4 flex flex-col gap-4"
+        >
+          <.input field={f[:name]} type="text" label="Name" placeholder="github" />
+          <.input field={f[:url]} type="text" label="URL" placeholder="https://host/x/y.git" />
+          <.input field={f[:refs]} type="text" label="Refs, a glob (optional)" />
+          <.input field={f[:user]} type="text" label="Username (optional)" />
+          <%!-- Write-only: nothing here is ever populated from a stored mirror, because
+                nothing keeps the token around to populate it with. --%>
+          <.input field={f[:token]} type="password" label="Token (optional)" />
+          <button
+            type="submit"
+            class="min-h-[52px] rounded-field bg-base-content px-4 text-sm font-medium text-base-100"
+          >
+            Add mirror
+          </button>
+        </.form>
       </section>
     </Layouts.app>
     """

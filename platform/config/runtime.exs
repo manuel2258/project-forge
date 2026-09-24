@@ -151,23 +151,80 @@ if config_env() != :test do
   # The tier's numbers. All three are the sample project's or a labelled guess, and
   # docs/measurements.md says the operator's own project replaces them: they are settings so
   # that replacing one is a setting, not a patch.
+  #
+  # **No `FORGE_MAX_WORKERS`**, and its absence is the point. How many machines may exist is a
+  # worker template's `max_workers` — `Forge.Workers.create_machine/1` compares
+  # `Provisioning.live_count/1` with the template's own column, and nothing reads a node-wide
+  # number (`docs/design/provisioning.md` § Lifecycle is per template). The variable was still
+  # read here long after its last reader went, which made it look like a way to stop a node
+  # provisioning; it was not, and `nix/platform-image.nix` said so on the container's behalf.
   config :forge,
          Forge.Workers,
          set.(
            slice_bytes: integer_env.("FORGE_SLICE_BYTES"),
-           max_workers: integer_env.("FORGE_MAX_WORKERS"),
            idle_period_ms: integer_env.("FORGE_IDLE_PERIOD_MS"),
            worker_timeout_ms: integer_env.("FORGE_WORKER_TIMEOUT_MS")
          )
 end
 
-# The worker reaches the platform over the network, not over loopback, and both dev and prod bind
-# to 127.0.0.1. FORGE_HTTP_IP is what the endpoint binds to when something else has to reach it.
+# ## OIDC
+#
+# Zero or more issuers, named by a list of ids: FORGE_OIDC_PROVIDERS=oecis,google. Each one then
+# reads its own variables under the id, upper-cased with anything that is not a letter or a digit
+# turned into an underscore — FORGE_OIDC_OECIS_ISSUER and so on.
+#
+# **Unset means no providers and no change to anything**, which is what development and every
+# node that does not want SSO get. `docs/design/identity.md` § Authentication.
+#
+# Read outside the `:prod` block on purpose: pointing a development node at a real issuer is how
+# anybody finds out whether the redirect URI is right, and a test that sets the variables gets
+# the same reading as a release.
+oidc_providers =
+  case System.get_env("FORGE_OIDC_PROVIDERS") do
+    nil ->
+      []
+
+    list ->
+      list
+      |> String.split(",", trim: true)
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.map(fn id ->
+        prefix = "FORGE_OIDC_" <> String.upcase(String.replace(id, ~r/[^A-Za-z0-9]/, "_"))
+
+        required = fn name ->
+          System.get_env(prefix <> "_" <> name) ||
+            raise "#{prefix}_#{name} is missing, and #{id} is named in FORGE_OIDC_PROVIDERS"
+        end
+
+        %Forge.Accounts.Oidc.Provider{
+          id: id,
+          name: System.get_env(prefix <> "_NAME") || id,
+          issuer: required.("ISSUER"),
+          client_id: required.("CLIENT_ID"),
+          client_secret: required.("CLIENT_SECRET"),
+          scope: System.get_env(prefix <> "_SCOPE") || "email profile",
+          id_token_alg: System.get_env(prefix <> "_ID_TOKEN_ALG") || "RS256"
+        }
+      end)
+  end
+
+# Set even when empty: `Oidc.providers/0` reading a key that is simply absent and one that is
+# absent *because nobody configured any* are the same answer, and writing it down is what lets
+# a release be asked what it thinks it has.
+config :forge, Forge.Accounts.Oidc, providers: oidc_providers
+
+# Both dev and prod bind to 127.0.0.1. FORGE_HTTP_IP is what the endpoint binds to when something
+# else has to reach it: a worker on another machine, or a proxy in another container.
 #
 # Widening this is a security decision, not a convenience: `force_ssl` trusts `x-forwarded-proto`,
-# so every address this listens on is an address from which that header can be forged. Set it to
-# the one interface the workers are on, never 0.0.0.0, and firewall the port — docs/deploy.md
-# § Behind a proxy.
+# so every address this listens on is an address from which that header can be forged. On a host,
+# set it to the one interface those clients are on and firewall the port.
+#
+# **Under a container runtime there is no such interface to name.** The proxy arrives on a bridge
+# address assigned at start, so 0.0.0.0 is the only value that serves at all, and what replaces
+# the firewall is the container network: publish no host port, and let the proxy be the only
+# thing attached to it. docs/deploy.md § Behind a proxy says what that trust boundary becomes.
 if ip = System.get_env("FORGE_HTTP_IP") do
   case :inet.parse_address(String.to_charlist(ip)) do
     {:ok, address} -> config :forge, ForgeWeb.Endpoint, http: [ip: address]
@@ -201,6 +258,75 @@ if config_env() == :prod do
       set DATABASE_URL (for example ecto://USER:PASS@HOST/DATABASE) or DATABASE_SOCKET_DIR
       (a local Postgres over its Unix socket)
       """
+  end
+
+  # ## Mail
+  #
+  # Account email is magic-link login and email-change confirmation, and until this existed
+  # neither worked on a release: `config.exs` sets `Swoosh.Adapters.Local`, a mailbox in memory,
+  # and nothing overrode it — so `docs/deploy.md` § Known limits had to say password login was
+  # the only one that functioned.
+  #
+  # **FORGE_SMTP_HOST is the switch.** Unset, the local adapter stands, which is what development
+  # wants and what a node with no relay should keep doing rather than failing at boot. Set, every
+  # other variable is read around it.
+  if relay = System.get_env("FORGE_SMTP_HOST") do
+    # gen_smtp's own default `tls_options` is `[{versions, [...]}]` and nothing else — no
+    # verification at all, on the connection that carries the relay password. So the options are
+    # written out here rather than left to the library, and the certificate is checked against a
+    # bundle: the image ships one and points SSL_CERT_FILE at it, a NixOS host sets the same
+    # variable, and `:public_key.cacerts_get/0` is the fallback for a machine that does neither.
+    anchors =
+      case System.get_env("FORGE_SMTP_CACERTFILE") || System.get_env("SSL_CERT_FILE") do
+        nil -> [cacerts: :public_key.cacerts_get()]
+        file -> [cacertfile: String.to_charlist(file)]
+      end
+
+    verify =
+      [
+        verify: :verify_peer,
+        depth: 3,
+        server_name_indication: String.to_charlist(relay),
+        customize_hostname_check: [
+          match_fun: :public_key.pkix_verify_hostname_match_fun(:https)
+        ]
+      ] ++ anchors
+
+    # Two different keys for the same certificate check, because gen_smtp makes the TLS
+    # connection in two different places: `sockopts` for implicit TLS, which is already
+    # encrypted when the first byte is sent, and `tls_options` for the STARTTLS upgrade.
+    transport =
+      case System.get_env("FORGE_SMTP_TLS") || "starttls" do
+        "ssl" -> [ssl: true, sockopts: verify]
+        "starttls" -> [ssl: false, tls: :always, tls_options: verify]
+        "none" -> [ssl: false, tls: :never]
+        other -> raise "FORGE_SMTP_TLS must be ssl, starttls or none, got #{inspect(other)}"
+      end
+
+    # A relay that is named is a relay that is meant: an MX lookup on its domain would let DNS
+    # choose a different host for the credentials. `auth` is `:never` without a username rather
+    # than gen_smtp's `:if_available`, which would offer `nil` as one.
+    credentials =
+      case {System.get_env("FORGE_SMTP_USERNAME"), System.get_env("FORGE_SMTP_PASSWORD")} do
+        {nil, _password} -> [auth: :never]
+        {username, password} -> [auth: :always, username: username, password: password]
+      end
+
+    config :forge,
+           Forge.Mailer,
+           [
+             adapter: Swoosh.Adapters.SMTP,
+             relay: relay,
+             port: integer_env.("FORGE_SMTP_PORT") || 587,
+             no_mx_lookups: true,
+             retries: 1
+           ] ++ transport ++ credentials
+  end
+
+  # Who that email is from. The compiled default is a placeholder address this node does not own,
+  # which a relay worth using refuses, so setting this is part of setting up mail.
+  if from = System.get_env("FORGE_MAIL_FROM") do
+    config :forge, :mail_from, {System.get_env("FORGE_MAIL_FROM_NAME") || "Forge", from}
   end
 
   # The secret key base is used to sign/encrypt cookies and other secrets.

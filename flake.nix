@@ -17,7 +17,13 @@
             elixir = prev.elixir_1_18;
           });
           elixir = beam.elixir;
-          version = "0.1.0";
+
+          # One version for the whole repository: the three `mix.exs` read the same file, and so
+          # does `nix/worker-image.nix` through the flake. A release is one edit rather than five
+          # — the state it was in, with four of the five reachable only by remembering them — and
+          # the image tag this produces is `v<version>`'s commit and no other, which is what
+          # `bin/release` refuses to publish twice.
+          version = lib.fileContents ./VERSION;
 
           esbuildPath = "${pkgs.esbuild}/bin/esbuild";
           tailwindPath = "${pkgs.tailwindcss_4}/bin/tailwindcss";
@@ -38,10 +44,16 @@
           # ones actually embedded are inputs.
           embeddedDocs = [ ./docs/design/workflow-grammar-v1.md ];
 
+          # Each `mix.exs` reads `../VERSION`, so it is a build input of every project for the
+          # same reason `embeddedDocs` are: outside the fileset the sandbox has no `VERSION` at
+          # all and `mix` fails on `File.read!` before it compiles a line. It is in `depsSrc`
+          # too, which evaluates `mix.exs` without any of the sources.
+          versionFile = ./VERSION;
+
           projectSrc = subdir: lib.fileset.toSource {
             root = ./.;
             fileset = lib.fileset.unions
-              ([ (./. + "/${subdir}") ] ++ pathDeps subdir ++ embeddedDocs);
+              ([ (./. + "/${subdir}") versionFile ] ++ pathDeps subdir ++ embeddedDocs);
           };
 
           # Only the files `mix deps.get` needs, so dependency fetching is not
@@ -53,6 +65,7 @@
             fileset = lib.fileset.unions ([
               (./. + "/${subdir}/mix.exs")
               (./. + "/${subdir}/mix.lock")
+              versionFile
             ] ++ map (dep: dep + "/mix.exs") (pathDeps subdir));
           };
 
@@ -72,7 +85,7 @@
           platformDeps = mixDeps {
             name = "forge";
             subdir = "platform";
-            hash = "sha256-0wvoS0FbpkVRzoum5v5eN/4OW8kPG6C67HUGYldUU/Q=";
+            hash = "sha256-f5gsN385ciaPh67MNTGOzOG5ODq5rUKiUbaJ6tu26cw=";
           };
 
           forge-worker = beam.mixRelease {
@@ -132,6 +145,10 @@
                 # putting the worker image in a project means driving a rescue server through
                 # the CLI — see `docs/design/worker-tier.md` § Updating a worker.
                 pkgs.hcloud
+                # `bin/release` copies the image tarball straight to the registry with it. No
+                # Docker daemon is involved, which is the whole reason it is this and not
+                # `docker load`.
+                pkgs.skopeo
               ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
                 pkgs.inotify-tools
                 # What `Forge.Provider.LocalVm` shells out to: QEMU boots the machine and
@@ -192,6 +209,7 @@
         modules = [
           (import ./nix/worker-image.nix {
             workerPackage = self.packages.${system}.forge-worker;
+            version = nixpkgs.lib.fileContents ./VERSION;
           })
           ({ lib, ... }: {
             # Claude Code is unfree; the image allows exactly that package, as the platform

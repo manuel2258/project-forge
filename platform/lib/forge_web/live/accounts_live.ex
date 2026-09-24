@@ -23,7 +23,25 @@ defmodule ForgeWeb.AccountsLive do
   defp load(socket) do
     users = Accounts.list_users()
     {pending, decided} = Enum.split_with(users, &pending?/1)
-    assign(socket, pending: pending, decided: decided)
+
+    assign(socket, pending: pending, decided: decided, issuers: issuers(users))
+  end
+
+  # Where each account logs in from, for the row. It is the question a node admin is actually
+  # answering when a pending account appears — an address proves nothing, and an account
+  # provisioned by an OIDC login is one an issuer let through rather than one somebody made on
+  # the host. `docs/design/identity.md` § Identity is `(issuer, subject)`, never email.
+  defp issuers(users), do: Accounts.issuers_by_user(users)
+
+  # A host-made account has none, and says so rather than looking like a row with missing data.
+  attr :issuers, :list, required: true
+
+  defp origin(assigns) do
+    ~H"""
+    <span class="font-mono text-[11.5px] opacity-60">
+      {if @issuers == [], do: "local", else: Enum.join(@issuers, " ")}
+    </span>
+    """
   end
 
   defp pending?(%User{approved_at: nil, suspended_at: nil}), do: true
@@ -45,6 +63,12 @@ defmodule ForgeWeb.AccountsLive do
   def handle_event("demote", %{"id" => id}, socket),
     do: act(socket, id, &Accounts.set_node_admin(&1, &2, false))
 
+  # Only offered on a waiting row, and `delete_unapproved_user/2` refuses an approved one
+  # regardless — the button is not the guard. `data-confirm` is because this is the one
+  # governance action that cannot be undone.
+  def handle_event("delete", %{"id" => id}, socket),
+    do: act(socket, id, &Accounts.delete_unapproved_user/2)
+
   # The guard is the context function, not this callback: `set_node_admin/3` refuses the last
   # node admin, and the button below is hidden for the same row. Hiding a button is cosmetics.
   defp act(socket, id, fun) do
@@ -61,6 +85,15 @@ defmodule ForgeWeb.AccountsLive do
 
       {:error, :last_node_admin} ->
         {:noreply, put_flash(socket, :error, "That is the only administrator left.")}
+
+      {:error, :approved} ->
+        {:noreply, put_flash(socket, :error, "An approved account cannot be deleted.")}
+
+      # What `on_delete: :restrict` answered. Worth its own message: the operator's next question
+      # is always "why not", and "it has a history" is the answer.
+      {:error, :has_history} ->
+        {:noreply,
+         put_flash(socket, :error, "That account has a history on this node and stays.")}
 
       {:error, _reason} ->
         {:noreply, put_flash(socket, :error, "That did not work.")}
@@ -88,9 +121,17 @@ defmodule ForgeWeb.AccountsLive do
         <ul class="mt-2 divide-y divide-base-300 border-y border-base-300">
           <li :for={user <- @pending} class="flex flex-wrap items-center gap-3 py-3">
             <span class="font-mono text-[13px]">{user.email}</span>
+            <.origin issuers={Map.get(@issuers, user.id, [])} />
             <div class="ml-auto flex gap-2">
               <.account_button id={user.id} event="approve">Approve</.account_button>
               <.account_button id={user.id} event="suspend">Refuse</.account_button>
+              <.account_button
+                id={user.id}
+                event="delete"
+                confirm={"Delete #{user.email}? This frees the address and cannot be undone."}
+              >
+                Delete
+              </.account_button>
             </div>
           </li>
         </ul>
@@ -101,6 +142,7 @@ defmodule ForgeWeb.AccountsLive do
         <ul class="mt-2 divide-y divide-base-300 border-y border-base-300">
           <li :for={user <- @decided} class="flex flex-wrap items-center gap-3 py-3">
             <span class="font-mono text-[13px]">{user.email}</span>
+            <.origin issuers={Map.get(@issuers, user.id, [])} />
             <span :if={user.node_admin} class="font-mono text-[11.5px] opacity-60">admin</span>
             <span :if={user.suspended_at} class="font-mono text-[11.5px] opacity-60">suspended</span>
             <div class="ml-auto flex gap-2">
@@ -134,6 +176,7 @@ defmodule ForgeWeb.AccountsLive do
 
   attr :id, :string, required: true
   attr :event, :string, required: true
+  attr :confirm, :string, default: nil
   slot :inner_block, required: true
 
   defp account_button(assigns) do
@@ -141,6 +184,7 @@ defmodule ForgeWeb.AccountsLive do
     <button
       phx-click={@event}
       phx-value-id={@id}
+      data-confirm={@confirm}
       class="min-h-[46px] rounded-field border border-base-300 px-3 text-sm hover:border-base-content/30"
     >
       {render_slot(@inner_block)}

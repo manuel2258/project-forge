@@ -18,7 +18,7 @@ defmodule ForgeWeb.CreateLiveTest do
   setup :register_and_log_in_user
 
   setup %{user: user} do
-    repos = tmp_dir("repos")
+    repos = node_repos_dir()
     original = Application.get_env(:forge, Forge.Jobs)
     Application.put_env(:forge, Forge.Jobs, Keyword.put(original, :repos_dir, repos))
     on_exit(fn -> Application.put_env(:forge, Forge.Jobs, original) end)

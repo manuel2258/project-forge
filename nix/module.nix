@@ -8,6 +8,11 @@ let
 
   # What the release needs on PATH: git for repositories and worktrees, nix for `nix develop`,
   # a shell and coreutils for the job wrapper, and Claude Code itself.
+  #
+  # No `openssh`: the `post-receive` mirror was its only caller, and the mirror speaks https now
+  # (`docs/design/git-hosting.md` § What a mirror URL may be) — an `ssh://` or `git@host:` mirror
+  # URL is refused before it is ever stored, so nothing on this path would run `ssh` anyway.
+  # `nix/platform-image.nix` drops the same package for the same reason.
   servicePath = [ pkgs.git pkgs.nix pkgs.bash pkgs.coreutils cfg.claudePackage ];
 
   # The service's environment. `forge-admin` runs one-off commands with the same one.

@@ -1,10 +1,15 @@
 defmodule ForgeCore.MixProject do
   use Mix.Project
 
+  # The repository's one version, read rather than repeated: `flake.nix` reads the same file for
+  # the release and the image tag, and a version used to mean editing the same string in five
+  # places and getting four of them. `bin/release` moves it; nothing else should.
+  @version String.trim(File.read!(Path.expand("../VERSION", __DIR__)))
+
   def project do
     [
       app: :forge_core,
-      version: "0.1.0",
+      version: @version,
       elixir: "~> 1.18",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,

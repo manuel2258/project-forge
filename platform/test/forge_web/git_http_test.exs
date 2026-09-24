@@ -222,58 +222,303 @@ defmodule ForgeWeb.GitHttpTest do
     end
   end
 
-  describe "the mirror" do
-    test "a push reaches the mirror, and only the refs it is configured for", %{
-      project: project,
-      bare: bare,
-      main: main
-    } do
-      mirror = Path.join(tmp_dir("mirror"), "mirror.git")
-      :ok = Git.init_bare(mirror)
-      :ok = Projects.set_mirror(project, mirror)
+  # Mirrored over the platform's own git endpoint rather than to a path on disk: a local path
+  # exercised neither the transport, the credential, nor `receive-pack` on the far side, and a
+  # local path is now refused anyway.
+  describe "the mirrors" do
+    setup %{project: project, bare: bare} do
+      # An admin of the project under test, because `register_owned!/1` does not hand its owner
+      # back and `put_mirror/5` needs a named actor.
+      owner = Forge.AccountsFixtures.user_fixture()
+      join!(project, owner, :admin)
 
+      # Two rules have to agree for an authenticated mirror to work at all: the hook derives its
+      # credential directory from its own working directory, and `Forge.Git.Credentials.path/2`
+      # derives the filename from `project.name`. Both hold by construction for a project
+      # registered the normal way, at `<repos_dir>/<name>.git` — but `bare` here is
+      # `seeded_repo/1`'s fixture, always named `project.git` under a `System.tmp_dir/0` path
+      # that is not inside any configured `repos_dir`. So this setup gives the project under
+      # test the address a normal registration would have, rather than working around the
+      # absence of one — `repos_dir` is pointed at `node_repos_dir/0`'s own unique, self-cleaning
+      # directory (already under `System.tmp_dir/0`, so the rename below is not cross-device;
+      # unique so an interrupted run never leaves a stale `<name>.git` for the next run's
+      # `File.rename!` to collide with) and the repository is moved to
+      # `<repos_dir>/<project.name>.git`.
+      jobs_config = Application.get_env(:forge, Forge.Jobs)
+
+      Application.put_env(
+        :forge,
+        Forge.Jobs,
+        Keyword.put(jobs_config, :repos_dir, node_repos_dir())
+      )
+
+      # Captured now, while the override above is live: `Credentials.dir/0` reads
+      # `Projects.repos_dir/0` when called, and an `on_exit` that restored the config first and
+      # read it after would compute the *original* `repos_dir` — deleting an empty directory
+      # nobody used while leaving the real credential files, mode 0600 and holding live git
+      # tokens, behind in the shared `mirror-credentials` directory forever.
+      credentials_dir = Forge.Git.Credentials.dir()
+
+      on_exit(fn ->
+        Application.put_env(:forge, Forge.Jobs, jobs_config)
+        File.rm_rf(credentials_dir)
+      end)
+
+      real_bare = Path.join(Forge.Projects.repos_dir(), project.name <> ".git")
+      File.mkdir_p!(Path.dirname(real_bare))
+      File.rename!(bare, real_bare)
+      bare = real_bare
+
+      {:ok, project} =
+        project
+        |> Forge.Projects.Project.changeset(%{repo_path: bare})
+        |> Forge.Repo.update()
+
+      # A clone of `bare`'s own current state, not an independently seeded repository: the
+      # mirror push below is fast-forward only on both ends, and two unrelated histories are
+      # never a fast-forward of one another.
+      destination_bare = mirror_target(bare)
+
+      {:ok, destination} =
+        register_owned!(%{
+          name: "destination#{System.unique_integer([:positive])}",
+          repo_path: destination_bare,
+          default_branch: "main"
+        })
+
+      # The default-branch write token is the shape only an operator can mint, and it is what
+      # `pre-receive` on the far side accepts as authority over `main`.
+      {:ok, token, _row} = Tokens.issue(destination, ref: "refs/heads/main", write: true)
+
+      %{
+        owner: owner,
+        project: project,
+        bare: bare,
+        destination: destination,
+        destination_bare: destination_bare,
+        mirror_url: "http://127.0.0.1:4002/git/#{destination.name}.git",
+        mirror_token: token
+      }
+    end
+
+    # The platform's own merge: a local push into the bare repository, the one path that runs the
+    # repository's own hooks. `Git.run/3` merges stderr unless told otherwise, so the hook's
+    # `forge: ` lines come back in `out`.
+    defp mirror_push(project, bare) do
       {:ok, token, _row} = Tokens.issue(project, ref: "refs/heads/ticket/1", write: true)
       dir = clone!(project, token, "ticket/1")
       commit!(dir, "work.txt", "done")
-      assert {_out, 0} = push(dir, project, token, "HEAD:refs/heads/ticket/1")
 
-      # The default is the default branch alone: a ticket's scratch history is not published.
-      assert {:error, {:unknown_ref, _}} = Git.resolve(mirror, "refs/heads/ticket/1")
-      assert {:error, {:unknown_ref, _}} = Git.resolve(mirror, "refs/heads/main")
-
-      # What the platform's merge does: a local push into the bare repository, which is the one
-      # path that runs the repository's own hooks — so the mirror is the same code that guards
-      # the branch discipline, rather than a second implementation beside it.
       {:ok, out} =
         Git.run(dir, ["push", "--quiet", bare, "HEAD:refs/heads/main"],
           env: [{"FORGE_INTERNAL", "1"}]
         )
 
-      assert out =~ "mirrored refs/heads/main to #{mirror}"
-      {:ok, head} = Git.resolve(bare, "refs/heads/main")
-      assert head != main
-      assert {:ok, ^head} = Git.resolve(mirror, "refs/heads/main")
+      out
     end
 
-    test "a mirror that cannot be reached does not fail the push", %{project: project, bare: bare} do
-      :ok = Projects.set_mirror(project, "/nowhere/at/all.git", "refs/heads/*")
+    test "a push reaches the mirror, and only the refs it is configured for", %{
+      project: project,
+      bare: bare,
+      destination: destination,
+      mirror_url: url,
+      mirror_token: token,
+      owner: owner
+    } do
+      :ok = Projects.put_mirror(project, owner, "backup", url, user: "forge", token: token)
 
-      {:ok, token, _row} = Tokens.issue(project, ref: "refs/heads/ticket/1", write: true)
-      dir = clone!(project, token, "ticket/1")
-      sha = commit!(dir, "work.txt", "done")
+      out = mirror_push(project, bare)
 
-      assert {out, 0} = push(dir, project, token, "HEAD:refs/heads/ticket/1")
-      assert out =~ "mirror to /nowhere/at/all.git FAILED"
-      assert {:ok, ^sha} = Git.resolve(bare, "refs/heads/ticket/1")
+      assert out =~ "forge: mirrored refs/heads/main to backup"
+      assert {:ok, _sha} = Git.resolve(Projects.repo_path(destination), "refs/heads/main")
     end
 
-    test "the mirror is repository configuration, not a column", %{project: project} do
-      refute Projects.mirror(project)
-      :ok = Projects.set_mirror(project, "/tmp/somewhere.git")
-      assert Projects.mirror(project) == "/tmp/somewhere.git"
-      assert Hooks.mirror(Projects.repo_path(project)) == "/tmp/somewhere.git"
-      :ok = Projects.set_mirror(project, nil)
-      refute Projects.mirror(project)
+    test "a ticket branch is not mirrored, because the glob does not name it", %{
+      project: project,
+      bare: bare,
+      destination: destination,
+      mirror_url: url,
+      mirror_token: token,
+      owner: owner
+    } do
+      :ok = Projects.put_mirror(project, owner, "backup", url, user: "forge", token: token)
+
+      mirror_push(project, bare)
+
+      assert {:error, {:unknown_ref, _}} =
+               Git.resolve(Projects.repo_path(destination), "refs/heads/ticket/1")
+    end
+
+    test "two mirrors both receive, and one failing does not stop the other", %{
+      project: project,
+      bare: bare,
+      destination: destination,
+      mirror_url: url,
+      mirror_token: token,
+      owner: owner
+    } do
+      # "bad" configured first, deliberately: `git config --get-regexp` walks the config file in
+      # write order, so this is what actually proves the loop does not stop at the first failure
+      # — putting the failing mirror last would still pass even if it did.
+      :ok = Projects.put_mirror(project, owner, "bad", "http://127.0.0.1:4002/git/nope.git", [])
+      :ok = Projects.put_mirror(project, owner, "good", url, user: "forge", token: token)
+
+      out = mirror_push(project, bare)
+
+      assert out =~ "forge: mirrored refs/heads/main to good"
+      assert out =~ "forge: mirror to bad FAILED"
+      assert {:ok, _sha} = Git.resolve(Projects.repo_path(destination), "refs/heads/main")
+    end
+
+    test "a failing mirror records why, and the push stands", %{
+      project: project,
+      bare: bare,
+      owner: owner
+    } do
+      :ok = Projects.put_mirror(project, owner, "bad", "http://127.0.0.1:4002/git/nope.git", [])
+
+      out = mirror_push(project, bare)
+
+      assert out =~ "the push itself stands"
+      assert [%{name: "bad", last_status: "failed"} = mirror] = Projects.list_mirrors(project)
+      assert mirror.last_error =~ "not found"
+      assert mirror.last_ok_at == nil
+      assert {:ok, _sha} = Git.resolve(Projects.repo_path(project), "refs/heads/main")
+    end
+
+    test "a succeeding mirror records when it last worked", %{
+      project: project,
+      bare: bare,
+      mirror_url: url,
+      mirror_token: token,
+      owner: owner
+    } do
+      :ok = Projects.put_mirror(project, owner, "backup", url, user: "forge", token: token)
+
+      mirror_push(project, bare)
+
+      assert [%{last_status: "ok", last_ok_at: at, last_error: nil}] =
+               Projects.list_mirrors(project)
+
+      assert at =~ ~r/\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\z/
+    end
+
+    # Neither `mirror_push/2` (merges stdout and stderr, per `Git.run/3`'s default) nor even
+    # `Git.run/3` with `stderr: :separate` can tell the two apart here: git's own client relays a
+    # hook's messages as "remote: " lines on the *client's* stderr regardless of which fd the
+    # hook wrote to, and the CGI wrapper's own `err_path` never receives hook output at all (see
+    # the comment on "a CGI-mediated push..." below). Neither push path can observe the hook's fd
+    # choice, so this runs the installed hook script directly, the way `receive-pack` runs it,
+    # with its own stdout and stderr captured into separate files — the one way to actually see
+    # it.
+    test "the success line is on stderr, not stdout", %{
+      project: project,
+      bare: bare,
+      mirror_url: url,
+      mirror_token: token,
+      owner: owner
+    } do
+      :ok = Projects.put_mirror(project, owner, "backup", url, user: "forge", token: token)
+
+      hook = Path.join(Projects.repo_path(project), "hooks/post-receive")
+      {:ok, main} = Git.resolve(bare, "refs/heads/main")
+
+      in_path = Path.join(tmp_dir("hook-in"), "stdin")
+      out_path = Path.join(tmp_dir("hook-out"), "stdout")
+      err_path = Path.join(tmp_dir("hook-err"), "stderr")
+      File.write!(in_path, "#{String.duplicate("0", 40)} #{main} refs/heads/main\n")
+
+      {_out, 0} =
+        System.cmd(
+          "sh",
+          ["-c", ~s(exec "#{hook}" <"#{in_path}" >"#{out_path}" 2>"#{err_path}")],
+          cd: bare
+        )
+
+      assert File.read!(out_path) == ""
+      assert File.read!(err_path) =~ "forge: mirrored refs/heads/main to backup"
+    end
+
+    # The hook is the second enforcement point, and this is the case that needs it: config
+    # written by something other than `Forge.Projects`.
+    test "a URL the rules refuse is never pushed to, however it got into the config", %{
+      project: project,
+      bare: bare
+    } do
+      repo = Projects.repo_path(project)
+      # A path unique to this test, not a fixed name two tests (or another user on the machine)
+      # could share: a leftover from an interrupted run would otherwise make the assertion below
+      # pass, or fail, for a reason that has nothing to do with this push.
+      target = Path.join(tmp_dir("pwned"), "pwned")
+      :ok = Hooks.put_mirror(repo, "evil", "ext::sh -c 'touch #{target}'", [])
+
+      out = mirror_push(project, bare)
+
+      refute File.exists?(target)
+      assert out =~ "forge: mirror evil is not an http(s) URL"
+      assert [%{name: "evil", last_status: "failed"}] = Projects.list_mirrors(project)
+    end
+
+    # Not covered by the `ext::` case above: `allowed/1`'s option-like guard and its `::`
+    # transport-helper guard are two different case arms, and a mutation of one does not move
+    # the other. `--end-of-options` in the push itself is the second line of defense for exactly
+    # this shape — this mirror would be refused before either mattered, but the URL is chosen so
+    # that removing *only* the option-like guard would hand git something that looks like a flag.
+    test "an option-like URL is refused too, not handed to git as an argument", %{
+      project: project,
+      bare: bare
+    } do
+      repo = Projects.repo_path(project)
+      target = Path.join(tmp_dir("pwned"), "pwned")
+      :ok = Hooks.put_mirror(repo, "opt", "--upload-pack=touch #{target}", [])
+
+      out = mirror_push(project, bare)
+
+      refute File.exists?(target)
+      assert out =~ "forge: mirror opt is not an http(s) URL"
+      assert [%{name: "opt", last_status: "failed"}] = Projects.list_mirrors(project)
+    end
+
+    test "a local path is never pushed to either", %{project: project, bare: bare} do
+      repo = Projects.repo_path(project)
+      elsewhere = Path.join(tmp_dir("elsewhere"), "elsewhere.git")
+      :ok = Git.init_bare(elsewhere)
+      :ok = Hooks.put_mirror(repo, "local", elsewhere, [])
+
+      mirror_push(project, bare)
+
+      assert {:error, {:unknown_ref, _}} = Git.resolve(elsewhere, "refs/heads/main")
+    end
+
+    # The brief for this task asserts a `git.hook.said` *event* here: `Forge.Git.Http.report/3`
+    # is documented (`docs/design/git-hosting.md` § What the mirrors say about themselves) as
+    # turning a hook's `forge: ` lines into that event, reading them from the CGI wrapper's
+    # captured stderr (`err_path`). It does not, for any push: `git http-backend` relays a
+    # hook's stderr to the *client* over the smart-HTTP protocol's own sideband — the "remote: "
+    # lines a git client prints — and that relay is embedded in the CGI's stdout (the response
+    # body), never written to the CGI's own stderr. `err_path` is empty after every push,
+    # verified by instrumenting `report/3` directly against this exact scenario, so no
+    # `git.hook.said` event is created today — not for a mirror, and not for the ticket-branch
+    # rewrite notice the same design section already claims one for. This is a real,
+    # pre-existing gap, not something this task's file list (the hook and this test) can fix —
+    # doing so needs `report/3` to parse the pkt-line/side-band-64k response body instead, which
+    # is a change to `Forge.Git.Http`. Flagged in the task-4 report rather than silently
+    # asserted here. What *is* true, and what this asserts instead, is the half that survives
+    # the CGI boundary: the client still sees the hook's line.
+    test "a CGI-mediated push still relays the hook's report to the client", %{
+      project: project,
+      mirror_url: url,
+      mirror_token: token,
+      owner: owner
+    } do
+      :ok = Projects.put_mirror(project, owner, "backup", url, user: "forge", token: token)
+
+      {:ok, main_token, _row} = Tokens.issue(project, ref: "refs/heads/main", write: true)
+      dir = clone!(project, main_token, "main")
+      commit!(dir, "work.txt", "done")
+
+      assert {out, 0} = push(dir, project, main_token, "HEAD:refs/heads/main")
+      assert out =~ "forge: mirrored refs/heads/main to backup"
     end
   end
 

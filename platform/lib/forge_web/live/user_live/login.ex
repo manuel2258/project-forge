@@ -2,6 +2,7 @@ defmodule ForgeWeb.UserLive.Login do
   use ForgeWeb, :live_view
 
   alias Forge.Accounts
+  alias Forge.Accounts.Oidc
 
   @impl true
   def render(assigns) do
@@ -15,7 +16,11 @@ defmodule ForgeWeb.UserLive.Login do
               <%= if @current_scope do %>
                 You need to reauthenticate to perform sensitive actions on your account.
               <% else %>
-                Accounts are created by the operator from the command line.
+                <%= if @providers == [] do %>
+                  Accounts are created by the operator from the command line.
+                <% else %>
+                  Sign in with your provider, or with an account the operator created.
+                <% end %>
               <% end %>
             </:subtitle>
           </.header>
@@ -30,6 +35,19 @@ defmodule ForgeWeb.UserLive.Login do
             </p>
           </div>
         </div>
+
+        <div :if={@providers != []} class="space-y-2">
+          <.link
+            :for={provider <- @providers}
+            href={~p"/auth/oidc/#{provider.id}"}
+            method="get"
+            class="btn btn-primary w-full"
+          >
+            Log in with {provider.name} <span aria-hidden="true">→</span>
+          </.link>
+        </div>
+
+        <div :if={@providers != []} class="divider">or</div>
 
         <.form
           :let={f}
@@ -99,8 +117,13 @@ defmodule ForgeWeb.UserLive.Login do
 
     form = to_form(%{"email" => email}, as: "user")
 
-    {:ok, assign(socket, form: form, trigger_submit: false)}
+    {:ok, assign(socket, form: form, trigger_submit: false, providers: buttons())}
   end
+
+  # The page needs an id and a name. It does not need a client secret in the socket, where a
+  # LiveView crash report would inspect it as part of the process state, so only those two
+  # fields cross into the assigns.
+  defp buttons, do: Enum.map(Oidc.providers(), &%{id: &1.id, name: &1.name})
 
   @impl true
   def handle_event("submit_password", _params, socket) do

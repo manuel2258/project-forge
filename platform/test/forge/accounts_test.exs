@@ -438,6 +438,20 @@ defmodule Forge.AccountsTest do
       assert user_token.sent_to == user.email
       assert user_token.context == "login"
     end
+
+    # The generated sender is `contact@example.com`, which is an address no node owns; a relay
+    # worth using refuses mail claiming to be from one. So the address is configuration, and
+    # `FORGE_MAIL_FROM` is what a release sets — see `config/runtime.exs` § Mail. Pin it to the
+    # configured value rather than to a literal, or this test passes against the literal.
+    test "the sender is what configuration says, not a literal in the notifier", %{user: user} do
+      previous = Application.get_env(:forge, :mail_from)
+      on_exit(fn -> Application.put_env(:forge, :mail_from, previous) end)
+      Application.put_env(:forge, :mail_from, {"oecis forge", "forge@example.org"})
+
+      {:ok, email} = Forge.Accounts.UserNotifier.deliver_login_instructions(user, "http://x/y")
+
+      assert email.from == {"oecis forge", "forge@example.org"}
+    end
   end
 
   describe "inspect/2 for the User module" do

@@ -16,9 +16,13 @@ tickets to read.
 
 `docs/design/identity.md` is the standard for who a user is, which projects they reach, and whose
 credential funds the work. Its first step is built: approval, `node_admin`, project membership,
-read scoping, and a guard on every human write. Credentials, worker ownership and OIDC are not,
-and the note says in what order they come. Its § Sequencing records what an independent review
-found in the first attempt, which is worth reading before writing the next guard.
+read scoping, and a guard on every human write. So is OIDC: providers from the environment, an
+`identities` table, and a pending account on first login that a node admin still has to approve.
+What is not built is the per-user `credential` that funds a job, worker ownership and
+`jobs.credential_id` — the rest of that step, `provider_credentials` and `worker_templates`,
+arrived with `docs/design/provisioning.md`. The note says in what order the remainder comes.
+Its § Sequencing records what an independent review found in the first attempt, which is worth
+reading before writing the next guard.
 
 `docs/design/provisioning.md` is the standard for what a job asks for and where a machine comes
 from: resources declared per job, a gate on kind as well as memory and cores, worker templates as

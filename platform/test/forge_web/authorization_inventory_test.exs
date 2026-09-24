@@ -59,9 +59,16 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     "/users/update-password" => :self,
 
     # No credential by definition.
+    # Liveness, answered to anyone: it carries nothing and reads nothing (`ForgeWeb.Plugs.Health`).
+    "/health" => :public,
     "/users/log-in" => :public,
     "/users/log-in/:token" => :public,
     "/users/log-out" => :public,
+    # The two legs of an OIDC login. The callback provisions an account, so it is the one public
+    # route that creates a row — and what it creates is *pending*, which is why that is not a
+    # hole: `docs/design/identity.md` § Approval is the perimeter, not authentication.
+    "/auth/oidc/:provider" => :public,
+    "/auth/oidc/:provider/callback" => :public,
 
     # Bearer token, refused for pending and suspended accounts, then scoped per project.
     "/api/v1/me" => :self,
@@ -107,6 +114,7 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"accounts_live.ex", "reinstate"} => :node_admin,
     {"accounts_live.ex", "promote"} => :node_admin,
     {"accounts_live.ex", "demote"} => :node_admin,
+    {"accounts_live.ex", "delete"} => :node_admin,
     {"chat_live.ex", "send"} => :member,
     {"chat_live.ex", "force"} => :member,
     {"chat_live.ex", "answer"} => :member,
@@ -129,6 +137,10 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"project_settings_live.ex", "model"} => :manage,
     {"project_settings_live.ex", "add-member"} => :manage,
     {"project_settings_live.ex", "remove-member"} => :manage,
+    # Same check as `issue`/`revoke`/`model`/`add-member`/`remove-member` above:
+    # `Projects.put_mirror/5` and `delete_mirror/3` both call `manageable/2`.
+    {"project_settings_live.ex", "add-mirror"} => :manage,
+    {"project_settings_live.ex", "remove-mirror"} => :manage,
     {"project_settings_live.ex", "dismiss"} => :local,
     {"project_settings_live.ex", "toggle-spent"} => :local,
     {"project_settings_live.ex", "validate"} => :local,

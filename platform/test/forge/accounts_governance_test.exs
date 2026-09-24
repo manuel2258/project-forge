@@ -138,6 +138,94 @@ defmodule Forge.AccountsGovernanceTest do
     end
   end
 
+  describe "delete_unapproved_user/2" do
+    test "frees the address a pending account was holding" do
+      admin = node_admin_fixture()
+      squatter = pending_user_fixture(%{email: "colleague@corp.com"})
+
+      assert {:ok, _deleted} = Accounts.delete_unapproved_user(squatter, admin)
+      refute Accounts.get_user_by_email("colleague@corp.com")
+
+      # The whole point: the address can now be used by the person whose it is.
+      assert {:ok, _user} = Accounts.create_operator("colleague@corp.com", "a long enough one")
+    end
+
+    test "takes the identities with it, so the issuer can provision again" do
+      admin = node_admin_fixture()
+
+      {:ok, squatter} =
+        Accounts.log_in_with_identity(%{
+          issuer: "https://id.oecis.io",
+          subject: "sub-1",
+          email: "colleague@corp.com"
+        })
+
+      assert {:ok, _deleted} = Accounts.delete_unapproved_user(squatter, admin)
+      refute Accounts.get_user_by_identity("https://id.oecis.io", "sub-1")
+    end
+
+    # The perimeter, stated as a refusal: this is irreversible, so the page hiding the button is
+    # not what may be relied on. Same shape as every other `govern/4` guard.
+    test "a user who is not a node admin may not delete anyone" do
+      assert {:error, :forbidden} =
+               Accounts.delete_unapproved_user(pending_user_fixture(), user_fixture())
+    end
+
+    # Approval is the line. An approved account has reached projects, answers and decisions, and
+    # the record of what it decided is what `on_delete: :restrict` exists to keep.
+    test "an approved account is not deletable, however quiet its history" do
+      admin = node_admin_fixture()
+
+      assert {:error, :approved} = Accounts.delete_unapproved_user(user_fixture(), admin)
+    end
+
+    test "a suspended but never approved account is still deletable" do
+      admin = node_admin_fixture()
+      {:ok, squatter} = Accounts.suspend_user(pending_user_fixture(), admin)
+
+      assert {:ok, _deleted} = Accounts.delete_unapproved_user(squatter, admin)
+    end
+
+    # The database is the authority on "has this account acted", not a question asked in Elixir.
+    # A pending account cannot normally reach any of the restricting tables, so this reaches
+    # around the perimeter to put a row there and proves the delete is refused rather than
+    # raising an `Ecto.ConstraintError` through whatever called it.
+    test "an account something still points at is refused, not raised through" do
+      admin = node_admin_fixture()
+      squatter = pending_user_fixture()
+
+      project = Forge.ForgeFixtures.project_fixture()
+      now = DateTime.utc_now(:second)
+
+      Forge.Repo.insert_all("project_members", [
+        %{
+          id: Ecto.UUID.bingenerate(),
+          project_id: Ecto.UUID.dump!(project.id),
+          user_id: Ecto.UUID.dump!(squatter.id),
+          role: "member",
+          inserted_at: now,
+          updated_at: now
+        }
+      ])
+
+      assert {:error, :has_history} = Accounts.delete_unapproved_user(squatter, admin)
+      assert Accounts.get_user_by_email(squatter.email)
+    end
+
+    test "the record of the deletion outlives the row" do
+      admin = node_admin_fixture()
+      squatter = pending_user_fixture(%{email: "colleague@corp.com"})
+
+      {:ok, _deleted} = Accounts.delete_unapproved_user(squatter, admin)
+
+      event = last_event("user.deleted")
+
+      assert event.payload["email"] == "colleague@corp.com"
+      assert event.payload["user_id"] == squatter.id
+      assert event.actor == %{"kind" => "user", "id" => admin.id}
+    end
+  end
+
   defp last_event(type) do
     Forge.Repo.one!(
       from e in Forge.Events.Event, where: e.type == ^type, order_by: [desc: e.seq], limit: 1

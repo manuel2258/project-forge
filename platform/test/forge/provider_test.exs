@@ -138,7 +138,12 @@ defmodule Forge.ProviderTest do
   end
 
   test "the cloud-init a machine boots with is written as a secret" do
-    dir = Path.join(System.tmp_dir!(), "forge-provider-#{System.unique_integer([:positive])}")
+    dir =
+      Path.join(
+        System.tmp_dir!(),
+        "#{System.pid()}-forge-provider-#{System.unique_integer([:positive])}"
+      )
+
     firmware = Path.join(dir, "vars.fd")
     File.mkdir_p!(dir)
     File.write!(firmware, "not really firmware")
@@ -197,7 +202,12 @@ defmodule Forge.ProviderTest do
 
   describe "what the local host is holding" do
     setup do
-      dir = Path.join(System.tmp_dir!(), "forge-local-#{System.unique_integer([:positive])}")
+      dir =
+        Path.join(
+          System.tmp_dir!(),
+          "#{System.pid()}-forge-local-#{System.unique_integer([:positive])}"
+        )
+
       File.mkdir_p!(dir)
       on_exit(fn -> File.rm_rf!(dir) end)
 

@@ -40,6 +40,41 @@ defmodule ForgeCore.Document do
   """
   @type opts :: [blocking: :always | :declared]
 
+  @doc """
+  Whether `raw` can be a document's text at all: valid UTF-8, with no NUL byte.
+
+  Not a parse rule — the parser reads bytes and would accept either — but the two places a
+  document goes refuse them: JSON cannot encode a string that is not UTF-8, so a worker's message
+  carrying one fails whole, and Postgres cannot store a NUL in text, so the transaction writing
+  one fails whole. Checked where a document is read and again where it is written, with this.
+  """
+  @spec text?(term()) :: boolean()
+  def text?(raw), do: is_binary(raw) and String.valid?(raw) and not String.contains?(raw, <<0>>)
+
+  @max_bytes 1024 * 1024
+
+  @doc """
+  The largest a document may be, in bytes. A document is markdown a person reads; a mebibyte of
+  it is already more than anybody will. The bound exists because a conversation re-sends every
+  file it wrote on every turn, over a socket, into a transaction, and nothing else limited that.
+  """
+  @spec max_bytes() :: pos_integer()
+  def max_bytes, do: @max_bytes
+
+  @doc """
+  Why `raw` cannot be a document's text, or nil. `text?/1` and `max_bytes/0` together, with the
+  sentence that says which: the one definition the worker reads `out/` with and the platform
+  checks what arrives with.
+  """
+  @spec text_error(term()) :: String.t() | nil
+  def text_error(raw) do
+    cond do
+      not text?(raw) -> "must be UTF-8 text with no NUL byte"
+      byte_size(raw) > @max_bytes -> "must be no larger than #{div(@max_bytes, 1024)} KiB"
+      true -> nil
+    end
+  end
+
   @spec parse(String.t(), opts()) :: {:ok, t()} | {:error, [Error.t()]}
   def parse(text, opts \\ []) when is_binary(text) do
     text = String.replace_prefix(text, "\uFEFF", "")
@@ -104,10 +139,16 @@ defmodule ForgeCore.Document do
     end
   end
 
+  # A NUL can arrive through YAML even when the raw text has none — `title: "a\0b"` is an escape
+  # — and the front matter is stored as `jsonb`, which refuses one with an exception inside the
+  # transaction that writes it, so every check before the write passed and the write still
+  # failed. Refused here, where the value is made, so every writer of a document is covered.
   defp decode_front_matter(yaml) do
     case YamlElixir.read_from_string(yaml) do
       {:ok, map} when is_map(map) ->
-        {map, []}
+        if nul?(map),
+          do: {%{}, [Error.new("front_matter", "must not contain a NUL character")]},
+          else: {map, []}
 
       {:ok, nil} ->
         {%{}, []}
@@ -119,6 +160,11 @@ defmodule ForgeCore.Document do
         {%{}, [Error.new("front_matter", "invalid YAML: #{message}")]}
     end
   end
+
+  defp nul?(value) when is_binary(value), do: String.contains?(value, <<0>>)
+  defp nul?(value) when is_list(value), do: Enum.any?(value, &nul?/1)
+  defp nul?(value) when is_map(value), do: Enum.any?(value, fn {k, v} -> nul?(k) or nul?(v) end)
+  defp nul?(_value), do: false
 
   defp outcome(front_matter) do
     case Map.get(front_matter, "outcome") do

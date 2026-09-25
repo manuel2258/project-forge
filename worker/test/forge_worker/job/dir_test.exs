@@ -48,9 +48,119 @@ defmodule ForgeWorker.Job.DirTest do
     assert File.dir?(Dir.home_dir(job_dir))
   end
 
+  # A reopened conversation's past arrives in its spec and is laid out as a file the manifest
+  # names. Read-only, like every other thing the platform hands the agent to read.
+  test "prepare/3 writes what a reopened conversation already said", %{root: root, spec: spec} do
+    job_dir = Dir.prepare(root, %{spec | replay: "# The conversation so far\n\nhello\n"})
+    path = Path.join(job_dir, "conversation.md")
+
+    assert File.read!(path) == "# The conversation so far\n\nhello\n"
+    assert Bitwise.band(File.stat!(path).mode, 0o777) == 0o444
+  end
+
+  # The directory is keyed by job id and outlives a process, so the file from one start is still
+  # there at the next. A start with no past must not inherit one — and a later reopen must be
+  # able to replace the read-only file the last one left.
+  test "prepare/3 leaves no conversation behind that the spec does not carry", %{
+    root: root,
+    spec: spec
+  } do
+    job_dir = Dir.prepare(root, %{spec | replay: "the first time\n"})
+    assert Dir.prepare(root, %{spec | replay: "the second time\n"}) == job_dir
+    assert File.read!(Path.join(job_dir, "conversation.md")) == "the second time\n"
+
+    Dir.prepare(root, spec)
+    refute File.exists?(Path.join(job_dir, "conversation.md"))
+  end
+
   test "prepare/2 refuses a job id that is not a UUID", %{root: root, spec: spec} do
     assert_raise ArgumentError, ~r/UUID/, fn ->
       Dir.prepare(root, %{spec | job_id: "../escape"})
+    end
+  end
+
+  # The agent owns the job directory, so `out` itself is its to replace, and a path through a
+  # link to a directory it cannot read would have this process — the more privileged user — read
+  # it on the agent's behalf. What is read is decided by the file opened, not by the path.
+  describe "what the agent may arrange under out/" do
+    setup %{root: root, spec: spec} do
+      job_dir = Dir.prepare(root, spec)
+      out = Path.join(job_dir, "out")
+
+      elsewhere = tmp_dir("elsewhere")
+      File.write!(Path.join(elsewhere, "plan.md"), "# Somebody else's\n")
+      File.write!(Path.join(elsewhere, "id_ed25519"), "-----BEGIN OPENSSH PRIVATE KEY-----\n")
+
+      %{job_dir: job_dir, out: out, elsewhere: elsewhere, owner: File.lstat!(job_dir).uid}
+    end
+
+    test "out/ replaced by a link is not listed, for a job or a conversation", context do
+      %{job_dir: job_dir, out: out, elsewhere: elsewhere, spec: spec} = context
+      File.rm_rf!(out)
+      File.ln_s!(elsewhere, out)
+
+      assert Dir.documents(job_dir) == %{documents: %{}, invalid_documents: %{}}
+
+      collected = Dir.collect(job_dir, spec)
+      assert collected.documents == %{}
+      assert "plan.md" in collected.missing
+    end
+
+    test "out/proposals replaced by a link is refused, and nothing in it is read", context do
+      %{job_dir: job_dir, out: out, elsewhere: elsewhere} = context
+      File.ln_s!(elsewhere, Path.join(out, "proposals"))
+
+      assert %{proposals: proposals, invalid_proposals: invalid} = Dir.proposals(job_dir)
+      assert proposals == %{}
+      assert Map.keys(invalid) == ["proposals"]
+      assert invalid["proposals"]["reason"] =~ "must be a directory, not a symlink"
+      assert invalid["proposals"]["raw"] == nil
+    end
+
+    # What the handle says is the rule, so a file that is not the job's own is refused however
+    # the path to it was arranged — a link swapped in after the check, a directory swapped under
+    # it. A second Unix user is what would make one for real; naming another owner is the same
+    # question asked the other way round.
+    test "a file the job does not own is refused, wherever it is", context do
+      %{job_dir: job_dir, out: out, spec: spec, owner: owner} = context
+      File.write!(Path.join(out, "plan.md"), "---\noutcome: done\n---\n# Plan\n")
+      File.mkdir_p!(Path.join(out, "proposals"))
+
+      File.write!(
+        Path.join([out, "proposals", "p.md"]),
+        "# A proposal\n\nBecause it is needed.\n"
+      )
+
+      stranger = owner + 1
+
+      assert %{invalid_documents: %{"plan.md" => reason}} = Dir.documents(job_dir, stranger)
+      assert reason =~ "the job's own file"
+
+      assert %{invalid_proposals: %{"p.md" => %{"reason" => reason, "raw" => nil}}} =
+               Dir.proposals(job_dir, stranger)
+
+      assert reason =~ "the job's own file"
+
+      assert %{invalid: %{"plan.md" => [%{message: message}]}} =
+               Dir.collect(job_dir, spec, stranger)
+
+      assert message =~ "the job's own file"
+
+      # And the job's own owner reads all three, which is what makes the refusal about the owner.
+      assert %{documents: %{"plan.md" => _}} = Dir.documents(job_dir, owner)
+      assert %{proposals: %{"p.md" => _}} = Dir.proposals(job_dir, owner)
+      assert %{documents: %{"plan.md" => _}} = Dir.collect(job_dir, spec, owner)
+    end
+
+    test "a document larger than a mebibyte is refused where it is read", context do
+      %{job_dir: job_dir, out: out} = context
+      File.write!(Path.join(out, "big.md"), String.duplicate("a", 1024 * 1024 + 1))
+      File.write!(Path.join(out, "fits.md"), String.duplicate("a", 1024 * 1024))
+
+      assert %{documents: %{"fits.md" => _}, invalid_documents: %{"big.md" => reason}} =
+               Dir.documents(job_dir)
+
+      assert reason =~ "no larger than 1024 KiB"
     end
   end
 
@@ -216,6 +326,114 @@ defmodule ForgeWorker.Job.DirTest do
     end
   end
 
+  # A conversation declares nothing, so every file it leaves in `out/` is a document it means to
+  # keep — held to a workflow job's rules where they apply. `docs/design/conversations.md`
+  # § Commits.
+  describe "a conversation's documents in out/" do
+    setup do
+      job_dir = Dir.prepare(tmp_dir("documents"), spec())
+      %{job_dir: job_dir, out: Path.join(job_dir, "out")}
+    end
+
+    test "every file is one, as the text the agent wrote, and proposals are not", %{
+      job_dir: job_dir,
+      out: out
+    } do
+      File.write!(Path.join(out, "notes.md"), "# Notes\n\nWhat we found.\n")
+      File.write!(Path.join(out, "plan.md"), "---\noutcome: done\n---\n# Plan\n")
+      File.mkdir_p!(Path.join(out, "proposals"))
+      File.write!(Path.join([out, "proposals", "p.md"]), "# A proposal\n")
+
+      assert Dir.documents(job_dir) == %{
+               documents: %{
+                 "notes.md" => "# Notes\n\nWhat we found.\n",
+                 "plan.md" => "---\noutcome: done\n---\n# Plan\n"
+               },
+               invalid_documents: %{}
+             }
+    end
+
+    # Each of these is a row or a file the platform owns, and a document under the name would be
+    # a new version of the ticket's body, its answers or its changeset, or a document passing
+    # itself off as a proposal. Refused by name, before anything is read.
+    test "a name the platform keeps, or one that is not a name, is refused with why", %{
+      job_dir: job_dir,
+      out: out
+    } do
+      for name <- ["ticket", "answers.md", "changeset", "proposal-x.md", ".hidden"] do
+        File.write!(Path.join(out, name), "# A document\n")
+      end
+
+      %{documents: documents, invalid_documents: invalid} = Dir.documents(job_dir)
+
+      assert documents == %{}
+      assert invalid["ticket"] =~ "reserved"
+      assert invalid["answers.md"] =~ "reserved"
+      assert invalid["changeset"] =~ "reserved"
+      assert invalid["proposal-x.md"] =~ "reserved for ticket proposals"
+      assert invalid[".hidden"] =~ "single path segment"
+    end
+
+    # The worker manager is a more privileged user than the agent: a link would have it read a
+    # file the agent cannot, and publish it as a document.
+    test "a symlink or a directory is refused, not followed", %{job_dir: job_dir, out: out} do
+      secret = Path.join(tmp_dir("secret-chat"), "key")
+      File.write!(secret, "BEGIN PRIVATE KEY")
+      File.ln_s!(secret, Path.join(out, "leak.md"))
+      File.mkdir_p!(Path.join(out, "folder.md"))
+
+      %{documents: documents, invalid_documents: invalid} = Dir.documents(job_dir)
+
+      assert documents == %{}
+      assert invalid["leak.md"] =~ "symlink"
+      assert invalid["folder.md"] =~ "directory"
+    end
+
+    # Opening a FIFO blocks until something writes to it, and the agent can make one. The lstat
+    # in front of the open is what keeps a turn from hanging on it for ever; run in a task with a
+    # deadline, so a regression fails here rather than hanging the suite.
+    test "a FIFO is refused without being opened", %{job_dir: job_dir, out: out} do
+      fifo = Path.join(out, "pipe.md")
+      {_output, 0} = System.cmd("mkfifo", [fifo])
+
+      task = Task.async(fn -> Dir.documents(job_dir) end)
+
+      assert {:ok, %{documents: documents, invalid_documents: invalid}} =
+               Task.yield(task, 5_000) || Task.shutdown(task, :brutal_kill)
+
+      assert documents == %{}
+      assert invalid["pipe.md"] =~ "must be a regular file"
+    end
+
+    # An empty file is a document with nothing in it, not an unreadable one: `:file.read/2` says
+    # `:eof` rather than handing back no bytes.
+    test "an empty file is an empty document", %{job_dir: job_dir, out: out} do
+      File.touch!(Path.join(out, "notes.md"))
+
+      assert %{documents: %{"notes.md" => ""}, invalid_documents: invalid} =
+               Dir.documents(job_dir)
+
+      assert invalid == %{}
+    end
+
+    test "bytes that are not text are refused", %{job_dir: job_dir, out: out} do
+      File.write!(Path.join(out, "image.md"), <<0x89, ?P, ?N, ?G, 0xFF>>)
+      File.write!(Path.join(out, "nul.md"), "# Notes\n" <> <<0>>)
+
+      %{documents: documents, invalid_documents: invalid} = Dir.documents(job_dir)
+
+      assert documents == %{}
+      assert invalid["image.md"] =~ "UTF-8 text"
+      assert invalid["nul.md"] =~ "UTF-8 text"
+    end
+
+    test "a directory with no out/ at all has written nothing", %{job_dir: job_dir, out: out} do
+      File.rm_rf!(out)
+
+      assert Dir.documents(job_dir) == %{documents: %{}, invalid_documents: %{}}
+    end
+  end
+
   describe "proposals in out/" do
     test "are read, and the reserved directory is never an undeclared output" do
       root = tmp_dir("proposals")
@@ -290,6 +508,26 @@ defmodule ForgeWorker.Job.DirTest do
 
       assert %{documents: %{}, invalid: %{"plan.md" => [error]}} = Dir.collect(job_dir, spec)
       assert error.message =~ "symlink"
+    end
+
+    # Bytes that are not UTF-8 cannot be encoded into the JSON the result travels in, so one
+    # such file took the whole result down with it — outcome, cost and every other document —
+    # and the worker re-sent it for ever. Refused where it is read instead, in both readers.
+    test "a declared output or a proposal that is not text is refused where it is read" do
+      root = tmp_dir("not-text")
+      spec = spec()
+      job_dir = Dir.prepare(root, spec)
+      File.write!(Path.join([job_dir, "out", "plan.md"]), <<"---\noutcome: done\n---\n", 0xFF>>)
+      File.mkdir_p!(Path.join([job_dir, "out", "proposals"]))
+      File.write!(Path.join([job_dir, "out", "proposals", "nul.md"]), "# Title\n\n" <> <<0>>)
+
+      collected = Dir.collect(job_dir, spec)
+
+      assert %{documents: %{}, invalid: %{"plan.md" => [error]}} = collected
+      assert error.message =~ "UTF-8 text"
+      assert collected.invalid_proposals["nul.md"]["reason"] =~ "UTF-8 text"
+      # Nothing of it is carried, because nothing of it could be.
+      assert collected.invalid_proposals["nul.md"]["raw"] == nil
     end
 
     test "a job that proposed nothing reports none, and is otherwise ordinary" do

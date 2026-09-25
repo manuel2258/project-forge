@@ -270,13 +270,20 @@ defmodule ForgeCore.Workflow.ParserTest do
       map =
         map
         |> update_in(["states", "refining"], &Map.delete(&1, "budget"))
-        |> put_in(["states", "merged"], %{"env" => "x", "produces" => ["y"], "model" => "opus"})
+        |> put_in(["states", "merged"], %{
+          "env" => "x",
+          "produces" => ["y"],
+          "model" => "opus",
+          "resources" => %{"memory" => "1GiB"}
+        })
 
-      # A human state runs no job, so naming a model for it is naming one for nothing.
+      # A human state runs no job, so naming a model or resources for it is naming them for
+      # nothing.
       assert messages(map) == [
                {"states.merged.env", "not allowed on a human state (no prompt)"},
                {"states.merged.model", "not allowed on a human state (no prompt)"},
                {"states.merged.produces", "not allowed on a human state (no prompt)"},
+               {"states.merged.resources", "not allowed on a human state (no prompt)"},
                {"states.refining.budget", "is required on a job state"}
              ]
     end
@@ -324,6 +331,15 @@ defmodule ForgeCore.Workflow.ParserTest do
                {"states.planning.inputs[1]",
                 "\"proposal-score-table.md\" is reserved for ticket proposals"},
                {"states.verifying.produces[1]", "\"proposals\" is reserved for ticket proposals"}
+             ]
+    end
+
+    test "a transcript's name is not a workflow's to produce", %{map: map} do
+      map = put_in(map, ["states", "verifying", "produces"], ["report.md", "transcript-x.jsonl"])
+
+      assert messages(map) == [
+               {"states.verifying.produces[1]",
+                "\"transcript-x.jsonl\" is reserved for job transcripts"}
              ]
     end
 

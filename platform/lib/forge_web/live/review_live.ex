@@ -82,13 +82,11 @@ defmodule ForgeWeb.ReviewLive do
     |> Enum.sort_by(& &1.version.inserted_at, DateTime)
   end
 
-  defp approve_pairs(%{pending_transition: pending}, changeset) when is_map(pending) do
-    for name <- List.wrap(pending["approve"]),
+  defp approve_pairs(ticket, changeset) do
+    for name <- Forge.Engine.awaiting_approval(ticket),
         changeset && name == Workflow.changeset_artifact(),
         do: {name, changeset.version}
   end
-
-  defp approve_pairs(_ticket, _changeset), do: []
 
   @impl true
   def handle_info({:ticket_changed, id}, %{assigns: %{ticket_id: id}} = socket),

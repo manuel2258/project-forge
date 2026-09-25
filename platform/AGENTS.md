@@ -2,7 +2,10 @@ This is a web application written using the Phoenix web framework.
 
 ## Project guidelines
 
-- Use `mix precommit` alias when you are done with all changes and fix any pending issues
+- Run `bin/check` from the repository root when you are done with all changes and fix what it
+  reports: it is the gate every commit passes (`CLAUDE.md` § Quality gate). The generated
+  `mix precommit` alias still exists, but it skips Credo and coverage and rewrites formatting
+  rather than checking it
 - Use the already included and available `:req` (`Req`) library for HTTP requests, **avoid** `:httpoison`, `:tesla`, and `:httpc`. Req is included by default and is the preferred HTTP client for Phoenix apps
 
 ### Phoenix v1.8 guidelines
@@ -80,7 +83,9 @@ first, then the code.
 The short version, because these are the rules most easily broken by habit:
 
 - The product is **quiet**. Structure is 1px rules, not cards or shadows (`--depth: 0`). Nothing
-  pulses, nothing tails, nothing auto-scrolls, and there is no live transcript anywhere.
+  pulses and nothing is decorative. Live output only where a person is waiting for it — a
+  conversation streams its reply; a running job's stream is allowed and not built — and it never
+  scrolls away from what the reader is looking at (`docs/design/ui.md` § Motion and structure).
 - **A border means you can tap it.** Identifiers — states, outcomes, branches, artifact names — are
   plain mono text with no box. Boxes are for things that do something.
 - **Accent means one thing: a human is being waited on.** Never use it for anything else.
@@ -96,10 +101,13 @@ The short version, because these are the rules most easily broken by habit:
 - **Always** be mindful of where to place routes. `phx.gen.auth` creates multiple router plugs and `live_session` scopes:
   - A plug `:fetch_current_scope_for_user` that is included in the default browser pipeline
   - A plug `:require_authenticated_user` that redirects to the log in page when the user is not authenticated
+  - A plug `:require_approved_user` (ours, not generated) that sends a *pending* account to `/users/pending`. Approval is the perimeter (`docs/design/identity.md` § Approval), so every operator route pipes through it
   - A `live_session :current_user` scope - for routes that need the current user but don't require authentication, similar to `:fetch_current_scope_for_user`
-  - A `live_session :require_authenticated_user` scope - for routes that require authentication, similar to the plug with the same name
-  - In both cases, a `@current_scope` is assigned to the Plug connection and LiveView socket
-  - A plug `redirect_if_user_is_authenticated` that redirects to a default path in case the user is authenticated - useful for a registration page that should only be shown to unauthenticated users
+  - A `live_session :operator` scope (ours) - the product's pages, `on_mount: [{ForgeWeb.UserAuth, :require_approved}, {ForgeWeb.Capacity, :own}]` (the second draws the top bar's window gauge)
+  - A `live_session :require_authenticated_user` scope - the generated settings pages, which here also mount `:require_approved`
+  - `live_session :node_admin` (`/accounts`, `:require_node_admin`) and `live_session :pending` (`/users/pending`, the one page behind authentication that does not require approval)
+  - In every case, a `@current_scope` is assigned to the Plug connection and LiveView socket
+  - **A new route fails `test/forge_web/authorization_inventory_test.exs` until it is classified there** with the guard it carries
 - **Always let the user know in which router scopes, `live_session`, and pipeline you are placing the route, AND SAY WHY**
 - `phx.gen.auth` assigns the `current_scope` assign - it **does not assign a `current_user` assign**
 - Always pass the assign `current_scope` to context modules as first argument. When performing queries, use `current_scope.user` to filter the query results
@@ -109,27 +117,25 @@ The short version, because these are the rules most easily broken by habit:
 
 ### Routes that require authentication
 
-LiveViews that require login should **always be placed inside the __existing__ `live_session :require_authenticated_user` block**:
+LiveViews that require login should **always be placed inside the __existing__ `live_session :operator` block**, which requires an *approved* user rather than merely a logged-in one. `:require_authenticated` alone would let a pending account in:
 
-    scope "/", AppWeb do
-      pipe_through [:browser, :require_authenticated_user]
+    scope "/", ForgeWeb do
+      pipe_through [:browser, :require_authenticated_user, :require_approved_user]
 
-      live_session :require_authenticated_user,
-        on_mount: [{ForgeWeb.UserAuth, :require_authenticated}] do
-        # phx.gen.auth generated routes
-        live "/users/settings", UserLive.Settings, :edit
-        live "/users/settings/confirm-email/:token", UserLive.Settings, :confirm_email
-        # our own routes that require logged in user
-        live "/", MyLiveThatRequiresAuth, :index
+      live_session :operator,
+        on_mount: [{ForgeWeb.UserAuth, :require_approved}, {ForgeWeb.Capacity, :own}] do
+        live "/", QueueLive
+        # our own routes that require an approved user
+        live "/my-page", MyLiveThatRequiresAuth
       end
     end
 
-Controller routes must be placed in a scope that sets the `:require_authenticated_user` plug:
+Controller routes must be placed in a scope that pipes through both `:require_authenticated_user` and `:require_approved_user`:
 
-    scope "/", AppWeb do
-      pipe_through [:browser, :require_authenticated_user]
+    scope "/", ForgeWeb do
+      pipe_through [:browser, :require_authenticated_user, :require_approved_user]
 
-      get "/", MyControllerThatRequiresAuth, :index
+      get "/my-path", MyControllerThatRequiresAuth, :show
     end
 
 ### Routes that work with or without authentication

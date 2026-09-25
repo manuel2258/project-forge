@@ -62,6 +62,17 @@ defmodule ForgeWeb.ChatLiveTest do
     assert html =~ "About this ticket"
   end
 
+  # A conversation nothing can place yet says why, where the reply will appear, and a page that
+  # was already open hears it. A chat sticks nothing, so this is the one surface that says a
+  # template is missing at all (`docs/design/provisioning.md` § The gate).
+  test "a conversation waiting for a machine says why", %{conn: conn, chat: chat} do
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+    refute has_element?(view, "#chat-waiting")
+
+    :ok = Jobs.record_wait(chat, "none_assigned", "Waiting for a template: none is assigned.")
+    assert has_element?(view, "#chat-waiting", "Waiting for a template")
+  end
+
   # The mechanism under streaming: the page is subscribed per job and appends what has arrived,
   # so a partial reply is on screen before the turn ends. A page that reloaded on completion
   # would show nothing until then and pass any test that only looked at the end.
@@ -246,8 +257,183 @@ defmodule ForgeWeb.ChatLiveTest do
     assert html =~ "Reopen"
     refute has_element?(view, "#draft")
 
+    # What reopening does, said where the button is. It said the rest of the conversation was
+    # not replayed, which stopped being true when the replay was built.
+    copy = view |> element("#reopen-copy") |> render()
+    assert copy =~ "given everything said here to read"
+    refute copy =~ "not replayed"
+
     view |> element("button", "Reopen") |> render_click()
     assert Conversations.get!(chat.id).status == :pending
+  end
+
+  # Ending deletes the branch, and ending is the one control on the page that does. The
+  # confirm is where a person finds that out before rather than after, and the line beside the
+  # control says it too — both from one definition, so neither can understate the other.
+  test "ending it says the branch goes with it", %{conn: conn, chat: chat} do
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+    rule = ForgeWeb.Conversations.ending_rule()
+
+    assert rule =~ "its branch is deleted"
+    assert view |> element(~s(button[phx-click="close"])) |> render() =~ rule
+    assert view |> element("#ending-copy") |> render() =~ "If you end it, #{rule}"
+  end
+
+  # Closing is not terminal: the branch it deleted is made again on reopen, from where opening
+  # made it — and the page says which, beside the button, rather than the new process finding a
+  # checkout without the work its replies describe.
+  test "a stopped conversation says where a deleted branch starts again", %{
+    conn: conn,
+    chat: chat,
+    project: project
+  } do
+    :ok = Conversations.close(chat)
+
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+    copy = view |> element("#reopen-copy") |> render()
+
+    assert copy =~ "Its branch is gone"
+    assert copy =~ project.default_branch
+    refute copy =~ "on its branch as it stands"
+  end
+
+  # Where the page says a deleted branch comes back from is where the reopen makes it — one
+  # definition, `Conversations.base_branch/2` — and for a ticket chat that is the ticket's branch.
+  test "a stopped ticket chat says its branch starts again from the ticket's", %{
+    conn: conn,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+    {:ok, chat} = Conversations.open(project, "about this", ticket: ticket)
+    :ok = Conversations.close(chat)
+
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+    copy = view |> element("#reopen-copy") |> render()
+
+    assert copy =~ ticket.branch
+    refute copy =~ ">#{project.default_branch}<"
+  end
+
+  # A merge deletes the branch too, and a conversation merged and then left idle was told its
+  # branch "was deleted when it ended" — which it was not; it ended with nothing to delete.
+  test "a merged conversation that stopped is not told its ending deleted the branch", %{
+    conn: conn,
+    chat: chat,
+    project: project
+  } do
+    {:ok, _result} = Forge.Merge.perform_chat(chat)
+    refute Forge.Git.branch_exists?(Projects.repo_path(project), "chat/" <> chat.id)
+    {:ok, _chat} = Conversations.ended(chat, nil, "idle")
+
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+    copy = view |> element("#reopen-copy") |> render()
+
+    assert copy =~ "a merge deletes it"
+    refute copy =~ "deleted when it ended"
+  end
+
+  # Every ticket change on the node reaches the page on the global topic, and a handler on one
+  # filters before it does any work. The page's own ticket is what it reloads for; another
+  # ticket's change is ignored. A status written without a notice is how the two are told apart:
+  # a reload would draw it, and ignoring the message leaves the page as it was.
+  test "another ticket's change does not reload the page; its own ticket's does", %{
+    conn: conn,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+    {:ok, other} = Tickets.admit(project, %{title: "Something else"}, :system)
+    {:ok, chat} = Conversations.open(project, "about this", ticket: ticket)
+
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+    assert has_element?(view, "#draft")
+
+    stop_quietly(chat)
+
+    send(view.pid, {:ticket_changed, other.id})
+    assert has_element?(view, "#draft")
+
+    send(view.pid, {:ticket_changed, ticket.id})
+    refute has_element?(view, "#draft")
+  end
+
+  # A project chat has no ticket, and its changes are announced under `nil`.
+  test "a project chat reloads for the changes announced without a ticket", %{
+    conn: conn,
+    chat: chat,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+    stop_quietly(chat)
+
+    send(view.pid, {:ticket_changed, ticket.id})
+    assert has_element?(view, "#draft")
+
+    send(view.pid, {:ticket_changed, nil})
+    refute has_element?(view, "#draft")
+  end
+
+  defp stop_quietly(chat) do
+    {:ok, _stopped} =
+      chat |> Jobs.Job.progress_changeset(%{status: :hibernated}) |> Forge.Repo.update()
+  end
+
+  # The page draws Reopen only when the conversation is not live, but an event is anything the
+  # socket sends. Reopened while running, a conversation lost the `worker_id` its worker reports
+  # under; the context refuses, and the page says so rather than crashing or pretending.
+  test "a reopen sent to a live conversation is refused, and said", %{conn: conn, chat: chat} do
+    {:ok, worker, _token} = Forge.Workers.create(%{provider: "fake"})
+
+    {:ok, _running} =
+      chat
+      |> Jobs.Job.progress_changeset(%{status: :running, worker_id: worker.id})
+      |> Forge.Repo.update()
+
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+    refute has_element?(view, ~s(button[phx-click="reopen"]))
+
+    assert render_hook(view, "reopen", %{}) =~ "still live"
+    assert %{status: :running, worker_id: worker_id} = Jobs.get!(chat.id)
+    assert worker_id == worker.id
+  end
+
+  # And the other way: End is drawn only while it is live, so a close arriving after it stopped
+  # is a stale page or a crafted event. It was a match on `:ok` that took the view down.
+  test "a close sent to a stopped conversation is refused, and said", %{conn: conn, chat: chat} do
+    {:ok, _chat} = Conversations.ended(chat, nil, "idle")
+
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+    refute has_element?(view, ~s(button[phx-click="close"]))
+
+    assert render_hook(view, "close", %{}) =~ "already stopped"
+    assert Jobs.get!(chat.id).status == :finished
+  end
+
+  # Remaking the branch is a git write and can fail. The page says so rather than crashing.
+  test "a reopen that cannot make its branch again says so", %{conn: conn, project: project} do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+    {:ok, chat} = Conversations.open(project, "about this", ticket: ticket)
+    :ok = Conversations.close(chat)
+    :ok = Forge.Git.delete_branch(Projects.repo_path(project), ticket.branch)
+
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+    assert view |> element("button", "Reopen") |> render_click() =~ "Could not reopen"
+    assert Conversations.get!(chat.id).status == :finished
+  end
+
+  test "a stopped conversation whose branch is kept says it carries on from it", %{
+    conn: conn,
+    chat: chat
+  } do
+    {:ok, _chat} = Conversations.ended(chat, nil, "idle")
+
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+    copy = view |> element("#reopen-copy") |> render()
+
+    assert copy =~ "on its branch as it stands"
+    refute copy =~ "was deleted"
   end
 
   # The box was already swapped for Reopen; the answer rows were not, and an answer row *is* a
@@ -309,6 +495,94 @@ defmodule ForgeWeb.ChatLiveTest do
     assert html =~ "This conversation has stopped"
     assert html =~ "Reopen"
     refute Enum.any?(Conversations.messages(chat.id), &(&1.text == "postgres"))
+  end
+
+  defp wrote(chat, index, documents) do
+    {:ok, _chat} =
+      Conversations.record_turn(chat, %{
+        "turn" => index,
+        "harness" => %{"turns" => 1, "cost_usd" => 0.01 * index, "subtype" => "success"},
+        "documents" => documents
+      })
+  end
+
+  # Every artifact name in the product links to its exact version (ui.md § Addressable artifact
+  # versions), and the rail listed a conversation's by bare name because it had no address.
+  test "what it wrote links to each exact version, at the conversation's address", %{
+    conn: conn,
+    chat: chat
+  } do
+    wrote(chat, 1, %{"notes.md" => "# Notes\n"})
+    wrote(chat, 2, %{"notes.md" => "# More notes\n"})
+
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+    assert has_element?(view, ~s(#written a[href="/chats/#{chat.id}/artifacts/notes.md/1"]))
+    assert has_element?(view, ~s(#written a[href="/chats/#{chat.id}/artifacts/notes.md/2"]))
+  end
+
+  # A ticket chat writes against its ticket, so its documents are the ticket's and have the
+  # ticket's address — the conversation's would be a miss for them.
+  test "a ticket chat's documents link to the ticket's address", %{conn: conn, project: project} do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+    {:ok, chat} = Conversations.open(project, "rewrite the plan", ticket: ticket)
+    wrote(chat, 1, %{"plan.md" => "# Plan\n"})
+
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+    assert has_element?(
+             view,
+             ~s(#written a[href="/tickets/#{project.name}/#{ticket.number}/artifacts/plan.md/1"])
+           )
+
+    refute has_element?(view, ~s(#written a[href^="/chats/"]))
+  end
+
+  # A ticket chat's proposals are not the ticket's: a proposal is scoped to the job that wrote it
+  # (`ticket-proposals.md` § Scope), so it has the conversation's address even when the
+  # conversation is about a ticket — and that address has to serve it. Only a project chat's were
+  # tested, and a page or a route that took "has a ticket" for "is the ticket's" passed.
+  test "a ticket chat's proposal links to the conversation's address, which serves it", %{
+    conn: conn,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+    {:ok, chat} = Conversations.open(project, "file a follow-up", ticket: ticket)
+
+    {:ok, _chat} =
+      Conversations.record_turn(chat, %{
+        "turn" => 1,
+        "harness" => %{"turns" => 1, "cost_usd" => 0.01, "subtype" => "success"},
+        "proposals" => %{
+          "later.md" => %{
+            "title" => "Do it later",
+            "body" => "b",
+            "raw" => "# Do it later\n\nb\n"
+          }
+        }
+      })
+
+    href = "/chats/#{chat.id}/artifacts/proposal-later.md/1"
+
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+    assert has_element?(view, ~s(#written a[href="#{href}"]))
+
+    assert get(conn, href) |> response(200) =~ "Do it later"
+  end
+
+  # A document that did not arrive would otherwise only be absent, which reads the same as one
+  # that was never written.
+  test "what the last turn left that was not recorded is listed, with why", %{
+    conn: conn,
+    chat: chat
+  } do
+    wrote(chat, 1, %{"ticket" => "# Not mine to write\n"})
+
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+    row = view |> element("#unrecorded li") |> render()
+    assert row =~ "ticket"
+    assert row =~ "reserved"
   end
 
   test "it requires a logged-in operator", %{chat: chat} do

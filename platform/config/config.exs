@@ -24,15 +24,22 @@ config :forge,
   ecto_repos: [Forge.Repo],
   generators: [timestamp_type: :utc_datetime, binary_id: true]
 
-# Where the platform keeps bare repositories, worktrees and job directories, and how the
-# embedded local worker runs jobs. Overridden per environment and in runtime.exs.
+# Where the platform keeps its data — the store, the local driver's machine directories and git's
+# scratch space — and how jobs are scheduled and bounded. The platform runs no job itself: a
+# worker does, and how it enters a project's environment is the worker's own setting
+# (`FORGE_NIX_ENV` in worker/config/runtime.exs). Overridden per environment and in runtime.exs.
 config :forge, Forge.Jobs,
   data_dir: "tmp/forge",
   run_jobs: true,
-  max_concurrent: 2,
   poll_ms: 2_000,
   wall_clock_ms: 3_600_000,
-  nix_env: false,
+  # The worker starts a job's clock only once its clone and seed are ready, so a store token
+  # spent after that — the transcript's, a conversation's history — has to outlive the
+  # preparation too. An hour, generously. Not from M4's 35-second cold start, which is mostly boot
+  # and the Nix store, both outside this window: what is inside it is the seed, 3.3 seconds over
+  # loopback in M4, and a provider's network makes that slower by an amount nobody has measured.
+  # See docs/design/storage.md § Serving.
+  preparation_margin_ms: 3_600_000,
   harness_opts: [],
   # A job reaches its repository over the platform's own git endpoint. The base URL is derived
   # from the endpoint unless something in front rewrites the host; the token outlives the job's
@@ -60,9 +67,9 @@ config :forge, Forge.Provider,
   # here; what is location-bound is which server types can be ordered.
   location: "nbg1"
 
-# The worker tier's numbers. `slice_bytes` is M3's observed peak plus its margin and
-# `idle_period_ms` is a labelled guess until M4 runs, which it cannot until this milestone
-# exists. Both are the sample's, not the operator's: docs/measurements.md § M3.
+# The worker tier's numbers. `slice_bytes` is M3's observed peak plus its margin
+# (docs/measurements.md § M3) and `idle_period_ms` is set from M4's cold start (below). Both are
+# the sample's, not the operator's.
 config :forge, Forge.Workers,
   slice_bytes: 2210 * 1024 * 1024,
   # What a chat gets instead, because `slice_bytes` is a cold *build*'s peak and a chat is an

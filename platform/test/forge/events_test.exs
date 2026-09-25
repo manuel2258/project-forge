@@ -63,19 +63,21 @@ defmodule Forge.EventsTest do
   describe "summary/1" do
     # The clause order is the whole design of this function: the typed clauses render the events
     # a reader actually follows, the empty-payload clause keeps a bare event from rendering as
-    # `%{}`, and the general clause is the fallback that inspects whatever is left. Nothing else
-    # in the platform calls it, so `Forge.CLI`'s event log is the only place a wrong clause shows,
-    # and there it reads as an event that says nothing rather than as an error.
+    # `%{}`, and the general clause is the fallback that inspects whatever is left. Its readers
+    # are `Forge.CLI`'s event log, the job page's stream, and the wait reason the ticket and
+    # conversation pages draw, and in each a wrong clause reads as an event that says nothing,
+    # or says it as data, rather than as an error.
 
     test "an event with nothing to say says nothing" do
       assert Events.summary(%Event{type: "ticket.noted", payload: %{}}) == ""
     end
 
     test "an event with a payload says what is in it" do
-      summary = Events.summary(%Event{type: "job.interrupted", payload: %{"reason" => "drained"}})
+      summary =
+        Events.summary(%Event{type: "job.interrupted", payload: %{"reason" => "worker_lost"}})
 
       assert summary =~ "reason="
-      assert summary =~ "drained"
+      assert summary =~ "worker_lost"
     end
 
     # A conversation's own words. Without the `chat.message` clause they would reach the log as
@@ -86,6 +88,18 @@ defmodule Forge.EventsTest do
                "are you there?"
 
       assert Events.summary(%Event{type: "chat.turn", payload: %{"turn" => 3}}) == "turn 3"
+    end
+
+    # The scheduler's sentence, which the ticket and conversation pages draw under a waiting
+    # job. The reason code beside it is for comparing passes, and the general clause would put
+    # both on the page as data.
+    test "a wait is the sentence the scheduler wrote, not its reason code" do
+      event = %Event{
+        type: "job.waiting",
+        payload: %{"reason" => "at_capacity", "text" => "Waiting for room."}
+      }
+
+      assert Events.summary(event) == "Waiting for room."
     end
 
     test "a long message is bounded rather than filling the line" do

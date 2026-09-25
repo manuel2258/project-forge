@@ -135,7 +135,15 @@ defmodule Mix.Tasks.Forge.E2e.Chat do
       merges(chat, project)
     end)
 
-    unless opts[:keep], do: :ok = Conversations.close(chat, "e2e")
+    # A cleanup for a run whose closing step failed before it closed anything. After one that
+    # passed, the conversation has already stopped, and closing it again is refused — which here
+    # is the nothing there is left to do.
+    unless opts[:keep] do
+      case Conversations.close(chat, "e2e") do
+        :ok -> :ok
+        {:error, :not_live} -> :ok
+      end
+    end
   end
 
   defp step_start(project, token) do

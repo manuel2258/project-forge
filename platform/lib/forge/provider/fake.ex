@@ -58,6 +58,15 @@ defmodule Forge.Provider.Fake do
   @impl Forge.Provider
   def credential_fields, do: [%{key: "token", label: "API token"}]
 
+  # Nothing unless a test says otherwise with `requiring/1`, so a page test can draw the form
+  # for a provider that needs an image without a network behind it.
+  @impl Forge.Provider
+  def required_template_fields, do: :persistent_term.get({__MODULE__, :requires}, [])
+
+  @doc "Makes `required_template_fields/0` answer `fields` until `allow/0`."
+  @spec requiring([:size | :image]) :: :ok
+  def requiring(fields), do: :persistent_term.put({__MODULE__, :requires}, fields)
+
   @impl Forge.Provider
   def list(credential) do
     notify({:provider_list, credential})
@@ -92,11 +101,15 @@ defmodule Forge.Provider.Fake do
   @spec refuse_destroy(term()) :: :ok
   def refuse_destroy(reason), do: :persistent_term.put({__MODULE__, :refuse_destroy}, reason)
 
-  @doc "Stops refusing, both kinds. Called on exit by anything that called either."
+  @doc """
+  Stops refusing, both kinds, and stops requiring template fields. Called on exit by anything
+  that called `refuse/1`, `refuse_destroy/1` or `requiring/1`.
+  """
   @spec allow() :: :ok
   def allow do
     :persistent_term.erase({__MODULE__, :refuse})
     :persistent_term.erase({__MODULE__, :refuse_destroy})
+    :persistent_term.erase({__MODULE__, :requires})
     :ok
   end
 

@@ -1,8 +1,16 @@
 defmodule Forge.Queue do
   @moduledoc """
   The operator's queue: everything waiting on a human decision, in one ordered list.
-  Blocking questions, pending approvals, stuck tickets, and tickets resting in a human
-  state that has a way forward.
+  Blocking questions, pending approvals, stuck tickets, tickets resting in a human state that
+  has a way forward, and conversations waiting on a reply.
+
+  And one kind that is waiting on nobody: an open non-blocking question, served as
+  `:assumption` — the agent said what it assumed and carried on. It is here so that it reaches
+  someone who has not opened its ticket (`docs/design/job-prompt.md` § Non-blocking questions),
+  and it is a kind of its own so that nothing reading the queue can count it as a question that
+  halted a job. `waiting?/1` is the one place that says which is which. The list is the
+  decisions, oldest first, and then the assumptions, oldest first: they are never sorted in among
+  what is waiting (`docs/design/ui.md` § Not waiting on you).
   """
 
   import Ecto.Query, only: [from: 2, dynamic: 1, dynamic: 2]
@@ -23,7 +31,7 @@ defmodule Forge.Queue do
   take a project of its own rather than reaching through the ticket.
   """
   @type item :: %{
-          kind: :question | :approval | :stuck | :review | :chat,
+          kind: :question | :assumption | :approval | :stuck | :review | :chat,
           ticket: Ticket.t() | nil,
           project: Projects.Project.t(),
           since: DateTime.t(),
@@ -48,6 +56,14 @@ defmodule Forge.Queue do
   @spec items(User.t()) :: [item()]
   def items(%User{} = user), do: build(Enum.map(Projects.list(user), & &1.id))
 
+  @doc """
+  Whether an item is waiting on a person. Everything is, except an assumption: a question the
+  agent did not stop for, which no count of what is waiting may include.
+  """
+  @spec waiting?(item()) :: boolean()
+  def waiting?(%{kind: :assumption}), do: false
+  def waiting?(%{kind: _kind}), do: true
+
   defp build(project_ids) do
     tickets =
       Repo.all(
@@ -70,9 +86,14 @@ defmodule Forge.Queue do
           order_by: t.inserted_at
       )
 
-    (questions(tickets) ++ Enum.flat_map(tickets, &ticket_items/1) ++ chats(project_ids))
-    |> Enum.sort_by(& &1.since, DateTime)
+    {waiting, assumed} =
+      (questions(tickets) ++ Enum.flat_map(tickets, &ticket_items/1) ++ chats(project_ids))
+      |> Enum.split_with(&waiting?/1)
+
+    oldest_first(waiting) ++ oldest_first(assumed)
   end
+
+  defp oldest_first(items), do: Enum.sort_by(items, & &1.since, DateTime)
 
   # `true` rather than a missing clause, so that the scoped and unscoped reads run the same
   # query shape and a mistake in one cannot pass because the other took a different path.
@@ -116,21 +137,22 @@ defmodule Forge.Queue do
     }
   end
 
+  # Every open question, blocking or not. The kind is what keeps them apart: a blocking one halted
+  # a job and is a decision; a non-blocking one is an assumption the job carried on from.
   defp questions(tickets) do
     by_id = Map.new(tickets, &{&1.id, &1})
 
     Enum.flat_map(tickets, fn ticket ->
       ticket.id
       |> Artifacts.open_questions()
-      |> Enum.filter(& &1.blocking)
       |> Enum.map(fn question ->
         %{
-          kind: :question,
+          kind: if(question.blocking, do: :question, else: :assumption),
           ticket: by_id[ticket.id],
           project: Projects.get!(ticket.project_id),
           since: question.inserted_at,
           question: question,
-          detail: %{key: question.key, text: question.text}
+          detail: %{key: question.key, text: question.text, assumption: question.assumption}
         }
       end)
     end)

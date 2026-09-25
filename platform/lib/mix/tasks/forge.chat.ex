@@ -24,6 +24,14 @@ defmodule Mix.Tasks.Forge.Chat do
   The platform must be running under that name and cookie:
 
       elixir --sname forge --cookie forge-e2e -S mix phx.server
+
+  ## `close` deletes the branch, and asks nothing first
+
+  Closing is the abandon (`docs/design/conversations.md` § Lifetime): once the ending is
+  recorded, the conversation's branch is deleted unless it would not merge cleanly, and work on
+  it that was never merged goes with it. The page and the chats list confirm before they close;
+  this does not. Merge what you want to keep first, from the conversation's page. A conversation
+  that has already stopped is refused rather than closed again.
   """
 
   use Mix.Task
@@ -67,8 +75,16 @@ defmodule Mix.Tasks.Forge.Chat do
   end
 
   defp dispatch(["close", id], opts) do
-    :ok = on_node(opts, Conversations, :close, [Conversations.get!(id), "closed"])
-    Mix.shell().info("closing #{id}; the last turn finishes first")
+    case on_node(opts, Conversations, :close, [Conversations.get!(id), "closed"]) do
+      :ok ->
+        Mix.shell().info(
+          "closing #{id}; the last turn finishes first, then its branch is deleted unless it " <>
+            "would not merge cleanly"
+        )
+
+      {:error, reason} ->
+        Mix.raise("could not close: #{inspect(reason)}")
+    end
   end
 
   defp dispatch(["show", id], _opts) do

@@ -55,9 +55,9 @@ These decisions are settled. They are not to be reopened.
 
 ## Execution
 
-- Three tiers: a small always-on orchestrator, one large worker created on demand, and a durable store for blobs and seeds (object storage once deployed).
+- Three tiers: a small always-on orchestrator, workers created on demand, and a durable store for blobs and seeds. *Two things here changed. The worker tier was one large machine and is plural: a worker template says what machine to make, how many may exist (`max_workers`), how long one may idle and which job kinds it takes (`design/provisioning.md`). And the store was to become object storage once deployed; it is a directory on the platform host and object storage is not planned (§ Technology, below).*
 - The orchestrator holds the state machine, event log, artifact store, git, credentials and the web application. It compiles nothing.
-- The worker hosts all agents for a session and is destroyed after a configurable idle period.
+- A worker hosts several agents at once and is destroyed after a configurable idle period — its template's, or the node's when the template names none.
 - Each job runs in its own resource-limited slice: hard memory ceiling so an out-of-memory build kills one job rather than the machine, and proportional CPU sharing so agents idle on inference donate capacity to whoever is compiling.
 - Each job gets its own worktree and its own build directory, cloned from a warm seed using filesystem-level copy-on-write.
 - No attached block volume, therefore no single-writer constraint.
@@ -81,8 +81,10 @@ These decisions are settled. They are not to be reopened.
   running job's stream — and nowhere else. *Reverses an earlier decision ("there is no live
   transcript view"), which generalised a true point about unattended work into a ban on live
   output as such. `docs/design/ui.md` § Motion and structure carries the distinction.*
-- Ticket proposals are digested, never queued: the queue is what will not move until a person
-  acts, and a proposal blocks nothing.
+- Ticket proposals are digested, never queued: the queue's decisions are what will not move until
+  a person acts, and a proposal blocks nothing. *The queue also serves open non-blocking
+  questions, beneath its decisions and in no count of what is waiting (`docs/design/ui.md` § Not
+  waiting on you); a proposal is not among them, and is decided on the project page.*
 - Message delivery must be visibly reliable: message state shown, sends retried, answers composed offline and synced. A silently dropped message must be impossible.
 
 ## Security and users
@@ -95,8 +97,12 @@ These decisions are settled. They are not to be reopened.
 - **An OIDC login provisions a user on the spot** — no prior row, no invitation, no linking
   step. Identity is `(issuer, subject)`, never email; the same person arriving through two
   issuers is two users, deliberately.
-- **A first login creates a pending account, local and OIDC alike, that a node admin approves.**
-  Approval is the perimeter, which is what lets everything behind it be permissive.
+- **An account that arrives through a login page is pending until a node admin approves it.**
+  Approval is the perimeter, which is what lets everything behind it be permissive. Only an OIDC
+  first login creates one: browser registration is off, a magic link goes only to an address that
+  already has an account, and an account made on the host (`Forge.Release.create_operator/3`,
+  `mix forge.user.add`) is approved outright. *This said "local and OIDC alike"; no local login
+  creates an account.*
 - **`node_admin` is account governance and nothing else**: approve, suspend, promote. Seeded on
   the host. It grants no access to any project. It is the only global role.
 - **Authorization is per project.** `project_member` with two roles: `admin` (settings, delete,
@@ -166,14 +172,14 @@ Settled for the project:
 Settled for the PoC, reversible afterwards on evidence from it (see `poc-plan.md`):
 
 - One repository, three Mix projects joined by path dependencies, no umbrella: `forge_core`, `forge`, `forge_worker`.
-- Postgres on the orchestrator. Oban for durable background work.
+- Postgres on the orchestrator. Durable background work is rows in Postgres: a job is a row, `Forge.Jobs.Scheduler` (one GenServer) hands pending ones out, and `Forge.Jobs.recover/0` re-queues on boot the workflow jobs a previous node left running. *This said "Oban for durable background work"; Oban was never added.*
 - Worker dials out over a Phoenix Channel, authenticated by a per-worker token injected at creation.
 - Git served by the platform over smart HTTP with a per-job short-lived token. No SSH: the operator reaches a repository over the same endpoint, with a token they mint — including the one shape that may write the default branch, fast-forward only, which is what seeds a repository and changes a workflow (`design/git-hosting.md` § The default-branch token, and what it costs).
 - The operator's Claude subscription (OAuth token) funds execution. API key billing remains a configuration choice; the comparison is not run.
 - Job isolation by transient systemd units with memory and CPU limits, a Unix user per job, environment via `nix develop`.
 - btrfs for copy-on-write worktrees and build directories.
-- A local VM driver behind the provider driver for the PoC; Hetzner as the second implementation in the closing step. **The Hetzner driver is written and has never run against Hetzner**, so the closing step is now a boot rather than an implementation. Which driver speaks for a machine is resolved per machine from the row rather than per node from configuration (`docs/design/provisioning.md`), which is what a fleet spanning two providers needs and what one global `impl` prevented.
+- A local VM driver behind the provider driver for the PoC; Hetzner as the second implementation in the closing step. **The Hetzner driver is written and has created and destroyed real Hetzner machines; no Hetzner worker has yet connected to a platform and run a job**, so what the closing step still owes the driver is that, not an implementation. Which driver speaks for a machine is resolved per machine from the row rather than per node from configuration (`docs/design/provisioning.md`), which is what a fleet spanning two providers needs and what one global `impl` prevented.
 - A storage behaviour for blobs and worker seeds, like the provider driver: one implementation, a directory on the platform host served over HTTP by the platform. No S3 client and no MinIO.
 - **Object storage is not a precondition for deploying, and the closing step no longer carries it.** The case for it was durability — "so seeds and blobs survive the platform host" — and durability is not what a bucket buys on its own. `artifact_version.blob_uri` is the only thing that maps a key to meaning and keys are opaque by design, so blobs that outlive the database are bytes with no names; of the three things the host holds that must survive it — Postgres, the bare repositories, the store — the store is the most replaceable (a seed is a warm build directory a job can rebuild) and the only one a bucket would cover, while the repositories already have the mirror and Postgres has nothing. One backup covers all three. What would move the decision is the host's disk becoming the binding constraint, or the store having to outlive the host it sits on; `design/storage.md` § What would move this to S3. The behaviour is what keeps that cheap: a second implementation is a module and a config key.
 - The PoC's goal is a functionally minimal platform the operator then deploys for their own project (a game); nothing in it may depend on that project or its language. The workload is a parameter: environment, build command and build directory come from the project's own workflow and flake.
-- The PoC runs entirely on the operator's machine and is independent of any particular real project. No deployment, no cloud machine, no phone until it concludes; those are one closing step after the last milestone.
+- The PoC runs entirely on the operator's machine and is independent of any particular real project. No deployment, no cloud machine, no phone until it concludes; those are one closing step after the last milestone. *Overtaken in part: the deployment path and the Hetzner driver were built without waiting for milestone 5, and `poc-plan.md` § Closing step says which parts of that step remain.*

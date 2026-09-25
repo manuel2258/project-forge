@@ -65,7 +65,8 @@ a person approving it and the platform merging it — never by a push from here.
 
 A conversation is the other thing the platform runs: an agent a person talks to, in a project's or
 a ticket's context, with no state, no outcome and no end until the person stops. It commits to its
-own branch like a job and the person merges that branch if they want the work.
+own branch like a job and the person merges that branch if they want the work; ending the
+conversation deletes a branch that was not merged, unless it would not merge cleanly.
 
 Bootstrapping a project — writing its first `.forge/workflow.yml` — is a conversation's job, not a
 workflow's, because until that file exists there is no workflow to run.
@@ -80,5 +81,6 @@ platform whatever you do, and a job stopped by a ceiling is recorded as having b
 - `$FORGE_JOB/platform/` — this file, and `workflow-grammar.md`, which is what
   `.forge/workflow.yml` may contain and what the validator accepts.
 - `$FORGE_JOB/inputs/` — what you were given, read-only.
-- `$FORGE_JOB/out/` — what you write, if you are a job.
+- `$FORGE_JOB/out/` — what you write: a job's declared outputs, or a conversation's documents.
 - `$FORGE_JOB/history/` — for a conversation about a ticket, what already ran on it.
+- `$FORGE_JOB/conversation.md` — for a conversation that was reopened, what was said before.

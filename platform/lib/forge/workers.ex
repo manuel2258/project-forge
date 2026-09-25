@@ -106,14 +106,17 @@ defmodule Forge.Workers do
   idle period; a permanent one is its owner's, and the row governing the gate
   (`docs/design/provisioning.md` § What a worker offers) is what makes the edit survive a
   reconnect.
+
+  **The guard is here and not on the workers page**, where it once was: the page matched
+  `managed: false` itself and then called `update/2`, whose changeset casts every field the row
+  has (`docs/design/identity.md` § Where the guard lives). Only the three figures are cast
+  (`Worker.offer_changeset/2`), and both numbers are required.
   """
   @spec set_offer(User.t(), String.t(), map()) ::
           {:ok, Worker.t()} | {:error, :not_found | :made_by_the_platform | Ecto.Changeset.t()}
   def set_offer(%User{} = user, id, attrs) do
-    case owned(user, id) do
-      nil -> {:error, :not_found}
-      %Worker{managed: true} -> {:error, :made_by_the_platform}
-      worker -> update(worker, Map.take(attrs, [:memory_budget, :cores, :accepts]))
+    with {:ok, worker} <- owned_permanent(user, id) do
+      worker |> Worker.offer_changeset(attrs) |> Repo.update()
     end
   end
 
@@ -230,12 +233,31 @@ defmodule Forge.Workers do
 
   def authenticate(_worker_id, _token), do: :error
 
+  @doc """
+  Writes any field of the row. **The platform's own writes only** — `busy/1`, `ready/2`,
+  `release/1`, the sweeps. It takes no actor and casts every field, `managed` and the token hash
+  included, so no page or API route may call it; a person's writes are `set_offer/3`,
+  `assign/3` and `unassign/3`.
+  """
   @spec update(Worker.t(), map()) :: {:ok, Worker.t()} | {:error, Ecto.Changeset.t()}
   def update(%Worker{} = worker, attrs), do: Repo.update(Worker.changeset(worker, attrs))
 
-  @doc "The worker has taken a job on."
+  @doc """
+  The worker has taken a job on.
+
+  **Written whatever the struct says.** The scheduler holds the row it read at the start of the
+  pass, and a job ending in between can have made the machine idle since: a struct that still
+  says `busy` is no change to Ecto, so nothing was written, the row stayed idle under a running
+  job, and the idle sweep destroyed the machine with the job still on it.
+  """
   @spec busy(Worker.t()) :: {:ok, Worker.t()} | {:error, Ecto.Changeset.t()}
-  def busy(%Worker{} = worker), do: update(worker, %{status: :busy, idle_since: nil})
+  def busy(%Worker{} = worker) do
+    worker
+    |> Worker.changeset(%{})
+    |> Ecto.Changeset.force_change(:status, :busy)
+    |> Ecto.Changeset.force_change(:idle_since, nil)
+    |> Repo.update()
+  end
 
   @doc """
   A job on this worker ended. When it was the last one the machine goes idle, and the clock
@@ -281,7 +303,8 @@ defmodule Forge.Workers do
     accepts = accepts_from(report["accepts"])
 
     attrs =
-      %{status: :ready, last_seen_at: now(), reported: reported(report)}
+      %{last_seen_at: now(), reported: reported(report)}
+      |> Map.merge(readiness(worker))
       |> fill(worker, :memory_budget, memory_budget)
       |> fill(worker, :cores, cores)
       |> fill(worker, :accepts, accepts)
@@ -293,6 +316,19 @@ defmodule Forge.Workers do
     Provisioning.succeeded(worker.template_id)
 
     update(worker, if(is_map(harness), do: Map.put(attrs, :harness, harness), else: attrs))
+  end
+
+  # **Up with nothing to do is idle, and the clock starts now.** Only a job ending used to make a
+  # machine idle, so a machine that came up and was never given anything — made for a job that
+  # was placed elsewhere first, or whose project stopped being one its template serves — sat
+  # `:ready` and was never swept, billing until somebody noticed. A machine that was already idle
+  # keeps its clock, or reconnecting would be a way to live for ever.
+  defp readiness(%Worker{id: id} = worker) do
+    cond do
+      Forge.Jobs.running_on(id) != [] -> %{status: :ready, idle_since: nil}
+      worker.status == :idle and not is_nil(worker.idle_since) -> %{status: :idle}
+      true -> %{status: :idle, idle_since: now()}
+    end
   end
 
   # Only the figures, and only as the machine gave them: `harness` has a column of its own and
@@ -689,20 +725,45 @@ defmodule Forge.Workers do
   end
 
   defp create_from(template) do
-    if Provisioning.live_count(template) < template.max_workers do
+    with :ok <- room(template),
+         {:ok, credential} <- spendable(template) do
       do_create(
         Provisioning.Template.worker_attrs(template),
         %{size: template.size, image: template.image},
-        template
+        credential
       )
-    else
-      {:error, :at_capacity}
     end
   end
 
-  defp do_create(attrs, shape, template) do
+  defp room(template) do
+    if Provisioning.live_count(template) < template.max_workers,
+      do: :ok,
+      else: {:error, :at_capacity}
+  end
+
+  # **Whose account, asked again where it costs money.** `Template.changeset/2` refuses a
+  # credential that is not the template owner's, but only for rows written after it existed; a
+  # template saved before then still names whatever it was given. So the credential the driver
+  # would be handed is read and checked here, before a worker row or a request exists, and a
+  # refusal is the template's failure like any other (`docs/design/provisioning.md` § Whose
+  # account). No row means no slot is held, so this is not rate-limited to one attempt per sweep
+  # the way a driver's refusal is — and a template spending somebody else's account is out of
+  # service three scheduling passes later, which is sooner, and is the point.
+  defp spendable(template) do
+    case Provisioning.spendable_credential(template) do
+      {:ok, credential} ->
+        {:ok, credential}
+
+      {:error, message} ->
+        Logger.warning("not making a machine from template #{template.id}: #{message}")
+        Provisioning.failed(template.id, message)
+        {:error, {:create_failed, {:credential, message}}}
+    end
+  end
+
+  defp do_create(attrs, shape, credential) do
     with {:ok, worker, token} <- create(attrs) do
-      case Provider.create(machine_opts(worker, token, shape, template)) do
+      case Provider.create(machine_opts(worker, token, shape, credential)) do
         {:ok, machine} ->
           {:ok, _worker} = update(worker, %{provider_id: machine.provider_id})
           Logger.info("created worker #{worker.id} (#{machine.provider_id})")
@@ -732,16 +793,18 @@ defmodule Forge.Workers do
   end
 
   # A driver's own words where it gave them, because "create failed" sends an operator nowhere
-  # and "no Hetzner image configured" sends them straight to the thing to fix.
+  # and "the template names no image" sends them straight to the thing to fix.
   defp message({:hetzner, message}) when is_binary(message), do: message
   defp message({_provider, status, message}) when is_binary(message), do: "#{status}: #{message}"
   defp message(reason) when is_binary(reason), do: reason
   defp message(reason), do: inspect(reason)
 
   # `size` and `image` are the template's own and opaque above the driver; a template that
-  # names no image leaves the key out, which the driver reads as *whatever this node is
-  # configured with* — what every template made before that column had.
-  defp machine_opts(worker, token, shape, template) do
+  # names no image passes nil, and what that means is the driver's: the local one boots this
+  # host's image whatever it is given, and Hetzner refuses — there is no node-wide image for it,
+  # `Forge.Provider.required_template_fields/1` keeps new templates from naming none, and a row
+  # saved before that rule is refused by the driver and counts against its template.
+  defp machine_opts(worker, token, shape, credential) do
     %{
       provider: worker.provider,
       worker_id: worker.id,
@@ -750,31 +813,33 @@ defmodule Forge.Workers do
       harness_env: harness_env(),
       size: Map.get(shape, :size),
       image: Map.get(shape, :image),
-      credential: credential_secret(template)
+      credential: open_secret(credential)
     }
   end
 
-  # A template with no credential is a local one, and the driver ignores it. A credential that
-  # cannot be decrypted is passed as nil rather than crashing the scheduler: the create fails at
-  # the provider with the provider's own message, which is visible, and the operator re-enters
-  # the secret.
-  defp credential_secret(nil), do: nil
+  # A worker's own credential, for asking its driver about the machine it made. A machine with
+  # none is a local one, and the driver ignores it.
   defp credential_secret(%{provider_credential_id: nil}), do: nil
 
-  defp credential_secret(%{provider_credential_id: id}) do
-    case Repo.get(Provisioning.Credential, id) do
-      nil ->
+  defp credential_secret(%{provider_credential_id: id}),
+    do: open_secret(Repo.get(Provisioning.Credential, id))
+
+  # A credential that cannot be decrypted is passed as nil rather than crashing the scheduler:
+  # the driver refuses with its own message, which is visible, and the operator re-enters the
+  # secret.
+  defp open_secret(nil), do: nil
+
+  defp open_secret(%Provisioning.Credential{} = credential) do
+    case Provisioning.Credential.secret(credential) do
+      {:ok, secret} ->
+        secret
+
+      :error ->
+        Logger.error(
+          "provider credential #{credential.id} cannot be decrypted; asking without it"
+        )
+
         nil
-
-      credential ->
-        case Provisioning.Credential.secret(credential) do
-          {:ok, secret} ->
-            secret
-
-          :error ->
-            Logger.error("provider credential #{id} cannot be decrypted; creating without it")
-            nil
-        end
     end
   end
 
@@ -801,13 +866,22 @@ defmodule Forge.Workers do
   end
 
   @doc """
-  Destroys workers that have had nothing to do for longer than the idle period. The default
-  is a guess: `docs/poc-plan.md` takes it from M4, and M4 cannot run until this milestone
-  exists (`docs/design/worker-tier.md` § Idle destroy).
+  Destroys managed workers that have had nothing to do for longer than the idle period: their
+  template's `idle_ms`, or the node's `idle_period_ms`, whose default is set from M4's cold
+  start (`docs/measurements.md` § M4, `docs/design/worker-tier.md` § Idle destroy).
   """
   @spec sweep_idle() :: non_neg_integer()
   def sweep_idle do
-    from(w in Worker, where: w.status == :idle and w.managed, preload: [:template])
+    # **And nothing running on it, whatever its status says.** A status is one write behind the
+    # jobs it describes, and destroying a machine under a job leaves that job `running` for ever:
+    # nothing re-queues a job whose worker was destroyed rather than lost.
+    running = from(j in Job, where: j.worker_id == parent_as(:worker).id and j.status == :running)
+
+    from(w in Worker,
+      as: :worker,
+      where: w.status == :idle and w.managed and not exists(running),
+      preload: [:template]
+    )
     |> Repo.all()
     |> Enum.filter(&idle_past?/1)
     |> Enum.count(&(destroy(&1) == :ok))
@@ -827,7 +901,9 @@ defmodule Forge.Workers do
     period =
       case worker.template do
         %{idle_ms: ms} when is_integer(ms) -> ms
-        _none -> config(:idle_period_ms, :timer.minutes(10))
+        # config.exs always sets `idle_period_ms`, so this fallback is an equivalent mutant under
+        # any configured node; it matches that value so removing the line changes nothing.
+        _none -> config(:idle_period_ms, :timer.minutes(5))
       end
 
     DateTime.compare(worker.idle_since, DateTime.add(now(), -period, :millisecond)) == :lt
@@ -840,9 +916,10 @@ defmodule Forge.Workers do
   machine that is merely partitioned is the right trade, because the jobs are re-runnable by
   construction and a worker nobody can reach is doing nothing that can be observed or billed.
 
-  A row left behind is not cosmetic. `max_workers` counts every row that is not `destroyed`, so
-  one machine the platform has lost track of is one machine's worth of capacity that never comes
-  back, and with `max_workers` at 1 that is all of it.
+  A row left behind is not cosmetic. A template's `max_workers` counts every row made from it
+  that is not `destroyed`, so one machine the platform has lost track of is one machine's worth
+  of that template's capacity that never comes back, and with `max_workers` at 1 that is all of
+  it.
   """
   @spec sweep_unreachable() :: non_neg_integer()
   def sweep_unreachable do

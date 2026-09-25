@@ -41,16 +41,17 @@ defmodule ForgeWeb.WorkersLiveTest do
     assert html =~ "mix forge.worker.new"
   end
 
-  test "a row that is ready but holds no channel says both", %{conn: conn, user: user} do
+  test "a row that is up but holds no channel says both", %{conn: conn, user: user} do
     w = worker(user)
     {:ok, w} = Workers.ready(w, %{"memory_budget" => 6 * 1024 * 1024 * 1024})
 
     {:ok, _view, html} = live(conn, ~p"/workers")
 
     assert html =~ String.slice(w.id, 0, 8)
-    assert html =~ "ready"
+    # Up with nothing to do is idle (`Forge.Workers.ready/2`).
+    assert html =~ "idle"
 
-    # The point of the page: the database says ready, the registry says otherwise.
+    # The point of the page: the database says it is up, the registry says otherwise.
     assert html =~ "not connected"
     assert html =~ "0 connected"
   end
@@ -287,13 +288,18 @@ defmodule ForgeWeb.WorkersLiveTest do
       {:ok, view, _html} = live(conn, ~p"/workers")
       view |> element("a[phx-click=edit][phx-value-id=\"#{w.id}\"]") |> render_click()
 
-      html =
-        view
-        |> element("form[phx-submit=save]")
-        |> render_submit(%{"worker_id" => w.id, "memory" => "", "cores" => ""})
+      # Each blank on its own as well as both: a page that read one of them as zero would store
+      # it, zero being an offer, whenever the other was filled in.
+      for {memory, cores} <- [{"", ""}, {"", "2"}, {"2GiB", ""}] do
+        html =
+          view
+          |> element("form[phx-submit=save]")
+          |> render_submit(%{"worker_id" => w.id, "memory" => memory, "cores" => cores})
 
-      assert html =~ "not figures a machine can have"
-      assert Workers.get!(w.id).memory_budget == 8_000
+        assert html =~ "not figures a machine can have", inspect({memory, cores})
+        saved = Workers.get!(w.id)
+        assert {saved.memory_budget, saved.cores} == {8_000, 4}, inspect({memory, cores})
+      end
     end
   end
 

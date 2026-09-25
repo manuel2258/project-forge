@@ -34,8 +34,9 @@ defmodule ForgeWorker.Job.Workspace do
   Prepares the worktree for an assignment and returns its path.
 
   A cold start gets the branch as the platform has it, with anything a dead run left
-  uncommitted discarded. A resume keeps the tree as it stands: the work in progress is the
-  point of resuming.
+  uncommitted discarded. A resume keeps a tree that is already here as it stands: the work in
+  progress is the point of resuming. A tree made for the resume — a snapshot, a clone — has no
+  work in progress, and is the branch as the platform has it like any other.
   """
   @spec prepare(assignment(), String.t()) :: {:ok, String.t()} | {:error, term()}
   def prepare(assignment, root) do
@@ -75,9 +76,10 @@ defmodule ForgeWorker.Job.Workspace do
   @doc """
   Removes ticket volumes older than `older_than_ms`, returning how many went.
 
-  Nothing tells this machine that a ticket was merged or abandoned — the platform sends `assign`,
-  `cancel` and `drain` — so age is what there is. Called where the job directories are swept, for
-  the same reason: the end of a job is already a moment spent on the filesystem.
+  Nothing tells this machine that a ticket was merged or abandoned — the platform sends `assign`
+  and `cancel`, and a conversation's `message`, `interrupt` and `close` — so age is what there
+  is. Called where the job directories are swept, for the same reason: the end of a job is
+  already a moment spent on the filesystem.
   """
   @spec sweep(String.t(), non_neg_integer()) :: non_neg_integer()
   def sweep(root, older_than_ms) do
@@ -156,12 +158,18 @@ defmodule ForgeWorker.Job.Workspace do
   # A snapshot of `source` — the ticket's template or the project's seed — pointed at this job's
   # branch and deliberately not cleaned: see `Checkout.ensure/1`'s `clean:` for what cleaning a
   # fresh snapshot would take with it.
+  #
+  # **Never a resume, whatever the assignment says.** A resume keeps the tree it finds because an
+  # unfinished tree is the point of resuming, and a snapshot is not one: it is on whatever commit
+  # the volume was, often not this branch at all. Kept as it was, a resume on a machine without
+  # the job's own worktree ran on the wrong tree, and the squash at its end pushed the difference
+  # as a commit undoing the ticket's work.
   defp from_volume(assignment, source, dir, what) do
     git = assignment["git"]
 
     with :ok <- Volume.impl().snapshot(source, dir),
          :ok <- Checkout.remote(dir, git["url"]),
-         :ok <- Checkout.ensure(checkout_opts(assignment, dir, clean: false)) do
+         :ok <- Checkout.ensure(checkout_opts(assignment, dir, clean: false, resume: false)) do
       {:ok, dir}
     else
       {:error, reason} ->
@@ -222,13 +230,16 @@ defmodule ForgeWorker.Job.Workspace do
   defp checkout_opts(assignment, dir, extra) do
     git = assignment["git"]
 
-    [
-      dir: dir,
-      url: git["url"],
-      branch: git["branch"],
-      token: git["token"],
-      resume: assignment["resume_session"] != nil
-    ] ++ extra
+    Keyword.merge(
+      [
+        dir: dir,
+        url: git["url"],
+        branch: git["branch"],
+        token: git["token"],
+        resume: assignment["resume_session"] != nil
+      ],
+      extra
+    )
   end
 
   defp maybe_push(_git, _dir, false), do: :ok

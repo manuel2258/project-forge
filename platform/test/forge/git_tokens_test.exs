@@ -113,6 +113,48 @@ defmodule Forge.GitTokensTest do
       refute token.ref == Tokens.default_ref(project)
     end
 
+    # A conversation pushes after every turn for up to a day. A token of the fixed ninety
+    # minutes refused every push after that, and each turn's commit was lost with a warning.
+    # (A workflow job's hour sits inside the fixed lifetime either way, so only a chat can tell
+    # the job's clock from the constant.)
+    test "a job's token lives as long as the job may", %{project: project} do
+      chat = chat_fixture(%{project: project})
+      {:ok, _secret, token} = Tokens.issue_for_job(chat, nil, project)
+
+      # Against the literal day, not `Forge.Jobs.wall_clock_ms/1`: a test that asks the function
+      # it depends on passes however short that function makes a conversation's clock.
+      lifetime = DateTime.diff(token.expires_at, DateTime.utc_now(:second))
+      assert lifetime > 24 * 3600
+    end
+
+    # A lost worker's job goes back in the queue and its next run mints its own credential. The
+    # old one lives the job's whole wall clock, so a machine that was only partitioned could
+    # otherwise go on pushing after the job was handed to somebody else.
+    test "requeueing a job revokes its credential", context do
+      %{project: project, ticket_a: ticket, job_a: job} = context
+      {:ok, secret, _token} = Tokens.issue_for_job(job, ticket, project)
+      assert {:ok, _token} = Tokens.authorise(secret, project, :read)
+
+      assert {:ok, _job} = Forge.Jobs.requeue(job.id, :worker_lost)
+      assert Tokens.authorise(secret, project, :read) == :error
+    end
+
+    # The same holds wherever a run stops without the job ending: the next run mints its own.
+    test "a job hibernated, or recovered on boot, loses its credential too", context do
+      %{project: project, ticket_a: ticket, job_a: job} = context
+      {:ok, hibernating, _token} = Tokens.issue_for_job(job, ticket, project)
+
+      assert {:ok, _job} = Forge.Jobs.hibernate(job.id, nil, "parked")
+      assert Tokens.authorise(hibernating, project, :read) == :error
+
+      other = ticket_fixture(%{project: project, branch: "ticket/3"})
+      running = job_fixture(%{ticket: other, status: :running})
+      {:ok, recovering, _token} = Tokens.issue_for_job(running, other, project)
+
+      assert Forge.Jobs.recover() >= 1
+      assert Tokens.authorise(recovering, project, :read) == :error
+    end
+
     test "a branch is privileged only where it is the default", %{project: project} do
       trunk = project_fixture(%{default_branch: "trunk"})
 

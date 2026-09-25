@@ -1,6 +1,7 @@
 defmodule Forge.CLITest do
   use Forge.DataCase, async: false
 
+  import Ecto.Query, only: [from: 2]
   import Forge.AccountsFixtures
   import Forge.ForgeFixtures
   import Forge.GitFixtures
@@ -95,6 +96,11 @@ defmodule Forge.CLITest do
 
       reviewing = ticket_fixture(%{project: project, number: 4, state: "review_ready"})
 
+      # Older than everything above, and still last: an assumption is not waiting on anyone, so
+      # it follows the decisions rather than being sorted in among them.
+      assuming = ticket_fixture(%{project: project, number: 5, state: "planning"})
+      assume(assuming)
+
       lines = String.split(CLI.queue(), "\n")
 
       assert line(lines, "QUESTION") ==
@@ -103,19 +109,54 @@ defmodule Forge.CLITest do
       assert line(lines, "APPROVAL") ==
                "APPROVAL  #{CLI.label(approving)}  refining -> planning: approve refinement.md"
 
+      # And `forge.show` names the same artifacts, from the same definition.
+      assert CLI.show(Tickets.get!(approving.id)) =~
+               "pending: refining -> planning needs approval of refinement.md"
+
       assert line(lines, "STUCK") ==
                "STUCK     #{CLI.label(stuck)}  in implementing; choose a transition with forge.transition"
 
       assert line(lines, "REVIEW") ==
                "REVIEW    #{CLI.label(reviewing)}  in review_ready; next: merged"
 
-      assert length(lines) == 4
+      assert List.last(lines) ==
+               "ASSUMED   #{CLI.label(assuming)}  [naming] What is the table called? " <>
+                 "assumed: scores (not waiting on you)"
+
+      assert length(lines) == 5
     end
   end
 
   defp line(lines, prefix) do
     assert [line] = Enum.filter(lines, &String.starts_with?(&1, prefix))
     line
+  end
+
+  # A non-blocking question, asked a day ago: the assumption the agent carried on from.
+  defp assume(ticket) do
+    {:ok, version} =
+      Artifacts.record_version(ticket.id, "plan.md", :document, :system, %{
+        content: """
+        ---
+        outcome: done
+        ---
+        # Plan
+
+        ```question
+        key: naming
+        text: What is the table called?
+        options: [scores, highscores]
+        default: scores
+        blocking: false
+        assumption: scores
+        ```
+        """
+      })
+
+    Repo.update_all(
+      from(q in Forge.Artifacts.Question, where: q.artifact_version_id == ^version.id),
+      set: [inserted_at: DateTime.add(DateTime.utc_now(:second), -86_400, :second)]
+    )
   end
 
   # A blocking question, written the way an agent writes one: in the document it produced.

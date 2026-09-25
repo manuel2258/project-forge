@@ -1,8 +1,10 @@
 # API and operator UI (milestone 2)
 
-The API is the product surface; the web UI is one client of the same operations. Every human
-action exists once, in `Forge.Operator`, and is reachable three ways: the JSON API, the
-LiveView pages, and the Mix tasks. None of the three holds logic of its own.
+The API is the product surface; the web UI is one client of the same operations. The intent is
+that every human action on a project's work exists once, in `Forge.Operator`, reachable up to
+three ways — the JSON API, the LiveView pages, and the Mix tasks — none of which holds logic of
+its own. It is not wholly so: not every operation has all three, and some human writes live
+outside `Operator` altogether (§ Operations).
 
 ## Operations
 
@@ -15,6 +17,12 @@ LiveView pages, and the Mix tasks. None of the three holds logic of its own.
 - `edit(ticket, user, name, content)` — writes a new version of a document.
 - `accept_proposal(version_id, user, comment)` — admits a ticket proposal as a ticket.
 - `decline_proposal(version_id, user, comment)` — records that it will not be.
+- `admit(project, user, attrs)` — admits a ticket.
+- `open_chat(project, user, text, opts)`, `send_chat(chat, user, text, opts)`,
+  `stop_chat(chat, user)`, `close_chat(chat, user, reason)`, `reopen_chat(chat, user)`,
+  `merge_chat(chat, user)` — a conversation's life; see `design/conversations.md`.
+- `set_model(project, user, model)`, `issue_token(project, user, opts)`,
+  `revoke_token(project, user, token_id)` — project settings, which need the admin capability.
 
 The first four return `{:ok, ticket}` or `{:error, reason}` and, on success, notify subscribers
 of the ticket so open pages refresh.
@@ -26,6 +34,29 @@ and a project chat's has no ticket anywhere near it. `accept_proposal/3` returns
 `decline_proposal/3` returns `{:ok, %Forge.Proposals.Decision{}}`. Neither notifies anything for
 a project chat's proposal, which has no ticket to notify — an open project page does not refresh
 on that decision and is reloaded.
+
+**Conversations and project settings have no API route.** They are reached from the pages;
+tokens also from `mix forge.git.token` and conversations from `mix forge.chat`, which go to the
+contexts directly — the command line is past every gate there is. The API registers a project
+through `Forge.Projects.register_named/3`, as the create view does.
+
+**The API admits a ticket through `admit/3`, as the page does.** It used to call
+`Forge.Tickets.admit/3` after finding the project among the caller's own, which was a second
+guard with its own model of who may admit — a membership row of any role, where `Operator` asks
+`:use` — and the two would have parted the day a role that cannot admit exists. The controller
+now resolves the project by name alone and lets `admit/3` refuse; a refusal answers 404 with the
+same body as a project that does not exist, because not a member and does not exist are the same
+answer (`design/identity.md` § Projects and members). The membership check runs before the
+ticket is validated, so a malformed request into somebody else's project is 404 too, never a 422
+that says the project is there.
+
+**Some human writes are not here.** Membership is guarded where it is changed, in
+`Forge.Projects` (`design/identity.md` § Where the guard lives), and so are mirrors
+(`put_mirror`, `delete_mirror`). Worker templates and provider credentials are one user's own
+and live in `Forge.Provisioning`; setting a permanent worker's figures is
+`Forge.Workers.set_offer/3`, which reads the machine scoped to its owner; approving,
+suspending and promoting accounts is `Forge.Accounts`, which refuses anyone who is not a node
+admin.
 
 ## JSON API
 
@@ -65,10 +96,15 @@ with 400, 401, 404, 409 or 422. No envelope, no HATEOAS, no versioning beyond th
 ## Pages
 
 Mobile-first LiveView, one column, large tap targets. Session login from the generated auth
-flow; public registration is disabled, users are created from the command line.
+flow; public registration is disabled. An account is created from the command line
+(`mix forge.user.add`) or by a first login through a configured OIDC provider, which makes a
+pending account that a node admin has to approve (`design/identity.md` § Approval).
 
 - `/` — the queue: one card per item, answerable in place. Options are buttons, free text a
   field; approvals have approve and reject; stuck and review items list the transitions.
+  Non-blocking questions follow the last card as a digest of lines, each leading to its ticket,
+  and are not cards (`design/ui.md` § Not waiting on you). `GET /queue` serves them as items of
+  kind `assumption`.
 - `/tickets/:project/:number` — timeline: state, cost, pending decision, open questions,
   jobs, artifacts with the latest document rendered, events.
 - `/tickets/:project/:number/review` — the merge decision: the diff, the documents the change was
@@ -82,9 +118,13 @@ ticket or conversation it came from, and Accept and Decline. `/tickets/:project/
 what that ticket's own jobs proposed in its rail and links to the project page, so the affordance
 that commits exists in one place rather than two.
 
-**Proposals are never queue items.** The queue is what will not move until a person acts, and a
-proposal blocks nothing — no job waits on it and no ticket is stuck behind it. They are counted
-in the daily digest instead. See `design/ticket-proposals.md` § Where it surfaces.
+**Proposals are never queue items.** The queue's decisions are what will not move until a person
+acts, and a proposal blocks nothing — no job waits on it and no ticket is stuck behind it. That is
+not the whole queue any more: beneath the decisions it serves open non-blocking questions, as
+`assumption` items that wait on nobody and that no count of what is waiting includes
+(`design/ui.md` § Not waiting on you). A proposal is not among those either. It is decided on
+the project page, where its Accept and Decline are, and counted in the daily digest. See
+`design/ticket-proposals.md` § Where it surfaces.
 
 Pages subscribe to their ticket (or all tickets for the queue and board) and reload when an
 operation completes anywhere, including from the API or a running job.
@@ -93,11 +133,13 @@ operation completes anywhere, including from the API or a running job.
 
 Web Push through the browser's push service, with VAPID keys the operator generates once.
 A subscription is stored per browser endpoint for the logged-in user. Blocking questions are
-pushed as they appear, tagged per question so a re-ask replaces rather than stacks. Everything
-else waits for one digest push a day at a configured UTC hour, sent when the queue is not empty
-or the project has open ticket proposals — which are counted separately in it, because they are
-not waiting on anyone. Subscriptions the push service reports gone are deleted. The service worker shows
-the notification and opens the ticket page on tap.
+pushed as they appear, tagged per question so a re-ask replaces rather than stacks, and so is a
+conversation's reply when a turn completes (`Forge.Push.chat_reply/2`). Everything else waits for
+one digest push a day at a configured UTC hour, sent when the reader has something waiting, an
+open non-blocking question or an open ticket proposal. The last two are counted separately in it
+(`N assumed`, `N proposed`) and never in its title's `N waiting on you`, because they are not
+waiting on anyone. Subscriptions the push service reports gone are deleted. The service worker
+shows the notification and opens the ticket page on tap.
 
 ## Message state
 

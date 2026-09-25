@@ -159,6 +159,13 @@ defmodule Forge.Provider.LocalVm do
   def credential_fields, do: []
 
   @doc """
+  Nothing: a local machine boots this host's image at this host's size, and `create/1` reads
+  neither from the template.
+  """
+  @impl Provider
+  def required_template_fields, do: []
+
+  @doc """
   The QEMU invocation for a machine. Public because it is the part of this driver that can be
   checked without a hypervisor, and a test that checked something else would be checking
   nothing.

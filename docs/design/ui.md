@@ -61,7 +61,7 @@ never hard-coded.
 ## Type
 
 Instrument Sans for language, JetBrains Mono for identifiers. Both are OFL and self-hosted from
-`platform/assets/fonts/` as subsetted woff2 with `font-display: swap`; there is no webfont CDN
+`platform/priv/static/fonts/` as subsetted woff2 with `font-display: swap`; there is no webfont CDN
 and the product must build without egress. The design depends on the sans/mono *distinction*, not
 on these two faces — the system stack is a supported fallback.
 
@@ -128,16 +128,17 @@ measure; each route sets its own:
 | `/board` | none | Full viewport. The columns are the workflow topology; capping them destroys the artefact. |
 | `/projects/:name` | none | The same board for one project, beside a 21rem rail. Same reason. |
 | `/workers` | 74rem | One table of machines. Wide enough for the row, no wider. |
-| `/projects/:name/settings` | 48rem | A form and a table of credentials. Narrower loses the row; wider is a rail with nothing to put in it. |
+| `/templates` | 60rem | Two lists with a form each — provider credentials, then templates. Not one wide table, so narrower than `/workers`; a template row carries its shape, figures, count and actions, and wraps where they do not fit. |
+| `/projects/:name/settings` | 48rem | Forms and tables — tokens, people, mirrors. Narrower loses the row; wider is a rail with nothing to put in it. |
 | `/tickets/:project/:number` | 74rem | 53rem timeline column plus a 21rem facts rail, divided by a 1px rule. Below `lg` the rail moves under the timeline. |
 | `…/review` | 74rem | Same frame. The diff needs the width; the rail carries the evidence. |
-| `…/jobs/:job_id` | 74rem | Same frame. Manifest in the rail, completed harness stream in the column. |
+| `…/jobs/:job_id` | 74rem | Same frame. Manifest in the rail, the recorded harness stream in the column — not live (§ Motion and structure). |
 | `/chats` | 34rem | One ordered list, so the queue's measure and for the queue's reason: width only lets a second row compete for the same glance. |
 | `/chats/:id` | 74rem | Same frame again: a conversation is work with a branch, a cost and a record. The talking is the column; what it cost and what it wrote is the rail. |
 | `/chats/new` | 34rem | The first message is prose and needs the queue's measure, not a form field's — the same reason `/tickets/new` has it. |
 | `/projects/new` | 26rem | A short form. Same frame as log-in, for the same reason. |
 | `/tickets/new` | 34rem | The body is prose and needs the queue's measure, not a form field's. |
-| `/users/log-in`, `/users/settings` | 26rem | Same shell, same type, same buttons. They must not read as a different product. |
+| `/users/log-in`, `/users/settings` | 26rem | Same shell, same type, same buttons. They must not read as a different product. **Not built as specified:** both are still the generator's pages under the layout's default 34rem, and log-in narrows its own form to `max-w-sm` (24rem) inside it. |
 | `/accounts` | 48rem | Two lists of addresses with a row of decisions each, so the settings page's measure and for its reason: the row is what has to fit. |
 | `/users/pending` | 34rem | A sentence and one button. The queue's measure because it is a single column of prose, and the only route that draws the layout **without its nav** — every link in it leads somewhere this account is redirected away from. |
 
@@ -172,7 +173,10 @@ decorative.** No spinner that conveys nothing, no shimmer, no animation that exi
 **Live output is allowed where a person is waiting for it.** This reverses a rule that said
 otherwise — see the note below — so: a conversation streams its reply as it arrives, and a job
 may show its stream while it runs. Neither auto-scrolls away from something you are reading; a
-view that has been scrolled up stays there and says how much arrived beneath.
+view that has been scrolled up stays there and says how much arrived beneath. **Only the
+conversation does so today.** The job page draws what was recorded and re-reads it when its
+ticket changes; it does not subscribe to a running job's events, so a live job stream is not
+built.
 
 **Output that accumulates scrolls inside itself rather than growing the page.** A conversation's
 messages and a job's stream are both bounded panes, because a page that grows downwards moves the
@@ -218,13 +222,19 @@ Getting these wrong makes the UI lie. They are acceptance criteria, not preferen
   reasoning that gives presentations no approval slot, applied to the workflow rather than to the
   artifact's kind.
 - **Blocking and non-blocking questions are different.** One has halted a job. Only blocking ones
-  are pushed to the phone; non-blocking ones sit in a digest under *Not waiting on you*.
+  are pushed to the phone; non-blocking ones sit in a digest under *Not waiting on you*, and are
+  counted in the daily digest push apart from what is waiting (§ Not waiting on you).
 - **`stuck` is a flag, not a state.** A stuck ticket is still in its workflow state, and stuck is
   drawn on the step rather than as a step.
 - **Free text is always a valid answer**, alongside any options — a real field with its own Send,
   never an escape hatch behind a link.
 - The queue is **one ordered list**, oldest first. No tabs and no filters that can hide an item;
-  the operator must be able to reach the end and know they are done.
+  the operator must be able to reach the end and know they are done. Its decisions come first,
+  oldest first; the digest of non-blocking questions follows the last of them, oldest first
+  itself; the end of the queue follows that. The digest is below the decisions rather than
+  sorted in among them because none of it is waiting on anyone, and an age beside a held job
+  would compete with it for the same glance. It is on the same page and behind no control, so
+  nothing is hidden and the end is still the end.
 - A **human state with outgoing transitions** waits for a person; one without is terminal and
   never enters the queue. The topology glyph is the only thing distinguishing them.
 - **Answering never navigates.** Tapping an answer does not move you, open a page, or reorder the
@@ -263,13 +273,35 @@ sentence phrased as completion, and one line of evidence that work happened with
 block, alone, is the empty state. Every other empty state names what would fill it rather than
 announcing absence.
 
+### Not waiting on you
+
+A non-blocking question is an assumption an agent stated and carried on from, so it is not a
+decision and does not get a decision's shape. `Forge.Queue` serves it as its own kind,
+`:assumption`, so that no reader — the page, the JSON API, the CLI, the digest push — can count it
+as a blocking question by accident; the page draws it in the digest between the last decision
+and the end of the queue:
+
+- **Prose, not cards.** A micro-label heading, one sentence saying how many assumptions were
+  stated and that work continued, then one line each: the question, what was assumed, and the
+  ticket and age as identifiers. No mark, no answer rows, no accent — nothing in it is waiting on
+  a human.
+- **Each line navigates to its ticket**, where the question is answered. Answering never
+  navigates and a navigation target never encloses a control that commits (§ The affordance
+  rule), so the digest offers no answer of its own rather than a second place to give one.
+- **It counts towards nothing.** Not the header's `N decisions · N items`, not the nav badge: a
+  number that answering nothing ever lowers is not a count of what is waiting.
+- **Answering one changes no job's flow.** Its answer joins `answers.md` for whichever job runs
+  next on the ticket; a waiting job resumes only once no *blocking* question is open, and a
+  non-blocking answer closes none (`job-prompt.md` § Non-blocking questions).
+
 ## Creating things
 
 **Where the two create actions live, and why they are not in the same place.** A project is made
 rarely and from nowhere in particular, so it is an action in the laptop top bar, beside the theme
 toggle rather than among the nav items — those are destinations and this is not one. A ticket is
-always made *for a project*, so it is offered on the project page and nowhere else: the queue is
-an inbox and the board is every project at once, and neither has a project to make a ticket for.
+always made *for a project*, so it is offered on the project page — and on the create view that
+has just made one — and nowhere else: the queue is an inbox and the board is every project at
+once, and neither has a project to make a ticket for.
 
 Both are laptop-only, because the header is. That is the same reasoning as the workers page: the
 phone is where decisions are answered, and creating a project is not a decision waiting on
@@ -291,13 +323,17 @@ list ends a live conversation from its row, because a live row is a machine runn
 alternative was opening it first. The row is the link and the control is its sibling, which is
 The affordance rule above applied rather than excepted. What a list may never offer is deleting a
 conversation: they are kept for ever (`conversations.md` § Lifetime), and the affordance that
-exists is the one that stops it costing something.
+exists is the one that stops it costing something. Ending one does delete its *branch*, unless
+the branch would not merge cleanly, so its confirm says so — the same sentence on the list and on
+the conversation's page, from one definition, so neither can understate it.
 
 A project and a ticket are made in the product. A **workflow is not**: it is
 `.forge/workflow.yml` in the project's own repository, read at the ticket's base commit and
 pinned at admission, so it versions with the code it governs and there is nothing for a form to
-edit. The two create views are pushed views with a back affordance, reached from the board (a
-project, and a ticket in a named project) and from the queue (a ticket).
+edit. The two create views are pushed views with a back affordance. A project's is reached from
+the laptop top bar, and from the board and the ticket form only when there are no projects at
+all; a ticket's from the project page, and from the project's create view once it exists. The
+queue links to neither.
 
 **A new project cannot take a ticket yet, and the product says so rather than failing.** The
 repository it just made has no workflow, so admission would fail on a parse error naming a file
@@ -322,10 +358,12 @@ the operator has never seen. Instead:
 Both are checked again on submit — the repository is a shared surface and a check is a moment,
 not a guarantee — but the operator is never the one who finds out.
 
-**The clone URL belongs on the project page and on the create view, and nowhere else.** Those are
-the two moments an operator needs it: when the repository has just been made, and when they have
-come to change the workflow and have found that they cannot do it here. A git URL anywhere else
-is an invitation to a surface that is not the product.
+**The clone URL belongs on the project page, on the create view and on project settings, and
+nowhere else.** Those are the moments an operator needs it: when the repository has just been
+made, when they have come to change the workflow and have found that they cannot do it here, and
+when they are minting the credential to use it with — settings names the URL a token is for, and
+shows it once with the token in it. A git URL anywhere else is an invitation to a surface that is
+not the product.
 
 ## The project page
 
@@ -373,6 +411,17 @@ and a human revoking one mid-run would fail that job for a reason nothing record
 
 Expired and revoked rows stay, behind the same disclosure the workers page uses for destroyed
 machines. They are the audit trail: what was issued, to what scope, and whether it was ever used.
+
+**The page has outgrown credentials.** Beside the tokens it carries the project's people — added
+by the address of an approved account, as `member` or `admin`, and removed; an address with no
+account and one whose account is still pending get the same answer, *No approved account for
+that address*, and a suspended account is named as suspended — its
+default model, its default branch as a fact, and its mirrors: a table of what each last push
+said, and the only place a mirror is set or removed (`git-hosting.md` § What the mirrors say about
+themselves). Tokens, people, mirrors and the model are drawn only for a project admin; the
+branch is drawn for every member. Saving the model is refused without the admin capability —
+`Operator.set_model/3` is the guard, not the form — and the form is not offered to anyone the
+guard would refuse.
 
 ## Account settings
 
@@ -445,38 +494,72 @@ carrying its credential — it is given no agent job, and the row says to update
 a machine holds no account, and the models are a credential's.
 
 `managed` is shown because it is the only thing that differs between a machine the platform may
-destroy and one it may not, and an unmanaged row sits against `max_workers` until somebody
-retires it. Destroyed rows are hidden unless asked for: they are history, and the page is about
-what exists.
+destroy and one it may not; the second reads `permanent`, and its row stays until somebody
+retires it (`mix forge.worker.retire`). It holds no `max_workers` slot: that ceiling is a
+template's and counts the machines made from it, and a permanent worker came from no template.
+Destroyed rows are hidden unless asked for: they are history, and the page is about what exists.
 
-Nothing here is accent and nothing here is a decision. It is the one operator surface that is
-purely a readout.
+Nothing here is accent. It is a readout with two decisions in it, both on a permanent row only: what
+the machine offers (below), and which projects it serves.
 
-**`docs/design/provisioning.md` makes the page's own summary line false, and that is the part to
-design rather than patch.** It reads *"A job is scheduled against memory, not against a count: one
-slice is 2.2 GiB, and a machine takes as many as its budget holds"*, which is exactly right while
-every job and every machine is the same. With resources declared per job, cores on the gate and
-several machine shapes, there is no equally short true sentence, and `slices/1` — a budget divided
-by one constant — has nothing to divide by. Two consequences for this page:
+**`docs/design/provisioning.md` made the page's old summary line false, and it was redesigned
+rather than patched.** It read *"A job is scheduled against memory, not against a count: one
+slice is 2.2 GiB, and a machine takes as many as its budget holds"*, which was exactly right while
+every job and every machine was the same. With resources declared per job, cores on the gate and
+several machine shapes there is no equally short true sentence, and `slices/1` — a budget divided
+by one constant — had nothing to divide by and is gone. What the page does now:
 
-- A row's capacity becomes two bars, memory and cores, each showing promised against offered.
-  What a machine *is* stops being derivable from one number, so it has to be shown.
-- The page stops being purely a readout. A permanent worker's `accepts`, memory and cores are
-  operator-set and editable here (`provisioning.md` § What a worker offers, and who says so),
-  which is the first
-  decision this surface has ever carried. § The affordance rule governs it: an editable field on
-  the one page that has never had one must look editable.
+- The header counts machines (`N live · N connected`), and the summary says a job is scheduled
+  against what it asked for in memory and cores and against the kinds a machine takes, and what a
+  job that declares nothing is given.
+- A row's capacity is two figures, memory and cores, each as free against offered, with the kinds
+  it takes beneath. What a machine *is* stops being derivable from one number, so it has to be
+  shown. The design was two bars; what was built is two lines of text. A machine that never
+  reported cores says so rather than showing an invented figure, and one whose own report
+  disagrees with its row shows the report in `error`: the row governs, so a machine reporting
+  less than its row is one the platform will overcommit.
+- A row whose create failed carries the driver's reason. Until it was drawn, a refusing driver
+  was invisible on every surface the operator has.
+- The page stopped being purely a readout. A permanent worker's `accepts`, memory and cores are
+operator-set and editable here (`provisioning.md` § What a worker offers, and who says so), which
+was the first decision this surface carried; the projects a permanent row serves, added and removed
+on the row, are the second. § The affordance rule governs it: an editable field on the one page that
+has never had one must look editable, so it is a form behind a *Set what it offers* link rather than
+a hover. A managed row offers none — it is replaced, not corrected.
 
-**And it gains a sibling.** Worker templates are a second list — the recipes machines are created
-from — and they carry `max_workers` and a price per hour, which makes them the first operator
-surface where a number is money that keeps accruing. § Creating things governs the form; the
-ceiling and the price belong on the same page, because raising one raises the other.
+**And it has a sibling.** `/templates` lists the recipes machines are created from and the
+provider credentials they spend — one person's own, never anybody else's. A template carries
+`max_workers`, and its size is chosen from the provider's catalogue with the price per hour where
+the driver reports one, which makes it the first operator surface where a number is money that
+keeps accruing. § Creating things governs the form; the ceiling and the price are in the same
+form, because raising one raises the other. The two pages link to each other and share the
+Workers nav item.
+
+## A job waiting for a machine
+
+A pending job the scheduler could not place says why, in one sentence, where the job is looked at:
+under its row on the ticket's timeline, and on a pending conversation's page where the reply will
+appear. The sentence is the scheduler's (`provisioning.md` § The gate), in the product's voice —
+*Waiting for room: …*, *Waiting for a template: …* — and it is language, so it is sans at body size,
+never mono. **A sentence that sends the operator somewhere sends them where the reason is.** A
+provider that refused to make a machine left its words on the worker row, so that sentence names the
+workers page; a template the platform would not spend from — its provider credential is another
+user's, or another provider's — made no worker row, and its words are on the template, so that one
+names the templates page. Both pages show the viewer's own rows only, so each sentence names whose
+page: the template owner's, who may not be the person reading it. It is drawn only while the job is
+pending, and only the latest reason since the job last started; every change stays in the job's own
+event stream, where it is a line like any other.
+
+**It is not accent**, even when the answer is a template nobody has assigned. Accent is the
+queue's mark, and a waiting job is not in the queue: a ticket that no template could ever hold
+is stuck, and gets its accent that way. A conversation in the same position waits on a person
+and is drawn quietly all the same — the gap `provisioning.md` § The gate records, not a rule.
 
 ## Documents
 
-An agent's document is rendered, not shown as source. Source is one click away — every artifact
-name is a link to its exact version (below) — and the roadmap's margin-questions view needs
-structure, which source text cannot carry.
+An agent's document is rendered, not shown as source. Source is one click away — every ticket
+artifact's name is a link to its exact version (below) — and the roadmap's margin-questions view
+needs structure, which source text cannot carry.
 
 Rendered document bodies are the one place the product styles Markdown, and they do it from a
 scoped block in `app.css` rather than from `@tailwindcss/typography`. The plugin brings its own
@@ -498,7 +581,19 @@ that is not the product's own writing, and the ground is what says so.
 
 `…/artifacts/:name/:version` serves the exact bytes of one version, to an authenticated operator.
 It is what every artifact name in the product links to: chips on the ticket, the produced list on
-a job, transcripts, the review page's documents and answers, the queue item's footer.
+a job, transcripts, the review page's documents and answers, the queue item's footer, a
+conversation's rail.
+
+**An artifact has the address of its scope.** A ticket's is under the ticket,
+`/tickets/:project/:number/artifacts/:name/:version`. One scoped to a conversation
+(`artifacts.job_id`) — a project chat's documents, and every conversation's proposals — is under
+the conversation, `/chats/:id/artifacts/:name/:version`, and served to whoever may open that
+conversation: a member of its project, the same guard as `/chats/:id`. `ArtifactController`
+resolves the name within the one scope the address names and nowhere else, so a version of the
+same name in another scope is not reachable through it. A ticket chat's documents are the
+ticket's, so they are under the ticket. The conversation's rail lists every version it wrote, the
+row the link, as a job page's produced list does. This was a gap until chats wrote documents: the
+rail listed names, unlinked and unversioned.
 
 **There is no versionless form.** `…/artifacts/:name` would have to mean "latest", and the word
 appears nowhere in this product for the same reason approval attaches to a version and not to a

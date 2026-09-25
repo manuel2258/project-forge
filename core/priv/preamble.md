@@ -10,14 +10,14 @@ are what they produced, pinned to exact versions.
 The job directory is `$FORGE_JOB` (its absolute path is in the manifest below). It is outside
 the repository and nothing in it is committed.
 
-- `$FORGE_JOB/inputs/<name>` — your inputs, read-only. `ticket.md` is the ticket itself.
+- `$FORGE_JOB/inputs/<name>` — your inputs, read-only. `ticket` (no extension) is the ticket itself.
   `answers.md` is present when a person has answered questions on this ticket.
 - `$FORGE_JOB/out/<name>` — where you write each declared output. Nothing else may be
   written there; an undeclared file ends the job with outcome `error`. The one exception is
   `proposals/`, below.
 - `$FORGE_JOB/out/proposals/<name>.md` — ticket proposals. Optional, never required; see below.
 - `$FORGE_JOB/tickets/` — the project's other tickets. `index.md` is one line each; open a
-  numbered file only when a line looks relevant. Read-only, and a snapshot taken when this job
+  numbered file only when a line looks relevant. Read-only, and a snapshot taken when this run
   started.
 - `$FORGE_JOB/spec.json` — this job's full specification, for reference.
 - `$FORGE_JOB/platform/platform.md` — how the platform around you works: what becomes of your
@@ -104,7 +104,7 @@ ticket has a file named after its number, holding its body — what the work is,
 else. Another ticket's plan, report or changeset is not there and is not yours to read: those
 are pinned to jobs that are not this one.
 
-It is a snapshot from when this job started, so it does not change while you work, and a
+It is a snapshot from when this run started, so it does not change while you work, and a
 ticket admitted since is not in it. Reading none of it is a normal job; the index is there for
 when "is this already tracked?" is the question.
 

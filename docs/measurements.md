@@ -249,7 +249,7 @@ measurements landed rather than that they passed.
 **The claim none of them tested.** The worker tier rests on "an out-of-memory build kills one
 job, not the machine". M3 drove builds toward ceilings but always alone; M2 ran four together
 but never under a binding one. Crossing them was deferred to milestone 3's demo, which is the
-last place it should first be tried — and § The isolation cross above is that crossing, run
+last place it should first be tried — and § The isolation cross below is that crossing, run
 during milestone 3 and before the demo depended on it. It passes.
 
 **Worth measuring next, in this order:** M1 variant (b), the only remaining question whose

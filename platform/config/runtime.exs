@@ -113,7 +113,6 @@ if config_env() != :test do
            data_dir: data_dir,
            repos_dir: System.get_env("FORGE_REPOS_DIR"),
            platform_url: System.get_env("FORGE_PLATFORM_URL"),
-           nix_env: System.get_env("FORGE_NIX_ENV") in ["1", "true"],
            # Set this where something in front of the platform rewrites the host, so a job's
            # clone URL is the one a client outside the node would use.
            git_base_url: System.get_env("FORGE_GIT_BASE_URL"),

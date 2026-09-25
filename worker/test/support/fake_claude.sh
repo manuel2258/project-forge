@@ -59,6 +59,9 @@ case "${FAKE_SCENARIO:-success}" in
       text="$(printf '%s' "$line" | sed -n 's/.*"text":"\([^"]*\)".*/\1/p')"
       turns=$((turns + 1))
       printf '%s\n' "$text" >> "$FORGE_JOB/fake-messages.txt"
+      # The whole line as well, because `text` above stops at the first escaped quote — and a
+      # composed prompt is full of them. A test about what one message carried reads this.
+      printf '%s\n' "$line" >> "$FORGE_JOB/fake-lines.jsonl"
 
       emit '{"type":"system","subtype":"init","session_id":"sess-42","model":"fake-model","tools":["Read"]}'
       # The echo, which the real harness writes only when it takes the message.
@@ -97,6 +100,13 @@ case "${FAKE_SCENARIO:-success}" in
         git add "turn-$turns.md" >&2
         git commit --quiet -m "turn $turns" >&2
       fi
+
+      # A conversation writing a document, which it means to keep by leaving it in `out/`.
+      case "$text" in
+        *WRITE*)
+          printf -- '# Notes\n\nWhat the conversation found.\n' > "$out/notes.md"
+          ;;
+      esac
 
       # A conversation filing a ticket. Written once and left there, because `out/` is not
       # cleared between turns — which is the case the platform's record-by-content rule is for.

@@ -11,7 +11,12 @@ defmodule ForgeWeb.StoreControllerTest do
   defp with_token(conn, token), do: put_req_header(conn, "authorization", "Bearer " <> token)
 
   setup do
-    dir = Path.join(System.tmp_dir!(), "forge-store-http-#{System.unique_integer([:positive])}")
+    dir =
+      Path.join(
+        System.tmp_dir!(),
+        "#{System.pid()}-forge-store-http-#{System.unique_integer([:positive])}"
+      )
+
     previous = Application.get_env(:forge, Storage, [])
     Application.put_env(:forge, Storage, Keyword.put(previous, :dir, dir))
 
@@ -87,12 +92,44 @@ defmodule ForgeWeb.StoreControllerTest do
     test "refuses an expired token", %{conn: conn} do
       key = "job/j1/transcript-1.jsonl"
       {:ok, _info} = Storage.put(key, "x")
+      # The lifetime is signed into the token, so it is the configuration at signing that counts.
+      previous = Application.get_env(:forge, Storage, [])
+      Application.put_env(:forge, Storage, Keyword.put(previous, :token_max_age, 0))
+      on_exit(fn -> Application.put_env(:forge, Storage, previous) end)
+
       token = Token.sign(:get, key)
+      conn = get(with_token(conn, token), ~p"/store/#{key}")
+
+      assert %{"error" => %{"reason" => "expired_token"}} = json_response(conn, 401)
+    end
+
+    # A transcript is uploaded when its job stops, which can be the job's whole wall clock after
+    # the token was minted. The lifetime is signed in, so a token that outlasts the configured
+    # one is still good once the configured one is gone — here, zero.
+    test "a token minted to outlast something is good past the ordinary lifetime", %{conn: conn} do
+      key = "job/j1/transcript-1.jsonl"
+      {:ok, _info} = Storage.put(key, "x")
 
       previous = Application.get_env(:forge, Storage, [])
       Application.put_env(:forge, Storage, Keyword.put(previous, :token_max_age, 0))
       on_exit(fn -> Application.put_env(:forge, Storage, previous) end)
 
+      token = Token.sign(:get, key, outlasting_ms: 60_000)
+      assert conn |> with_token(token) |> get(~p"/store/#{key}") |> response(200) == "x"
+    end
+
+    # Milliseconds, like every other duration in the platform's config: 999 of them is no whole
+    # second, so with no ordinary lifetime this token is born expired. Read as seconds it would
+    # last a quarter of an hour.
+    test "outlasting is counted in milliseconds", %{conn: conn} do
+      key = "job/j1/transcript-1.jsonl"
+      {:ok, _info} = Storage.put(key, "x")
+
+      previous = Application.get_env(:forge, Storage, [])
+      Application.put_env(:forge, Storage, Keyword.put(previous, :token_max_age, 0))
+      on_exit(fn -> Application.put_env(:forge, Storage, previous) end)
+
+      token = Token.sign(:get, key, outlasting_ms: 999)
       conn = get(with_token(conn, token), ~p"/store/#{key}")
 
       assert %{"error" => %{"reason" => "expired_token"}} = json_response(conn, 401)

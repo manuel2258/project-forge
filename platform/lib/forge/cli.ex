@@ -76,10 +76,15 @@ defmodule Forge.CLI do
 
   defp pending_line(%Ticket{pending_transition: nil}), do: "pending: none"
 
-  defp pending_line(%Ticket{pending_transition: p}),
-    do: "pending: #{p["from"]} -> #{p["to"]} needs approval of #{Enum.join(p["approve"], ", ")}"
+  defp pending_line(%Ticket{pending_transition: p} = ticket),
+    do:
+      "pending: #{p["from"]} -> #{p["to"]} needs approval of " <>
+        Enum.join(Forge.Engine.awaiting_approval(ticket), ", ")
 
-  @doc "Prints the queue."
+  @doc """
+  Prints the queue: a line per item, in `Forge.Queue`'s order — the decisions, then what is not
+  waiting on anyone.
+  """
   def queue do
     case Forge.Queue.items() do
       [] -> "queue is empty"
@@ -96,8 +101,21 @@ defmodule Forge.CLI do
     "QUESTION  #{label(ticket)}  [#{q.key}] #{q.text}#{options}"
   end
 
+  defp queue_line(%{kind: :assumption, ticket: ticket, question: q}),
+    do:
+      "ASSUMED   #{label(ticket)}  [#{q.key}] #{q.text} assumed: #{q.assumption} (not waiting on you)"
+
+  # A conversation about a project has no ticket, so it is named by its project. What it said is
+  # what the page shows: its question when it asked one, else the first line of its reply.
+  defp queue_line(%{kind: :chat, ticket: ticket, project: project, detail: d}) do
+    about = if ticket, do: label(ticket), else: project.name
+    said = if d.question, do: d.question.text, else: first_line(d.text)
+    "CHAT      #{about}  #{said}; reply with forge.chat say #{d.chat_id}"
+  end
+
   defp queue_line(%{kind: :approval, ticket: ticket, detail: d}) do
-    "APPROVAL  #{label(ticket)}  #{d["from"]} -> #{d["to"]}: approve #{Enum.join(d["approve"], ", ")}"
+    "APPROVAL  #{label(ticket)}  #{d["from"]} -> #{d["to"]}: approve " <>
+      Enum.join(Forge.Engine.awaiting_approval(ticket), ", ")
   end
 
   defp queue_line(%{kind: :stuck, ticket: ticket, detail: d}) do
@@ -107,6 +125,8 @@ defmodule Forge.CLI do
   defp queue_line(%{kind: :review, ticket: ticket, detail: d}) do
     "REVIEW    #{label(ticket)}  in #{d.state}; next: #{Enum.join(d.transitions, ", ")}"
   end
+
+  defp first_line(text), do: text |> to_string() |> String.split("\n", parts: 2) |> hd()
 
   def fail(message) do
     Mix.raise(message)

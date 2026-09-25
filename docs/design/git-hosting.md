@@ -132,8 +132,10 @@ url-safe base64, stored as a sha256 hash, looked up by hash so no secret is ever
   environment and never argv — not the runner's, and not the transient unit's either, which names
   a secret without its value. **It is never written into the job's `spec`**, which is stored on
   the row forever. The worker holds it for the length of the job and dies with it.
-- **Revocation.** When the job finishes or fails. A waiting job keeps its token; a resumed one is
-  issued a fresh one. Rows are kept rather than deleted: they are the audit trail behind the
+- **Revocation.** When the job finishes or fails, and when it is requeued because its worker was
+  lost, retired or rejoined without it (`Jobs.requeue/2`) — the next run is issued its own, and
+  the old one would otherwise outlive a partitioned machine by the job's whole wall clock. A
+  waiting job keeps its token; a resumed one is issued a fresh one. Rows are kept rather than deleted: they are the audit trail behind the
   `git.token.issued` and `git.token.revoked` events.
 
 The username in the Basic credential is ignored; the convention is `forge:<token>` so the URL form
@@ -184,16 +186,22 @@ operator sees a mirror that stopped working rather than a mirror that was never 
   request it serves, or a credential whose `FORGE_ALLOWED_REF` *is* the default branch — the shape
   § Issuing a token describes and only an operator can mint. So the default branch is
   fast-forward-only by construction, and no credential a job holds can move it.
-- Any other branch must be exactly the credential's `FORGE_ALLOWED_REF`, and must be
-  `refs/heads/ticket/<number>`. One branch per ticket, enforced rather than assumed.
+- Any other branch must be exactly the credential's `FORGE_ALLOWED_REF` (or be written by the
+  platform's own `FORGE_INTERNAL` push), and must be `refs/heads/ticket/<number>` or
+  `refs/heads/chat/<uuid>` — the second matched to a UUID's shape rather than to `chat/*`, because
+  a glob in the enforcement point would hand out the namespace. One branch per ticket or
+  conversation, enforced rather than assumed.
 - A push with no `FORGE_ALLOWED_REF` and no `FORGE_INTERNAL` writes nothing.
 
 ### Non-fast-forward on a ticket branch: allowed, recorded, and pinned
 
-`decisions.md` says a job commits freely and history is squashed. The squash happens at merge, so
-the common case is append-only — but a resumed job amending its last commit, or a rebase onto a
-moved base, is a rewrite, and refusing those would fail the job's own recovery path with a git
-error the agent cannot act on.
+`decisions.md` says a job commits freely and history is squashed. The squash happens on the
+worker, once per run: `ForgeWorker.Checkout.squash/3` resets softly to the fetched branch head and
+commits everything the run did as one commit, so the ticket branch gains one commit per run
+rather than the agent's keystrokes. The merge does not squash again — it keeps both parents
+(§ The merge). So the common case is append-only — but a resumed job amending its last commit, or
+a rebase onto a moved base, is a rewrite, and refusing those would fail the job's own recovery
+path with a git error the agent cannot act on.
 
 **So the ticket branch accepts a rewrite and the default branch does not.** The ticket branch is
 scratch space with exactly one writer, and the record that matters is not the ref: it is the
@@ -353,14 +361,15 @@ worktree, no filesystem cost:
 
 ```
 git merge-tree --write-tree --messages <default head> <approved sha>
-git commit-tree <tree> -p <default head> -m <message>
+git commit-tree <tree> -p <default head> -p <approved sha> -m <message>
 git push <bare repo path> <new sha>:refs/heads/<default>
 ```
 
 `merge-tree` is a real three-way merge from the merge base; a non-zero exit lists the conflicted
 paths, so conflict detection is free and costs nothing when there is no conflict. The commit's
 author is the approving operator and its committer is forge, so *who approved* is recorded in git
-itself and survives the platform. The message carries `Ticket:` and `Changeset:` trailers.
+itself and survives the platform. The message carries `Ticket:`, `Changeset:` and `Approved-by:`
+trailers.
 
 **The merge pushes rather than calling `update-ref`.** Pushing over the local transport spawns
 `receive-pack` in the bare repository, which runs both hooks — so the merge is enforced by, and
@@ -368,8 +377,10 @@ mirrored by, exactly the code path a job's push takes. `update-ref` plus an expl
 would mean the branch discipline and the mirror each had two implementations, and the demo's
 "mirrored" claim would be proven by a path no job ever takes. One rule, one enforcement point.
 
-The new commit's parent is the current default head, so the push is a fast-forward and needs no
-force; `pre-receive` asserts that.
+The new commit's first parent is the current default head, so the push is a fast-forward and
+needs no force; `pre-receive` asserts that. Its second parent is the approved sha, so the ticket's
+own commits stay reachable from the default branch and `git log` says where the change came from.
+One parent would put the merged content on the branch and lose every commit that produced it.
 
 `perform/2` is idempotent: if the approved sha is already an ancestor of the default branch it
 returns without making a second commit. Safe to call twice, safe to retry.
@@ -388,10 +399,36 @@ default branch never moved. The resolution is a **pre-flight check**, shaped lik
    at all, because a terminal state has none. That dead end is the reason for the pre-flight.
 2. The transaction records the approvals, the transition and the events, as it does today.
 3. After it commits, the entry action runs the merge for real.
-4. A late failure — another merge moved the default branch between the check and the push — is
-   retried once against the new head. If it still fails the ticket is stuck with the reason, and
-   `Forge.Operator.retry_merge/2` is the one verb that closes the loop. Without it a merge
-   failure is a dead end in the product.
+4. A late failure — another merge moved the default branch while this one was being written — is
+   **retried once against the new head**. `Forge.Merge.perform/2` makes an attempt from the head
+   it resolves; when the attempt fails and the default branch is no longer at that head, it
+   resolves the branch again and makes one more attempt from there. Whatever the second attempt
+   returns is final, and the entry action (`Forge.Engine.enter/4`) sticks the ticket with its
+   reason on anything but success.
+
+**What decides a retry is the ref, read the way the attempt read it.** What the push asserts is
+that the branch is still where the attempt found it — a fast-forward of that head, checked by the
+client against what `receive-pack` advertises and by `receive-pack` again under the ref's lock —
+so "did the branch move?" is the one question a retry can change the answer to. A refused push
+with the branch unmoved was refused for some other reason (the hook, the disk), and a conflict
+with the branch unmoved is a conflict with the newest head there is; a second attempt would fail
+both the same way, so neither is retried. Once, not until it works: two merges that keep crossing
+each other's pushes are a sign of something other than bad luck, and a stuck ticket says so
+where a loop would not.
+
+The retry lives in `Forge.Merge`, beneath both routes into the default branch, so a
+conversation's merge (`perform_chat/2`) has it as well. It is exercised against a default branch
+really moved underneath the push: a test wraps the repository's `pre-receive` to move the ref
+before handing over to the real hook.
+
+**`Forge.Operator.retry_merge/2` is not built, and is no longer the plan.** It was drawn as the
+verb that closes the loop after a failed retry. What a failed retry leaves is mostly what running
+the same merge again cannot fix — a conflict against the new head needs new work on the branch —
+and the one case a verb would close, a failure that is neither a race nor a conflict (a push
+refused while the disk was full), is rare enough to be named here rather than built. The dead end
+it was meant to close is still there: a ticket stuck in terminal `merged` has no transitions to
+offer, and getting it out is a way out of a stuck terminal state — a workflow question, not a git
+one. `perform/2` is idempotent, so a retry, whenever something asks for one, is safe.
 
 ## The job's own git
 
@@ -431,6 +468,10 @@ in this one module, which is what keeps the credential's handling in one place.
   mirrored over `git@host:` stops mirroring on upgrade and says so in the mirror's own status,
   which is the point of that status existing.
 - **Sideband progress on a clone** — see the CGI limit above.
+- **`Forge.Operator.retry_merge/2`.** Cut, where it was pending. The automatic retry against a
+  moved head is built; a verb that repeats the merge by hand is not, because what the retry
+  leaves is mostly a conflict, which repeating cannot fix — § Where it runs, and what a conflict
+  does. A ticket stuck in terminal `merged` is still a dead end, and that is the gap to close.
 - **Reconciling a mirror** is still cut: a mirror that was unreachable is not retried and is not
   caught up, it is simply reported as failing until the next push to a matching ref succeeds.
   What is no longer cut is knowing — § What the mirrors say about themselves.

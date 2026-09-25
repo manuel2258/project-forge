@@ -5,8 +5,16 @@ job on its own machine against a named commit. Two things invoke one: an agent, 
 state allows it; and a state that is nothing but commands. `docs/design/workflow-grammar-v1.md`
 carries the grammar; this note carries the mechanism and the reasoning.
 
-**None of this is built.** The grammar note marks the keys as unimplemented, the validator rejects
-them today, and no `kind: :command` job exists. What is settled is the shape.
+**Commands are not built.** The grammar note marks `commands`, `invoke`, `may_invoke` and `exit`
+as unimplemented, the parser rejects all four as unknown keys, and no `kind: :command` job exists
+— `jobs.kind` is `:workflow | :chat`. What is settled is the shape.
+
+**What this note argued for on the way is built**, because `docs/design/provisioning.md` took it:
+`resources` on a state and under the workflow's `defaults`, with `cpu` as a gate dimension
+(§ Resources); the cores and `accepts` a worker reports at `ready` (§ Worker pools); affinity on
+resume (§ Always park); and the worker templates, `shapes/1` and driver registry that gave
+`opts.size` a consumer. `resources` on a *command* is the one piece of that which waits for
+commands.
 
 **This is a resource-optimisation feature, not a sandbox.** An agent has a shell inside its slice
 and can already run anything the environment provides. Nothing here takes that away, and a note
@@ -114,8 +122,13 @@ memory and CPU share return to the worker for the length of the command, and the
 other work or be destroyed. A spot eviction or an idle destroy while a twenty-minute test suite
 runs costs nothing, because on the agent's side there is nothing running to lose.
 
-The machinery exists. `docs/design/job-prompt.md` § Blocking questions parks a job, refreshes its
-inputs and resumes the same job and attempt with a continuation prompt; `worker-tier.md` has
+The machinery exists. `docs/design/job-prompt.md` § Blocking questions and `waiting` parks a job,
+refreshes its inputs and resumes the same job and attempt. This note relied on a continuation
+prompt there, and one is built for answers (`job-prompt.md` § The continuation prompt): a run
+that resumes its session is handed the answers, the branch and the manifest rather than the whole
+prompt. It names answers and nothing else, so a resume after a command needs a section naming the
+command's result beside them — the manifest would list the result as an input, but a session
+that is not told an input is new has no reason to read it. `worker-tier.md` has
 commit-and-hibernate with resume from branch and manifest; the channel already has `hibernated`
 (`docs/design/worker-channel.md` § Messages). A command result is structurally what an answered
 question is: an input appears, the job resumes. Only the party satisfying the wait differs — a
@@ -135,13 +148,13 @@ invocations, and `may_invoke`'s `max` is a cap on park cycles as much as on comp
 be set with that in mind rather than as a generous safety number.
 
 **Whether the harness session survives a park is not a measurement. It is a consequence, and the
-answer is usually no.** This paragraph used to say measuring it was the first thing to do; two
-facts settle it without a run. A parked job holds no slice — which is the whole point of the
+answer was usually no.** This paragraph used to say measuring it was the first thing to do; two
+facts settled it without a run. A parked job holds no slice — which is the whole point of the
 feature — so a worker whose only job is parked has nothing running, goes `idle`, and is destroyed
-on its period while the command is still going. And `Workers.assignable/1` is first-fit by
-`inserted_at`, so even a machine that survives is not preferred for the resume. Claude Code's
-session lookup is per project directory (`docs/design/claude-code-events.md` § Resume), so a
-different worker cannot find it.
+on its period while the command is still going. And `Workers.assignable/1` was first-fit by
+`inserted_at`, so even a machine that survived was not preferred for the resume. The second is
+no longer true (below); the first still is. Claude Code's session lookup is per project directory
+(`docs/design/claude-code-events.md` § Resume), so a different worker cannot find it.
 
 Nothing about correctness turns on this — that note is explicit that *"resume is never required
 for correctness, and no outcome depends on it"*, and `worker-tier.md` § Hibernation and resume
@@ -149,11 +162,10 @@ reconstructs from the branch and the manifest rather than the conversation. What
 re-composed prompt, and context is this system's expensive resource. So `max` should be set as a
 cap on park cycles assuming the fallback, not the session.
 
-**The lever that would change it is affinity, not measurement.** Prefer the worker that still
-holds this job's worktree and fall through when it is gone. `docs/design/provisioning.md`
-§ Affinity on resume carries it: `assignable/1` is already growing arguments there, a preferred
-worker id is the same change, and a per-template idle period long enough on the agent side is what
-makes it hit.
+**The lever that changes it is affinity, not measurement, and it is built.**
+`Workers.assignable/2` prefers the worker the job last ran on and falls through to any other that
+fits when that one is gone (`docs/design/provisioning.md` § Affinity on resume). What makes it
+hit is the first fact's answer: a per-template idle period long enough on the agent side.
 
 ## The ensured commit
 
@@ -203,11 +215,14 @@ second when warm.
 
 ## Resources
 
-**Today the platform has one number for every job**: `config.exs` sets `slice_bytes` to M3's peak
-plus its margin, and `Forge.Jobs.Scheduler` reads `Workers.slice_bytes/0` for a refine job and a
-release build alike. `worker-tier.md` § Open names this and says per-state slices belong in the
-grammar. Commands are the reason it can no longer wait: a command declaring the same 2.2 GiB as a
-prose-refining agent is the gate doing nothing.
+**The platform had one number for every job**: `config.exs` set `slice_bytes` to M3's peak plus
+its margin, and `Forge.Jobs.Scheduler` read `Workers.slice_bytes/0` for a refine job and a
+release build alike. `worker-tier.md` § Open named this and said per-state slices belong in the
+grammar. Commands were the reason it could no longer wait: a command declaring the same 2.2 GiB
+as a prose-refining agent is the gate doing nothing. **It has not been one number since**: a job
+row carries the `memory_max` and `cores` it was admitted with, resolved once at creation, and the
+scheduler places it by those. `slice_bytes` is what a workflow job declaring nothing gets, and
+what a row from before the columns is read as.
 
 **This section is the grammar half. `docs/design/provisioning.md` is the platform half** — what
 the scheduler does with a declaration, how a worker says what it will take, and where a machine
@@ -215,15 +230,19 @@ that can satisfy one comes from. What is written here did not change when that n
 which is the useful part: the declaration was designed without knowing how it would be matched,
 and it survived contact.
 
-A `resources` map, valid on a command, on a job state, and as a project default:
+A `resources` map, valid on a job state and under the workflow's `defaults` — both built — and on
+a command, which waits for commands:
 
 ```yaml
 defaults:
   resources: { memory: 2200MiB, cpu: 1 }
 ```
 
-Resolved by the same chain `model` uses: the command's, then the state's, then the project's
-default, then the platform's `slice_bytes`.
+Resolved nearest-first: the command's, then the state's, then `defaults`, then the platform's
+`slice_bytes` and one core. This note first called that *the same chain `model` uses*, and it is
+not: a model resolves the state's, then the project's `model` column — a setting on the project,
+not a key in its workflow file — and there is no per-project `resources`. A project's default is
+its workflow's `defaults`.
 
 | Key | Means | Enforced by |
 |---|---|---|
@@ -239,13 +258,15 @@ predictability nothing has asked for. So `cpu` becomes a second dimension on the
 memory — does this fit alongside what is running — and the slice still gets `CPUWeight`. A command
 that finds the machine to itself uses all of it.
 
-**The gate needs a number nothing reports.** `ready` carries `memory_budget` and the harness
-offer (`docs/design/worker-channel.md` § Messages); it carries no core count, because until now
-nothing asked for one — every job was weighted equally and `CPUWeight` needs no arithmetic. A
-`cpu` dimension on the gate needs the worker to report its usable cores at `ready`, beside the
-memory budget and derived the same way: what the machine has, less what the system is holding
-back. Without it a declared `cpu` is a number the scheduler cannot check against anything, which
-is the decorative guard this repository keeps writing.
+**The gate needed a number nothing reported.** `ready` carried `memory_budget` and the harness
+offer and no core count, because until then nothing asked for one — every job was weighted
+equally and `CPUWeight` needs no arithmetic. Without one a declared `cpu` is a number the
+scheduler cannot check against anything, which is the decorative guard this repository keeps
+writing. **`ready` carries `cores` now, and `accepts` beside it** (`docs/design/worker-channel.md`
+§ What a worker offers). It was to be derived the way the memory budget is — what the machine
+has, less what the system holds back — and is not: it is the logical processors online, or
+`FORGE_CORES`, with no reserve (`docs/design/provisioning.md` § Open). A worker that omits it is
+not gated on cores rather than read as having none.
 
 **There is no `disk` key.** Build directories are the obvious third dimension and btrfs has the
 quota groups to enforce one, but nothing has measured disk as the binding constraint — M2 found
@@ -255,18 +276,21 @@ enforcing is worse than an absent one. § Open says where it would go.
 **A declaration no worker can satisfy is a runtime failure, not a validation error.**
 `forge_core` has no database and no network, so the validator cannot know what machines exist and
 cannot reject `memory: 512GiB`. The scheduler must therefore distinguish *does not fit right now*
-from *could never fit*, and stick the ticket with the reason in the second case. This is the same
+from *could never fit*, and stick the ticket with the reason in the second case — which it does,
+as `{:no_template, :none_fit}` (`docs/design/provisioning.md` § The gate). This is the same
 distinction `worker-tier.md` makes between a failed create and a machine somebody else owns, and
 it fails the same way if it is not made: a job queued for ever against capacity that will never
 exist.
 
-**What this gives the provider driver.** `Forge.Provider`'s `opts.size` is an opaque optional
-string today and nothing derives it. With declared resources the platform can size a machine from
-the demand that is queued rather than being told a magic name, which is why `resources` is
-expressed in bytes and cores rather than in t-shirt sizes. `docs/design/provisioning.md` § Where a
-machine comes from is what collects on it: a worker template carrying that opaque string, a
-`shapes/1` callback so the operator picks from machines the driver actually offers, and a registry
-in place of one global `impl/0`.
+**What this gives the provider driver.** `Forge.Provider`'s `opts.size` was an opaque optional
+string that nothing derived. With declared resources the platform can size a machine from the
+demand that is queued rather than being told a magic name, which is why `resources` is expressed
+in bytes and cores rather than in t-shirt sizes. `docs/design/provisioning.md` § Where a machine
+comes from collected on it, and all of it is built: a worker template carrying that opaque
+string, a `shapes/1` callback so the operator picks from machines the driver actually offers, and
+a registry in place of one global `impl/0`. The size is still a person's choice from that list:
+the platform picks the smallest template assigned to the job's project that holds the demand
+(`provisioning.md` § Whose account), not a size computed from it.
 
 ## Limits
 
@@ -352,10 +376,11 @@ errors never.
   fleet — and leaves the other: an unplaceable job is skipped and the pass continues, so a large
   job can be jumped by small ones indefinitely. An age-based reservation is the fix and neither
   note builds it.
-- **Whether affinity on resume is worth building.** § Always park no longer asks whether the
-  harness session survives a park, because the topology answers it: usually not. What is open is
-  the size of the prize — how many tokens a re-composed prompt costs against a resumed session —
-  and that one *is* a measurement, on the operator's real project rather than on a sample.
+- **Whether affinity on resume pays.** It is built (§ Always park), and § Always park no longer
+  asks whether the harness session survives a park, because the topology answers it. What is open
+  is the size of the prize — how many tokens a re-composed prompt costs against a resumed
+  session — and that one *is* a measurement, on the operator's real project rather than on a
+  sample.
 - **`disk` in `resources`.** Wanted the first time a build directory fills a worker; needs btrfs
   quota groups on the build subvolume and a free-space dimension on the gate.
 - **`arch` in `resources`.** A project whose toolchain is x86-only cannot run commands on an Arm

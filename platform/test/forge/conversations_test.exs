@@ -65,6 +65,24 @@ defmodule Forge.ConversationsTest do
       assert chat.memory_max == 700 * 1024 * 1024
     end
 
+    # What the person said is used, and what is not a figure is refused rather than replaced:
+    # a conversation opened on the default because a zero was passed is one nobody asked for
+    # (`docs/design/conversations.md` § What it asks for).
+    test "a figure is used as given, and one that is not a figure is refused", %{
+      project: project
+    } do
+      assert {:ok, chat} = Conversations.open(project, "hi", memory: 3_000_000_000, cores: 3)
+      assert {chat.memory_max, chat.cores} == {3_000_000_000, 3}
+
+      before = Repo.aggregate(Jobs.Job, :count)
+
+      for {key, value} <- [memory: 0, memory: -1, memory: "2 gigs", cores: 0, cores: 1.5] do
+        assert Conversations.open(project, "hi", [{key, value}]) == {:error, {:invalid, key}}
+      end
+
+      assert Repo.aggregate(Jobs.Job, :count) == before
+    end
+
     test "a ticket chat starts from the ticket's branch", %{project: project} do
       {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
 
@@ -225,6 +243,44 @@ defmodule Forge.ConversationsTest do
                Repo.all(from r in Forge.Jobs.Run, where: r.job_id == ^chat.id)
     end
 
+    # A reopened conversation is a new process: its turns are numbered from one again. Keyed on
+    # the turn alone, the new session's first turns read as re-sends of the old one's and were
+    # dropped — commit, proposals and push with them. What they cost is the run's
+    # (`Forge.Jobs.Runs`), which the test above pins.
+    test "a new session's turns are its own, and a re-send is still one", %{chat: chat} do
+      {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.10))
+      {:ok, chat} = Conversations.record_turn(chat, turn(2, 0.30))
+
+      {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.05, "sess-2"))
+      {:ok, chat} = Conversations.record_turn(chat, turn(2, 0.08, "sess-2"))
+      assert chat.turns == 4
+
+      # A re-send within the new session is still recorded once.
+      {:ok, chat} = Conversations.record_turn(chat, turn(2, 0.08, "sess-2"))
+      assert chat.turns == 4
+
+      turns = chat.id |> Events.for_job() |> Enum.count(&(&1.type == "chat.turn"))
+      assert turns == 4
+    end
+
+    # A harness that reports no session is one session as far as this can tell: its re-sent
+    # turn is recorded once, and the first session that does report is another one.
+    test "turns with no session are one session", %{chat: chat} do
+      {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.10, nil))
+      {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.10, nil))
+      assert chat.turns == 1
+
+      {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.05, "sess-2"))
+      assert chat.turns == 2
+    end
+
+    test "a session that reported no cost adds nothing, and breaks nothing", %{chat: chat} do
+      {:ok, chat} = Conversations.record_turn(chat, turn(1, nil))
+      {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.05, "sess-2"))
+
+      assert Decimal.equal?(chat.cost_usd, Decimal.new("0.05"))
+    end
+
     # The worker re-sends a turn until it is acked, so the same one can arrive twice.
     test "the same turn twice is recorded once", %{chat: chat} do
       {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.01))
@@ -234,6 +290,338 @@ defmodule Forge.ConversationsTest do
       turns = chat.id |> Events.for_job() |> Enum.count(&(&1.type == "chat.turn"))
       assert turns == 1
     end
+  end
+
+  # A conversation declares nothing, so every file it leaves in `out/` is a document it means to
+  # keep. `docs/design/conversations.md` § Commits.
+  describe "what a turn wrote" do
+    setup %{project: project} do
+      {:ok, chat} = Conversations.open(project, "write it down")
+      %{chat: chat}
+    end
+
+    defp turn_with_documents(index, documents, invalid \\ %{}) do
+      index
+      |> turn(0.01 * index)
+      |> Map.merge(%{"documents" => documents, "invalid_documents" => invalid})
+    end
+
+    defp last_turn_payload(chat) do
+      chat.id
+      |> Events.for_job()
+      |> Enum.filter(&(&1.type == "chat.turn"))
+      |> List.last()
+      |> Map.fetch!(:payload)
+    end
+
+    test "a project chat's document is a version of its own, written by it", %{chat: chat} do
+      {:ok, _chat} =
+        Conversations.record_turn(chat, turn_with_documents(1, %{"notes.md" => "# Notes\n"}))
+
+      assert %{kind: :document, job_id: job_id, ticket_id: nil} =
+               Forge.Artifacts.find({:job, chat.id}, "notes.md")
+
+      assert job_id == chat.id
+
+      assert [{_artifact, version}] = Forge.Artifacts.written_by(chat.id)
+      assert version.content == "# Notes\n"
+      assert version.version == 1
+    end
+
+    # A ticket chat writes against its ticket, because that is the work it is about: the version
+    # is the ticket's, which is what its next job reads.
+    test "a ticket chat's document is a version of the ticket's", %{project: project} do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+      {:ok, chat} = Conversations.open(project, "rewrite the plan", ticket: ticket)
+
+      {:ok, _chat} =
+        Conversations.record_turn(chat, turn_with_documents(1, %{"plan.md" => "# Plan\n"}))
+
+      assert [%{content: "# Plan\n", author: %{"kind" => "job", "id" => author}}] =
+               Forge.Artifacts.versions(ticket.id, "plan.md")
+
+      assert author == chat.id
+      assert Forge.Artifacts.find({:job, chat.id}, "plan.md") == nil
+    end
+
+    # `out/` accumulates, so every turn re-reports every file. A version per turn would be a
+    # version per sentence, and each would be the one an approval had to attach to.
+    test "the same file every turn is one version, and a changed one is the next", %{
+      chat: chat
+    } do
+      {:ok, chat} =
+        Conversations.record_turn(chat, turn_with_documents(1, %{"notes.md" => "# Notes\n"}))
+
+      {:ok, chat} =
+        Conversations.record_turn(chat, turn_with_documents(2, %{"notes.md" => "# Notes\n"}))
+
+      assert [%{version: 1}] = Forge.Artifacts.versions({:job, chat.id}, "notes.md")
+
+      {:ok, chat} =
+        Conversations.record_turn(chat, turn_with_documents(3, %{"notes.md" => "# More\n"}))
+
+      assert [%{version: 1}, %{version: 2, content: "# More\n"}] =
+               Forge.Artifacts.versions({:job, chat.id}, "notes.md")
+
+      # Compared with the *newest* version it wrote, not the first: the same file again is
+      # still nothing new, and going back to the first text is a change like any other.
+      {:ok, chat} =
+        Conversations.record_turn(chat, turn_with_documents(4, %{"notes.md" => "# More\n"}))
+
+      assert length(Forge.Artifacts.versions({:job, chat.id}, "notes.md")) == 2
+
+      {:ok, _chat} =
+        Conversations.record_turn(chat, turn_with_documents(5, %{"notes.md" => "# Notes\n"}))
+
+      assert [_one, _two, %{version: 3, content: "# Notes\n"}] =
+               Forge.Artifacts.versions({:job, chat.id}, "notes.md")
+    end
+
+    # Compared against what this conversation last wrote, not against the latest version: on a
+    # ticket the latest may be a job's or a person's since, and comparing against it would write
+    # the conversation's stale copy back over theirs on every turn.
+    test "a newer version by someone else is not overwritten by the same file again", %{
+      project: project
+    } do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+      {:ok, chat} = Conversations.open(project, "draft the plan", ticket: ticket)
+
+      {:ok, chat} =
+        Conversations.record_turn(chat, turn_with_documents(1, %{"plan.md" => "# Draft\n"}))
+
+      # The ticket's own job, since, and then a person. Another job is the case that tells "what
+      # this conversation wrote" from "what any job wrote".
+      [job] = Jobs.for_ticket(ticket.id)
+
+      {:ok, _theirs} =
+        Forge.Artifacts.record_version(ticket.id, "plan.md", :document, {:job, job.id}, %{
+          content: "# The job's\n"
+        })
+
+      {:ok, chat} =
+        Conversations.record_turn(chat, turn_with_documents(2, %{"plan.md" => "# Draft\n"}))
+
+      {:ok, _theirs} =
+        Forge.Artifacts.record_version(ticket.id, "plan.md", :document, :system, %{
+          content: "# Someone else's\n"
+        })
+
+      {:ok, _chat} =
+        Conversations.record_turn(chat, turn_with_documents(3, %{"plan.md" => "# Draft\n"}))
+
+      assert ["# Draft\n", "# The job's\n", "# Someone else's\n"] =
+               ticket.id |> Forge.Artifacts.versions("plan.md") |> Enum.map(& &1.content)
+    end
+
+    # Each would fail inside the turn's transaction — the name the platform keeps, text the
+    # database cannot store, a document that does not parse, a name that is already a blob here —
+    # and take the turn's cost and commit down with it, for ever, since the worker re-sends an
+    # unacked turn. Refused before the transaction instead, and the turn is recorded.
+    test "what cannot be a document is refused, with why, and the turn is still recorded", %{
+      project: project
+    } do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+      {:ok, chat} = Conversations.open(project, "look", ticket: ticket)
+
+      {:ok, _blob} =
+        Forge.Artifacts.record_version(ticket.id, "build.log", :blob, :system, %{
+          blob_uri: "store:job/x/build.log"
+        })
+
+      documents = %{
+        "notes.md" => "# Fine\n",
+        "ticket" => "# A new ticket body\n",
+        "nul.md" => "# Nul\n" <> <<0>>,
+        "broken.md" => "---\noutcome: done\n",
+        "build.log" => "# Not a log\n",
+        # A transcript's name before the transcript exists: the job would find it taken when it
+        # finished, and be unable to record its result.
+        "transcript-refining-1.jsonl" => "# Mine\n",
+        # No NUL byte in the text, so `text?/1` passes it — the YAML escape makes one, and the
+        # `jsonb` front matter refused it inside the turn's transaction, with an exception: the
+        # turn's cost went unrecorded and the channel crashed on every re-send.
+        "escaped.md" => "---\ntitle: \"a\\0b\"\n---\n# Escaped\n",
+        "huge.md" => "# Huge\n" <> String.duplicate("a", 1024 * 1024)
+      }
+
+      {:ok, chat} =
+        Conversations.record_turn(
+          chat,
+          turn_with_documents(1, documents, %{"image.png" => "must be UTF-8 text"})
+        )
+
+      assert chat.turns == 1
+      assert [{%{name: "notes.md"}, _version}] = Forge.Artifacts.written_by(chat.id)
+
+      refused = last_turn_payload(chat)["refused_documents"]
+
+      assert refused["ticket"] =~ "reserved"
+      assert refused["nul.md"] =~ "UTF-8 text"
+      assert refused["broken.md"] =~ "does not parse"
+      assert refused["build.log"] =~ "is a blob here"
+      assert refused["transcript-refining-1.jsonl"] =~ "reserved for job transcripts"
+      assert refused["escaped.md"] =~ "NUL"
+      assert refused["huge.md"] =~ "no larger than"
+      # What the worker refused comes through beside what the platform did.
+      assert refused["image.png"] =~ "UTF-8 text"
+      refute Map.has_key?(refused, "notes.md")
+
+      assert Conversations.unrecorded(chat.id) == refused
+    end
+
+    # The page reads the newest turn's, so a file the agent fixed stops being listed as refused.
+    test "a later turn that refuses nothing clears what was refused", %{chat: chat} do
+      {:ok, chat} =
+        Conversations.record_turn(chat, turn_with_documents(1, %{"ticket" => "# No\n"}))
+
+      assert %{"ticket" => _why} = Conversations.unrecorded(chat.id)
+
+      {:ok, _chat} = Conversations.record_turn(chat, turn_with_documents(2, %{}))
+
+      assert Conversations.unrecorded(chat.id) == %{}
+    end
+
+    # A conversation asks in its reply, where the person is. A block in a document it wrote
+    # became a blocking question on the ticket and reached the queue, holding the ticket's work
+    # on a question nobody had been asked (`conversations.md` § Commits).
+    test "a question in a chat's document is not a question on the ticket", %{project: project} do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+      {:ok, chat} = Conversations.open(project, "sketch a plan", ticket: ticket)
+
+      {:ok, _chat} =
+        Conversations.record_turn(chat, turn_with_documents(1, %{"plan.md" => asking("backend")}))
+
+      # Written, front matter and all — only the question is not extracted from it.
+      assert [%{content: content, meta: %{"title" => "Plan"}}] =
+               Forge.Artifacts.versions(ticket.id, "plan.md")
+
+      assert content =~ "```question"
+      assert Forge.Artifacts.open_questions(ticket.id) == []
+      refute Enum.any?(Forge.Queue.items(), &(&1.kind in [:question, :assumption]))
+    end
+
+    # The review reproduced it: a job stopped on a question in `refinement.md`, a ticket chat
+    # wrote `refinement.md` without the block, and — a question counting only on the latest
+    # version — the job sat `:waiting` with nothing open, nothing in the queue and nothing that
+    # could resume it. The chat's version is refused, the question stays open, and answering it
+    # both resumes the job and lets the next turn write the file.
+    test "a ticket chat may not rewrite the document a waiting job stopped on", %{
+      project: project
+    } do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+      [job] = Jobs.for_ticket(ticket.id)
+
+      {:ok, _asked} =
+        Forge.Artifacts.record_version(ticket.id, "refinement.md", :document, {:job, job.id}, %{
+          content: asking("backend")
+        })
+
+      {:ok, _waiting} = job |> Jobs.Job.progress_changeset(%{status: :waiting}) |> Repo.update()
+      {:ok, chat} = Conversations.open(project, "tidy the refinement", ticket: ticket)
+      rewrite = %{"refinement.md" => "# Refinement\n\nNo question now.\n", "notes.md" => "# N\n"}
+
+      {:ok, chat} = Conversations.record_turn(chat, turn_with_documents(1, rewrite))
+
+      assert [%{version: 1}] = Forge.Artifacts.versions(ticket.id, "refinement.md")
+      assert last_turn_payload(chat)["refused_documents"]["refinement.md"] =~ "waiting job"
+      assert last_turn_payload(chat)["refused_documents"]["refinement.md"] =~ "`backend`"
+      assert [%{key: "backend"}] = Forge.Artifacts.open_blocking_questions(ticket.id)
+      assert Enum.any?(Forge.Queue.items(), &(&1.kind == :question))
+
+      # Only the document the question is on: the rest of what the turn wrote is the ticket's.
+      assert [%{content: "# N\n"}] = Forge.Artifacts.versions(ticket.id, "notes.md")
+
+      user = Forge.ForgeFixtures.member_fixture(project)
+      {:ok, _ticket} = Forge.Operator.answer(ticket, user, "backend", %{choice: "sqlite"})
+      assert Jobs.get!(job.id).status == :pending
+
+      {:ok, _chat} = Conversations.record_turn(chat, turn_with_documents(2, rewrite))
+
+      assert [%{version: 1}, %{version: 2, author: %{"id" => author}}] =
+               Forge.Artifacts.versions(ticket.id, "refinement.md")
+
+      assert author == chat.id
+    end
+
+    # The hold is the question *and* the waiting job, as it is for `Operator.answer/4`: a
+    # blocking question nobody is stopped on holds nothing, and a chat may rewrite its document
+    # like any other.
+    test "a blocking question with no job waiting on it holds nothing", %{project: project} do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+      [job] = Jobs.for_ticket(ticket.id)
+      assert job.status == :pending
+
+      {:ok, _asked} =
+        Forge.Artifacts.record_version(ticket.id, "refinement.md", :document, {:job, job.id}, %{
+          content: asking("backend")
+        })
+
+      {:ok, chat} = Conversations.open(project, "tidy the refinement", ticket: ticket)
+
+      {:ok, chat} =
+        Conversations.record_turn(
+          chat,
+          turn_with_documents(1, %{"refinement.md" => "# Refinement\n"})
+        )
+
+      assert [_asked, %{content: "# Refinement\n"}] =
+               Forge.Artifacts.versions(ticket.id, "refinement.md")
+
+      assert last_turn_payload(chat)["refused_documents"] == %{}
+    end
+
+    # The review's second reproduction: an approval pending on `refinement.md`, a ticket chat
+    # writing `refinement.md`, and `Engine.decide/4` approving the latest version — the chat's,
+    # which the operator never saw. Refused until the decision is made, and the approval lands
+    # on the version that was shown.
+    test "a ticket chat may not rewrite a document waiting for approval", %{project: project} do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+      [job] = Jobs.for_ticket(ticket.id)
+
+      {:ok, shown} =
+        Forge.Artifacts.record_version(ticket.id, "refinement.md", :document, {:job, job.id}, %{
+          content: "---\noutcome: done\n---\n# Refinement\n"
+        })
+
+      {:ok, ticket} = Forge.Engine.after_job(ticket, job, "done")
+      assert ticket.pending_transition["approve"] == ["refinement.md"]
+
+      {:ok, chat} = Conversations.open(project, "tighten the refinement", ticket: ticket)
+      rewrite = %{"refinement.md" => "# Refinement, tightened\n"}
+
+      {:ok, chat} = Conversations.record_turn(chat, turn_with_documents(1, rewrite))
+
+      assert [%{id: id}] = Forge.Artifacts.versions(ticket.id, "refinement.md")
+      assert id == shown.id
+      assert last_turn_payload(chat)["refused_documents"]["refinement.md"] =~ "approve"
+
+      user = Forge.ForgeFixtures.member_fixture(project)
+      {:ok, ticket} = Forge.Engine.decide(ticket, user.id, :approved, nil)
+      assert ticket.state == "planning"
+      assert Forge.Artifacts.approved?(shown)
+
+      {:ok, _chat} = Conversations.record_turn(chat, turn_with_documents(2, rewrite))
+
+      assert [_shown, %{content: "# Refinement, tightened\n"}] =
+               Forge.Artifacts.versions(ticket.id, "refinement.md")
+    end
+  end
+
+  # A document with a blocking question in it, the way a job writes one.
+  defp asking(key) do
+    """
+    ---
+    title: Plan
+    ---
+    # Plan
+
+    ```question
+    key: #{key}
+    text: Local file or SQLite?
+    options: [local-file, sqlite]
+    blocking: true
+    ```
+    """
   end
 
   describe "reaching the worker" do
@@ -294,6 +682,10 @@ defmodule Forge.ConversationsTest do
       assert entry["metadata"] =~ job.id
       assert entry["transcript"]["key"] == "job/#{job.id}/transcript-1.jsonl"
       assert is_binary(entry["transcript"]["token"])
+
+      # Fetched only once the conversation's worktree is prepared, so the token outlives the
+      # preparation margin, an hour, as well as the store's own fifteen minutes.
+      assert store_token_lifetime(entry["transcript"]["token"]) == 3600 + 15 * 60
 
       # The bytes are not here, and that is the point.
       refute entry["metadata"] =~ "\"type\":"
@@ -373,6 +765,141 @@ defmodule Forge.ConversationsTest do
       {:ok, _} = Conversations.record_turn(chat, turn(1, 0.01))
 
       assert [%{role: :user}, %{role: :assistant, text: "done"}] = Conversations.messages(chat.id)
+    end
+  end
+
+  describe "what the next process starts with" do
+    setup %{project: project} do
+      {:ok, chat} = Conversations.open(project, "hello")
+      %{chat: chat}
+    end
+
+    defp assigned_spec(chat) do
+      chat = Jobs.get!(chat.id)
+      Jobs.assignment(chat, nil, Projects.get!(chat.project_id), "token")["spec"]
+    end
+
+    test "a first start opens with what the person said, and has nothing to replay", %{
+      chat: chat
+    } do
+      spec = assigned_spec(chat)
+
+      assert spec["prompt"] == "hello"
+      assert spec["replay"] == nil
+    end
+
+    # Pushed to a conversation with no worker, a message was logged as undelivered and went
+    # nowhere. It is after the last reply like any unanswered message, so it is answered.
+    test "what was said while it waited for a machine is part of its opening", %{chat: chat} do
+      {:ok, _event} = Conversations.send(chat, "and one more thing")
+
+      assert assigned_spec(chat)["prompt"] == "hello\n\nand one more thing"
+    end
+
+    # The defect this exists for. A reopen was handed the first `chat.message` as its prompt, so
+    # the new process answered the opening message a second time, as though new, and knew
+    # nothing said after it. Two exchanges, so that a split at the *first* reply would leave the
+    # second question looking unanswered and be caught.
+    test "a reopened conversation is given what was said, and nothing to answer again", %{
+      chat: chat
+    } do
+      text(chat, "It is a game.")
+      {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.01))
+      {:ok, _event} = Conversations.send(chat, "which engine?")
+      text(chat, "Its own.")
+      {:ok, chat} = Conversations.record_turn(chat, turn(2, 0.02))
+      {:ok, chat} = Conversations.ended(chat, nil, "idle")
+      {:ok, chat} = Conversations.reopen(chat)
+
+      spec = assigned_spec(chat)
+
+      assert spec["prompt"] == nil
+
+      # All four, in the order they were said, each saying who said it.
+      replay = spec["replay"]
+
+      positions =
+        Enum.map(
+          ["## The person", "hello", "## You", "It is a game.", "which engine?", "Its own."],
+          fn needle -> :binary.match(replay, needle) |> elem(0) end
+        )
+
+      assert positions == Enum.sort(positions)
+      assert replay =~ ~r/## The person[^\n]*\n\nwhich engine\?/
+      assert replay =~ ~r/## You[^\n]*\n\nIts own\./
+    end
+
+    test "what the person says after a reopen is what it answers, and not replayed", %{
+      chat: chat
+    } do
+      text(chat, "It is a game.")
+      {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.01))
+      {:ok, chat} = Conversations.ended(chat, nil, "idle")
+      {:ok, chat} = Conversations.reopen(chat)
+      {:ok, _event} = Conversations.send(chat, "does it still build?")
+
+      spec = assigned_spec(chat)
+
+      assert spec["prompt"] == "does it still build?"
+      assert spec["replay"] =~ "It is a game."
+      refute spec["replay"] =~ "does it still build?"
+    end
+
+    # A reopen is a cold start and a cold start clears `out/`, so a project chat's own documents
+    # were gone from its view — while a ticket chat's came back as the ticket's. Now it is handed
+    # what it last wrote of each, and not its proposals, which are backlog and not documents.
+    test "a reopened project chat is handed what it wrote, at its latest", %{chat: chat} do
+      {:ok, chat} =
+        Conversations.record_turn(
+          chat,
+          Map.merge(turn(1, 0.01), %{
+            "documents" => %{"notes.md" => "# One\n"},
+            "proposals" => %{
+              "later.md" => %{"title" => "Later", "body" => "b", "raw" => "# Later\n\nb\n"}
+            }
+          })
+        )
+
+      {:ok, chat} =
+        Conversations.record_turn(
+          chat,
+          Map.put(turn(2, 0.02), "documents", %{"notes.md" => "# Two\n"})
+        )
+
+      {:ok, chat} = Conversations.ended(chat, nil, "idle")
+      {:ok, chat} = Conversations.reopen(chat)
+
+      assert [%{"name" => "notes.md", "version" => 2, "content" => "# Two\n"}] =
+               assigned_spec(chat)["inputs"]
+    end
+
+    # The other half, so the two cannot be swapped: a ticket chat's inputs are the ticket's.
+    test "a ticket chat is handed the ticket's documents, not its own scope", %{project: project} do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+      {:ok, chat} = Conversations.open(project, "about this", ticket: ticket)
+
+      {:ok, _chat} =
+        Conversations.record_turn(
+          chat,
+          Map.put(turn(1, 0.01), "documents", %{"notes.md" => "# N\n"})
+        )
+
+      chat = Jobs.get!(chat.id)
+      spec = Jobs.assignment(chat, ticket, project, "token")["spec"]
+
+      assert spec["inputs"] |> Enum.map(& &1["name"]) |> Enum.sort() == ["notes.md", "ticket"]
+    end
+
+    # No `chat.turn` closed it: the machine went while the agent was still speaking. A reply
+    # that stops mid-sentence would otherwise read as a finished one that trailed off.
+    test "a reply the process never finished is replayed as cut off", %{chat: chat} do
+      text(chat, "Let me look at the")
+      {:ok, chat} = Conversations.ended(chat, nil, "worker_lost")
+      {:ok, chat} = Conversations.reopen(chat)
+
+      replay = assigned_spec(chat)["replay"]
+
+      assert replay =~ ~r/## You[^\n]*cut off[^\n]*\n\nLet me look at the/
     end
   end
 
@@ -544,6 +1071,101 @@ defmodule Forge.ConversationsTest do
       assert chat.id in (Jobs.pending(10) |> Enum.map(& &1.id))
     end
 
+    # A `reopen` is anything the socket sends, and the page draws the button only when the
+    # conversation is not live. On a running one it cleared the `worker_id` its worker reports
+    # under — every later turn failed the channel's ownership check — and queued it to be placed
+    # a second time.
+    test "a live conversation is not reopened", %{chat: chat, project: project} do
+      {:ok, worker, _token} = Forge.Workers.create(%{provider: "fake"})
+
+      {:ok, running} =
+        chat
+        |> Jobs.Job.progress_changeset(%{status: :running, worker_id: worker.id})
+        |> Repo.update()
+
+      assert {:error, :live} = Conversations.reopen(running)
+      # The row is asked, not the struct: one rendered after it stopped says nothing now.
+      assert {:error, :live} = Conversations.reopen(%{running | status: :hibernated})
+
+      assert %{status: :running, worker_id: worker_id} = Jobs.get!(chat.id)
+      assert worker_id == worker.id
+      refute Enum.any?(Events.for_job(chat.id), &(&1.type == "chat.reopened"))
+
+      # Waiting for a machine is live too.
+      {:ok, waiting} = Conversations.open(project, "another")
+      assert {:error, :live} = Conversations.reopen(waiting)
+    end
+
+    # The same line from the other side. An idle conversation keeps its branch; a close arriving
+    # afterwards — a stale page, a crafted event — recorded a second ending, as `closed`, and
+    # dealt with the branch as though a person had abandoned it.
+    test "a conversation that has stopped is not closed again", %{chat: chat, project: project} do
+      {:ok, idle} = Conversations.ended(chat, nil, "idle")
+
+      assert {:error, :not_live} = Conversations.close(idle)
+      # The struct the caller holds still says pending; the row says otherwise.
+      assert {:error, :not_live} = Conversations.close(chat)
+
+      assert Git.branch_exists?(Projects.repo_path(project), "chat/" <> chat.id)
+      assert [_once] = Enum.filter(Events.for_job(chat.id), &(&1.type == "chat.ended"))
+    end
+
+    # `Jobs.assign/2` puts a row back to pending when the assignment cannot be pushed, and leaves
+    # the worker it chose on it. Asked whether the row named a worker, a close went to a machine
+    # that never had the conversation, and the row stayed pending with nobody to end it.
+    test "a pending conversation that still names a worker is ended here", %{chat: chat} do
+      {:ok, worker, _token} = Forge.Workers.create(%{provider: "fake"})
+      {:ok, worker} = Forge.Workers.ready(worker, %{"memory_budget" => 8_000_000_000})
+      :ok = Forge.Workers.connected(worker.id)
+
+      {:ok, pending} =
+        chat |> Jobs.Job.progress_changeset(%{worker_id: worker.id}) |> Repo.update()
+
+      assert pending.status == :pending
+
+      assert :ok = Conversations.close(pending)
+
+      refute_received {"close", _payload}
+      assert Jobs.get!(chat.id).status == :finished
+    end
+
+    # A scheduling pass holds the rows it read for as long as it runs. A close in the meantime
+    # ended the row and deleted the branch, and the pass then marked it running from the struct
+    # it held and sent it to a machine.
+    test "a conversation closed during a scheduling pass is not started by it", %{
+      chat: chat,
+      project: project
+    } do
+      funded!(project)
+      worker = Forge.FakeWorker.connect(project: project)
+      read_by_the_pass = chat
+
+      assert :ok = Conversations.close(chat)
+
+      assert {:error, {:changed, :finished}} = Jobs.assign(read_by_the_pass, worker)
+      assert Jobs.get!(chat.id).status == :finished
+      refute_received {"assign", _payload}
+      assert Git.Tokens.revoke_for_job(chat.id) == 0
+    end
+
+    # The other order: the pass got there first, so there is a process to tell, and the ending
+    # recorded here for a conversation with none would leave that process running unrecorded.
+    test "an ending expected of a pending row does not end one that has since started", %{
+      chat: chat,
+      project: project
+    } do
+      read_by_the_close = chat
+
+      {:ok, _running} =
+        chat |> Jobs.Job.progress_changeset(%{status: :running}) |> Repo.update()
+
+      assert {:error, {:row, {:changed, :running}}} =
+               Conversations.ended(read_by_the_close, nil, "closed", expect: :pending)
+
+      assert Jobs.get!(chat.id).status == :running
+      assert Git.branch_exists?(Projects.repo_path(project), "chat/" <> chat.id)
+    end
+
     test "its messages survive it", %{chat: chat} do
       text(chat, "a reply")
       {:ok, _} = Conversations.record_turn(chat, turn(1, 0.01))
@@ -553,20 +1175,213 @@ defmodule Forge.ConversationsTest do
     end
   end
 
+  describe "its branch, when it ends" do
+    setup %{project: project} do
+      {:ok, chat} = Conversations.open(project, "tidy the readme")
+      %{chat: chat, repo: Projects.repo_path(project)}
+    end
+
+    # What a worker's push is, without a worker: a clone of the branch, a commit, and a push by
+    # path — `FORGE_INTERNAL` because the hook refuses an uncredentialed push, which is its job.
+    defp push_to(repo, branch, path, content) do
+      work = Path.join(tmp_dir("push"), "clone")
+
+      for args <- [
+            ["clone", "--quiet", "--branch", branch, repo, work],
+            ["-C", work, "config", "user.name", "someone"],
+            ["-C", work, "config", "user.email", "someone@forge"]
+          ] do
+        {_out, 0} = System.cmd("git", args, stderr_to_stdout: true)
+      end
+
+      File.write!(Path.join(work, path), content)
+
+      for args <- [
+            ["add", "."],
+            ["commit", "--quiet", "-m", "change #{path}"],
+            ["push", "--quiet", "origin", "HEAD:refs/heads/" <> branch]
+          ] do
+        {_out, 0} =
+          System.cmd("git", ["-C", work | args],
+            stderr_to_stdout: true,
+            env: [{"FORGE_INTERNAL", "1"}]
+          )
+      end
+
+      {:ok, head} = Git.resolve(repo, "refs/heads/" <> branch)
+      head
+    end
+
+    defp branch_events(chat, type),
+      do: chat.id |> Events.for_job() |> Enum.filter(&(&1.type == type))
+
+    # The abandon. The person had a merge that worked and ended the conversation instead, so the
+    # work goes — and nothing is pinned, because a pin would keep exactly what closing reclaims.
+    test "closing deletes a branch that was not merged, and pins nothing", %{
+      chat: chat,
+      repo: repo
+    } do
+      head = push_to(repo, "chat/" <> chat.id, "NOTES.md", "a note\n")
+
+      assert :ok = Conversations.close(chat)
+
+      refute Git.branch_exists?(repo, "chat/" <> chat.id)
+      assert {:error, _} = Git.resolve(repo, "refs/forge/chat/#{chat.id}")
+
+      # Its head is in the log, which is where the sha of discarded work can still be found.
+      assert [event] = branch_events(chat, "chat.branch_deleted")
+      assert event.payload["head"] == head
+      assert event.payload["merged"] == false
+    end
+
+    # § Commits' order: the pin first, then the branch, so the merged commit is never only
+    # reachable through a ref that is about to go. A chat that committed nothing has its head on
+    # the default branch already, which is the same case.
+    test "closing one whose work is on the default branch pins it before the branch goes", %{
+      chat: chat,
+      repo: repo
+    } do
+      {:ok, head} = Git.resolve(repo, "refs/heads/chat/" <> chat.id)
+
+      assert :ok = Conversations.close(chat)
+
+      refute Git.branch_exists?(repo, "chat/" <> chat.id)
+      assert {:ok, ^head} = Git.resolve(repo, "refs/forge/chat/#{chat.id}")
+      assert [%{payload: %{"merged" => true}}] = branch_events(chat, "chat.branch_deleted")
+    end
+
+    # A merge that conflicted deletes nothing, and neither does an ending: the branch is where the
+    # work still is, and taking it by hand — what the page says to do about a conflict — needs
+    # it. Asked of the merge itself, so a branch nobody tried to merge is kept the same way.
+    test "a branch that would not merge cleanly survives the close", %{chat: chat, repo: repo} do
+      head = push_to(repo, "chat/" <> chat.id, "README.md", "the conversation's version\n")
+      push_to(repo, "main", "README.md", "someone else's version\n")
+
+      assert :ok = Conversations.close(chat)
+
+      assert {:ok, ^head} = Git.resolve(repo, "refs/heads/chat/" <> chat.id)
+      assert [event] = branch_events(chat, "chat.branch_kept")
+      assert event.payload["reason"] == "conflict"
+    end
+
+    # Nobody decided anything, so nothing is abandoned: these are dormancy, and a dormant
+    # conversation is reopened to carry on with the work that is on its branch.
+    test "going idle or losing the machine keeps the branch", %{chat: chat, repo: repo} do
+      head = push_to(repo, "chat/" <> chat.id, "NOTES.md", "a note\n")
+
+      for reason <- ["idle", "worker_lost", "ended"] do
+        {:ok, chat} = Conversations.ended(chat, nil, reason)
+        assert {:ok, ^head} = Git.resolve(repo, "refs/heads/chat/" <> chat.id), reason
+        {:ok, _chat} = Conversations.reopen(chat)
+      end
+
+      assert branch_events(chat, "chat.branch_deleted") == []
+    end
+
+    # A conversation with a machine finishes its last turn and pushes it before the worker
+    # reports. Deleted when the person asked, the branch would be pushed straight back by that
+    # last turn — so it waits for the report, when nothing can push to it any more.
+    test "with a machine, the branch goes when the worker reports the ending, not before", %{
+      chat: chat,
+      repo: repo
+    } do
+      {:ok, worker, _token} = Forge.Workers.create(%{provider: "fake"})
+      {:ok, worker} = Forge.Workers.ready(worker, %{"memory_budget" => 8_000_000_000})
+      :ok = Forge.Workers.connected(worker.id)
+
+      {:ok, running} =
+        chat
+        |> Jobs.Job.progress_changeset(%{status: :running, worker_id: worker.id})
+        |> Repo.update()
+
+      :ok = Conversations.close(running)
+      assert_receive {"close", %{"reason" => "closed"}}
+      assert Git.branch_exists?(repo, "chat/" <> chat.id)
+
+      head = push_to(repo, "chat/" <> chat.id, "LAST.md", "the last turn\n")
+      {:ok, _ended} = Conversations.ended(running, head, "closed")
+
+      refute Git.branch_exists?(repo, "chat/" <> chat.id)
+    end
+
+    # Closing is not terminal: every conversation that is not live can be reopened. A branch that
+    # is gone is made again where opening would make it, or the worker refuses the conversation
+    # minutes later for a branch that does not exist.
+    test "reopening after a close starts the branch again from the default branch", %{
+      chat: chat,
+      repo: repo
+    } do
+      push_to(repo, "chat/" <> chat.id, "NOTES.md", "abandoned\n")
+      :ok = Conversations.close(chat)
+      moved = push_to(repo, "main", "LATER.md", "the default branch moved on\n")
+
+      {:ok, _reopened} = Conversations.reopen(Jobs.get!(chat.id))
+
+      assert {:ok, ^moved} = Git.resolve(repo, "refs/heads/chat/" <> chat.id)
+      assert [%{payload: %{"branch" => "recreated"}}] = branch_events(chat, "chat.reopened")
+    end
+
+    test "a ticket chat's branch comes back from the ticket's, as opening makes it", %{
+      project: project,
+      repo: repo
+    } do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+      {:ok, chat} = Conversations.open(project, "about this", ticket: ticket)
+      push_to(repo, "chat/" <> chat.id, "NOTES.md", "abandoned\n")
+      :ok = Conversations.close(chat)
+      push_to(repo, "main", "LATER.md", "the default branch moved on\n")
+      ticket_head = push_to(repo, ticket.branch, "WORK.md", "the ticket's work\n")
+
+      {:ok, _reopened} = Conversations.reopen(Jobs.get!(chat.id))
+
+      assert {:ok, ^ticket_head} = Git.resolve(repo, "refs/heads/chat/" <> chat.id)
+    end
+
+    # Made in the reopen's own transaction, so a branch that cannot be made is a reopen that did
+    # not happen — not a pending row the worker will refuse for a branch that is not there.
+    test "a branch that cannot be made again leaves the conversation where it was", %{
+      project: project,
+      repo: repo
+    } do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+      {:ok, chat} = Conversations.open(project, "about this", ticket: ticket)
+      :ok = Conversations.close(chat)
+      :ok = Git.delete_branch(repo, ticket.branch)
+
+      assert {:error, {:branch, _reason}} = Conversations.reopen(Jobs.get!(chat.id))
+
+      assert Jobs.get!(chat.id).status == :finished
+      assert branch_events(chat, "chat.reopened") == []
+    end
+
+    test "reopening one whose branch is still there leaves it as it stands", %{
+      chat: chat,
+      repo: repo
+    } do
+      head = push_to(repo, "chat/" <> chat.id, "NOTES.md", "kept\n")
+      {:ok, chat} = Conversations.ended(chat, nil, "idle")
+
+      {:ok, _reopened} = Conversations.reopen(chat)
+
+      assert {:ok, ^head} = Git.resolve(repo, "refs/heads/chat/" <> chat.id)
+      assert [%{payload: %{"branch" => "kept"}}] = branch_events(chat, "chat.reopened")
+    end
+  end
+
   defp turn_with_proposals(index, proposals, invalid \\ %{}) do
     index
     |> turn(0.01)
     |> Map.merge(%{"proposals" => proposals, "invalid_proposals" => invalid})
   end
 
-  defp turn(index, cost) do
+  defp turn(index, cost, session \\ "sess-1") do
     %{
       "turn" => index,
       "commit" => String.duplicate("a", 40),
       "harness" => %{
         "turns" => 1,
         "cost_usd" => cost,
-        "session_id" => "sess-1",
+        "session_id" => session,
         "subtype" => "success"
       }
     }

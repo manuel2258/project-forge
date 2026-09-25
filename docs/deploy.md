@@ -7,7 +7,7 @@ environment variables, same first-run commands.
 | | NixOS module | Container (§ In a container) |
 |---|---|---|
 | Postgres | on the host, Unix socket | yours, over `DATABASE_URL` |
-| Machines for jobs | local VMs under QEMU | none unless a template says otherwise |
+| Machines for jobs | none until a template is assigned; a `local` one needs the host set up by hand (§ Known limits) | none until a template is assigned; never a local VM |
 | Endpoint binding | loopback | every interface, behind a proxy-only network |
 | One-off commands | `forge-admin` | `docker exec … forge eval` |
 
@@ -30,7 +30,6 @@ environment variables, same first-run commands.
             enable = true;
             host = "forge.example.org";
             environmentFile = "/run/secrets/forge.env";   # see below
-            # nixEnv = true;             wrap jobs in the project's `nix develop .#<env>`
             # digestHourUtc = 9;
           };
           # A TLS proxy in front is not optional. See § Behind a proxy.
@@ -103,10 +102,10 @@ derived from the endpoint rather than configured, so it is right exactly when `P
 An `email` claim is required: the account row needs an address and there is nothing sensible to
 invent, so a scope that does not yield one is a misconfiguration and the login says so.
 
-**An OIDC login is authentication and not admission.** A first login makes a *pending* account
-like any other, and a node admin approves it at `/accounts` — where the row now says which issuer
-it came from, or `local`. Refusing such an account suspends it; **deleting** it is the other
-button, and it is there because a suspended row keeps the address. An issuer where anybody may
+**An OIDC login is authentication and not admission.** A first login makes a *pending* account,
+and a node admin approves it at `/accounts` — where the row now says which issuer it came from,
+or `local`. Refusing such an account suspends it; **deleting** it is the other button, and it is
+there because a suspended row keeps the address. An issuer where anybody may
 type any address into their own profile could otherwise park a colleague's on this node for
 good. Only a never-approved account can be deleted, the database refuses it if anything at all
 points at the row, and the `user.deleted` event outlives it. No claim, group or role from an issuer reaches a project; membership is
@@ -227,13 +226,14 @@ template is given to nobody until `Forge.Release.own_worker(worker_id, email)` n
 
 ## What the module sets
 
-- User `forge` with home `/var/lib/forge`; repositories under `repos/`, job checkouts and job
-  directories under `data/`.
+- User `forge` with home `/var/lib/forge`; repositories under `repos/`, and under `data/` the
+  store, the local driver's machines and git's scratch files.
 - Postgres locally, reached over its Unix socket with peer authentication.
 - `git`, `nix` and Claude Code on the service PATH; `FORGE_CLAUDE_EXECUTABLE` points at
-  the packaged binary. `nix` on the PATH is what lets `nixEnv` enter a project's devshell; the
-  service user needs to be allowed to talk to the Nix daemon (it is, by default). No ssh client:
-  the mirror was its only caller and speaks https now.
+  the packaged binary. `nix` on the PATH dates from when the platform ran jobs: nothing in the
+  platform runs `nix` now. A job's `nix develop` is the worker's, set by the worker's own
+  `FORGE_NIX_ENV`, which the worker image turns on; the platform has no such setting. No ssh
+  client: the mirror was its only caller and speaks https now.
 - Distribution off (a fixed `RELEASE_COOKIE` satisfies the release script; it guards nothing),
   and port 4000 **on loopback** — see § Behind a proxy for why that is a security property and
   not a default.
@@ -259,8 +259,14 @@ docker-archive and `skopeo copy docker-archive:… docker://…` streams it to t
 decompressing on the way, so nothing has to load the image first. It spools the decompressed
 archive through `$TMPDIR`, which needs room for an uncompressed image.
 
-Credentials are `GHCR_TOKEN` (a token with `write:packages`) and `GHCR_USER`, or whatever
-`skopeo login ghcr.io` already stored.
+Credentials, in order: `GHCR_TOKEN` if it is set, else the GitHub CLI's own token when `gh` is
+installed and logged in, else whatever `skopeo login ghcr.io` already stored. `GHCR_USER`
+defaults to the registry path's owner. The token reaches skopeo on stdin and a temporary auth
+file deleted on exit, never argv.
+
+`--skip-tag` publishes without making the `v<version>` tag when none exists; a tag naming another
+commit still stops the run. `--dry-run` makes no tag and copies nothing: it builds the image and
+says what it would have done.
 
 **The version is `VERSION` at the repository root and nothing else.** `flake.nix` reads it for
 the image tag and each `mix.exs` reads it for the release, so a release is one edit: bump
@@ -328,7 +334,8 @@ invoking a harness. It does carry `git`, for the repositories — the smart HTTP
 there is no key and no `known_hosts` to put in the volume.
 
 **It provisions no machines**, and what keeps that true is that no worker template exists. A
-machine is made from a template a node admin created and assigned to a project, so a fresh node
+machine is made from a template that its owner — any approved user — created and assigned to a
+project they are a member of, so a fresh node
 creates nothing: `Workers.create_machine/1` answers `{:no_template, :none_assigned}` and
 `Jobs.Scheduler` sticks the ticket with *"no worker template is assigned to this project, so
 there is nothing to make a machine from"* rather than failing at a driver.
@@ -450,6 +457,25 @@ access log; the worker's is long lived and grants the channel for the life of th
 you add a provider whose workers dial in from outside, that property is what makes exposing
 `/worker` survivable.
 
+## Upgrading
+
+What changes for a node that is already running, where the change is in what the platform does
+with rows it already has. Newest first.
+
+- **A Hetzner template that names no image stops making machines.** Such a template used to fall
+  back to the node's image setting, which is the local driver's disk image — a file path from
+  `FORGE_WORKER_IMAGE`, and never an image Hetzner has. Now the Hetzner driver refuses the create
+  before sending anything, with *the template names no image* (`design/provisioning.md` § Where a
+  machine comes from). Every refusal counts against the template, and after three in a row
+  (`failure_limit` under `config :forge, Forge.Provisioning`) it is disabled: skipped when
+  machines are made, and — once every template assigned to a project is disabled — that
+  project's tickets stick with *every worker template assigned to this project is disabled after
+  failing to make a machine*, and its conversations wait with the same words. A template cannot
+  be saved without an image any more, so only one saved before that rule is affected. Before
+  upgrading, give every Hetzner template on `/templates` an image (`bin/hetzner-image` makes
+  one). One that was disabled first is put back with *Enable* once it names one; editing it does
+  not re-enable it.
+
 ## Known limits
 
 Jobs run on their own machine with a Unix user per job (`docs/design/worker-tier.md`), so the
@@ -464,11 +490,12 @@ platform host no longer runs agent code. What neither mode yet has:
   has such a column. Sizing a host from it would budget 2.2 GiB for a VM that asks for sixteen.
   **This is what makes the container server-only in practice**: a
   container cannot boot a VM, so a containerised platform's workers are the Hetzner driver's or
-  are provisioned by hand and dial in. The Hetzner driver exists and has never spoken to Hetzner
-  (`design/provisioning.md`).
+  are provisioned by hand and dial in. The Hetzner driver has created and destroyed real Hetzner
+  machines, but none has yet connected to a platform and run a job (`design/provisioning.md`
+  § A template that cannot make a working machine is taken out of service).
 - **The module does not configure the worker tier.** The image path, the OVMF firmware, KVM
   access and the tier's numbers are environment variables today; there are no module options for
-  them yet.
+  them yet, and QEMU is not on the service's PATH.
 - **Nothing is backed up, and three things here do not survive this host.** Postgres, the bare
   repositories under `repos/`, and the store under `data/store/`. The repositories have a mirror
   if you set one; the other two have nothing, and the database is what gives a blob its name. A

@@ -195,6 +195,10 @@ defmodule Forge.Projects do
   There are no invitations: the user already exists, because approval is what made them exist
   (`docs/design/identity.md` § Projects and members). `by` is the acting admin, recorded as the
   event's actor.
+
+  **Only an account that may act is added**, which is `User.active?/1`: a pending account is
+  refused with `:not_approved` and a suspended one with `:suspended`. Asked after the caller's
+  own check, so a non-admin learns nothing about anybody's account from the answer.
   """
   @spec put_member(Project.t(), User.t(), Member.role(), User.t()) ::
           {:ok, Member.t()} | {:error, term()}
@@ -203,6 +207,13 @@ defmodule Forge.Projects do
     cond do
       manageable(project, by) != :ok ->
         {:error, :forbidden}
+
+      # Approval is the perimeter, and a membership is inside it. A pending account in a project
+      # could use nothing — its session and token are refused — but its row is one
+      # `on_delete: :restrict` holds against `Accounts.delete_unapproved_user/2`, the one way a
+      # squatted address is freed.
+      not User.active?(user) ->
+        {:error, standing(user)}
 
       # Demotion is removal by another name: a project whose last admin becomes a member has
       # nobody who can make one again, and `remove_member/3` refuses exactly this.
@@ -213,6 +224,11 @@ defmodule Forge.Projects do
         set_member(project, user, role, by)
     end
   end
+
+  # Which of the two an inactive account is. Suspension outranks approval, as it does in
+  # `User.active?/1`: a suspended account keeps `approved_at` so reinstating is one field.
+  defp standing(%User{suspended_at: %DateTime{}}), do: :suspended
+  defp standing(%User{}), do: :not_approved
 
   defp set_member(project, user, role, by) do
     changeset =

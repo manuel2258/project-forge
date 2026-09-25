@@ -14,10 +14,16 @@ These questions are open. They have not been answered and no recommendation is r
   of sharing a machine, it does not arise until a second person exists on a node, and it is
   undecided.
 - How structured questions are represented in a document.
-- The idle period before a worker is destroyed.
+- The idle period before a worker is destroyed. **Has an evidence-based default, not an answer.**
+  M4 measured about 35 seconds from nothing to a machine that can build, and the node's
+  `idle_period_ms` is five minutes on that basis (`measurements.md` § M4,
+  `platform/config/config.exs`); a worker template may set its own. That cold start was local,
+  with the seed and the Nix store arriving over loopback, and the closing step is to re-measure it
+  on a provider. The idle time across real tickets, which `poc-plan.md` § How each open question is
+  probed also asks for, is unrecorded.
 - Branch granularity: one branch per job, or one per ticket with rebasing on conflict.
 - Whether the build cache can be produced as a reproducible artifact rather than a maintained blob. Measured for one toolchain: M1 variant (a) built a cargo `target/` from the dependency closure alone with a Nix builder, and cargo rejected it outright — all 155 dependency crates rebuilt and the build cost what a cold one costs. Variant (c), a warm build directory copied from another checkout path, transplanted at 1.34× a warm local build. So for cargo the maintained blob is the form that works, which is the heavier storage model `poc-plan.md` § Risks names. One toolchain is not an answer, and the measurement closed with variant (b), a compilation cache read cold, unrun; no toolchain but cargo has been tried either. The question stays open, and what would move it is (b) on cargo — a content-keyed cache is the form most likely to transplant, and it would lighten the storage model again — or any second toolchain. See `measurements.md` § M1 and § What these measurements decided.
-- Whether to adopt an existing self-hostable sandbox platform as the worker tier rather than building it.
+- Whether to adopt an existing self-hostable sandbox platform as the worker tier rather than building it. **Not reopened:** `poc-plan.md` reopens it only if milestone 3's thin version — systemd slices plus btrfs — failed, and it held. The isolation cross and milestone 3's demo each saw the one under a binding ceiling killed by its own cgroup while its neighbours finished (`measurements.md` § The isolation cross). No alternative has been evaluated.
 
 ## Probe notes
 
@@ -65,7 +71,7 @@ runaway job in testing. It has, though so far in the test suite rather than on a
   coarse stop beside it.
 - **Two caps, two treatments**, per `capacity.md`: a ticket allowance sticks the ticket into the
   queue, a daily cap pauses the node and puts nothing in the queue. Both are asked in
-  `Forge.Jobs.start/1`, the one place every billed invocation passes.
+  `Forge.Jobs.assign/2`, the one place every billed invocation passes.
 - **What is still unobserved:** whether the harness honours `--max-budget-usd` as precisely as the
   test's stand-in does, and what a real overshoot costs. That is dogfooding's to record.
 
@@ -104,8 +110,9 @@ on the stream-json channel, all on a subscription credential.
 ### Message reliability
 
 - **Web push: not exercised.** VAPID keys were never configured on this node and no browser
-  subscribed, so neither a blocking-question push nor the daily digest has run. The phone
-  demo milestone 2 calls for is what would produce this evidence.
+  subscribed, so neither a blocking-question push nor the daily digest has run. Milestone 2's
+  demo — one blocking question arriving as a push, verified on the desktop browser — is what
+  would produce this evidence; the phone is the closing step's.
 - **The queue could be lost whole.** A ticket whose pinned workflow no longer parsed raised
   from the queue's own read path, so one such row returned 500 for the queue page and the
   queue API — for every ticket, not just that one. A pinned definition is validated at

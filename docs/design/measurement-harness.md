@@ -34,6 +34,9 @@ measure/lib/census.sh           build-directory census, diff, rebuild classifica
 measure/lib/btrfs.sh            volume, seed_create, snapshots, exclusive bytes
 measure/lib/preflight.sh        the preconditions, collected and reported once
 measure/lib/m1.sh m2.sh m3.sh   one file per measurement
+measure/lib/isolation.sh        the isolation cross (§ The isolation cross)
+measure/lib/m4.sh               worker cold start against a booted VM (§ M4)
+measure/lib/streaming.sh        the conversations spike: does the harness take streaming input
 measure/lib/report.sh           JSONL to markdown
 measure/lib/selftest.sh         the self-test and its assertions
 measure/lib/sample.sh           materialises the sample project and M2's branches
@@ -43,7 +46,14 @@ measure/testdata/report/        records the renderer is tested against
 .measure/                       scratch: checkouts, volumes, results. Not committed
 ```
 
-Subcommands: `preflight`, `m1`, `m2`, `m3`, `report`, `selftest`, `sample-init`, `clean`.
+Subcommands: `preflight`, `m1`, `m2`, `m3`, `isolation`, `m4`, `streaming`, `report`,
+`selftest`, `sample-init`, `clean`.
+
+`streaming` is the odd one: not a measurement and not a workload's. It is the spike
+`docs/design/conversations.md` § The harness supports this directly, and this was measured rests
+on — it drives a real `claude` against the real API, writes one record, and exits non-zero when an
+answer contradicts that note. It is here rather than in the test suite for the reason M1 to M4
+are: it costs real money and cannot run in CI.
 
 The entrypoint is in `bin/` because that is where this repository puts things you run;
 the library is not, because `bin/` should stay a list of commands rather than become a tree.

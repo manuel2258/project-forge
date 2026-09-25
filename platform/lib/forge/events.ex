@@ -151,6 +151,11 @@ defmodule Forge.Events do
 
   def summary(%Event{type: "chat.turn", payload: %{"turn" => turn}}), do: "turn #{turn}"
 
+  # The scheduler's sentence (`Forge.Jobs.record_wait/3`). The reason code beside it is for
+  # comparing one pass with the next, not for reading; without this the operator would read
+  # `reason="at_capacity" text="Waiting for room: …"` under a job.
+  def summary(%Event{type: "job.waiting", payload: %{"text" => text}}), do: text
+
   def summary(%Event{payload: payload}) when map_size(payload) == 0, do: ""
 
   def summary(%Event{payload: payload}) do

@@ -249,6 +249,72 @@ defmodule Forge.PushTest do
     assert :empty = Push.digest()
   end
 
+  # A non-blocking question an agent carried on from: the digest is how it reaches somebody who
+  # has not opened its ticket, and it is not waiting on them — so never in "waiting on you".
+  defp assume(ticket) do
+    {:ok, _version} =
+      Forge.Artifacts.record_version(ticket.id, "plan.md", :document, :system, %{
+        content: """
+        ---
+        outcome: done
+        ---
+        # Plan
+
+        ```question
+        key: naming
+        text: What is the table called?
+        options: [scores, highscores]
+        default: scores
+        blocking: false
+        assumption: scores
+        ```
+        """
+      })
+  end
+
+  test "the digest counts open assumptions, and says they are not waiting on you", %{
+    user: user
+  } do
+    {:ok, _} = Push.subscribe(user, browser_subscription("https://push.example/a"))
+    ticket = ticket_fixture() |> join_ticket!(user)
+    assume(ticket)
+
+    assert :ok = Push.digest()
+    Push.flush()
+
+    assert_receive {:push, "https://push.example/a",
+                    %{"title" => "forge: 1 assumed", "body" => "1 assumed"}, _opts}
+
+    {:ok, _ticket} = Forge.Operator.answer(ticket, user, "naming", %{choice: "highscores"})
+
+    assert :empty = Push.digest()
+  end
+
+  test "what is waiting, what was assumed and what is proposed are counted apart", %{user: user} do
+    {:ok, _} = Push.subscribe(user, browser_subscription("https://push.example/a"))
+    ticket = ticket_fixture() |> join_ticket!(user)
+
+    {:ok, _} =
+      Repo.update(
+        Forge.Tickets.Ticket.progress_changeset(ticket, %{
+          state: ticket.state,
+          status: :stuck,
+          cost_usd: ticket.cost_usd
+        })
+      )
+
+    assume(ticket)
+    proposal_fixture(%{job: job_fixture(%{ticket: ticket})})
+
+    assert :ok = Push.digest()
+    Push.flush()
+
+    assert_receive {:push, "https://push.example/a",
+                    %{"title" => "forge: 1 waiting on you", "body" => body}, _opts}
+
+    assert body == "1 stuck, 1 assumed, 1 proposed"
+  end
+
   test "a queue item and a proposal are counted separately in one digest", %{user: user} do
     {:ok, _} = Push.subscribe(user, browser_subscription("https://push.example/a"))
 

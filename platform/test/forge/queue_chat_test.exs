@@ -58,6 +58,30 @@ defmodule Forge.QueueChatTest do
     assert item.project.id == chat.project_id
   end
 
+  # `mix forge.queue` prints every item the queue serves, one line per kind, and had no line for
+  # this one: a conversation waiting on anyone took the whole command down with a
+  # `FunctionClauseError`, on the one surface a terminal has.
+  test "a conversation waiting on you has a line on the terminal", %{chat: chat, project: project} do
+    reply(chat, "It is a game.\nAnd a second line.")
+
+    assert Forge.CLI.queue() ==
+             "CHAT      #{project.name}  It is a game.; reply with forge.chat say #{chat.id}"
+  end
+
+  test "a conversation that asked a question shows the question", %{chat: chat} do
+    reply(chat, """
+    I can do either.
+
+    ```question
+    key: backend
+    text: Which backend should it use?
+    options: [sqlite, postgres]
+    ```
+    """)
+
+    assert Forge.CLI.queue() =~ "  Which backend should it use?; reply with forge.chat say"
+  end
+
   # Said something back, so the ball is yours again — it is working, not waiting.
   test "a conversation you have answered is not waiting on you", %{chat: chat} do
     chat = reply(chat, "Which backend?")

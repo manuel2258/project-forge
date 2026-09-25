@@ -94,8 +94,8 @@ Only one of them is the operator's.
 |---|---|---|
 | Job turn budget | the engine retries | outcome `budget_exhausted` on the job row, nowhere else |
 | Ticket allowance | **a human** — raise it or reroute | sticks the ticket, enters the queue, drawn in accent |
-| Daily spend cap | **time**, or the operator raising it | `PAUSED · SPEND 6h 12m`, neutral, on the board and the ticket, **never in the queue** |
-| Window capacity | **time** | `PAUSED · CAPACITY 1h 12m`, neutral, on the board and the ticket, **never in the queue** |
+| Daily spend cap | **time**, or the operator raising it | `PAUSED · SPEND 6h 12m`, neutral, on the ticket; the board and the project page draw `PAUSED · SPEND` without the countdown. **Never in the queue** |
+| Window capacity | **time** | `PAUSED · CAPACITY 1h 12m`, neutral, on the board and the ticket, **never in the queue**. Not built (§ Engine support) |
 
 Keeping the pauses out of the queue is load-bearing. A paused ticket in the inbox trains the
 operator to open items they cannot act on, which is the exact failure the thesis is written
@@ -106,10 +106,12 @@ drawn the same way. The countdown is to the next UTC midnight.
 ## Spend caps
 
 `cost_usd` is what a cap is enforced against, even though it is not what the operator is shown.
-Both caps live in `Forge.Spend` and are asked in `Forge.Jobs.start/1`, which every billed
-invocation passes through — including `run/1` from a Mix task, which a gate in the scheduler alone
-would not catch. A ticket over its allowance is stuck, which also drops it out of
-`Forge.Jobs.pending/1` so the scheduler stops retrying it every tick.
+Both caps live in `Forge.Spend` and are asked in `Forge.Jobs.assign/2` (its `spend_gate`), which
+every billed invocation passes through: a job reaches a machine only by being assigned to one, so
+a ticket over its allowance is stuck before a worker is spoken to. It was `start/1` while the
+platform ran jobs itself. A conversation has no ticket allowance and meets the daily cap alone. A
+ticket over its allowance is stuck, which also drops it out of `Forge.Jobs.pending/1` so the
+scheduler stops retrying it every tick.
 
 **The day's total** is the sum of the costs of the runs that *started* in that UTC day — each start
 of a job is a run (`docs/design/credentials.md` § Spend) — monotonic, and it matches what the

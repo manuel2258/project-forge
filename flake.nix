@@ -152,7 +152,7 @@
               ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
                 pkgs.inotify-tools
                 # What `Forge.Provider.LocalVm` shells out to: QEMU boots the machine and
-                # overlays the image, genisoimage builds the cloud-init seed.
+                # overlays the image, genisoimage builds the config disk.
                 pkgs.qemu
                 pkgs.cdrkit
               ];
@@ -201,8 +201,8 @@
       systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" "x86_64-darwin" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
 
-      # The machine a job runs on: a NixOS appliance that boots, learns who it is from
-      # cloud-init and runs the forge_worker release. docs/design/worker-tier.md § The worker
+      # The machine a job runs on: a NixOS appliance that boots, learns who it is from a config
+      # disk or a metadata service and runs the forge_worker release. docs/design/worker-tier.md § The worker
       # image. x86_64 only, because that is what `Forge.Provider.LocalVm` boots.
       workerConfiguration = system: nixpkgs.lib.nixosSystem {
         inherit system;

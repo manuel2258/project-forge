@@ -8,16 +8,6 @@ defmodule ForgeCore.Workflow.Validator do
   alias ForgeCore.Workflow
   alias ForgeCore.Workflow.{State, Transition}
 
-  # Artifact and state names are single path segments: they become file and directory
-  # names in the job directory and must never escape it.
-  #
-  # The leading-alphanumeric requirement is the whole of that guard, and `.`, `..` and every
-  # other all-dots name are refused by it rather than by any list — there is one defence here,
-  # not two. Widening this to allow a leading dot would therefore make `..` a legal artifact
-  # name and a write to the job directory's parent; the names test in `parser_test.exs` is what
-  # would notice.
-  @name_format ~r/^[A-Za-z0-9][A-Za-z0-9._-]*$/
-
   @spec validate(Workflow.t(), keyword()) :: [Error.t()]
   def validate(%Workflow{} = workflow, opts \\ []) do
     [
@@ -62,7 +52,9 @@ defmodule ForgeCore.Workflow.Validator do
     end)
   end
 
-  defp valid_name?(name), do: Regex.match?(@name_format, name)
+  # `Workflow.valid_name?/1`, which says why the rule is what it is. One definition, because a
+  # conversation's documents are held to it too.
+  defp valid_name?(name), do: Workflow.valid_name?(name)
 
   defp initial(%Workflow{initial: initial} = workflow) do
     case Workflow.state(workflow, initial) do
@@ -84,7 +76,10 @@ defmodule ForgeCore.Workflow.Validator do
         inputs: human.inputs,
         produces: human.produces,
         outcomes: human.outcomes,
-        budget: human.budget
+        budget: human.budget,
+        # Nothing runs, so there is nothing to size — and a declaration nothing reads is one the
+        # author believes is doing something.
+        resources: human.resources
       ]
       |> Enum.reject(fn {_key, value} -> value in [nil, []] end)
       |> Enum.map(fn {key, _value} -> to_string(key) end)
@@ -199,8 +194,8 @@ defmodule ForgeCore.Workflow.Validator do
       name == Workflow.answers_artifact() ->
         Error.new(Error.join(path, index), "answers.md is platform-managed and never declared")
 
-      reserved_proposal?(name) ->
-        Error.new(Error.join(path, index), reserved_proposal_message(name))
+      reserved = Workflow.reserved_name_error(name) ->
+        Error.new(Error.join(path, index), reserved)
 
       name == Workflow.ticket_artifact() ->
         nil
@@ -237,8 +232,8 @@ defmodule ForgeCore.Workflow.Validator do
       name in [Workflow.ticket_artifact(), Workflow.answers_artifact()] ->
         Error.new(Error.join(path, index), "#{inspect(name)} is reserved and cannot be produced")
 
-      reserved_proposal?(name) ->
-        Error.new(Error.join(path, index), reserved_proposal_message(name))
+      reserved = Workflow.reserved_name_error(name) ->
+        Error.new(Error.join(path, index), reserved)
 
       name == Workflow.changeset_artifact() ->
         nil
@@ -255,17 +250,6 @@ defmodule ForgeCore.Workflow.Validator do
   end
 
   defp reserved_prefix?(name), do: String.ends_with?(name, "/*")
-
-  # Two reserved shapes, one rule: `proposals` is the subdirectory of `out/` an agent writes
-  # proposals into, and `proposal-*` is what the platform stores them under. A workflow naming
-  # either would collide with a file or a row it does not own.
-  defp reserved_proposal?(name) do
-    name == Workflow.proposals_dir() or Workflow.proposal?(name)
-  end
-
-  defp reserved_proposal_message(name) do
-    "#{inspect(name)} is reserved for ticket proposals"
-  end
 
   defp outcome_declarations(%Workflow{states: states}) do
     Enum.flat_map(states, fn {name, state} ->

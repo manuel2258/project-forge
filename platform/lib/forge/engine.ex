@@ -297,6 +297,21 @@ defmodule Forge.Engine do
   end
 
   @doc """
+  The artifacts the ticket's pending transition is waiting to have approved, by name; none when
+  nothing is pending.
+
+  `decide/4` approves the latest version of each of these, so this is also the list of documents
+  whose latest version must be the one the operator was shown. One definition for every reader —
+  the queue, the ticket and review pages, and `Forge.Conversations`, which refuses a chat a new
+  version of any of them until the decision is made (`docs/design/conversations.md` § Commits).
+  """
+  @spec awaiting_approval(Ticket.t()) :: [String.t()]
+  def awaiting_approval(%Ticket{pending_transition: %{} = pending}),
+    do: List.wrap(pending["approve"])
+
+  def awaiting_approval(%Ticket{}), do: []
+
+  @doc """
   A person takes a declared transition out of the current state: from a human state, or to
   unstick a ticket. Refused while a job for the current state is pending, running or
   waiting. A transition that requires approval records the approvals as part of the choice.
@@ -418,9 +433,10 @@ defmodule Forge.Engine do
   Runs what entering `state_name` does, after the transition into it has been recorded.
 
   `merge` is the only action in v1. It was checked before the transition was taken, so a failure
-  here is a race — something else moved the default branch in between — and the ticket is stuck
-  with the reason rather than left claiming to be merged. `Forge.Merge.perform/2` is idempotent,
-  so retrying is always safe.
+  here is a race — something else moved the default branch in between. `Forge.Merge.perform/2`
+  retries once against the moved head, and what it returns then is final: anything but success
+  sticks the ticket with the reason rather than leaving it claiming to be merged.
+  `Forge.Merge.perform/2` is idempotent, so retrying is always safe.
   """
   @spec enter(Ticket.t(), Workflow.t(), String.t(), String.t() | nil) :: Ticket.t()
   def enter(%Ticket{} = ticket, %Workflow{} = workflow, state_name, user_id) do

@@ -5,9 +5,20 @@ defmodule Forge.GitFixtures do
 
   @workflow Path.expand("../../../../core/test/fixtures/workflow_example.yml", __DIR__)
 
-  @doc "A fresh temporary directory, removed when the test process exits."
+  @doc """
+  A fresh temporary directory, removed when the test process exits.
+
+  Named by the OS process as well as `System.unique_integer/1`, which is unique only within one
+  BEAM: suites run side by side from sibling worktrees share the system temp directory, and two
+  of them made — and removed — each other's directories.
+  """
   def tmp_dir(label) do
-    dir = Path.join(System.tmp_dir!(), "forge-#{label}-#{System.unique_integer([:positive])}")
+    dir =
+      Path.join(
+        System.tmp_dir!(),
+        "#{System.pid()}-forge-#{label}-#{System.unique_integer([:positive])}"
+      )
+
     File.mkdir_p!(dir)
     ExUnit.Callbacks.on_exit(fn -> File.rm_rf!(dir) end)
     dir
@@ -50,6 +61,15 @@ defmodule Forge.GitFixtures do
     :ok = Git.init_bare(dest)
     {:ok, _out} = Git.run(source, ["push", "--quiet", dest, "refs/heads/main:refs/heads/main"])
     dest
+  end
+
+  @doc """
+  The platform's own git URL for `repo` as this test run serves it. Built from the endpoint's
+  configured port rather than written out, so a run on another `PORT` — two suites side by side
+  on one machine — reaches its own server and not the other's.
+  """
+  def platform_git_url(repo) do
+    "http://127.0.0.1:#{ForgeWeb.Endpoint.config(:http)[:port]}/git/#{repo}.git"
   end
 
   @doc """

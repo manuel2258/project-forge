@@ -18,7 +18,7 @@ usage: bin/hetzner-image [--image PATH] [--type TYPE] [--location LOC] [--name N
   --image     qcow2 to write. Default: result/forge-worker.qcow2 from `nix build .#worker-image`
               Converted to raw in $TMPDIR first, so that much free space is needed there.
   --type      server type to rescue-boot on. Default: cx23
-  --location  where to make it. Default: fsn1
+  --location  where to make it. Default: nbg1 (fsn1 sold no x86 type; see platform/config/config.exs)
   --name      the snapshot's description. Default: forge-worker-<date>
   --ssh-key   name of a key already in the Hetzner project. Default: the first one listed
   --wait      seconds to wait for rescue to answer. Default: 300
@@ -29,7 +29,7 @@ USAGE
 
 image="result/forge-worker.qcow2"
 type="cx23"
-location="fsn1"
+location="nbg1"
 name="forge-worker-$(date -u +%Y%m%d-%H%M%S)"
 key=""
 wait_seconds=300

@@ -191,7 +191,9 @@ Three kinds:
 - **Documents** — prose plus structured fields. The contract between steps. Approvable.
 - **Blobs** — build output, test logs, screenshots. Held in object storage, referenced by
   URI, served to the operator through the platform rather than by provider-specific signed
-  links.
+  links. *Since settled otherwise: blobs sit behind a storage behaviour whose one
+  implementation is a directory on the platform host, and object storage is not planned
+  (`decisions.md` § Technology).*
 - **Presentations** — rich, human-only views. Nothing downstream may consume them, so they
   need no schema and carry no approval semantics.
 
@@ -241,6 +243,10 @@ a hard memory ceiling so an out-of-memory build kills one job rather than the ma
 proportional CPU sharing so agents idle on inference donate capacity to whoever is
 compiling. Scheduling admits a job only when its slice fits the remaining memory budget.
 
+*Since made plural: a worker template says what machine to make, how many may exist, how long
+one may idle and which job kinds it takes, and a project draws on the templates assigned to it.
+The gate asks about kind and cores as well as memory (`design/provisioning.md`).*
+
 Each job gets its own worktree and its own build directory, cloned from a warm seed using
 filesystem-level copy-on-write, so several parallel builds share storage and diverge only
 where they actually recompile.
@@ -251,6 +257,11 @@ orchestrator strands storage.
 
 Everything above the provider API is ordinary Linux. Provider-specific surface is confined to
 a driver: create a machine, destroy it, and an object-storage endpoint.
+
+*Object storage is not planned: blobs and seeds live behind the storage behaviour, in a
+directory on the platform host, and a driver has no storage endpoint, because the bytes are
+`Forge.Storage`'s
+(`decisions.md` § Technology; `design/worker-tier.md` § The provider driver).*
 
 ---
 
@@ -298,7 +309,9 @@ event log, provider tokens confined to the orchestrator, short-lived scoped cred
 issued per job, spend caps.
 
 Single-operator today. The data model carries users and roles from the start — approver,
-promoter, spender — so team use is an expansion rather than a rewrite.
+promoter, spender — so team use is an expansion rather than a rewrite. *That role list was
+dropped: `node_admin` governs accounts and nothing else, and a project has `admin` and `member`
+(`decisions.md` § Security and users).*
 
 ---
 

@@ -99,7 +99,7 @@ defmodule Forge.DemoTest do
         project,
         user,
         "backup",
-        "http://127.0.0.1:4002/git/#{destination.name}.git",
+        platform_git_url(destination.name),
         user: "forge",
         token: token
       )

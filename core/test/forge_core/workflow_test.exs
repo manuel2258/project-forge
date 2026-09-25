@@ -45,6 +45,50 @@ defmodule ForgeCore.WorkflowTest do
     end
   end
 
+  # What a conversation writes in `out/` is a document by being there — nothing declared it — so
+  # the names a workflow may not produce are the names it may not write, and the name rule is
+  # the validator's. Each refused name is one whose row or file the platform owns: writing it
+  # would be a new version of the ticket's body, of its answers, of its changeset, or a document
+  # passing itself off as a proposal.
+  describe "the names a conversation may write a document under" do
+    test "an ordinary name is allowed" do
+      for name <- ["plan.md", "notes", "design-v2.md", "0_readme.txt"] do
+        assert Workflow.document_name_error(name) == nil, name
+      end
+    end
+
+    test "a name that is not one path segment is refused" do
+      for name <- ["..", ".hidden", "a/b.md", "with space.md", "", "-dash.md"] do
+        assert Workflow.document_name_error(name) =~ "single path segment", inspect(name)
+      end
+    end
+
+    test "the names the platform keeps for itself are refused, each for its reason" do
+      for name <- ["ticket", "answers.md", "changeset"] do
+        assert Workflow.document_name_error(name) =~ "is reserved", name
+      end
+
+      for name <- ["proposals", "proposal-score-table.md"] do
+        assert Workflow.document_name_error(name) =~ "reserved for ticket proposals", name
+      end
+
+      # The whole prefix, not only the transcripts that exist: a name taken before the job's
+      # transcript is recorded leaves that job unable to record its result.
+      for name <- ["transcript-refining-1.jsonl", "transcript-notes.md"] do
+        assert Workflow.document_name_error(name) =~ "reserved for job transcripts", name
+      end
+
+      assert Workflow.document_name_error("transcripts.md") == nil
+    end
+
+    # One definition: the validator's rule is this function, so the two cannot drift apart.
+    test "the rule is the validator's" do
+      refute Workflow.valid_name?("..")
+      refute Workflow.valid_name?(nil)
+      assert Workflow.valid_name?("plan.md")
+    end
+  end
+
   describe "the documents handed to an agent" do
     test "the grammar is the design note itself, not a copy of it" do
       grammar = Workflow.grammar()

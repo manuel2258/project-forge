@@ -56,9 +56,11 @@ defmodule Forge.Operator do
     end
   end
 
-  defp resume_if_unblocked(%Ticket{id: ticket_id, state: state}) do
-    waiting =
-      Enum.find(Jobs.for_ticket(ticket_id), &(&1.status == :waiting and &1.state == state))
+  # The two facts a waiting job is held by, from the functions `Forge.Conversations` asks too
+  # when it refuses a chat the document holding one of those questions: the refusal and the
+  # resume have to agree on what holds a job.
+  defp resume_if_unblocked(%Ticket{id: ticket_id} = ticket) do
+    waiting = Jobs.waiting_job(ticket)
 
     cond do
       waiting == nil -> :ok

@@ -8,8 +8,10 @@ defmodule ForgeWorker.Job.Dir do
       <root>/<job_id>/inputs/<name>
       <root>/<job_id>/tickets/index.md     the project's tickets and open proposals
       <root>/<job_id>/tickets/<number>.md  one ticket's body
+      <root>/<job_id>/conversation.md      a reopened conversation's past, read-only
       <root>/<job_id>/out/<name>
       <root>/<job_id>/out/proposals/<file> ticket proposals, written by the agent
+      <root>/<job_id>/out/<file>           a conversation's documents; see documents/1
       <root>/<job_id>/home                 HOME for the harness process
       <root>/<job_id>/transcript-<run>.jsonl
       <root>/<job_id>/stderr.log
@@ -52,6 +54,7 @@ defmodule ForgeWorker.Job.Dir do
     File.write!(Path.join(job_dir, "spec.json"), Spec.to_json(spec))
     write_platform_docs(job_dir)
     write_backlog(job_dir, Keyword.get(opts, :backlog))
+    write_replay(job_dir, spec.replay)
 
     Enum.each(spec.inputs, fn input ->
       path = Path.join(inputs, input.name)
@@ -76,6 +79,16 @@ defmodule ForgeWorker.Job.Dir do
       File.write!(path, content)
       File.chmod!(path, 0o444)
     end)
+  end
+
+  # What a reopened conversation had already said, for the new process to read. Removed when the
+  # spec carries none: the directory is keyed by job id and outlives a process, so a file left
+  # from an earlier start would be a conversation the agent believes it had. Removed before it is
+  # written, too, because the last one was left read-only.
+  defp write_replay(job_dir, replay) do
+    path = Path.join(job_dir, Workflow.replay_file())
+    File.rm_rf!(path)
+    if is_binary(replay), do: write_readonly(path, replay)
   end
 
   # The project's tickets and open proposals, laid out as a folder rather than put in the prompt.
@@ -208,18 +221,23 @@ defmodule ForgeWorker.Job.Dir do
           proposals: %{String.t() => Proposal.t()},
           invalid_proposals: %{String.t() => String.t()}
         }
-  def collect(job_dir, %Spec{} = spec) do
+  def collect(job_dir, %Spec{} = spec), do: collect(job_dir, spec, owner(job_dir))
+
+  # The owner is the job directory's, always; this arity exists so a test can name another and
+  # see a file refused for its owner without needing a second Unix user to make one.
+  @doc false
+  def collect(job_dir, %Spec{} = spec, owner) do
     out = Path.join(job_dir, "out")
     declared = Spec.document_outputs(spec)
     reserved = Workflow.proposals_dir()
-    written = out |> File.ls!() |> Enum.sort()
+    written = out |> list_dir() |> Enum.sort()
 
     parsed =
       declared
       |> Enum.filter(&(&1 in written))
-      |> Map.new(fn name -> {name, read_document(Path.join(out, name))} end)
+      |> Map.new(fn name -> {name, read_document(Path.join(out, name), owner)} end)
 
-    proposals = collect_proposals(Path.join(out, reserved))
+    proposals = collect_proposals(Path.join(out, reserved), owner)
 
     %{
       documents: for({name, {:ok, doc}} <- parsed, into: %{}, do: {name, doc}),
@@ -243,8 +261,11 @@ defmodule ForgeWorker.Job.Dir do
           proposals: %{String.t() => Proposal.t()},
           invalid_proposals: %{String.t() => String.t()}
         }
-  def proposals(job_dir) do
-    collected = collect_proposals(Path.join([job_dir, "out", Workflow.proposals_dir()]))
+  def proposals(job_dir), do: proposals(job_dir, owner(job_dir))
+
+  @doc false
+  def proposals(job_dir, owner) do
+    collected = collect_proposals(Path.join([job_dir, "out", Workflow.proposals_dir()]), owner)
 
     %{
       proposals: for({name, {:ok, p}} <- collected, into: %{}, do: {name, p}),
@@ -252,69 +273,198 @@ defmodule ForgeWorker.Job.Dir do
     }
   end
 
+  @doc """
+  What a conversation wrote in `out/` besides its proposals: every file there, as text, and the
+  ones that cannot be documents with the reason.
+
+  A conversation declares nothing, so there is nothing to collect against — every file it leaves
+  in `out/` is a document it means to keep, and it is reported every turn for the reason
+  `proposals/1` is (`docs/design/conversations.md` § Commits). Held to a workflow job's rules
+  where they apply: a name the platform does not keep for itself
+  (`ForgeCore.Workflow.document_name_error/1`), a regular file, and text. Whether it parses is
+  the platform's to decide, where it is recorded — it checks all of this again, since what
+  crosses the channel is not a guard.
+  """
+  @spec documents(String.t()) :: %{
+          documents: %{String.t() => String.t()},
+          invalid_documents: %{String.t() => String.t()}
+        }
+  def documents(job_dir), do: documents(job_dir, owner(job_dir))
+
+  @doc false
+  def documents(job_dir, owner) do
+    out = Path.join(job_dir, "out")
+
+    read =
+      out
+      |> list_dir()
+      |> Kernel.--([Workflow.proposals_dir()])
+      |> Map.new(&{&1, read_output(out, &1, owner)})
+
+    %{
+      documents: for({name, {:ok, raw}} <- read, into: %{}, do: {name, raw}),
+      invalid_documents: for({name, {:error, why}} <- read, into: %{}, do: {name, why})
+    }
+  end
+
+  # The name first, so a file that could never be recorded is not read at all.
+  defp read_output(out, name, owner) do
+    case Workflow.document_name_error(name) do
+      nil -> read_text(Path.join(out, name), owner)
+      reason -> {:error, reason}
+    end
+  end
+
   # Everything in `out/proposals/`, readable or not. A proposal the platform cannot use is
   # reported with its reason rather than skipped: it is a person's to look at, and dropping it
   # silently is the failure this whole path exists to avoid.
-  defp collect_proposals(dir) do
-    case File.ls(dir) do
-      {:ok, files} ->
-        Map.new(Enum.sort(files), fn file -> {file, read_proposal(Path.join(dir, file))} end)
+  defp collect_proposals(dir, owner) do
+    case File.lstat(dir) do
+      {:ok, %File.Stat{type: :directory}} ->
+        dir
+        |> list_dir()
+        |> Enum.sort()
+        |> Map.new(fn file -> {file, read_proposal(Path.join(dir, file), owner)} end)
 
-      # Not a directory, or not there. A job that proposed nothing is the ordinary case, and a
-      # regular file called `proposals` is reported rather than mistaken for one.
-      {:error, :enotdir} ->
-        reason = unusable("proposals must be a directory, not a file", nil)
-        %{Workflow.proposals_dir() => {:error, reason}}
-
+      # Not there: a job that proposed nothing, the ordinary case.
       {:error, _reason} ->
         %{}
+
+      # Anything else — a regular file called `proposals`, or a symlink standing in for the
+      # directory — is reported rather than mistaken for one, and never listed.
+      {:ok, %File.Stat{type: type}} ->
+        reason = unusable("proposals must be a directory, not a #{describe(type)}", nil)
+        %{Workflow.proposals_dir() => {:error, reason}}
     end
   end
+
+  defp describe(:regular), do: "file"
+  defp describe(type), do: to_string(type)
 
   # A proposal the platform cannot use comes back with **the text as well as the reason**, so
   # the platform can keep what the agent wrote rather than only what was wrong with it. Dropping
   # the text is the drop `docs/design/ticket-proposals.md` § Malformed degrades, never drops
   # exists to forbid, and reporting a filename and an error message is not keeping it.
   #
-  # `raw` is nil where there is no text to keep — a symlink, a directory, an unreadable file.
-  defp read_proposal(path) do
-    case File.lstat(path) do
-      {:ok, %File.Stat{type: :regular}} ->
-        raw = File.read!(path)
-
+  # `raw` is nil where there is no text to keep — a symlink, a directory, an unreadable file,
+  # bytes that are not text.
+  defp read_proposal(path, owner) do
+    case read_text(path, owner) do
+      {:ok, raw} ->
         case Proposal.parse(raw) do
           {:ok, proposal} -> {:ok, proposal}
           {:error, errors} -> {:error, unusable(ForgeCore.Error.format(errors), raw)}
         end
 
-      {:ok, %File.Stat{type: type}} ->
-        {:error, unusable("a proposal must be a regular file, got #{type}", nil)}
-
       {:error, reason} ->
-        {:error, unusable("unreadable: #{inspect(reason)}", nil)}
+        {:error, unusable("a proposal " <> reason, nil)}
     end
   end
 
   defp unusable(reason, raw), do: %{"reason" => reason, "raw" => raw}
 
-  # Only regular files count, and `lstat` rather than `stat` because a symlink is not one.
-  #
-  # `stat` follows the link, so a symlink the agent plants in `out/` has *this* process read the
-  # target — and this process is the worker manager, a different and more privileged Unix user
-  # than the transient one the agent runs as. `ln -s /root/.ssh/id_ed25519 out/plan.md` would
-  # publish a key the agent itself cannot read into an artifact. `lstat` reports the link as
-  # `:symlink`, which is not `:regular`, so it is refused with everything else that is not a
-  # file. Fixed in both readers rather than only in the one that exposed it, per CLAUDE.md.
-  defp read_document(path) do
-    case File.lstat(path) do
-      {:ok, %File.Stat{type: :regular}} ->
-        path |> File.read!() |> Document.parse()
+  defp read_document(path, owner) do
+    case read_text(path, owner) do
+      {:ok, raw} -> Document.parse(raw)
+      {:error, reason} -> {:error, [ForgeCore.Error.new("", "output " <> reason)]}
+    end
+  end
 
-      {:ok, %File.Stat{type: type}} ->
-        {:error, [ForgeCore.Error.new("", "output must be a regular file, got #{type}")]}
+  # Every reader of `out/` reads through this, so what an agent may leave there is one rule.
+  #
+  # **What is read is decided by the file actually opened, not by a path.** The agent owns the
+  # job directory, so every name under it is the agent's to rearrange — `out` itself can be a
+  # symlink to `/etc`, and `lstat` of `out/<name>` checks only the last component, following
+  # every one before it. And this process is the worker manager, a more privileged Unix user than
+  # the transient one the agent runs as: whatever it reads through a path the agent arranged is
+  # a file the agent could not read itself, published as an artifact. A check on the path and a
+  # read of the path are also two steps, and a conversation's agent is alive between them.
+  #
+  # So the file is opened once, and the *handle's* own stat decides: a regular file, owned by the
+  # owner of the job directory — the job's own Unix user, fresh per job, which owns nothing
+  # outside it — and no larger than a document is. A symlink to someone else's file, a
+  # directory swapped in for `out`, a file swapped in between the check and the read: each opens
+  # something the job's user does not own, and is refused. The same model as the read, because
+  # it is the read. (A hard link to another user's file is the one shape this could not tell
+  # apart, and `fs.protected_hardlinks` — on by default — refuses to make one.)
+  #
+  # The `lstat` in front is not the guard. It keeps a FIFO from being opened at all, which would
+  # block this process until something wrote to it, and it names a symlink as a symlink.
+  #
+  # And only text (`ForgeCore.Document.text?/1`). Bytes that are not UTF-8 cannot be encoded
+  # into the JSON the result or the turn travels in, so one file of them failed the whole message
+  # — every other document, the outcome, the cost — and a NUL fails the transaction that stores
+  # it the same way on the platform.
+  defp read_text(path, owner) do
+    with {:ok, %File.Stat{type: :regular}} <- File.lstat(path),
+         {:ok, io} <- :file.open(path, [:read, :binary, :raw]) do
+      try do
+        read_open(io, owner)
+      after
+        :file.close(io)
+      end
+    else
+      {:ok, %File.Stat{type: type}} -> {:error, "must be a regular file, got #{type}"}
+      {:error, reason} -> {:error, "unreadable: #{inspect(reason)}"}
+    end
+  end
+
+  # `type: :regular` on the handle is out of a test's reach: only something swapped in between
+  # the lstat above and the open gets here as anything else, and of those a directory is already
+  # refused by the open (`:eisdir`) and a FIFO blocks inside it. What it still stops is a device
+  # node the job's user owns, made in that gap.
+  defp read_open(io, owner) do
+    with {:ok, info} <- :file.read_file_info(io),
+         %File.Stat{type: :regular, uid: ^owner} <- File.Stat.from_record(info),
+         {:ok, raw} <- read_capped(io) do
+      case Document.text_error(raw) do
+        nil -> {:ok, raw}
+        reason -> {:error, reason}
+      end
+    else
+      %File.Stat{type: :regular, uid: uid} ->
+        {:error, "must be the job's own file, not one owned by uid #{uid}"}
+
+      %File.Stat{type: type} ->
+        {:error, "must be a regular file, got #{type}"}
 
       {:error, reason} ->
-        {:error, [ForgeCore.Error.new("", "output unreadable: #{inspect(reason)}")]}
+        {:error, "unreadable: #{inspect(reason)}"}
+    end
+  end
+
+  # One byte past the cap and no further: enough for `Document.text_error/1` to see that the file
+  # is too large without reading all of a file that may still be growing.
+  defp read_capped(io) do
+    case :file.read(io, Document.max_bytes() + 1) do
+      :eof -> {:ok, ""}
+      result -> result
+    end
+  end
+
+  # Who the job is: the owner of its directory. The directory's parent is the worker's, so the
+  # agent can replace what is inside the job directory but not the directory itself. The `nil`
+  # for a missing directory is an equivalent mutant: nothing under it can be listed either, so no
+  # file is ever compared with it.
+  defp owner(job_dir) do
+    case File.lstat(job_dir) do
+      {:ok, %File.Stat{uid: uid}} -> uid
+      {:error, _reason} -> nil
+    end
+  end
+
+  # A directory's entries, if it is one, and not through a symlink standing in for it, whose
+  # listing would be a way to learn the names in a directory the agent cannot read. **Not
+  # airtight:** the check and the listing are two calls by path, and an agent swapping `out` for
+  # a link between them is listed through it — Erlang cannot list a directory it holds open. What
+  # that leaks is names, reported as refused entries: every file is read through a handle whose
+  # owner is checked (`read_open/2`), so no content crosses.
+  defp list_dir(dir) do
+    with {:ok, %File.Stat{type: :directory}} <- File.lstat(dir),
+         {:ok, names} <- File.ls(dir) do
+      names
+    else
+      _not_a_directory -> []
     end
   end
 

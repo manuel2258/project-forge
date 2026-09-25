@@ -165,9 +165,54 @@ defmodule Forge.ProvisioningTest do
       {:ok, mine} = create_template(user, %{provider: "fake"})
 
       assert {:error, changeset} =
-               Provisioning.update_template(mine, %{provider_credential_id: theirs.id})
+               Provisioning.update_template(user, mine.id, %{
+                 provider_credential_id: theirs.id
+               })
 
       assert %{provider_credential_id: ["is not one of your credentials"]} = errors_on(changeset)
+    end
+
+    # An id naming nothing is answered by the same guard, in the same words, rather than left to
+    # the foreign key: from the outside it is indistinguishable from somebody else's.
+    test "a credential id naming nothing is not one of yours", %{user: user} do
+      assert {:error, changeset} =
+               create_template(user, %{
+                 provider: "fake",
+                 provider_credential_id: Ecto.UUID.generate()
+               })
+
+      assert %{provider_credential_id: ["is not one of your credentials"]} = errors_on(changeset)
+    end
+
+    # The credential is checked as the template now stands, not only when its id changes: a
+    # provider edited under a credential it already holds is the same mismatch as a new one.
+    test "changing the provider re-checks the credential already held", %{user: user} do
+      {:ok, mine} =
+        Provisioning.create_credential(user, %{
+          name: "mine-#{System.unique_integer([:positive])}",
+          provider: "fake",
+          secret: %{"token" => "t"}
+        })
+
+      {:ok, template} = create_template(user, %{provider_credential_id: mine.id})
+
+      assert {:error, changeset} =
+               Provisioning.update_template(user, template.id, %{provider: "local"})
+
+      assert %{provider_credential_id: ["is for fake, not local"]} = errors_on(changeset)
+    end
+
+    # The other side of the guard: refusing every credential would pass the test above.
+    test "the owner's own credential is taken", %{user: user} do
+      {:ok, mine} =
+        Provisioning.create_credential(user, %{
+          name: "mine",
+          provider: "fake",
+          secret: %{"token" => "t"}
+        })
+
+      assert {:ok, template} = create_template(user, %{provider_credential_id: mine.id})
+      assert template.provider_credential_id == mine.id
     end
 
     # A local template is the case that has no credential at all, and it must stay creatable:
@@ -175,6 +220,48 @@ defmodule Forge.ProvisioningTest do
     test "a template for a provider that needs no credential is fine without one", %{user: user} do
       assert {:ok, template} = create_template(user, %{provider: "local"})
       assert template.provider_credential_id == nil
+      # Nor a size or an image: the local driver reads neither from a template.
+      assert template.size == nil
+      assert template.image == nil
+    end
+
+    # `Forge.Provider.Hetzner` refuses a create with no image or no server type, and there is no
+    # node-wide image for it to fall back to, so a template naming neither could only ever fail.
+    # It is refused where it is typed, by the driver's own declaration.
+    test "a provider that cannot make a machine without an image or a size requires both",
+         %{user: user} do
+      assert {:error, changeset} = create_template(user, %{provider: "hetzner"})
+      assert %{image: ["can't be blank"], size: ["can't be blank"]} = errors_on(changeset)
+
+      assert {:error, changeset} = create_template(user, %{provider: "hetzner", size: "cpx32"})
+      assert errors_on(changeset) == %{image: ["can't be blank"]}
+
+      assert {:error, changeset} = create_template(user, %{provider: "hetzner", image: "42"})
+      assert errors_on(changeset) == %{size: ["can't be blank"]}
+
+      assert {:ok, template} =
+               create_template(user, %{provider: "hetzner", size: "cpx32", image: "42"})
+
+      assert template.image == "42"
+    end
+
+    # Asked of the template as it stands, not only of what an edit changed: a Hetzner row saved
+    # before the rule — forced in here, since the changeset no longer lets one be made — cannot
+    # be renamed without being given the image it lacks.
+    test "an edit is held to it too, so a row from before the rule has to be given an image",
+         %{user: user} do
+      {:ok, template} = create_template(user, %{provider: "hetzner", size: "cpx32", image: "42"})
+
+      {1, _} =
+        Repo.update_all(from(t in Template, where: t.id == ^template.id), set: [image: nil])
+
+      assert {:error, changeset} =
+               Provisioning.update_template(user, template.id, %{name: "renamed"})
+
+      assert errors_on(changeset) == %{image: ["can't be blank"]}
+
+      assert {:ok, _} =
+               Provisioning.update_template(user, template.id, %{name: "renamed", image: "43"})
     end
 
     test "zero machines is a template turned off, not an unlimited one", %{user: user} do
@@ -192,6 +279,35 @@ defmodule Forge.ProvisioningTest do
       assert Provisioning.template(user, theirs.id) == nil
       assert Provisioning.templates(user) == []
       assert Provisioning.delete_template(user, theirs.id) == {:error, :not_found}
+    end
+
+    # **The edit is guarded here, not on the page.** It used to take the row and no actor, and
+    # the templates page reading the row scoped to the caller was the only thing deciding whose
+    # it was (`docs/design/identity.md` § Where the guard lives). The id is the client's.
+    test "an edit reaches only the caller's own template", %{user: user} do
+      {:ok, theirs} = create_template(user_fixture(), %{name: "theirs"})
+
+      for id <- [theirs.id, Ecto.UUID.generate(), "not-a-uuid", nil] do
+        assert Provisioning.update_template(user, id, %{name: "stolen"}) == {:error, :not_found}
+      end
+
+      assert Repo.get!(Template, theirs.id).name == "theirs"
+    end
+
+    # And the owner is the context's to set, as it is on create: an edit carrying a `user_id`
+    # would otherwise hand the template — and every machine it bills — to another account.
+    test "an edit cannot hand a template to somebody else", %{user: user} do
+      other = user_fixture()
+      {:ok, mine} = create_template(user, %{name: "mine"})
+
+      assert {:ok, saved} =
+               Provisioning.update_template(user, mine.id, %{
+                 "name" => "renamed",
+                 "user_id" => other.id
+               })
+
+      assert saved.name == "renamed"
+      assert Repo.get!(Template, mine.id).user_id == user.id
     end
   end
 
@@ -246,6 +362,44 @@ defmodule Forge.ProvisioningTest do
 
       assert Provisioning.assign(user, template.id, elsewhere.id) == {:error, :not_a_member}
       assert Provisioning.for_project(elsewhere.id) == []
+    end
+  end
+
+  # What a machine made from a template would be billed to, asked again at creation because a
+  # changeset guards only the rows written after it (`Forge.Workers` is the caller; its tests
+  # force a row onto another user's credential and watch nothing be made).
+  describe "the credential a machine would spend" do
+    test "the owner's own is spendable, and no credential is nothing to check", %{user: user} do
+      {:ok, mine} =
+        Provisioning.create_credential(user, %{
+          name: "mine",
+          provider: "fake",
+          secret: %{"token" => "t"}
+        })
+
+      {:ok, template} = create_template(user, %{provider_credential_id: mine.id})
+      assert {:ok, %Credential{id: id}} = Provisioning.spendable_credential(template)
+      assert id == mine.id
+
+      {:ok, bare} = create_template(user, %{})
+      assert Provisioning.spendable_credential(bare) == {:ok, nil}
+    end
+
+    # Deleting a credential nilifies the column, so a template read before the delete names an
+    # id with no row behind it. That is a template with no credential, and the driver says what
+    # that means — not a crash in the scheduler.
+    test "a credential deleted since the template was read is no credential", %{user: user} do
+      {:ok, mine} =
+        Provisioning.create_credential(user, %{
+          name: "going",
+          provider: "fake",
+          secret: %{"token" => "t"}
+        })
+
+      {:ok, stale} = create_template(user, %{provider_credential_id: mine.id})
+      :ok = Provisioning.delete_credential(user, mine.id)
+
+      assert Provisioning.spendable_credential(stale) == {:ok, nil}
     end
   end
 
@@ -324,7 +478,7 @@ defmodule Forge.ProvisioningTest do
 
     %{
       name: "proj-#{n}",
-      repo_path: Path.join(System.tmp_dir!(), "forge-prov-#{n}.git")
+      repo_path: Path.join(System.tmp_dir!(), "#{System.pid()}-forge-prov-#{n}.git")
     }
   end
 
@@ -398,7 +552,10 @@ defmodule Forge.ProvisioningTest do
           %{
             name: "p-#{System.unique_integer([:positive])}",
             repo_path:
-              Path.join(System.tmp_dir!(), "forge-pt-#{System.unique_integer([:positive])}.git")
+              Path.join(
+                System.tmp_dir!(),
+                "#{System.pid()}-forge-pt-#{System.unique_integer([:positive])}.git"
+              )
           },
           user
         )

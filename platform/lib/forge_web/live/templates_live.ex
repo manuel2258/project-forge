@@ -262,25 +262,22 @@ defmodule ForgeWeb.TemplatesLive do
 
   def handle_event("cancel-edit", _params, socket), do: {:noreply, reset_forms(socket)}
 
-  # **The scoped read here is an equivalent mutant and must not have a test written for it.**
-  # `editing` is server state, set only by `edit-template` above and only after that event has
-  # read the template scoped to the caller, so no id a client can send reaches this. Replacing
-  # `Provisioning.template/2` with an unscoped `Repo.get/2` changes nothing observable, and a
-  # test asserting otherwise would be asserting a hole that does not exist. It stays because the
-  # pairing is what makes it safe: the day somebody sets `editing` from params, this is the
-  # guard that is already here.
+  # **`Provisioning.update_template/3` is the guard**: it reads the template scoped to the
+  # caller and pins the owner, so the id this sends is checked where the write is. `editing` is
+  # server state, set only by `edit-template` above after its own scoped read, so from this page
+  # the context's check never refuses anything — it is there for the day somebody sets `editing`
+  # from params, and it is tested at the context rather than here, where no test could fail.
   def handle_event("save-template", %{"template" => params}, socket) do
     user = socket.assigns.current_scope.user
 
-    with %Provisioning.Template{} = template <-
-           Provisioning.template(user, socket.assigns.editing),
-         {:ok, _template} <- Provisioning.update_template(template, template_attrs(params)) do
-      {:noreply, socket |> load() |> reset_forms()}
-    else
+    case Provisioning.update_template(user, socket.assigns.editing, template_attrs(params)) do
+      {:ok, _template} ->
+        {:noreply, socket |> load() |> reset_forms()}
+
       {:error, %Ecto.Changeset{} = changeset} ->
         {:noreply, assign(socket, error: errors(changeset))}
 
-      _other ->
+      {:error, :not_found} ->
         {:noreply, socket}
     end
   end
@@ -433,6 +430,12 @@ defmodule ForgeWeb.TemplatesLive do
   defp price(%{price_hourly: hourly}), do: ", #{hourly}/h"
   defp price(_shape), do: ""
 
+  # The empty option of a select, worded for what leaving it empty does. A provider that cannot
+  # make a machine without the field gets a prompt, because *the node's default* would be a
+  # promise `Template.changeset/2` then refuses to keep.
+  defp blank_choice(required, field, otherwise),
+    do: {if(field in required, do: "choose one", else: otherwise), ""}
+
   defp kinds(nil), do: "any kind"
   defp kinds([]), do: "any kind"
   defp kinds(accepts), do: Enum.map_join(accepts, ", ", &to_string/1)
@@ -447,6 +450,7 @@ defmodule ForgeWeb.TemplatesLive do
   attr :shapes_error, :string, default: nil
   attr :images_error, :string, default: nil
   attr :ready, :boolean, required: true
+  attr :required, :list, required: true
   attr :submit, :string, required: true
   slot :beside
 
@@ -498,12 +502,18 @@ defmodule ForgeWeb.TemplatesLive do
         <%!-- The driver's own catalogue, so an operator picks a machine that exists rather
                   than typing a name that does not. Free text when the provider sells no named
                   shapes, which is the local one. --%>
+        <%!-- The blank choice says what blank does: *custom* where the driver takes a template
+                  with no size, and *choose one* where it refuses one
+                  (`Forge.Provider.required_template_fields/1`). --%>
         <.input
           :if={Enum.any?(@shapes, & &1.size)}
           field={@form[:size]}
           type="select"
           label="Size"
-          options={[{"custom", ""}] ++ for s <- @shapes, s.size, do: {shape_label(s), s.size}}
+          options={
+            [blank_choice(@required, :size, "custom")] ++
+              for s <- @shapes, s.size, do: {shape_label(s), s.size}
+          }
         />
         <.input
           :if={not Enum.any?(@shapes, & &1.size)}
@@ -524,7 +534,10 @@ defmodule ForgeWeb.TemplatesLive do
           field={@form[:image]}
           type="select"
           label="Image"
-          options={[{"the node's default", ""}] ++ for(i <- @images, do: {i.name || i.id, i.id})}
+          options={
+            [blank_choice(@required, :image, "the node's default")] ++
+              for(i <- @images, do: {i.name || i.id, i.id})
+          }
         />
         <.input
           :if={@images == []}
@@ -753,6 +766,7 @@ defmodule ForgeWeb.TemplatesLive do
               shapes_error={@shapes_error}
               images_error={@images_error}
               ready={@template_ready}
+              required={Provider.required_template_fields(@template_provider)}
               submit="Save it"
             >
               <:beside>
@@ -836,6 +850,7 @@ defmodule ForgeWeb.TemplatesLive do
           shapes_error={@shapes_error}
           images_error={@images_error}
           ready={@template_ready}
+          required={Provider.required_template_fields(@template_provider)}
           submit="Create it"
         />
       </.form>

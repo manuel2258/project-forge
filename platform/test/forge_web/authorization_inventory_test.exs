@@ -49,6 +49,7 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     "/chats" => :member,
     "/chats/new" => :member,
     "/chats/:id" => :member,
+    "/chats/:id/artifacts/:name/:version" => :member,
 
     # Account governance, the only thing the node-wide flag unlocks.
     "/accounts" => :node_admin,
@@ -169,7 +170,8 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"templates_live.ex", "add-template"} => :self,
     {"templates_live.ex", "delete-template"} => :self,
     # Own templates only, and each reads the row scoped to the caller before touching it — the
-    # id is the client's in all three.
+    # id is the client's in all three. For `save-template` and `enable-template` the scoped read
+    # is the context's (`Provisioning.update_template/3`, `enable/2`), not the page's.
     {"templates_live.ex", "edit-template"} => :self,
     {"templates_live.ex", "save-template"} => :self,
     {"templates_live.ex", "enable-template"} => :self,

@@ -7,8 +7,10 @@ defmodule Forge.Provider.Hetzner do
   **The image is the one thing here that is not an API call.** Hetzner Cloud has no image
   upload: a custom image is made by booting a rescue server, writing the disk, snapshotting it
   and throwing the server away (`worker-tier.md` § Updating a worker). So this driver is
-  *given* a snapshot id rather than creating one, and a node with none configured cannot make a
-  machine — which it says plainly rather than failing at the API.
+  *given* a snapshot id rather than creating one, by the template — and a template that names
+  none cannot make a machine, which it says plainly rather than failing at the API. There is no
+  node-wide image to fall back to: the one `Provider.config(:image)` holds is the local
+  driver's qcow2 path (`docs/design/provisioning.md` § Where a machine comes from).
 
   **How a machine learns what it is.** The same `KEY=VALUE` bytes the local driver writes to a
   labelled disk go here as the server's `user_data`. `worker-tier.md` § How a machine learns
@@ -25,8 +27,10 @@ defmodule Forge.Provider.Hetzner do
   the template's. That is the loop `docs/design/provisioning.md` § What a worker offers
   describes, and it is one correction rather than a running cost.
 
-  **Unrun.** Every request here is shaped against Hetzner's published API and exercised through
-  a seam, and none of it has spoken to Hetzner. `worker-tier.md` § What the operator's machine
+  **Run only as far as the machine.** Every request here is shaped against Hetzner's published
+  API and exercised through a seam, and the real API has been spoken to: machines were created
+  and destroyed (the `fsn1` finding below is from one). None has yet connected to a platform and
+  run a job. `worker-tier.md` § What the operator's machine
   settled is the standing warning about exactly this: in every case the tests against the fakes
   passed and the real thing did not.
   """
@@ -173,6 +177,11 @@ defmodule Forge.Provider.Hetzner do
   @impl Provider
   def credential_fields, do: [%{key: "token", label: "API token"}]
 
+  # Both refused at create below when blank, so a template without them could only ever fail.
+  # Declaring them is what lets the template form refuse one instead of saving it.
+  @impl Provider
+  def required_template_fields, do: [:size, :image]
+
   # **Followed to the end, and that is not a detail.** Hetzner pages at 25 by default, so a
   # first page taken for the whole answer reports *no orphans* while billing for the ones on
   # page two — a leak panel that lies is worse than no leak panel. `per_page` is asked at the
@@ -270,7 +279,11 @@ defmodule Forge.Provider.Hetzner do
   # Where this node makes machines. One reader, because `create/1`, the catalogue and the price
   # must all mean the same place — a catalogue filtered for one location and a create in another
   # is the trap this filter exists to close, rebuilt.
-  defp location, do: Provider.config(:location, "fsn1")
+  # The fallback is config.exs's own `nbg1`, for the reason given there: `fsn1`, the old one,
+  # sold no x86 type at all. **An equivalent mutant under any configured node**, the test one
+  # included — config.exs always names a location — so no test pins it; it is here so that
+  # removing that config line does not quietly bring `fsn1` back.
+  defp location, do: Provider.config(:location, "nbg1")
 
   # A deprecated type can still be seen and still be running, but a template built on one stops
   # being able to create the day Hetzner withdraws it. Offering it in a form is offering a trap.
@@ -283,6 +296,10 @@ defmodule Forge.Provider.Hetzner do
   # The credential is the template's, passed in `opts`; the node-wide token is the fallback for
   # a node that has not moved to per-user credentials yet. A driver with neither says so here
   # rather than sending an unauthenticated request and reporting Hetzner's 401.
+  #
+  # **Unlike the image's, this fallback is left**, and not because it is right: `:token` is read
+  # by no other driver, so it cannot hand Hetzner another driver's value, and nothing in
+  # `runtime.exs` sets it. Removing it is its own decision about nodes that set it by hand.
   defp token(opts) do
     case Map.get(opts, :credential) do
       %{"token" => token} when is_binary(token) and token != "" -> {:ok, token}
@@ -290,12 +307,15 @@ defmodule Forge.Provider.Hetzner do
     end
   end
 
-  # The template's, then the node's. A template that names one is what `images/1` exists to
-  # fill in; the configured fallback is what a node had before templates could name one.
+  # The template's, and nothing else. It used to fall back to `Provider.config(:image)`, which
+  # is not a Hetzner setting: it is the local driver's disk image, a path on this host filled
+  # from `FORGE_WORKER_IMAGE`, and a Hetzner template naming no image sent that path to Hetzner
+  # as a snapshot id. `Template.changeset/2` now refuses such a template (see
+  # `required_template_fields/0`); this is what a template saved before that rule gets.
   defp image_for(opts) do
     case Map.get(opts, :image) do
       value when is_binary(value) and value != "" -> {:ok, value}
-      _none -> setting(:image, "no Hetzner image configured")
+      _none -> {:error, {:hetzner, "the template names no image"}}
     end
   end
 
@@ -326,7 +346,7 @@ defmodule Forge.Provider.Hetzner do
   # policy included, and none of it should have a test written for it: a test that reached it
   # would be a test that needs a network, and one that faked the network would be asserting
   # against its own fake. That is the boundary this seam exists to draw, and it is why the
-  # module's own docs say the driver has never spoken to Hetzner.
+  # module's own docs say that what has run against Hetzner was run by hand, not by the suite.
   defp request(method, path, token, body) do
     Provider.config(:request, &__MODULE__.http/4).(method, path, token, body)
   end

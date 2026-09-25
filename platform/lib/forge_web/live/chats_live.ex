@@ -14,8 +14,9 @@ defmodule ForgeWeb.ChatsLive do
   person comes looking for conversations, and it is the only surface that must ask which project
   — every other one is already about a project (`docs/design/ui.md` § Creating things). Ending
   one is offered because a live row is a machine running, and until it was here the only way to
-  stop one was to open it first. Neither deletes anything: a conversation is kept for ever
-  (`docs/design/conversations.md` § Lifetime).
+  stop one was to open it first. Neither deletes a conversation, which is kept for ever
+  (`docs/design/conversations.md` § Lifetime) — but ending one deletes its branch unless the
+  branch would not merge cleanly, and the confirm says so in the page's own words.
   """
 
   use ForgeWeb, :live_view

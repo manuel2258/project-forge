@@ -36,7 +36,7 @@ the S3 implementation impossible and reintroduces the milestone-1 assumption tha
 worker share a disk. Callers get bytes, a file they named, or a URL.
 
 **`hash` is `sha256:<hex>`**, the form `artifact_version.content_hash` already carries
-(`platform/lib/forge/jobs.ex` `file_hash/1`). The store computes it while writing, so no caller
+(`Forge.Storage.hash/1`). The store computes it while writing, so no caller
 reads a file twice to hash it.
 
 ## Keys
@@ -46,7 +46,7 @@ at most 512 bytes. The behaviour validates; implementations do not have to. The 
 
 - `job/<job_id>/<name>` — per-job blobs. Transcripts land here, one per run.
 - `seed/<project>/<seed_id>` — worker seeds. `<seed_id>` identifies the contents, not the time:
-  see `docs/design/worker-tier.md` § Seed.
+  see `docs/design/worker-tier.md` § Volumes and the seed.
 - `artifact/<sha256>` — content-addressed blobs an artifact version points at that are not tied
   to one job.
 
@@ -77,17 +77,42 @@ the platform's decision.
 the job assignment (`docs/design/worker-channel.md`), and calls `GET`/`PUT /store/:key`.
 
 The token is `Phoenix.Token.sign/4` over the endpoint's `secret_key_base`, with
-`%{key: key, op: :get | :put}` and a `max_age` from config (default 15 minutes). It is the first
-`Phoenix.Token` in the codebase; the per-job git token (`docs/design/worker-tier.md` § Git token)
-is the second and reuses the module.
+`%{key: key, op: :get | :put}` and a `max_age` from config (default 15 minutes). It is the only
+`Phoenix.Token` in the codebase. The per-job git token was expected to be the second and is not:
+it is 32 random bytes stored as a sha256 hash in `git_tokens`, with the mechanics of
+`Forge.Accounts.UserToken`. It is revoked when its job ends and its rows are the audit trail, and a
+signed token offers neither (`docs/design/git-hosting.md` § The per-job token).
 
 Three properties this must have, and why:
 
 - **Scoped to one key and one verb.** A token that says "you may read the store" is a token that
   reads every ticket's transcripts. A worker holding a `put` token for its own job's transcript
   cannot overwrite the seed.
-- **Short-lived, and minted per assignment.** A job that outlives its tokens asks for new ones
-  over the channel rather than holding a long-lived one.
+- **Short-lived, minted per assignment, and sized to their use.** The lifetime is signed into the
+  token (`Forge.Storage.Token.sign/3`), so a verifier does not apply one number to all of them.
+  Most live `token_max_age`, fifteen minutes. The transcript `put` is minted at assignment and
+  used when the job stops, and between the two lie the job's preparation as well as its wall
+  clock: the worker starts the clock only once the clone and the seed are ready
+  (`ForgeWorker.Link`'s `prepare_and_run/3`, and `ForgeWorker.Job.Conversation` for a chat), so
+  a slow first seed fetch is time the clock never sees. So it lives the wall clock, plus a
+  preparation margin — `preparation_margin_ms` under `config :forge, Forge.Jobs`, an hour — plus
+  the ordinary fifteen minutes: two hours and a quarter for a workflow job, twenty-five hours and
+  a quarter for a conversation. At a flat fifteen minutes every transcript of a longer job was
+  refused as `expired_token`, and at the clock alone so was that of any job whose preparation
+  outran the fifteen minutes. A conversation's `history` tokens — a `get` for each earlier
+  transcript on its ticket (`Conversations.history/1`) — are read only once the worktree is
+  prepared, so they carry the same margin over the ordinary fifteen minutes; the seed's `get` is
+  spent as preparation begins and does not. The hour is a generous guess rather than a
+  measurement. M4's 35-second cold start is not the figure for it: most of that is booting the
+  machine and populating its Nix store, and neither is inside the window — a machine is up before
+  it is assigned anything, and the runner enters the project's environment after the clock has
+  started. What is inside it is the seed fetched and unpacked, which M4 put at 3.3 seconds for
+  192 MiB over loopback, and the fetch of the branch into the snapshot, which it did not time. A
+  provider's network makes the seed slower by an amount nobody has measured, and a project with no
+  seed is cloned whole, which nobody has timed either. The per-job git token already had the same
+  room — it outlives the clock by `git_token_ttl_minutes`, ninety minutes
+  (`docs/design/git-hosting.md` § The per-job token). Refreshing tokens over the channel was the
+  first plan and is not built; one key and one verb for the life of one job is a small grant.
 - **Not a bearer of identity.** The token authorises an operation on a key. It says nothing about
   who the worker is; that is the channel's job, and it happened before any token was minted.
 
@@ -96,8 +121,9 @@ and the store is not the place to discover that a job ran twice.
 
 ## The local implementation
 
-`Forge.Storage.Local`, writing under `<data_dir>/store/<key>`, where `data_dir` is the one
-`Forge.Jobs.data_dir/0` already returns.
+`Forge.Storage.Local`, writing under `<root>/<key>`, where the root (`Forge.Storage.Local.root/0`)
+is the `:dir` of `config :forge, Forge.Storage`: `FORGE_STORE_DIR` when it is set, and otherwise
+`store/` under `FORGE_DATA_DIR` (default `tmp/forge`), beside the rest of the platform's data.
 
 - Writes are to a temporary file in the same directory, then `File.rename/2`. A crash mid-write
   leaves a temp file, never a short object that `stat` would report as whole.
@@ -143,8 +169,9 @@ two keys.
 - **Deletion has no policy.** Nothing deletes a transcript or an old seed today. The store grows
   monotonically for the PoC, which is fine on the operator's disk and is not fine on the host.
   Retention lands with the closing step, when there is a bill attached.
-- **The seed's transport form is not settled here** — tar versus `btrfs send` stream — because it
-  is the worker tier's question. See `docs/design/worker-tier.md` § Seed.
+- **The seed's transport form is not settled here**, because it is the worker tier's question —
+  and it has settled it: a compressed tar, not a `btrfs send` stream. See
+  `docs/design/worker-tier.md` § Volumes and the seed.
 - **No integrity check on read.** `stat` reports the hash the store recorded at write; nothing
   re-reads a blob to confirm it. A local disk that silently rots is out of scope.
 
@@ -155,5 +182,5 @@ A store token goes in `Authorization: Bearer <token>`, never in the query string
 every proxy and access log on the path, and a request header is not.
 
 It matters less here than it does for the channel — a store token is scoped to one key and one
-verb and expires in minutes — but the two are minted by the same platform and read by the same
+verb and most expire in minutes — but the two are minted by the same platform and read by the same
 worker, and having one rule instead of two is worth more than the minutes of exposure it saves.

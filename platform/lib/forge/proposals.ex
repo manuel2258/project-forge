@@ -4,8 +4,9 @@ defmodule Forge.Proposals do
 
   The standard is `docs/design/ticket-proposals.md`. In one paragraph: any job may propose and
   no job may write, a proposal is one document artifact at one version scoped to the job that
-  wrote it, and accepting it calls `Forge.Tickets.admit/3` — a proposal is a `ticket` document
-  that has not been admitted yet.
+  wrote it, and accepting it admits it — `Forge.Tickets.prepare_admission/1` and
+  `Forge.Tickets.put_admit/5` inside `accept/3`'s own transaction, so the ticket and the decision
+  are one write. A proposal is a `ticket` document that has not been admitted yet.
 
   Nothing here creates a ticket on its own. `accept/3` takes the acting user because admission
   is the human act that widens the envelope, which is the only reason an agent is allowed to

@@ -50,7 +50,10 @@ while read -r old new ref; do
   # because this hook is the enforcement point and a glob here would hand out the namespace: a
   # credential scoped to one ref cannot reach another, but `chat/anything` is a wider grant than
   # any conversation needs. See docs/design/conversations.md § Commits.
+  # A ticket's is ticket/<number>, digits only: `ticket/[0-9]*` alone is a digit followed by
+  # anything, so the first line refuses a number with anything after it.
   case "$ref" in
+    refs/heads/ticket/*[!0-9]*) deny "branches are ticket/<number> or chat/<id>; $ref is not" ;;
     refs/heads/ticket/[0-9]*) : ;;
     refs/heads/chat/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) : ;;
     *) deny "branches are ticket/<number> or chat/<id>; $ref is not" ;;

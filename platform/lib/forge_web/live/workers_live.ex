@@ -67,16 +67,24 @@ defmodule ForgeWeb.WorkersLive do
     )
   end
 
-  # Blank is refused rather than read as nothing: this form is how an operator *sets* what a
-  # machine offers, and an empty memory field would silently un-gate the machine it was meant
-  # to correct. The same sizes the grammar takes, so `8GiB` works here too.
+  # The same sizes the grammar takes, so `8GiB` works here too. What does not parse is nil, and
+  # `Workers.set_offer/3` refuses a blank figure rather than reading it as nothing: this form is
+  # how an operator *sets* what a machine offers, and an empty memory field would silently
+  # un-gate the machine it was meant to correct.
   defp offered_attrs(params) do
-    with {:ok, memory} <- ForgeCore.Workflow.Resources.parse_bytes(params["memory"] || ""),
-         {cores, _rest} <- Integer.parse(params["cores"] || "") do
-      {:ok, %{memory_budget: memory, cores: cores, accepts: ticked(params)}}
-    else
-      _other -> {:error, %Ecto.Changeset{}}
-    end
+    memory =
+      case ForgeCore.Workflow.Resources.parse_bytes(params["memory"] || "") do
+        {:ok, memory} -> memory
+        _other -> nil
+      end
+
+    cores =
+      case Integer.parse(params["cores"] || "") do
+        {cores, _rest} -> cores
+        :error -> nil
+      end
+
+    %{memory_budget: memory, cores: cores, accepts: ticked(params)}
   end
 
   # Nothing ticked is nil, which every reader treats as "takes anything" — the same reading a
@@ -155,12 +163,10 @@ defmodule ForgeWeb.WorkersLive do
   id is the shape these holes keep taking.
   """
   def handle_event("save", %{"worker_id" => id} = params, socket) do
-    user = socket.assigns.current_scope.user
+    case Workers.set_offer(socket.assigns.current_scope.user, id, offered_attrs(params)) do
+      {:ok, _worker} ->
+        {:noreply, socket |> assign(editing: nil, error: nil) |> load()}
 
-    with {:ok, attrs} <- offered_attrs(params),
-         {:ok, _worker} <- Workers.set_offer(user, id, attrs) do
-      {:noreply, socket |> assign(editing: nil, error: nil) |> load()}
-    else
       {:error, :made_by_the_platform} ->
         {:noreply, assign(socket, error: "a machine the platform made is replaced, not edited")}
 
@@ -331,8 +337,9 @@ defmodule ForgeWeb.WorkersLive do
               <td class="py-3 pr-3">
                 <div class="font-mono">{row.worker.status}</div>
                 <%!-- The only thing that differs between a machine the platform may destroy and
-                      one it may not, and an unmanaged row holds a slot until somebody retires
-                      it. See docs/design/worker-tier.md § Managed and unmanaged. --%>
+                      one it may not: an unmanaged row stays until somebody retires it, and
+                      counts against no template's ceiling. See docs/design/worker-tier.md
+                      § Managed and unmanaged. --%>
                 <div class="font-mono text-[11px] opacity-50">
                   {if row.worker.managed, do: "managed", else: "permanent"}
                 </div>

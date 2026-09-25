@@ -81,25 +81,48 @@ Platform → worker:
 
 | Message | Payload | Meaning |
 |---|---|---|
-| `assign` | spec JSON, slice limits, git endpoint + per-job token + branch, transcript key + token, seed key + token, `resume_session`, wall clock, the job's inference credential sealed for this worker (`credentials.md` § Delivery to the machine) | Run this job. |
+| `assign` | `job_id`, `kind`, spec JSON, slice limits (`memory_max`, `cpu_weight`), git endpoint + per-job token + branch + base, transcript key + token, seed key + token, the backlog, `resume_session`, wall clock, the job's inference credential sealed for this worker (`credentials.md` § Delivery to the machine); a chat adds `idle_ms`, `max_cost_usd` and `history` and a longer wall clock, and its spec a `replay` once it has been reopened | Run this job. |
 | `cancel` | `job_id`, reason | Stop it. The worker still sends a terminal message. |
-| `drain` | — | Take no new work. Precedes idle destroy. |
+| `message` | `job_id`, `message_id`, text | A chat only: write this to the harness's stdin. |
+| `interrupt` | `job_id` | A chat only: end this turn, keep the process. |
+| `close` | `job_id`, reason | A chat only: end the conversation, release the machine. |
+
+**There is no `drain`.** This table carried one — *take no new work* — meant to precede idle
+destroy, and nothing ever sent it: `Workers.sweep_idle/0` takes only a worker that is already
+`idle`, with no job to wait for, and destroys it directly. The worker honoured it and the
+channel could push it, so both ends knew a message neither used, and it was removed from both
+rather than kept for a use that might come. It was wrong where it was honoured, too: a draining
+worker refused an assignment with a log line and no reply, and the platform — which marks a job
+`running` before the assignment goes out (§ Delivery) — was left holding a job nothing was
+running until the next rejoin. The first thing that would want a worker to stop taking work is
+the pulled `update` `docs/design/worker-tier.md` § Updating a worker sketches, and that can say
+so itself.
 
 Worker → platform:
 
 | Message | Payload | Acked |
 |---|---|---|
-| `ready` | `memory_budget`, `seeds`, `root`, `harness` | no |
+| `ready` | `memory_budget`, `seeds`, `root`, `harness`, and `cores` and `accepts` when known | no |
 | `heartbeat` | running job ids | no |
 | `event` | `job_id`, normalised harness event | no |
-| `result` | `job_id`, `attempt`, `ForgeCore.Job.Result` as JSON | yes |
-| `hibernated` | `job_id`, `attempt`, commit sha, reason | yes |
-| `failed` | `job_id`, `attempt`, reason | yes |
+| `turn` | `job_id`, turn index, commit, the turn's proposals and documents, and a harness summary carrying its cost | yes |
+| `result` | `job_id`, `ForgeCore.Job.Result` as JSON | yes |
+| `hibernated` | `job_id`, commit sha, reason, the result as far as it got; a chat adds its turn count | yes |
+| `failed` | `job_id`, reason | yes |
+
+The conversation rows are `docs/design/conversations.md`'s — § The wire for the four messages, §
+Context for `history`, § Lifetime for `idle_ms` and the `replay`, and § Spend for `max_cost_usd` —
+and the backlog is `docs/design/ticket-proposals.md` § Reading the backlog.
+`Forge.Jobs.assignment/4` builds what `assign` carries, and `Forge.Jobs.assign/2` adds the sealed
+credential to it.
 
 **`ready` is not `join`.** A worker joins when its release boots; it is `ready` when it has
-worked out what it can offer — the memory budget it is scheduled against, and the seeds it
-already holds. On a provider the two are minutes apart, because the machine answers long before
-the release does. The platform will not assign a job to a worker that has joined but is not ready.
+worked out what it can offer — its memory budget, cores and kinds (§ What a worker offers), and
+the seeds it already holds. On a provider the two are minutes apart, because the machine answers
+long before the release does. The platform will not assign a job to a worker that has joined for
+the first time but is not ready. A worker that *re*joins keeps the status it had — nothing resets
+it on disconnect — so for the moment between its join and its `ready` it is assignable on its
+old figures, which the `ready` then confirms or corrects.
 
 The Nix store and the seed are *not* between these two messages, though an earlier draft of
 `docs/design/worker-tier.md` put them there. They cannot be: neither is knowable before the
@@ -182,8 +205,8 @@ the harness binary is picked up on the next connection rather than on the next m
 **More than one worker.** The platform keeps each worker's answer on its own row and offers the
 **union** of the live ones' aliases. Workers built from one image answer identically; a union that
 is not a single set means an image rollout is half done. Union rather than intersection because
-the list is an offer, not a gate — see `docs/design/workflow-grammar-v1.md` § Model for why naming
-a model the platform has never heard of stays legal.
+the list is an offer, not a gate — see `docs/design/workflow-grammar-v1.md` § Semantics, under
+**Model**, for why naming a model the platform has never heard of stays legal.
 
 ## Delivery
 
@@ -194,16 +217,19 @@ and nothing recovers one lost to a dropped socket. This is allowed because of wh
 for: `docs/decisions.md` says artifacts are the contract and the conversation is an optimisation.
 A lost event costs a line in the timeline. It never costs a decision, because no decision is taken
 from the event stream — the result carries everything the engine reads. A lost event is not
-detectable: the worker pushes `job_id` and the event and nothing else (`link.ex:139`), so there is
+detectable: the worker pushes `job_id` and the event and nothing else (`ForgeWorker.Link`'s
+`handle_info({:event, …})`), so there is
 no per-event sequence and the platform cannot tell a gap from a quiet job. The `seq` on an `events`
 row is the platform's own insertion order, assigned on arrival, and orders what arrived rather than
 what was sent.
 
 **Terminal messages are acked and retried.** `result`, `hibernated` and `failed` are pushed with a
-reply expected; the platform replies only after the transaction that records them commits. Until
-the ack arrives the worker keeps the message and re-sends it after any reconnect. The platform
-therefore must treat them as idempotent, keyed by `(job_id, attempt)`: a second `result` for a job
-already `finished` is acked and dropped, not recorded twice.
+reply expected, and so is a chat's `turn`, because it carries the cost the daily cap is computed
+from; the platform replies only after the transaction that records them commits. Until the ack
+arrives the worker keeps the message and re-sends it after any reconnect. The platform therefore
+must treat them as idempotent — keyed by the job, since a job row is one attempt and the payloads
+carry no attempt, and a `turn` by its place in the conversation (`Conversations.record_turn/2`):
+a second `result` for a job already `finished` is acked and dropped, not recorded twice.
 
 That ordering — commit, then ack — is the one that fails safely. Acking first and crashing loses
 the job's outcome while the worker believes it is delivered. Committing first and crashing costs a
@@ -211,7 +237,8 @@ duplicate delivery, which the idempotency key absorbs.
 
 **`assign` is not acked, and the row is marked before it goes out.** The opposite was written
 here first — ack, then mark — and it is wrong for the same reason milestone 1 already
-discovered in `Forge.Jobs.start/1`: a row the progress changeset refuses must be refused
+discovered in `Forge.Jobs.start/1`, the in-process entry point `Forge.Jobs.assign/2` replaced: a
+row the progress changeset refuses must be refused
 *before* anything is running, or the refusal arrives after a billed invocation has already
 started and the scheduler retries the job every tick. So the platform marks the job `running`
 with its worker, sends the assignment, and puts the row back to `pending` if the send fails.
@@ -238,23 +265,38 @@ against the platform's rows for this worker:
 
 ## When the machine goes away
 
-`last_seen_at` is written by every `heartbeat` and every message. Past `worker_timeout_ms` the
-platform stops waiting: it re-queues that worker's running jobs, asks the provider driver to
-destroy the machine, and marks the row `destroyed`. Destroying a machine that is merely
-partitioned is the right trade here — the jobs are re-runnable by construction, and a worker that
-is unreachable is not doing anything the platform can observe or bill.
+`last_seen_at` is written at join, at `ready` and by every `heartbeat`. Past `worker_timeout_ms`
+the platform stops waiting (`Workers.sweep_unreachable/0`), and what it does next depends on whose
+machine it is:
+
+- **A managed worker** has its running jobs re-queued — a workflow job to `pending`, a chat to
+  dormant — and its machine destroyed through the driver. The row is marked `destroyed` only once
+  the driver says the machine went: a refusal keeps the row, with the driver's words in
+  `last_error`, and the next sweep tries again, because the row is the platform's claim that
+  nothing is billing (`docs/design/provisioning.md` § Whose account). A row naming a provider
+  this node no longer has is retired at once, since no retry could succeed.
+- **An unmanaged worker keeps its row.** Its running jobs are re-queued the same way, but the
+  machine is the operator's and may well come back, and a `destroyed` row never can
+  (`docs/design/worker-tier.md` § Managed and unmanaged).
+
+Destroying a managed machine that is merely partitioned is the right trade — the jobs are
+re-runnable by construction, and a worker that is unreachable is not doing anything the platform
+can observe or bill.
 
 **This runs on every scheduling pass, before anything asks for capacity**, and that ordering is
-not housekeeping. `max_workers` counts every row that is not `destroyed`, so a machine the
-platform has lost track of holds a slot for ever; at the PoC's `max_workers` of 1 it holds all of
-them, and the queue never moves again. A killed VM, a platform restarted while a machine was
-booting, a `create` that half-succeeded — each leaves exactly that row, and each was a deadlock
-until this existed.
+not housekeeping. A template's `max_workers` counts every row made from it that is not
+`destroyed` (`Provisioning.live_count/1`), so a machine the platform has lost track of holds one
+of that template's slots for ever; at the default of 1 it holds all of them, and nothing more is
+made from it. A killed VM, a platform restarted while a machine was booting, a `create` that
+half-succeeded — each leaves exactly that row, and each was a deadlock until this existed, when
+the ceiling was the node's `max_workers` of 1 rather than a template's.
 
 A worker that has never reported has no `last_seen_at`, so it is timed from when its row was
 made: a machine that never finishes booting has to expire too, or a failed `create` is
-indistinguishable from a slow one for ever. A worker that is connected is never swept, however
-quiet: the registry is the evidence, and the timeout is only for workers that are not in it.
+indistinguishable from a slow one for ever. A managed one swept that way also counts as a failure
+of its template (`docs/design/provisioning.md` § A template that cannot make a working machine
+is taken out of service). A worker that is connected is never swept, however quiet: the registry
+is the evidence, and the timeout is only for workers that are not in it.
 
 ## Why Slipstream
 
@@ -286,20 +328,13 @@ already has the framework for.
 - **One channel carries both control and data.** A large `result` blocks events behind it on the
   same socket. Transcripts already go to the store rather than over the channel, which is what
   keeps results small; if they stop being small, they follow the transcript.
-- **`drain` is one-way, and has no deadline.** The row above used to say the worker replies when
-  its last job ends. It does not, and nothing waits for one: `handle_message/4` sets `draining`
-  and returns, `WorkerChannel` pushes and moves on. Draining is therefore advisory — the sweep
-  that follows it is timed, not triggered. A job that will not finish keeps a worker alive past
-  its idle period, and the wall clock in the runner is the backstop, which is a long one. If
-  idle destroy ever needs to be prompt rather than eventual, the reply is what to build, and
-  `send_acked/4` is the machinery it would use.
 - **The model is not a scheduling requirement.** A job naming a model goes to whichever worker
   the memory gate offers, and nothing checks that the job's *credential* may use it. The cost of
   being wrong is one wasted assignment: the harness refuses the name and the job fails with the
   harness's own message, which is visible rather than silent.
 
   Since `docs/design/credentials.md` the model list is a credential's and not a machine's, so the
-  requirement belongs in the pick rather than in `Workers.assignable/1`: prefer a credential
+  requirement belongs in the pick rather than in `Workers.assignable/2`: prefer a credential
   whose `models` lists the one the job wants. The data is on the credential row.
 
   Two traps for whoever builds it. A credential that has never been **checked** has no list and

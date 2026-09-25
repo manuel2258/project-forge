@@ -17,18 +17,21 @@ defmodule Forge.Provisioning.Template do
   import Ecto.Changeset
 
   alias Forge.Jobs.Job
+  alias Forge.Provisioning.Credential
 
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id
   schema "worker_templates" do
     belongs_to :user, Forge.Accounts.User
-    belongs_to :provider_credential, Forge.Provisioning.Credential
+    belongs_to :provider_credential, Credential
 
     field :name, :string
     field :provider, :string
     field :size, :string
-    # Opaque above the driver, like `size`. Null means the node's configured image, which is
-    # what every template made before this column has.
+    # Opaque above the driver, like `size`. Null leaves it to the driver: the local one boots
+    # this host's image whatever a template says, and one that lists `:image` in
+    # `Forge.Provider.required_template_fields/1` — Hetzner — refuses a template without one,
+    # here on save and at create for a row saved before that rule.
     field :image, :string
     field :memory, :integer
     field :cores, :integer
@@ -73,12 +76,13 @@ defmodule Forge.Provisioning.Template do
     |> validate_length(:name, min: 1, max: 100)
     |> validate_number(:memory, greater_than: 0)
     |> validate_number(:cores, greater_than: 0)
-    # Zero is meaningful and is not "unlimited": a template the operator has turned off, which
-    # `docs/design/worker-tier.md` § Managed and unmanaged already describes as the pure
-    # permanent model — provision by hand and let the platform create nothing.
+    # Zero is meaningful and is not "unlimited": a template the operator has turned off, so the
+    # platform creates nothing from it — the pure permanent model of
+    # `docs/design/worker-tier.md` § Managed and unmanaged, one template at a time.
     |> validate_number(:max_workers, greater_than_or_equal_to: 0)
     |> validate_number(:idle_ms, greater_than: 0)
     |> validate_provider()
+    |> validate_required_by_driver()
     |> validate_credential_provider()
     |> unique_constraint([:user_id, :name])
     |> foreign_key_constraint(:user_id)
@@ -94,6 +98,23 @@ defmodule Forge.Provisioning.Template do
     end)
   end
 
+  # `size` and `image` are opaque here, so whether a template may leave one blank is the
+  # driver's to say. Asked of the provider the template now names, on create and on edit alike:
+  # a Hetzner template saved before this rule cannot be renamed without being given an image,
+  # which is the edit that makes it work.
+  defp validate_required_by_driver(changeset) do
+    case get_field(changeset, :provider) do
+      provider when is_binary(provider) ->
+        validate_required(changeset, Forge.Provider.required_template_fields(provider))
+
+      # An equivalent mutant, whatever this clause asks: a template naming no provider is
+      # already refused by `validate_required/2` above, so anything added here is a second
+      # error on a changeset that cannot be saved.
+      _none ->
+        changeset
+    end
+  end
+
   # A template naming one provider and holding another's credential would create a machine in
   # the wrong account, or fail at the API with a message about a token rather than about the
   # row that is wrong. The two are checked together because neither is wrong alone.
@@ -106,20 +127,53 @@ defmodule Forge.Provisioning.Template do
   defp validate_credential_provider(changeset) do
     credential_id = get_field(changeset, :provider_credential_id)
     provider = get_field(changeset, :provider)
-    owner = get_field(changeset, :user_id)
 
-    case is_binary(credential_id) && Forge.Repo.get(Forge.Provisioning.Credential, credential_id) do
-      false ->
+    case is_binary(credential_id) &&
+           mismatch(Forge.Repo.get(Credential, credential_id), changeset, provider) do
+      nothing when nothing in [false, nil] ->
         changeset
 
-      %{user_id: ^owner, provider: ^provider} ->
-        changeset
-
-      %{user_id: ^owner, provider: other} ->
-        add_error(changeset, :provider_credential_id, "is for #{other}, not #{provider}")
-
-      _someone_elses_or_none ->
+      :not_owner ->
         add_error(changeset, :provider_credential_id, "is not one of your credentials")
+
+      {:wrong_provider, theirs} ->
+        add_error(changeset, :provider_credential_id, "is for #{theirs}, not #{provider}")
+    end
+  end
+
+  # An id naming no credential reads as somebody else's: from outside the two cannot be told
+  # apart, and the answer should not tell them apart either.
+  defp mismatch(nil, _changeset, _provider), do: :not_owner
+
+  defp mismatch(%Credential{} = credential, changeset, provider),
+    do: credential_mismatch(get_field(changeset, :user_id), provider, credential)
+
+  @doc """
+  What is wrong with a template owned by `user_id` and naming `provider` holding `credential`,
+  or nil when nothing is.
+
+  **One definition, asked at both ends of a template's life.** `changeset/2` asks it when a row
+  is written; `Forge.Provisioning.spendable_credential/1` asks it again when a machine is about
+  to be made, because a row saved before the changeset checked anything still names whatever
+  credential it was given. Two copies of the rule would be two places for it to disagree.
+  """
+  @spec credential_mismatch(Ecto.UUID.t() | nil, String.t() | nil, Credential.t()) ::
+          nil | :not_owner | {:wrong_provider, String.t()}
+  def credential_mismatch(user_id, provider, %Credential{} = credential) do
+    cond do
+      credential.user_id != user_id ->
+        :not_owner
+
+      # `is_binary/1` is an equivalent mutant for whether a row is saved or a machine made: a nil
+      # provider already fails `validate_required` in the changeset, and
+      # `worker_templates.provider` is `null: false` for a row read at creation. Dropping it adds
+      # a second error — "is for hetzner, not " — to a changeset already refused, which a test
+      # could see but no user would.
+      is_binary(provider) and credential.provider != provider ->
+        {:wrong_provider, credential.provider}
+
+      true ->
+        nil
     end
   end
 

@@ -13,7 +13,7 @@ defmodule ForgeWeb.TicketLive do
   import ForgeWeb.Indicators
   import ForgeWeb.Operator.Components
 
-  alias Forge.{Artifacts, Events, Jobs, Proposals, Spend, Tickets}
+  alias Forge.{Artifacts, Engine, Events, Jobs, Proposals, Spend, Tickets}
   alias ForgeCore.Workflow
   alias ForgeWeb.{Format, Indicators, Markdown}
   alias ForgeWeb.Operator.Actions
@@ -63,6 +63,7 @@ defmodule ForgeWeb.TicketLive do
       questions: Artifacts.open_questions(ticket.id),
       jobs: jobs,
       steps: steps(jobs, artifacts, ticket, workflow),
+      waits: waits(jobs),
       artifacts: artifacts,
       events: ticket.id |> Events.for_ticket() |> Enum.reverse() |> Enum.take(4),
       transitions:
@@ -70,7 +71,6 @@ defmodule ForgeWeb.TicketLive do
       human_state:
         ticket.status in [:active, :stuck] and
           not Workflow.State.job?(Workflow.state(workflow, ticket.state)),
-      approve: approve_versions(ticket),
       proposals: Proposals.open_for_ticket(ticket.id),
       reviewable: reviewable?(ticket, workflow),
       paused: ticket.status == :active and Spend.paused?(),
@@ -113,6 +113,18 @@ defmodule ForgeWeb.TicketLive do
     |> Enum.map(&Map.put(&1, :topology, Board.topology(workflow, &1.name)))
   end
 
+  # Why each pending job has not gone out, in the scheduler's own sentence — only a pending job
+  # has one (`docs/design/ui.md` § A job waiting for a machine).
+  defp waits(jobs) do
+    Enum.flat_map(jobs, fn job ->
+      case Jobs.current_wait(job) do
+        nil -> []
+        wait -> [{job.id, Events.summary(wait)}]
+      end
+    end)
+    |> Map.new()
+  end
+
   defp written_in?(%{latest: nil}, _jobs), do: false
 
   defp written_in?(%{latest: latest}, jobs) do
@@ -121,9 +133,6 @@ defmodule ForgeWeb.TicketLive do
       _other -> false
     end
   end
-
-  defp approve_versions(%{pending_transition: pending}) when is_map(pending), do: pending
-  defp approve_versions(_ticket), do: nil
 
   @impl true
   def handle_info({:ticket_changed, id}, %{assigns: %{ticket_id: id}} = socket),
@@ -182,7 +191,7 @@ defmodule ForgeWeb.TicketLive do
             :if={@ticket.pending_transition}
             ticket={@ticket}
             pending={@ticket.pending_transition}
-            approve={approve_pairs(@approve, @artifacts)}
+            approve={approve_pairs(@ticket, @artifacts)}
           />
 
           <.link
@@ -237,7 +246,7 @@ defmodule ForgeWeb.TicketLive do
                   <li :for={job <- step.jobs}>
                     <.link
                       navigate={~p"/tickets/#{@project.name}/#{@ticket.number}/jobs/#{job.id}"}
-                      class="flex min-h-[46px] items-center gap-3 border-b border-base-300/60 text-[12.5px] hover:bg-base-200"
+                      class="flex min-h-[46px] items-center gap-3 border-b border-base-300/60 py-1.5 text-[12.5px] hover:bg-base-200"
                     >
                       <span class="w-8 shrink-0 font-mono">#{job.attempt}</span>
                       <span class="min-w-0 flex-1">
@@ -247,6 +256,15 @@ defmodule ForgeWeb.TicketLive do
                           bucket={job.declared_outcome && Indicators.bucket(job.outcome)}
                         />
                         <.job_status :if={is_nil(job.outcome)} status={job.status} />
+                        <%!-- Language, not an identifier: sans at body size, and never accent —
+                              a machine is being waited on, not the operator. --%>
+                        <span
+                          :if={@waits[job.id]}
+                          id={"job-#{job.id}-waiting"}
+                          class="block text-sm/[1.4] opacity-60"
+                        >
+                          {@waits[job.id]}
+                        </span>
                       </span>
                       <span class="shrink-0 font-mono opacity-60">{job.turns} turns</span>
                       <span class="w-20 shrink-0 text-right font-mono opacity-60">
@@ -418,8 +436,8 @@ defmodule ForgeWeb.TicketLive do
 
   # A decision that pins the changeset is a merge decision, which has a page of its own — whether
   # it is waiting as a pending approval or as the transition out of the state the ticket rests in.
-  defp reviewable?(%{pending_transition: pending}, _workflow) when is_map(pending),
-    do: Workflow.changeset_artifact() in List.wrap(pending["approve"])
+  defp reviewable?(%{pending_transition: pending} = ticket, _workflow) when is_map(pending),
+    do: Workflow.changeset_artifact() in Engine.awaiting_approval(ticket)
 
   defp reviewable?(ticket, workflow) do
     workflow
@@ -427,10 +445,8 @@ defmodule ForgeWeb.TicketLive do
     |> Enum.any?(&(Workflow.changeset_artifact() in &1.approve))
   end
 
-  defp approve_pairs(nil, _artifacts), do: []
-
-  defp approve_pairs(pending, artifacts) do
-    for name <- List.wrap(pending["approve"]),
+  defp approve_pairs(ticket, artifacts) do
+    for name <- Engine.awaiting_approval(ticket),
         entry = Enum.find(artifacts, &(&1.artifact.name == name)),
         entry && entry.latest,
         do: {name, entry.latest.version}

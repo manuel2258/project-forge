@@ -224,4 +224,95 @@ defmodule ForgeWeb.ArtifactControllerTest do
     assert get(conn, ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/plan.md/nope").status ==
              404
   end
+
+  # A conversation's own artifacts had no address at all: the route is under a ticket and the
+  # controller resolved names within a ticket only, so the chat page listed them by bare name.
+  # `docs/design/ui.md` § Addressable artifact versions.
+  describe "a conversation's own artifacts" do
+    setup %{project: project} do
+      {:ok, chat} = Forge.Conversations.open(project, "write it down")
+      %{chat: chat}
+    end
+
+    defp chat_write(chat, name, content) do
+      {:ok, version} =
+        Artifacts.record_version({:job, chat.id}, name, :document, {:job, chat.id}, %{
+          content: content
+        })
+
+      version
+    end
+
+    test "an exact version is served from the conversation's address", %{
+      conn: conn,
+      chat: chat
+    } do
+      chat_write(chat, "notes.md", "# first\n")
+      chat_write(chat, "notes.md", "# second\n")
+
+      conn1 = get(conn, ~p"/chats/#{chat.id}/artifacts/notes.md/1")
+      assert response(conn1, 200) == "# first\n"
+      assert get_resp_header(conn1, "x-content-type-options") == ["nosniff"]
+      assert [disposition] = get_resp_header(conn1, "content-disposition")
+      assert disposition =~ ~s(filename="notes-v1.md")
+
+      assert get(conn, ~p"/chats/#{chat.id}/artifacts/notes.md/2") |> response(200) ==
+               "# second\n"
+
+      assert get(conn, ~p"/chats/#{chat.id}/artifacts/notes.md/3").status == 404
+    end
+
+    # The address names its scope, and nothing else answers to it: a ticket's `plan.md` is not
+    # a conversation's, and another conversation's is not this one's.
+    test "a name is resolved in the conversation's scope and no other", %{
+      conn: conn,
+      project: project,
+      user: user,
+      chat: chat
+    } do
+      ticket = admitted(project, user)
+      write(ticket, "plan.md", "# the ticket's\n", user)
+      {:ok, other} = Forge.Conversations.open(project, "another")
+      chat_write(other, "plan.md", "# the other conversation's\n")
+
+      assert get(conn, ~p"/chats/#{chat.id}/artifacts/plan.md/1").status == 404
+
+      assert get(conn, ~p"/chats/#{other.id}/artifacts/plan.md/1") |> response(200) ==
+               "# the other conversation's\n"
+    end
+
+    # A workflow job has artifacts of its own scope too — its proposals — and its id is a job's id
+    # like a conversation's. `Conversations.get!/1` refusing a job that is not a chat is the only
+    # thing making this address a conversation's; without it, any job's proposals were served
+    # here to anyone who could see the project, under an address that says "chat".
+    test "a workflow job's id is not a conversation's address, even for a member", %{
+      conn: conn,
+      project: project,
+      user: user
+    } do
+      ticket = admitted(project, user)
+      [job] = Forge.Jobs.for_ticket(ticket.id)
+
+      {:ok, _proposal} =
+        Artifacts.record_version(
+          {:job, job.id},
+          "proposal-later.md",
+          :document,
+          {:job, job.id},
+          %{
+            content: "# Later\n"
+          }
+        )
+
+      assert_error_sent 404, fn ->
+        get(conn, ~p"/chats/#{job.id}/artifacts/proposal-later.md/1")
+      end
+    end
+
+    test "requires a logged-in operator", %{chat: chat} do
+      conn = get(build_conn(), ~p"/chats/#{chat.id}/artifacts/notes.md/1")
+
+      assert redirected_to(conn) == ~p"/users/log-in"
+    end
+  end
 end

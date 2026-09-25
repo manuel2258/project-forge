@@ -66,6 +66,87 @@ defmodule ForgeCore.Prompt do
   end
 
   @doc """
+  What a workflow job is handed when it resumes its harness session: what changed while it was
+  stopped, and the manifest as it stands now. See `docs/design/job-prompt.md` § The continuation
+  prompt.
+
+  The preamble and the state prompt are not repeated — the session already holds them, and they
+  are the bulk of `compose/2`. The manifest is: it is short, it now lists `answers.md` among the
+  inputs, and its budget is the one this run was assigned, which may have been lowered since.
+
+  `head` is the commit the worktree is at, or nil when it could not be read.
+
+  Only for a run that passes `--resume`. A cold start gets `compose/2`, and the caller chooses
+  between them from the same value that puts the flag on the command line.
+  """
+  @spec continuation(Spec.t(), String.t(), String.t() | nil) :: String.t()
+  def continuation(%Spec{} = spec, job_dir, head) do
+    [
+      """
+      # Continue this job
+
+      This resumes your session on it. Your instructions are the ones you were given; below is
+      what changed while you were stopped, and the manifest as it stands now. Where the manifest
+      differs from what you remember, the manifest is right.
+      """,
+      answers(spec, job_dir),
+      branch_state(spec, head),
+      "---\n\n" <> manifest(spec, job_dir)
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.map_join("\n\n", &String.trim/1)
+    |> Kernel.<>("\n")
+  end
+
+  defp answers(%Spec{inputs: inputs}, job_dir) do
+    case Enum.find(inputs, &(&1.name == Workflow.answers_artifact())) do
+      nil ->
+        nil
+
+      input ->
+        fence = fence(input.content)
+
+        """
+        ## Answers
+
+        A person answered. `#{input.name}` version #{input.version} holds every answer on this
+        ticket, oldest first; it is also at `#{Path.join([job_dir, "inputs", input.name])}`.
+
+        #{fence}markdown
+        #{String.trim(input.content)}
+        #{fence}
+
+        A question whose key has an answer does not stop the job again, so a block you leave in a
+        document is not asked twice.
+        """
+    end
+  end
+
+  # Longer than any run of backticks in what it wraps, so a person's answer that quotes a fenced
+  # block cannot close this one early and leave the rest of the prompt inside it.
+  defp fence(content) do
+    longest =
+      ~r/`+/
+      |> Regex.scan(content)
+      |> Enum.map(fn [run] -> String.length(run) end)
+      |> Enum.max(fn -> 0 end)
+
+    String.duplicate("`", max(3, longest + 1))
+  end
+
+  defp branch_state(%Spec{branch: branch}, head) do
+    at = if head, do: ", at `#{head}`", else: ""
+
+    """
+    ## Your branch
+
+    `#{branch}`#{at}, checked out in the worktree you are running in. What the earlier run had
+    not committed was committed when it stopped, and a run's commits are squashed into one, so
+    the history may not be the one you remember; the files are what you left.
+    """
+  end
+
+  @doc """
   What a conversation is told about where it is.
 
   Deliberately not the job manifest: there is no state to be in, no outcome to declare, no
@@ -90,6 +171,32 @@ defmodule ForgeCore.Prompt do
 
     #{inputs(spec, job_dir)}
     #{history(spec, job_dir)}
+    #{replay(spec, job_dir)}
+    """
+  end
+
+  # A reopened conversation is a new process with none of the old one's context, and the
+  # message at the end of this prompt is the next thing the person said — not the first. Told
+  # so here, because an agent that took it for an opening would answer as though nothing had
+  # been said, and one that took the file for its instructions would answer it all again. The
+  # file is named rather than inlined for the reason `history/` is: it is read with the agent's
+  # own tools, and a long conversation does not become one enormous first message.
+  defp replay(%Spec{replay: nil}, _job_dir), do: ""
+
+  defp replay(%Spec{}, job_dir) do
+    path = Path.join(job_dir, Workflow.replay_file())
+
+    """
+
+    ## This conversation was reopened
+
+    It went on before, in a process that has since stopped. What was said — the person's
+    messages and your replies, oldest first — is in `#{path}`.
+    **Read it before you reply.** It ends with your last reply, and the message at the end of
+    this prompt is the next thing the person said — not the first.
+
+    The checkout is your branch as it stands now, which may not hold everything those replies
+    describe: `git log` says what is there.
     """
   end
 

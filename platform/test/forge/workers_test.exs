@@ -671,7 +671,7 @@ defmodule Forge.WorkersTest do
       assert worker.accepts == [:workflow]
 
       # Editing the template afterwards reaches nothing that exists.
-      {:ok, _} = Provisioning.update_template(template, %{memory: 1, cores: 1})
+      {:ok, _} = Provisioning.update_template(user, template.id, %{memory: 1, cores: 1})
       assert Workers.get!(worker_id).memory_budget == 9_000
     end
 
@@ -709,14 +709,55 @@ defmodule Forge.WorkersTest do
       assert_receive {:provider_create, %{image: "snapshot-42", size: "cpx32"}}
     end
 
-    # Null is not "no image": it is *the node's*, which is what every template made before the
-    # column has and what keeps them able to create.
-    test "a template naming none leaves the driver to its own default", context do
+    # Null is passed as null and nothing above the driver substitutes for it: what no image means
+    # is the driver's to say — the local one boots its host's image, Hetzner refuses (below).
+    test "a template naming none leaves it to the driver", context do
       %{user: user, project: project} = context
       assigned(user, project, %{})
 
       assert {:error, :creating} = Workers.create_machine(demand(project_id: project.id))
       assert_receive {:provider_create, %{image: nil}}
+    end
+
+    # **A Hetzner template saved before it had to name an image.** It is forced in here because
+    # `Template.changeset/2` no longer lets one be made. It used to boot whatever
+    # `Provider.config(:image)` held — the local driver's qcow2 path — and now it makes nothing,
+    # sends nothing, and says why on the template, where the failure counter takes it out of
+    # service like any other recipe that cannot work.
+    test "a Hetzner template from before the rule makes nothing and says why", context do
+      %{user: user, project: project} = context
+
+      configure_provider(
+        image: "/nix/store/worker-image/nixos.qcow2",
+        request: fn _method, path, _token, _body -> flunk("sent #{path} to Hetzner") end
+      )
+
+      {:ok, credential} =
+        Provisioning.create_credential(user, %{
+          name: "hcloud",
+          provider: "hetzner",
+          secret: %{"token" => "t"}
+        })
+
+      template =
+        assigned(user, project, %{
+          provider: "hetzner",
+          provider_credential_id: credential.id,
+          size: "cpx32",
+          image: "snapshot-42"
+        })
+
+      {1, _} =
+        Forge.Repo.update_all(
+          Ecto.Query.from(t in Provisioning.Template, where: t.id == ^template.id),
+          set: [image: nil]
+        )
+
+      assert {:error, {:create_failed, {:hetzner, "the template names no image"}}} =
+               Workers.create_machine(demand(project_id: project.id))
+
+      assert reloaded(template).failures == 1
+      assert reloaded(template).last_error == "the template names no image"
     end
 
     test "the credential travels to the driver, decrypted", context do
@@ -735,6 +776,93 @@ defmodule Forge.WorkersTest do
 
       assert_receive {:provider_create,
                       %{size: "large", credential: %{"token" => "hcloud-secret"}}}
+    end
+
+    # **A row saved before `Template.changeset/2` checked whose credential it held.** It cannot
+    # be made through the changeset any more, so it is forced in here — and until the check was
+    # repeated at creation, every machine made from it was billed to somebody else's account.
+    test "a template holding another user's credential makes nothing and says why", context do
+      %{user: user, project: project} = context
+      template = assigned(user, project, %{})
+
+      {:ok, theirs} =
+        Provisioning.create_credential(Forge.AccountsFixtures.user_fixture(), %{
+          name: "theirs",
+          provider: "fake",
+          secret: %{"token" => "their-money"}
+        })
+
+      force_credential(template, theirs)
+
+      assert {:error, {:create_failed, {:credential, message}}} =
+               Workers.create_machine(demand(project_id: project.id))
+
+      assert message == "its provider credential belongs to another user"
+      refute_receive {:provider_create, _opts}
+      # No row: nothing was made, so there is nothing to hold a slot or to sweep.
+      assert Workers.list() == []
+      assert reloaded(template).failures == 1
+      assert reloaded(template).last_error == message
+    end
+
+    # With no row to hold a slot it is refused on every pass rather than once per sweep, which
+    # is what takes it out of service in three passes — and the answer after that is the one a
+    # disabled template gets, so the ticket sticks with a reason rather than waiting.
+    test "and three passes of that take the template out of service", context do
+      %{user: user, project: project} = context
+      template = assigned(user, project, %{})
+
+      {:ok, theirs} =
+        Provisioning.create_credential(Forge.AccountsFixtures.user_fixture(), %{
+          name: "theirs",
+          provider: "fake",
+          secret: %{"token" => "t"}
+        })
+
+      force_credential(template, theirs)
+
+      for _ <- 1..Provisioning.failure_limit() do
+        assert {:error, {:create_failed, _}} =
+                 Workers.create_machine(demand(project_id: project.id))
+      end
+
+      assert Provisioning.disabled?(reloaded(template))
+
+      assert {:error, {:no_template, :all_disabled}} =
+               Workers.create_machine(demand(project_id: project.id))
+
+      refute_receive {:provider_create, _opts}
+    end
+
+    # The changeset's other half, asked again for the same reason: the owner's own credential
+    # for another provider would be handed to a driver that cannot use it.
+    test "a template holding a credential for another provider makes nothing", context do
+      %{user: user, project: project} = context
+      template = assigned(user, project, %{})
+
+      {:ok, hetzner} =
+        Provisioning.create_credential(user, %{
+          name: "hcloud",
+          provider: "hetzner",
+          secret: %{"token" => "t"}
+        })
+
+      force_credential(template, hetzner)
+
+      assert {:error, {:create_failed, {:credential, message}}} =
+               Workers.create_machine(demand(project_id: project.id))
+
+      assert message == "its provider credential is for hetzner, not fake"
+      refute_receive {:provider_create, _opts}
+      assert reloaded(template).last_error == message
+    end
+
+    defp force_credential(template, credential) do
+      {1, _} =
+        Forge.Repo.update_all(
+          Ecto.Query.from(t in Provisioning.Template, where: t.id == ^template.id),
+          set: [provider_credential_id: credential.id]
+        )
     end
   end
 
@@ -897,6 +1025,46 @@ defmodule Forge.WorkersTest do
       refute_receive {:provider_create, _opts}
     end
 
+    # A machine made from a template runs on its owner's provider credential, so it serves the
+    # projects that template is assigned to and nobody else's
+    # (`docs/design/provisioning.md` § Whose account).
+    test "a managed machine is offered only to projects its template is assigned to" do
+      %{user: user, project: mine, template: template} = with_template()
+      {:ok, other} = Forge.Projects.register(project_attrs(), user)
+      worker = managed_worker(template)
+
+      assert %{id: id} = Workers.assignable(demand(memory: 1_000, project_id: mine.id))
+      assert id == worker.id
+      refute Workers.assignable(demand(memory: 1_000, project_id: other.id))
+
+      # Read through the assignment as it stands, so unassigning takes effect on a live machine.
+      :ok = Provisioning.unassign(user, template.id, mine.id)
+      refute Workers.assignable(demand(memory: 1_000, project_id: mine.id))
+    end
+
+    # A busy machine this project may use will be free again, so the job waits for it — even
+    # once the template it came from is disabled and could make no other.
+    test "a busy machine from the project's own template is a queue, even disabled" do
+      %{project: project, template: template} = with_template()
+      worker = managed_worker(template)
+      running(Workers.get!(worker.id), memory_max: 8_000, cores: 4)
+      {:ok, _} = template |> Ecto.Changeset.change(failures: 1_000) |> Forge.Repo.update()
+
+      assert {:error, :at_capacity} =
+               Workers.provide(demand(memory: 1_000, project_id: project.id))
+    end
+
+    # Waiting on a machine this project may never use is a queue that never moves, so another
+    # project's busy machine must not turn "nothing assigned" into "at capacity".
+    test "another project's machine is not a reason to wait" do
+      %{user: user, template: template} = with_template()
+      {:ok, other} = Forge.Projects.register(project_attrs(), user)
+      managed_worker(template)
+
+      assert {:error, {:no_template, :none_assigned}} =
+               Workers.provide(demand(memory: 1_000, project_id: other.id))
+    end
+
     test "offers the one it has rather than making another" do
       configure(slice_bytes: 1_000)
       {:ok, worker, _token} = Workers.create(%{provider: "fake"})
@@ -911,6 +1079,94 @@ defmodule Forge.WorkersTest do
   end
 
   describe "idle destroy" do
+    # Only a job ending used to make a machine idle, and only an idle machine is swept — so one
+    # that came up and was never given anything sat `:ready` and billed for ever. Placing jobs by
+    # project made that common: a machine whose template is unassigned before it boots is given
+    # nothing, ever.
+    test "a machine that comes up with nothing to do is idle from that moment" do
+      %{template: template} = with_template()
+      {:ok, worker, _token} = Workers.create(%{provider: "fake", template_id: template.id})
+
+      {:ok, worker} = Workers.ready(worker, %{"memory_budget" => 8_000, "cores" => 4})
+
+      assert worker.status == :idle
+      assert worker.idle_since
+    end
+
+    test "a machine with a job running is ready, not idle" do
+      worker = live_worker(%{"memory_budget" => 8_000, "cores" => 4})
+      running(worker, memory_max: 1_000, cores: 1)
+
+      {:ok, worker} = Workers.ready(Workers.get!(worker.id), %{"memory_budget" => 8_000})
+
+      assert worker.status == :ready
+      assert worker.idle_since == nil
+    end
+
+    # Otherwise reconnecting would be a way for an idle machine to live for ever.
+    test "reconnecting does not restart an idle machine's clock" do
+      worker = live_worker(%{"memory_budget" => 8_000, "cores" => 4})
+      long_ago = DateTime.add(DateTime.utc_now(:second), -3600)
+      {:ok, worker} = Workers.update(worker, %{status: :idle, idle_since: long_ago})
+
+      {:ok, worker} = Workers.ready(worker, %{"memory_budget" => 8_000})
+
+      assert worker.status == :idle
+      assert worker.idle_since == long_ago
+    end
+
+    # The sweep used to run only when nothing at all was pending, so one job nobody could place
+    # kept every idle machine on the node alive — and a conversation in a project with no
+    # template is exactly such a job, for as long as it exists.
+    test "a job nobody can place does not keep another project's idle machine alive" do
+      configure(idle_period_ms: 60_000)
+      %{user: user, template: template} = with_template()
+      worker = managed_worker(template)
+
+      {:ok, _} =
+        Workers.update(Workers.get!(worker.id), %{
+          provider_id: "fake-idle",
+          status: :idle,
+          idle_since: DateTime.add(DateTime.utc_now(:second), -3600)
+        })
+
+      {:ok, stranded} = Forge.Projects.register(project_attrs(), user)
+      chat = chat_fixture(%{project: stranded})
+      start_supervised!(Forge.Jobs.Scheduler)
+
+      assert Forge.Jobs.Scheduler.tick() == 0
+
+      assert Forge.Jobs.get!(chat.id).status == :pending
+      assert Workers.get!(worker.id).status == :destroyed
+    end
+
+    # The scheduler marks a machine busy from the row it read at the start of the pass. A job that
+    # ended in between made the row idle; a struct that still said busy wrote nothing, and the
+    # sweep then destroyed the machine under the job it had just been given.
+    test "busy is written from a stale read, and a machine with a job running is never swept" do
+      configure(idle_period_ms: 60_000)
+      %{template: template} = with_template()
+      worker = managed_worker(template)
+      {:ok, stale} = Workers.update(Workers.get!(worker.id), %{status: :busy})
+
+      long_ago = DateTime.add(DateTime.utc_now(:second), -3600)
+      {:ok, _} = Workers.update(Workers.get!(worker.id), %{status: :idle, idle_since: long_ago})
+
+      assert {:ok, _} = Workers.busy(stale)
+      assert %{status: :busy, idle_since: nil} = Workers.get!(worker.id)
+
+      # And the sweep does not take a status's word for it: a row that says idle under a running
+      # job, however it came to, keeps its machine.
+      {:ok, _} = Workers.update(Workers.get!(worker.id), %{status: :idle, idle_since: long_ago})
+      job = running(Workers.get!(worker.id), memory_max: 1_000, cores: 1)
+
+      assert Workers.sweep_idle() == 0
+      assert Workers.get!(worker.id).status == :idle
+
+      {:ok, _} = job |> Ecto.Changeset.change(status: :finished) |> Forge.Repo.update()
+      assert Workers.sweep_idle() == 1
+    end
+
     # One period cannot serve two kinds of machine: an agent box is cheap by the hour and its
     # warm store is worth keeping, a command machine is expensive by the hour and its warm
     # store is worth more (`docs/design/provisioning.md` § Lifecycle is per template). Tested
@@ -1141,6 +1397,67 @@ defmodule Forge.WorkersTest do
     end
   end
 
+  # **A person's one write on a machine, guarded where it is made.** It was guarded only on the
+  # workers page, which matched `managed: false` itself and then called `update/2` — no actor,
+  # every field cast. These call the context directly, which is what a page that forgot the
+  # check would reach (`docs/design/identity.md` § Where the guard lives).
+  describe "setting what a permanent machine offers" do
+    setup do
+      user = Forge.AccountsFixtures.user_fixture()
+
+      {:ok, worker, _token} =
+        Workers.create(%{provider: "fake", managed: false, user_id: user.id})
+
+      {:ok, worker} = Workers.ready(worker, %{"memory_budget" => 8_000, "cores" => 4})
+      %{worker: worker, user: user}
+    end
+
+    test "the owner sets the three figures, and only those", context do
+      %{worker: worker, user: user} = context
+
+      assert {:ok, _worker} =
+               Workers.set_offer(user, worker.id, %{
+                 memory_budget: 2_000,
+                 cores: 2,
+                 accepts: [:chat],
+                 # None of these is a figure. `update/2` would have written every one.
+                 managed: true,
+                 status: :destroyed,
+                 token_hash: "chosen-by-the-client",
+                 provider_id: "somebody-elses-server"
+               })
+
+      saved = Workers.get!(worker.id)
+      assert {saved.memory_budget, saved.cores, saved.accepts} == {2_000, 2, [:chat]}
+      assert saved.managed == false
+      assert saved.status == worker.status
+      assert saved.token_hash == worker.token_hash
+      assert saved.provider_id == worker.provider_id
+    end
+
+    # The id is off the wire: well-formed and unknown, malformed, or not a string at all.
+    test "an id that names no machine is not found rather than a crash", %{user: user} do
+      for id <- [Ecto.UUID.generate(), "not-a-uuid", nil, %{"id" => "x"}] do
+        assert {:error, :not_found} = Workers.set_offer(user, id, %{memory_budget: 1, cores: 1}),
+               "#{inspect(id)} should not be found"
+      end
+    end
+
+    # A blank figure would silently un-gate the machine it was meant to correct.
+    test "a blank figure is refused rather than stored", %{worker: worker, user: user} do
+      for attrs <- [%{memory_budget: nil, cores: 2}, %{memory_budget: 2_000, cores: nil}] do
+        assert {:error, %Ecto.Changeset{}} = Workers.set_offer(user, worker.id, attrs)
+      end
+
+      for attrs <- [%{memory_budget: -1, cores: 2}, %{memory_budget: 2_000, cores: -1}] do
+        assert {:error, %Ecto.Changeset{}} = Workers.set_offer(user, worker.id, attrs)
+      end
+
+      saved = Workers.get!(worker.id)
+      assert {saved.memory_budget, saved.cores} == {8_000, 4}
+    end
+  end
+
   # The models are the worker's answer, not the platform's assumption: the platform holds no
   # credential and a fleet may hold more than one. See docs/design/worker-channel.md § What a
   # worker offers.
@@ -1296,6 +1613,16 @@ defmodule Forge.WorkersTest do
     {:ok, worker} = Workers.ready(worker, report)
     :ok = Workers.connected(worker.id)
     serve!(worker, gate_project())
+  end
+
+  # A connected machine as the platform makes one: from `template`, carrying its id.
+  defp managed_worker(template) do
+    {:ok, worker, _token} =
+      Workers.create(%{provider: "fake", managed: true, template_id: template.id})
+
+    {:ok, worker} = Workers.ready(worker, %{"memory_budget" => 8_000, "cores" => 4})
+    :ok = Workers.connected(worker.id)
+    worker
   end
 
   # A job occupying part of a worker. `:running` rather than pending, because that is what

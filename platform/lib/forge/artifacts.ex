@@ -4,7 +4,7 @@ defmodule Forge.Artifacts do
   answers people give, and approvals. Every write goes through a multi with its event.
   """
 
-  import Ecto.Query, only: [from: 2]
+  import Ecto.Query, only: [from: 2, dynamic: 2]
 
   alias Ecto.Multi
   alias Forge.Artifacts.{Answer, Approval, Artifact, Question, Version}
@@ -186,16 +186,20 @@ defmodule Forge.Artifacts do
   end
 
   @doc """
-  The latest version of every document on a ticket, with its name, newest artifact first.
+  The latest version of every document in one scope, with its name, newest artifact first. A bare
+  id is a ticket, as everywhere here.
 
-  This is the context a conversation about a ticket opens with: the same documents the ticket's
-  next job would be handed, at the versions it would see. Documents only — a blob is in the store
-  and a changeset is a commit, and neither is something to inline into a prompt.
+  This is the context a conversation opens with (`docs/design/conversations.md` § Context). On a
+  ticket it is every document the ticket has — more than any one job is handed, which is the
+  inputs its state declares. In a conversation's own scope it is what that conversation wrote,
+  which a reopen would otherwise lose from view: a reopen is a cold start, and a cold start
+  clears `out/`. Documents only — a blob is in the store and a changeset is a commit, and neither
+  is something to inline into a prompt.
   """
-  @spec latest_documents(String.t()) :: [
+  @spec latest_documents(scope()) :: [
           %{name: String.t(), version: pos_integer(), content: String.t()}
         ]
-  def latest_documents(ticket_id) do
+  def latest_documents(scope) do
     latest =
       from v in Version,
         group_by: v.artifact_id,
@@ -204,9 +208,11 @@ defmodule Forge.Artifacts do
     Repo.all(
       from v in Version,
         join: a in assoc(v, :artifact),
+        as: :artifact,
         join: l in subquery(latest),
         on: l.artifact_id == v.artifact_id and l.version == v.version,
-        where: a.ticket_id == ^ticket_id and a.kind == :document and not is_nil(v.content),
+        where: ^in_scope(scope(scope)),
+        where: a.kind == :document and not is_nil(v.content),
         # `artifact_versions` has no `updated_at` — a version is immutable, so its schema says
         # `updated_at: false`. Ordering by one compiled fine and failed at the database, on the
         # only path that reaches this: a ticket chat being assigned.
@@ -215,30 +221,58 @@ defmodule Forge.Artifacts do
     )
   end
 
-  @doc "A conversation's own artifacts, by name."
-  @spec list_for_job(String.t()) :: [Artifact.t()]
-  def list_for_job(job_id),
-    do: Repo.all(from a in Artifact, where: a.job_id == ^job_id, order_by: a.name)
+  defp in_scope({:ticket, id}), do: dynamic([artifact: a], a.ticket_id == ^id)
+  defp in_scope({:job, id}), do: dynamic([artifact: a], a.job_id == ^id)
 
-  @doc "The latest version of one of a conversation's artifacts."
-  @spec latest_for_job(String.t(), String.t()) :: Version.t() | nil
-  def latest_for_job(job_id, name) do
-    Repo.one(
+  @doc """
+  Every version of `name` in one scope, oldest first. A bare id is a ticket, as everywhere here;
+  `{:job, id}` is a conversation's own. The address of a version names its scope
+  (`docs/design/ui.md` § Addressable artifact versions), so nothing here looks in another one.
+  """
+  @spec versions(scope(), String.t()) :: [Version.t()]
+  def versions(scope, name) do
+    artifact_ids = from a in scope_query(scope(scope), name), select: a.id
+
+    Repo.all(
       from v in Version,
-        join: a in assoc(v, :artifact),
-        where: a.job_id == ^job_id and a.name == ^name,
-        order_by: [desc: v.version],
-        limit: 1
+        where: v.artifact_id in subquery(artifact_ids),
+        order_by: v.version
     )
   end
 
-  @spec versions(String.t(), String.t()) :: [Version.t()]
-  def versions(ticket_id, name) do
-    Repo.all(
+  @doc "The artifact called `name` in a scope, or nil."
+  @spec find(scope(), String.t()) :: Artifact.t() | nil
+  def find(scope, name), do: Repo.one(scope_query(scope(scope), name))
+
+  @doc """
+  The newest version of `name` in a scope that `job_id` wrote, or nil — whatever anyone else has
+  written since.
+
+  What a conversation re-reports every turn is compared against this rather than against the
+  artifact's latest: on a ticket that may be a job's or a person's since, and comparing against
+  it would write the conversation's stale copy back over theirs (`docs/design/conversations.md`
+  § Commits).
+  """
+  @spec latest_written(scope(), String.t(), String.t()) :: Version.t() | nil
+  def latest_written(scope, name, job_id) do
+    # The scope is an equivalent mutant, kept because a version's address is its scope: every
+    # name a job writes is written in exactly one. Its documents go to its ticket's scope — or,
+    # for a project chat, its own — and its proposals to its own under `proposal-`, a prefix no
+    # document may take. So asked by author and name alone, the answer is the same version, and
+    # no test can put one name by one author in a second scope.
+    artifact_ids = from a in scope_query(scope(scope), name), select: a.id
+
+    Repo.one(
       from v in Version,
-        join: a in assoc(v, :artifact),
-        where: a.ticket_id == ^ticket_id and a.name == ^name,
-        order_by: v.version
+        # The kind as well as the id says whose it is. No test can tell the kind away: a
+        # person's id and a job's are both random UUIDs, and one never equals the other — an
+        # equivalent mutant, kept because an author is the pair and not the id.
+        where:
+          v.artifact_id in subquery(artifact_ids) and
+            fragment("?->>'kind'", v.author) == "job" and
+            fragment("?->>'id'", v.author) == ^job_id,
+        order_by: [desc: v.version],
+        limit: 1
     )
   end
 

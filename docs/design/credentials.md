@@ -265,8 +265,11 @@ rule that resuming reconstructs from the branch and the manifest, never from the
 **A job waiting for a reset holds no machine, and does not keep other machines up.** The idle
 sweep ran only on a pass with nothing pending, and a job waiting for a reset *is* pending: one
 limited job would have kept every idle machine on the node alive for as long as it waited, a
-week for a weekly limit. A job the pick answers `limited` for is not something to run, and does
-not hold the sweep off.
+week for a weekly limit. The sweep now runs at the end of every pass whatever is pending
+(`docs/design/worker-tier.md` § Idle destroy), so a limited job, which is given no machine, holds
+none up. It records `limited` as its wait reason (`docs/design/provisioning.md` § The gate),
+without a reset time: the reason is recorded once, and the soonest reset can move while it stays
+`limited`, so a time in the sentence would go stale.
 
 **What it leaves alone.** A resumed run gets its state's budget again, as a job resuming after a
 question already does; the ticket allowance and the daily cap, which include the stopped run's

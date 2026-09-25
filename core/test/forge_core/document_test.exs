@@ -118,6 +118,63 @@ defmodule ForgeCore.DocumentTest do
     end
   end
 
+  # Not a parse rule — the parser reads bytes — but what JSON and a text column can carry. A
+  # document that is not text fails the whole message or transaction it rides in, so it is
+  # refused where it is read instead.
+  describe "text?/1" do
+    test "UTF-8 is text" do
+      assert Document.text?("# Plan\n\nDo the thing — carefully.\n")
+      assert Document.text?("")
+    end
+
+    test "bytes that are not UTF-8 are not" do
+      refute Document.text?(<<0xFF, 0xFE, ?a>>)
+    end
+
+    test "a NUL is not, although it is valid UTF-8" do
+      refute Document.text?("before" <> <<0>> <> "after")
+    end
+
+    test "anything but a binary is not" do
+      refute Document.text?(nil)
+    end
+  end
+
+  describe "text_error/1" do
+    test "says nothing of text that can be a document" do
+      assert Document.text_error("# Plan\n") == nil
+      assert Document.text_error(String.duplicate("a", Document.max_bytes())) == nil
+    end
+
+    test "names what is wrong with what cannot" do
+      assert Document.text_error(<<0xFF>>) == "must be UTF-8 text with no NUL byte"
+
+      assert Document.text_error(String.duplicate("a", Document.max_bytes() + 1)) ==
+               "must be no larger than 1024 KiB"
+    end
+  end
+
+  # The raw text has no NUL, so `text?/1` passes it — the escape makes one — and front matter is
+  # stored as `jsonb`, which refuses it inside the transaction that writes the document.
+  describe "a NUL made by a YAML escape" do
+    test "is refused in a value, a key, or anything nested" do
+      for yaml <- [~s(title: "a\\0b"), ~s("k\\0": v), ~s(tags: ["x", "y\\0"]), ~s(a: {b: "c\\0"})] do
+        raw = "---\n#{yaml}\n---\n# Doc\n"
+        assert Document.text?(raw), yaml
+
+        assert {:error, [%Error{path: "front_matter", message: message}]} = Document.parse(raw),
+               yaml
+
+        assert message =~ "NUL"
+      end
+    end
+
+    test "and front matter without one is kept as it was" do
+      assert {:ok, %Document{front_matter: %{"title" => "a b"}}} =
+               Document.parse("---\ntitle: \"a b\"\n---\n# Doc\n")
+    end
+  end
+
   describe "documents without front matter or questions" do
     test "are plain bodies" do
       assert {:ok, %Document{front_matter: %{}, outcome: nil, questions: [], body: "just text\n"}} =

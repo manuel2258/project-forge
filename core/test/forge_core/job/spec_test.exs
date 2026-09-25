@@ -72,6 +72,17 @@ defmodule ForgeCore.Job.SpecTest do
       assert Spec.from_map(map) == chat_spec()
     end
 
+    # What a reopened conversation had already said crosses the wire in the spec, and the worker
+    # writes it for the new process to read. Dropped on the way back in, the new process is told
+    # nothing and answers the next message as though the conversation had just begun.
+    test "what a reopened conversation already said survives the round trip" do
+      spec = %{chat_spec() | replay: "# The conversation so far\n\nhello\n", prompt: nil}
+
+      assert {:ok, decoded} = spec |> Spec.to_json() |> Spec.from_json()
+      assert decoded.replay == "# The conversation so far\n\nhello\n"
+      assert decoded.prompt == nil
+    end
+
     test "a row written before kind existed is a workflow job" do
       assert Spec.from_map(%{"job_id" => "job-1", "branch" => "ticket/7"}).kind == :workflow
     end

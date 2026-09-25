@@ -20,6 +20,12 @@ defmodule Forge.ProposalsTest do
   alias Forge.Proposals.Decision
   alias ForgeCore.{Proposal, Workflow}
 
+  # Every artifact scoped to one job, by name — which is what a job's proposals are. Read here
+  # rather than through `Forge.Artifacts`, which has no reader for a whole scope because nothing
+  # in the product lists one.
+  defp artifacts_of(job_id),
+    do: Repo.all(from a in Forge.Artifacts.Artifact, where: a.job_id == ^job_id, order_by: a.name)
+
   defp registered_project do
     {:ok, project} =
       register_owned!(%{
@@ -332,7 +338,7 @@ defmodule Forge.ProposalsTest do
 
       {:ok, _changes} = record(job, %{"score-table.md" => proposal("Extract the score table")})
 
-      assert [artifact] = Artifacts.list_for_job(job.id)
+      assert [artifact] = artifacts_of(job.id)
       assert artifact.name == Workflow.proposal_artifact("score-table.md")
       assert artifact.kind == :document
 
@@ -361,7 +367,7 @@ defmodule Forge.ProposalsTest do
       """
 
       assert {:ok, _changes} = record(job, %{"score-table.md" => Proposal.parse!(body)})
-      assert [artifact] = Artifacts.list_for_job(job.id)
+      assert [artifact] = artifacts_of(job.id)
       assert artifact.name == Workflow.proposal_artifact("score-table.md")
     end
 
@@ -399,7 +405,7 @@ defmodule Forge.ProposalsTest do
 
       {:ok, _changes} = record(job, proposals)
 
-      assert length(Artifacts.list_for_job(job.id)) == cap
+      assert length(artifacts_of(job.id)) == cap
 
       assert [event] =
                job.ticket_id
@@ -446,7 +452,7 @@ defmodule Forge.ProposalsTest do
         })
 
       assert Proposals.open(job.project_id) == []
-      assert Artifacts.list_for_job(job.id) == []
+      assert artifacts_of(job.id) == []
     end
 
     # An unreadable proposal is open, so a person can see it — and unacceptable, because
@@ -470,7 +476,7 @@ defmodule Forge.ProposalsTest do
       {:ok, changes} = record(job, %{})
 
       assert changes == %{}
-      assert Artifacts.list_for_job(job.id) == []
+      assert artifacts_of(job.id) == []
     end
   end
 
@@ -488,7 +494,7 @@ defmodule Forge.ProposalsTest do
                record(job, %{long => proposal("Too long"), "fine.md" => proposal("Fine")})
 
       # The well-formed one in the same batch survives, which it did not when this raised.
-      assert [artifact] = Artifacts.list_for_job(job.id)
+      assert [artifact] = artifacts_of(job.id)
       assert artifact.name == Workflow.proposal_artifact("fine.md")
     end
 
@@ -504,7 +510,7 @@ defmodule Forge.ProposalsTest do
 
       {:ok, _changes} = record(job, %{wide => proposal("Wide")})
 
-      assert Artifacts.list_for_job(job.id) == []
+      assert artifacts_of(job.id) == []
     end
 
     test "re-recording sees only this job's own proposals, not another job's" do
@@ -517,8 +523,8 @@ defmodule Forge.ProposalsTest do
       {:ok, _} = record(first, %{"shared.md" => proposal("Theirs")})
       {:ok, _} = record(second, %{"shared.md" => proposal("Theirs")})
 
-      assert Enum.map(Artifacts.list_for_job(first.id), & &1.name) == ["proposal-shared.md"]
-      assert Enum.map(Artifacts.list_for_job(second.id), & &1.name) == ["proposal-shared.md"]
+      assert Enum.map(artifacts_of(first.id), & &1.name) == ["proposal-shared.md"]
+      assert Enum.map(artifacts_of(second.id), & &1.name) == ["proposal-shared.md"]
     end
 
     test "a name that exactly fills the limit is stored, one byte more is not" do
@@ -530,11 +536,11 @@ defmodule Forge.ProposalsTest do
 
       job = job_fixture()
       {:ok, _changes} = record(job, %{exact => proposal("At the limit")})
-      assert Enum.map(Artifacts.list_for_job(job.id), & &1.name) == ["proposal-" <> exact]
+      assert Enum.map(artifacts_of(job.id), & &1.name) == ["proposal-" <> exact]
 
       other = job_fixture()
       {:ok, _changes} = record(other, %{over => proposal("One byte over")})
-      assert Artifacts.list_for_job(other.id) == []
+      assert artifacts_of(other.id) == []
     end
 
     test "says so in the event, rather than dropping it in silence" do
@@ -625,11 +631,11 @@ defmodule Forge.ProposalsTest do
         {:ok, _} = record(job, %{"p#{n}.md" => proposal("Proposal #{n}")})
       end
 
-      assert length(Artifacts.list_for_job(job.id)) == cap
+      assert length(artifacts_of(job.id)) == cap
 
       {:ok, _} = record(job, %{"one-too-many.md" => proposal("One too many")})
 
-      assert length(Artifacts.list_for_job(job.id)) == cap
+      assert length(artifacts_of(job.id)) == cap
     end
   end
 
@@ -652,7 +658,7 @@ defmodule Forge.ProposalsTest do
 
       {:ok, _job} = Jobs.complete(job.id, finished)
 
-      assert [artifact] = Artifacts.list_for_job(job.id)
+      assert [artifact] = artifacts_of(job.id)
       assert artifact.name == Workflow.proposal_artifact("score-table.md")
       assert [%{version: version}] = Proposals.open(job.project_id)
       assert version.content =~ "Extract the score table"
@@ -695,7 +701,7 @@ defmodule Forge.ProposalsTest do
       }
 
       {:ok, _job} = Jobs.complete(job.id, waiting)
-      assert Artifacts.list_for_job(job.id) == []
+      assert artifacts_of(job.id) == []
     end
   end
 end

@@ -21,6 +21,12 @@ defmodule ForgeWorker.Job.Runner do
     * `:extra_env` - additional `{name, value}` pairs for the process environment.
     * `:backlog` - the project's tickets, as the platform composed them at assignment. Written
       to `tickets/` in the job directory; see `ForgeWorker.Job.Dir.prepare/3`.
+    * `:head` - the commit the worktree is at. Named in the continuation a resumed run is
+      handed; see `ForgeCore.Prompt.continuation/3`.
+    * `:hold_prompt` - streaming only. When true nothing is delivered at start: the composed
+      prompt waits for the first `send_message/2` and goes down with it, as one message. A
+      reopened conversation with nothing waiting to be answered is the case
+      (`docs/design/conversations.md` § Lifetime).
 
   The harness process gets a clean environment: an allowlist of the worker's own variables
   (PATH, locale, proxies, Nix settings), a private HOME inside the job directory, what the
@@ -117,7 +123,19 @@ defmodule ForgeWorker.Job.Runner do
         backlog: Keyword.get(opts, :backlog)
       )
 
-    File.write!(Dir.prompt_path(job_dir), Prompt.compose(spec, job_dir))
+    # Held, the prompt is composed when the message it opens with arrives, and written then:
+    # `prompt.md` is the prompt as the harness was given it, and until then it has been given
+    # nothing.
+    #
+    # `mode == :streaming` is an equivalent mutant: its only caller that holds is
+    # `ForgeWorker.Job.Conversation`, which always runs streaming, and a workflow job's runner is
+    # never passed `:hold_prompt`. Kept because in `:prompt` mode the shell redirects stdin from
+    # `prompt.md`, and a held prompt is one that file was never written for.
+    hold = mode == :streaming and Keyword.get(opts, :hold_prompt, false)
+
+    unless hold,
+      do: File.write!(Dir.prompt_path(job_dir), prompt(spec, job_dir, resume?, opts))
+
     transcript_path = Dir.new_transcript_path(job_dir)
 
     state = %{
@@ -139,6 +157,7 @@ defmodule ForgeWorker.Job.Runner do
       # what the result is built from; `turns` is how many there have been, which is what tells
       # a second turn from a first.
       turns: 0,
+      hold: hold,
       interrupting: nil,
       killed: nil,
       exit_status: nil,
@@ -157,6 +176,17 @@ defmodule ForgeWorker.Job.Runner do
 
     {state, {:continue, {:spawn, opts}}}
   end
+
+  # A run that resumes its session is handed what changed while it was stopped, not the whole
+  # prompt again. Chosen from `resume?`, which is `:resume_session` — the value the driver turns
+  # into `--resume` — so the prompt and the flag cannot disagree. Whether the session is really
+  # there is the harness's to find out: a resume it cannot honour ends before `system/init`, and
+  # the platform re-queues the job with no session, which lands in the second clause
+  # (`docs/design/job-prompt.md` § The continuation prompt).
+  defp prompt(spec, job_dir, true = _resume?, opts),
+    do: Prompt.continuation(spec, job_dir, Keyword.get(opts, :head))
+
+  defp prompt(spec, job_dir, false = _resume?, _opts), do: Prompt.compose(spec, job_dir)
 
   @impl true
   def handle_continue({:spawn, opts}, %{spec: spec, job_dir: job_dir, harness: harness} = state) do
@@ -233,6 +263,7 @@ defmodule ForgeWorker.Job.Runner do
     # The prompt is composed the same way for both modes and written to the same file; in
     # streaming mode it goes down the pipe as the first message instead of being redirected in.
     case state.mode do
+      :streaming when state.hold -> state
       :streaming -> deliver(state, File.read!(Dir.prompt_path(job_dir)))
       :prompt -> state
     end
@@ -311,6 +342,20 @@ defmodule ForgeWorker.Job.Runner do
 
   def handle_call(_request, _from, %{mode: :prompt} = state),
     do: {:reply, {:error, :unsupported}, state}
+
+  # The first message to a held prompt carries it: the context and what the person said arrive
+  # as one message and are answered in one turn. Composed the way a first start would compose
+  # it with this message as its opening, so what a reopened conversation is given differs from
+  # a new one's only in what the spec says about the past.
+  def handle_call({:send_message, text}, _from, %{hold: true} = state) do
+    prompt = Prompt.compose(%{state.spec | prompt: text}, state.job_dir)
+    File.write!(Dir.prompt_path(state.job_dir), prompt)
+
+    case write(state, state.harness.encode_message(prompt)) do
+      :ok -> {:reply, :ok, %{state | hold: false}}
+      error -> {:reply, error, state}
+    end
+  end
 
   def handle_call({:send_message, text}, _from, state) do
     {:reply, write(state, state.harness.encode_message(text)), state}

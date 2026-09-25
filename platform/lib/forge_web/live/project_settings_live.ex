@@ -116,7 +116,8 @@ defmodule ForgeWeb.ProjectSettingsLive do
     case Forge.Accounts.get_user_by_email(String.trim(email)) do
       nil ->
         # Not "invited": there are no invitations, and an address nobody has approved is not a
-        # person this node knows about yet. Saying so is the whole answer.
+        # person this node knows about yet. Saying so is the whole answer — and it is the answer
+        # for a pending account too, which `Projects.put_member/4` refuses below.
         {:noreply, assign(socket, member_error: "No approved account for that address.")}
 
       user ->
@@ -223,6 +224,14 @@ defmodule ForgeWeb.ProjectSettingsLive do
 
   defp member(socket, fun) do
     case fun.() do
+      # The same words as an address with no account at all: a pending account is not a person
+      # this project can have yet, and `Projects.put_member/4` is what says so.
+      {:error, :not_approved} ->
+        {:noreply, assign(socket, member_error: "No approved account for that address.")}
+
+      {:error, :suspended} ->
+        {:noreply, assign(socket, member_error: "That account is suspended.")}
+
       {:error, :last_admin} ->
         {:noreply, assign(socket, member_error: "A project keeps at least one administrator.")}
 
@@ -483,7 +492,9 @@ defmodule ForgeWeb.ProjectSettingsLive do
         <p :if={@member_error} class="mt-2 text-sm text-error">{@member_error}</p>
       </section>
 
-      <section class="mt-10">
+      <%!-- Behind `@manage` like every other form here: `Operator.set_model/3` refuses a plain
+            member, and a form the context refuses is one that answers "Could not save that." --%>
+      <section :if={@manage} class="mt-10">
         <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Model</h2>
         <p class="mt-2 text-sm/[1.55] opacity-70">
           What this project's work runs on when a workflow state does not name one of its own.

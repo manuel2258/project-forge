@@ -46,9 +46,20 @@ defmodule ForgeWorker.Fixtures do
     |> IO.iodata_to_binary()
   end
 
-  @doc "A fresh temporary directory, removed when the test process exits."
+  @doc """
+  A fresh temporary directory, removed when the test process exits.
+
+  Named by the OS process as well as `System.unique_integer/1`, which is unique only within one
+  BEAM: suites run side by side from sibling worktrees share the system temp directory, and two
+  of them made — and removed — each other's directories.
+  """
   def tmp_dir(context) do
-    dir = Path.join(System.tmp_dir!(), "forge-#{context}-#{System.unique_integer([:positive])}")
+    dir =
+      Path.join(
+        System.tmp_dir!(),
+        "#{System.pid()}-forge-#{context}-#{System.unique_integer([:positive])}"
+      )
+
     File.mkdir_p!(dir)
     ExUnit.Callbacks.on_exit(fn -> File.rm_rf!(dir) end)
     dir

@@ -302,7 +302,7 @@ defmodule ForgeWorker.LinkTest do
   # suite had ever seen one sent, so a worker that stopped heartbeating would have been swept
   # mid-job with the suite green. The interval is shortened for the test; see `Link.heartbeat_ms/0`.
   test "it heartbeats on its own, saying what it is running", context do
-    %{client: client, origin: origin} = context
+    %{client: client, origin: origin, root: root} = context
     Application.put_env(:forge_worker, :heartbeat_ms, 100)
 
     connect_and_assert_join(client, @topic, %{}, :ok)
@@ -314,6 +314,13 @@ defmodule ForgeWorker.LinkTest do
 
     {%{"running" => running}, _events} = take_push("heartbeat")
     assert running == [%{"job_id" => job_id, "attempt" => 1}]
+
+    # A job is running from the moment it is taken, so the heartbeat can arrive while its clone
+    # and its harness are still writing under `root` — which `on_exit` removes, and a removal
+    # racing a write fails this test for nothing it asserts. The fake's last new file is the mark
+    # that both are done.
+    last = Path.join([root, "jobs", job["spec"]["job_id"], "fake-env-all.txt"])
+    wait_until(fn -> File.exists?(last) end)
   end
 
   # `ready` is the message that says what this machine can offer: its memory, and its harness.
@@ -379,6 +386,50 @@ defmodule ForgeWorker.LinkTest do
     Process.sleep(100)
     assert Process.alive?(client)
     assert Link.unacked(client) == []
+  end
+
+  # A transcript the store will not take is not worth the job: the token may have lapsed
+  # (`docs/design/storage.md` § Serving) or the store may be down, and the outcome is what the
+  # engine acts on. The result arrives without a transcript key rather than not at all.
+  test "a transcript the store refuses does not cost the job its result", context do
+    %{client: client, origin: origin} = context
+
+    Application.put_env(:forge_worker, :req_options,
+      plug: fn conn ->
+        conn
+        |> Plug.Conn.put_status(401)
+        |> Req.Test.json(%{"error" => %{"reason" => "expired_token"}})
+      end
+    )
+
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    job = assignment(origin)
+    job_id = job["job_id"]
+    push(client, @topic, "assign", job)
+
+    {%{"job_id" => ^job_id, "result" => result}, _before} = take_push("result")
+
+    assert result["outcome"] == "converged"
+    assert result["transcript"] == nil
+  end
+
+  # And with nowhere to put it — an assignment with no key — nothing is attempted.
+  test "a transcript with no key to go to is not uploaded", context do
+    %{client: client, origin: origin} = context
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    job = origin |> assignment() |> Map.put("store", %{})
+    job_id = job["job_id"]
+    push(client, @topic, "assign", job)
+
+    {%{"job_id" => ^job_id, "result" => result}, _before} = take_push("result")
+
+    assert result["outcome"] == "converged"
+    assert result["transcript"] == nil
+    refute_received {:uploaded, _path, _authorization, _query, _body}
   end
 
   test "an assignment is run, and its events and result reported", context do
@@ -508,6 +559,22 @@ defmodule ForgeWorker.LinkTest do
      %Slipstream.Events.TopicJoinClosed{topic: topic, reason: :closed_by_platform}}
   end
 
+  # `drain` is gone from both ends, so a platform one release behind can still send it — or any
+  # message this release has never heard of. It is logged and the link carries on.
+  test "a message this release does not know changes nothing", context do
+    %{client: client, origin: origin} = context
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    push(client, @topic, "drain", %{})
+
+    job = assignment(origin)
+    push(client, @topic, "assign", job)
+
+    job_id = job["job_id"]
+    assert {%{"job_id" => ^job_id}, _events} = take_push("result")
+  end
+
   test "a job already running is not started twice", context do
     %{client: client, origin: origin} = context
     connect_and_assert_join(client, @topic, %{}, :ok)
@@ -518,19 +585,14 @@ defmodule ForgeWorker.LinkTest do
     push(client, @topic, "assign", job)
 
     job_id = job["job_id"]
-    {%{"job_id" => ^job_id}, _events} = take_push("result")
-    refute_push(@topic, "result", %{"job_id" => ^job_id}, 500)
-  end
+    {%{"job_id" => ^job_id}, before} = take_push("result")
 
-  test "a drained worker takes no more work", context do
-    %{client: client, origin: origin} = context
-    connect_and_assert_join(client, @topic, %{}, :ok)
-    assert_push(@topic, "ready", %{})
-
-    push(client, @topic, "drain", %{})
-    push(client, @topic, "assign", assignment(origin))
-
-    refute_push(@topic, "result", %{}, 500)
+    # Nothing but the run's own events before its result, and nothing about the job after it. A
+    # second run started over the first fails on the worktree they share, and its `failed` lands
+    # among the pushes `take_push/1` walks past on the way to the result — so refuting a second
+    # result alone passed with the guard removed.
+    assert Enum.all?(before, fn {name, _payload} -> name == "event" end)
+    refute_push(@topic, _anything, %{"job_id" => ^job_id}, 500)
   end
 
   test "a cancelled job commits what it has and hibernates", context do
@@ -544,7 +606,7 @@ defmodule ForgeWorker.LinkTest do
 
     # Wait until the harness is really running before asking for it to stop.
     {_payload, _seen} = take_push("event")
-    push(client, @topic, "cancel", %{"job_id" => job_id, "reason" => "drained"})
+    push(client, @topic, "cancel", %{"job_id" => job_id, "reason" => "not_ours"})
 
     {%{"job_id" => ^job_id, "commit" => commit}, _events} = take_push("hibernated")
     assert String.length(commit) == 40
@@ -685,6 +747,25 @@ defmodule ForgeWorker.LinkTest do
     {%{"result" => _result}, _events} = take_push("result")
 
     assert harness_env(root, job) =~ "ANTHROPIC_API_KEY=unset\nCLAUDE_CODE_OAUTH_TOKEN=unset"
+  end
+
+  # The continuation names the commit the agent will find, and the only place that knows it is
+  # the tree this machine just made: the platform's idea of the branch is not what the harness
+  # runs in. See docs/design/job-prompt.md § The continuation prompt.
+  test "a resumed job is told the commit its worktree is at", context do
+    %{client: client, origin: origin, root: root} = context
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    tip = git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"]) |> String.trim()
+    job = assignment(origin, resume_session: "sess-42")
+    push(client, @topic, "assign", job)
+
+    {%{"result" => _result}, _events} = take_push("result")
+
+    prompt = File.read!(Path.join([root, "jobs", job["spec"]["job_id"], "prompt.md"]))
+    assert String.starts_with?(prompt, "# Continue this job")
+    assert prompt =~ ", at `#{tip}`, checked out in the worktree"
   end
 
   # The agent gets the worker's own push credential, because it works in a real clone and may
@@ -868,6 +949,72 @@ defmodule ForgeWorker.LinkTest do
                _other ->
                  false
              end)
+    end
+
+    # A reopened conversation whose last word was the agent's has nothing to answer, and the
+    # platform says so with a spec that has no prompt. Started the way a first start is, it would
+    # answer its opening message again as though it were new, and bill a turn for it.
+    test "reopened with nothing waiting, it answers nothing until the person speaks", context do
+      %{client: client, origin: origin, root: root} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin)
+      job_id = job["job_id"]
+
+      spec =
+        Map.merge(job["spec"], %{
+          "kind" => "chat",
+          "prompt" => nil,
+          "replay" => "# The conversation so far\n\nhello\n"
+        })
+
+      push(client, @topic, "assign", Map.put(job, "spec", spec))
+
+      # Not a turn and not an event: the harness has been given nothing to answer.
+      refute_push(@topic, _event, _payload, 500)
+      assert File.read!(Path.join([root, "jobs", job_id, "conversation.md"])) =~ "hello"
+
+      push(client, @topic, "message", %{
+        "job_id" => job_id,
+        "message_id" => "m-7",
+        "text" => "and now?"
+      })
+
+      {%{"turn" => 1}, seen} = take_push("turn")
+
+      # The first echo is the person's message with the prompt riding in it, so it is that
+      # message's delivery. Taken for the prompt's own echo it would be dropped, and the page
+      # would say "queued" beside a message that had been answered.
+      assert Enum.any?(seen, fn
+               {"event", %{"event" => %{"type" => "job.harness.delivered", "payload" => p}}} ->
+                 p[:message_id] == "m-7"
+
+               _other ->
+                 false
+             end)
+    end
+
+    # Nothing to answer is also a prompt of nothing but whitespace — the messages after the last
+    # reply, joined, with nothing in them. Started with it, the harness would take a blank line as
+    # the person's words and bill a turn answering it.
+    test "a prompt of nothing but whitespace is held like no prompt", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin)
+
+      spec =
+        Map.merge(job["spec"], %{
+          "kind" => "chat",
+          "prompt" => " \n\n ",
+          "replay" => "# The conversation so far\n\nhello\n"
+        })
+
+      push(client, @topic, "assign", Map.put(job, "spec", spec))
+
+      refute_push(@topic, _event, _payload, 500)
     end
 
     # `Link.send_terminal/4` keyed unacked messages `{job_id, message}`, which is sound when a
@@ -1156,6 +1303,71 @@ defmodule ForgeWorker.LinkTest do
       {%{"turn" => 2, "proposals" => proposals}, _} = take_push("turn")
 
       assert proposals["score-table.md"]["title"] == "Extract the score table"
+    end
+
+    # A conversation has no result, so a document it wrote reaches the platform with a turn or
+    # not at all — and `out/` is not committed, so waiting for the end would lose it to an idle
+    # timeout nobody was there for.
+    test "a document written during a turn goes out with that turn, and every turn after",
+         context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin)
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1, "documents" => none}, _} = take_push("turn")
+      assert none == %{}
+
+      push(client, @topic, "message", %{
+        "job_id" => job["job_id"],
+        "message_id" => "m-2",
+        "text" => "WRITE the notes"
+      })
+
+      {%{"turn" => 2, "documents" => documents, "invalid_documents" => invalid}, _} =
+        take_push("turn")
+
+      assert documents == %{"notes.md" => "# Notes\n\nWhat the conversation found.\n"}
+      assert invalid == %{}
+
+      # Still there next turn: the platform records by content, so this costs nothing and a
+      # turn that was never acked cannot be the only one that carried it.
+      push(client, @topic, "message", %{
+        "job_id" => job["job_id"],
+        "message_id" => "m-3",
+        "text" => "thanks"
+      })
+
+      {%{"turn" => 3, "documents" => again}, _} = take_push("turn")
+      assert again == documents
+    end
+
+    # What the worker refuses goes to the platform too, with why, so the page can list it: a
+    # document that did not arrive has to be visible rather than merely absent. Every other test
+    # left `out/` clean, and a turn that always sent no refusals passed them all.
+    test "a file the worker refuses goes out with the turn, with why", context do
+      %{client: client, origin: origin, root: root} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin)
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      File.write!(Path.join([root, "jobs", job["job_id"], "out", "image.png"]), <<0xFF, 0xFE, 0>>)
+
+      push(client, @topic, "message", %{
+        "job_id" => job["job_id"],
+        "message_id" => "m-2",
+        "text" => "thanks"
+      })
+
+      {%{"turn" => 2, "documents" => documents, "invalid_documents" => invalid}, _} =
+        take_push("turn")
+
+      refute Map.has_key?(documents, "image.png")
+      assert invalid["image.png"] =~ "UTF-8"
     end
 
     # The folder is what a ticket chat is told to read, so it has to be there before the first

@@ -42,7 +42,10 @@ defmodule ForgeWeb.TemplatesLiveTest do
 
     {:ok, project} =
       Forge.Projects.register(
-        %{name: "proj-#{n}", repo_path: Path.join(System.tmp_dir!(), "forge-tl-#{n}.git")},
+        %{
+          name: "proj-#{n}",
+          repo_path: Path.join(System.tmp_dir!(), "#{System.pid()}-forge-tl-#{n}.git")
+        },
         user
       )
 
@@ -415,6 +418,70 @@ defmodule ForgeWeb.TemplatesLiveTest do
     assert html =~ "the node&#39;s default"
   end
 
+  # **A provider that cannot make a machine without an image is not offered the node's.** There
+  # is no node-wide image for Hetzner — the key it used to read is the local driver's qcow2 path
+  # — so that option would be a promise the changeset then refuses. The fake stands in, because
+  # the real driver's catalogue is a network call.
+  describe "a provider that requires an image and a size" do
+    setup do
+      Forge.Provider.Fake.requiring([:size, :image])
+      on_exit(&Forge.Provider.Fake.allow/0)
+    end
+
+    test "offers a prompt where the default was", %{conn: conn} do
+      {:ok, _view, html} = live(conn, ~p"/templates")
+
+      images = options_of(html, "template[image]")
+      assert images =~ ~s(<option value="">choose one</option>)
+      refute images =~ "default"
+      assert images =~ "forge-worker"
+
+      sizes = options_of(html, "template[size]")
+      assert sizes =~ ~s(<option value="">choose one</option>)
+      refute sizes =~ "custom"
+    end
+
+    # The edit form is the create form's fields with the stored template's provider, and it
+    # has to ask the same question of it — or an edit offers the node's default the changeset
+    # then refuses, which is the promise the create form stopped making.
+    test "the edit form offers a prompt where the default was, too", %{conn: conn, user: user} do
+      template = template_for(user, %{size: "small", image: "forge-worker"})
+
+      {:ok, view, _html} = live(conn, ~p"/templates")
+
+      view
+      |> element(~s(button[phx-click=edit-template][phx-value-id="#{template.id}"]))
+      |> render_click()
+
+      form = view |> element(~s(form#edit-template-#{template.id})) |> render()
+
+      images = options_of(form, "template[image]")
+      assert images =~ ~s(<option value="">choose one</option>)
+      refute images =~ "default"
+
+      sizes = options_of(form, "template[size]")
+      assert sizes =~ ~s(<option value="">choose one</option>)
+      refute sizes =~ "custom"
+    end
+
+    test "and a template left without one is refused, with the reason", %{
+      conn: conn,
+      user: user
+    } do
+      {:ok, view, _html} = live(conn, ~p"/templates")
+
+      html =
+        view
+        |> form("#template-form",
+          template: %{name: "bare", size: "large", memory: "4GiB", cores: "2", max_workers: "1"}
+        )
+        |> render_submit()
+
+      assert html =~ "image can&#39;t be blank"
+      assert Provisioning.templates(user) == []
+    end
+  end
+
   test "a template records the image it was given", %{conn: conn, user: user} do
     {:ok, view, _html} = live(conn, ~p"/templates")
 
@@ -435,9 +502,10 @@ defmodule ForgeWeb.TemplatesLiveTest do
     assert template.image == "snapshot-1"
   end
 
-  # Null is not "no image", it is *the node's configured one* — which is what every template
-  # made before the column had, and what keeps them able to create.
-  test "a template that names none leaves it to the node", %{conn: conn, user: user} do
+  # For a provider that does not require one, no image is saved as none and left to the driver
+  # — the local one boots its host's image whatever a template says. A provider that does
+  # require one is the describe above.
+  test "a template that names none leaves it to the driver", %{conn: conn, user: user} do
     {:ok, view, _html} = live(conn, ~p"/templates")
 
     view

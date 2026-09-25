@@ -29,7 +29,7 @@ defmodule Forge.ReleaseTest do
     capture_io(fn ->
       Release.register_project(
         name,
-        Path.join(System.tmp_dir!(), "#{name}.git"),
+        Path.join(System.tmp_dir!(), "#{System.pid()}-#{name}.git"),
         "main",
         owner.email
       )
@@ -44,7 +44,7 @@ defmodule Forge.ReleaseTest do
     name = "rel-#{System.unique_integer([:positive])}"
 
     capture_io(fn ->
-      Release.register_project(name, Path.join(System.tmp_dir!(), "#{name}.git"))
+      Release.register_project(name, Path.join(System.tmp_dir!(), "#{System.pid()}-#{name}.git"))
     end)
 
     assert Forge.Projects.role(Forge.Projects.by_name(name), admin) == :admin
@@ -57,7 +57,7 @@ defmodule Forge.ReleaseTest do
     capture_io(fn ->
       Release.register_project(
         name,
-        Path.join(System.tmp_dir!(), "#{name}.git"),
+        Path.join(System.tmp_dir!(), "#{System.pid()}-#{name}.git"),
         "main",
         owner.email
       )

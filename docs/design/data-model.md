@@ -1,12 +1,18 @@
 # Core data model
 
-Scope: what milestone 1 persists. Users, roles and workers are present from the start so team
-use and the worker tier are additions, not rewrites. All ids are UUIDs. Times are UTC.
+Scope: what the platform persists — milestone 1's tables, and what conversations, the worker
+tier, identity, provisioning and inference credentials added to them. Users, roles and workers were present from the
+start so that team use and the worker tier would be additions, not rewrites; the one that did not
+survive is `users.role`, which project membership replaced (see **user**). All ids are UUIDs.
+Times are UTC.
 
 ## Entities
 
 **project** — `name`, `repo_path` (bare repository on the orchestrator; the API only ever
-sets `<repos_dir>/<name>.git`, an arbitrary path needs the command line), `default_branch`.
+sets `<repos_dir>/<name>.git`, an arbitrary path needs the command line), `default_branch`,
+`seed_id` (the seed a worker fetches for this project, set by `mix forge.seed.publish`; null means
+none was ever published and the job clones cold — `design/storage.md`), `model` (the project's
+default when a state names none; null means the machine's).
 A mirror is deliberately **not** a column: it lives in the repository's own `git config` under
 `forge.mirror.<name>.url`, because the `post-receive` hook is what pushes it and a hook can read
 only git config. See `design/git-hosting.md`.
@@ -17,19 +23,35 @@ the project row), `title`, `body`, `base_commit`, `branch` (`ticket/<number>`), 
 workflow), `status` (`active | stuck | done | cancelled`), `cost_usd` (denormalised sum
 over jobs), `pending_transition` (set while a transition waits for approval).
 
-**job** — one execution of one job state. `ticket_id`, `state`, `attempt` (per ticket and
-state), `parent_job_id` (null in v1), `spec` (immutable, JSON: prompt text and path, inputs
-with name, version and content inlined, `env`, `commit`, budgets, permitted children, which
-is empty in v1; `answers.md` and the answered keys are added at run time, not stored), `status` (`pending | running | waiting | hibernated | finished`),
+**job** — one execution of one job state, or one conversation. `kind` (`workflow | chat`),
+`project_id`, `ticket_id`, `state`, `attempt` (per ticket and state), `parent_job_id` (null in v1),
+`spec` (immutable, JSON: prompt text and path, inputs with name, version and content inlined, `env`,
+`commit`, budgets, permitted children, which is empty in v1; `answers.md` and the answered keys are
+added at run time, not stored), `status` (`pending | running | waiting | hibernated | finished`),
 `outcome` (`converged | did_not_converge | budget_exhausted | error | cancelled`, null until
 finished), `declared_outcome` (the workflow outcome the agent selected, null unless converged),
-`turns`, `cost_usd`, `harness_session_id` (opaque, nullable, an optimisation only),
-`worker_id` (nullable), `started_at`, `finished_at`. Its timestamps are sub-second: jobs are read
-back in creation order and that order is the ticket's timeline, so two jobs created within one
-second must still be ordered.
+`turns`, `cost_usd` (what its runs have cost between them — a conversation's read from them with
+`Runs.total/1`, a workflow job's added up as each run reports; see **job_run**),
+`harness_session_id` (opaque, nullable, an optimisation only), `worker_id` (nullable),
+`credential_id` (the inference credential its current or last run spent, nullable until it first
+starts), `model` (a conversation's, chosen when it was opened; a workflow job's is its state's and
+is not on the row), `memory_max` and `cores` (what the scheduler gates on, resolved once at creation
+and never rewritten — `design/provisioning.md` § What a job asks for), `started_at`, `finished_at`.
+Its timestamps are sub-second: jobs are read back in creation order and that order is the ticket's
+timeline, so two jobs created within one second must still be ordered.
 
-**artifact** — `ticket_id`, `name` (as in the workflow, e.g. `plan.md`), `kind`
-(`document | blob | presentation`). Unique per ticket and name. Holds no content. The
+A chat is a job with a project, no state and no spec, and a ticket only when it is a ticket
+chat — `design/conversations.md` § Shape. `ticket_id`, `state` and `spec` are therefore nullable,
+and the CHECK constraint `jobs_kind_shape` is what says which shape a row must have: a workflow
+row carries all three, a chat row has no state and no spec. The `(ticket_id, state, attempt)`
+unique index is partial, over workflow rows, because Postgres treats NULLs as distinct and would
+otherwise constrain nothing.
+
+**artifact** — `ticket_id` or `job_id` (exactly one, by the CHECK `artifacts_one_scope`: a
+project conversation's documents and every conversation's proposals belong to the conversation,
+and a ticket conversation's documents to its ticket — `design/conversations.md` § Commits), `name` (as in the workflow, e.g.
+`plan.md`), `kind` (`document | blob | presentation`). Unique per scope and name, by two partial
+unique indexes — one over rows with a ticket, one over rows with a job. Holds no content. The
 `changeset` is a blob artifact whose versions record the branch head (`git:<sha>`) when a
 job that produces it finishes, so approval attaches to an exact commit.
 
@@ -57,19 +79,79 @@ approval authorises an edge in the statechart and the engine reads it against a 
 `pending_transition`, and a proposal has no edge — what it authorises is admission. See
 `design/ticket-proposals.md` § Deciding.
 
-**event** — `seq` (bigserial), `ticket_id`, `job_id` (both nullable), `actor`
+**event** — `seq` (bigserial), `project_id`, `ticket_id`, `job_id` (all nullable; `project_id`
+is denormalised so "the events I may read" is one indexed query, and null means node-wide, which
+only a node admin reads — `design/identity.md` § Read scoping is the half that leaks), `actor`
 (`system`, `{user, id}` or `{job, id}`), `type` (dotted, e.g. `ticket.admitted`,
 `job.started`, `job.harness.tool_use`, `question.answered`, `transition.taken`),
 `payload` (JSON), `inserted_at`. Append only.
 
-**user** — from the Phoenix auth generator: `email`, `hashed_password`, plus `role`
-(`operator` only in v1; `approver`, `promoter`, `spender` reserved).
+**user** — from the Phoenix auth generator: `email`, `hashed_password` (null for an account
+that only logs in through an identity provider), plus `node_admin` (account governance only:
+approve, suspend, promote; it reaches no project), `approved_at` and `suspended_at` (an account
+acts only when approved and not suspended). The `role` column this entry once had
+(`operator | approver | promoter | spender`) was dropped by `20260916100000`: what a user may
+reach is per project, in **project_member**. See `design/identity.md` § Approval.
 
-**worker** — `provider`, `provider_id`, `status`, `token_hash`, `memory_budget`,
-`last_seen_at`. Empty until milestone 3; the local worker manager registers as one row.
+**identity** — `user_id`, `issuer`, `subject` (unique together), `email` (as claimed at the last
+login, for display, never looked up by), `last_login_at`. An account at an external issuer; a
+user has zero or more. `design/identity.md` § Identity is `(issuer, subject)`, never email.
+
+**project_member** — `project_id`, `user_id` (unique together), `role` (`admin | member`).
+`admin` is settings, deletion and membership; `member` is everything else. `Forge.Access` expands
+the role into capabilities, and all but two readers go through it — `Projects`' last-admin rule
+compares `:admin` by name (`design/identity.md` § The capability seam). `design/identity.md`
+§ Projects and members.
+
+**push_subscription** — `user_id`, `endpoint` (unique), `p256dh`, `auth`, `last_sent_at`. One
+browser's Web Push subscription.
+
+**worker** — `provider`, `provider_id`, `status` (`creating | ready | busy | idle | destroyed`),
+`token_hash`, `memory_budget`, `cores`, `accepts` (the job kinds it takes), `managed` (whether the
+platform made it and may destroy it — `design/worker-tier.md` § Managed and unmanaged), `harness`
+and `reported` (what the machine said about its harness and about itself at `ready`, verbatim;
+recorded, not scheduled on), `last_error` (what the driver said about a create that never became a
+machine), `idle_since`, `last_seen_at`, `template_id` and `provider_credential_id` (provenance: the
+recipe and the account it was made from, both null for a machine the operator registered with `mix
+forge.worker.new`), `user_id` (its owner: the template's for a machine the platform made; for a
+permanent one, whoever minted it with `mix forge.worker.new --owner` or adopted it).
+
+**provider_credential** — `user_id`, `name` (unique per user), `provider`, `secret`. An account
+at a machine provider (e.g. Hetzner) that a user owns; `secret` is a driver-shaped map encrypted
+by `Forge.Provisioning.Vault` and never rendered. Not a harness credential.
+`design/provisioning.md` § Whose account.
+
+**worker_template** — `user_id`, `provider_credential_id` (null for a provider that needs no
+account), `name` (unique per user), `provider`, `size` and `image` (opaque above the driver),
+`memory`, `cores`, `accepts`, `max_workers`, `idle_ms`, `failures` (consecutive machines it
+failed to make; disabled is derived from it, not stored) and `last_error`. A recipe: its values
+are copied onto a worker at creation and never read back through. `design/provisioning.md` § Two
+tables, and the second is only a recipe.
+
+**project_template** — `project_id`, `template_id` (unique together). A template a project may
+have machines made from, assigned by the template's owner.
+
+**project_worker** — `project_id`, `worker_id` (unique together). A permanent machine a project
+may run its jobs on, assigned by the machine's owner; one the platform made reaches projects
+through its template instead. `design/identity.md` § Workers.
+
+**credential** — `user_id`, `name`, `harness`, `kind` (the harness's kinds of secret — for Claude
+Code `oauth` or `api_key`), `secret` (encrypted, never selected by default), `daily_limit_usd`,
+`models` (what the check on save found it may use), `checked_at`, `check_error`, `revoked_at`. An
+inference credential: what an agent authenticates with, owned by a user and never by a machine.
+Revoked rather than deleted, because spend stays attributed to it. `design/credentials.md`.
+
+**project_credential** — `project_id`, `credential_id` (unique together). A project's pool: the
+credentials its jobs may be paid for with, assigned by each credential's owner.
+
+**job_run** — `job_id`, `credential_id`, `worker_id`, `started_at`, `finished_at`, `cost_usd`. One
+process of a job: a resume, a requeue or a reopened conversation is a new run. Spend is recorded
+here per credential, set from the harness's running total for that process (`Forge.Jobs.Runs`).
 
 **git_token** — `project_id`, `ticket_id`, `job_id` (the last two nullable), `token_hash`,
-`ref` (the one ref a write token may update, `refs/heads/ticket/<n>`), `write`, `expires_at`,
+`ref` (the one ref a write token may update: `refs/heads/ticket/<n>` for a ticket's job,
+`refs/heads/chat/<uuid>` for a conversation, or the project's default branch for the token an
+operator mints by hand, which no job is ever given), `write`, `expires_at`,
 `revoked_at`, `last_used_at`. The credential the git endpoint accepts. Not a user token: no user,
 a ref rather than an account for a scope, and a job rather than "until revoked" for a lifetime.
 Rows are revoked rather than deleted, because they are the audit trail behind the
@@ -82,10 +164,13 @@ There is no in-memory statechart: the engine is a pure function
 `(workflow, state, outcome, transition_counts) -> transition | :stuck`, and every application
 of it writes the ticket row and an event in one transaction.
 
-Live jobs are processes only while `status` is `running`: one supervised process per job,
-registered by job id. A job in `waiting` (blocked on a human) or `hibernated` has no process.
-On boot, any job still marked `running` is set to `hibernated`; resume rebuilds it from the
-branch and the manifest. Transitions from `waiting` back to `running` start a new process.
+The platform runs no job processes. A job is a process only while `status` is `running`, and
+that process is on the worker it was assigned to: one supervised process per job there, keyed
+by job id. A job in `waiting` (blocked on a human) or `hibernated` has none anywhere.
+On boot, `Forge.Jobs.recover/0` deals with rows a previous node left `running`: a workflow job
+goes back to `pending` for the scheduler to place again, a conversation goes `hibernated` until a
+person resumes it. Answering a waiting job's blocking questions sets it `pending` too; its next
+run rebuilds from the branch and the manifest.
 
 ## Invariants
 
@@ -109,6 +194,7 @@ branch and the manifest. Transitions from `waiting` back to `running` start a ne
 
 ## Not in v1, but shaped for
 
-`parent_job_id` and `spec.permitted_children` carry subagents. `worker_id` carries the
-worker tier. `role` carries multi-user. `artifact.kind = presentation` exists but nothing
-renders it yet.
+`parent_job_id` and `spec.permitted_children` carry subagents. `worker_id` carried the
+worker tier, which has since arrived. `role` was to carry multi-user; it was dropped for
+`node_admin` and `project_members` when multi-user arrived. `artifact.kind = presentation` exists
+but nothing renders it yet.

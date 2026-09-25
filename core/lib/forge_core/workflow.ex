@@ -52,6 +52,7 @@ defmodule ForgeCore.Workflow do
   @proposals "proposals"
   @proposal_prefix "proposal-"
   @tickets_dir "tickets"
+  @replay "conversation.md"
 
   @enforce_keys [:initial, :states, :transitions, :limits]
   defstruct version: 1, initial: nil, states: %{}, transitions: [], limits: nil, defaults: nil
@@ -110,10 +111,83 @@ defmodule ForgeCore.Workflow do
   def proposal?(name), do: String.starts_with?(name, @proposal_prefix)
 
   @doc """
+  Whether an artifact name is one the platform keeps for a job's transcript
+  (`transcript-<state>-<attempt>.jsonl`, a blob). A document under such a name, written before
+  the transcript it collides with exists, would leave that job unable to record its result —
+  refused at `Forge.Artifacts`' kind check, retried by the worker for ever. So the whole prefix is
+  the platform's, not only the names already taken.
+  """
+  @spec transcript?(artifact_name()) :: boolean()
+  def transcript?(name), do: String.starts_with?(name, "transcript-")
+
+  @doc """
   The directory of `$FORGE_JOB` holding the project's tickets, for a job that wants to know
   what else exists. See `docs/design/ticket-proposals.md` § Reading the backlog.
   """
   def tickets_dir, do: @tickets_dir
+
+  @doc """
+  The file in `$FORGE_JOB` holding what a reopened conversation had already said, for the new
+  process to read. See `docs/design/conversations.md` § Lifetime.
+  """
+  def replay_file, do: @replay
+
+  # Artifact and state names are single path segments: they become file and directory names in
+  # the job directory and must never escape it.
+  #
+  # The leading-alphanumeric requirement is the whole of that guard, and `.`, `..` and every
+  # other all-dots name are refused by it rather than by any list — there is one defence here,
+  # not two. Widening this to allow a leading dot would therefore make `..` a legal artifact
+  # name and a write to the job directory's parent; the names test in `parser_test.exs` is what
+  # would notice.
+  @name_format ~r/^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
+  @doc """
+  Whether `name` may be an artifact's or a state's: one path segment of letters, digits, `.`,
+  `_` and `-`, starting with a letter or a digit. The validator's rule for a workflow, and the
+  rule for what a conversation writes, which is why it lives here rather than in either.
+  """
+  @spec valid_name?(term()) :: boolean()
+  def valid_name?(name), do: is_binary(name) and Regex.match?(@name_format, name)
+
+  @doc """
+  Why an agent may not write `name` in `out/` as a document of its own accord, or nil if it may.
+
+  A conversation declares nothing, so what it writes is held to the rules a workflow's `produces`
+  is held to where they apply (`docs/design/conversations.md` § Commits): a valid name, and none
+  the platform keeps for itself — the ticket's body, the answers it writes, the changeset, the
+  two shapes proposals take, and the prefix transcripts are stored under.
+  """
+  @spec document_name_error(String.t()) :: String.t() | nil
+  def document_name_error(name) do
+    cond do
+      not valid_name?(name) ->
+        "must be a single path segment: letters, digits, . _ -, starting with a letter or digit"
+
+      name in [@ticket, @answers, @changeset] ->
+        "#{inspect(name)} is reserved"
+
+      true ->
+        reserved_name_error(name)
+    end
+  end
+
+  @doc """
+  Why `name` is one the platform stores something of its own under — the two shapes proposals
+  take, and the prefix transcripts are kept at — or nil.
+
+  Asked of what a conversation writes (`document_name_error/1`) and of what a workflow's state
+  may produce (`ForgeCore.Workflow.Validator`), which is the same collision from two directions:
+  a file or a row the job does not own.
+  """
+  @spec reserved_name_error(String.t()) :: String.t() | nil
+  def reserved_name_error(name) do
+    cond do
+      name == @proposals or proposal?(name) -> "#{inspect(name)} is reserved for ticket proposals"
+      transcript?(name) -> "#{inspect(name)} is reserved for job transcripts"
+      true -> nil
+    end
+  end
 
   @doc "Whether an artifact name denotes a document rather than the changeset."
   @spec document?(artifact_name()) :: boolean()

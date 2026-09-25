@@ -123,6 +123,50 @@ defmodule ForgeWorker.Job.RunnerStreamingTest do
     assert "a question" in delivered
   end
 
+  # A reopened conversation whose last word was the agent's has nothing to answer. Delivering
+  # the prompt at start, as a first start does, is a billed turn spent answering the opening
+  # message a second time as though it were new — which is what the old path did, because the
+  # platform handed a reopen the first `chat.message` as its prompt.
+  test "a held prompt waits for the first message and goes down with it", context do
+    held =
+      spec(%{
+        kind: :chat,
+        prompt: nil,
+        replay: "# The conversation so far\n",
+        branch: "chat/held"
+      })
+
+    {pid, spec} = chat(context, spec: held, hold_prompt: true)
+    lines = Path.join(job_dir(context, spec), "fake-lines.jsonl")
+
+    # Nothing was sent, so nothing was answered: no turn, and the harness has read no line.
+    refute_receive {:turn, _job_id, _index, _event}, 500
+    refute File.exists?(lines)
+    refute File.exists?(Path.join(job_dir(context, spec), "prompt.md"))
+
+    assert Runner.send_message(pid, "and what about the tests?") == :ok
+    assert_receive {:turn, _job_id, 1, _event}, 5_000
+
+    # One message, carrying both: the context a first start would have been given, and what
+    # the person said next as its end. Two messages would be two turns, the first of them the
+    # one this exists to avoid.
+    assert [line] = lines |> File.read!() |> String.split("\n", trim: true)
+    %{"message" => %{"content" => [%{"text" => text}]}} = Jason.decode!(line)
+
+    assert String.starts_with?(text, "# You are in a conversation")
+    assert text =~ "## This conversation was reopened"
+    assert String.ends_with?(String.trim_trailing(text), "and what about the tests?")
+
+    # `prompt.md` is the prompt as the harness was given it, which is this one.
+    assert File.read!(Path.join(job_dir(context, spec), "prompt.md")) == text
+
+    # And the one after it is an ordinary message: the prompt went once.
+    assert Runner.send_message(pid, "thanks") == :ok
+    assert_receive {:turn, _job_id, 2, _event}, 5_000
+    assert [_first, second] = lines |> File.read!() |> String.split("\n", trim: true)
+    assert %{"message" => %{"content" => [%{"text" => "thanks"}]}} = Jason.decode!(second)
+  end
+
   # An interrupted turn reports `error_during_execution` with a null result — exactly what a
   # genuine failure reports. Only the runner knows it asked, so only the runner can say; left
   # to the payload, an operator's own Stop renders in their conversation as an error.

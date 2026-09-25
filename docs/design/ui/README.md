@@ -358,6 +358,8 @@ mark in the product does not shift meaning when the theme does.
 **Type.** Instrument Sans for language, JetBrains Mono for identifiers. Both OFL and self-hostable,
 which is the binding constraint. Ship subsetted woff2 (latin; weights 400/500/600 and 400/500/700)
 in `assets/fonts/` with a local `@font-face` block and `font-display: swap` — roughly 90 KB total.
+(As built they are one latin-subset variable woff2 per face in `platform/priv/static/fonts/`;
+`ui.md` § Type is the record.)
 Scale and the full mono-vs-sans rule are in **`forge Spec.html` §3**. The short version:
 
 - **Mono is for things the system named** — states, statuses, outcomes, artifact names and versions,
@@ -469,5 +471,5 @@ Stated plainly so it is a known trade rather than a surprise:
 |---|---|
 | `forge Spec.html` | **The specification.** Both daisyUI theme blocks in oklch, type and spacing scales, the mono rule, per-component specs, IA and measures, implementation order, fit with the planned roadmap, open decisions. Printable. **Read this first; where it and the mockups differ, it wins.** |
 | `forge Mockups.html` | **The evidence.** Annotated mockups at phone (390px) and laptop (1180px). Newest work is at the **top**: turn 4 (sequence as primary mode), turn 3 (many questions per interruption), turn 2 (the affordance rule). Below them, sections 01–07: IA, queue, ticket timeline, job, board at 50 tickets, component specimens, capacity. Annotations beside each frame give the *reason*, not the pixel. |
-| `forge Directions.html` | The three visual directions explored before "Bureau" was chosen. Historical context only — **do not implement from this file.** |
+| `forge Directions.html` | **Not in this repository.** The handoff named it and it was never vendored. It held the three visual directions explored before "Bureau" was chosen — historical context only, and nothing here depends on it. |
 | `forge-ui-design-brief.md` | The original brief this work answers. |

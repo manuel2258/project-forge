@@ -54,6 +54,13 @@ defmodule Forge.FlowTest do
 
   defp event_types(ticket), do: ticket.id |> Events.for_ticket() |> Enum.map(& &1.type)
 
+  # A job's wait reasons and its starts, in the order they were written.
+  defp waits_and_starts(job) do
+    for %{type: type} = event <- Events.for_job(job.id),
+        type in ["job.waiting", "job.started"],
+        do: if(type == "job.started", do: :started, else: event.payload["reason"])
+  end
+
   test "admission pins the workflow, creates the branch, the ticket document and the first job",
        %{project: project, repo: repo, user: user} do
     {:ok, ticket} =
@@ -147,6 +154,8 @@ defmodule Forge.FlowTest do
 
     {:ok, job} = run(planning, worker, "blocking", "plan.md")
     assert job.status == :waiting
+    # The run is over; the answer resumes the job on a new one with its own git credential.
+    assert Forge.Git.Tokens.revoke_for_job(job.id) == 0
     Forge.Push.flush()
     assert_receive {:push, "https://push.example/phone", %{"body" => "Which backend?"}, _opts}
     assert job.harness_session_id == "sess-42"
@@ -306,6 +315,8 @@ defmodule Forge.FlowTest do
     assert job.status == :pending
     assert job.harness_session_id == nil
     assert "job.resume_failed" in event_types(ticket)
+    # The fresh run mints its own; the failed one's is revoked, not left to its wall clock.
+    assert Forge.Git.Tokens.revoke_for_job(job.id) == 0
 
     {:ok, job} = run(job, worker, "success", "refinement.md")
     assert job.outcome == :converged
@@ -497,6 +508,9 @@ defmodule Forge.FlowTest do
              |> Map.fetch!(:payload)
 
     assert reason =~ "template"
+
+    # Stuck is the record, and a wait beside it would be the same fact said twice.
+    assert waits_and_starts(job) == []
   end
 
   # **A placement stick used to be a dead end.** The ticket is stuck holding a pending job, and a
@@ -649,7 +663,34 @@ defmodule Forge.FlowTest do
 
     assert Tickets.get!(ticket.id).status == :active
     refute "ticket.stuck" in event_types(ticket)
-    assert %Job{status: :pending, worker_id: nil} = only_pending(ticket)
+    assert %Job{status: :pending, worker_id: nil} = job = only_pending(ticket)
+
+    # Not stuck, so the job itself says what it is waiting for.
+    assert waits_and_starts(job) == ["limited"]
+    assert Jobs.current_wait(job) |> Events.summary() =~ "Waiting for a limit to reset"
+  end
+
+  # A conversation has no ticket to stick, so an empty pool is its wait reason instead, in the
+  # sentence a ticket would have been stuck with — the same answer a chat gets for a template.
+  test "a chat in a project with nothing in its pool waits, saying who can fix it", %{
+    project: project,
+    worker: worker
+  } do
+    Registry.unregister(Forge.Workers.Registry, worker.id)
+
+    Repo.delete_all(
+      from a in Forge.Credentials.ProjectCredential, where: a.project_id == ^project.id
+    )
+
+    {:ok, chat} = Forge.Conversations.open(project, "hello")
+    start_supervised!(Forge.Jobs.Scheduler)
+
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert Jobs.get!(chat.id).status == :pending
+    assert waits_and_starts(chat) == ["no_credential"]
+
+    assert Jobs.current_wait(Jobs.get!(chat.id)) |> Events.summary() =~
+             "no credential is assigned to this project"
   end
 
   # A credential this node cannot open — its `secret_key_base` rotated — is one no job can run on.
@@ -1052,15 +1093,19 @@ defmodule Forge.FlowTest do
   end
 
   # The same path reached by a **project chat**, which has no ticket to stick. Unguarded this
-  # is not a wrong answer but a crash — `Tickets.get!(nil)` inside the scheduling pass — and
-  # `init/1` explains what a crashed scheduler costs: every live conversation on the node goes
-  # dormant, because the restart recovers the node.
+  # is not a wrong answer but a crash — `Tickets.get!(nil)` inside the scheduling pass, on every
+  # pass. What it does instead is wait, and say why on its own page.
+  #
+  # **Destroyed, not merely unregistered**, for the reason the test above gives: a permanent
+  # machine that could hold the chat once free makes it a queue, and with it left standing this
+  # test answered `:at_capacity` and never reached the template path it is named for.
   test "a chat that no template can hold leaves the scheduler standing", %{
     project: project,
     user: user,
     worker: worker
   } do
     Registry.unregister(Forge.Workers.Registry, worker.id)
+    :ok = Forge.Workers.destroy(worker)
 
     {:ok, template} =
       Forge.Provisioning.create_template(user, %{
@@ -1078,8 +1123,214 @@ defmodule Forge.FlowTest do
     assert Forge.Jobs.Scheduler.tick() == 0
     assert Jobs.get!(chat.id).status == :pending
 
-    # Still alive, and still able to answer — which is the whole assertion.
+    # Still alive, and still able to answer.
     assert Forge.Jobs.Scheduler.tick() == 0
+
+    # And the answer is recorded once, in the sentence a ticket would have been stuck with.
+    assert waits_and_starts(chat) == ["none_fit"]
+    sentence = Jobs.current_wait(Jobs.get!(chat.id)) |> Events.summary()
+    assert sentence =~ "Waiting for a template"
+    # The template here is too small, but the same answer covers one that refuses the kind — a
+    # chat on a builds-only template — so the sentence names both rather than size alone.
+    assert sentence =~ "both takes this kind of job and is big enough for it"
+  end
+
+  # A job that cannot be placed says why, and says it once per reason: the scheduler asks every
+  # two seconds and the log is append-only (`docs/design/provisioning.md` § The gate). Three
+  # rules, each with its own step — the same reason twice is one event, a changed reason is
+  # another, and a job that ran and came back may say the same thing again.
+  test "a job that waits says why, once each time the reason changes", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    Registry.unregister(Forge.Workers.Registry, worker.id)
+    :ok = Forge.Workers.destroy(worker)
+
+    {:ok, template} =
+      Forge.Provisioning.create_template(user, %{
+        name: "one",
+        provider: "fake",
+        memory: 64_000_000_000,
+        cores: 64,
+        max_workers: 1
+      })
+
+    {:ok, _} = Forge.Provisioning.assign(user, template.id, project.id)
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    job = only_pending(ticket)
+    start_supervised!(Forge.Jobs.Scheduler)
+
+    # The template makes a machine, and while it boots the template is at its ceiling.
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert waits_and_starts(job) == ["creating"]
+    assert Jobs.current_wait(Jobs.get!(job.id)) |> Events.summary() =~ "one is being made"
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert waits_and_starts(job) == ["creating", "at_capacity"]
+
+    # Asked again, the answer is the same, and nothing is written.
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert waits_and_starts(job) == ["creating", "at_capacity"]
+
+    # A machine turns up and the job runs on it — then that machine is lost, and the job is
+    # back in the queue behind the same full template.
+    second = FakeWorker.connect(project: project)
+    assert Forge.Jobs.Scheduler.tick() == 1
+    {:ok, _} = Jobs.requeue(job.id, :worker_lost)
+    Registry.unregister(Forge.Workers.Registry, second.id)
+
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert waits_and_starts(job) == ["creating", "at_capacity", :started, "at_capacity"]
+
+    # What the page draws is the latest reason, in words.
+    assert Jobs.current_wait(Jobs.get!(job.id)) |> Events.summary() =~ "Waiting for room"
+  end
+
+  # A driver that refuses leaves its words on the worker row, and the job says where to look.
+  # The refused row keeps its slot until the sweep retires it, so the next pass is a queue.
+  test "a machine the provider refused is what the job waits on", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    Registry.unregister(Forge.Workers.Registry, worker.id)
+    :ok = Forge.Workers.destroy(worker)
+    Forge.Provider.Fake.refuse({:fake, "no such size"})
+    on_exit(&Forge.Provider.Fake.allow/0)
+
+    {:ok, template} =
+      Forge.Provisioning.create_template(user, %{
+        name: "refused",
+        provider: "fake",
+        memory: 64_000_000_000,
+        cores: 64,
+        max_workers: 1
+      })
+
+    {:ok, _} = Forge.Provisioning.assign(user, template.id, project.id)
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    job = only_pending(ticket)
+    start_supervised!(Forge.Jobs.Scheduler)
+
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert waits_and_starts(job) == ["create_failed"]
+    # The page shows its viewer's own machines, so the sentence says whose to look at.
+    assert Jobs.current_wait(Jobs.get!(job.id)) |> Events.summary() =~
+             "workers page of whoever owns the template"
+
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert waits_and_starts(job) == ["create_failed", "at_capacity"]
+  end
+
+  # Not every refusal after placement is a wait. A ticket over its allowance is stuck, which is
+  # its own record and takes the job out of the queue; recording a wait beside it would say the
+  # job is waiting for a machine when it is waiting for a person (`provisioning.md` § The gate).
+  test "a ticket over its allowance is stuck, and its job records no wait", %{
+    project: project,
+    user: user
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    job = only_pending(ticket)
+
+    {:ok, _over} =
+      ticket |> Ecto.Changeset.change(cost_usd: Decimal.new("25.00")) |> Forge.Repo.update()
+
+    start_supervised!(Forge.Jobs.Scheduler)
+
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert Tickets.get!(ticket.id).status == :stuck
+    assert waits_and_starts(job) == []
+  end
+
+  # The platform refuses a template whose provider credential is not its owner's before any driver
+  # is asked, so no worker row is written and the workers page has nothing to say. The sentence
+  # sent the operator there all the same; it names the templates page, where the words are.
+  test "a template whose credential may not be spent says so, and where", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    Registry.unregister(Forge.Workers.Registry, worker.id)
+    :ok = Forge.Workers.destroy(worker)
+
+    {:ok, template} =
+      Forge.Provisioning.create_template(user, %{
+        name: "theirs",
+        provider: "fake",
+        memory: 64_000_000_000,
+        cores: 64,
+        max_workers: 1
+      })
+
+    {:ok, theirs} =
+      Forge.Provisioning.create_credential(Forge.AccountsFixtures.user_fixture(), %{
+        name: "theirs",
+        provider: "fake",
+        secret: %{"token" => "their-money"}
+      })
+
+    # A row saved before the changeset checked whose credential it held.
+    {1, _} =
+      Forge.Repo.update_all(
+        Ecto.Query.from(t in Forge.Provisioning.Template, where: t.id == ^template.id),
+        set: [provider_credential_id: theirs.id]
+      )
+
+    {:ok, _} = Forge.Provisioning.assign(user, template.id, project.id)
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    job = only_pending(ticket)
+    start_supervised!(Forge.Jobs.Scheduler)
+
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert waits_and_starts(job) == ["credential_refused"]
+
+    sentence = Jobs.current_wait(Jobs.get!(job.id)) |> Events.summary()
+    assert sentence =~ "templates page of whoever owns the template"
+    refute sentence =~ "workers page"
+    # And there is nothing on that page to read: no machine was made from the template.
+    refute Enum.any?(Forge.Workers.list(), &(&1.template_id == template.id))
+  end
+
+  # A **ticket** chat has a ticket, and it is not the chat's to stick: the ticket's own work may
+  # place perfectly well. Here the template takes workflow jobs and refuses chats, so the job is
+  # being made a machine while the conversation about it can go nowhere.
+  test "a ticket chat no template can hold leaves its ticket active", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    Forge.Provider.Fake.watch()
+    Registry.unregister(Forge.Workers.Registry, worker.id)
+    :ok = Forge.Workers.destroy(worker)
+
+    {:ok, template} =
+      Forge.Provisioning.create_template(user, %{
+        name: "builds-only",
+        provider: "fake",
+        memory: 64_000_000_000,
+        cores: 64,
+        max_workers: 1,
+        accepts: [:workflow]
+      })
+
+    {:ok, _} = Forge.Provisioning.assign(user, template.id, project.id)
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    {:ok, chat} = Forge.Conversations.open(project, "what is this about?", ticket: ticket)
+    start_supervised!(Forge.Jobs.Scheduler)
+
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert Forge.Jobs.Scheduler.tick() == 0
+
+    assert Jobs.get!(chat.id).status == :pending
+    assert Tickets.get!(ticket.id).status == :active
+    refute "ticket.stuck" in event_types(ticket)
+
+    # Two jobs on one ticket, each with its own reason, each said once per change. What a wait
+    # is compared with is that job's own latest, not the ticket's: read by ticket, each pass
+    # found the other job's reason, took it for a change, and wrote its own again.
+    job = Enum.find(Jobs.for_ticket(ticket.id), &(&1.status == :pending))
+    assert waits_and_starts(job) == ["creating", "at_capacity"]
+    assert waits_and_starts(chat) == ["none_fit"]
   end
 
   # A job that has run before still points at the machine that ran it, and that machine may
@@ -1136,6 +1387,25 @@ defmodule Forge.FlowTest do
       Forge.Workers,
       Keyword.merge(previous, idle_period_ms: 60_000)
     )
+
+    # Only a managed machine is ever destroyed for being idle, so the setup's permanent one is
+    # made into what the scheduler would have made: a machine from a template on this project.
+    {:ok, template} =
+      Forge.Provisioning.create_template(user, %{
+        name: "idle",
+        provider: "fake",
+        memory: 64_000_000_000,
+        cores: 64,
+        max_workers: 1
+      })
+
+    {:ok, _} = Forge.Provisioning.assign(user, template.id, project.id)
+
+    {:ok, worker} =
+      Forge.Workers.update(Forge.Workers.get!(worker.id), %{
+        managed: true,
+        template_id: template.id
+      })
 
     # The machine has been sitting there long enough to qualify; the clock is moved rather than
     # waited on.

@@ -37,6 +37,11 @@ defmodule ForgeCore.Job.Spec do
     :branch,
     :budget,
     :preamble_hash,
+    # What a reopened conversation had already said, rendered, for the new process to read as
+    # `$FORGE_JOB/conversation.md`. Nil for a conversation's first process and for every workflow
+    # job. Inlined like an input's content, and for the same reason: the worker needs no further
+    # round trip (`docs/design/conversations.md` § Lifetime).
+    :replay,
     kind: :workflow,
     inputs: [],
     produces: [],
@@ -71,6 +76,7 @@ defmodule ForgeCore.Job.Spec do
           branch: String.t(),
           budget: %{turns: pos_integer(), cost: number()},
           preamble_hash: String.t() | nil,
+          replay: String.t() | nil,
           inputs: [Input.t()],
           produces: [String.t()],
           outcomes: [String.t()],
@@ -138,6 +144,7 @@ defmodule ForgeCore.Job.Spec do
       branch: get.(:branch),
       budget: budget_from_map(get.(:budget)),
       preamble_hash: get.(:preamble_hash),
+      replay: get.(:replay),
       inputs: Enum.map(get.(:inputs) || [], &input_from_map/1),
       produces: get.(:produces) || [],
       outcomes: get.(:outcomes) || ["done"],

@@ -27,8 +27,9 @@ defmodule Mix.Tasks.Forge.Worker.New do
   **The row is unmanaged, and so it is permanent.** Neither sweep will destroy it — not the idle
   period, and not the unreachable timeout, which re-queues its jobs and leaves the row so the
   machine can rejoin. That is what makes a long-lived worker possible, and it is also the catch:
-  a row minted here and never used sits there counting against `max_workers` until somebody
-  removes it. `mix forge.worker.list` shows them.
+  a row minted here and never used sits there until somebody removes it. It counts against no
+  ceiling — `max_workers` is a template's, and this row has none — so nothing stops them piling
+  up. `mix forge.worker.list` shows them.
   """
 
   use Mix.Task

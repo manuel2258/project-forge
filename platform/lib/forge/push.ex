@@ -1,7 +1,8 @@
 defmodule Forge.Push do
   @moduledoc """
-  Web push to the operator's browsers. Blocking questions are pushed as they appear;
-  everything else goes into one daily digest. Enabled only when VAPID keys are configured.
+  Web push to the operator's browsers. Blocking questions are pushed as they appear, and so is
+  a conversation's reply when its turn completes (`chat_reply/2`); everything else goes into
+  one daily digest. Enabled only when VAPID keys are configured.
 
   Delivery runs in a supervised task so a slow or failing push service never blocks the
   caller, and one bad subscription never prevents the others from being served.
@@ -143,6 +144,10 @@ defmodule Forge.Push do
   proposal blocks nothing, and `docs/decisions.md` puts everything that is not a blocking
   question in the digest — but a proposal nobody is ever told about is a proposal nobody
   decides, and the backlog an agent reads keeps offering it back.
+
+  Open non-blocking questions are counted apart for the same reason: they are in the queue as
+  `:assumption`, and waiting on nobody (`docs/design/job-prompt.md` § Non-blocking questions).
+  Neither is ever in the title's "waiting on you".
   """
   @spec digest() :: :ok | :empty
   def digest do
@@ -164,18 +169,18 @@ defmodule Forge.Push do
   # everybody how many decisions are open somewhere they cannot go, which is both a leak and a
   # number nobody can act on.
   defp digest_for(user) do
-    items = Queue.items(user)
-    proposals = Proposals.open_count(user)
+    {waiting, assumed} = user |> Queue.items() |> Enum.split_with(&Queue.waiting?/1)
+    apart = %{assumed: length(assumed), proposed: Proposals.open_count(user)}
 
-    case {items, proposals} do
-      {[], 0} ->
+    case {waiting, apart} do
+      {[], %{assumed: 0, proposed: 0}} ->
         :empty
 
-      {items, proposals} ->
+      {waiting, apart} ->
         deliver(
           %{
-            title: digest_title(length(items), proposals),
-            body: digest_body(items, proposals),
+            title: digest_title(length(waiting), apart),
+            body: digest_body(waiting, apart),
             url: "/",
             tag: "digest"
           },
@@ -190,21 +195,23 @@ defmodule Forge.Push do
     Repo.all(from s in Subscription, where: s.user_id == ^user_id, order_by: s.inserted_at)
   end
 
-  # The title says what is *waiting*, which proposals are not. A count that folded them in would
-  # make the queue's promise — reach the end and be done — read as broken by things that never
-  # belonged to it.
-  defp digest_title(0, proposals), do: "forge: #{proposals} proposed"
-  defp digest_title(waiting, _proposals), do: "forge: #{waiting} waiting on you"
+  # The title says what is *waiting*, which assumptions and proposals are not. A count that
+  # folded them in would make the queue's promise — reach the end and be done — read as broken by
+  # things that never belonged to it.
+  defp digest_title(0, apart), do: "forge: " <> Enum.join(counted_apart(apart), ", ")
+  defp digest_title(waiting, _apart), do: "forge: #{waiting} waiting on you"
 
-  defp digest_body(items, proposals) do
+  defp digest_body(waiting, apart) do
     counts =
-      items
+      waiting
       |> Enum.frequencies_by(& &1.kind)
       |> Enum.map(fn {k, n} -> "#{n} #{k}" end)
 
-    counts = if proposals > 0, do: counts ++ ["#{proposals} proposed"], else: counts
+    Enum.join(counts ++ counted_apart(apart), ", ")
+  end
 
-    Enum.join(counts, ", ")
+  defp counted_apart(%{assumed: assumed, proposed: proposed}) do
+    for {n, word} <- [{assumed, "assumed"}, {proposed, "proposed"}], n > 0, do: "#{n} #{word}"
   end
 
   @doc "Waits for in-flight deliveries to finish. For tests."

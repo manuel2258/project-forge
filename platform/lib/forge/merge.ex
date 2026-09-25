@@ -13,6 +13,11 @@ defmodule Forge.Merge do
 
   `perform/2` is idempotent: an approved commit already on the default branch is left alone. See
   `docs/design/git-hosting.md`.
+
+  **A merge that loses a race is retried once.** An attempt is written against the head it
+  resolved; when it fails and the default branch has moved since, one more attempt is made
+  against the new head, and what that returns is final. See `docs/design/git-hosting.md`
+  § Where it runs, and what a conflict does.
   """
 
   alias Forge.Accounts.User
@@ -91,7 +96,82 @@ defmodule Forge.Merge do
     end
   end
 
+  @doc """
+  What closing a conversation does to its branch. `docs/design/conversations.md` § Lifetime has
+  the rule and the reasons; in short:
+
+  - **merged** — its head is on the default branch: pinned at `refs/forge/chat/<id>`, then
+    deleted, in the order `perform_chat/2` uses and for its reason;
+  - **unmerged, and it would merge cleanly** — deleted, with nothing pinned. This is the abandon:
+    the person had a merge that worked and ended the conversation instead, and the commits
+    become collectable;
+  - **it would not merge cleanly** — kept. A merge that conflicted deletes nothing, because the
+    branch is where the work still is, and taking the change by hand needs it;
+  - **already gone** — nothing.
+
+  The conflict is asked of the merge itself (`merge-tree`, as `check_chat/1` does) rather than of
+  a record that a merge once failed: a guard must use the model of the operation it guards.
+  """
+  @spec abandon_chat(Job.t()) ::
+          {:ok, {:deleted, :merged | :unmerged, String.t()} | {:kept, :conflict, String.t()}}
+          | {:ok, :gone}
+          | {:error, term()}
+  def abandon_chat(%Job{kind: :chat} = chat) do
+    repo = chat.project_id |> Projects.get!() |> Projects.repo_path()
+    branch = Jobs.chat_branch(chat)
+
+    if Git.branch_exists?(repo, branch) do
+      with {:ok, plan} <- chat_plan(chat), do: abandon(plan, branch)
+    else
+      {:ok, :gone}
+    end
+  end
+
+  defp abandon(%{repo: repo, head: head, source: source} = plan, branch) do
+    if Git.ancestor?(repo, source, head) do
+      # Pin, then delete. Which comes first is not something a test can see — both have happened
+      # by the time anything looks — so swapping them is an equivalent mutant as far as the suite
+      # can tell. It matters to a `git gc` that runs between the two, which is the case § Commits
+      # names for `perform_chat/2`.
+      with :ok <- Git.pin(repo, plan.pin, source),
+           :ok <- Git.delete_branch(repo, branch) do
+        {:ok, {:deleted, :merged, source}}
+      end
+    else
+      plan |> check_refs() |> abandon_unmerged(repo, branch, source)
+    end
+  end
+
+  defp abandon_unmerged(:ok, repo, branch, source) do
+    with :ok <- Git.delete_branch(repo, branch), do: {:ok, {:deleted, :unmerged, source}}
+  end
+
+  defp abandon_unmerged({:conflict, _paths}, _repo, _branch, source),
+    do: {:ok, {:kept, :conflict, source}}
+
+  defp abandon_unmerged({:error, reason}, _repo, _branch, _source), do: {:error, reason}
+
+  # One attempt, and one more when the default branch moved while the first was being written.
+  #
+  # The retry is decided by the ref, read exactly as the plan read it, because that is what the
+  # push asserts: a fast-forward of the head the attempt found. An unmoved branch means the failure
+  # was something a second attempt would meet again — a conflict with the newest head there is,
+  # a hook's refusal, a repository that is not there — so it is returned as it is. The head that
+  # decided the retry is the head it is made against.
   defp perform_refs(plan, user) do
+    case attempt(plan, user) do
+      {:ok, _merged} = merged ->
+        merged
+
+      failed ->
+        case default_head(plan.repo, plan.project) do
+          {:ok, head} when head != plan.head -> attempt(%{plan | head: head}, user)
+          _unmoved -> failed
+        end
+    end
+  end
+
+  defp attempt(plan, user) do
     %{repo: repo, head: head, source: source} = plan
     Git.pin(repo, plan.pin, source)
 
@@ -101,6 +181,9 @@ defmodule Forge.Merge do
       merge(plan, user)
     end
   end
+
+  defp default_head(repo, %Project{default_branch: default}),
+    do: Git.resolve(repo, "refs/heads/" <> default)
 
   @doc "Whether the ticket's approved changeset is already on the default branch."
   @spec merged?(Ticket.t()) :: boolean()
@@ -140,7 +223,7 @@ defmodule Forge.Merge do
 
     with {:ok, approved} <- approved_sha(ticket),
          {:ok, source} <- resolve_approved(repo, approved),
-         {:ok, head} <- Git.resolve(repo, "refs/heads/" <> project.default_branch) do
+         {:ok, head} <- default_head(repo, project) do
       {:ok,
        %{
          repo: repo,
@@ -159,7 +242,7 @@ defmodule Forge.Merge do
     branch = Jobs.chat_branch(chat)
 
     with {:ok, source} <- Git.resolve(repo, "refs/heads/" <> branch),
-         {:ok, head} <- Git.resolve(repo, "refs/heads/" <> project.default_branch) do
+         {:ok, head} <- default_head(repo, project) do
       {:ok,
        %{
          repo: repo,

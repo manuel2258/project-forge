@@ -54,9 +54,14 @@ defmodule ForgeWeb.ChatLive do
     assign(socket,
       chat: chat,
       messages: Conversations.messages(id),
-      written: Artifacts.list_for_job(id),
+      written: Artifacts.written_by(id),
+      unrecorded: Conversations.unrecorded(id),
       diff: chat_diff(project, chat),
+      branch_exists: Git.branch_exists?(Projects.repo_path(project), Jobs.chat_branch(chat)),
+      # Where a reopen makes a deleted branch again, from the definition the reopen uses.
+      base_branch: Conversations.base_branch(project, socket.assigns.ticket),
       merged: Merge.merged_chat?(chat),
+      waiting: Jobs.current_wait(chat),
       conflict: nil
     )
   end
@@ -83,7 +88,17 @@ defmodule ForgeWeb.ChatLive do
 
   def handle_info({:job_event, _id, _event}, socket), do: {:noreply, socket}
 
-  def handle_info({:ticket_changed, _id}, socket), do: {:noreply, load(socket)}
+  # The global topic, filtered before any work, as `CLAUDE.md` § Rules asks of a handler on one:
+  # every ticket change on the node arrives here, and each reload is a handful of queries. What
+  # this page needs from it is its own conversation's changes of status — started, stopped,
+  # reopened — which `Forge.Jobs` and `Forge.Conversations` announce under the job's ticket and
+  # not on the job's own topic. So only that ticket: a ticket chat's, or `nil` for a project chat,
+  # which is also what every other project chat's changes are announced under. That residue is
+  # the cost of the status paths not notifying per job.
+  def handle_info({:ticket_changed, id}, %{assigns: %{chat: %{ticket_id: id}}} = socket),
+    do: {:noreply, load(socket)}
+
+  def handle_info({:ticket_changed, _other}, socket), do: {:noreply, socket}
 
   @impl true
   def handle_event("draft", %{"text" => text}, socket),
@@ -102,9 +117,17 @@ defmodule ForgeWeb.ChatLive do
     {:noreply, socket}
   end
 
+  # The page offers End only while the conversation is live, and the context refuses one that is
+  # not, so a stale page or a crafted event is told rather than crashing the view.
   def handle_event("close", _params, socket) do
-    :ok = Operator.close_chat(socket.assigns.chat, socket.assigns.current_scope.user)
-    {:noreply, socket}
+    case Operator.close_chat(socket.assigns.chat, socket.assigns.current_scope.user) do
+      :ok ->
+        {:noreply, socket}
+
+      {:error, :not_live} ->
+        {:noreply,
+         socket |> put_flash(:error, "This conversation has already stopped.") |> load()}
+    end
   end
 
   # The second route into the default branch. Both routes are the platform's own merge and both
@@ -126,8 +149,20 @@ defmodule ForgeWeb.ChatLive do
   end
 
   def handle_event("reopen", _params, socket) do
-    {:ok, _chat} = Operator.reopen_chat(socket.assigns.chat, socket.assigns.current_scope.user)
-    {:noreply, load(socket)}
+    case Operator.reopen_chat(socket.assigns.chat, socket.assigns.current_scope.user) do
+      {:ok, _chat} ->
+        {:noreply, load(socket)}
+
+      # Reopening a live one would take its worker away from under it. The page offers Reopen
+      # only when it is not live; this is a stale page, or an event nobody drew a button for.
+      {:error, :live} ->
+        {:noreply, socket |> put_flash(:error, "This conversation is still live.") |> load()}
+
+      # Remaking a deleted branch is a git write, and it can fail — a ticket branch that is gone
+      # too. Said, rather than a crash that reads as the page breaking.
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Could not reopen: #{inspect(reason)}")}
+    end
   end
 
   # Answering a question is sending what you chose as the next message, so the agent sees it
@@ -254,6 +289,14 @@ defmodule ForgeWeb.ChatLive do
             <span class="font-mono text-[17px] leading-none opacity-40">…</span>
           </p>
 
+          <%!-- A conversation that has not started yet says why, in the same place: the
+                scheduler's sentence, the latest since it last started (docs/design/ui.md § A job
+                waiting for a machine). A chat sticks nothing, so this is the only surface that
+                says a template is missing. --%>
+          <p :if={@waiting} id="chat-waiting" class="mt-6 text-sm/[1.55] opacity-70">
+            {Events.summary(@waiting)}
+          </p>
+
           <%!-- A reply that asked something gets one-tap answers, which is the difference
                 between answering from a phone and not. Free text stays valid and is the box
                 below, not an escape hatch behind a link.
@@ -340,9 +383,16 @@ defmodule ForgeWeb.ChatLive do
           </section>
 
           <section :if={not live?(@chat)} class="mt-8">
-            <p class="text-sm/[1.55] opacity-70">
-              This conversation has stopped. Reopening starts a new process with what was said
-              replayed as context — the machine it was on is gone.
+            <p id="reopen-copy" class="text-sm/[1.55] opacity-70">
+              This conversation has stopped. Reopening starts a new process on a new machine: it
+              is given everything said here to read, and answers the next thing you say.
+              <%= if @branch_exists do %>
+                It works on its branch as it stands.
+              <% else %>
+                Its branch is gone — a merge deletes it, and so does ending — so it starts one
+                again from <span class="font-mono text-[12.5px]">{@base_branch}</span>
+                as it stands now.
+              <% end %>
             </p>
             <button
               type="button"
@@ -366,11 +416,35 @@ defmodule ForgeWeb.ChatLive do
             <.fact label="branch" value={"chat/" <> @chat.id} />
           </dl>
 
+          <%!-- Every version it wrote, whichever scope it is in — a ticket chat's documents are
+                the ticket's — and each is a link to itself: ui.md § Addressable artifact
+                versions. The row is the link, as on a job page's produced list. --%>
           <section class="mt-8">
             <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Written</h2>
-            <p :if={@written == []} class="mt-3 text-sm opacity-60">Nothing yet.</p>
-            <ul class="mt-3 flex flex-col gap-2 text-[12.5px]">
-              <li :for={artifact <- @written} class="font-mono break-all">{artifact.name}</li>
+            <p :if={@written == [] and @unrecorded == %{}} class="mt-3 text-sm opacity-60">
+              Nothing yet.
+            </p>
+            <ul id="written" class="mt-3 flex flex-col">
+              <li :for={{artifact, version} <- @written}>
+                <.link
+                  href={version_href(@chat, @project, @ticket, artifact, version)}
+                  class="flex min-h-[46px] items-center gap-2 border-b border-base-300/60 font-mono text-[12.5px] hover:bg-base-200"
+                >
+                  <span class="min-w-0 flex-1 truncate">{artifact.name}</span>
+                  <span class="shrink-0 opacity-60">v{version.version}</span>
+                  <span class="shrink-0 opacity-40" aria-hidden="true">›</span>
+                </.link>
+              </li>
+            </ul>
+            <%!-- What the last turn left in out/ that was not recorded, and why. Without this a
+                  document that did not arrive is only absent, which reads the same as one
+                  that was never written. --%>
+            <ul :if={@unrecorded != %{}} id="unrecorded" class="mt-3 flex flex-col gap-2">
+              <li :for={{name, why} <- Enum.sort(@unrecorded)} class="text-[12.5px]">
+                <span class="font-mono break-all">{name}</span>
+                <span class="text-error">not recorded:</span>
+                <span class="opacity-70">{why}</span>
+              </li>
             </ul>
           </section>
 
@@ -378,13 +452,13 @@ defmodule ForgeWeb.ChatLive do
             <button
               type="button"
               phx-click="close"
-              data-confirm="End this conversation? The last turn finishes first, and the machine is released."
+              data-confirm={ForgeWeb.Conversations.ending_confirm()}
               class="min-h-[46px] text-sm text-primary hover:underline"
             >
               End it
             </button>
-            <p class="mt-1 text-sm/[1.55] opacity-60">
-              It holds a worker until it ends or goes idle.
+            <p id="ending-copy" class="mt-1 text-sm/[1.55] opacity-60">
+              It holds a worker until it ends or goes idle. If you end it, {ForgeWeb.Conversations.ending_rule()}; going idle does not.
             </p>
           </section>
         </aside>
@@ -398,6 +472,16 @@ defmodule ForgeWeb.ChatLive do
 
   defp where(project, nil), do: project.name
   defp where(project, ticket), do: "#{project.name}##{ticket.number} · #{ticket.title}"
+
+  # The address of a version is its scope's (ui.md § Addressable artifact versions): the
+  # conversation's own for what is scoped to it, the ticket's for a ticket chat's documents.
+  defp version_href(chat, _project, _ticket, %{job_id: job_id} = artifact, version)
+       when is_binary(job_id),
+       do: ~p"/chats/#{chat.id}/artifacts/#{artifact.name}/#{version.version}"
+
+  defp version_href(_chat, project, ticket, artifact, version),
+    do:
+      ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/#{artifact.name}/#{version.version}"
 
   defp context_line(nil), do: "About the repository as a whole."
   defp context_line(_ticket), do: "About this ticket, from its branch as it stood."

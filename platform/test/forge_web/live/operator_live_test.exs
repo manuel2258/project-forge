@@ -151,6 +151,8 @@ defmodule ForgeWeb.OperatorLiveTest do
     # the page refreshes on its own when the job finishes
     assert render(view) =~ "approval"
     assert render(view) =~ "refining"
+    # The card names the exact version it pins, from what the pending transition awaits.
+    assert view |> element("#approval-#{ticket.id}") |> render() =~ "refinement.md v1"
 
     view
     |> form("#approval-#{ticket.id} form", %{"comment" => "fine"})
@@ -231,6 +233,71 @@ defmodule ForgeWeb.OperatorLiveTest do
     assert render(view) =~ "rejected; now in refining"
   end
 
+  # Why a pending job has not gone out, under its own row on the timeline — and on a page that
+  # was already open when the reason changed, because that is how an operator waiting on a
+  # machine is looking at it (`docs/design/ui.md` § A job waiting for a machine).
+  test "a pending job says why it is waiting, and an open page hears when that changes", %{
+    conn: conn,
+    user: user,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
+    [job] = Jobs.for_ticket(ticket.id)
+
+    row =
+      ~s(a[href="/tickets/#{project.name}/#{ticket.number}/jobs/#{job.id}"] ) <>
+        ~s([id="job-#{job.id}-waiting"])
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+    refute has_element?(view, row)
+
+    :ok = Jobs.record_wait(job, "at_capacity", "Waiting for room: every machine is busy.")
+    assert has_element?(view, row, "Waiting for room")
+  end
+
+  # Under the job that is waiting, and only there. With one job on the ticket, a page that drew
+  # every wait under the first row it had looked right; a ticket has several jobs by its second
+  # state, and the reason belongs to the one still pending.
+  test "a wait is drawn under the waiting job, not the ticket's first", %{
+    conn: conn,
+    user: user,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
+    scenario("success", "refinement.md")
+    refining = run_pending(ticket.id)
+    {:ok, _ticket} = Forge.Engine.decide(Tickets.get!(ticket.id), user.id, :approved, nil)
+    [planning] = Enum.filter(Jobs.for_ticket(ticket.id), &(&1.status == :pending))
+
+    :ok = Jobs.record_wait(planning, "at_capacity", "Waiting for room: every machine is busy.")
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+
+    assert has_element?(
+             view,
+             ~s(a[href$="/jobs/#{planning.id}"] [id="job-#{planning.id}-waiting"]),
+             "Waiting for room"
+           )
+
+    refute has_element?(view, ~s(a[href$="/jobs/#{refining.id}"] [id$="-waiting"]))
+  end
+
+  # A job can leave the queue without ever starting — the scheduler fails one that raised on its
+  # way to a worker — and the last thing it waited on is then not why it is anything.
+  test "a job that is no longer pending says nothing about waiting", %{
+    conn: conn,
+    user: user,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
+    [job] = Jobs.for_ticket(ticket.id)
+    :ok = Jobs.record_wait(job, "at_capacity", "Waiting for room: every machine is busy.")
+    {:ok, _job} = Jobs.fail(job.id, {:assign_raised, "boom"})
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+    refute has_element?(view, ~s([id="job-#{job.id}-waiting"]))
+  end
+
   # The symptom as an operator met it on the dev node: reject, and the card stays. The decision
   # had been answered, but `pending_transition` was only ever cleared on the approved path, so
   # the page kept offering the same approve-or-reject and the chooser behind
@@ -246,7 +313,7 @@ defmodule ForgeWeb.OperatorLiveTest do
     run_pending(ticket.id)
 
     {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
-    assert has_element?(view, "#approval-#{ticket.id}")
+    assert view |> element("#approval-#{ticket.id}") |> render() =~ "refinement.md v1"
 
     view |> form("#approval-#{ticket.id} form") |> render_submit(%{"decision" => "rejected"})
 

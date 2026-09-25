@@ -34,6 +34,16 @@ defmodule Forge.Conversations do
   """
   @spec open(Projects.Project.t(), String.t(), keyword()) :: {:ok, Job.t()} | {:error, term()}
   def open(project, text, opts \\ []) do
+    # A chat has no state and so no declaration to resolve — the grammar is a workflow's, and
+    # this is not one. So the person opening it says, and the platform's defaults are what they
+    # get when they do not (`docs/design/conversations.md` § What it asks for).
+    with {:ok, memory} <- resource(opts, :memory, Jobs.default_resources().memory),
+         {:ok, cores} <- resource(opts, :cores, Jobs.default_resources().cores) do
+      insert(project, text, Keyword.merge(opts, memory: memory, cores: cores))
+    end
+  end
+
+  defp insert(project, text, opts) do
     ticket = Keyword.get(opts, :ticket)
     actor = Keyword.get(opts, :actor, :system)
     id = Ecto.UUID.generate()
@@ -50,11 +60,8 @@ defmodule Forge.Conversations do
         # starts, so changing it later means a new process. A conversation that wants a different
         # one is a conversation you close and open again.
         model: model(opts),
-        # A chat has no state and so no declaration to resolve — the grammar is a workflow's,
-        # and this is not one. So the person opening it says, and the platform's defaults are
-        # what they get when they do not (`docs/design/conversations.md` § What it asks for).
-        memory_max: resource(opts, :memory, Jobs.default_resources().memory),
-        cores: resource(opts, :cores, Jobs.default_resources().cores)
+        memory_max: Keyword.fetch!(opts, :memory),
+        cores: Keyword.fetch!(opts, :cores)
       })
     )
     |> Events.log(:opened, "chat.opened", actor, fn %{chat: chat} ->
@@ -93,10 +100,17 @@ defmodule Forge.Conversations do
     end
   end
 
-  # A ticket chat starts from the ticket's branch as it stands, a project chat from the default
-  # branch: the same context the ticket's next job would get, which is the point (§ Context).
-  defp base(project, nil), do: "refs/heads/" <> project.default_branch
-  defp base(_project, ticket), do: "refs/heads/" <> ticket.branch
+  @doc """
+  The branch a conversation's own is made from: the ticket's as it stands for a ticket chat, the
+  default branch for a project chat (`docs/design/conversations.md` § Context). Opening makes it
+  from here, and so does a reopen that finds it gone — and the page says which it will be, from
+  this and not a copy of it.
+  """
+  @spec base_branch(Projects.Project.t(), Tickets.Ticket.t() | nil) :: String.t()
+  def base_branch(project, nil), do: project.default_branch
+  def base_branch(_project, ticket), do: ticket.branch
+
+  defp base(project, ticket), do: "refs/heads/" <> base_branch(project, ticket)
 
   @spec get!(String.t()) :: Job.t()
   def get!(id) do
@@ -106,14 +120,17 @@ defmodule Forge.Conversations do
     end
   end
 
-  # Nothing said is the platform's default, and so is anything that is not a positive number.
-  # The form has already parsed and refused what a person typed; this is the second reader of
-  # the same value — a caller off the CLI, a future API — and a chat admitted with a zero or a
-  # negative would be a row the gate can never satisfy rather than a refusal anybody sees.
+  # Nothing said is the platform's default; anything said that is not a positive number is
+  # refused. The form has already parsed and refused what a person typed; this is the second
+  # reader of the same value — a caller off the CLI, a future API — and replacing a zero with
+  # the default would open a conversation on figures nobody asked for, which is the silent
+  # substitution `docs/design/conversations.md` § What it asks for rules out. Opened as given,
+  # it would be a row the gate can never satisfy rather than a refusal anybody sees.
   defp resource(opts, key, default) do
     case Keyword.get(opts, key) do
-      value when is_integer(value) and value > 0 -> value
-      _other -> default
+      nil -> {:ok, default}
+      value when is_integer(value) and value > 0 -> {:ok, value}
+      _other -> {:error, {:invalid, key}}
     end
   end
 
@@ -195,21 +212,47 @@ defmodule Forge.Conversations do
 
   @doc """
   Ends the conversation: the harness's stdin closes, the last turn finishes, and the machine is
-  released. The transcript, the events and the branch stay.
+  released. The transcript and the events stay; the branch goes unless it would not merge
+  cleanly, once the ending is recorded (`ended/3`, and `docs/design/conversations.md`
+  § Lifetime). Closing is how a person abandons a conversation, and it is not terminal: a closed
+  conversation can be reopened.
 
-  **A conversation with no machine is ended here rather than asked to end itself.** `live?/1`
-  counts `:pending`, so a chat waiting for a worker is one the page offers to close — and every
-  other message to a conversation is a push, which for a chat with no `worker_id` logs that it
-  was not delivered and returns `:ok`. Closing through that path left the row pending for ever
-  with nothing said: a conversation the gate could never place could also never be got rid of.
-  So when there is nobody to tell, the platform records the ending itself, which is what the
-  worker's report would have caused anyway.
+  **A conversation that is not live is refused**, `{:error, :not_live}`, on the row's status and
+  not the caller's struct, as `send/3` is. The page offers End only on a live one, but an event is
+  anything the socket sends: a close on one that had stopped went to a machine no longer running
+  it, or — with no worker on the row — recorded a second ending and dealt with the branch of a
+  conversation that was already dormant, which nobody decided.
+
+  **A conversation with no process is ended here rather than asked to end itself**, and whether
+  it has one is its status. `live?/1` counts `:pending`, so a chat waiting for a worker is one
+  the page offers to close — and every other message to a conversation is a push, which for a
+  chat with no `worker_id` logs that it was not delivered and returns `:ok`. Closing through that
+  path left the row pending for ever with nothing said: a conversation the gate could never place
+  could also never be got rid of. So when there is nobody to tell, the platform records the
+  ending itself, which is what the worker's report would have caused anyway. It used to ask
+  whether the row named a worker, and a pending row can name one: `Jobs.assign/2` puts a row back
+  to `:pending` when the assignment cannot be pushed, and leaves the worker it chose.
   """
-  @spec close(Job.t(), String.t()) :: :ok | {:error, term()}
+  @spec close(Job.t(), String.t()) :: :ok | {:error, :not_live} | {:error, term()}
   def close(%Job{kind: :chat} = chat, reason \\ "closed") do
-    case worker_of(chat) do
-      nil -> with {:ok, _chat} <- ended(chat, nil, reason), do: :ok
-      worker_id -> deliver(worker_id, chat.id, "close", %{"reason" => reason})
+    case Repo.one(from j in Job, where: j.id == ^chat.id, select: {j.status, j.worker_id}) do
+      {:running, worker_id} when is_binary(worker_id) ->
+        deliver(worker_id, chat.id, "close", %{"reason" => reason})
+
+      {status, _worker_id} ->
+        if live?(status), do: ended_here(chat, status, reason), else: {:error, :not_live}
+    end
+  end
+
+  # Ended only if the row is still what was just read: a scheduling pass may have placed it in
+  # between, and then there is a worker to tell instead, so it is asked again. The retry is out
+  # of a test's reach — it needs a pass to commit between the read above and the lock in
+  # `ended/4`, two statements apart in this process — so `ended/4`'s refusal is what is tested.
+  defp ended_here(chat, seen, reason) do
+    case ended(chat, nil, reason, expect: seen) do
+      {:ok, _chat} -> :ok
+      {:error, {:row, {:changed, _now}}} -> close(chat, reason)
+      {:error, _reason} = error -> error
     end
   end
 
@@ -244,20 +287,24 @@ defmodule Forge.Conversations do
   @doc """
   Records that a turn ended: what it cost, how many turns it took, and where its work is.
 
-  **Cost is set, not added.** The harness reports `total_cost_usd` cumulatively across the
-  session — measured, see § Spend — while `num_turns` counts one turn. `progress_attrs/2` adds
-  both, and doing that here would count turn one's cost in every later turn: by turn five a
-  conversation reports several times what it spent and the daily cap trips early on money nobody
-  spent. The number stays plausible and monotonic the whole time, which is why this is written
-  down rather than left to be noticed.
+  **Cost is set on the run, and the conversation's is every run's.** The harness reports
+  `total_cost_usd` cumulatively across the process — measured, see § Spend — while `num_turns`
+  counts one turn. `progress_attrs/2` adds both, and doing that here would count turn one's cost
+  in every later turn: by turn five a conversation reports several times what it spent and the
+  daily cap trips early on money nobody spent. So the figure is set on the current run
+  (`Forge.Jobs.Runs.cost/3`), and a reopened conversation — a new process, whose figure starts
+  again from nothing — adds a run rather than overwriting the last one's.
 
-  Idempotent on `(job_id, turn)`: the worker re-sends a turn until it is acked.
+  Idempotent on `(job_id, session, turn)`: the worker re-sends a turn until it is acked, and it
+  numbers turns from one in every process — so after a reopen, turn one is a turn nobody has
+  recorded, not a re-send of the first session's.
   """
   @spec record_turn(Job.t(), map()) :: {:ok, Job.t()} | {:error, term()}
   def record_turn(%Job{kind: :chat} = chat, payload) do
     turn = payload["turn"]
+    session = get_in(payload, ["harness", "session_id"])
 
-    if recorded?(chat.id, turn) do
+    if recorded?(chat.id, session, turn) do
       {:ok, chat}
     else
       do_record_turn(chat, turn, payload)
@@ -266,12 +313,14 @@ defmodule Forge.Conversations do
 
   defp do_record_turn(chat, turn, payload) do
     harness = payload["harness"] || %{}
+    {documents, refused} = documents(chat, payload)
 
     # The turn's figure is the process's running total, so it is *set* on this run
     # (`docs/design/conversations.md` § Spend) — and the conversation's cost is every run's, since
     # a conversation reopened is a new process whose total starts again from nothing.
     Multi.new()
     |> put_proposals(chat, payload)
+    |> put_documents(chat, documents)
     |> Runs.cost(chat.id, decimal(harness["cost_usd"]))
     |> Multi.update(:job, fn _changes ->
       Job.progress_changeset(chat, %{
@@ -286,10 +335,14 @@ defmodule Forge.Conversations do
       job_id: chat.id,
       payload: %{
         "turn" => turn,
+        "session_id" => harness["session_id"],
         "commit" => payload["commit"],
         "interrupted" => payload["interrupted"] == true,
         "cost_usd" => harness["cost_usd"],
-        "subtype" => harness["subtype"]
+        "subtype" => harness["subtype"],
+        # Every turn, empty or not: the page reads the newest, so a file the agent fixed stops
+        # being listed as refused the turn it is fixed.
+        "refused_documents" => refused
       }
     })
     |> Repo.transaction()
@@ -320,6 +373,158 @@ defmodule Forge.Conversations do
     Proposals.put_from_result(multi, chat, proposals, payload["invalid_proposals"] || %{})
   end
 
+  # What a conversation left in `out/` besides its proposals, which it means to keep: split into
+  # what is written this turn and what is refused, with why. `docs/design/conversations.md`
+  # § Commits.
+  #
+  # Every check is made here, before the transaction, rather than left to fail inside it: the
+  # turn's transaction also carries its cost, its commit and its proposals, and the worker
+  # re-sends an unacked turn for ever — so a document that could not be stored would be a
+  # conversation whose spending was never recorded again. The worker made the name and file
+  # checks already; they are asked again because what crosses the channel is not a guard.
+  defp documents(chat, payload) do
+    scope = document_scope(chat)
+    held = held(chat)
+
+    checked =
+      (payload["documents"] || %{})
+      |> Enum.sort()
+      |> Enum.map(fn {name, raw} -> {name, raw, check(scope, held, name, raw)} end)
+
+    write =
+      for {name, raw, {:ok, meta}} <- checked,
+          not unchanged?(scope, name, raw, chat),
+          do: {name, raw, meta}
+
+    refused =
+      for {name, _raw, {:refused, reason}} <- checked, into: %{}, do: {name, reason}
+
+    {{scope, write}, Map.merge(payload["invalid_documents"] || %{}, refused)}
+  end
+
+  # Against the ticket for a ticket chat, because that is the work it is about; against the
+  # conversation for a project chat, which has nothing else to belong to (§ Commits).
+  defp document_scope(%Job{ticket_id: nil, id: id}), do: {:job, id}
+  defp document_scope(%Job{ticket_id: ticket_id}), do: {:ticket, ticket_id}
+
+  # Whether this can be recorded as `name` in `scope`: `{:ok, front_matter}`, or refused with
+  # why. The workflow's rules where they apply, each with its one definition: the name, the text,
+  # the parse, a name that on this ticket is already something a document version would
+  # contradict — a transcript, the changeset — and a document a person's decision is waiting on.
+  # The front matter comes back because the version is written without a second parse (below).
+  defp check(scope, held, name, raw) do
+    with nil <- ForgeCore.Workflow.document_name_error(name),
+         nil <- ForgeCore.Document.text_error(raw),
+         {:ok, document} <- parse(raw),
+         nil <- kind_error(scope, name),
+         nil <- held[name] do
+      {:ok, document.front_matter}
+    else
+      reason when is_binary(reason) -> {:refused, reason}
+    end
+  end
+
+  defp parse(raw) do
+    case ForgeCore.Document.parse(raw) do
+      {:ok, document} -> {:ok, document}
+      {:error, errors} -> "does not parse as a document: " <> ForgeCore.Error.format(errors)
+    end
+  end
+
+  # The documents on a ticket that a person's decision is waiting on, by name, with why a chat may
+  # not write them now (`docs/design/conversations.md` § Commits). A version the chat wrote would
+  # be the latest, and the latest is what both decisions read:
+  #
+  # - a document carrying an open blocking question, while a job waits — a question counts only
+  #   on the latest version, so a version without the block closed it and left the job waiting on
+  #   nothing, which nothing then resumed. Asked of the two functions `Operator.answer/4` resumes
+  #   on, so the refusal and the resume cannot disagree about what holds a job;
+  # - a document the pending transition is waiting to approve — `Engine.decide/4` approves the
+  #   latest version, which would have been the chat's, and nobody had seen it.
+  #
+  # A project chat's documents are its own, and nothing waits on them.
+  defp held(%Job{ticket_id: nil}), do: %{}
+
+  defp held(%Job{ticket_id: ticket_id}) do
+    ticket = Tickets.get!(ticket_id)
+    Map.merge(questioned(ticket), awaiting_approval(ticket))
+  end
+
+  defp questioned(ticket) do
+    case Jobs.waiting_job(ticket) do
+      nil ->
+        %{}
+
+      _waiting ->
+        ticket.id
+        |> Forge.Artifacts.open_blocking_questions()
+        |> Enum.group_by(& &1.artifact_version.artifact.name, & &1.key)
+        |> Map.new(fn {name, keys} ->
+          {name,
+           "holds the question a waiting job stopped on (#{Enum.map_join(keys, ", ", &"`#{&1}`")})" <>
+             ", and can be written once that is answered"}
+        end)
+    end
+  end
+
+  defp awaiting_approval(ticket) do
+    Map.new(Forge.Engine.awaiting_approval(ticket), fn name ->
+      {name,
+       "is waiting for a person to approve the version they were shown, and can be written " <>
+         "once that is decided"}
+    end)
+  end
+
+  defp kind_error(scope, name) do
+    case Forge.Artifacts.find(scope, name) do
+      %{kind: kind} when kind != :document -> "is a #{kind} here, not a document"
+      _document_or_nothing -> nil
+    end
+  end
+
+  # Unchanged since this conversation last wrote it — not since anyone did (§ Commits).
+  defp unchanged?(scope, name, raw, chat) do
+    match?(%{content: ^raw}, Forge.Artifacts.latest_written(scope, name, chat.id))
+  end
+
+  # `parse: false`, as a proposal is recorded, and for the reason a conversation's documents are
+  # not a job's: a conversation asks in its reply, where the person is. Parsed, a `question` block
+  # in a chat's document became a question on the ticket — a blocking one held a waiting job on
+  # something nobody had been asked. The block was still checked by `check/4`, which is also where
+  # the front matter kept as the version's `meta` comes from (§ Commits).
+  defp put_documents(multi, chat, {scope, write}) do
+    Enum.reduce(write, multi, fn {name, raw, meta}, multi ->
+      Forge.Artifacts.put_version(
+        multi,
+        {:document, name},
+        scope,
+        name,
+        :document,
+        {:job, chat.id},
+        %{content: raw, parse: false, meta: meta}
+      )
+    end)
+  end
+
+  @doc """
+  What the conversation's last turn left in `out/` that was not recorded, by name, with why. The
+  newest turn's, because every turn reports all of `out/` and says so even when it is nothing.
+  """
+  @spec unrecorded(String.t()) :: %{String.t() => String.t()}
+  def unrecorded(job_id) do
+    Repo.one(
+      from e in Event,
+        where: e.job_id == ^job_id and e.type == "chat.turn",
+        order_by: [desc: e.seq],
+        limit: 1,
+        select: e.payload
+    )
+    |> case do
+      %{"refused_documents" => %{} = refused} -> refused
+      _none -> %{}
+    end
+  end
+
   defp push_reply(chat) do
     case chat.id |> messages() |> List.last() do
       %{role: :assistant, text: text} -> Forge.Push.chat_reply(chat, text)
@@ -327,12 +532,16 @@ defmodule Forge.Conversations do
     end
   end
 
-  defp recorded?(job_id, turn) do
+  # `IS NOT DISTINCT FROM` so that a turn with no session matches another with none: a harness
+  # that never reported one is one session as far as this can tell, which is what it was before
+  # sessions were recorded.
+  defp recorded?(job_id, session, turn) do
     Repo.exists?(
       from e in Event,
         where:
           e.job_id == ^job_id and e.type == "chat.turn" and
-            fragment("(? -> 'turn')::int = ?", e.payload, ^turn)
+            fragment("(? -> 'turn')::int = ?", e.payload, ^turn) and
+            fragment("(? ->> 'session_id') IS NOT DISTINCT FROM ?::text", e.payload, ^session)
     )
   end
 
@@ -340,20 +549,34 @@ defmodule Forge.Conversations do
   defp decimal(number) when is_float(number), do: Decimal.from_float(number)
   defp decimal(number) when is_integer(number), do: Decimal.new(number)
 
+  @closed "closed"
+
   @doc """
   Records that a conversation stopped, and why. It is not over: reopening is a cold start.
 
+  `expect: status` records it only if the row still has the status the caller read, and answers
+  `{:error, {:row, {:changed, now}}}` otherwise (`close/2`).
+
   A chat that was closed is finished; one that lost its machine or its platform is dormant, and
   the difference is whether anyone asked for it.
+
+  **A closed one has its branch dealt with here, and nowhere earlier** (`Merge.abandon_chat/1`).
+  A conversation with a machine finishes its last turn and pushes it before the worker reports
+  the ending, so this is the first moment the branch is the one the conversation left — and the
+  credential is revoked first, so nothing can push to it afterwards. Deleting it when the person
+  asked would delete a branch the worker was about to push to, and the push would put it back.
+  Going idle, losing a machine and a restart are not a person deciding anything, and keep it.
   """
-  @spec ended(Job.t(), String.t() | nil, String.t() | nil) :: {:ok, Job.t()} | {:error, term()}
-  def ended(%Job{kind: :chat} = chat, commit, reason) do
-    status = if reason in ["closed", "idle"], do: :finished, else: :hibernated
+  @spec ended(Job.t(), String.t() | nil, String.t() | nil, keyword()) ::
+          {:ok, Job.t()} | {:error, term()}
+  def ended(%Job{kind: :chat} = chat, commit, reason, opts \\ []) do
+    status = if reason in [@closed, "idle"], do: :finished, else: :hibernated
 
     worker_id =
       chat.worker_id || Repo.one(from j in Job, where: j.id == ^chat.id, select: j.worker_id)
 
     Multi.new()
+    |> Multi.run(:row, fn repo, _changes -> expected(repo, chat, opts[:expect]) end)
     |> Multi.update(
       :job,
       Job.progress_changeset(chat, %{status: status, finished_at: DateTime.utc_now(:second)})
@@ -372,6 +595,7 @@ defmodule Forge.Conversations do
         # back. Without this the machine stays `busy` for ever and takes no more work — which
         # is not visible anywhere except the next thing that never gets scheduled.
         Tokens.revoke_for_job(chat.id)
+        if reason == @closed, do: abandon_branch(chat)
         Workers.release(worker_id)
         Events.notify_job(chat.id, event)
         Events.notify(chat.ticket_id)
@@ -382,37 +606,112 @@ defmodule Forge.Conversations do
     end
   end
 
-  @doc """
-  Reopens a dormant conversation: back in the queue, cold.
+  # `:expect` is the status the caller read, locked and compared, the other half of
+  # `Forge.Jobs`' check before it marks a row running. Without it — the worker reporting its own
+  # ending — there is nothing to compare, because the process that ended is the one telling.
+  defp expected(_repo, _chat, nil), do: {:ok, nil}
 
-  The machine is gone and so is the harness session, so the new process starts with the
-  transcript replayed as context rather than `--resume`, which cannot find a session whose
-  worktree no longer exists.
+  defp expected(repo, %Job{id: id}, seen) do
+    case repo.one!(from j in Job, where: j.id == ^id, lock: "FOR UPDATE", select: j.status) do
+      ^seen -> {:ok, seen}
+      now -> {:error, {:changed, now}}
+    end
+  end
+
+  # After the transaction rather than inside it: the ending is recorded whatever git says, since
+  # the worker is waiting on the ack. Each outcome is an event carrying the head, so the sha of
+  # discarded work is in the log for as long as the object database still has it.
+  defp abandon_branch(chat) do
+    case Forge.Merge.abandon_chat(chat) do
+      {:ok, :gone} ->
+        :ok
+
+      {:ok, {:deleted, how, head}} ->
+        branch_event(chat, "chat.branch_deleted", %{"head" => head, "merged" => how == :merged})
+
+      {:ok, {:kept, why, head}} ->
+        branch_event(chat, "chat.branch_kept", %{"head" => head, "reason" => to_string(why)})
+
+      {:error, reason} ->
+        Logger.warning("chat #{chat.id}: could not deal with its branch: #{inspect(reason)}")
+    end
+  end
+
+  defp branch_event(chat, type, payload) do
+    {:ok, _event} =
+      Events.append(type, :system, %{
+        ticket_id: chat.ticket_id,
+        job_id: chat.id,
+        payload: Map.put(payload, "branch", Jobs.chat_branch(chat))
+      })
+
+    :ok
+  end
+
+  @doc """
+  Reopens a conversation that is not live: back in the queue, cold. One that is live is
+  refused, `{:error, :live}`.
+
+  The machine is gone and so is the harness session, so the new process starts fresh rather
+  than with `--resume`, which cannot find a session whose worktree no longer exists. What it is
+  given is the branch as it stands and the conversation so far, replayed (`opening/1`): it reads
+  what was said, and answers what the person says next rather than the opening message again.
+
+  **A branch that is gone is made again**, where opening would make it — the default branch or
+  the ticket's, as it stands now — and in the same transaction, the way `open/3` does: a worker
+  handed a branch that does not exist refuses the conversation minutes later. Closing deletes a
+  conversation's branch and a merge does too, and neither makes it one that cannot be reopened.
   """
-  @spec reopen(Job.t()) :: {:ok, Job.t()} | {:error, term()}
+  @spec reopen(Job.t()) :: {:ok, Job.t()} | {:error, :live} | {:error, term()}
   def reopen(%Job{kind: :chat} = chat) do
     Multi.new()
-    |> Multi.update(
-      :job,
-      Job.progress_changeset(chat, %{
+    |> Multi.run(:dormant, fn repo, _changes -> dormant(repo, chat) end)
+    |> Multi.update(:job, fn %{dormant: row} ->
+      Job.progress_changeset(row, %{
         status: :pending,
         worker_id: nil,
         harness_session_id: nil,
         finished_at: nil
       })
-    )
-    |> Events.log(:reopened, "chat.reopened", :system, %{
-      ticket_id: chat.ticket_id,
-      job_id: chat.id
-    })
+    end)
+    |> Multi.run(:branch, fn _repo, _changes -> restore_branch(chat) end)
+    |> Events.log(:reopened, "chat.reopened", :system, fn %{branch: branch} ->
+      %{ticket_id: chat.ticket_id, job_id: chat.id, payload: %{"branch" => branch}}
+    end)
     |> Repo.transaction()
     |> case do
       {:ok, %{job: chat}} ->
         Events.notify(chat.ticket_id)
         {:ok, chat}
 
+      {:error, :dormant, :live, _changes} ->
+        {:error, :live}
+
       {:error, step, reason, _changes} ->
         {:error, {step, reason}}
+    end
+  end
+
+  # **A live conversation is not reopened**, and the row says whether it is live — locked, so a
+  # scheduler marking it running cannot slip between the question and the write. Reopening one
+  # that is running cleared the `worker_id` its worker is still reporting under: every turn it
+  # sent after that failed the channel's ownership check for ever, and the scheduler placed the
+  # conversation a second time. The page offers Reopen only when `live?/1` says no; an event off
+  # the socket is not the page.
+  defp dormant(repo, chat) do
+    row = repo.one!(from j in Job, where: j.id == ^chat.id, lock: "FOR UPDATE")
+    if live?(row), do: {:error, :live}, else: {:ok, row}
+  end
+
+  defp restore_branch(chat) do
+    %{project: project, ticket: ticket} = context(chat)
+    repo = Projects.repo_path(project)
+    branch = Jobs.chat_branch(chat)
+
+    if Git.branch_exists?(repo, branch) do
+      {:ok, "kept"}
+    else
+      with :ok <- Git.create_branch(repo, branch, base(project, ticket)), do: {:ok, "recreated"}
     end
   end
 
@@ -497,6 +796,79 @@ defmodule Forge.Conversations do
     do: %{message | text: pieces |> Enum.join() |> String.trim()}
 
   defp finish_message(message), do: message
+
+  @doc """
+  What a conversation's next process starts with: what was said before it, and what it answers.
+
+  **Split at the agent's last reply.** Everything up to it is the conversation so far — what the
+  person said and what they were told — rendered oldest first as `:replay`, which the worker
+  writes to `$FORGE_JOB/conversation.md` and the manifest names. What the person said after it
+  is `:prompt`, the message the process opens with. A conversation that has never been answered
+  has no replay and its whole opening is the prompt, which is a first start; one whose last word
+  was the agent's has a replay and no prompt, and the worker then holds the prompt until the
+  person's next message (`docs/design/conversations.md` § Lifetime).
+
+  That second case is a reopen, and it is why this exists. The prompt used to be the first
+  `chat.message` and nothing else, so a reopened conversation began by answering its opening
+  message a second time, as though new, and knew nothing that was said after it.
+
+  Messages sent while the conversation waited for a machine are after the last reply too, so
+  they are answered rather than pushed to nobody. What the split cannot see: a turn that said
+  nothing leaves the message before it looking unanswered, and it is answered again; and a
+  message queued mid-turn that the process never took reads as answered, because the projection
+  draws the rest of that turn's reply after it.
+  """
+  @spec opening(String.t()) :: %{replay: String.t() | nil, prompt: String.t() | nil}
+  def opening(job_id) do
+    {said, waiting} = split_at_last_reply(messages(job_id))
+
+    %{
+      replay: render_replay(said),
+      prompt:
+        case waiting do
+          [] -> nil
+          texts -> Enum.join(texts, "\n\n")
+        end
+    }
+  end
+
+  defp split_at_last_reply(messages) do
+    case messages |> Enum.reverse() |> Enum.find_index(&(&1.role == :assistant)) do
+      nil ->
+        {[], user_texts(messages)}
+
+      from_end ->
+        {said, after_it} = Enum.split(messages, length(messages) - from_end)
+        {said, user_texts(after_it)}
+    end
+  end
+
+  defp user_texts(messages), do: for(%{role: :user, text: text} <- messages, do: text)
+
+  defp render_replay([]), do: nil
+
+  defp render_replay(said) do
+    """
+    # The conversation so far
+
+    Everything said before this process started, oldest first. It ends with your last reply;
+    the person's next message is at the end of your prompt, not here.
+
+    """ <> Enum.map_join(said, "\n", &replay_entry/1)
+  end
+
+  defp replay_entry(%{role: :user, text: text, at: at}),
+    do: "## The person, #{stamp(at)}\n\n#{text}\n"
+
+  # No `chat.turn` closed it: the process stopped while it was still speaking. Said so, because
+  # a reply that ends mid-sentence reads as a finished one that trailed off.
+  defp replay_entry(%{role: :assistant, text: text, at: at, turn: nil}),
+    do: "## You, #{stamp(at)} — cut off: the process stopped before this reply ended\n\n#{text}\n"
+
+  defp replay_entry(%{role: :assistant, text: text, at: at}),
+    do: "## You, #{stamp(at)}\n\n#{text}\n"
+
+  defp stamp(at), do: Calendar.strftime(at, "%Y-%m-%d %H:%M UTC")
 
   @doc """
   The question a reply asked, if it asked one.
@@ -694,10 +1066,15 @@ defmodule Forge.Conversations do
 
   # The store key and a token to read it. A job that never uploaded one — it failed before it
   # could, or the upload did — has none, and the folder says so rather than pretending.
+  #
+  # The worker fetches it only once the conversation's worktree is prepared, so the token has
+  # to outlive the preparation as well as its own fifteen minutes (`docs/design/storage.md`
+  # § Serving).
   defp transcript_ref(job) do
     with %{blob_uri: uri} when is_binary(uri) <- newest_transcript(job),
          {:ok, key} <- Forge.Storage.key_from_uri(uri) do
-      %{"key" => key, "token" => Forge.Storage.Token.sign(:get, key)}
+      token = Forge.Storage.Token.sign(:get, key, outlasting_ms: Jobs.preparation_margin_ms())
+      %{"key" => key, "token" => token}
     else
       _none -> nil
     end

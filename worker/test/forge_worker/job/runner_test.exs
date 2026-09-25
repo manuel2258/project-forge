@@ -275,6 +275,60 @@ defmodule ForgeWorker.Job.RunnerTest do
     assert result.missing == []
   end
 
+  # The prompt and `--resume` come from the same option, so they cannot disagree: a run that
+  # resumes its session is handed what changed, and a cold start the whole prompt. Asserted on
+  # what reached the harness — its stdin and its argv — because that is the pair that has to
+  # match (`docs/design/job-prompt.md` § The continuation prompt).
+  describe "which prompt goes with which invocation" do
+    setup do
+      answers = %ForgeCore.Job.Spec.Input{
+        name: "answers.md",
+        version: 2,
+        content: "# Answers\n\n## backend\n\nQ: Which backend?\n\nA: sqlite\n"
+      }
+
+      spec = spec()
+      %{spec: %{spec | inputs: spec.inputs ++ [answers]}}
+    end
+
+    test "a run that resumes its session gets the continuation", %{spec: spec} = context do
+      pid =
+        run(context, "success",
+          spec: spec,
+          head: "c0ffee",
+          harness_opts: [
+            executable: fake_executable(),
+            credential: {:api_key, "secret-key"},
+            resume_session: "sess-42"
+          ]
+        )
+
+      {:ok, result} = Runner.await(pid, 5_000)
+      job_dir = Path.dirname(result.transcript_path)
+      prompt = File.read!(Path.join(job_dir, "fake-prompt.txt"))
+
+      assert File.read!(Path.join(job_dir, "fake-args.txt")) =~ "--resume sess-42"
+      assert String.starts_with?(prompt, "# Continue this job")
+      assert prompt =~ "A: sqlite"
+      assert prompt =~ "`ticket/7`, at `c0ffee`"
+      refute prompt =~ "# You are one job in a ticket lifecycle"
+
+      # And the file the job directory keeps is what the harness was given. The fake reads its
+      # stdin with `$(cat)`, which drops the final newline.
+      assert File.read!(Path.join(job_dir, "prompt.md")) == prompt <> "\n"
+    end
+
+    test "a cold start gets the whole prompt, and no --resume", %{spec: spec} = context do
+      {:ok, result} = context |> run("success", spec: spec, head: "c0ffee") |> Runner.await(5_000)
+      job_dir = Path.dirname(result.transcript_path)
+      prompt = File.read!(Path.join(job_dir, "fake-prompt.txt"))
+
+      refute File.read!(Path.join(job_dir, "fake-args.txt")) =~ "--resume"
+      assert String.starts_with?(prompt, "# You are one job in a ticket lifecycle")
+      refute prompt =~ "# Continue this job"
+    end
+  end
+
   defp seed_output(root, spec, content) do
     out = Path.join([root, spec.job_id, "out"])
     File.mkdir_p!(out)
@@ -335,23 +389,28 @@ defmodule ForgeWorker.Job.RunnerTest do
   # flake, and the spec names which one. Nothing asserted the command that produces, so a
   # machine with `nix_env` on could have been running the harness outside the environment its
   # build needs and the job would only have failed later, in the build.
+  # Both await the run before ending: the harness writes under `root`, which `on_exit` removes,
+  # and a removal racing those writes fails the test for nothing it asserts.
   test "with nix_env the harness runs inside the project's environment", context do
-    run(context, "success",
-      nix_env: true,
-      slice: WrapReportingSlice,
-      slice_opts: %{reply_to: self()}
-    )
+    pid =
+      run(context, "success",
+        nix_env: true,
+        slice: WrapReportingSlice,
+        slice_opts: %{reply_to: self()}
+      )
 
     assert_receive {:wrapped, "nix", ["develop", ".#implement", "--command" | rest]}
     assert [executable | _flags] = rest
     assert executable == fake_executable()
+    {:ok, _result} = Runner.await(pid, 5_000)
   end
 
   test "without it the harness is run as it is", context do
-    run(context, "success", slice: WrapReportingSlice, slice_opts: %{reply_to: self()})
+    pid = run(context, "success", slice: WrapReportingSlice, slice_opts: %{reply_to: self()})
 
     assert_receive {:wrapped, executable, _args}
     assert executable == fake_executable()
+    {:ok, _result} = Runner.await(pid, 5_000)
   end
 
   # A slice that cannot be made is a job that cannot run. The alternative — starting the

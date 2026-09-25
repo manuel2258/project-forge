@@ -8,10 +8,14 @@ and whose account the machine is billed to. It replaces three single numbers —
 its slices, its volumes. This note is about the tier becoming plural — more than one shape of
 machine, more than one provider, and more than one person paying.
 
-It is built, apart from `resources` on a *command*, which waits for commands to be a job kind.
-`docs/design/commands.md` § Resources drafted the job half of it and `worker-tier.md` § Open had
-carried the rest as *"`slice_memory` is one number for every job"* since the tier was written;
-this is where both landed.
+**It is built**, apart from `resources` on a *command*, which waits for commands to be a job kind
+(`docs/design/commands.md` § An invocation is a job). The schema is migrations `20260919140000`
+to `20260920190000`, templates and provider credentials are `Forge.Provisioning`, the gate is
+`Forge.Workers.fits?/2`, and the Hetzner driver has created and destroyed real machines but none
+has yet connected to a platform and run a job.
+`docs/design/commands.md` § Resources drafted the job half of it and `worker-tier.md` § Open
+carried the rest, as one slice size for every job, from the day the tier was written; this is
+where both landed.
 
 ## There are no classes
 
@@ -81,10 +85,15 @@ represents: one row shape, one column saying who may end its life.
 
 ## What a job asks for
 
-`resources: {memory, cpu}`, valid on a command, on a job state, and as a project default, resolved
-by the chain `model` uses: the command's, then the state's, then the project's default, then the
-platform's `slice_bytes`. `commands.md` § Resources holds the grammar and the reasoning; two
-things from it matter here.
+`resources: {memory, cpu}`, valid on a job state and under the workflow's `defaults`, and on a
+command once commands exist. It resolves nearest-first: the command's, then the state's, then
+`defaults.resources`, then the platform's `slice_bytes` and `Workers.default_cores/0` —
+`ForgeCore.Workflow.resources/2` walks the workflow's links and `Forge.Jobs.resources/2` adds
+the platform's. **That is not the chain `model` uses**, though this note first said it was: a
+model resolves the state's, then the project's `model` column, which is a setting on the project
+rather than a key in its workflow file. There is no per-project `resources` column; a project's
+default is its workflow's `defaults`. `commands.md` § Resources holds the grammar and the
+reasoning; two things from it matter here.
 
 **`cpu` is a reservation, not a quota.** The gate counts it when placing the job; the slice still
 gets `CPUWeight`, so a command that finds the machine to itself uses all of it. `decisions.md`
@@ -130,8 +139,10 @@ from the template at creation, or from the operator for a permanent machine.
 **`ready` records what the machine says; the row decides what it gets.** The worker still reports
 its own budget and core count (`worker-channel.md` § What a worker offers), and that report is
 stored — but it is stored *beside* the scheduling values, not over them. A hand-edit on a
-permanent worker survives every reconnect, which it does not today: `Workers.ready/3` writes
-`memory_budget` from the message, so the UI field would be a lie the moment the machine came back.
+permanent worker survives every reconnect: `Workers.ready/2` fills only the fields the row has
+empty and keeps what the machine said in `workers.reported`. Before this it wrote
+`memory_budget` from every message, which would have made the page's field a lie the moment the
+machine came back.
 
 **Silence is *unknown*, and unknown is not zero — except for memory.** A worker that has never
 said how many cores it has is not gated on cores, and one that has never said which kinds it
@@ -149,7 +160,10 @@ existed; a missing budget means it never spoke.
 overcommitted, and the per-job ceiling cannot catch it: `MemoryMax` bounds one job, and what
 overcommitment breaks is the *sum*, which the global kernel OOM killer finds instead — picking by
 heuristic, and the largest thing outside the slices is the worker release itself. So the
-difference is surfaced on the worker page and in the logs rather than being quietly split.
+difference is surfaced on the workers page — `ForgeWeb.WorkersLive.mismatch/1`, for memory and
+cores — rather than being quietly split. **It is not logged**, though this note said it would
+be: `Workers.ready/2` stores the report without a word, so the page is the only place a
+disagreement shows.
 
 **This is a real risk accepted deliberately, and it is the one place this note trades safety for
 predictability.** Trusting the row means capacity is knowable before a machine exists, which is
@@ -164,22 +178,68 @@ next step is to refuse the join, not to change which number wins.
 `Forge.Jobs.Scheduler` stops reading one number and starts reading three.
 
 ```
-assignable(kind, memory, cores) =
-  first connected worker, oldest first, where
-    kind in worker.accepts
+assignable(kind, memory, cores, harness, project, preferred) =
+  preferred if it qualifies, else the first connected worker, oldest first, where
+    (worker is assigned to project, or its template is)
+    and kind in worker.accepts
+    and worker runs harness, taking the job's credential from the assignment
     and worker.memory_budget - promised_memory(worker) >= memory
     and worker.cores        - promised_cores(worker)  >= cores
 ```
 
+Whose machines a project may use is `Workers.serving/1`: a permanent machine through the
+`project_workers` its owner made, one the platform made through its template's `project_templates`
+(`identity.md` § Workers). A permanent machine nobody assigned serves nothing. The harness clause
+is `Workers.runs?/2` (`credentials.md` § What a worker offers now).
+
 `promised` stops being `count * slice_bytes()` and becomes two sums over the worker's `:running`
 and `:waiting` jobs, which is what the denormalised columns above are for.
 
-**An unplaceable job is skipped and the pass continues.** That is what `assign_pending/0` does
-today and it stays: a job that fits nothing is offered again next pass, which is a queue. Per
-template `max_workers` already removes the starvation that mattered — one kind of work cannot eat
-the fleet — and what remains is that a large job can be jumped by small ones indefinitely. **The
-skip is recorded**, because the alternative is a job that never runs and no surface saying why.
-An age-based reservation is the standard fix and § Open is where it waits.
+**An unplaceable job is skipped and the pass continues** — within the pass. A job that fits nothing
+is offered again next pass, which is a queue. Per template `max_workers` already removes the
+starvation that mattered — one kind of work cannot eat the fleet — and what remains is that a large
+job can be jumped by small ones indefinitely. An age-based reservation is the standard fix and §
+Open is where it waits. **A pass is the ten oldest pending jobs** (`Jobs.pending/1`,
+`max_pending_per_pass`), so the skip does not reach past them: ten jobs that can never be placed —
+conversations in a project with no template or no credential, jobs waiting out a week's limit — are
+the whole of every pass, and nothing younger on the node is offered at all. § Open records it.
+
+**The skip is recorded, once per reason.** The alternative is a job that never runs and no surface
+saying why, which is what there was: `Scheduler` dropped the reason on the floor, with no event, log
+line or count. A pending job the pass cannot place now gets a `job.waiting` event carrying the
+reason — `creating`, `at_capacity`, `create_failed`, `credential_refused`, `limited` when every
+credential in the project's pool is rate-limited (`docs/design/credentials.md` § How a job picks),
+and for a chat the three template answers below and `no_credential` — beside the sentence the
+operator reads. The two refusals are two because their reasons are in two places: `create_failed` is
+the driver saying no, and its words are on the worker row it made, so the sentence sends the
+operator to the workers page; `credential_refused` is the platform refusing a template whose
+provider credential it may not spend — another user's, or another provider's (§ Whose account) —
+which makes no worker row at all, so the words are on the template and the sentence sends them to
+the templates page — in both cases the template owner's, since each page shows only the viewer's own
+rows. One sentence for both sent the second case to a page with nothing on it. **Only when the
+reason changes**: the scheduler asks every two seconds and `events` is append-only, so an event per
+pass would be some forty thousand copies of one sentence per job per day. What a new reason is
+compared with is the job's latest `job.waiting` since its latest `job.started`
+(`Jobs.current_wait/1`), so a job that ran and came back — requeued, recovered, reopened — says the
+same thing again, once. The dedup reads the same query the pages draw from, so what is recorded and
+what is shown cannot disagree about what "the current reason" means.
+
+It is drawn where the job is looked at: under the pending job's row on the ticket's timeline, on
+a pending conversation's page where the reply will appear, and as a line in the job's own event
+stream (`docs/design/ui.md` § A job waiting for a machine). `job.waiting` is not the job status
+`:waiting`, which is a job stopped on a question.
+
+**`Jobs.assign/2` can refuse after placement, and one of its refusals is a wait too.** The
+spend caps are asked there, once a worker has been found (`docs/design/worker-tier.md`
+§ Scheduling). A paused node leaves the job pending until midnight, which is recorded the same
+way, as `spend_paused` — and it had been writing a `spend.paused` event on every pass for every
+pending job a worker was found for, the flood the rule above exists to prevent, which it no
+longer does. The allowance
+sticks the ticket, which is its own record. The rest are deliberately not recorded as waits:
+`:not_connected` is a worker that left between being chosen and being told, which the next pass
+routes around, and a token or a row that cannot be written is an error and is logged as one. A
+reason the operator cannot act on, flapping pass to pass, would be noise with the look of a
+signal.
 
 **Could-never-fit is distinguished from does-not-fit-now.** A job declaring more than the largest
 template assigned to its project can ever provide is stuck with that as the reason, through the
@@ -196,18 +256,23 @@ three of them would send somebody looking at the wrong thing:
 |---|---|---|
 | nothing assigned to the project | `{:no_template, :none_assigned}` | assign one |
 | everything assigned is disabled | `{:no_template, :all_disabled}` | fix the recipe, then enable |
-| assigned, enabled, none big enough | `{:no_template, :none_fit}` | make a bigger one, or ask for less |
+| assigned, enabled, none that takes its kind is big enough | `{:no_template, :none_fit}` | make one that fits, or ask for less |
 | one fits and is at `max_workers` | `:at_capacity` | nothing — it is a queue |
 
 Only the last is a queue. The other three are a person being waited on, which is what the stick
-mechanism is for — and it is why `Scheduler.stick/1` being a no-op for a chat (a chat has no
-ticket to stick) is a real gap rather than a detail: a conversation blocked by any of the first
-three sits dormant and silent. `conversations.md` § Lifetime is where that belongs.
+mechanism is for — and it is why `Scheduler.stick/2` sticking nothing for a chat is a real gap
+rather than a detail: a conversation blocked by any of the first three sits pending. It is no
+longer silent — it records the answer as a `job.waiting`, with the sentence a ticket would have
+been stuck with, and its page draws it — but nothing puts it in the queue, so the person being
+waited on is told only if they open the conversation. A ticket chat included — its ticket is not
+the chat's to stick, because the ticket's own work may place perfectly well (a template can take
+workflow jobs and refuse chats). `conversations.md` § Lifetime is where the rest belongs.
 
 ## Where a machine comes from
 
-**`Forge.Provider.impl/0` is a single global module today**, and it is the thing standing between
-this design and a second provider. It becomes a registry keyed by the provider name:
+**`Forge.Provider.impl/0` was a single global module**, and it was the thing standing between
+this design and a second provider. It is now a registry keyed by the provider name, which
+`Forge.Provider.driver/1` reads — and an unknown name is an error, never the default:
 
 ```elixir
 config :forge, Forge.Provider,
@@ -218,9 +283,14 @@ The driver for a create is resolved from the template's credential, not from nod
 Adding a provider is a config line and a module implementing the behaviour; no platform code
 learns its name.
 
-**A fourth callback, `shapes/1`.** The template UI has to offer machine sizes, and the sizes are
-the provider's. The driver answers — from the provider's API or from a table it embeds, which is
-the driver's business and changeable without touching the platform:
+**`shapes/1` was the fourth callback, and four more followed it.** The behaviour now has eight:
+`create`, `destroy` and `status` from before, then `shapes/1`, `images/1` (below),
+`credential_fields/0` (§ Whose account), `required_template_fields/0` (below) and `list/1` —
+every machine forge made in a credential's account, for reconciling against `workers`. Nothing reconciles yet: `Forge.Provider.list/2` has
+no caller, so a machine the platform lost track of is still found in the provider's console.
+The template UI has to offer machine sizes, and the sizes are the provider's. The driver answers
+— from the provider's API or from a table it embeds, which is the driver's business and
+changeable without touching the platform:
 
 ```
 @callback shapes(credential) :: {:ok, [shape]} | {:error, term}
@@ -260,12 +330,33 @@ it.
   one command, and it deletes the rescue server whatever happened — a box left running is the
   hourly leak the workers page exists to catch.
 
-  **A template names the image, and the node configures the fallback.** It was one
-  `FORGE_HETZNER_IMAGE` per node, which is wrong the same way one `machine_size` was: two
-  templates may want different images, and an operator rolling a new one wants both to exist
-  while they move over. `images/1` lists the snapshots a credential can see so the form offers
-  real ones; the id is opaque above the driver exactly like `size`. A template naming none falls
-  back to the node's, which is what every template made before the column has.
+  **A template names the image, and there is no node fallback.** It was one image per node,
+  which is wrong the same way one `machine_size` was: two templates may want different images,
+  and an operator rolling a new one wants both to exist while they move over. `images/1` lists
+  the snapshots a credential can see so the form offers real ones; the id is opaque above the
+  driver exactly like `size`.
+
+  **The fallback there was is gone, because it was never Hetzner's.** A template naming no image
+  used to fall back to `Provider.config(:image)` — which this note once called
+  `FORGE_HETZNER_IMAGE`, a variable nothing ever read. The key is the one `LocalVm` reads as the
+  path of its disk image, filled from `FORGE_WORKER_IMAGE` in `runtime.exs`, so on a node
+  configured for local machines a Hetzner template naming no image sent a qcow2 path to Hetzner
+  as an image id. Now the driver refuses such a create before sending anything, with *the
+  template names no image* — which is what a template saved before the rule below gets, and
+  what its failure counter records (§ A template that cannot make a working machine is taken
+  out of service).
+
+  **And a template that must name one cannot be saved without it.** `required_template_fields/0`
+  is the driver saying which of a template's opaque fields it cannot make a machine without —
+  `[:size, :image]` for Hetzner, nothing for the local driver, which boots the node's image at
+  the node's size whatever a template says — and `Template.changeset/2` requires those, on
+  create and on edit. It is a declaration and not a name check for the reason `credential_fields/0`
+  is: no code above the driver learns that Hetzner is the one that needs an image. The size came
+  with it because it is the same failure: the driver already refused a template naming no server
+  type at create, after the template had been saved and assigned. The form offers *choose one*
+  rather than *the node's default* or *custom* for a field its provider requires. The token
+  keeps a node fallback, `Provider.config(:token)`; nothing in `runtime.exs` sets it, and no
+  other driver reads the key.
 - **The catalogue offers only what the node's location will sell.** `shapes/1` reads the
   datacenters as well as the server types and keeps the intersection, because a size that cannot
   be ordered where the platform creates fails at `create` with `422: unsupported location for
@@ -357,7 +448,7 @@ Two ways out, and they are different on purpose:
   What that writes down is a claim about the world the platform could not check, so it is not the
   platform's to make.
 
-**A template is owned, and assigned to projects.** `project_template` — `project_id`,
+**A template is owned, and assigned to projects.** `project_templates` — `project_id`,
 `template_id` — created by the template's owner and only for a project they are a member of. This
 is `identity.md` § Workers' `project_worker` with the noun changed, and it inherits that note's
 argument unaltered: *"A project admin cannot reach for someone else's machine, because assigning
@@ -370,6 +461,25 @@ Smallest rather than first: creating a thirty-two core machine for a job that de
 how a fleet gets expensive without anybody deciding that it should. The machine inherits the
 template's provider credential and its owner. It inherits **no inference credential**: a machine
 holds none, and a job brings its own in the assignment (`docs/design/credentials.md`).
+
+**And a machine made from a template serves the projects that template is assigned to, and no
+others.** Placing a job was at first blind to it: `Workers.assignable/2` took any connected worker
+that fit, so a machine made on one owner's account for their project ran every other project's work
+too, and the rule above held for creating a machine and not for using one. The filter reads the
+assignment as it stands, so unassigning a template stops its machines taking that project's work; a
+machine whose template was deleted serves nobody and idles out. A permanent machine has no template
+and serves the projects its owner assigned it to (`project_workers`, `identity.md` § Workers), and
+nothing until then. A template may only hold a provider credential its owner owns — the id comes
+from a form, and `Template.changeset/2` reads the credential's row and refuses anyone else's.
+
+**And that is asked again when a machine is made**, because a changeset only guards the rows
+written after it: a template saved before the check existed kept whatever credential it named,
+and every machine made from it was billed there. `Forge.Workers` reads the credential's row
+before it calls the driver, and one that is not the template owner's — or is for another
+provider, the changeset's other half — is refused without a call and without a worker row, as a
+failure of the template (§ A template that cannot make a working machine is taken out of
+service). The two sites ask one function, `Template.credential_mismatch/3`, so they cannot
+disagree about what a mismatch is.
 
 **A machine comes from a template or it does not come.** There is no node fallback: a project
 with nothing assigned creates nothing, and the scheduler says so.
@@ -436,6 +546,14 @@ setting the counter back to zero.
   every create succeeded in the case that cost money; a counter watching only refusals would have
   watched that loop run forever.
 
+**A third counts with them: the platform refusing before it asks the driver**, because the
+template's credential is not one it may spend — another user's, or another provider's (§ Whose
+account). No machine is made and no worker row
+is written, so nothing holds a slot and the refusal is not rate-limited to one attempt per sweep
+the way a driver's is — which is the point: a template spending somebody else's account is out
+of service after three scheduling passes rather than three sweeps, with *its provider credential
+belongs to another user* as the last error.
+
 A worker reaching `ready` sets the counter to zero: the recipe demonstrably works, and a template
 that has made a hundred good machines should not be disabled by three bad ones spread across a
 year. Consecutive, not cumulative.
@@ -455,12 +573,15 @@ again with extra steps. The page shows the count and the last error beside a `DI
 
 ## Editing a template
 
-`update_template/2` has existed since templates did and nothing could reach it. Every field is
-editable, including the provider and the credential — `Template.changeset/2` already refuses a
-credential belonging to a different provider — because a template only describes how *future*
-machines are made. Values are copied at creation (§ Two tables, and the second is only a recipe),
-so editing one never reaches a machine that exists, which is what makes editing safe rather than
-alarming.
+`update_template/3` takes the acting user and the template's id, reads the row scoped to them,
+and pins `user_id` to them as `create_template/2` does; a template somebody else owns is
+`:not_found`, as it is for `enable/2` and `delete_template/2`. It used to take the row and no
+actor, with the page's scoped read as the only thing deciding whose row it was (`identity.md`
+§ Where the guard lives). Every field is editable, including the provider and the credential —
+`Template.changeset/2` already refuses a credential belonging to a different provider — because
+a template only describes how *future* machines are made. Values are copied at creation (§ Two
+tables, and the second is only a recipe), so editing one never reaches a machine that exists,
+which is what makes editing safe rather than alarming.
 
 ## Lifecycle is per template
 
@@ -504,28 +625,34 @@ reconstructs from the branch and the manifest, *never* from the conversation, an
 `claude-code-events.md` § Resume is explicit: *"Resume is never required for correctness, and no
 outcome depends on it."* A hibernated job resumes on any worker.
 
-What is lost is the harness session, and that costs tokens. `commands.md` § Always park says the
-first thing to measure is whether the session survives a park. **It is no longer a measurement.**
-Two facts settle it: a parked job holds no slice, so its worker is idle-destroyable; and
-`Workers.assignable/1` is first-fit by `inserted_at`, so even a surviving worker is not preferred.
-Session reuse is unavailable by construction, most of the time.
+What is lost is the harness session, and that costs tokens. `commands.md` § Always park said the
+first thing to measure was whether the session survives a park. **It is no longer a
+measurement.** Two facts settled it: a parked job holds no slice, so its worker is
+idle-destroyable; and `Workers.assignable/1` was first-fit by `inserted_at`, so even a surviving
+worker was not preferred. Session reuse was unavailable by construction, most of the time.
 
-**So prefer the worker that still holds the worktree, and fall through.** `assignable/1` is
-already gaining arguments for kind and cores; a preferred worker id is the same change, and it
-costs nothing when the machine is gone. With a per-template idle period long enough on the agent
-side, it will usually hit. `may_invoke`'s `max` should still be set as a cap on park cycles rather
-than a generous safety number, because the fallback is a re-composed prompt and context is this
-system's expensive resource.
+**So the worker that still holds the worktree is preferred, and the rest fall through — which is
+built.** `Workers.assignable/2` takes the demand and a preferred worker id, and
+`Forge.Jobs.Scheduler` passes the job's `worker_id`, the machine it last ran on. When that one is
+gone, full or will not take the kind, any other that fits is taken, so it costs nothing when the
+machine is gone. The first fact still stands, and it is what the idle period answers: with a
+per-template idle period long enough on the agent side, the preference will usually hit.
+`may_invoke`'s `max` should still be set as a cap on park cycles rather than a generous safety
+number, because the fallback is a re-composed prompt and context is this system's expensive
+resource.
 
 ## What this gives up
 
-- **The single number was legible, and a surface says so in words.** `/workers` currently renders
-  *"A job is scheduled against memory, not against a count: one slice is 2.2 GiB, and a machine
-  takes as many as its budget holds"* (`ForgeWeb.WorkersLive`), with `slices/1` dividing the
-  budget by one constant. Every clause of that sentence stops being true here: jobs differ, cores
-  count, and machines differ from each other. `docs/design/ui.md` § The workers page is where the
-  replacement has to be designed, and there is no equally short true sentence — which is a real
-  loss, not a formatting problem.
+- **The single number was legible, and a surface said so in words.** `/workers` rendered *"A job
+  is scheduled against memory, not against a count: one slice is 2.2 GiB, and a machine takes as
+  many as its budget holds"*, with a `slices/1` dividing the budget by one constant. Every clause
+  of that sentence stopped being true here: jobs differ, cores count, and machines differ from
+  each other. `ForgeWeb.WorkersLive` now says *"A job is scheduled against what it asked for, in
+  memory and in cores, and against the kinds a machine says it takes"*, with the slice a job that
+  declares nothing gets, and shows each machine's memory and cores free rather than a count of
+  slices — true, and not a figure anyone can do arithmetic with. `docs/design/ui.md` § The
+  workers page is where it is designed, and there is no equally short true sentence — which is
+  a real loss, not a formatting problem.
 - **A template is a thing to get wrong.** Node configuration is reviewed when it is deployed; a
   row is edited by whoever has the page. Machine shapes that do not match reality now have a place
   to live, which is why the mismatch above is surfaced rather than silent.
@@ -554,7 +681,16 @@ system's expensive resource.
 - **Fractional cores.** Shared vCPU makes `cpu: 0.5` meaningful and the gate would work in
   millicores. Not in the first pass.
 - **An age-based reservation**, so a large job stops being jumped by small ones. § The gate says
-  why it is not here yet; the trigger is the first time a skip count gets large.
+  why it is not here yet; the trigger is the first time a job is jumped for long enough to
+  matter. Skips are recorded now, but as changes of reason rather than as a count — the dedup is
+  what keeps the log readable — so the figure to watch is how long a job's latest `at_capacity`
+  has stood while jobs admitted after it started. Nothing reads it yet.
+- **A pass that only ever sees the oldest ten.** § The gate: ten pending jobs that can never be
+  placed fill every pass, and every younger job on the node waits behind them — which any member
+  can bring about by opening ten conversations in a project with no template. The fixes are a
+  cursor that moves each pass past what it offered, or leaving out of the pass a job whose
+  latest wait is one only a person resolves; either changes which job a freed machine goes to,
+  which is the decision this waits on.
 - **Caching `shapes/1`.** An API call per page render is wrong. Per credential, with a manual
   refresh, is the obvious shape and is not designed here.
 - **Currency.** `capacity.md` § Spend caps is in dollars and Hetzner bills euros. A fleet spanning

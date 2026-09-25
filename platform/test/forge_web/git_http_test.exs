@@ -188,6 +188,24 @@ defmodule ForgeWeb.GitHttpTest do
       assert out =~ "branches are ticket/<number>"
     end
 
+    # The hook is the enforcement point, so it must hold without the token's own validation in
+    # front of it: `ticket/[0-9]*` as a glob is a digit followed by anything.
+    test "a ticket branch is a number and nothing after it", %{project: project} do
+      {:ok, token, _row} = Tokens.issue(project, ref: "refs/heads/ticket/1", write: true)
+      dir = clone!(project, token, "ticket/1")
+      commit!(dir, "work.txt", "done")
+
+      # Anything after the number, wherever it is — not only at the end.
+      for bad <- ["ticket/1abc", "ticket/1a2", "ticket/1/2"] do
+        {:ok, wild, wild_row} = Tokens.issue(project, ref: "refs/heads/ticket/1", write: true)
+        Repo.update!(Ecto.Changeset.change(wild_row, ref: "refs/heads/" <> bad))
+
+        assert {out, code} = push(dir, project, wild, "HEAD:refs/heads/" <> bad)
+        assert code != 0, bad
+        assert out =~ "branches are ticket/<number>", bad
+      end
+    end
+
     test "a ref is never deleted", %{project: project, bare: bare} do
       {:ok, token, _row} = Tokens.issue(project, ref: "refs/heads/ticket/1", write: true)
       dir = clone!(project, token, "ticket/1")
@@ -296,7 +314,7 @@ defmodule ForgeWeb.GitHttpTest do
         bare: bare,
         destination: destination,
         destination_bare: destination_bare,
-        mirror_url: "http://127.0.0.1:4002/git/#{destination.name}.git",
+        mirror_url: platform_git_url(destination.name),
         mirror_token: token
       }
     end
@@ -360,7 +378,7 @@ defmodule ForgeWeb.GitHttpTest do
       # "bad" configured first, deliberately: `git config --get-regexp` walks the config file in
       # write order, so this is what actually proves the loop does not stop at the first failure
       # — putting the failing mirror last would still pass even if it did.
-      :ok = Projects.put_mirror(project, owner, "bad", "http://127.0.0.1:4002/git/nope.git", [])
+      :ok = Projects.put_mirror(project, owner, "bad", platform_git_url("nope"), [])
       :ok = Projects.put_mirror(project, owner, "good", url, user: "forge", token: token)
 
       out = mirror_push(project, bare)
@@ -375,7 +393,7 @@ defmodule ForgeWeb.GitHttpTest do
       bare: bare,
       owner: owner
     } do
-      :ok = Projects.put_mirror(project, owner, "bad", "http://127.0.0.1:4002/git/nope.git", [])
+      :ok = Projects.put_mirror(project, owner, "bad", platform_git_url("nope"), [])
 
       out = mirror_push(project, bare)
 

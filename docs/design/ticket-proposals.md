@@ -51,10 +51,10 @@ per proposal, an open-ness rule parallel to the one questions already have — i
 the bundling and disappears without it.
 
 **A proposal has no front matter.** It is an H1 and prose, written with `parse: false`, which
-makes it byte-identical to the `ticket` document `admit/3` already writes
-(`"# #{title}\n\n#{body}"`, also `parse: false`). The title is the H1. Accepting splits it back
-off and calls `admit/3` — a proposal is a `ticket` document that has not been admitted yet, and
-that is the whole mechanism.
+makes it byte-identical to the `ticket` document admission already writes
+(`"# #{title}\n\n#{body}"`, also `parse: false`, in `Tickets.put_admit/5`). The title is the H1.
+Accepting splits it back off and admits it by the same steps `admit/3` runs (§ Accepting) — a
+proposal is a `ticket` document that has not been admitted yet, and that is the whole mechanism.
 
 This is also the one thing that had to be got right rather than merely chosen, and the reason is
 not the one it first looks like. `Artifacts.put_version/7` parses every document unless
@@ -103,7 +103,8 @@ out of the `name/*` artifact-name form the v1 validator rejects.
 
 **Stored as `proposal-<file>`, and the prefix is the discriminator.** A job-scoped artifact is a
 proposal because its name says so, and nothing else does — job scope alone cannot say it, because
-a conversation's own documents are job-scoped too. The agent's filename is kept after the prefix:
+a project conversation's own documents are job-scoped too (`conversations.md` § Commits), and the
+names they may take exclude this prefix for that reason. The agent's filename is kept after the prefix:
 it is the only place the agent names what a proposal is about in a word, and the title names it in
 a sentence. `ForgeCore.Workflow.proposal_artifact/1` and `proposal?/1` are the pair, and they are
 tested together, because moving them apart means proposals written under one name and looked for
@@ -116,9 +117,11 @@ both shapes — the directory name and the `proposal-` prefix — as it already 
 
 ## Accepting
 
-Acceptance calls `Tickets.admit/3` with the proposal's title and body. Nothing about admission
-changes: it pins the workflow, allocates the number under the lock on the project row, writes the
-`ticket` document, creates the first job and the branch.
+Acceptance admits the proposal's title and body by the steps `Tickets.admit/3` is made of, not by
+calling it: `Tickets.prepare_admission/1` before the transaction, then `Tickets.put_admit/5`
+inside `Proposals.accept/3`'s own multi, beside the decision. Nothing about admission changes: it
+pins the workflow, allocates the number under the lock on the project row, writes the `ticket`
+document, creates the first job and the branch.
 
 **The workflow pins at accept time, not at propose time**, and the opposite reading is plausible
 enough to write down. A proposal is not work in flight and holds nothing; it should run against
@@ -127,7 +130,10 @@ of it.
 
 Acceptance and the admission it causes are one transaction. The decision row carries the new
 ticket (§ Deciding), so the link is a foreign key in both directions rather than a payload field
-to be dug out of the log, and the events are written beside it as every mutation's are.
+to be dug out of the log, and the events are written beside it as every mutation's are. One
+effect is outside the transaction: `put_admit/5` creates the branch in the repository, which an
+accept rolled back after that step leaves behind with no ticket naming it — a stray ref, which is
+collectable, where a stray ticket would spend money.
 
 ## Deciding
 
@@ -169,10 +175,12 @@ next job proposes the same thing, and the one after that.
 
 **Recording is idempotent by content**, which is what makes it safe to collect the same folder
 more than once for one job. `out/proposals/` accumulates: a conversation reports it every turn, so
-turn five re-reports what turn one wrote, and a workflow job resumed after a blocking question
-does the same. Writing those again as new versions would *reopen* a proposal the operator had
-already decided, because a decision attaches to a version and the newest one would have none. A
-proposal whose text changed does get a new version, which is the case this must not also swallow.
+turn five re-reports what turn one wrote. Writing those again as new versions would *reopen* a
+proposal the operator had already decided, because a decision attaches to a version and the
+newest one would have none. A proposal whose text changed does get a new version, which is the
+case this must not also swallow. A workflow job's folder likewise survives a park on a blocking
+question, and there the platform does not lean on this: `Forge.Jobs` records proposals only from
+a run that finished, never from one that stopped to wait.
 
 **The cap is on the job, not on the call.** `Forge.Proposals.cap/0` is a platform setting beside
 the daily spend cap, and what is already stored counts against it — otherwise a conversation could
@@ -188,8 +196,11 @@ fail the job.
 
 The text is what matters and it is the part that was missing: an earlier version of this recorded
 the filename and the error and dropped what the agent had written, which is the drop this section
-forbids. Where there is no text to keep — a symlink, a directory, a file that would not open —
-there is no version, and the reason in the log is all there ever was.
+forbids. Where there is no text to keep — a symlink, a directory, a file that would not open, a
+file that is not the job's own — there is no version, and the reason in the log is all there
+ever was. "The job's own" is decided by the file opened, not by its path, and `proposals`
+itself is listed only when it is a directory and not a link standing in for one
+(`conversations.md` § Commits has why: this path exported a file root could read).
 
 `proposals/` is not in `produces` and carries no outcome, so nothing about the job's result
 depends on it, and ending a finished implementation with `error` over a malformed side-channel
@@ -199,10 +210,13 @@ harness line the event mapping does not recognise rather than dropping it
 
 ## Where it surfaces
 
-**Proposals are digested, not queued.** The queue is for what will not move until a person acts,
-and a proposal blocks nothing — no job waits on it and no ticket is stuck behind it.
+**Proposals are digested, not queued.** The queue's decisions are what will not move until a
+person acts, and a proposal blocks nothing — no job waits on it and no ticket is stuck behind it.
 `docs/decisions.md` already draws this line: push for blocking questions, everything else
-digested.
+digested. The queue is no longer only decisions — open non-blocking questions follow them, as
+`assumption` lines that no count of what is waiting includes (`ui.md` § Not waiting on you) —
+and a proposal is not one of those either, for the two reasons below: how many there would be,
+and that its decision belongs on the project page.
 
 Putting them in the queue would be the more obvious choice and it is the wrong one. Eighteen jobs
 proposing two each is how the queue's promise — that you can reach the end of it and be done —
@@ -254,8 +268,14 @@ Composed by `Forge.Backlog.compose/2` when the job is assigned, carried in the a
 `seed` and `slice`, and written by `Dir.prepare/3` — for a conversation on the same terms as a
 workflow job, because both reach the same `Runner.start_link/1`. It is rewritten whole on every
 prepare, resume included: a file left from an earlier composition is a ticket the agent believes
-still exists, which is worse than having no folder at all. The file names cross the channel and
-are joined to a path, so they are checked with the model the write uses, not against the string.
+still exists, which is worse than having no folder at all.
+
+**The file names cross the channel and are joined to a path, and the check on them is lexical.**
+Each is expanded with `Path.expand` and required to sit directly in the folder, which is not the
+model `File.write!` follows — the gap `CLAUDE.md` names. It is sound for a reason outside the
+check: the folder is removed and recreated on every write, so nothing the agent planted survives
+into it and an entry cannot make a subdirectory to hide a symlink in. `Dir.write_backlog_entry/2`
+says so where it lives; a change that stops recreating the folder has to replace the check.
 
 **The index is what an agent reads; the files are what it opens.** A line carries the number,
 state, status and title — enough to decide whether the file is worth a read, and useless for
@@ -267,12 +287,13 @@ a job would be building on a document that is not in its manifest, cannot be app
 behalf, and may have moved. The body says what the work is, which is all that duplicate
 suppression and coordination need.
 
-**Composed once at job start, with its hash recorded.** It is a snapshot, not a pinned version,
+**Composed at every assignment, with its hash recorded.** It is a snapshot, not a pinned version,
 and it is the one thing a job is handed that is not an artifact version — a generated index has no
 version to pin. Recording the hash is what keeps "what was this built on?" answerable: not by
 naming a version, but by making the snapshot reproducible from the log. `Jobs.assign/2` writes it
-as `job.backlog` with the counts beside it. A long job's view ages, and the index says when it was
-taken.
+as `job.backlog` with the counts beside it, once per assignment — so a job resumed after a
+blocking question, and a conversation reopened, is handed a fresh snapshot and logs a second
+event for it. Within one run the view ages, and the index says when it was taken.
 
 The hash covers the **bodies**, not only the index. Titles appear in both, so a hash over the
 index alone looks correct on every change to a title and misses every change to a body — a

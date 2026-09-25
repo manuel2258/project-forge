@@ -65,6 +65,25 @@ defmodule ForgeWeb.Conversations do
     """
   end
 
+  @ending_rule "its branch is deleted unless it would not merge cleanly"
+
+  @doc """
+  What ending a conversation does to its branch, as a clause for a sentence to carry.
+
+  One definition, because ending deletes the branch (`conversations.md` § Lifetime) and every
+  surface that offers ending says so: the confirm on the list and the page, and the page's own
+  line beside *End it*. Two wordings of the rule would be one of them understating it.
+  """
+  @spec ending_rule() :: String.t()
+  def ending_rule, do: @ending_rule
+
+  @doc "What ending a conversation asks before it happens, from every surface that offers it."
+  @spec ending_confirm() :: String.t()
+  def ending_confirm,
+    do:
+      "End this conversation? The last turn finishes, the machine is released, and " <>
+        @ending_rule <> " — merge first what you want to keep."
+
   attr :summaries, :list, required: true
   attr :now, :any, required: true
   attr :project, :boolean, default: true, doc: "name the project; false on a project's own page"
@@ -116,13 +135,14 @@ defmodule ForgeWeb.Conversations do
 
         <%!-- Only a live one, and worded as the conversation's own page words it: a
               conversation cannot be deleted at all (`conversations.md` § Lifetime), so the
-              affordance a list can offer is the one that stops it costing something. --%>
+              affordance a list can offer is the one that stops it costing something — which
+              also deletes its branch, and the confirm says so. --%>
         <button
           :if={@ending && summary.live}
           type="button"
           phx-click={@ending}
           phx-value-id={summary.chat.id}
-          data-confirm="End this conversation? The last turn finishes first, and the machine is released."
+          data-confirm={ending_confirm()}
           class="mt-[15px] min-h-[46px] shrink-0 text-sm text-primary hover:underline"
         >
           End

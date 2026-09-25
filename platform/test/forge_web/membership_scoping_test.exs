@@ -62,6 +62,26 @@ defmodule ForgeWeb.MembershipScopingTest do
       end
     end
 
+    # The same miss at a conversation's own address, which is guarded as its page is.
+    test "a conversation's artifact bytes are a miss", %{
+      conn: conn,
+      project: project,
+      outsider: outsider
+    } do
+      chat = chat_fixture(%{project: project})
+
+      {:ok, _version} =
+        Forge.Artifacts.record_version({:job, chat.id}, "notes.md", :document, {:job, chat.id}, %{
+          content: "# private\n"
+        })
+
+      assert_raise Ecto.NoResultsError, fn ->
+        conn
+        |> log_in_user(outsider)
+        |> get(~p"/chats/#{chat.id}/artifacts/notes.md/1")
+      end
+    end
+
     test "the board shows nothing", %{conn: conn, project: project, outsider: outsider} do
       {:ok, _view, html} = conn |> log_in_user(outsider) |> live(~p"/board")
       refute html =~ project.name
@@ -153,6 +173,9 @@ defmodule ForgeWeb.MembershipScopingTest do
 
       {:ok, view, _html} =
         conn |> log_in_user(plain) |> live(~p"/projects/#{project.name}/settings")
+
+      # Not offered, since it would be refused.
+      refute has_element?(view, "#model-form")
 
       render_change(view, "model", %{"project" => %{"model" => "evil-model"}})
 
@@ -278,6 +301,52 @@ defmodule ForgeWeb.MembershipScopingTest do
       assert html =~ "No approved account for that address."
     end
 
+    # The sentence above was false for exactly this case: a pending account has an address, so
+    # the page handed it to `put_member/4`, which added it. Now the context refuses and the page
+    # says what it says for an address with no account at all.
+    test "a pending account gets the same answer, and is not added", %{
+      conn: conn,
+      project: project,
+      owner: owner
+    } do
+      pending = pending_user_fixture()
+
+      {:ok, view, _html} =
+        conn |> log_in_user(owner) |> live(~p"/projects/#{project.name}/settings")
+
+      html =
+        view
+        |> form("form[phx-submit='add-member']", %{
+          "member" => %{"email" => pending.email, "role" => "member"}
+        })
+        |> render_submit()
+
+      assert html =~ "No approved account for that address."
+      assert Forge.Projects.role(project, pending) == nil
+      refute html =~ pending.email
+    end
+
+    test "a suspended account is named as one, and is not added", %{
+      conn: conn,
+      project: project,
+      owner: owner
+    } do
+      {:ok, suspended} = Accounts.suspend_user(user_fixture(), node_admin_fixture())
+
+      {:ok, view, _html} =
+        conn |> log_in_user(owner) |> live(~p"/projects/#{project.name}/settings")
+
+      html =
+        view
+        |> form("form[phx-submit='add-member']", %{
+          "member" => %{"email" => suspended.email, "role" => "member"}
+        })
+        |> render_submit()
+
+      assert html =~ "That account is suspended."
+      assert Forge.Projects.role(project, suspended) == nil
+    end
+
     test "a plain member is not offered the section at all", %{conn: conn, project: project} do
       plain = member_fixture(project, :member)
 
@@ -382,12 +451,31 @@ defmodule ForgeWeb.MembershipScopingTest do
       assert json_response(conn, 404)
     end
 
+    # **This is what proves the guard is `Operator.admit/3`'s.** The controller resolves the
+    # project by name and has no membership check of its own, so an endpoint that called
+    # `Tickets.admit/3` directly — as it used to, behind its own scoping — would admit this
+    # ticket. The answer is the one a project that does not exist gets, byte for byte, and a
+    # body that would not validate is refused the same way rather than as a 422.
     test "admitting a ticket into it is 404", %{conn: conn, project: project, outsider: outsider} do
-      conn =
+      before = Forge.Tickets.list(project)
+
+      refused =
         api(conn, outsider)
         |> post(~p"/api/v1/projects/#{project.name}/tickets", %{title: "theirs"})
+        |> json_response(404)
 
-      assert json_response(conn, 404)
+      missing =
+        api(conn, outsider)
+        |> post(~p"/api/v1/projects/no-such-project/tickets", %{title: "theirs"})
+        |> json_response(404)
+
+      assert refused == missing
+
+      assert api(conn, outsider)
+             |> post(~p"/api/v1/projects/#{project.name}/tickets", %{title: ""})
+             |> json_response(404) == missing
+
+      assert Forge.Tickets.list(project) == before
     end
 
     test "reading its proposals is 404", %{conn: conn, project: project, outsider: outsider} do

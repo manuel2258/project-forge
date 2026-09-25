@@ -23,7 +23,7 @@ defmodule Forge.ForgeFixtures do
     attrs =
       Enum.into(attrs, %{
         name: "game-#{n}",
-        repo_path: Path.join(System.tmp_dir!(), "forge-unregistered-#{n}.git")
+        repo_path: Path.join(System.tmp_dir!(), "#{System.pid()}-forge-unregistered-#{n}.git")
       })
 
     Repo.insert!(Forge.Projects.Project.changeset(%Forge.Projects.Project{}, attrs))
@@ -305,5 +305,22 @@ defmodule Forge.ForgeFixtures do
       })
 
     Repo.insert!(Forge.Artifacts.Version.changeset(%Forge.Artifacts.Version{}, attrs))
+  end
+
+  @doc """
+  The lifetime, in seconds, a store token was signed with, read back out of the token.
+
+  `Forge.Storage.Token.verify/3` can only say whether a token is alive now, and a lifetime of
+  hours cannot be waited out. This reads Plug.Crypto's format — `protected.payload.signature`,
+  the payload a term of the data, when it was signed and for how many seconds — so a change
+  there fails the tests that use it loudly rather than letting them pass.
+  """
+  def store_token_lifetime(token) do
+    [_protected, payload, _signature] = String.split(token, ".")
+
+    {_data, _signed_at_ms, seconds} =
+      payload |> Base.url_decode64!(padding: false) |> :erlang.binary_to_term([:safe])
+
+    seconds
   end
 end

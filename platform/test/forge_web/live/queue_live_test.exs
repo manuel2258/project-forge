@@ -144,11 +144,10 @@ defmodule ForgeWeb.QueueLiveTest do
     assert ticket.id |> Artifacts.open_questions() |> Enum.map(& &1.key) == ["naming"]
   end
 
-  # `ForgeWeb.QueueLive`: "A blocking question has halted a job; a non-blocking one has not, and
-  # must never compete with work that is actually waiting." A non-blocking question is the
-  # assumption an agent recorded and carried on from, so it is not a decision at all: not a row,
-  # not a line in the digest, and not part of the figure the nav badge carries. Counting it would
-  # put a number on the operator's home screen that never goes down by answering anything.
+  # A non-blocking question is the assumption an agent recorded and carried on from, so it is
+  # not a decision: not a card among the decisions, and not part of the figure the header and the
+  # nav badge carry — counting it would put a number on the home screen that answering nothing
+  # ever lowers. It is a line in the digest instead (`docs/design/ui.md` § Not waiting on you).
   test "a non-blocking question is not an interruption", %{conn: conn, project: project} do
     ticket = admit(project, "Persist scores")
 
@@ -157,11 +156,85 @@ defmodule ForgeWeb.QueueLiveTest do
       non_blocking("naming", "What should the table be called?")
     ])
 
-    {:ok, view, html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/")
 
-    assert html =~ "Which backend?"
-    refute html =~ "What should the table be called?"
+    decisions = view |> element("#queue-decisions") |> render()
+    assert decisions =~ "Which backend?"
+    refute decisions =~ "What should the table be called?"
+    assert view |> element("#queue-digest") |> render() =~ "What should the table be called?"
     assert view |> element("main header span.font-mono") |> render() =~ "1 decision · 1 item"
+  end
+
+  describe "not waiting on you" do
+    # Beneath the last decision and above the end, whatever its age: an assumption sorted in
+    # among the decisions by age would compete with a held job for the same glance.
+    test "the digest follows the decisions, however old it is", %{conn: conn, project: project} do
+      assuming = admit(project, "Carried on")
+      asking = admit(project, "Stopped")
+      assumption = ask(assuming, [non_blocking("naming", "What should the table be called?")])
+      decision = ask(asking, [blocking("backend", "Which backend?")])
+      aged(assumption, 7200)
+      aged(decision, 60)
+
+      {:ok, _view, html} = live(conn, ~p"/")
+
+      [question] = Repo.preload(assumption, :questions).questions
+
+      assert index(html, "item-questions-#{decision.id}") <
+               index(html, "assumption-#{question.id}")
+
+      assert index(html, "assumption-#{question.id}") < index(html, "queue-end")
+    end
+
+    test "its lines are oldest first", %{conn: conn, project: project} do
+      older = ask(admit(project, "First"), [non_blocking("naming", "Which name?")])
+      newer = ask(admit(project, "Second"), [non_blocking("format", "Which format?")])
+      aged(older, 3600)
+      aged(newer, 60)
+
+      {:ok, _view, html} = live(conn, ~p"/")
+
+      [older_q] = Repo.preload(older, :questions).questions
+      [newer_q] = Repo.preload(newer, :questions).questions
+      assert index(html, "assumption-#{older_q.id}") < index(html, "assumption-#{newer_q.id}")
+
+      # And the sentence above them counts them, in the plural.
+      assert html =~ "2 assumptions were stated and work continued."
+    end
+
+    # Answering never navigates, and a navigation target never encloses a control that commits,
+    # so a line leads to its ticket — where the question is answered — and answers nothing here.
+    test "a line leads to its ticket, says what was assumed, and answers nothing", %{
+      conn: conn,
+      project: project
+    } do
+      ticket = admit(project, "Persist scores")
+      version = ask(ticket, [non_blocking("naming", "What should the table be called?")])
+      [question] = Repo.preload(version, :questions).questions
+
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      line = "#assumption-#{question.id}"
+      assert has_element?(view, ~s(#{line} a[href="/tickets/#{project.name}/#{ticket.number}"]))
+      assert view |> element(line) |> render() =~ "Assumed: went with a"
+      refute has_element?(view, "#queue-digest [phx-click]")
+      refute has_element?(view, "#queue-digest form")
+
+      assert view |> element("#queue-digest") |> render() =~
+               "1 assumption was stated and work continued."
+    end
+
+    # With nothing but assumptions, nothing is waiting: no count in the header, and the end of
+    # the queue says so. The digest is still there above it.
+    test "assumptions alone leave nothing waiting on you", %{conn: conn, project: project} do
+      ask(admit(project, "Carried on"), [non_blocking("naming", "Which name?")])
+
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      refute has_element?(view, "main header span.font-mono")
+      assert view |> element("#queue-end") |> render() =~ "Nothing needs you."
+      assert has_element?(view, "#queue-digest")
+    end
   end
 
   # `ForgeWeb.Operator.Actions.ticket/1` casts before it queries, which is CLAUDE.md's "a guard

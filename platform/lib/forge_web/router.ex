@@ -53,6 +53,8 @@ defmodule ForgeWeb.Router do
     # Not a LiveView: this serves bytes, and every artifact name in the product links to it.
     # See docs/design/ui.md § Addressable artifact versions.
     get "/tickets/:project/:number/artifacts/:name/:version", ArtifactController, :show
+    # A conversation's own artifacts, by the same rule: the address names the scope.
+    get "/chats/:id/artifacts/:name/:version", ArtifactController, :chat
   end
 
   # Account governance, and the only thing `node_admin` unlocks. Not under the operator scope:
@@ -100,7 +102,8 @@ defmodule ForgeWeb.Router do
   end
 
   # The worker's door to the blob store. No session and no pipeline: the short-lived token in
-  # the query string authorises exactly one key and one verb, and nothing else here does.
+  # the `authorization` header authorises exactly one key and one verb, and nothing else here
+  # does (`docs/design/storage.md` § The token is a header).
   # See docs/design/storage.md.
   scope "/store", ForgeWeb do
     get "/*key", StoreController, :show

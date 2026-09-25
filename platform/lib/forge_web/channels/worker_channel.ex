@@ -53,11 +53,6 @@ defmodule ForgeWeb.WorkerChannel do
     {:noreply, socket}
   end
 
-  def handle_info(:drain, socket) do
-    push(socket, "drain", %{})
-    {:noreply, socket}
-  end
-
   # A conversation is spoken to while it runs. `Forge.Conversations` sends these; the channel
   # only carries them, as it carries an assignment.
   def handle_info({message, %{"job_id" => _id} = payload}, socket)
@@ -97,8 +92,9 @@ defmodule ForgeWeb.WorkerChannel do
   end
 
   # Acked after the transaction commits, like a result, because it carries the turn's cost and
-  # the cost is what the daily cap is computed from. Idempotent on `(job_id, turn)`: the worker
-  # re-sends until it is acked, so the platform has to be able to hear the same turn twice.
+  # the cost is what the daily cap is computed from. Idempotent on `(job_id, session, turn)`
+  # (`Conversations.record_turn/2`): the worker re-sends until it is acked, so the platform has to
+  # be able to hear the same turn twice.
   def handle_in("turn", %{"job_id" => job_id} = payload, socket) do
     ack(with(:ok <- owns(socket, job_id), do: record_turn(job_id, payload)), socket)
   end

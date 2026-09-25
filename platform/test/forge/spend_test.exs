@@ -103,6 +103,37 @@ defmodule Forge.SpendTest do
       assert Spend.paused?()
     end
 
+    # The pause is a wait like any other, and is said once. `Jobs.assign/2` asks the cap on every
+    # pass for every pending job, and it used to write a `spend.paused` event each time — one per
+    # job every two seconds until midnight, into a log nothing may delete from. Counted across
+    # the whole log, because a conversation's version of that event named no ticket.
+    test "a paused job and a paused conversation say they wait for midnight, once each", %{
+      user: user,
+      worker: worker
+    } do
+      spend!(admit(user, ticket_cost: 25.0), "2.00", started: true)
+      ticket = admit(user, ticket_cost: 25.0)
+      project = Projects.get!(ticket.project_id)
+      # A machine and a credential for the project, so that the cap is what stops them.
+      serve!(worker, project)
+      funded!(project)
+      {:ok, chat} = Forge.Conversations.open(project, "hello")
+      Application.put_env(:forge, Forge.Spend, daily_cost_usd: 1.0)
+      start_supervised!(Forge.Jobs.Scheduler)
+
+      assert Forge.Jobs.Scheduler.tick() == 0
+      logged = Repo.aggregate(Forge.Events.Event, :count)
+      assert Forge.Jobs.Scheduler.tick() == 0
+      assert Repo.aggregate(Forge.Events.Event, :count) == logged
+
+      for job <- [only_pending(ticket), chat] do
+        assert [%{payload: %{"reason" => "spend_paused", "text" => text}}] =
+                 job.id |> Forge.Events.for_job() |> Enum.filter(&(&1.type == "job.waiting"))
+
+        assert text =~ "midnight"
+      end
+    end
+
     test "counts what live jobs are budgeted to spend, not only what is recorded", %{user: user} do
       ticket = admit(user, ticket_cost: 25.0)
       Application.put_env(:forge, Forge.Spend, daily_cost_usd: 1.0)

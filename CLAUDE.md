@@ -41,7 +41,8 @@ a recipe the platform creates from, per-user provider credentials, and a driver 
 of one global provider. It supersedes the single `slice_bytes` gate in
 `docs/design/worker-tier.md` § Scheduling and is read together with `docs/design/commands.md`,
 which holds the grammar half. **It is built**, apart from `resources` on a *command*, which
-waits for commands to be a job kind. The Hetzner driver exists and has never spoken to Hetzner.
+waits for commands to be a job kind. The Hetzner driver has created and destroyed real Hetzner
+machines; none has yet connected to a platform and run a job.
 
 ## Layout
 

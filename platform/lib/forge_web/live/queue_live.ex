@@ -10,6 +10,10 @@ defmodule ForgeWeb.QueueLive do
   typically stops with several questions, and one card per question would turn three decisions
   into twenty items with identical timestamps. `Forge.Queue` keeps its per-question shape,
   because the JSON API and the CLI are built on it; the grouping is this page's presentation.
+
+  Beneath the decisions, before the end, is what is **not waiting on you**: the questions agents
+  did not stop for, as lines that lead to their tickets. They count towards nothing on this page
+  — `docs/design/ui.md` § Not waiting on you.
   """
 
   use ForgeWeb, :live_view
@@ -32,19 +36,21 @@ defmodule ForgeWeb.QueueLive do
      |> load()}
   end
 
+  # The decisions are grouped and counted; the assumptions are the digest beneath them, in the
+  # order `Forge.Queue` gives them, and count towards nothing — see docs/design/ui.md § Not
+  # waiting on you.
   defp load(socket) do
-    items =
+    {waiting, digest} =
       Queue.items(socket.assigns.current_scope.user)
       |> Enum.map(&Map.put(&1, :project, &1.project.name))
-      |> group()
-      |> Enum.map(&decorate/1)
+      |> Enum.split_with(&Queue.waiting?/1)
 
-    {waiting, digest} = Enum.split_with(items, & &1.actionable)
+    items = waiting |> group() |> Enum.map(&decorate/1)
 
     assign(socket,
-      items: waiting,
+      items: items,
       digest: digest,
-      decisions: Enum.sum(Enum.map(waiting, & &1.decisions)),
+      decisions: Enum.sum(Enum.map(items, & &1.decisions)),
       now: DateTime.utc_now()
     )
   end
@@ -77,28 +83,17 @@ defmodule ForgeWeb.QueueLive do
     item
     |> Map.put(:topology, topology(item.ticket))
     |> Map.put(:decisions, decisions(item))
-    |> Map.put(:actionable, actionable?(item))
     |> Map.put_new(:questions, [])
     |> Map.put_new(:version, nil)
     |> put_approve()
   end
 
-  # A blocking question has halted a job; a non-blocking one has not, and must never compete
-  # with work that is actually waiting.
-  #
-  # `Forge.Queue.questions/1` is where that is enforced — it filters on `blocking` before an item
-  # is built, so this list cannot hold a non-blocking question and the check below is always
-  # true. Kept as a statement of the rule at the point it is relied on, not as a second defence:
-  # no test can tell it from `is_list/1`, and the rule is tested one layer up, where it is real.
-  defp actionable?(%{kind: :questions} = item), do: Enum.any?(item.questions, & &1.blocking)
-  defp actionable?(_item), do: true
-
   defp decisions(%{kind: :questions} = item), do: length(item.questions)
   defp decisions(_item), do: 1
 
-  defp put_approve(%{kind: :approval, ticket: ticket, detail: detail} = item) do
+  defp put_approve(%{kind: :approval, ticket: ticket} = item) do
     approve =
-      for name <- List.wrap(detail["approve"]),
+      for name <- Forge.Engine.awaiting_approval(ticket),
           version = Artifacts.latest(ticket.id, name),
           do: {name, version.version}
 
@@ -209,7 +204,7 @@ defmodule ForgeWeb.QueueLive do
         </div>
       </header>
 
-      <section class="mt-6 flex flex-col">
+      <section id="queue-decisions" class="mt-6 flex flex-col">
         <article
           :for={item <- @items}
           id={item_id(item)}
@@ -273,18 +268,31 @@ defmodule ForgeWeb.QueueLive do
         </article>
       </section>
 
-      <section :if={@digest != []} class="mt-8 border-t border-base-300 pt-5">
+      <%!-- Prose, not cards: no mark, no answer rows, no accent, because nothing here is waiting
+            on anyone. Each line leads to its ticket, where the question is answered — see
+            docs/design/ui.md § Not waiting on you. --%>
+      <section :if={@digest != []} id="queue-digest" class="mt-8 border-t border-base-300 pt-5">
         <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
           Not waiting on you
         </h2>
-        <ul class="mt-3 flex flex-col gap-2">
-          <li :for={item <- @digest} class="flex items-baseline justify-between gap-3 text-sm">
-            <.link navigate={destination(item)} class="truncate opacity-80 hover:opacity-100">
-              {sentence(item)}
+        <p class="mt-2 text-sm/[1.55] opacity-70">{digest_sentence(@digest)}</p>
+        <ul class="mt-2 flex flex-col">
+          <li :for={item <- @digest} id={"assumption-#{item.question.id}"}>
+            <.link
+              navigate={destination(item)}
+              class="flex min-h-[46px] flex-col justify-center gap-0.5 py-2 opacity-80 hover:opacity-100"
+            >
+              <span class="flex items-baseline justify-between gap-3">
+                <span class="text-sm/[1.55]">{item.question.text}</span>
+                <span class="shrink-0 font-mono text-[12.5px] opacity-60">
+                  {Format.ago(item.since, @now)}
+                </span>
+              </span>
+              <span class="text-sm/[1.55] opacity-70">Assumed: {item.question.assumption}</span>
+              <span class="font-mono text-[12.5px] opacity-60">
+                {item.project}#{item.ticket.number}
+              </span>
             </.link>
-            <span class="shrink-0 font-mono text-[12.5px] opacity-50">
-              {Format.ago(item.since, @now)}
-            </span>
           </li>
         </ul>
       </section>
@@ -382,13 +390,10 @@ defmodule ForgeWeb.QueueLive do
 
   defp reviewable?(_item), do: false
 
-  defp kind_label(%{kind: :questions, questions: questions}) do
-    blocking = Enum.count(questions, & &1.blocking)
-
-    if blocking > 0,
-      do: "#{blocking} blocking #{noun(blocking, "question")}",
-      else: "#{length(questions)} #{noun(length(questions), "question")}"
-  end
+  # Every question grouped here is blocking: a non-blocking one is an `:assumption`, which is in
+  # the digest and never reaches `group/1`.
+  defp kind_label(%{kind: :questions, questions: questions}),
+    do: "#{length(questions)} blocking #{noun(length(questions), "question")}"
 
   defp kind_label(%{kind: :chat}), do: "conversation"
   defp kind_label(%{kind: :approval}), do: "approval"
@@ -426,6 +431,11 @@ defmodule ForgeWeb.QueueLive do
     |> hd()
     |> String.slice(0, 160)
   end
+
+  defp digest_sentence([_one]), do: "1 assumption was stated and work continued."
+
+  defp digest_sentence(digest),
+    do: "#{length(digest)} assumptions were stated and work continued."
 
   defp closing([]), do: "Nothing needs you. Work continues without you."
   defp closing(_items), do: "That is everything waiting on you."

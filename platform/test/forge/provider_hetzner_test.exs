@@ -19,6 +19,7 @@ defmodule Forge.Provider.HetznerTest do
     token: "worker-token",
     platform_url: "https://forge.example",
     size: "cpx32",
+    image: "snapshot-42",
     credential: %{"token" => "hcloud-abc"}
   }
 
@@ -47,7 +48,7 @@ defmodule Forge.Provider.HetznerTest do
 
   describe "creating a machine" do
     setup do
-      configure(image: "snapshot-42", location: "nbg1", token: nil)
+      configure(location: "nbg1", token: nil)
       :ok
     end
 
@@ -78,9 +79,8 @@ defmodule Forge.Provider.HetznerTest do
       assert body.user_data =~ "FORGE_PLATFORM_URL=https://forge.example"
     end
 
-    # The template's image beats the node's, which is the whole reason the column exists: two
-    # templates may want different images, and an operator rolling a new one wants both to
-    # exist while they move over.
+    # The template's image, even on a node that configures one: `Provider.config(:image)` is the
+    # local driver's disk image and was never Hetzner's to read.
     test "a template that names an image is the one booted, not the node's" do
       configure(image: "the-nodes-image", token: "t")
       answering(201, %{"server" => %{"id" => 5}})
@@ -89,18 +89,6 @@ defmodule Forge.Provider.HetznerTest do
 
       assert_receive {:hetzner, :post, _path, _token, body}
       assert body.image == "the-templates-image"
-    end
-
-    # And a template naming none falls back rather than failing, which is what every template
-    # made before the column does.
-    test "a template naming none falls back to the node's" do
-      configure(image: "the-nodes-image", token: "t")
-      answering(201, %{"server" => %{"id" => 5}})
-
-      {:ok, _machine} = Hetzner.create(Map.delete(@opts, :image))
-
-      assert_receive {:hetzner, :post, _path, _token, body}
-      assert body.image == "the-nodes-image"
     end
 
     test "the harness credential rides along, as it does locally" do
@@ -146,13 +134,21 @@ defmodule Forge.Provider.HetznerTest do
   describe "what it refuses before sending anything" do
     # Each of these would otherwise be a request that fails at Hetzner, reported as a status
     # code with a message about a token when the thing that is wrong is a row or a config key.
-    test "no image configured" do
-      configure(image: nil, token: "t", request: &never/4)
-      assert {:error, {:hetzner, "no Hetzner image configured"}} = Hetzner.create(@opts)
+    # **Whatever the node configures.** It fell back to `Provider.config(:image)`, which is the
+    # key `LocalVm` reads as the path of its qcow2, filled from `FORGE_WORKER_IMAGE` — so on a
+    # node set up for local machines a Hetzner template naming no image sent that path to
+    # Hetzner as a snapshot id. A template saved before `Template.changeset/2` required one is
+    # exactly this call.
+    test "a template that names no image, even on a node that configures one" do
+      configure(image: "/nix/store/worker-image/nixos.qcow2", token: "t", request: &never/4)
+
+      for opts <- [Map.delete(@opts, :image), Map.put(@opts, :image, nil), %{@opts | image: ""}] do
+        assert {:error, {:hetzner, "the template names no image"}} = Hetzner.create(opts)
+      end
     end
 
     test "no credential at all" do
-      configure(image: "snapshot-42", token: nil, request: &never/4)
+      configure(token: nil, request: &never/4)
 
       assert {:error, {:hetzner, "no Hetzner credential"}} =
                Hetzner.create(Map.delete(@opts, :credential))
@@ -162,7 +158,7 @@ defmodule Forge.Provider.HetznerTest do
     # it accepts `%{"token" => ""}` and sends an unauthenticated request, which comes back as a
     # 401 about a token rather than as the configured fallback being used.
     test "a credential with an empty token falls back to the configured one" do
-      configure(image: "snapshot-42", token: "from-config")
+      configure(token: "from-config")
       answering(201, %{"server" => %{"id" => 9}})
 
       {:ok, _machine} = Hetzner.create(Map.put(@opts, :credential, %{"token" => ""}))
@@ -171,7 +167,7 @@ defmodule Forge.Provider.HetznerTest do
     end
 
     test "a template that names no server type" do
-      configure(image: "snapshot-42", token: "t", request: &never/4)
+      configure(token: "t", request: &never/4)
 
       assert {:error, {:hetzner, "the template names no server type"}} =
                Hetzner.create(Map.delete(@opts, :size))
@@ -552,5 +548,11 @@ defmodule Forge.Provider.HetznerTest do
 
   test "it declares the one field its credential is made of" do
     assert Hetzner.credential_fields() == [%{key: "token", label: "API token"}]
+  end
+
+  # Both are refused at create when blank, so a template without them could only fail; saying
+  # so here is what lets `Template.changeset/2` refuse one where it is typed.
+  test "it declares the template fields it cannot make a machine without" do
+    assert Hetzner.required_template_fields() == [:size, :image]
   end
 end

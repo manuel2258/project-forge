@@ -14,40 +14,61 @@ defmodule ForgeWeb.ArtifactController do
 
   use ForgeWeb, :controller
 
-  alias Forge.{Artifacts, Tickets}
+  alias Forge.{Artifacts, Conversations, Projects, Tickets}
 
   def show(conn, %{"project" => name, "number" => number, "name" => artifact} = params) do
     {ticket, project} = Tickets.fetch!(name, number)
     ForgeWeb.Access.project_scope!(conn.assigns.current_scope, project)
 
-    with {:ok, version} <- version(ticket.id, artifact, params["version"]),
-         {:ok, bytes} <- Artifacts.content(version) do
-      conn
-      |> put_resp_content_type("text/plain")
-      |> put_resp_header("x-content-type-options", "nosniff")
-      |> put_resp_header(
-        "content-disposition",
-        ~s(inline; filename="#{filename(artifact, version)}")
-      )
-      |> send_resp(200, bytes)
-    else
-      {:error, :not_a_file} ->
-        # A changeset is a commit, and the diff is its rendering.
-        redirect(conn, to: ~p"/tickets/#{name}/#{number}/review")
-
-      {:error, _reason} ->
-        conn
-        |> put_status(:not_found)
-        |> put_view(html: ForgeWeb.ErrorHTML)
-        |> render(:"404")
+    case version(ticket.id, artifact, params["version"]) do
+      # A changeset is a commit, and the diff is its rendering.
+      {:error, :not_a_file} -> redirect(conn, to: ~p"/tickets/#{name}/#{number}/review")
+      found -> serve(conn, artifact, found)
     end
   end
 
-  defp version(ticket_id, name, requested) do
+  @doc """
+  A version scoped to a conversation — a project chat's documents, and every chat's proposals —
+  at `/chats/:id/artifacts/:name/:version`.
+
+  Guarded as the conversation's own page is: a member of its project, and a miss for anyone
+  else. The name is resolved in the conversation's scope and no other, so the same name on a
+  ticket, or in another conversation, is not reachable through this address. A ticket chat's
+  documents are the ticket's and live under the ticket's route.
+  """
+  def chat(conn, %{"id" => id, "name" => artifact} = params) do
+    chat = Conversations.get!(id)
+    ForgeWeb.Access.project_scope!(conn.assigns.current_scope, Projects.get!(chat.project_id))
+
+    serve(conn, artifact, version({:job, chat.id}, artifact, params["version"]))
+  end
+
+  defp serve(conn, artifact, {:ok, bytes, version}) do
+    conn
+    |> put_resp_content_type("text/plain")
+    |> put_resp_header("x-content-type-options", "nosniff")
+    |> put_resp_header(
+      "content-disposition",
+      ~s(inline; filename="#{filename(artifact, version)}")
+    )
+    |> send_resp(200, bytes)
+  end
+
+  defp serve(conn, _artifact, {:error, _reason}) do
+    conn
+    |> put_status(:not_found)
+    |> put_view(html: ForgeWeb.ErrorHTML)
+    |> render(:"404")
+  end
+
+  # The version and its bytes, or why not. `:not_a_file` is a changeset, which only a ticket has.
+  defp version(scope, name, requested) do
     with {n, ""} when n > 0 <- Integer.parse(requested),
-         %{} = version <- Enum.find(Artifacts.versions(ticket_id, name), &(&1.version == n)) do
-      {:ok, version}
+         %{} = version <- Enum.find(Artifacts.versions(scope, name), &(&1.version == n)),
+         {:ok, bytes} <- Artifacts.content(version) do
+      {:ok, bytes, version}
     else
+      {:error, reason} -> {:error, reason}
       _other -> {:error, :not_found}
     end
   end

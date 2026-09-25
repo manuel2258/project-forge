@@ -6,7 +6,7 @@ defmodule Mix.Tasks.Forge.Worker.Retire do
 
   This is the only way an unmanaged worker ends. Neither sweep will touch it — that is what
   `mix forge.worker.new` buys — so a machine the operator has finished with needs saying so,
-  or it counts against `max_workers` for ever.
+  or its row stays for ever.
 
   Destruction is the platform's record that the machine is gone: the token stops working and a
   machine that disagrees is refused at the socket. So retire the row *after* the machine is

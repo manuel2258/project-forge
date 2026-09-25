@@ -77,9 +77,31 @@ defmodule Forge.Workers.Worker do
       :user_id
     ])
     |> validate_required([:provider, :status])
-    # Zero is a real offer and not an error: `ForgeWorker.Config` reports nothing rather than
-    # guessing when it cannot read `/proc/meminfo`, so the platform assigns the machine nothing,
-    # which is visible. Negative is not an offer.
+    |> validate_offer()
+  end
+
+  @doc """
+  What a person may set on a machine: what it offers the gate, and nothing else.
+
+  `changeset/2` casts every field the row has — status, token hash, `managed` — because the
+  platform's own writes need them. A form does not, and a changeset that cast them would let one
+  more field in the params turn a permanent machine into one the platform may destroy. Both
+  figures are required: this is how an operator *sets* what a machine offers, and a blank would
+  silently un-gate the machine it was meant to correct (`docs/design/provisioning.md` § What a
+  worker offers).
+  """
+  def offer_changeset(worker, attrs) do
+    worker
+    |> cast(attrs, [:memory_budget, :cores, :accepts])
+    |> validate_required([:memory_budget, :cores])
+    |> validate_offer()
+  end
+
+  # Zero is a real offer and not an error: `ForgeWorker.Config` reports nothing rather than
+  # guessing when it cannot read `/proc/meminfo`, so the platform assigns the machine nothing,
+  # which is visible. Negative is not an offer.
+  defp validate_offer(changeset) do
+    changeset
     |> validate_number(:memory_budget, greater_than_or_equal_to: 0)
     |> validate_number(:cores, greater_than_or_equal_to: 0)
   end

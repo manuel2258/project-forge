@@ -10,9 +10,10 @@ questions. The interface is files, not tools, so any harness with a filesystem c
 2. **Project state prompt.** The file named by `prompt` in the workflow, e.g.
    `.forge/agents/refine.md`. Says what this kind of document is and how the project wants it
    written. Read at the pinned commit.
-3. **Job manifest.** Rendered from the immutable spec: ticket title and number, each input
-   with its path and version, each `produces` entry with its target path, the allowed
-   outcomes, the budgets.
+3. **Job manifest.** Rendered from the spec as assigned — the immutable one, with `answers.md`
+   appended once there are answers and the cost budget perhaps lowered (`capacity.md` § Spend
+   caps): ticket title and number, each input with its path and version, each `produces` entry
+   with its target path, the allowed outcomes, the budgets.
 
 The repository's own `CLAUDE.md` is read by Claude Code as usual; project conventions need no
 special handling.
@@ -22,35 +23,66 @@ special handling.
 Outside the worktree, so nothing in it can be committed by accident:
 
 ```
-$FORGE_JOB/spec.json                # the immutable spec, for reference
-$FORGE_JOB/inputs/ticket.md         # reserved input: the ticket body
-$FORGE_JOB/inputs/refinement.md     # pinned version, read-only
-$FORGE_JOB/inputs/answers.md        # present after any question was answered
-$FORGE_JOB/out/plan.md              # written by the agent
-$FORGE_JOB/home                     # HOME for the harness process
+$FORGE_JOB/spec.json                     # the spec this run was assigned, for reference
+$FORGE_JOB/prompt.md                     # the composed prompt, as the harness was given it
+$FORGE_JOB/inputs/ticket                 # reserved input: the ticket body, no extension
+$FORGE_JOB/inputs/refinement.md          # pinned version, read-only
+$FORGE_JOB/inputs/answers.md             # present after any question was answered
+$FORGE_JOB/out/plan.md                   # written by the agent
+$FORGE_JOB/out/proposals/<name>.md       # ticket proposals, optional (ticket-proposals.md)
+$FORGE_JOB/tickets/index.md              # the project's tickets and open proposals, read-only
+$FORGE_JOB/tickets/<number>.md           # one ticket's body
+$FORGE_JOB/conversation.md               # a reopened conversation's past, read-only
+$FORGE_JOB/platform/platform.md          # how the platform works, read-only
+$FORGE_JOB/platform/workflow-grammar.md  # workflow-grammar-v1.md as compiled in, read-only
+$FORGE_JOB/home                          # HOME for the harness process
+$FORGE_JOB/transcript-<n>.jsonl          # the harness's raw stdout, one file per run
+$FORGE_JOB/stderr.log                    # the harness's stderr
 ```
 
-On a resume the inputs and spec are refreshed; `out/` and earlier transcripts are kept.
-Artifact and state names are single path segments, checked by the validator, so nothing in
-the workflow can name a path outside these directories.
+`ForgeWorker.Job.Dir` owns the layout. `tickets/` is `ticket-proposals.md` § Reading the backlog;
+a conversation's directory also holds `history/` (`conversations.md` § Context) and, once it has
+been reopened, `conversation.md` — what was said before this process started, from the spec's
+`replay` (`conversations.md` § Lifetime). `Dir.prepare/3` removes it when the spec carries none.
+
+On a resume the spec, the prompt, `inputs/`, `platform/`, `tickets/` and `conversation.md` are
+rewritten; `out/`,
+`home` and earlier transcripts are kept. A run with no session to resume is a cold start and
+clears `out/` as well (`Dir.prepare/3`). Artifact and state names are single path segments,
+checked by the validator, so nothing in the workflow can name a path outside these directories.
+
+A conversation declares nothing: every file it leaves in `out/` besides `proposals/` is a
+document, recorded after each turn (`conversations.md` § Commits, `Dir.documents/1`). A
+conversation never resumes a session, so every start of one is cold and begins with `out/`
+empty; what it wrote before is in `inputs/` instead — the ticket's latest documents for a ticket
+chat, and a project chat's own (`conversations.md` § Context).
 
 The path is passed as an environment variable and repeated in the manifest. `changeset` has
-no file: it is the branch.
+no file under `out/`: it is the branch. As an input it is `inputs/changeset`, the diff of the
+ticket's branch against its base, taken when the job was created.
 
 ## The contract, as the preamble states it
 
 - Read the inputs. Do the work described by the state prompt. Commit code to the current
   branch with ordinary commits; history is squashed later.
 - Write each declared output to its path under `out/`. Do not write anything else there;
-  undeclared files are rejected and the job ends with outcome `error`.
+  undeclared files are rejected and the job ends with outcome `error`. The one exception is
+  `out/proposals/`, which `Dir.collect/2` subtracts before it counts what is undeclared.
 - Begin each document with YAML front matter containing `outcome`, one of the values listed
   in the manifest, or `did_not_converge` if the work could not be completed.
 - Ask questions inside the document, next to the passage they concern, as fenced
   `question` blocks. Prefer few, specific questions with a recommended default. State the
   assumption taken for non-blocking questions and continue. Use `blocking: true` only when
   no reasonable assumption exists.
+- Propose a ticket for work that is real but not this ticket's, instead of doing it or losing
+  it: one file per proposal in `out/proposals/`, an H1 title and a body, with no front matter
+  and no `question` blocks. A proposal is a suggestion; nothing runs until a person accepts it,
+  and there is a limit per job (`ticket-proposals.md`).
+- Read `tickets/index.md` before proposing. It lists every ticket on the project and every open
+  proposal, as a snapshot; each ticket's file holds its body and nothing else.
 - Budgets are fixed. Stop when told to; the platform enforces them regardless.
 - Do not edit `.forge/workflow.yml` or anything under `.forge/agents/` in this job.
+- Do not write outside the repository and `$FORGE_JOB/out/`.
 
 ## Output format
 
@@ -86,14 +118,82 @@ passes the answered keys to the worker.
 
 When the collected document contains an open question with `blocking: true`, the worker does
 not evaluate outcomes. The job's status becomes `waiting`, its process ends, and the question
-enters the queue. On answer, the platform writes a new version of the `answers` artifact,
-adds it to the job's inputs, and resumes the same job, same attempt, with a continuation
-prompt naming the answer. Resume uses the harness session where available and a fresh
-invocation otherwise. Front matter written before the block is ignored until the job ends
-without open blocking questions. There is no timeout and no automatic fallback.
+enters the queue. On answer, the platform writes a new version of the `answers.md` artifact,
+adds it to the job's inputs, and resumes the same job, same attempt, with the harness session it
+recorded. Front matter written before the block is ignored until the job ends without open
+blocking questions. There is no timeout and no automatic fallback.
 
-Non-blocking questions do not stop anything. They are recorded, shown in the queue as
-digested items, and their answers arrive as inputs to whichever job runs next on the ticket.
+### The continuation prompt
+
+A run that resumes its harness session is handed a **continuation**, `Prompt.continuation/3`,
+rather than the whole prompt again. The session already holds the preamble and the state prompt;
+what it lacks is what happened while it was stopped:
+
+1. **The answers** — `answers.md` as the spec pins it: its version, its path, and its text
+   inline, fenced verbatim. That is every answer on the ticket, oldest first, so the ones this
+   job stopped for are among the newest. Absent when the spec carries no answers input.
+2. **The branch** — its name and the commit the worktree is at, which the worker reads from the
+   checkout it has just made (`ForgeWorker.Checkout.head/1`). The earlier run's work was
+   committed and squashed when it stopped (`worker-tier.md` § Git), so the history is not the one
+   the session remembers even though the files are, and the prompt says so.
+3. **The manifest**, whole: it is short, it lists `answers.md` among the inputs, and it carries
+   the budget as assigned, which the platform may have lowered since the session last saw it.
+
+**Which prompt a run gets is decided where `--resume` is, from the same value.** The worker's
+runner reads `resume_session` from the assignment: set, the continuation goes to stdin and the
+driver adds `--resume`; unset, `Prompt.compose/2` and no flag. One value decides both, so the
+prompt and the flag cannot disagree.
+
+**Whether the session is really there is not predicted, by either side.** The platform could
+compare the worker it picked with the job's `worker_id`, and the worker could look for Claude
+Code's session file under the job's `home`, but both are a model of the harness's session lookup
+rather than the lookup, and a guard must use the model of the operation it guards. The lookup is
+`--resume` itself. When it finds nothing the harness exits before `system/init`, the platform
+re-queues the job with no session (`claude-code-events.md` § Resume), and that run is a cold
+start with the full composed prompt — so a continuation is never acted on by a session that did
+not resume. That rests on the harness failing a missing session rather than starting a new one,
+which is what `Forge.Jobs.complete/2` already reads; a harness that started afresh instead would
+hand the continuation to an agent with no memory of the job. **That is unmeasured.** Nothing has
+run `claude --resume` against a session id its home does not hold and recorded what it does:
+`bin/measure streaming` does not resume, and no other measurement covers it. It is what the code
+assumes, and it is the first thing to measure if a resumed job ever behaves as though it
+remembers nothing.
+
+**The worktree a continuation names has to be the branch.** A resume keeps the working tree it
+finds, because an unfinished tree is what a resume is for. It used to skip the reset for a tree it
+had only just made, too — a snapshot of the ticket's volume or the project's seed, which is on
+whatever commit that volume was — so a resume on a machine without the job's own worktree ran on
+the wrong tree, and the squash at its end pushed the difference as a commit reverting the ticket's
+work. A snapshot is reset to the branch whatever the assignment says
+(`ForgeWorker.Job.Workspace.prepare/2`); only a worktree that was already there is kept.
+
+### Non-blocking questions
+
+Non-blocking questions do not stop anything. They are recorded and shown on the ticket's page,
+where they can be answered, and their answers arrive as inputs to whichever job runs next on the
+ticket.
+
+They are also **shown in the queue as digested items**, so that a question an agent carried on
+past reaches someone who has not opened its ticket. `Forge.Queue` serves each open one as its own
+kind, `:assumption` — never as a `:question`, so nothing that reads the queue can take it for
+one that halted a job — and the queue page draws them beneath its decisions under *Not waiting
+on you*, as lines that lead to the ticket rather than cards that answer in place
+(`ui.md` § Not waiting on you). The daily digest push counts them apart from what is waiting
+(`Forge.Push.digest/0`, `api-and-ui.md` § Push). They are never pushed on their own.
+
+**Answering one changes no job's flow.** `Forge.Operator.answer/4` writes the answer and a new
+`answers.md` version, then resumes the waiting job of the ticket's state only if no blocking
+question on the ticket is still open — and a non-blocking answer closes none, so a job waiting on
+a blocking question keeps waiting, and a job that is running or not yet started is untouched. The
+answer reaches the next run through `answers.md`, which is how every answer reaches a job.
+
+One case bends that, and it is a gap in editing rather than a rule of answering: a person's edit
+that drops a blocking block while its job waits leaves the job waiting with nothing open, because
+`Operator.edit/4` resumes nothing, and the next answer of any kind — a non-blocking one included —
+then resumes it. The resume is the edit's, arriving late; the fix belongs to the edit. A person's
+edit is the one way left to get there. A conversation about the ticket was the other — it writes
+the ticket's documents every turn — and it is refused that document while the job waits, and
+never raises a question of its own (`conversations.md` § Commits).
 
 ## Reserved for later
 

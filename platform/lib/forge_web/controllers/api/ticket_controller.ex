@@ -50,15 +50,27 @@ defmodule ForgeWeb.Api.TicketController do
     json(conn, %{tickets: tickets})
   end
 
+  # **`Operator.admit/3` is the guard, and the only one.** This used to find the project among
+  # the caller's own and then call `Tickets.admit/3` — a second check with its own idea of who
+  # may admit (any membership row, where `Operator` asks `:use`), and an admission the Operator
+  # never saw. The project is resolved by name alone here so that nothing but `admit/3` decides,
+  # and its refusal is the same 404 as a project that does not exist: not a member and does not
+  # exist are the same answer (`docs/design/identity.md` § Projects and members). It runs before
+  # the ticket is validated, so a malformed request into somebody else's project is not a 422
+  # that says the project is there. `docs/design/api-and-ui.md` § Operations.
   def create(conn, %{"project" => name} = params) do
-    with %{} = project <- find_project(conn, name),
-         {:ok, ticket} <-
-           Tickets.admit(
-             project,
-             %{title: params["title"] || "", body: params["body"] || ""},
-             actor(conn)
-           ) do
+    attrs = %{title: params["title"] || "", body: params["body"] || ""}
+
+    with %{} = project <- Projects.by_name(name) || {:error, :not_found},
+         {:ok, ticket} <- admit(project, user(conn), attrs) do
       conn |> put_status(:created) |> json(Render.ticket(ticket, project.name))
+    end
+  end
+
+  defp admit(project, user, attrs) do
+    case Operator.admit(project, user, attrs) do
+      {:error, :forbidden} -> {:error, :not_found}
+      other -> other
     end
   end
 
@@ -224,5 +236,4 @@ defmodule ForgeWeb.Api.TicketController do
   end
 
   defp user(conn), do: conn.assigns.current_scope.user
-  defp actor(conn), do: {:user, user(conn).id}
 end

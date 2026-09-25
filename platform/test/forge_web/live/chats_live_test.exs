@@ -187,7 +187,12 @@ defmodule ForgeWeb.ChatsLiveTest do
     {:ok, view, _html} = live(conn, ~p"/chats")
 
     refute has_element?(view, ~s(ol li a[href="/chats/#{chat.id}"] button))
-    view |> element(~s(ol li button[phx-value-id="#{chat.id}"])) |> render_click()
+
+    # Ending deletes the branch unless it would not merge cleanly, and the confirm says so —
+    # the conversation's own page's sentence, not a quieter one of the list's.
+    button = view |> element(~s(ol li button[phx-value-id="#{chat.id}"]))
+    assert render(button) =~ "its branch is deleted"
+    button |> render_click()
 
     assert Jobs.get(chat.id).status == :finished
   end

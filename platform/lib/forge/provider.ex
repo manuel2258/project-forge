@@ -161,6 +161,37 @@ defmodule Forge.Provider do
   end
 
   @doc """
+  Which of a template's opaque fields this provider cannot make a machine without.
+
+  `size` and `image` mean nothing above the driver, so only the driver can say that a template
+  naming neither is useless to it. Hetzner needs both; the local driver needs neither, because
+  it boots this host's image at this host's size whatever a template says.
+  `Forge.Provisioning.Template.changeset/2` requires what is listed, so such a template is
+  refused where it is typed rather than saved, assigned, and then failing at its first create
+  (`docs/design/provisioning.md` § Where a machine comes from).
+
+  Declared here, like `credential_fields/0`, so that no code above the driver compares a
+  provider's name to find out.
+  """
+  @callback required_template_fields() :: [:size | :image]
+
+  @spec required_template_fields(String.t()) :: [:size | :image]
+  def required_template_fields(provider) do
+    case driver(provider) do
+      {:ok, module} -> module.required_template_fields()
+      # An equivalent mutant, whatever it answers. A template naming a provider this node does
+      # not have is already refused by `Template.changeset/2`, so requiring more of it only adds
+      # errors to a changeset that cannot be saved. The page can reach it — the create form
+      # offers only `names/0`, but the edit form takes the provider from the stored template,
+      # which may name one the node no longer has — and draws nothing from the answer: with no
+      # driver there is no catalogue, so size and image are free text, and the blank choice this
+      # list words ("choose one" or the default) is the one thing it decides, on a select that
+      # is not there.
+      {:error, _reason} -> []
+    end
+  end
+
+  @doc """
   Creates a machine. The driver comes from `opts.provider`, or the default when it says nothing.
   """
   @spec create(opts()) :: {:ok, machine()} | {:error, term()}
@@ -208,9 +239,10 @@ defmodule Forge.Provider do
   @doc """
   The provider a machine is made by when nothing names one.
 
-  A worker template names its own through its credential; this is what the platform falls back
-  to while there are no templates, and what `mix forge.worker.new` records for a machine the
-  operator built by hand.
+  A worker template names its own; this is what `mix forge.worker.new` records for a machine
+  the operator built by hand, and the driver for anything that names none. It is never a
+  reason to create a machine — there is no node fallback (`docs/design/provisioning.md`
+  § Whose account).
   """
   @spec default() :: String.t()
   def default, do: config(:default, "local")

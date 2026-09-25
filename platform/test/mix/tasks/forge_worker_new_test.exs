@@ -66,7 +66,12 @@ defmodule Mix.Tasks.Forge.Worker.NewTest do
   end
 
   test "--out writes it at 0600 and keeps the worker token off stdout" do
-    path = Path.join(System.tmp_dir!(), "worker-#{System.unique_integer([:positive])}.env")
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "#{System.pid()}-worker-#{System.unique_integer([:positive])}.env"
+      )
+
     on_exit(fn -> File.rm(path) end)
 
     New.run(["--out", path])

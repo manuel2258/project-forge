@@ -216,7 +216,9 @@ defmodule ForgeWeb.WorkerChannelTest do
       ref = push(socket, "ready", %{"memory_budget" => 8_000_000_000})
       assert_reply ref, :ok
 
-      assert %{status: :ready, memory_budget: 8_000_000_000, last_seen_at: seen} =
+      # Idle, because the join put the job back: this worker rejoined without it, so nothing is
+      # running on it (`Forge.Workers.ready/2`).
+      assert %{status: :idle, memory_budget: 8_000_000_000, last_seen_at: seen} =
                Workers.get!(worker.id)
 
       assert seen
@@ -292,6 +294,30 @@ defmodule ForgeWeb.WorkerChannelTest do
       assert Jobs.get!(job_id).credential_id == credential.id
     end
 
+    # The transcript is uploaded when the job stops, up to its preparation and its whole wall
+    # clock after this token was minted. With the store's own lifetime at zero, only those two
+    # keep it.
+    test "the transcript token lasts as long as the job may", %{worker: worker, job: job} do
+      previous = Application.get_env(:forge, Forge.Storage, [])
+      Application.put_env(:forge, Forge.Storage, Keyword.put(previous, :token_max_age, 0))
+      on_exit(fn -> Application.put_env(:forge, Forge.Storage, previous) end)
+
+      :ok = Workers.connected(worker.id)
+      {:ok, worker} = Workers.ready(worker, %{"memory_budget" => 8_000_000_000})
+      # Back in the queue, as a rejoin would put it: `assign/2` starts only a pending job.
+      {:ok, job} = Jobs.requeue(job.id, :worker_lost)
+      {:ok, _job} = Jobs.assign(job, worker)
+
+      assert_receive {:assign, %{"store" => store}}
+
+      assert :ok =
+               Forge.Storage.Token.verify(
+                 store["transcript_token"],
+                 :put,
+                 store["transcript_key"]
+               )
+    end
+
     test "an event becomes a line in the timeline", %{worker: worker, token: token} = context do
       %{ticket: ticket, job: job} = context
       {:ok, _reply, socket} = join_worker(worker, token)
@@ -357,7 +383,7 @@ defmodule ForgeWeb.WorkerChannelTest do
         push(socket, "hibernated", %{
           "job_id" => job.id,
           "commit" => sha,
-          "reason" => "drained"
+          "reason" => "cancelled"
         })
 
       assert_reply ref, :ok
@@ -450,6 +476,102 @@ defmodule ForgeWeb.WorkerChannelTest do
       |> Forge.Repo.update!()
 
     %{job: job}
+  end
+
+  describe "how long an assignment lasts" do
+    setup :ticket_with_job
+
+    setup %{worker: worker} do
+      :ok = Workers.connected(worker.id)
+      {:ok, worker} = Workers.ready(worker, %{"memory_budget" => 8_000_000_000})
+
+      jobs = Application.get_env(:forge, Jobs, [])
+      store = Application.get_env(:forge, Forge.Storage, [])
+
+      on_exit(fn ->
+        Application.put_env(:forge, Jobs, jobs)
+        Application.put_env(:forge, Forge.Storage, store)
+      end)
+
+      %{worker: worker}
+    end
+
+    defp configure(app, opts),
+      do:
+        Application.put_env(
+          :forge,
+          app,
+          Keyword.merge(Application.get_env(:forge, app, []), opts)
+        )
+
+    defp token_row(job_id), do: Forge.Repo.get_by!(Forge.Git.Token, job_id: job_id)
+
+    defp lifetime(token),
+      do: DateTime.diff(token.expires_at, DateTime.utc_now(:second))
+
+    test "a conversation runs for a day and a workflow job for its hour", context do
+      %{worker: worker, job: job, project: project} = context
+      chat = chat_fixture(%{project: project})
+
+      {:ok, _} = Jobs.assign(job, worker)
+      {:ok, _} = Jobs.assign(chat, worker)
+
+      job_id = job.id
+      chat_id = chat.id
+      assert_receive {:assign, %{"job_id" => ^job_id, "wall_clock_ms" => 3_600_000}}
+      assert_receive {:assign, %{"job_id" => ^chat_id, "wall_clock_ms" => 86_400_000}}
+    end
+
+    # Each kind by its own clock, set here so that neither is inside the fixed ninety minutes a
+    # token had before: a workflow job's default hour would pass either way.
+    test "a job's git token outlives its own clock, whatever its kind", context do
+      %{worker: worker, job: job, project: project} = context
+      configure(Jobs, wall_clock_ms: :timer.hours(3), chat_wall_clock_ms: :timer.hours(30))
+      chat = chat_fixture(%{project: project})
+
+      {:ok, _} = Jobs.assign(job, worker)
+      {:ok, _} = Jobs.assign(chat, worker)
+
+      assert lifetime(token_row(job.id)) > 3 * 3600
+      assert lifetime(token_row(chat.id)) > 30 * 3600
+      assert lifetime(token_row(job.id)) < 30 * 3600
+    end
+
+    # Against literals, with nothing configured here: `docs/design/storage.md` § Serving says two
+    # hours and a quarter for a workflow job and twenty-five hours and a quarter for a
+    # conversation — the clock, then the preparation margin, then the store's own fifteen
+    # minutes. The worker starts the clock only once the clone and the seed are ready, so a token
+    # sized to the clock alone lapsed for any job whose preparation outran its fifteen minutes.
+    test "the transcript token outlasts the job's preparation as well as its clock", context do
+      %{worker: worker, job: job, project: project} = context
+      chat = chat_fixture(%{project: project})
+
+      {:ok, _} = Jobs.assign(job, worker)
+      {:ok, _} = Jobs.assign(chat, worker)
+
+      job_id = job.id
+      chat_id = chat.id
+      assert_receive {:assign, %{"job_id" => ^job_id, "store" => %{"transcript_token" => j}}}
+      assert_receive {:assign, %{"job_id" => ^chat_id, "store" => %{"transcript_token" => c}}}
+
+      assert store_token_lifetime(j) == 2 * 3600 + 15 * 60
+      assert store_token_lifetime(c) == 25 * 3600 + 15 * 60
+    end
+
+    # And no longer: a second of clock, no preparation and no ordinary lifetime is a token dead
+    # after a second. The margin is set to nothing here, so a margin read from anywhere but its
+    # configuration would keep the token alive.
+    test "the transcript token dies with the job's clock", %{worker: worker, job: job} do
+      configure(Jobs, wall_clock_ms: 1_000, preparation_margin_ms: 0)
+      configure(Forge.Storage, token_max_age: 0)
+
+      {:ok, _} = Jobs.assign(job, worker)
+      assert_receive {:assign, %{"store" => %{"transcript_key" => key, "transcript_token" => t}}}
+
+      assert :ok = Forge.Storage.Token.verify(t, :put, key)
+      Process.sleep(1_100)
+      assert {:error, :expired} = Forge.Storage.Token.verify(t, :put, key)
+    end
   end
 
   describe "rejoining" do

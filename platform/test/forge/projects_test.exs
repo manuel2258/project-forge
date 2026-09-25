@@ -76,19 +76,39 @@ defmodule Forge.ProjectsTest do
     refute Git.branch_exists?(repo, "attacker")
   end
 
+  # Git refusing everything, for the length of one test: a global config it cannot parse fails
+  # every command before it does anything. The branch name used to be the way to make git fail
+  # after the row was reserved; the changeset asks git about the name now, so no name gets
+  # that far.
+  defp with_git_broken(fun) do
+    config = Path.join(tmp_dir("gitconfig"), "config")
+    File.write!(config, "[[[not a config\n")
+    previous = System.get_env("GIT_CONFIG_GLOBAL")
+    System.put_env("GIT_CONFIG_GLOBAL", config)
+
+    try do
+      fun.()
+    after
+      if previous,
+        do: System.put_env("GIT_CONFIG_GLOBAL", previous),
+        else: System.delete_env("GIT_CONFIG_GLOBAL")
+    end
+  end
+
   # A git failure after the row is reserved must leave neither the row nor a directory: the
   # transaction rolls the row back and the initializer removes a directory it created.
   test "a git failure during registration leaves no row and no directory" do
     repo = Path.join(tmp_dir("bare"), "broken.git")
     name = "broken-#{System.unique_integer([:positive])}"
 
-    # A branch name the changeset accepts but git refuses (a path component beginning with a
-    # dot), so init runs, the directory is created, and `ensure_head` then fails.
+    # The directory is created before `git init` runs, and `git init` then fails.
     assert {:error, _reason} =
-             Projects.register(
-               %{name: name, repo_path: repo, default_branch: "trunk/.x"},
-               Forge.AccountsFixtures.user_fixture()
-             )
+             with_git_broken(fn ->
+               Projects.register(
+                 %{name: name, repo_path: repo},
+                 Forge.AccountsFixtures.user_fixture()
+               )
+             end)
 
     refute File.exists?(repo)
     assert Projects.by_name(name) == nil
@@ -101,21 +121,34 @@ defmodule Forge.ProjectsTest do
     # Import is by name onto an existing directory; a git failure must not delete the caller's
     # pushed history, because this call did not create the directory.
     assert {:error, _reason} =
-             Projects.register(
-               %{
-                 name: "import-#{System.unique_integer([:positive])}",
-                 repo_path: repo,
-                 default_branch: "trunk/.x"
-               },
-               Forge.AccountsFixtures.user_fixture()
-             )
+             with_git_broken(fn ->
+               Projects.register(
+                 %{name: "import-#{System.unique_integer([:positive])}", repo_path: repo},
+                 Forge.AccountsFixtures.user_fixture()
+               )
+             end)
 
     assert File.dir?(repo)
     assert {:ok, ^before} = Git.resolve(repo, "refs/heads/main")
   end
 
   describe "the default branch" do
-    for bad <- ["-rf", "../evil", "a b", "master;touch x", "trunk/", "a..b", "a//b", "main.lock"] do
+    # The last four passed a hand-written copy of git's rules and then failed inside git as a
+    # 500 (`docs/security/pentest-2026-09-20.md` F2): git is asked now, not imitated.
+    for bad <- [
+          "-rf",
+          "../evil",
+          "a b",
+          "master;touch x",
+          "trunk/",
+          "a..b",
+          "a//b",
+          "main.lock",
+          "main.",
+          "trunk/.x",
+          "a.lock/b",
+          "HEAD"
+        ] do
       test "is rejected: #{inspect(bad)}" do
         changeset =
           Forge.Projects.Project.changeset(%Forge.Projects.Project{}, %{

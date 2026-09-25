@@ -282,7 +282,7 @@ defmodule Forge.Accounts do
   @doc """
   Turns a verified identity into the user it is, creating one on first login.
 
-  **A new account is pending**, exactly as a local first login would be — § Approval is the
+  **A new account is pending** — § Approval is the
   perimeter and an issuer does not get to move it. `confirmed_at` is set because the issuer
   asserted the address and there is no confirmation email to send; that is not approval and
   grants nothing.

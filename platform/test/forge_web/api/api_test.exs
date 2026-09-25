@@ -52,6 +52,75 @@ defmodule ForgeWeb.ApiTest do
     job
   end
 
+  # Admitting is a member's work, not an admin's: `Operator.admit/3` asks `:use`. And the
+  # admission is the member's in the log, which is what says who asked for the work. Both were
+  # held only by tests whose caller owned the project.
+  test "a plain member admits a ticket, and the log says it was them", %{
+    conn: conn,
+    project: project
+  } do
+    member = Forge.ForgeFixtures.member_fixture(project, :member)
+    assert Projects.role(project, member) == :member
+    token = Accounts.create_api_token(member, "member")
+
+    conn =
+      conn
+      |> delete_req_header("authorization")
+      |> put_req_header("authorization", "Bearer " <> token)
+
+    assert %{"number" => number} =
+             conn
+             |> post(~p"/api/v1/projects/#{project.name}/tickets", %{title: "Persist scores"})
+             |> json_response(201)
+
+    ticket = Tickets.get_by_number!(project, number)
+
+    assert [%{actor: %{"kind" => "user", "id" => actor}}] =
+             ticket.id
+             |> Forge.Events.for_ticket()
+             |> Enum.filter(&(&1.type == "ticket.admitted"))
+
+    assert actor == member.id
+  end
+
+  # A client that reads the queue decides what is waiting from the kind. A non-blocking question
+  # served as a `question` would read as a halted job to every client that was not told otherwise.
+  test "the queue serves a non-blocking question as an assumption", %{
+    conn: conn,
+    user: user,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
+
+    {:ok, _version} =
+      Forge.Artifacts.record_version(ticket.id, "plan.md", :document, :system, %{
+        content: """
+        ---
+        outcome: done
+        ---
+        # Plan
+
+        ```question
+        key: naming
+        text: What is the table called?
+        options: [scores, highscores]
+        blocking: false
+        assumption: scores
+        ```
+        """
+      })
+
+    assert %{
+             "items" => [
+               %{
+                 "kind" => "assumption",
+                 "question" => %{"key" => "naming", "blocking" => false},
+                 "detail" => %{"assumption" => "scores"}
+               }
+             ]
+           } = conn |> get(~p"/api/v1/queue") |> json_response(200)
+  end
+
   test "rejects missing or bad tokens", %{conn: conn} do
     assert %{"error" => %{"reason" => "unauthorized"}} =
              conn

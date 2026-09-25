@@ -6,8 +6,9 @@ let
   cfg = config.services.forge;
   inherit (lib) mkEnableOption mkOption mkIf types;
 
-  # What the release needs on PATH: git for repositories and worktrees, nix for `nix develop`,
-  # a shell and coreutils for the job wrapper, and Claude Code itself.
+  # What the release needs on PATH: git for repositories, a shell and coreutils for its hooks, and
+  # Claude Code itself. `nix` is left from when the platform ran jobs and entered each project's
+  # `nix develop`; nothing on the platform calls it now.
   #
   # No `openssh`: the `post-receive` mirror was its only caller, and the mirror speaks https now
   # (`docs/design/git-hosting.md` § What a mirror URL may be) — an `ssh://` or `git@host:` mirror
@@ -28,7 +29,6 @@ let
     RELEASE_TMP = "${cfg.dataDir}/tmp";
     FORGE_DATA_DIR = "${cfg.dataDir}/data";
     FORGE_REPOS_DIR = "${cfg.dataDir}/repos";
-    FORGE_NIX_ENV = if cfg.nixEnv then "1" else "0";
     FORGE_CLAUDE_EXECUTABLE = lib.getExe cfg.claudePackage;
     FORGE_DIGEST_HOUR_UTC = toString cfg.digestHourUtc;
   } // lib.optionalAttrs cfg.database.createLocally {
@@ -79,7 +79,7 @@ in
     dataDir = mkOption {
       type = types.path;
       default = "/var/lib/forge";
-      description = "Home of the service: bare repositories, worktrees, job directories.";
+      description = "Home of the service: bare repositories, the blob store, the local driver's machines.";
     };
 
     environmentFile = mkOption {
@@ -96,12 +96,6 @@ in
       type = types.bool;
       default = true;
       description = "Run Postgres on this host and connect over its Unix socket.";
-    };
-
-    nixEnv = mkOption {
-      type = types.bool;
-      default = true;
-      description = "Run each job inside the project's `nix develop .#<env>`.";
     };
 
     claudePackage = mkOption {

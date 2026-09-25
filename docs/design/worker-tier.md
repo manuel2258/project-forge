@@ -6,10 +6,11 @@ interrupted. `docs/decisions.md` settles the architecture — transient systemd 
 copy-on-write, `nix develop`, a provider driver, a worker that dials out — and M1 to M3 supply the
 numbers this note carries. Nothing here reopens those.
 
-What changes in this milestone: the platform stops running jobs in its own BEAM. Today
-`platform/mix.exs` depends on `forge_worker` by path and `Forge.Jobs.start/1` spawns a runner
-in-process. After this milestone the platform knows workers only through the provider driver and
-the channel, and `forge_worker` is a release that runs on a different machine.
+What changed in this milestone: the platform stopped running jobs in its own BEAM. Before it,
+`platform/mix.exs` depended on `forge_worker` by path and `Forge.Jobs.start/1` spawned a runner
+in-process. Now `forge_core` is the only project the platform depends on by path, it knows
+workers only through the provider driver and the channel, and `forge_worker` is a release that
+runs on a different machine.
 
 ## Worker lifecycle
 
@@ -41,17 +42,22 @@ because the two differ in exactly one way, and it is the only way that matters: 
 this machine's life.*
 
 Everything else is the same. An unmanaged worker joins the same channel with the same kind of
-token, is scheduled by the same memory gate, runs the same slices, and counts against
-`max_workers` like any other — that setting is how many machines exist, not how many the
-platform made. Setting `max_workers` to 0 and provisioning by hand is the pure permanent model;
-leaving room above the permanent ones is a permanent worker with burst capacity.
+token, is scheduled by the same gate and runs the same slices.
 
-**`docs/design/provisioning.md` keeps this exactly as it is, and that is the point.** A worker
-template is a recipe for creating a machine, so a machine nobody created from one simply has a
-null `template_id` and its resources set by the operator rather than copied. No second concept
-appears for a machine the platform did not make — which is the choice `managed` already
-represents, and the reason `max_workers` moving onto a template does not change the sentence
-above: it is still how many machines of that shape exist.
+**It counts against no ceiling**, which is the one thing here that changed. While `max_workers`
+was one number for the node it counted every machine, the operator's included, and setting it to
+0 was how a node ran on permanent machines alone. The ceiling is a worker template's now, and
+`Provisioning.live_count/1` counts the rows carrying that template's id — which a permanent
+worker never does. The pure permanent model is a project with no template assigned: when a
+permanent machine could hold the job once it is free, the answer is a queue rather than a stuck
+ticket (`Workers.create_machine/1`). Permanent workers with a template assigned as well is that
+model with burst capacity.
+
+**`docs/design/provisioning.md` keeps the rest exactly as it is, and that is the point.** A
+worker template is a recipe for creating a machine, so a machine nobody created from one simply
+has a null `template_id` and its resources set by the operator rather than copied. No second
+concept appears for a machine the platform did not make — which is the choice `managed` already
+represents.
 
 **"Everything else is the same" includes what the machine is given at creation**, and that is
 the part it is easy to get wrong. `mix forge.worker.new` prints the whole environment a machine
@@ -77,10 +83,13 @@ destroyed as before: it is cattle, and the platform can make another.
 
 `Forge.Provider`, and the second implementation now exists — `Forge.Provider.Hetzner`, behind
 the same callbacks, resolved through the registry `docs/design/provisioning.md` § Where a
-machine comes from describes rather than through one configured module. **It has never spoken
-to Hetzner.** Every request is shaped against the published API and exercised through a seam,
-which is precisely the position § What the operator's machine settled warns about: in every
-case the tests against the fakes passed and the real thing did not. What it does settle is the
+machine comes from describes rather than through one configured module. **It has created and
+destroyed real Hetzner machines, and none has yet run a job**: they booted, could not reach a
+platform on `localhost`, and were destroyed at the timeout (`provisioning.md` § A template that
+cannot make a working machine is taken out of service). Every request is shaped against the
+published API and exercised through a seam, which is precisely the position § What the
+operator's machine settled warns about: in every case the tests against the fakes passed and the
+real thing did not. What it does settle is the
 boundary — nothing above `Forge.Provider.*` learned a Hetzner name for it to exist, and the
 identity route needed no change at all, because § How a machine learns what it is had already
 chosen Hetzner's metadata endpoint and the bytes are the same ones the local driver writes to a
@@ -89,24 +98,36 @@ disk.
 The callbacks:
 
 ```
-@callback create(opts) :: {:ok, %{provider_id: String.t(), address: String.t()}} | {:error, term}
-@callback destroy(provider_id) :: :ok | {:error, term}
-@callback status(provider_id) :: {:ok, :pending | :running | :gone} | {:error, term}
+@callback create(opts) ::
+            {:ok, %{provider_id: String.t(), address: String.t() | nil}} | {:error, term}
+@callback destroy(provider_id, credential) :: :ok | {:error, term}
+@callback status(provider_id, credential) :: {:ok, :pending | :running | :gone} | {:error, term}
+@callback shapes(credential) :: {:ok, [shape]} | {:error, term}
+@callback images(credential) :: {:ok, [image]} | {:error, term}
+@callback list(credential) :: {:ok, [instance]} | {:error, term}
+@callback credential_fields() :: [%{key: String.t(), label: String.t()}]
+@callback required_template_fields() :: [:size | :image]
 ```
 
-`opts` carries the worker id, the token, the platform's address and the machine size. That is the
-whole surface, and it matches what `docs/vision.md` says a provider is: create a machine, destroy
-it, and somewhere to put bytes. The bytes are `Forge.Storage`'s (`docs/design/storage.md`), not
-the driver's, which is why `create` and `destroy` are all that is left here.
+`opts` carries the worker id, the token, the platform's address, the provider name the registry
+resolves the driver from, the template's `size` and `image`, the provider credential's secret as
+`credential`, and `harness_env`. The first three callbacks are a machine's whole life, and they
+match what `docs/vision.md` says a provider is: create a machine, destroy it, and somewhere to put
+bytes. The bytes are `Forge.Storage`'s (`docs/design/storage.md`), not the driver's. `destroy`
+and `status` take the credential the machine was made with, because ending a machine is an
+account operation too (`docs/design/provisioning.md` § Whose account records what it cost when
+they did not). `status` has no caller above the driver yet.
 
 **`opts.size` used to be declared and read by nobody** — a `String.t()` on the type and a
 `machine_size` config key that reached `Provider.create/1` and stopped there, because one
 machine shape needs no name. `docs/design/provisioning.md` gave it a consumer: a worker
 template carries it and the driver maps it, so `"cpx32"` means something in exactly one module.
-Two callbacks joined the three above — `shapes/1`, the machine shapes a driver sells, and
-`credential_fields/0`, the shape of the secret that reaches its account — and `impl/0` became a
-registry, so the driver is resolved per machine from the row rather than per node from
-configuration. All of it is built.
+Five callbacks joined the three that were here — `shapes/1`, the machine shapes a driver sells;
+`images/1`, the images a credential can make one from; `credential_fields/0`, the shape of the
+secret that reaches its account; `required_template_fields/0`, which of `size` and `image` a
+template must name for the driver to make anything from it; and `list/1`, the machines forge
+made in that account, which nothing calls yet — and `impl/0` became a registry, so the driver is
+resolved per machine from the row rather than per node from configuration. All of it is built.
 
 **Nothing above the driver knows the provider.** Not the scheduler, not the channel, not the
 worker. A module that pattern-matches on `"local"` outside `Forge.Provider.*` is the bug this
@@ -125,7 +146,7 @@ removes the overlay and the disk. `status` reads the process.
 direction of the channel exists to give. `ssh_key` and `ssh_port` open one anyway — a forward
 from the platform host's loopback to the guest's sshd, with a key the config disk carries — and
 two things need it. M4 measures cold-start phases from outside the guest
-(`docs/design/measurement-harness.md` § What M4 reuses), and a job that failed on a machine
+(`docs/design/measurement-harness.md` § M4), and a job that failed on a machine
 about to be destroyed has left its stderr on that machine and nowhere else. Both are the
 operator's own machine looking at its own VM. Neither is configured unless the operator does it,
 and the Hetzner implementation in the closing step is free to have no equivalent.
@@ -262,32 +283,49 @@ by hand.
 
 ## Scheduling
 
-> **Superseded in part by `docs/design/provisioning.md`.** What is below is what runs: one slice
-> size for every job, a memory-only gate, and one `max_workers` for the node. That note replaces
-> the single number with resources declared per job, adds `kind` and cores as gate dimensions, and
-> moves `max_workers` and the idle period onto a worker template. It is unbuilt; this section
-> describes the code until it is, and the rule the gate exists to enforce does not change.
+> **Extended by `docs/design/provisioning.md`, which is built and is the standard for the gate.**
+> What is below is where it started: one slice size for every job, a memory-only gate, and one
+> `max_workers` for the node. That note replaced the single number with resources declared per
+> job, added `kind` and cores as gate dimensions, and moved `max_workers` and the idle period onto
+> a worker template. The rule the gate exists to enforce did not change.
 
-`Forge.Jobs.Scheduler` stops counting jobs and starts measuring memory.
+`Forge.Jobs.Scheduler` stopped counting jobs and started measuring memory.
 
-A job's slice is `slice_memory` — configuration, defaulting to **2.2 GiB**, which is M3's observed
-peak (2009 MiB) plus its margin (`docs/measurements.md` § M3). A worker's `memory_budget` is its
-RAM less a reserve for the system and the Nix daemon. A job is assigned only when its slice fits
-what the worker has left. That is the rule `docs/vision.md` states, and the reason it is a rule is
-the claim the whole tier rests on: an out-of-memory build kills one job, not the machine.
+A job's slice was `slice_bytes` — configuration, defaulting to **2.2 GiB**, which is M3's observed
+peak (2009 MiB) plus its margin (`docs/measurements.md` § M3). It is now the last link of the chain
+a job's memory resolves through, and what a workflow job declaring nothing gets
+(`docs/design/provisioning.md` § What a job asks for). A worker's `memory_budget` is its RAM less
+a reserve for the system and the Nix daemon. A job is assigned only when its slice fits what the
+worker has left. That is the rule `docs/vision.md` states, and the reason it is a rule is the claim
+the whole tier rests on: an out-of-memory build kills one job, not the machine.
 
-Two gates now compose, and they answer different questions:
+Two gates were to compose, and they answer different questions:
 
-1. **The window gate** (`docs/design/capacity.md` § Gate the scheduler): may we spend an
-   invocation at all? A blocking rate-limit window pauses everything.
+1. **The window gate** (`docs/design/capacity.md` § Engine support, the third change): may we
+   spend an invocation at all? It is per credential rather than node-wide: the pick passes over a
+   credential whose window blocks, and a job whose every credential is limited waits, recorded as
+   `limited` (`docs/design/credentials.md` § How a job picks).
 2. **The memory gate**: does this job's slice fit on a worker we have, and if not, is it worth
    creating one?
 
-The window gate runs first. Nothing is gained by creating a machine for a job that cannot start.
+The window gate runs first — the scheduler asks `Credentials.for_job/1` before `Workers.provide/2` —
+because nothing is gained by creating a machine for a job that cannot start. **The spend gate runs
+after placement.** The ticket's allowance and the node's daily cap are asked in
+`Forge.Jobs.assign/2`, which runs only once `Workers.provide/2` has returned a worker, so a job the
+caps refuse can already have had a machine created for it.
 
-When no ready worker has room, the platform creates one — up to `max_workers`, which is 1 for the
-PoC because everything runs on the operator's laptop. A job that fits no worker and cannot have one
-created stays `pending`; it is not an error, and the ticket stays `active`.
+When no connected worker has room, the platform creates one from the smallest worker template
+assigned to the job's project that holds it, up to that template's `max_workers`; there is no
+node-wide ceiling (`docs/design/provisioning.md` § Whose account). A job that fits no worker and
+cannot have one created — the template is at its ceiling, or a machine that exists could hold it
+once free — stays `pending`; it is not an error, and the ticket stays `active`. It says why,
+though: a `job.waiting` event carries the reason each time it changes, and the ticket's timeline
+draws it (`docs/design/provisioning.md` § The gate). A job with no template to be made from —
+none assigned, all disabled, none that both takes its kind and is big enough — is a different
+answer: the ticket is stuck with that as its reason (`Scheduler.stick/2`), because nothing will
+change it until a person does. A chat sticks nothing, not even a ticket chat's ticket — that
+ticket's own work may place perfectly well — and waits, with that answer recorded as its wait
+reason and drawn on its page.
 
 **2.2 GiB is the sample's number, not the operator's.** `docs/measurements.md` is explicit that M2
 and M3 proved mechanism rather than quantity, and that issue #12 replaces both with the operator's
@@ -429,12 +467,12 @@ matched against `ticket/<number>` before it is used as one rather than trusted b
 platform sent it — the same reason `Forge.Storage.Key` validates a key the platform built.
 
 **It is machine-local, and nothing announces it.** No upload, no new channel message, and nothing
-tells a machine that a ticket merged or was abandoned — the platform's messages are `assign`,
-`cancel` and `drain`. So a ticket volume is swept by age like the job directories beside it,
-defaulting to two days: long enough to cover a ticket blocked on a question overnight, short
-enough that a machine which never dies is not holding a volume per ticket it ever touched. The
-exclusive bytes are what that ticket's builds wrote, which M2 measured and which is the number
-that matters on a real host.
+tells a machine that a ticket merged or was abandoned — the platform's messages are `assign` and
+`cancel`, and a conversation's `message`, `interrupt` and `close`. So a ticket volume
+is swept by age like the job directories beside it, defaulting to two days: long enough to cover
+a ticket blocked on a question overnight, short enough that a machine which never dies is not
+holding a volume per ticket it ever touched. The exclusive bytes are what that ticket's builds
+wrote, which M2 measured and which is the number that matters on a real host.
 
 **On `Volume.Copy` promotion is a full `cp -a`.** On the image it is a btrfs snapshot and costs
 nothing; on a machine without btrfs — a development machine, a container — each promotion copies
@@ -523,12 +561,14 @@ the operator can already reach the machine and nowhere else. **It does not work 
 by construction: a worker there has no inbound port, which is the property the whole channel
 direction exists to give.
 
-What that needs instead is the same operation pulled rather than pushed, and every piece is
-already here: `drain` stops the worker taking work, the store serves it blobs under scoped
-short-lived tokens, and the channel carries platform-to-worker messages. An `update` message
-carrying a store key and a token, a fetch, a symlink swap and a restart uses no new transport and
-no new kind of credential. It is not built, because nothing yet runs a worker the operator cannot
-ssh to.
+What that needs instead is the same operation pulled rather than pushed, and the transport is
+already here: the store serves it blobs under scoped short-lived tokens, and the channel carries
+platform-to-worker messages. An `update` message carrying a store key and a token, a fetch, a
+symlink swap and a restart uses no new transport and no new kind of credential. What it adds is
+a machine that stops taking work while it swaps, which this section once gave to `drain` — a
+message nothing ever sent, and dropped (§ Idle destroy) — so `update` has to mean that itself,
+and the platform has to stop assigning to a machine it has sent one to. It is not built, because
+nothing yet runs a worker the operator cannot ssh to.
 
 **A machine says which build it is running when it joins.** Once the release is separable from
 the image, "what is this worker running" stops being answerable from the image, and the
@@ -536,7 +576,7 @@ application version does not answer it either — every release in the PoC is `0
 changes on a code edit is the store path, so the join line names it:
 
 ```
-joined worker:8eaaacc1-… running 0.1.0 (8rh57whmgk6m); ready with 6176456704 bytes
+joined worker:8eaaacc1-… running 0.1.0 (8rh57whmgk6m); ready with 6176456704 bytes and 4 cores
 ```
 
 which is the first twelve characters of what `nix build .#forge-worker` prints, so the operator
@@ -585,35 +625,62 @@ know an age is a sweep that cannot get that wrong.
 
 **None of this is per-job hygiene, and it should not become it.** A job's *worktree* is deleted
 the moment the job ends, because that is a snapshot whose whole cost is what the job wrote into
-it. These three are shared or resumable, and deleting them eagerly would either break a resume
+it. These four are shared or resumable, and deleting them eagerly would either break a resume
 or throw away the warm start the seed exists to provide.
 
 ## Hibernation and resume
 
-A job that is interrupted — cancelled, drained, out of budget, a worker being destroyed — commits
-before it stops. `docs/decisions.md`: jobs are disposable, anything that must survive is committed
+A job that is interrupted — cancelled, out of budget, a worker being destroyed — commits before
+it stops. `docs/decisions.md`: jobs are disposable, anything that must survive is committed
 to the branch or written to the store, history is squashed.
 
 The sequence: SIGTERM the harness, wait the grace period, `git add -A` and commit in the worktree,
 push to the ticket branch with the job's token, upload the transcript to the store, send
 `hibernated` with the commit sha. The platform records the sha and sets the job `hibernated` — a
-status that has existed since milestone 1 and has never been reachable.
+status that existed from milestone 1 and was unreachable until this one.
+
+**Only one of those three interruptions reaches it for a workflow job.** The worker sends
+`hibernated` when a `cancel` stopped the runner (`ForgeWorker.Link` maps `killed: :operator` to
+it), and the platform sends `cancel` in one place: rejoin reconciliation, for a job it has
+already finished with (`docs/design/worker-channel.md` § Reconnection). No operator action
+sends one. Out of budget ends in a `result` like any other ending, and a worker that is lost or
+swept re-queues its running jobs to `pending` (`Workers.sweep_unreachable/0`) rather than
+hibernating them. A conversation is the exception
+the other way: every chat ends by sending `hibernated`, and one whose run is lost is set
+`hibernated` — dormant — by the platform (`docs/design/conversations.md` § Lifetime).
 
 Resume reconstructs from the branch and the manifest, never from the conversation. The spec is
 immutable and already in the row; inputs are re-pinned at run time as they are today; the worktree
-is a fresh snapshot with the branch checked out at the commit the hibernation left. Conversation
-resume is attempted only when the same worker still has the same worktree path, because Claude
-Code's session lookup is per project directory and will not find it anywhere else
-(`docs/design/claude-code-events.md`). When it is not found, the job runs from the prompt and the
-artifacts, which is the contract.
+is a fresh snapshot with the branch checked out at the commit the hibernation left — reset to it
+even though the run is a resume, because a snapshot has no unfinished work of its own to keep
+(`docs/design/job-prompt.md` § The continuation prompt). Resuming the harness session — a workflow
+job's `--resume`; a chat never resumes one (`docs/design/conversations.md` § Lifetime) — is
+attempted whenever a session was recorded, and succeeds only where the same worker still has the
+same worktree path, because Claude Code's session lookup is per project directory and will not
+find it anywhere else (`docs/design/claude-code-events.md`). When it is not found, the job is
+re-queued without the session and runs from the full prompt and the artifacts, which is the
+contract.
 
 ## Idle destroy
 
-A worker with no running jobs goes `idle` and starts a timer. On expiry the platform sends `drain`,
-waits for the last job to end, destroys the machine through the driver, and marks the row
-`destroyed`. The next ticket creates a new one.
+A worker with no running jobs goes `idle` and starts a timer: when its last job ends, or when it
+reports `ready` with nothing running — a machine that came up and was never given anything is
+idle from that moment, and a reconnect does not restart a clock already running. On expiry the
+platform destroys the machine through the driver and marks the row `destroyed` — only once the
+driver says it went (`Workers.destroy/2`). The next ticket creates a new one.
+`Workers.sweep_idle/0` does it, only to a `managed` worker, at the end of every scheduling pass:
+after the pass, because before it the sweep destroyed the machine the pass was about to use, and
+whatever is still pending, because gating it on nothing pending let one job nobody could place —
+a conversation in a project with no template — keep every idle machine on the node alive.
 
-The period is configuration, and its default is now M4's rather than a guess: **five minutes**.
+**No `drain` precedes it, and there is no `drain` any more.** This section said one would: a
+worker that is `idle` has no job to wait for, so the sweep destroys it directly. Nothing ever
+sent the message, and it was removed from both ends rather than kept for a use that might come
+(`docs/design/worker-channel.md` § Messages).
+
+The period is the machine's template's `idle_ms`, and the node's `idle_period_ms` for a template
+that sets none or a machine with no template (`docs/design/provisioning.md` § Lifecycle is per
+template). The node's default is now M4's rather than a guess: **five minutes**.
 M4 measured a machine going from nothing to able to build in about 35 seconds
 (`docs/measurements.md` § M4), which is what being wrong costs — less than the operator's own
 round trip to approve the artifact that produces the next ticket. Five minutes covers an
@@ -658,12 +725,13 @@ ticket.
 
 ## Open
 
-- **`slice_memory` is one number for every job.** A refine job and a build job get the same
-  ceiling. Per-state slices belong in the workflow grammar, and there is no evidence yet that the
-  difference matters. **`docs/design/provisioning.md` is where this goes** — it was
-  `docs/design/commands.md` § Resources, which still holds the grammar half, and commands are what
-  made the single number cost something: a command declaring the same 2.2 GiB as a prose-refining
-  agent is the gate doing nothing. Unbuilt; the shape is settled.
+- **`slice_bytes` was one number for every job, and is not any more.** A state or the workflow's
+  `defaults` declares `resources`, and `docs/design/provisioning.md` built the platform half;
+  `docs/design/commands.md` § Resources holds the grammar half, and commands are what made the
+  single number cost something: a command declaring the same 2.2 GiB as a prose-refining agent is
+  the gate doing nothing. What stays open is evidence: nothing has shown that a refine job and a
+  build job need different ceilings, `slice_bytes` is still what a workflow job declaring nothing
+  gets, and `resources` on a command waits for commands.
 - **The 2 GiB reserve is traced to nothing.** `ForgeWorker.Config`'s `@reserve` is what a worker
   holds back from `memory_budget` for the system and the Nix daemon, and unlike every other
   constant here it has no measurement behind it, no comment, and no note. It is a fixed tax per
@@ -675,9 +743,10 @@ ticket.
   `memory.peak` before moving it**, because the failure is asymmetric: too small a *slice*
   OOM-kills one job with `CONSTRAINT_MEMCG`, and too small a *reserve* lets the global OOM killer
   pick, which on this machine means the worker release.
-- **`max_workers` is 1 for the PoC.** Nothing in the scheduler assumes it; nothing has tested it
-  above 1 either. `docs/design/provisioning.md` moves it onto a worker template, so every
-  per-template ceiling there is a generalisation of a number that has only ever held one value.
+- **`max_workers` was 1 for the PoC, and is 1 by default on a template.** Nothing in the
+  scheduler assumes it; nothing has tested it above 1 either. `docs/design/provisioning.md` moved
+  it onto a worker template, so every per-template ceiling there is a generalisation of a number
+  that has only ever held one value.
 - **Seed refresh has no schedule.** Someone runs the Mix task. How stale a seed may be before it
   costs more than it saves is a dogfooding question.
 - **A partitioned worker is destroyed, not waited for.** Correct while jobs are re-runnable and

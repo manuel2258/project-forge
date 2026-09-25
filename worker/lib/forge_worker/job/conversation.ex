@@ -63,6 +63,7 @@ defmodule ForgeWorker.Job.Conversation do
     assignment = Keyword.fetch!(opts, :assignment)
     # The runner is linked, and its ending is the conversation's ending rather than a crash.
     Process.flag(:trap_exit, true)
+    hold = holds?(assignment)
 
     {:ok,
      %{
@@ -76,8 +77,10 @@ defmodule ForgeWorker.Job.Conversation do
        # The platform's ids for messages written but not yet taken by the harness, oldest
        # first. The harness echoes the text and not the id, so the queue is the correlation:
        # it takes them in the order they were written. The prompt is the first of them, sent
-       # by the runner itself.
-       pending: [:prompt],
+       # by the runner itself — unless it is held, when the first echo is the first message's,
+       # the prompt riding with it.
+       pending: if(hold, do: [], else: [:prompt]),
+       hold: hold,
        idle_ms: Keyword.get(opts, :idle_ms) || assignment["idle_ms"] || @default_idle_ms,
        idle_timer: nil,
        closing: nil,
@@ -192,6 +195,17 @@ defmodule ForgeWorker.Job.Conversation do
     end
   end
 
+  # A spec with nothing to open with is a reopened conversation whose last word was the agent's:
+  # everything said has been answered, and the new process waits for the person rather than
+  # answering its opening message a second time as though it were new. One decision, made here
+  # and handed to the runner, because the pending queue above has to agree with it.
+  defp holds?(assignment) do
+    case assignment["spec"]["prompt"] do
+      prompt when is_binary(prompt) -> String.trim(prompt) == ""
+      _none -> true
+    end
+  end
+
   defp runner_opts(state) do
     me = self()
     assignment = state.assignment
@@ -217,6 +231,7 @@ defmodule ForgeWorker.Job.Conversation do
       slice_opts: %{memory_max: slice["memory_max"], cpu_weight: slice["cpu_weight"]},
       harness_opts: harness_opts,
       backlog: assignment["backlog"],
+      hold_prompt: state.hold,
       # A conversation is bounded by going idle, not by the clock: a chat someone is still in
       # is not a runaway. The wall clock stays as a backstop, far out.
       wall_clock_ms: assignment["wall_clock_ms"] || :timer.hours(24),
@@ -293,11 +308,12 @@ defmodule ForgeWorker.Job.Conversation do
   def handle_info({:turn, _job_id, index, event}, state) do
     head = commit_turn(state, index)
 
-    # Every turn, not at the end. `out/` is never committed, so a proposal reported only when
-    # the conversation closes is a proposal a lost machine takes with it — and a conversation
-    # can be closed by an idle timeout nobody is present for. The platform records by content,
-    # so re-reporting the same file every turn costs nothing.
+    # Every turn, not at the end. `out/` is never committed, so a proposal or a document
+    # reported only when the conversation closes is one a lost machine takes with it — and a
+    # conversation can be closed by an idle timeout nobody is present for. The platform records
+    # by content, so re-reporting the same file every turn costs nothing.
     proposals = Dir.proposals(job_dir(state))
+    documents = Dir.documents(job_dir(state))
 
     send(
       state.link,
@@ -312,6 +328,8 @@ defmodule ForgeWorker.Job.Conversation do
              {file, %{"title" => p.title, "body" => p.body, "raw" => p.raw}}
            end),
          "invalid_proposals" => proposals.invalid_proposals,
+         "documents" => documents.documents,
+         "invalid_documents" => documents.invalid_documents,
          "harness" => turn_summary(event)
        }}
     )

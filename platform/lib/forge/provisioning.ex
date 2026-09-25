@@ -85,16 +85,63 @@ defmodule Forge.Provisioning do
   end
 
   @doc """
-  Edits a template.
+  Edits one of `user`'s templates, named by an id that came off the wire.
 
   **This changes nothing about machines that already exist**, by construction rather than by
   care: a worker was given copies of these values at creation and does not read through to the
   row (`docs/design/provisioning.md` § Two tables).
+
+  **The owner is checked here, and kept.** The row is read scoped to `user`, so somebody else's
+  template is `:not_found` exactly as a missing one is; and `user_id` is set by this function, as
+  `create_template/2` sets it, so no attribute in `attrs` can hand the template — and the
+  credential it spends — to another account. It used to take the row and no actor, and the
+  templates page's own scoped read was the only thing deciding whose row it was
+  (`docs/design/identity.md` § Where the guard lives).
   """
-  @spec update_template(Template.t(), map()) ::
-          {:ok, Template.t()} | {:error, Ecto.Changeset.t()}
-  def update_template(%Template{} = template, attrs) do
-    template |> Template.changeset(attrs) |> Repo.update()
+  @spec update_template(User.t(), term(), map()) ::
+          {:ok, Template.t()} | {:error, :not_found | Ecto.Changeset.t()}
+  def update_template(%User{id: user_id} = user, id, attrs) do
+    with {:ok, template} <- owned(user, id) do
+      template |> Template.changeset(put_user(attrs, user_id)) |> Repo.update()
+    end
+  end
+
+  @doc """
+  The provider credential a machine made from `template` would be billed to, checked again.
+
+  `Template.changeset/2` refuses a credential that is not the template owner's, but a changeset
+  guards only the rows written after it: a template saved before it checked anything still names
+  whatever credential it was given, and every machine made from it is billed there. So the
+  question is asked again where it costs money, of the row the driver is about to be handed,
+  with the changeset's own `Template.credential_mismatch/3`
+  (`docs/design/provisioning.md` § Whose account).
+
+  `{:ok, nil}` for a template with no credential, which is a local one. `{:error, message}`, in
+  the words the template's failure counter records, for one its owner may not spend.
+  """
+  @spec spendable_credential(Template.t()) :: {:ok, Credential.t() | nil} | {:error, String.t()}
+  def spendable_credential(%Template{provider_credential_id: nil}), do: {:ok, nil}
+
+  def spendable_credential(%Template{provider_credential_id: id} = template) do
+    case Repo.get(Credential, id) do
+      # Deleted since the template was read — the column is nilified — so this is the template
+      # with no credential that the clause above answers, and the driver says what that means.
+      nil -> {:ok, nil}
+      credential -> spendable(template, credential)
+    end
+  end
+
+  defp spendable(template, credential) do
+    case Template.credential_mismatch(template.user_id, template.provider, credential) do
+      nil ->
+        {:ok, credential}
+
+      :not_owner ->
+        {:error, "its provider credential belongs to another user"}
+
+      {:wrong_provider, theirs} ->
+        {:error, "its provider credential is for #{theirs}, not #{template.provider}"}
+    end
   end
 
   @spec delete_template(User.t(), String.t()) :: :ok | {:error, :not_found}

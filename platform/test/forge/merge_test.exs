@@ -85,7 +85,7 @@ defmodule Forge.MergeTest do
         project,
         user,
         "backup",
-        "http://127.0.0.1:4002/git/#{destination.name}.git",
+        platform_git_url(destination.name),
         user: "forge",
         token: token
       )
@@ -238,7 +238,183 @@ defmodule Forge.MergeTest do
     end
   end
 
+  # `docs/design/git-hosting.md` § Where it runs, and what a conflict does: a merge whose push
+  # loses to another write of the default branch is retried once against the new head. The race
+  # is real, not simulated in Elixir: the repository's `pre-receive` is wrapped so that the
+  # default branch moves after the push was advertised and before `receive-pack` takes the ref's
+  # lock, which is exactly the window another merge would land in.
+  describe "a default branch that moves under the merge" do
+    test "is merged against the new head, and only once more", context do
+      %{ticket: ticket, bare: bare, user: user} = context
+      sha = commit_on_branch(context, "feature.txt", "the change")
+      changeset!(ticket, sha)
+      {:ok, before} = Git.resolve(bare, "refs/heads/main")
+      other = commit_beside(bare, before, "other.txt", "another merge")
+      pushes = race(bare, moves: [other])
+      ticket = pend_merge(ticket)
+
+      assert {:ok, ticket} = Operator.decide(ticket, user, :approved, nil)
+
+      assert ticket.state == "merged"
+      assert ticket.status == :done
+      assert "ticket.merged" in event_types(ticket)
+      assert pushes.() == 2
+
+      # On top of what moved the branch, not over it: the other merge is the first parent, and
+      # the approved commit the second.
+      {:ok, head} = Git.resolve(bare, "refs/heads/main")
+      assert {:ok, ^other} = Git.resolve(bare, head <> "^1")
+      assert {:ok, ^sha} = Git.resolve(bare, head <> "^2")
+    end
+
+    test "is stuck, naming the paths, when the new head conflicts", context do
+      %{ticket: ticket, bare: bare, user: user} = context
+      sha = commit_on_branch(context, "README.md", "the branch's version")
+      changeset!(ticket, sha)
+      {:ok, before} = Git.resolve(bare, "refs/heads/main")
+      other = commit_beside(bare, before, "README.md", "the trunk's version")
+      pushes = race(bare, moves: [other])
+      ticket = pend_merge(ticket)
+
+      assert {:ok, ticket} = Operator.decide(ticket, user, :approved, nil)
+
+      assert ticket.status == :stuck
+      assert stuck_reason(ticket) == "merge conflict in README.md"
+      refute "ticket.merged" in event_types(ticket)
+      # The retry found the conflict before writing anything, so it never pushed.
+      assert pushes.() == 1
+      assert {:ok, ^other} = Git.resolve(bare, "refs/heads/main")
+    end
+
+    # Once, not until it works. Two writers that keep crossing are a sign of something other than
+    # bad luck, and a stuck ticket says so where a loop would not.
+    test "is stuck when it loses the retry too, and is not retried again", context do
+      %{ticket: ticket, bare: bare, user: user} = context
+      sha = commit_on_branch(context, "feature.txt", "the change")
+      changeset!(ticket, sha)
+      {:ok, before} = Git.resolve(bare, "refs/heads/main")
+      first = commit_beside(bare, before, "one.txt", "a merge")
+      second = commit_beside(bare, first, "two.txt", "and another")
+      pushes = race(bare, moves: [first, second, before])
+      ticket = pend_merge(ticket)
+
+      assert {:ok, ticket} = Operator.decide(ticket, user, :approved, nil)
+
+      assert ticket.status == :stuck
+      assert stuck_reason(ticket) =~ "could not merge: {:push_refused"
+      assert pushes.() == 2
+      assert {:ok, ^second} = Git.resolve(bare, "refs/heads/main")
+    end
+
+    # What the push asserts is that the branch is still where the attempt found it, so a refusal
+    # with the branch unmoved was for some other reason — and a second attempt would meet it again.
+    test "a refusal with the branch unmoved is not retried", context do
+      %{ticket: ticket, bare: bare, user: user} = context
+      sha = commit_on_branch(context, "feature.txt", "the change")
+      changeset!(ticket, sha)
+      {:ok, before} = Git.resolve(bare, "refs/heads/main")
+      pushes = race(bare, refuse: true)
+      ticket = pend_merge(ticket)
+
+      assert {:ok, ticket} = Operator.decide(ticket, user, :approved, nil)
+
+      assert ticket.status == :stuck
+      assert stuck_reason(ticket) =~ "could not merge: {:push_refused"
+      assert pushes.() == 1
+      assert {:ok, ^before} = Git.resolve(bare, "refs/heads/main")
+    end
+
+    # The same code is beneath the second route into the default branch.
+    test "a conversation's merge is retried the same way", context do
+      %{project: project, bare: bare, user: user} = context
+      {:ok, chat} = Forge.Conversations.open(project, "have a look at this")
+      head = commit_on_chat(project, chat, "NOTES.md", "from a conversation\n")
+      {:ok, before} = Git.resolve(bare, "refs/heads/main")
+      other = commit_beside(bare, before, "other.txt", "another merge")
+      pushes = race(bare, moves: [other])
+
+      assert {:ok, %{sha: merged, already: false}} = Merge.perform_chat(chat, user)
+
+      assert pushes.() == 2
+      assert {:ok, ^other} = Git.resolve(bare, merged <> "^1")
+      assert {:ok, ^head} = Git.resolve(bare, merged <> "^2")
+    end
+  end
+
   # -- helpers ---------------------------------------------------------------------------------
+
+  # A commit on top of `parent`, made in a scratch clone and fetched into the bare repository
+  # without moving any ref: something for the race below to move the default branch to.
+  defp commit_beside(bare, parent, path, content) do
+    dir = Path.join(tmp_dir("merge-beside"), "work")
+    {:ok, _out} = Git.run(tmp_dir("merge-beside-parent"), ["clone", "--quiet", bare, dir])
+
+    for args <- [
+          ["checkout", "--quiet", "--detach", parent],
+          ["config", "user.name", "elsewhere"],
+          ["config", "user.email", "elsewhere@forge"]
+        ],
+        do: {:ok, _out} = Git.run(dir, args)
+
+    File.write!(Path.join(dir, path), content <> "\n")
+    {:ok, _out} = Git.run(dir, ["add", path])
+    {:ok, _out} = Git.run(dir, ["commit", "--quiet", "-m", content])
+    {:ok, sha} = Git.resolve(dir, "HEAD")
+    {:ok, _out} = Git.run(bare, ["fetch", "--quiet", dir, "HEAD"])
+    sha
+  end
+
+  # Wraps the repository's `pre-receive`. On the n-th push it moves the default branch to the n-th
+  # of `moves`, if there is one, and then hands over to the real hook — or, with `refuse: true`,
+  # refuses without moving anything. Returns a function counting the pushes it saw.
+  #
+  # The move has to leave git's quarantine to be allowed at all: a hook may not update a ref
+  # while the pushed objects are still quarantined, which is the rule that makes this window
+  # otherwise impossible to reach from inside the push.
+  defp race(bare, opts) do
+    dir = tmp_dir("merge-race")
+    count = Path.join(dir, "pushes")
+    moves = Path.join(dir, "moves")
+    File.write!(moves, Enum.map_join(Keyword.get(opts, :moves, []), &(&1 <> "\n")))
+
+    hook = Path.join([bare, "hooks", "pre-receive"])
+    File.rename!(hook, hook <> ".real")
+
+    finish =
+      if Keyword.get(opts, :refuse, false),
+        do: ~s(echo "forge: refused by the test" >&2; exit 1),
+        else: ~s(exec "$0.real")
+
+    File.write!(hook, """
+    #!/usr/bin/env bash
+    set -eu
+    n=$(( $(cat "#{count}" 2>/dev/null || echo 0) + 1 ))
+    echo "$n" > "#{count}"
+    target=$(sed -n "${n}p" "#{moves}")
+    if [ -n "$target" ]; then
+      env -u GIT_QUARANTINE_PATH git update-ref refs/heads/main "$target"
+    fi
+    #{finish}
+    """)
+
+    File.chmod!(hook, 0o755)
+
+    fn ->
+      case File.read(count) do
+        {:ok, n} -> n |> String.trim() |> String.to_integer()
+        {:error, :enoent} -> 0
+      end
+    end
+  end
+
+  defp stuck_reason(ticket) do
+    ticket.id
+    |> Events.for_ticket()
+    |> Enum.filter(&(&1.type == "ticket.stuck"))
+    |> List.last()
+    |> Map.fetch!(:payload)
+    |> Map.fetch!("reason")
+  end
 
   # A commit on the ticket branch, pushed the way a job pushes: over the platform's endpoint.
   defp commit_on_branch(%{project: project, ticket: ticket}, path, content) do

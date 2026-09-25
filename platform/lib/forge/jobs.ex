@@ -31,6 +31,7 @@ defmodule Forge.Jobs do
     Workers
   }
 
+  alias Forge.Events.Event
   alias Forge.Git.{Tokens, Url}
   alias Forge.Jobs.{Job, Runs}
   alias Forge.Tickets.Ticket
@@ -259,6 +260,24 @@ defmodule Forge.Jobs do
     )
   end
 
+  @doc """
+  The job of the ticket's current state that is stopped on a question, or nil.
+
+  One definition, because two things ask it and must agree: `Forge.Operator.answer/4`, which
+  resumes it once no blocking question on the ticket is open, and `Forge.Conversations`, which
+  refuses a chat the document holding such a question while it waits — a version without the
+  block would close the question and leave this job waiting on nothing.
+  """
+  @spec waiting_job(Ticket.t()) :: Job.t() | nil
+  # `&1.state == state` is an equivalent mutant, kept because it says which job is meant. A
+  # ticket leaves a state by a transition: the engine's, once that state's job has finished; a
+  # person's approval of one, which is pending only once that job has finished; or a person's
+  # `Engine.choose/4`, which refuses while a job there is live, `:waiting` included. So no
+  # waiting job is ever in a state other than its ticket's, and a test telling the two apart
+  # would have to write a row the product cannot produce.
+  def waiting_job(%Ticket{id: ticket_id, state: state}),
+    do: Enum.find(for_ticket(ticket_id), &(&1.status == :waiting and &1.state == state))
+
   @doc "Whether a job for `state` on the ticket is pending, running or waiting."
   @spec live?(String.t(), String.t()) :: boolean()
   def live?(ticket_id, state) do
@@ -308,6 +327,12 @@ defmodule Forge.Jobs do
       log_backlog(started, assignment)
       {:ok, started}
     else
+      # Somebody else moved the row first — a conversation closed during the pass. It is theirs
+      # now: putting it back to `:pending` would reopen what they ended.
+      {:error, {:changed, _now}} = changed ->
+        Tokens.revoke_for_job(job.id)
+        changed
+
       {:error, reason} ->
         # Nothing is running, so the job must not sit `running` until the next boot, the run it
         # was marked with never happened, and the credential it would have used is no good to
@@ -385,7 +410,13 @@ defmodule Forge.Jobs do
       },
       "store" => %{
         "transcript_key" => transcript,
-        "transcript_token" => Storage.Token.sign(:put, transcript)
+        # Used when the job stops, not when it starts, so it lives as long as the job may: its
+        # preparation and then its whole clock, which the worker starts only once the clone and
+        # the seed are ready (`docs/design/storage.md` § Serving).
+        "transcript_token" =>
+          Storage.Token.sign(:put, transcript,
+            outlasting_ms: wall_clock_ms(job) + preparation_margin_ms()
+          )
       },
       # Every job, workflow and chat alike, with no grammar key: an unread file costs nothing
       # (`docs/design/ticket-proposals.md` § Reading the backlog).
@@ -401,10 +432,31 @@ defmodule Forge.Jobs do
         "cpu_weight" => Workers.config(:cpu_weight, 100)
       },
       "resume_session" => job.harness_session_id,
-      "wall_clock_ms" => config(:wall_clock_ms, :timer.hours(1))
+      "wall_clock_ms" => wall_clock_ms(job)
     }
     |> Map.merge(chat_assignment(job))
   end
+
+  @doc """
+  How long a job may run once assigned: an hour for a workflow job, a day for a conversation.
+  The worker enforces it; the platform sizes the credentials it hands out by it, because a
+  credential that lapses before the job does fails the job's last act rather than its first.
+  """
+  @spec wall_clock_ms(Job.t()) :: pos_integer()
+  def wall_clock_ms(%Job{kind: :chat}), do: config(:chat_wall_clock_ms, :timer.hours(24))
+  def wall_clock_ms(%Job{}), do: config(:wall_clock_ms, :timer.hours(1))
+
+  @doc """
+  How long a job may spend being prepared — cloned, its seed fetched and unpacked — before the
+  worker starts its clock. A store token minted at assignment and spent after that has to
+  outlive it as well: the transcript's `put`, and a conversation's history
+  (`docs/design/storage.md` § Serving).
+  """
+  @spec preparation_margin_ms() :: non_neg_integer()
+  # The hour here is an equivalent mutant: `config/config.exs` sets the key for every
+  # environment, so this default is never read. It matches config so that a node that dropped
+  # the key would get the same answer rather than a token that lapses mid-preparation.
+  def preparation_margin_ms, do: config(:preparation_margin_ms, :timer.hours(1))
 
   # What only a conversation carries. `max_cost_usd` is what is left of the day, passed to the
   # harness as its per-turn ceiling: a chat has no state to take a budget from, and the daily cap
@@ -413,7 +465,6 @@ defmodule Forge.Jobs do
     %{
       "idle_ms" => config(:chat_idle_ms, :timer.minutes(30)),
       "max_cost_usd" => remaining_today(),
-      "wall_clock_ms" => config(:chat_wall_clock_ms, :timer.hours(24)),
       # What already ran on this ticket. Metadata inline because it is small; transcripts as a
       # key and a token, because they are not (`Conversations.history/1`).
       "history" => job.ticket_id |> ticket_of() |> Conversations.history()
@@ -454,22 +505,25 @@ defmodule Forge.Jobs do
 
   defp seed(_project), do: nil
 
-  # Every billed invocation passes through `start/1`, including `run/1` from a Mix task, so this
-  # is where both caps are asked rather than in the scheduler alone. A ticket over its own
+  # Every billed invocation passes through `assign/2`, so this is where both caps are asked
+  # rather than in the scheduler alone. A ticket over its own
   # allowance is stuck, which also takes it out of `pending/1` and stops the scheduler retrying it
   # every tick; the daily cap only pauses, and the ticket stays active and out of the queue.
   # A conversation has no ticket allowance and no workflow to take one from: the note says the
   # daily cap is its only ceiling, and this is where that is true rather than merely intended.
-  # Each turn is also invoked with what is left of the day — see `Conversations` — so the cap
-  # binds during the conversation as well as before it.
+  # The harness is also given what is left of the day as its ceiling (`chat_assignment/1`), but
+  # read once, at assignment, and never refreshed: spend by other jobs during the conversation
+  # does not lower it, so the node's pause is the backstop (`docs/design/conversations.md`
+  # § Spend).
+  #
+  # **A pause writes nothing here.** It used to append a `spend.paused` event, and this runs on
+  # every scheduling pass for every pending job a worker was found for, so a paused node wrote
+  # one per job every two seconds until midnight. The scheduler records it as the job's wait
+  # reason instead, once per change (`record_wait/3`, `docs/design/provisioning.md` § The gate).
   defp spend_gate(%Job{kind: :chat}, _ticket) do
     case Spend.day_gate() do
-      :ok ->
-        :ok
-
-      {:pause, reason} ->
-        Events.append("spend.paused", :system, %{payload: %{"reason" => reason}})
-        {:error, {:spend_paused, :day}}
+      :ok -> :ok
+      {:pause, _reason} -> {:error, {:spend_paused, :day}}
     end
   end
 
@@ -484,12 +538,7 @@ defmodule Forge.Jobs do
         Engine.stick(ticket, reason)
         {:error, {:spend_exhausted, :ticket}}
 
-      {:pause, reason} ->
-        Events.append("spend.paused", :system, %{
-          ticket_id: ticket.id,
-          payload: %{"reason" => reason}
-        })
-
+      {:pause, _reason} ->
         {:error, {:spend_paused, :day}}
     end
   end
@@ -502,14 +551,20 @@ defmodule Forge.Jobs do
   # below, where a workflow job's assignment spec is already not the row's. What it carries is
   # what a chat actually has: where its work goes, and the context it was opened with.
   defp runtime_spec(%Job{kind: :chat} = job, ticket) do
+    # Read from the log rather than stored on the row, because the log is already the
+    # conversation (§ Shape) and a copy on the row would be a second one. A prompt of nil is a
+    # reopen with nothing to answer, which the worker holds for the person's next message.
+    opening = Conversations.opening(job.id)
+
     spec = %Spec{
       job_id: job.id,
       kind: :chat,
       branch: chat_branch(job),
       ticket: ticket && %{number: ticket.number, title: ticket.title},
       commit: ticket && ticket.base_commit,
-      prompt: opening_prompt(job),
-      inputs: chat_inputs(ticket),
+      prompt: opening.prompt,
+      replay: opening.replay,
+      inputs: chat_inputs(job, ticket),
       preamble_hash: ForgeCore.Prompt.chat_preamble_hash(),
       model: model_for(job),
       produces: [],
@@ -564,28 +619,28 @@ defmodule Forge.Jobs do
     Repo.one(from p in Projects.Project, where: p.id == ^project_id, select: p.model)
   end
 
-  # The message that opened the conversation, which the worker delivers as the first turn. It is
-  # read from the log rather than stored on the row, because the log is already the conversation
-  # (§ Shape) and a copy on the row would be a second one.
-  defp opening_prompt(%Job{id: job_id}) do
-    Repo.one(
-      from e in Forge.Events.Event,
-        where: e.job_id == ^job_id and e.type == "chat.message",
-        order_by: e.seq,
-        limit: 1,
-        select: fragment("? ->> 'text'", e.payload)
-    ) || "Hello."
+  # A ticket chat gets every document on the ticket, which is more than any one of its jobs is
+  # handed and is the point: it is for asking about, or fixing, the work in flight. A project chat
+  # gets what it wrote itself. Every start of a conversation is cold and begins with `out/`
+  # empty, so without this a reopened project chat could not see a document it wrote an hour ago,
+  # while a ticket chat's came back as the ticket's (`docs/design/conversations.md` § Context).
+  # Its proposals are its own too, and are left out: they are backlog, not documents, and an open
+  # one is already in `tickets/index.md`.
+  defp chat_inputs(%Job{} = chat, nil) do
+    {:job, chat.id}
+    |> Artifacts.latest_documents()
+    |> Enum.reject(&Workflow.proposal?(&1.name))
+    |> Enum.map(&as_input/1)
   end
 
-  # The same inputs the ticket's next job would get, which is the point of a ticket chat: it is
-  # for asking about, or fixing, the work in flight (§ Context).
-  defp chat_inputs(nil), do: []
-
-  defp chat_inputs(%Ticket{id: ticket_id}) do
+  defp chat_inputs(%Job{}, %Ticket{id: ticket_id}) do
     ticket_id
     |> Artifacts.latest_documents()
-    |> Enum.map(&%Input{name: &1.name, version: &1.version, content: &1.content})
+    |> Enum.map(&as_input/1)
   end
+
+  defp as_input(document),
+    do: %Input{name: document.name, version: document.version, content: document.content}
 
   # The job row's `spec` is written once and never rewritten — the invariant holds for what was
   # declared. Only the copy the harness runs with is narrowed, and the difference is an event,
@@ -609,6 +664,70 @@ defmodule Forge.Jobs do
       %{spec | budget: %{spec.budget | cost: cost}}
     end
   end
+
+  # -- waiting --------------------------------------------------------------------------------
+
+  @doc """
+  Records why a pending job was not placed, unless that is already what it says.
+
+  One `job.waiting` event per *change* of reason, never one per pass: the scheduler asks every
+  two seconds and `events` is append-only, so an event per ask would bury the job's history
+  under one sentence (`docs/design/provisioning.md` § The gate). `reason` is what is compared;
+  `text` is the sentence the operator reads, kept beside it so the log says what was shown.
+
+  Compared with `current_wait/1`, the same reading the pages draw, so what counts as the
+  current reason is decided once.
+  """
+  @spec record_wait(Job.t(), String.t(), String.t()) :: :ok
+  def record_wait(%Job{} = job, reason, text) do
+    case current_wait(job) do
+      %Event{payload: %{"reason" => ^reason}} ->
+        :ok
+
+      _changed_or_first ->
+        {:ok, event} =
+          Events.append("job.waiting", :system, %{
+            ticket_id: job.ticket_id,
+            job_id: job.id,
+            payload: %{"reason" => reason, "text" => text}
+          })
+
+        # Per job for a conversation's page, and per ticket for the ticket's timeline and the
+        # job's own page, which is what each of them is subscribed to.
+        Events.notify_job(job.id, event)
+        if job.ticket_id, do: Events.notify(job.ticket_id)
+        :ok
+    end
+  end
+
+  @doc """
+  Why a pending job is waiting: its latest `job.waiting` since it last started, or nil.
+
+  **Since it last started**, because `job.started` is the first thing an assignment writes: a
+  job that ran and came back to the queue — requeued, recovered, a conversation reopened — is
+  waiting afresh, and what held it up before is history.
+
+  **Nil for a job that is not pending**, whatever its log holds. A job can leave the queue
+  without starting — the scheduler fails one that raised on its way to a worker — and its last
+  wait is then not why it is anything.
+
+  Not the job status `:waiting`, which is a job stopped on a question.
+  """
+  @spec current_wait(Job.t()) :: Event.t() | nil
+  def current_wait(%Job{status: :pending, id: id}) do
+    Repo.one(
+      from e in Event,
+        where: e.job_id == ^id and e.type in ["job.waiting", "job.started"],
+        order_by: [desc: e.seq],
+        limit: 1
+    )
+    |> case do
+      %Event{type: "job.waiting"} = event -> event
+      _started_or_never_waited -> nil
+    end
+  end
+
+  def current_wait(%Job{}), do: nil
 
   @doc """
   Records one harness event against its job. Events arrive over the channel and are the
@@ -655,6 +774,7 @@ defmodule Forge.Jobs do
     now = DateTime.utc_now(:second)
 
     Multi.new()
+    |> Multi.run(:row, fn repo, _changes -> still_pending(repo, job) end)
     |> Multi.update(
       :job,
       Job.progress_changeset(job, %{
@@ -677,10 +797,26 @@ defmodule Forge.Jobs do
         Events.notify(job.ticket_id)
         {:ok, job}
 
-      # `Repo.transaction/1` reports a Multi failure as a four-tuple, which callers of
-      # `start/1` are not promised and `Forge.Jobs.Scheduler` does not match.
+      {:error, :row, changed, _changes} ->
+        {:error, changed}
+
+      # `Repo.transaction/1` reports a Multi failure as a four-tuple, which callers are not
+      # promised and `Forge.Jobs.Scheduler` does not match.
       {:error, failed, reason, _changes} ->
         {:error, {failed, reason}}
+    end
+  end
+
+  # **The row is still pending, whatever the struct says.** A pass holds the rows `pending/1` gave
+  # it for as long as the pass takes, and a conversation can be closed in the meantime; writing
+  # `running` from the old struct started a chat that had ended, on a branch already deleted.
+  # Asked of the row, not compared with the struct, because pending is the only status a job is
+  # started from. Locked, so a close waiting on the same row sees `running` and asks the worker
+  # instead (`Forge.Conversations.close/2`).
+  defp still_pending(repo, %Job{id: id}) do
+    case repo.one!(from j in Job, where: j.id == ^id, lock: "FOR UPDATE", select: j.status) do
+      :pending -> {:ok, :pending}
+      now -> {:error, {:changed, now}}
     end
   end
 
@@ -804,6 +940,8 @@ defmodule Forge.Jobs do
     |> Repo.transaction()
     |> case do
       {:ok, %{job: job}} ->
+        # The fresh run mints its own (`assign/2`); see `requeue/2` for why this one goes now.
+        Tokens.revoke_for_job(job.id)
         Events.notify(ticket.id)
         {:ok, job}
 
@@ -824,6 +962,8 @@ defmodule Forge.Jobs do
           follow_up(ticket, job, result)
 
         :waiting ->
+          # Stopped on a question: the run is over, and the answer resumes it with a new one.
+          Tokens.revoke_for_job(job.id)
           Enum.each(result.questions, &Forge.Push.blocking_question(ticket, &1))
       end
 
@@ -1046,6 +1186,9 @@ defmodule Forge.Jobs do
       |> Repo.transaction()
       |> case do
         {:ok, %{job: job}} ->
+          # The worker pushed before it said so, and a resume is a new assignment with a new
+          # credential — for a conversation, a day's worth of one (`requeue/2`).
+          Tokens.revoke_for_job(job.id)
           Events.notify(job.ticket_id)
           {:ok, job}
 
@@ -1057,7 +1200,14 @@ defmodule Forge.Jobs do
 
   @doc """
   Puts a job back in the queue without recording a result: the run it was having is gone.
-  Used when a worker rejoins without a job the platform believes it is running.
+  Used when a worker rejoins without a job the platform believes it is running, and when a
+  worker is lost or retired.
+
+  **The run's git credential goes with it.** The next assignment mints its own, and the old one
+  lives the job's whole wall clock — a day, for a conversation — so a machine that is only
+  partitioned, not gone, could otherwise go on pushing to the branch after its job was handed to
+  somebody else. The same holds wherever a run stops without the job ending — `recover/0`,
+  `hibernate/3`, a failed resume, a stop on a question — and each of them revokes it too.
   """
   @spec requeue(String.t(), atom()) :: {:ok, Job.t()} | {:error, term()}
   def requeue(job_id, reason) do
@@ -1074,6 +1224,7 @@ defmodule Forge.Jobs do
     |> Repo.transaction()
     |> case do
       {:ok, %{job: job}} ->
+        Tokens.revoke_for_job(job.id)
         Events.notify(job.ticket_id)
         {:ok, job}
 
@@ -1111,6 +1262,8 @@ defmodule Forge.Jobs do
         })
         |> Repo.transaction()
 
+      # Whatever machine was running it may still be up and reachable; see `requeue/2`.
+      Tokens.revoke_for_job(job.id)
       Events.notify(job.ticket_id)
     end)
 

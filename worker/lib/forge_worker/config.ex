@@ -1,6 +1,7 @@
 defmodule ForgeWorker.Config do
   @moduledoc """
-  What cloud-init wrote and the machine can see about itself. The worker learns its identity
+  What the config disk or metadata service said (`forge-worker-config.service` in the image)
+  and what the machine can see about itself. The worker learns its identity
   and the platform's address from its environment, because that is what a provider can inject
   at creation and what `docs/design/worker-tier.md` § The worker image relies on.
   """

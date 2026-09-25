@@ -85,7 +85,12 @@ defmodule Forge.ArtifactsTest do
       root = Path.expand(Forge.Jobs.config(:data_dir, "tmp/forge"))
       File.mkdir_p!(root)
 
-      secret = Path.join(System.tmp_dir!(), "forge-outside-#{System.unique_integer([:positive])}")
+      secret =
+        Path.join(
+          System.tmp_dir!(),
+          "#{System.pid()}-forge-outside-#{System.unique_integer([:positive])}"
+        )
+
       File.write!(secret, "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-would-leak\n")
       link = Path.join(root, "innocent-#{System.unique_integer([:positive])}.jsonl")
       File.ln_s!(secret, link)
@@ -107,7 +112,12 @@ defmodule Forge.ArtifactsTest do
     end
 
     test "a file:// path outside the data directory is refused, not read" do
-      outside = Path.join(System.tmp_dir!(), "forge-artifacts-test-#{System.unique_integer()}")
+      outside =
+        Path.join(
+          System.tmp_dir!(),
+          "#{System.pid()}-forge-artifacts-test-#{System.unique_integer()}"
+        )
+
       File.write!(outside, "not yours\n")
       on_exit(fn -> File.rm(outside) end)
 
@@ -179,6 +189,34 @@ defmodule Forge.ArtifactsTest do
     test "a ticket with nothing written has no documents" do
       assert Artifacts.latest_documents(ticket_fixture().id) == []
     end
+
+    # What a reopened project chat is handed of its own work (`conversations.md` § Context). The
+    # scope is the whole of the question: a conversation's documents are nobody's ticket's, and a
+    # ticket's are not the conversation's, even when the names are the same.
+    test "a conversation's own scope is its own documents, and only those" do
+      chat = chat_fixture()
+      ticket = ticket_fixture()
+
+      {:ok, _v1} =
+        Artifacts.record_version({:job, chat.id}, "notes.md", :document, :system, %{
+          content: "# One\n"
+        })
+
+      {:ok, _v2} =
+        Artifacts.record_version({:job, chat.id}, "notes.md", :document, :system, %{
+          content: "# Two\n"
+        })
+
+      {:ok, _theirs} =
+        Artifacts.record_version(ticket.id, "notes.md", :document, :system, %{
+          content: "# The ticket's\n"
+        })
+
+      assert [%{name: "notes.md", version: 2, content: "# Two\n"}] =
+               Artifacts.latest_documents({:job, chat.id})
+
+      assert [%{content: "# The ticket's\n"}] = Artifacts.latest_documents(ticket.id)
+    end
   end
 
   describe "scope" do
@@ -190,10 +228,11 @@ defmodule Forge.ArtifactsTest do
           content: "# Notes\n"
         })
 
-      assert [artifact] = Artifacts.list_for_job(chat.id)
+      assert artifact = Artifacts.find({:job, chat.id}, "notes.md")
       assert artifact.job_id == chat.id
       assert is_nil(artifact.ticket_id)
-      assert Artifacts.latest_for_job(chat.id, "notes.md").id == version.id
+      assert [%{id: id}] = Artifacts.versions({:job, chat.id}, "notes.md")
+      assert id == version.id
     end
 
     test "writing the same name twice is a second version, not a second artifact" do
@@ -209,7 +248,7 @@ defmodule Forge.ArtifactsTest do
           content: "# Two\n"
         })
 
-      assert length(Artifacts.list_for_job(chat.id)) == 1
+      assert first.artifact_id == second.artifact_id
       assert first.version == 1
       assert second.version == 2
     end
@@ -247,8 +286,8 @@ defmodule Forge.ArtifactsTest do
       {:ok, _} =
         Artifacts.record_version({:job, b.id}, "notes.md", :document, :system, %{content: "b"})
 
-      assert Artifacts.latest_for_job(a.id, "notes.md").content == "a"
-      assert Artifacts.latest_for_job(b.id, "notes.md").content == "b"
+      assert [%{content: "a"}] = Artifacts.versions({:job, a.id}, "notes.md")
+      assert [%{content: "b"}] = Artifacts.versions({:job, b.id}, "notes.md")
     end
 
     test "a ticket's artifacts are unchanged, and a bare id still means the ticket" do

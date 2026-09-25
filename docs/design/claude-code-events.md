@@ -7,8 +7,12 @@ sessions pages under code.claude.com/docs, read on 2026-09-11.
 
 ## Invocation
 
-One OS process per job, opened as an Erlang Port in line mode, prompt written to stdin, stdin
-closed, stdout consumed line by line, stderr captured to the job log.
+One OS process per job, opened as an Erlang Port in line mode, stdout consumed line by line,
+stderr captured to `stderr.log` in the job directory. There are two shapes, and
+`ForgeWorker.Harness.ClaudeCode.command/3` picks one by its `:mode` option.
+
+**Prompt**, for a workflow job. The composed prompt is written to `prompt.md` in the job directory
+and redirected into stdin, which is therefore at EOF from the start:
 
 ```
 claude -p \
@@ -18,6 +22,33 @@ claude -p \
   --permission-mode bypassPermissions \
   --model <configured>
 ```
+
+**Streaming**, for a conversation (`conversations.md`). Stdin stays open: the composed prompt,
+then every message, is written to it as a stream-json `user` line, and closing it is how the
+conversation ends. A reopened conversation with nothing waiting to be answered holds the
+composed prompt instead, and writes it with the first message as one line (`conversations.md`
+§ Lifetime). A port cannot half-close, so the runner writes through a shell `read` loop that
+exits on a sentinel line, which the harness sees as EOF (`ForgeWorker.Job.Runner`).
+
+```
+claude -p \
+  --output-format stream-json --verbose \
+  --input-format stream-json --replay-user-messages \
+  --max-budget-usd <assignment.max_cost_usd> \
+  --permission-mode bypassPermissions \
+  --model <configured>
+```
+
+No `--max-turns`: a conversation ends when a person stops talking. `--max-budget-usd` is what was
+left of the day when the conversation was assigned, and is absent when the day has no cap
+(`conversations.md` § Spend). `--replay-user-messages` is what makes delivery observable
+(`conversations.md` § Turns). A conversation is never given `--resume`.
+
+In both, `--model` is the model the platform resolved into the spec, else the machine's
+`FORGE_CLAUDE_MODEL`, and is absent when neither names one. A workflow job whose assignment
+carries a session also gets `--resume <session_id>` (§ Resume), and its `<spec.budget.cost>` is the
+budget it was assigned, which the platform may have lowered to whichever cap binds first
+(`capacity.md` § Spend caps).
 
 Working directory is the job's worktree, inside `nix develop .#<env>`, with `FORGE_JOB`
 pointing at the job directory described in `job-prompt.md`. Permissions are
@@ -36,11 +67,14 @@ variables (PATH, locale, proxies, Nix settings), a private HOME inside the job d
 are forwarded through the environment, never placed on a command line, and are resolved by
 the driver at spawn time so they never sit in process state or crash reports.
 
-In milestone 1 the harness still runs as the same Unix user as the platform, in a linked
-worktree of the bare repository. That is not a sandbox: an agent could reach the repository
-or the data directory through the filesystem. The worker tier with a Unix user per job and
-its own machine is what closes this; until then the operator runs their own agents on their
-own machine. Documented precedence puts
+The harness runs on a worker, not beside the platform, in a worktree the worker made for the job
+and pushes back over the git endpoint with a token scoped to one ref (`worker-tier.md` § Git). On
+the worker image (`FORGE_SLICE=systemd`) it runs in a transient systemd unit as a Unix user made
+for that job, which owns the worktree and the job directory while it runs and is deleted after
+(`ForgeWorker.Slice.Systemd`, `worker-tier.md` § The job slice). Where systemd is not PID 1 — a
+development machine, a container — `ForgeWorker.Slice.Direct` runs it as the worker's own user
+with no unit and no ceiling. That is not a sandbox, and it is a machine for running your own
+agents on. Documented precedence puts
 `ANTHROPIC_API_KEY` above the OAuth token, so both are never set. **Which one is the job's
 credential's `kind`**, not a project setting — this line said *per-project* from the day it was
 written, and nothing ever made it one. A job picks a credential from its project's pool when it starts
@@ -51,41 +85,52 @@ assignment, sealed, and is opened only when the process is spawned.
 
 ## Input messages
 
-Each stdout line is JSON with a top-level `type`. Documented types and what the driver does:
+Each stdout line is JSON with a top-level `type`. The types the driver knows and what it does:
 
 | `type` | `subtype` | Driver action |
 |---|---|---|
 | `system` | `init` | Record `session_id`, `model`, `tools`. Emit `harness.started`. |
 | `system` | `api_retry` | Emit `harness.retry` with `attempt`, `max_retries`, `error`. |
-| `system` | other | Emit `harness.notice` with the raw message. |
-| `rate_limit_event` | | Emit `harness.rate_limit` with `status`, `resets_at`, `rate_limit_type`, `utilization`, `is_using_overage`. Undocumented; see below. |
-| `assistant` | | For each content block: `text` -> `harness.text`, `tool_use` -> `harness.tool_use` (`id`, `name`, input), `thinking` -> counted, not stored. |
-| `user` | | For each `tool_result` block -> `harness.tool_result` (`tool_use_id`, `is_error`, byte size, first 4 KB). |
+| `system` | other | Emit `harness.notice` with the subtype and the raw message. |
+| `rate_limit_event` | | Emit `harness.rate_limit` with `status`, `resets_at`, `rate_limit_type`, `utilization`, `is_using_overage`, and `windows` when the release sends `unifiedWindows`. Undocumented; see below. |
+| `assistant` | | For each content block: `text` -> `harness.text`, `tool_use` -> `harness.tool_use` (`id`, `name`, input). Any other block, `thinking` included, is dropped. |
+| `user` | | For each `tool_result` block -> `harness.tool_result` (`tool_use_id`, `is_error`, byte size, first 4 KB). For each `text` block -> `harness.delivered` (`text`): the echo `--replay-user-messages` writes when the harness takes a message, so only a conversation produces one. |
+| `control_response` | | Emit `harness.control` with the response's `request_id` and `subtype`: the acknowledgement of an interrupt a conversation asked for. |
 | `stream_event` | | Ignored. Not requested (`--include-partial-messages` is off). |
 | `result` | `success` | Emit `harness.finished`. |
 | `result` | `error_max_turns` | Emit `harness.finished`. Outcome `budget_exhausted`. |
 | `result` | anything else | Emit `harness.finished`. Outcome `error`. |
-| unknown | | Emit `harness.unknown` with the raw line. Never crash. |
+| unknown | | Emit `harness.unknown` with its `type` and the raw message. Never crash. |
 | unparseable line | | Emit `harness.malformed` with the raw line. Never crash. |
 
 Messages carrying a non-null `parent_tool_use_id` belong to a harness-internal subagent. In v1
 they are recorded with that id and otherwise treated the same; the platform's own subagents
 are separate jobs and do not use this mechanism.
 
-Every emitted event keeps the raw message in `payload.raw`. The documentation does not list
+An event that stands for a whole message keeps it in `payload.raw`: `started`, `retry`, `notice`,
+`control`, `rate_limit`, `finished` and `unknown`, and `malformed` keeps the raw line. The per-block events —
+`text`, `tool_use`, `tool_result`, `delivered` — carry their block's fields and not the message;
+the whole line is in the run's transcript regardless (below). The documentation does not list
 all `result` subtypes nor every field (`duration_api_ms`, `modelUsage` and the shape of
-`permission_denials` are undocumented), so nothing is dropped on the assumption it is
-unimportant.
+`permission_denials` are undocumented), which is why `finished` keeps the whole message rather
+than only the fields named here.
 
 ## Emitted events
 
 All are `job.harness.*` in the event log, with `job_id`, `ticket_id`, `actor = {job, id}`:
 
 `started` (session_id, model, tools), `text` (text), `tool_use` (id, name, input),
-`tool_result` (tool_use_id, is_error, bytes, excerpt), `retry` (attempt, max_retries, error),
-`rate_limit` (status, resets_at, rate_limit_type, utilization, is_using_overage),
-`notice`, `unknown`, `malformed`, `finished` (subtype, is_error, num_turns, duration_ms,
-total_cost_usd, usage, result, exit_status).
+`tool_result` (tool_use_id, is_error, bytes, excerpt), `delivered` (text), `control`
+(request_id, subtype), `retry` (attempt, max_retries, error), `notice` (subtype), `rate_limit`
+(status, resets_at, rate_limit_type, utilization, is_using_overage, windows), `unknown` (type),
+`malformed` (reason), `finished` (subtype, is_error, num_turns, duration_ms, total_cost_usd,
+usage, result, session_id).
+
+`text`, `tool_use`, `tool_result` and `delivered` also carry `parent_tool_use_id`. A conversation
+forwards `delivered` with the platform's `message_id` added, and does not forward the echo of its
+opening prompt (`conversations.md` § The wire). The process's exit status is not on `finished`: it
+arrives separately from the output (often before its last chunk, so the runner waits for both),
+and is reported with the run's result as `exit_status` in its harness summary.
 
 ## Rate limit events
 
@@ -100,9 +145,10 @@ This section said it was mapped before it was. Until `credentials.md` step 5 it 
 catch-all into `harness.unknown`, which is the behaviour the unknown clause exists for and the
 reason nothing was lost — the samples in `capacity.md` were read back out of stored transcripts.
 
-The full raw stdout of each run is written to `transcript-<run>.jsonl` in the job directory
-and recorded as a blob version with its content hash. It is never rendered live; it exists
-for debugging after the fact.
+The full raw stdout of each run is written to `transcript-<run>.jsonl` in the job directory. A
+workflow job's is uploaded to the store and recorded as a blob version with its content hash; a
+conversation's is uploaded when it ends and recorded nowhere (`conversations.md` § Lifetime). It
+is never rendered live; it exists for debugging after the fact.
 
 ## Accounting
 
@@ -111,7 +157,8 @@ documentation calls the cost a client-side estimate; it is stored as such and re
 against provider billing later if that ever matters. `--max-turns` and `--max-budget-usd`
 are the harness-side enforcement; the driver additionally enforces a wall-clock limit
 (engine default, not in the workflow grammar) and kills the process with SIGTERM, then SIGKILL
-after a grace period, emitting `finished` with outcome `cancelled` or `budget_exhausted`.
+after a grace period. No `finished` event is emitted for that; the run's result records why it
+was killed, and § Outcome mapping reads it as `cancelled` or `budget_exhausted`.
 
 ## Outcome mapping
 
@@ -154,17 +201,31 @@ still the cost ceiling — but nothing may assume an unauthenticated run is sile
 
 ## Resume
 
-`system/init` supplies `session_id`, stored as `job.harness_session_id`. After hibernation,
-the driver first tries `claude -p --resume <session_id>` with a continuation prompt naming the
-pinned manifest and the branch state. Documented caveat: session lookup is per project
-directory, so the worktree path must be the same one the session started in; on a different
-worker it will not be found. A resume that exits without ever emitting `system/init` is
-re-queued as a fresh invocation with the same spec and no session. Resume is never required
-for correctness, and no outcome depends on it.
+`system/init` supplies `session_id`, stored as `job.harness_session_id`. When the job is assigned
+again — resumed after a blocking question is answered, say — the assignment carries it as
+`resume_session` and the driver adds `--resume <session_id>`. The prompt is then a continuation
+naming the answers, the branch and the commit the worktree is at, and the pinned manifest — not
+the whole prompt a fresh run gets — and the runner chooses it from the same `resume_session` the
+flag comes from (`job-prompt.md` § The continuation prompt). A conversation never resumes this
+way; reopening one clears its session (`conversations.md` § Lifetime). Documented caveat: session
+lookup is per project directory, so the worktree path must be the same one the session started
+in; on a different worker it will not be found. A resume that exits without ever emitting
+`system/init` is re-queued as a fresh invocation with the same spec and no session, and so with
+the full composed prompt: the fallback is that re-queue, not a guess made before the run. Resume
+is never required for correctness, and no outcome depends on it.
+
+That the harness *does* exit before `system/init` when the session is not found — rather than
+starting a new session and carrying on — is **unmeasured**. It is inferred from the caveat, not
+observed, and the continuation prompt rests on it (`job-prompt.md` § The continuation prompt):
+a harness that started afresh would hand a continuation to an agent that remembers nothing of the
+job. No measurement resumes anything; that is the first one to add.
 
 ## Declared capabilities
 
 The driver module exports `capabilities/0` returning
-`%{resume: true, permission_prompting: false, budget_turns: true, budget_usd: true}`. The
-engine reads these rather than assuming them, so a second harness is a module with a
-different map.
+`%{resume: true, permission_prompting: false, budget_turns: true, budget_usd: true,
+streaming_input: true}`, so a second harness is a module with a different map. **Only one key is
+read.** The worker's runner refuses a streaming run on a driver without `streaming_input` rather
+than starting one that ignores every message. The map is also forwarded to the platform in the
+harness offer on `ready` and stored with the worker's `harness`, where nothing reads it; the other
+four keys are declarations nothing checks yet.

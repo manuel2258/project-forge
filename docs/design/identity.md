@@ -4,30 +4,33 @@ Scope: who a user is, which projects they reach, and whose credential funds the 
 replaces the shape the Phoenix generator left behind, and it is the note that turns
 `decisions.md` § Security and users from a promise into a mechanism.
 
-The relations land first because they are what is painful to retrofit; OIDC lands in the closing
-step, where there is a real origin, TLS and redirect URIs. See § Sequencing, which records what
-is built and what is not.
+The relations landed first because they are what is painful to retrofit; OIDC followed once
+there was a real origin, TLS and redirect URIs. See § Sequencing, which records what is built and
+what is not.
 
-## What is there today
+## What was there before
 
-Worth stating plainly, because the gap is not where the decision record implies it is.
+Kept because the gap was not where the decision record implied it was.
 
-- Authentication is the generator's, unmodified: email and password, magic link, session
+- Authentication was the generator's, unmodified: email and password, magic link, session
   tokens, and per-user API bearer tokens under the `api` context.
-- **Authorization does not exist.** Every operator-facing route is
-  `require_authenticated_user` and nothing else; the two that are not (`/store` and `/git`)
-  authorise a token rather than a person, and stay that way. `user.role` — `operator | approver | promoter | spender` — is read in exactly one
-  place, `GET /api/v1/me`, which echoes it back. It is a decorative column.
-- **There is no user-to-project edge at all.** `project` is a name, a repository path, a
-  default branch, a model and a seed. The queue, the board, `/projects` and the ticket list
-  are global.
-- What does exist is **attribution**: `answers`, `approvals`, `proposal_decisions` and
-  `push_subscriptions` all carry `user_id`, and `artifact_version.author` is
-  `{user, id} | {job, id}`.
+- **Authorization did not exist.** Every operator-facing route was
+  `require_authenticated_user` and nothing else. `user.role` — `operator | approver | promoter |
+  spender` — was read in exactly one place, `GET /api/v1/me`, which echoed it back. It was a
+  decorative column.
+- **There was no user-to-project edge at all.** The queue, the board, `/projects` and the
+  ticket list were global.
+- What did exist was **attribution**: `answers`, `approvals`, `proposal_decisions` and
+  `push_subscriptions` carry `user_id`, and an artifact version's `author` names a user, a job
+  or the system.
 
-So the audit trail is real and the gate in front of it is not. `decisions.md` says users and
-roles are in the data model so that team use is an expansion rather than a rewrite; half of
-that is true. Attribution is there, the relation is not.
+So the audit trail was real and the gate in front of it was not. `decisions.md` says users and
+roles are in the data model so that team use is an expansion rather than a rewrite; half of that
+was true. **The other half is built now** (§ Sequencing): `users.role` was dropped by
+`20260916100000_accounts_approval_and_node_admin` for approval and `node_admin`,
+`project_members` is the edge, `Forge.Access` answers what a membership permits, and every
+operator route also passes `require_approved_user` and the `:require_approved` mount. `/store` and
+`/git` authorise a token rather than a person, and stay that way.
 
 ## Two questions, kept apart
 
@@ -63,7 +66,7 @@ That is what § Approval is for.
 
 A new table, because the user table cannot carry this:
 
-**identity** — `user_id`, `issuer`, `subject`, `email` (as claimed at the last login, for
+**identities** — `user_id`, `issuer`, `subject`, `email` (as claimed at the last login, for
 display only), `last_login_at`. Unique on `(issuer, subject)`.
 
 Email is not an identifier. It is mutable at the IdP, it is re-assignable by whoever runs the
@@ -122,7 +125,9 @@ flow against an issuer they signed themselves.
 
 ## Approval
 
-**The first login creates a pending account, for local and OIDC alike.** A pending user can log
+**The first login creates a pending account.** Only an OIDC login creates accounts: a local one
+is made on the host (`mix forge.user.add`, approved as it is made), and the magic link goes only
+to an address that already has an account. A pending user can log
 in, and sees one thing: a page saying the account is waiting. No projects, no queue, no API. A
 pending user's API token is refused for the same reason the session is.
 
@@ -169,7 +174,7 @@ Bootstrapping is explicit rather than "whoever reached the login page first".
 
 ## Projects and members
 
-**project_member** — `project_id`, `user_id`, `role` (`admin | member`), `inserted_at`. Unique
+**project_members** — `project_id`, `user_id`, `role` (`admin | member`), `inserted_at`. Unique
 on `(project_id, user_id)`.
 
 - **admin** — project settings, deleting the project, and managing membership.
@@ -187,6 +192,18 @@ stays as it is, gated on approval rather than on a role.
 approved user does by construction. This is the whole reason approval was worth putting in
 front: with it, "add a member" needs no pending-membership row, no email matching, and no
 bearer link in a chat message.
+
+**And only an approved account is added.** `Projects.put_member/4` refuses an account that
+`User.active?/1` refuses — pending, or suspended — with `:not_approved` or `:suspended`, after
+the caller's own `:manage` check so that a non-admin learns nothing about anyone's account. It
+used to take any row with an address, so a project admin could put a pending account in a
+project: nothing it could use, since its session and token are turned away, but a
+`project_members` row that `on_delete: :restrict` then held against the one deletion § Approval
+allows, until somebody removed the membership first — and § Approval's claim that a pending
+account is by construction outside the restricting tables was false for this one. A
+suspended member keeps its row, because suspension is reversible and reinstating is one field;
+it can be removed, and it cannot be given a new role. `grant_member/3`, the host's repair path,
+does not ask.
 
 A project always has at least one admin. Removing or demoting the last one is refused.
 
@@ -241,6 +258,29 @@ A LiveView that hides a button is cosmetics. The context refusing is the guard, 
 mutation aimed at these rules removes the check in the context**, not the one in the template. A
 test that only asserts a hidden button passes against a broken platform.
 
+**Machines and templates are outside `Operator`, and guarded in their own contexts.** Provider
+credentials and worker templates are `Forge.Provisioning`'s, and every human write there takes the
+acting user and scopes itself to them — assigning a template to a project checks membership there,
+as `Forge.Projects` does for members. Workers are `Forge.Workers`'s, and its three human writes — a
+permanent machine's figures (`set_offer/3`) and the projects it serves (`assign/3`, `unassign/3`) —
+do the same.
+
+Two of these were guarded only in the LiveView until a review listed them here as exceptions,
+and they are recorded because the shape is the one this section keeps finding:
+
+- **Saving a permanent worker's figures** was `WorkersLive` matching `managed: false` itself and
+  then calling `Workers.update/2`, which takes no actor and casts every field the row has. It is
+  `Workers.set_offer/3` now: it reads the row scoped to the caller, so somebody else's machine is
+  `:not_found` exactly as a missing one is (§ Workers), refuses a machine the platform made, and
+  casts only memory, cores and kinds, so the form cannot reach `managed`, `status` or a token hash
+  by sending more fields. `update/2` stays for the platform's own writes — `busy/1`, `ready/2`,
+  `release/1`, the sweeps — and no page or API route calls it.
+- **Editing a template** was `Provisioning.update_template/2`, which took the row and no actor;
+  ownership was `TemplatesLive` reading the row scoped to the caller before calling it. It is
+  `update_template/3` now, taking the acting user and an id, reading the row scoped to them, and
+  setting `user_id` itself as `create_template/2` does — so an edit can no more hand a template to
+  somebody else than a form can create one in their name.
+
 ## Read scoping is the half that leaks
 
 Refusing a mutation is easy to get right and easy to test. The holes are in reads, and every
@@ -252,7 +292,8 @@ one of these is a surface that is global today:
   named here for a month while `ChatsLive` still called `Conversations.summaries()` unqualified
   and handed every account the project name, the link and the last line of every transcript on
   the node. A surface named in a note is not a surface that is scoped.
-- `ArtifactController` — serves bytes by project and number, needs membership.
+- `ArtifactController` — serves bytes by project and number, or by conversation, and needs
+  membership of the project either way.
 - Push fan-out. `push_subscriptions` carries `user_id`; a blocking question must reach the
   people who may answer it and no one else — and not a suspended account, whose device would
   otherwise keep buzzing about projects it can no longer open.
@@ -388,7 +429,7 @@ than a running total somebody has to maintain (`credentials.md` § Spend).
 
 **A worker template is owned and assigned the same way.** `docs/design/provisioning.md` adds a
 recipe the platform creates machines from, and it inherits this section whole: a template belongs
-to a user, carries their provider credential, and reaches a project through `project_template` —
+to a user, carries their provider credential, and reaches a project through `project_templates` —
 `project_id`, `template_id` — which only its owner may create and only for a project they are a
 member of. *A project admin cannot reach for someone else's template, because creating from it
 spends its owner's credential and the money stays with whoever spends it.*
@@ -455,7 +496,9 @@ What that comes to:
   `member`**, and needs ownership as well — an admin of the project cannot reach for somebody
   else's.
 - **`node_admin`** is one page.
-- **`token`** is four: `/git`, `/store/*key`, and the two sockets. None of them carries a person.
+- **`token`** is three: `/git`, `/store/*key` and the worker socket. None of them carries a
+  person. The LiveView socket is not one of them: it carries the session, and every route behind
+  it sits in a `live_session` whose `on_mount` checks it.
 - **`public`** is the three login routes, the two OIDC ones and the log-out — plus `/health`,
   which carries nothing and reads nothing. There is no registration route: accounts are made on
   the host or by an OIDC login, and then approved.
@@ -473,7 +516,7 @@ Two results of the audit worth keeping:
 
 ## Sequencing
 
-1. **Built.** `project_member`, the two roles, `Forge.Access`, `Scope` carrying the membership,
+1. **Built.** `project_members`, the two roles, `Forge.Access`, `Scope` carrying the membership,
    guards in `Forge.Operator` and in `Forge.Projects` for membership itself, read scoping across
    the queue, the board, both project lists, artifacts, the API and the push fan-out, and
    `events.project_id`. Approval, `node_admin`, the accounts page and the project's people
@@ -507,7 +550,7 @@ Two results of the audit worth keeping:
    test went through a LiveView route where `on_mount` caught it first; the socket-join direction
    then turned out to be the untested one. And `Projects.put_member/4` checked nothing about its
    caller — the page hid the form, and hiding it was the only thing stopping anyone.
-2. **Built, across two notes.** `provider_credentials`, `worker_templates`, `project_template`
+2. **Built, across two notes.** `provider_credentials`, `worker_templates`, `project_templates`
    and the provider registry that lets a credential name which driver it is for all arrived with
    `docs/design/provisioning.md`, which is where that pass turned out to live. The rest — the
    inference `credential`, worker ownership, `project_worker`, the project's credential pool,
@@ -515,7 +558,7 @@ Two results of the audit worth keeping:
    which moved the credential from the machine to the job; its own § Sequencing records what
    landed in which order and what each step found on the way.
 3. **Built, once there was a real origin to redirect to.** OIDC: providers configured from the
-   environment, the `identity` table, provisioning on first login, and § What the first
+   environment, the `identities` table, provisioning on first login, and § What the first
    implementation settled above for the five questions the design left open.
 
    **What it did not change, and that is the point.** Approval is untouched: an OIDC login makes

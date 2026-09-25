@@ -7,7 +7,12 @@ defmodule Forge.StorageTest do
   alias Forge.Storage.Key
 
   setup do
-    dir = Path.join(System.tmp_dir!(), "forge-store-test-#{System.unique_integer([:positive])}")
+    dir =
+      Path.join(
+        System.tmp_dir!(),
+        "#{System.pid()}-forge-store-test-#{System.unique_integer([:positive])}"
+      )
+
     previous = Application.get_env(:forge, Storage, [])
     Application.put_env(:forge, Storage, Keyword.put(previous, :dir, dir))
 
@@ -71,7 +76,10 @@ defmodule Forge.StorageTest do
       assert {:error, :not_found} = Storage.stat("job/j1/missing.txt")
 
       assert {:error, :not_found} =
-               Storage.fetch("job/j1/missing.txt", Path.join(System.tmp_dir!(), "nope"))
+               Storage.fetch(
+                 "job/j1/missing.txt",
+                 Path.join(System.tmp_dir!(), "#{System.pid()}-nope")
+               )
     end
 
     test "leaves nothing behind on delete, and does not mind deleting twice" do

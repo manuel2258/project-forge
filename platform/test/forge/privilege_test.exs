@@ -123,6 +123,45 @@ defmodule Forge.PrivilegeTest do
       assert {:ok, _member} = Projects.put_member(project, second, :member, admin)
       assert Projects.role(project, second) == :member
     end
+
+    # Approval is the perimeter, and a membership is inside it. The page said "No approved
+    # account" for an unknown address and then added a pending one.
+    test "an account nobody has approved is not added", %{project: project, admin: admin} do
+      pending = pending_user_fixture()
+
+      assert {:error, :not_approved} = Projects.put_member(project, pending, :member, admin)
+      assert Projects.role(project, pending) == nil
+    end
+
+    # Suspended outranks approved, as it does for a login: the row keeps `approved_at` so that
+    # reinstating is one field, and that must not read as "may be added".
+    test "a suspended account is not added either", %{project: project, admin: admin} do
+      {:ok, suspended} = Accounts.suspend_user(user_fixture(), node_admin_fixture())
+
+      assert {:error, :suspended} = Projects.put_member(project, suspended, :member, admin)
+      assert Projects.role(project, suspended) == nil
+    end
+
+    # Not only for someone new: a member already in the project who is then suspended is not
+    # promoted either. A check that looked only at accounts with no row yet would let a
+    # suspended member be made an admin of the project they can no longer sign in to.
+    test "a member who is suspended is not given a new role", %{project: project, admin: admin} do
+      member = member_fixture(project, :member)
+      {:ok, suspended} = Accounts.suspend_user(member, node_admin_fixture())
+
+      assert {:error, :suspended} = Projects.put_member(project, suspended, :admin, admin)
+      assert Projects.role(project, suspended) == :member
+    end
+
+    # The caller's check comes first, so the answer says nothing about somebody's account to
+    # somebody who could not have added them anyway.
+    test "a non-admin is refused before anything is said about the account", %{
+      project: project,
+      member: member
+    } do
+      assert {:error, :forbidden} =
+               Projects.put_member(project, pending_user_fixture(), :member, member)
+    end
   end
 
   describe "account governance checks its actor" do

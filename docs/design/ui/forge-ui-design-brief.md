@@ -1,5 +1,12 @@
 # forge — operator UI design brief
 
+> **Historical: the brief as it was handed to the redesign, kept as written.** Much of what it
+> calls *not built* has been built since — the ticket timeline, the merge review view, blob
+> artifacts in the platform's store, the worker tier and its page, per-ticket and per-day spend
+> caps, and multi-user accounts. The roles §7 names — approver, promoter, spender — were dropped
+> for a per-project `admin | member` (`docs/design/identity.md`). `docs/design/ui.md` is the
+> standard for what exists; read this for what the design was asked to answer.
+
 You are redesigning the operator interface of **forge**, a self-hosted platform that moves
 software tickets through a per-repository, statechart-defined lifecycle executed by
 disposable AI agent jobs.

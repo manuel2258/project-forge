@@ -16,7 +16,7 @@ defmodule ForgeWorker.Link do
   use Slipstream, restart: :permanent
 
   alias ForgeCore.Job.Result
-  alias ForgeWorker.{Config, Store}
+  alias ForgeWorker.{Checkout, Config, Store}
   alias ForgeWorker.Job.{Conversation, Credential, Dir, Runner, Seed, Workspace}
 
   require Logger
@@ -52,7 +52,6 @@ defmodule ForgeWorker.Link do
       |> assign(:jobs, %{})
       |> assign(:unacked, %{})
       |> assign(:acks, %{})
-      |> assign(:draining, false)
       |> assign(:root, Keyword.get(opts, :root, Config.root()))
       |> assign(:topic, "worker:" <> worker_id)
 
@@ -111,17 +110,11 @@ defmodule ForgeWorker.Link do
 
   @impl Slipstream
   def handle_message(_topic, "assign", assignment, socket) do
-    cond do
-      socket.assigns.draining ->
-        Logger.info("refusing an assignment while draining")
-        {:ok, socket}
-
-      Map.has_key?(socket.assigns.jobs, assignment["job_id"]) ->
-        Logger.info("already running job #{assignment["job_id"]}")
-        {:ok, socket}
-
-      true ->
-        {:ok, start_job(socket, assignment)}
+    if Map.has_key?(socket.assigns.jobs, assignment["job_id"]) do
+      Logger.info("already running job #{assignment["job_id"]}")
+      {:ok, socket}
+    else
+      {:ok, start_job(socket, assignment)}
     end
   end
 
@@ -150,11 +143,6 @@ defmodule ForgeWorker.Link do
     with_conversation(socket, job_id, "close", fn pid ->
       Conversation.close(pid, payload["reason"] || "closed")
     end)
-  end
-
-  def handle_message(_topic, "drain", _payload, socket) do
-    Logger.info("draining: no new work")
-    {:ok, assign(socket, :draining, true)}
   end
 
   def handle_message(topic, event, _payload, socket) do
@@ -409,6 +397,10 @@ defmodule ForgeWorker.Link do
       sink: fn event -> send(link, {:event, job_id, event}) end,
       harness_opts: harness_opts,
       backlog: assignment["backlog"],
+      # Named in the continuation a resumed run is handed, read from the tree it is about to run
+      # in rather than taken from the platform: what the agent will find is what it is told
+      # (`docs/design/job-prompt.md` § The continuation prompt).
+      head: head(worktree),
       wall_clock_ms: assignment["wall_clock_ms"] || :timer.hours(1),
       nix_env: Application.get_env(:forge_worker, :nix_env, true),
       extra_env: Application.get_env(:forge_worker, :extra_env, []) ++ git_env(assignment)
@@ -423,6 +415,16 @@ defmodule ForgeWorker.Link do
     do: [{"FORGE_GIT_URL", url}, {"FORGE_GIT_TOKEN", {:secret, token}}]
 
   defp git_env(_assignment), do: []
+
+  # Equivalent mutant in the second clause: a worktree `Workspace.prepare/2` returned was cloned
+  # or reset onto a branch, so it always has a HEAD and nil is never what reaches the prompt.
+  # Kept because a job must not fail over one sentence of its prompt.
+  defp head(worktree) do
+    case Checkout.head(worktree) do
+      {:ok, sha} -> sha
+      {:error, _reason} -> nil
+    end
+  end
 
   defp resume_opts(%{"resume_session" => session}) when is_binary(session),
     do: [resume_session: session]

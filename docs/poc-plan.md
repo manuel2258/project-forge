@@ -10,6 +10,9 @@ small repository kept for the purpose. The real deployment, the cloud driver and
 are one step after the last milestone, so that step is the first time the design meets a
 network it does not control.
 
+*Overtaken in part: the deployment path and the Hetzner driver were built without waiting for
+milestone 5. § Closing step says what of that step remains.*
+
 The goal is a functionally minimal platform the operator can then deploy for their own
 project, a game. Nothing in the PoC may depend on that project or on its language: the
 workload is a parameter (the project's environment, build command and build directory, as
@@ -37,12 +40,15 @@ The PoC is done when all of the following hold:
 - One repository, three Mix projects joined by path dependencies, no umbrella:
   `forge_core` (workflow parser, event schema, artifact types), `forge` (Phoenix platform),
   `forge_worker` (worker release). Each is a Nix-built release.
-- Postgres on the orchestrator. Oban for durable background work.
+- Postgres on the orchestrator. Durable background work is rows in it: a job is a row, and one
+  GenServer, `Forge.Jobs.Scheduler`, hands pending ones out. *The plan named Oban; it was never
+  added.*
 - Worker dials out to the platform over a Phoenix Channel, authenticated by a per-worker token
   injected at creation on a config disk. Slipstream as the client.
 - Git served by the platform over smart HTTP wrapping `git http-backend`; per-job short-lived
-  token as the password. Bare repositories on the orchestrator filesystem. SSH for the
-  operator only.
+  token as the password. Bare repositories on the orchestrator filesystem. No SSH, the operator
+  included: a token they mint reaches the same endpoint (`design/git-hosting.md` § Not built).
+  *The plan kept SSH for the operator; it was cut.*
 - The operator's Claude subscription, as an OAuth token, funds execution. API key billing
   remains a configuration choice but is not compared during the PoC.
 - Job isolation on the worker: transient systemd units with MemoryMax and CPUWeight, a fresh
@@ -50,6 +56,8 @@ The PoC is done when all of the following hold:
 - btrfs subvolumes and snapshots for copy-on-write worktrees and build directories.
 - A local VM driver (QEMU, booting the NixOS worker image) as the provider behind the
   driver for the whole PoC. Hetzner arrives in the closing step, as a second driver.
+  *Overtaken: the Hetzner driver was built with worker templates, and which driver makes a
+  machine is the template's choice rather than the node's (`design/provisioning.md`).*
 - A storage behaviour for blobs and worker seeds with one implementation: a directory on the
   platform host, served over HTTP by the platform. No S3 client and no MinIO. The behaviour
   exists so a second implementation is a module and a config key rather than a rewrite — which
@@ -68,8 +76,9 @@ the first commit:
 
 - Every job runs `mix compile --warnings-as-errors`, `mix format --check-formatted`,
   `mix credo --strict` and `mix test` before committing.
-- Dependency versions are pinned. Hexdocs for the pinned versions are checked into the
-  repository so agents read them rather than recall them.
+- Dependency versions are pinned, and agents read a library's docs from `deps/<name>` — the
+  pinned version's own — rather than recall them (`CLAUDE.md` § Rules). *The plan was to check
+  hexdocs into the repository; that was never done.*
 - Phoenix generators produce the boilerplate; agents edit generated code rather than write it
   from memory.
 
@@ -79,6 +88,10 @@ Not in the PoC: fan-out and join blocks, experiment mode, presentations, multi-u
 beyond the data model, second factor, the analysis agent, a native client, offline compose,
 repository mirroring beyond a single push hook. Environment proposals fall out for free: an
 agent editing the flake in its worktree is already part of the changeset.
+
+*Two of these were built after all: multi-user and roles — account approval, `node_admin`,
+per-project membership and OIDC (`design/identity.md`) — and mirroring, which is several named
+http(s) mirrors per project, each showing its last attempt (`design/git-hosting.md`).*
 
 ## Phase 0: measurements
 
@@ -165,6 +178,10 @@ Probes: branch granularity (one branch per ticket).
 Demo: the ticket from milestone 1, driven entirely from the queue page in a browser, with
 one blocking question arriving as a push notification.
 
+*Status: built, but the demo's push half has never run: web push is unexercised
+(`open-questions.md` § Message reliability). Single-user auth was overtaken by
+`design/identity.md`.*
+
 Probes: question representation under real use, message reliability.
 
 ### Milestone 3: worker tier
@@ -188,6 +205,11 @@ Probes: question representation under real use, message reliability.
 Demo: implement and verify states run on a fresh local worker VM for the demo project, two
 tickets in parallel, one deliberately exhausting memory, the other finishing untouched.
 Worker destroyed after idle, recreated on the next ticket.
+
+*Status: done. The demo ran (`measurements.md` § The isolation cross; `design/worker-tier.md`
+§ What the operator's machine settled), and the platform no longer depends on `forge_worker`.
+Since then the single memory gate has become kind, memory and cores per job, and the one driver
+has become a registry with Hetzner in it (`design/provisioning.md`).*
 
 Probes: idle period, sandbox platform question (only reopened if this milestone fails),
 build cache in practice.
@@ -214,6 +236,12 @@ worker VMs. Fix what breaks. Record cost, timing, retries and backward transitio
 so the analysis agent has data later. Ends when the definition of usable is met.
 
 ### Closing step: deployment, cloud, phone
+
+*Status: begun without waiting for milestone 5. Built: the NixOS module, and a container image
+with `bin/release` to publish it (`deploy.md`); the Hetzner driver, which has created and
+destroyed real machines but has not had one connect to a platform and run a job, and on which
+measurement 4 has not been re-run. Not done: backups (`deploy.md` § Known limits), the phone,
+and the real project's move; nothing yet records the platform running on a host.*
 
 After the PoC has concluded on evidence, and only then:
 

@@ -181,8 +181,175 @@ defmodule ForgeCore.PromptTest do
       assert manifest =~ "/var/forge/jobs/chat-1/history"
     end
 
+    # A reopened conversation is a new process, and the message at the end of its prompt is the
+    # next thing the person said. Without this section the agent is handed a file it is never
+    # told about and a message it takes for an opening, and it answers as though nothing had
+    # been said — the failure `docs/design/conversations.md` § Lifetime is built against.
+    test "that was reopened is pointed at what was said before, and told it is not the first" do
+      spec = chat_spec(%{replay: "# The conversation so far\n", prompt: nil})
+      manifest = Prompt.chat_manifest(spec, "/var/forge/jobs/chat-1")
+      flat = String.replace(manifest, "\n", " ")
+
+      assert manifest =~ "## This conversation was reopened"
+      assert manifest =~ "`/var/forge/jobs/chat-1/conversation.md`"
+      assert flat =~ "Read it before you reply"
+      assert flat =~ "the next thing the person said — not the first"
+    end
+
+    # And a first start is not told about a file nobody wrote.
+    test "that was never reopened is not pointed at a conversation file" do
+      manifest = Prompt.chat_manifest(chat_spec(), "/var/forge/jobs/chat-1")
+
+      refute manifest =~ "reopened"
+      refute manifest =~ "conversation.md"
+    end
+
+    # Ending a conversation deletes an unmerged branch, and the agent is the one the person asks
+    # about their work — so it is told, and can say so before rather than after.
+    test "is told what ending the conversation does to its branch" do
+      flat = Prompt.chat_preamble() |> String.replace("\n", " ")
+
+      assert flat =~ "a branch they have not merged is deleted unless it would not merge cleanly"
+    end
+
+    # A file an agent is never told about is a file it never writes. What it is told has to match
+    # what is recorded: where, which names are kept, and that each turn records it.
+    test "is told where a document it means to keep goes, and which names are not its" do
+      flat = Prompt.chat_preamble() |> String.replace("\n", " ")
+
+      assert flat =~ "`$FORGE_JOB/out/`, one per document"
+      assert flat =~ "recorded at the end of each turn as a version"
+      assert flat =~ "The name is one path segment"
+
+      for reserved <- ["`ticket`", "`answers.md`", "`changeset`", "`proposals`", "`proposal-`"] do
+        assert flat =~ reserved
+      end
+
+      # It said there was nowhere for a document to go, which stopped being true.
+      refute flat =~ "nowhere for those to go"
+    end
+
+    # A reopen is a cold start and a cold start clears `out/`, so the agent is told where what it
+    # wrote before now is, and that writing it to `out/` again is what changes it.
+    test "is told where what it wrote before a reopen is, and how to change it" do
+      flat = Prompt.chat_preamble() |> String.replace(~r/\s+/, " ")
+
+      assert flat =~ "otherwise the documents this conversation wrote itself"
+      assert flat =~ "copy it from `inputs/` into `out/`"
+    end
+
+    # It said a ticket's next job reads what a chat wrote. A job reads the inputs its state
+    # declares, pinned when the job was created — so a name no state produces reaches no job.
+    test "is not told that the ticket's next job reads whatever it writes" do
+      flat = Prompt.chat_preamble() |> String.replace(~r/\s+/, " ")
+
+      refute flat =~ "which its next job reads"
+      assert flat =~ "a name the workflow never produces reaches no job at all"
+    end
+
+    # What the platform does with a document is what the agent is told: a question block in one
+    # is text, and a document a person is deciding about is refused until they have.
+    test "is told a document asks nothing, and which of a ticket's it may not write" do
+      flat = Prompt.chat_preamble() |> String.replace(~r/\s+/, " ")
+
+      assert flat =~ "asks nobody anything"
+      assert flat =~ "one holding the question a waiting job stopped on"
+      assert flat =~ "one waiting for their approval"
+    end
+
+    test "is told in its preamble where a reopened conversation's past is kept" do
+      assert Prompt.chat_preamble() =~ "$FORGE_JOB/conversation.md"
+    end
+
     test "with no inputs says so rather than leaving the section blank" do
       assert Prompt.chat_manifest(chat_spec(), "/var/forge/jobs/chat-1") =~ "- none"
+    end
+  end
+
+  # A run that resumes its harness session already holds the preamble and the state prompt. What
+  # it lacks is what happened while it was stopped, which is what `continuation/3` says —
+  # `docs/design/job-prompt.md` § The continuation prompt.
+  describe "a continuation" do
+    @answers "# Answers\n\nDecisions a person made on this ticket, oldest first.\n\n" <>
+               "## backend\n\nQ: Local file or SQLite?\n\nA: sqlite\n"
+
+    defp resumed_spec(answers \\ @answers) do
+      spec = spec()
+
+      %{
+        spec
+        | inputs: spec.inputs ++ [%Spec.Input{name: "answers.md", version: 3, content: answers}]
+      }
+    end
+
+    # The whole saving. A continuation that carried the preamble or the state prompt would be
+    # `compose/2` with a paragraph on top, and a resumed session would read its contract twice.
+    test "is not the whole prompt again: no preamble and no state prompt" do
+      prompt = Prompt.continuation(resumed_spec(), "/var/forge/jobs/job-1", "c0ffee")
+
+      assert String.starts_with?(prompt, "# Continue this job")
+      refute prompt =~ "# You are one job in a ticket lifecycle"
+      refute prompt =~ "# Project instructions for state"
+      refute prompt =~ "Write a plan."
+    end
+
+    # Asked of the Answers section and nothing else: the manifest below it lists the same input
+    # with its version and path, so a whole-prompt match passed with both dropped from here.
+    test "names the answers, verbatim, with the version and path they were pinned at" do
+      prompt = Prompt.continuation(resumed_spec(), "/var/forge/jobs/job-1", "c0ffee")
+
+      [_before, from_answers] = String.split(prompt, "## Answers\n", parts: 2)
+      [section, _rest] = String.split(from_answers, "\n## Your branch", parts: 2)
+      flat = String.replace(section, ~r/\s+/, " ")
+
+      assert flat =~ "`answers.md` version 3"
+      assert flat =~ "`/var/forge/jobs/job-1/inputs/answers.md`"
+      assert section =~ "```markdown\n" <> String.trim(@answers) <> "\n```\n"
+    end
+
+    # A free-text answer is a person's words, and a person may quote a fenced block. A fence that
+    # did not outgrow it would close early and leave the rest of the prompt inside a code block.
+    test "fences the answers with more backticks than they contain" do
+      quoted = @answers <> "\n## format\n\nQ: Which?\n\nA: like this:\n\n````\nx = 1\n````\n"
+      prompt = Prompt.continuation(resumed_spec(quoted), "/var/forge/jobs/job-1", nil)
+
+      assert prompt =~ "`````markdown\n# Answers"
+      assert prompt =~ "x = 1\n````\n`````\n"
+    end
+
+    test "names the branch and the commit the worktree is at" do
+      prompt = Prompt.continuation(resumed_spec(), "/var/forge/jobs/job-1", "c0ffee")
+
+      assert prompt =~ "## Your branch\n\n`ticket/7`, at `c0ffee`, checked out"
+    end
+
+    test "says only the branch when the commit could not be read" do
+      prompt = Prompt.continuation(resumed_spec(), "/var/forge/jobs/job-1", nil)
+
+      assert prompt =~ "## Your branch\n\n`ticket/7`, checked out"
+    end
+
+    # The manifest is whole and last, because it is what may have moved: the answers are now an
+    # input, and the budget is the one this run was assigned.
+    test "ends with the manifest as it stands, answers among the inputs" do
+      spec = %{resumed_spec() | budget: %{turns: 40, cost: 0.75}}
+      prompt = Prompt.continuation(spec, "/var/forge/jobs/job-1", "c0ffee")
+
+      assert [_changes, manifest] = String.split(prompt, "\n---\n\n")
+      assert manifest == Prompt.manifest(spec, "/var/forge/jobs/job-1")
+      assert manifest =~ "- `answers.md` version 3 -> `/var/forge/jobs/job-1/inputs/answers.md`"
+      assert manifest =~ "- Cost: 0.75 USD"
+    end
+
+    # No path resumes a session without an answer today — only a run that stopped to ask records
+    # one — but this is handed a spec, not that history, and must not say a person answered when
+    # the spec carries no answer.
+    test "with no answers among the inputs says nothing about answers" do
+      prompt = Prompt.continuation(spec(), "/var/forge/jobs/job-1", "c0ffee")
+
+      refute prompt =~ "## Answers"
+      refute prompt =~ "A person answered"
+      assert prompt =~ "## Your branch"
     end
   end
 end

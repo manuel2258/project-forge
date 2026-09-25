@@ -25,10 +25,16 @@ defmodule Forge.Provisioning.Vault do
   @salt "forge provider credential"
   @aad "forge/provisioning/v1"
 
-  @doc "Encrypts a map of secret fields. The shape inside is the driver's business, not ours."
-  @spec seal(map()) :: String.t()
-  def seal(secret) when is_map(secret) do
-    MessageEncryptor.encrypt(Jason.encode!(secret), @aad, key(), "unused")
+  @doc """
+  Encrypts a map of secret fields. The shape inside is the driver's business, not ours.
+
+  `label` is the associated data, and it is what keeps one table's secrets out of another's: an
+  inference credential is sealed under its own (`Forge.Credentials.Credential`), so a provider
+  token's ciphertext pasted into that column does not open, and the reverse does not either.
+  """
+  @spec seal(map(), String.t()) :: String.t()
+  def seal(secret, label \\ @aad) when is_map(secret) do
+    MessageEncryptor.encrypt(Jason.encode!(secret), label, key(), "unused")
   end
 
   @doc """
@@ -38,11 +44,12 @@ defmodule Forge.Provisioning.Vault do
   another node — because none of them is separately actionable and all of them mean the same
   thing to the caller: this credential cannot be used and the operator has to say it again.
   """
-  @spec open(String.t() | nil) :: {:ok, map()} | :error
-  def open(nil), do: :error
+  @spec open(String.t() | nil, String.t()) :: {:ok, map()} | :error
+  def open(sealed, label \\ @aad)
+  def open(nil, _label), do: :error
 
-  def open(sealed) when is_binary(sealed) do
-    with {:ok, json} <- MessageEncryptor.decrypt(sealed, @aad, key(), "unused"),
+  def open(sealed, label) when is_binary(sealed) do
+    with {:ok, json} <- MessageEncryptor.decrypt(sealed, label, key(), "unused"),
          {:ok, secret} when is_map(secret) <- Jason.decode(json) do
       {:ok, secret}
     else

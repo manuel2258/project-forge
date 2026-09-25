@@ -9,8 +9,9 @@ defmodule Forge.Provider.MachineConfig do
   nothing to format and nothing to parse. It lived in `Forge.Provider.LocalVm` while there was
   one driver, which made the second one either call into the first or copy it.
 
-  The worker token and the harness credential are in here, so whatever a driver does with the
-  result is a thing done to a secret.
+  The worker token is in here, so whatever a driver does with the result is a thing done to a
+  secret. (The harness credential used to be as well; a job brings its own now,
+  `docs/design/credentials.md`.)
   """
 
   alias Forge.Provider

@@ -34,7 +34,7 @@ defmodule ForgeWeb.Operator.Components do
   change a setting nobody touched.
   """
   attr :field, Phoenix.HTML.FormField, required: true
-  attr :offered, :map, required: true, doc: "as `Forge.Workers.offered/0`"
+  attr :offered, :map, required: true, doc: "as `Forge.Workers.offered/1`"
   attr :label, :string, default: "Model"
   attr :fallback, :string, required: true, doc: "what an empty choice means, in words"
 

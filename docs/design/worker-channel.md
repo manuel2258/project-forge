@@ -49,6 +49,13 @@ assignment. So the blast radius of a leaked worker token is: it can pretend to b
 until the worker is destroyed. It cannot read another worker's jobs, another ticket's blobs, or
 push to another branch.
 
+Pretending to be a worker includes being handed its jobs, and since `docs/design/credentials.md`
+a job carries its inference credential — sealed with a key derived from this token, so whoever
+holds the token opens it. That is not a wider radius than before: the token used to sit in the
+machine's user data beside the machine's own inference credential, and whoever could read one
+could read both. What is new is that it is the *pool's* credential, for as long as the platform
+keeps assigning to that worker.
+
 ## Topic
 
 `worker:<worker_id>`, one channel per worker, and `join/3` refuses a topic whose id is not the
@@ -74,7 +81,7 @@ Platform → worker:
 
 | Message | Payload | Meaning |
 |---|---|---|
-| `assign` | spec JSON, slice limits, git endpoint + per-job token + branch, transcript key + token, seed key + token, `resume_session`, wall clock | Run this job. |
+| `assign` | spec JSON, slice limits, git endpoint + per-job token + branch, transcript key + token, seed key + token, `resume_session`, wall clock, the job's inference credential sealed for this worker (`credentials.md` § Delivery to the machine) | Run this job. |
 | `cancel` | `job_id`, reason | Stop it. The worker still sends a terminal message. |
 | `drain` | — | Take no new work. Precedes idle destroy. |
 
@@ -134,52 +141,49 @@ Three things about them that the code depends on and a reader would not guess.
   "name": "Claude Code",
   "version": "2.1.220",
   "capabilities": {"resume": true, "streaming_input": true, "...": true},
-  "login": "ok",
-  "models": [{"id": "claude-opus-5", "name": "Claude Opus 5"}, "..."],
+  "credential": "per_job",
   "aliases": ["opus", "sonnet", "haiku", "fable"]
 }
 ```
 
 `capabilities` is `ForgeWorker.Harness.capabilities/0`, which the worker has always computed and
-has never told anyone. Everything else is new.
+told nobody until the probe existed.
 
-**The models are discovered, not declared.** The driver asks
-`GET https://api.anthropic.com/v1/models` with the machine's own credential and reports what
-comes back. The models a credential may use is not something the platform can know: it holds no
-credential, and on a fleet with more than one it would be answering for the wrong account.
+**It describes a harness, not an account.** Until `docs/design/credentials.md` it carried `login`
+and `models` as well: the driver asked `GET https://api.anthropic.com/v1/models` with the machine's
+own token and reported what came back, because the models a credential may use were the account's
+and the platform held no account. The machine holds none now — a job brings its credential in the
+assignment — so both questions moved to where the accounts are. The platform asks the provider
+once per credential, when the credential is saved (`credentials.md` § Checked on save), and a
+picker offers the models of the credentials in a project's pool.
 
-That the harness's own CLI cannot answer this was checked rather than assumed. Claude Code 2.1.220
-has no models subcommand; `--model` documents four aliases in its help text and otherwise accepts
-any string, and a name it rejects is rejected only once a turn is under way. So the alternative to
-the API call is a probe session per candidate name — a billed turn each, to learn something one
-free unbilled request already answers.
+That the harness's own CLI cannot answer the model question was checked rather than assumed, and
+it is why the answer comes from the API at all. Claude Code 2.1.220 has no models subcommand;
+`--model` documents four aliases in its help text and otherwise accepts any string, and a name it
+rejects is rejected only once a turn is under way. So the alternative to the API call is a probe
+session per candidate name — a billed turn each, to learn something one free unbilled request
+already answers.
 
-The list is the *account's*, and it is the only thing about the model that varies. A model is a
-remote service: nothing about the machine — its memory, its store, its devShell — constrains
-which one it may call. That is why this is one blob reported once at `ready` rather than a
-capability the scheduler matches against.
+**What is left is free and cannot fail on the network.** `claude --version` says the binary is
+there and which one, and the aliases are declared by the driver rather than discovered. A binary
+that is missing reports a `null` version and still reports the rest; the probe always answers.
 
-**Two probes, both free, and together they are the login check.** `claude --version` says the
-binary is there and which one; the models request says the credential is accepted. A worker minted
-without a credential currently joins, reports ready, and then fails every job with *Not logged in*
-(`Forge.Workers.harness_env/0` names this failure). `login` makes it visible before the first job
-instead of after it. Neither probe starts a session and neither spends a token.
+**`"credential": "per_job"` is the worker saying it takes its credential from the assignment**,
+and the gate reads it (`Forge.Workers.runs?/2`). It is added by the link rather than by the
+driver, because it is the link that does it, and it is said even when the probe raises — beside
+the driver's name, which the driver declares apart from its probe for exactly that case. A release older than that ignores the assignment's credential and runs the
+job on whatever its own environment holds, which the platform would then record against a
+credential it did not spend — so a worker that does not say it is given no inference job, and
+`credentials.md` § What a worker offers now says why that inverts the trap in § Open below.
 
-The probe runs at join, not at boot, so a rejoin re-reads it — a credential rotated under a
-running worker, or a `bin/worker-update` that replaced the harness binary, is picked up on the
-next connection rather than on the next machine.
-
-**A probe that fails never prevents `ready`.** The worker reports what it learned and reports the
-failure as `login`; refusing to go ready would turn a transient network error into a machine that
-takes no work at all, which is strictly worse than a machine whose model list is momentarily
-unknown.
+The probe runs at join, not at boot, so a rejoin re-reads it — a `bin/worker-update` that replaced
+the harness binary is picked up on the next connection rather than on the next machine.
 
 **More than one worker.** The platform keeps each worker's answer on its own row and offers the
-**union** of the live ones. Workers built by the same provider driver share an image and a
-credential and so answer identically; a union that is not a single set means either an image
-rollout is half done or the fleet holds more than one account. Union rather than intersection
-because the list is an offer, not a gate — see `docs/design/workflow-grammar-v1.md` § Model for
-why naming a model the platform has never heard of stays legal.
+**union** of the live ones' aliases. Workers built from one image answer identically; a union that
+is not a single set means an image rollout is half done. Union rather than intersection because
+the list is an offer, not a gate — see `docs/design/workflow-grammar-v1.md` § Model for why naming
+a model the platform has never heard of stays legal.
 
 ## Delivery
 
@@ -290,21 +294,22 @@ already has the framework for.
   idle destroy ever needs to be prompt rather than eventual, the reply is what to build, and
   `send_acked/4` is the machinery it would use.
 - **The model is not a scheduling requirement.** A job naming a model goes to whichever worker
-  the memory gate offers, and nothing checks that *that* worker reported it. Harmless while the
-  fleet is homogeneous — workers from one provider driver share an image and a credential, so
-  they answer § What a worker offers identically — and the cost of being wrong is one wasted
-  assignment: the harness refuses the name and the job fails with the harness's own message,
-  which is visible rather than silent.
+  the memory gate offers, and nothing checks that the job's *credential* may use it. The cost of
+  being wrong is one wasted assignment: the harness refuses the name and the job fails with the
+  harness's own message, which is visible rather than silent.
 
-  It stops being harmless when workers genuinely diverge, which is a half-finished image rollout
-  or a fleet holding more than one account. The fix is to make the model a requirement beside the
-  slice: `Workers.assignable/1` takes the wanted model as well as the bytes and skips a worker
-  whose `harness["models"]` does not list it. The data is already on the row — this is a `where`
-  clause, not a new mechanism.
+  Since `docs/design/credentials.md` the model list is a credential's and not a machine's, so the
+  requirement belongs in the pick rather than in `Workers.assignable/1`: prefer a credential
+  whose `models` lists the one the job wants. The data is on the credential row.
 
-  Two traps for whoever builds it. A worker that reported **no** harness at all must stay
-  assignable: a release older than the probe, or one whose probe could not reach anything, is
-  still a worker, and filtering it out would idle the fleet on a network blip. And the aliases
-  are not in `models` — `opus` is a name the CLI resolves, not an id the API returns — so a
-  requirement matched against ids alone would refuse every workflow that names one. The only
+  Two traps for whoever builds it. A credential that has never been **checked** has no list and
+  must stay pickable, or a platform that cannot reach the provider refuses every job. And the
+  aliases are not in `models` — `opus` is a name the CLI resolves, not an id the API returns — so
+  a requirement matched against ids alone would refuse every workflow that names one. The only
   workflow in this repository that names a model names `opus`.
+
+  The trap this item used to open with — *a worker that reported no harness must stay
+  assignable* — no longer holds, and not because it was wrong: it was about a probe that could
+  fail on a network blip, and the probe no longer makes a request. A worker reporting no harness
+  is now a release too old to take a job's credential, and it takes no inference job
+  (`credentials.md` § What a worker offers now).

@@ -166,6 +166,16 @@ case "${FAKE_SCENARIO:-success}" in
     emit '{"type":"result","subtype":"success","is_error":true,"num_turns":1,"duration_ms":103,"total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0},"result":"Not logged in · Please run /login","session_id":"sess-42"}'
     exit 1
     ;;
+  rate_limited)
+    # Stopped by the account's limit mid-run. Nothing recorded in this repository shows the
+    # shape; this is the one third-party reports give: a `rejected` report, then the process ends
+    # with an error result naming the limit. See docs/design/credentials.md § A limit reached
+    # mid-run.
+    emit '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":4102444800,"rateLimitType":"five_hour","utilization":0.97},"session_id":"sess-42"}'
+    emit '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":4102444800,"rateLimitType":"five_hour"},"session_id":"sess-42"}'
+    emit '{"type":"result","subtype":"success","is_error":true,"num_turns":2,"duration_ms":99,"total_cost_usd":0.2,"result":"You have hit your session limit","session_id":"sess-42"}'
+    exit 1
+    ;;
   crash)
     emit 'this is not json'
     emit '{"type":"weird_thing","x":1}'

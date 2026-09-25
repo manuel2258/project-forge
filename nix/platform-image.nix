@@ -42,7 +42,7 @@ let
   #
   # Not here, and each for a reason: `nix`, because the platform stopped running jobs in
   # milestone 3 and `nix develop` happens on the worker; Claude Code, because the platform
-  # forwards a credential and never invokes a harness (`Forge.Workers.harness_env/0` says so);
+  # hands each job a sealed credential and never invokes a harness (`docs/design/credentials.md`);
   # `qemu`, because a container cannot boot a VM and § In a container explains what that costs.
   runtimeInputs = [ pkgs.git pkgs.bash pkgs.coreutils ];
 

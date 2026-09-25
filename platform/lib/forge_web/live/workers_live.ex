@@ -6,6 +6,11 @@ defmodule ForgeWeb.WorkersLive do
   registry inside the running platform, so `mix forge.worker.list` — a different node — has no
   column for it. A LiveView runs inside the platform and can simply ask.
 
+  **It shows the caller's own machines and nobody else's.** A machine has an owner, and a row names
+  the projects it serves — a project a person is not in is not one they may learn exists
+  (`docs/design/identity.md` § Workers). A node admin sees their own too: the flag governs
+  accounts and grants no room.
+
   The two facts are kept apart on purpose. `status` is what was last written down; **connected**
   is whether a channel is held right now. A `ready` row that is not connected is a machine that
   looks healthy on every other surface and cannot take work, which is the state worth seeing.
@@ -14,7 +19,7 @@ defmodule ForgeWeb.WorkersLive do
 
   use ForgeWeb, :live_view
 
-  alias Forge.{Jobs, Workers}
+  alias Forge.{Jobs, Projects, Provisioning, Workers}
   alias ForgeWeb.Format
 
   # Connection is read from a registry rather than pushed at us, so the page asks again on a
@@ -35,8 +40,10 @@ defmodule ForgeWeb.WorkersLive do
   end
 
   defp load(socket) do
+    user = socket.assigns.current_scope.user
+
     rows =
-      for worker <- Workers.list(),
+      for worker <- Workers.list(user),
           socket.assigns.show_destroyed or worker.status != :destroyed do
         jobs = Jobs.running_on(worker.id)
 
@@ -45,12 +52,14 @@ defmodule ForgeWeb.WorkersLive do
           connected: Workers.connected?(worker.id),
           jobs: jobs,
           remaining_memory: Workers.remaining(worker),
-          remaining_cores: Workers.remaining_cores(worker)
+          remaining_cores: Workers.remaining_cores(worker),
+          serves: serving_projects(worker)
         }
       end
 
     assign(socket,
       rows: rows,
+      projects: Projects.list(user),
       live_count: Enum.count(rows, &(&1.worker.status != :destroyed)),
       connected_count: Enum.count(rows, & &1.connected),
       slice_bytes: Workers.slice_bytes(),
@@ -76,6 +85,20 @@ defmodule ForgeWeb.WorkersLive do
     case Enum.filter(Forge.Jobs.Job.kinds(), &(params["accepts_#{&1}"] == "true")) do
       [] -> nil
       kinds -> kinds
+    end
+  end
+
+  # What a row says about which projects the machine serves. A permanent machine lists its own
+  # assignments; one the platform made serves through its template, which is where the operator
+  # would go to change it, so that is what it names.
+  defp serving_projects(%{managed: false} = worker), do: {:direct, Workers.projects(worker)}
+
+  defp serving_projects(%{template_id: nil}), do: {:template, nil, []}
+
+  defp serving_projects(%{template_id: template_id}) do
+    case Forge.Repo.get(Provisioning.Template, template_id) do
+      nil -> {:template, nil, []}
+      template -> {:template, template.name, Provisioning.for_projects(template)}
     end
   end
 
@@ -126,31 +149,42 @@ defmodule ForgeWeb.WorkersLive do
   @doc """
   Sets what a permanent machine offers.
 
-  **Only a machine the platform did not make.** A managed worker was given its figures by the
-  template that made it and will be replaced rather than corrected, so editing one would be an
-  edit with a lifetime of one idle period. A permanent machine is the operator's, and the row
-  governing the gate (`docs/design/provisioning.md` § What a worker offers) is what makes the
-  edit survive the next `ready`.
-
-  The id comes off the wire, so the row is fetched and checked here rather than trusted —
-  `docs/design/identity.md` § Sequencing records that a `handle_event` holding a
-  client-supplied id is the shape these holes keep taking.
+  **Only the owner's, and only a machine the platform did not make** — both decided by
+  `Workers.set_offer/3`, which reads the row scoped to the caller. The id comes off the wire, and
+  `docs/design/identity.md` § Sequencing records that a `handle_event` holding a client-supplied
+  id is the shape these holes keep taking.
   """
   def handle_event("save", %{"worker_id" => id} = params, socket) do
-    with %Forge.Workers.Worker{managed: false} = worker <- Workers.get(id),
-         {:ok, attrs} <- offered_attrs(params),
-         {:ok, _worker} <- Workers.update(worker, attrs) do
+    user = socket.assigns.current_scope.user
+
+    with {:ok, attrs} <- offered_attrs(params),
+         {:ok, _worker} <- Workers.set_offer(user, id, attrs) do
       {:noreply, socket |> assign(editing: nil, error: nil) |> load()}
     else
-      %Forge.Workers.Worker{} ->
+      {:error, :made_by_the_platform} ->
         {:noreply, assign(socket, error: "a machine the platform made is replaced, not edited")}
 
       {:error, %Ecto.Changeset{}} ->
         {:noreply, assign(socket, error: "those are not figures a machine can have")}
 
-      _other ->
+      {:error, :not_found} ->
         {:noreply, assign(socket, error: "that machine is not here")}
     end
+  end
+
+  # Both reach a project, and both are refused unless the caller owns the machine *and* is a
+  # member of the project — `Workers.assign/3` reads both from the database, whatever ids arrive.
+  def handle_event("assign", %{"worker" => id, "project" => project_id}, socket) do
+    case Workers.assign(socket.assigns.current_scope.user, id, project_id) do
+      {:ok, _assignment} -> {:noreply, socket |> assign(error: nil) |> load()}
+      {:error, :not_a_member} -> {:noreply, assign(socket, error: "you are not in that project")}
+      {:error, _reason} -> {:noreply, assign(socket, error: "could not assign it")}
+    end
+  end
+
+  def handle_event("unassign", %{"worker" => id, "project" => project_id}, socket) do
+    Workers.unassign(socket.assigns.current_scope.user, id, project_id)
+    {:noreply, socket |> assign(error: nil) |> load()}
   end
 
   def handle_event("toggle-destroyed", _params, socket) do
@@ -160,10 +194,78 @@ defmodule ForgeWeb.WorkersLive do
   defp gib(nil), do: "—"
   defp gib(bytes), do: :erlang.float_to_binary(bytes / 1024 / 1024 / 1024, decimals: 1) <> " GiB"
 
+  attr :row, :map, required: true
+  attr :projects, :list, required: true
+
+  # Which projects may run their jobs on this machine. A job runs only on a machine assigned to
+  # its project (`docs/design/identity.md` § Workers), so a permanent machine with none here takes
+  # no work at all — which is the thing worth seeing on this row.
+  defp serves(%{row: %{serves: {:template, name, projects}}} = assigns) do
+    assigns = assign(assigns, name: name, assigned: projects)
+
+    ~H"""
+    <div class="mt-1 text-[11px]">
+      <span class="opacity-50">
+        {if @name, do: "serves through template #{@name}:", else: "from a template since removed:"}
+      </span>
+      <span :for={project <- @assigned} class="ml-1 font-mono">{project.name}</span>
+      <span :if={@assigned == []} class="ml-1 opacity-50">no project</span>
+    </div>
+    """
+  end
+
+  defp serves(%{row: %{serves: {:direct, projects}}} = assigns) do
+    assigns = assign(assigns, assigned: projects)
+
+    ~H"""
+    <div class="mt-1 flex flex-wrap items-center gap-2 text-[11px]">
+      <span class="opacity-50">serves</span>
+      <span
+        :for={project <- @assigned}
+        class="flex items-center gap-1 rounded-field border border-base-300 px-2 font-mono"
+      >
+        {project.name}
+        <button
+          type="button"
+          phx-click="unassign"
+          phx-value-worker={@row.worker.id}
+          phx-value-project={project.id}
+          class="min-h-[46px] min-w-[32px] opacity-60 hover:opacity-100"
+          aria-label={"Stop serving #{project.name}"}
+        >
+          ×
+        </button>
+      </span>
+      <span :if={@assigned == []} class="text-error">no project, so it takes no work</span>
+      <form
+        :if={@row.worker.status != :destroyed and @projects != []}
+        phx-submit="assign"
+        class="flex items-center gap-2"
+      >
+        <input type="hidden" name="worker" value={@row.worker.id} />
+        <select
+          name="project"
+          aria-label="Project"
+          class="h-[40px] rounded-field border border-base-300 bg-base-100 px-2"
+        >
+          <option :for={project <- @projects} value={project.id}>{project.name}</option>
+        </select>
+        <button type="submit" class="min-h-[46px] text-primary hover:underline">Assign</button>
+      </form>
+    </div>
+    """
+  end
+
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} active={:workers} measure="74rem">
+    <Layouts.app
+      flash={@flash}
+      current_scope={@current_scope}
+      capacity={@capacity}
+      active={:workers}
+      measure="74rem"
+    >
       <header class="flex flex-wrap items-baseline gap-x-4 gap-y-2">
         <h1 class="text-2xl font-semibold -tracking-[.025em]">Workers</h1>
         <%!-- No node-wide ceiling any more: every machine comes from a template and every
@@ -193,7 +295,7 @@ defmodule ForgeWeb.WorkersLive do
       <p :if={@error} class="mt-4 text-sm text-error">{@error}</p>
 
       <p :if={@rows == []} class="mt-6 text-sm opacity-60">
-        No machines. One is created when a job needs it, or provisioned by hand with <code class="font-mono text-[12.5px]">mix forge.worker.new</code>.
+        You have no machines. One is created from your templates when a job needs it, or provisioned by hand with <code class="font-mono text-[12.5px]">mix forge.worker.new</code>.
       </p>
 
       <div :if={@rows != []} class="mt-6 overflow-x-auto">
@@ -223,6 +325,7 @@ defmodule ForgeWeb.WorkersLive do
                   {row.worker.provider}{if row.worker.provider_id,
                     do: " · " <> String.slice(row.worker.provider_id, 0, 12)}
                 </div>
+                <.serves row={row} projects={@projects} />
               </td>
 
               <td class="py-3 pr-3">
@@ -331,25 +434,34 @@ defmodule ForgeWeb.WorkersLive do
                 </.form>
               </td>
 
-              <%!-- What the machine said at `ready`, not what the platform assumes. A worker that
-                    joined before it reported this, or whose probe could not reach anything, shows
-                    a dash and still takes work — see docs/design/worker-channel.md § What a
-                    worker offers. The login line appears only when it is a problem, because a
-                    machine that is logged in is the case nobody needs told about. --%>
+              <%!-- What the machine said at `ready`, not what the platform assumes: which harness
+                    and which version. No models and no login any more — both were questions
+                    about the machine's own token, and a machine holds none; the login line is
+                    only drawn for a row an older release wrote. A machine that reported no
+                    harness shows a dash and takes no agent job (`docs/design/credentials.md`
+                    § What a worker offers now). --%>
               <td class="py-3 pr-3 font-mono">
                 <span :if={is_nil(row.worker.harness)} class="opacity-40">—</span>
                 <div :if={row.worker.harness}>
                   {row.worker.harness["name"] || row.worker.harness["driver"]}
                   <span class="opacity-50">{row.worker.harness["version"]}</span>
                 </div>
-                <div :if={row.worker.harness} class="text-[11px] opacity-50">
-                  {length(row.worker.harness["models"] || [])} models
-                </div>
                 <div
                   :if={row.worker.harness && row.worker.harness["login"] not in [nil, "ok"]}
                   class="text-[11px] text-error"
                 >
                   login {row.worker.harness["login"]}
+                </div>
+                <%!-- A release that does not take the job's credential from the assignment is
+                      given no inference job at all (`Workers.runs?/2`), so a machine that looks
+                      healthy everywhere else takes no work — which is the thing to say. --%>
+                <div
+                  :if={
+                    row.worker.status != :destroyed and not Workers.runs?(row.worker, "claude_code")
+                  }
+                  class="text-[11px] text-error"
+                >
+                  takes no agent job: its release predates per-job credentials; update it
                 </div>
               </td>
 

@@ -45,7 +45,13 @@ defmodule ForgeWeb.BoardLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} active={:board} measure={nil}>
+    <Layouts.app
+      flash={@flash}
+      current_scope={@current_scope}
+      capacity={@capacity}
+      active={:board}
+      measure={nil}
+    >
       <div class="flex flex-wrap items-center gap-3">
         <h1 class="text-2xl font-semibold -tracking-[.025em]">Board</h1>
         <%!-- Neutral, and only here and on the ticket: a pause is resolved by the clock, so it

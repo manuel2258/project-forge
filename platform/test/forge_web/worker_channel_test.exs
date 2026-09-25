@@ -150,7 +150,8 @@ defmodule ForgeWeb.WorkerChannelTest do
 
     {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
     [job] = Jobs.for_ticket(ticket.id)
-    %{project: project, ticket: ticket, job: job}
+    credential = funded!(project)
+    %{project: project, ticket: ticket, job: job, credential: credential}
   end
 
   describe "connecting" do
@@ -232,15 +233,17 @@ defmodule ForgeWeb.WorkerChannelTest do
           "harness" => %{
             "driver" => "claude_code",
             "version" => "2.1.220",
-            "login" => "ok",
-            "models" => [%{"id" => "claude-opus-5", "name" => "Claude Opus 5"}]
+            "credential" => "per_job",
+            "aliases" => ["opus"]
           }
         })
 
       assert_reply ref, :ok
 
-      assert Workers.get!(worker.id).harness["version"] == "2.1.220"
-      assert Workers.models() == [%{id: "claude-opus-5", name: "Claude Opus 5"}]
+      recorded = Workers.get!(worker.id)
+      assert recorded.harness["version"] == "2.1.220"
+      assert Workers.runs?(recorded, "claude_code")
+      assert Workers.offered(nil).aliases == ["opus"]
     end
 
     test "heartbeat says we are still here", %{worker: worker, token: token} do
@@ -263,6 +266,30 @@ defmodule ForgeWeb.WorkerChannelTest do
       assert_push "assign", %{"job_id" => ^job_id, "git" => git, "store" => store}
       assert git["branch"] == "ticket/1"
       assert store["transcript_key"] =~ job_id
+    end
+
+    # **The job's credential crosses sealed for this worker and this job**, and nothing on the way
+    # holds it in the clear: not the assignment, not the channel's message, not the frame
+    # (`docs/design/credentials.md` § Delivery to the machine). This worker, with its own token,
+    # opens it; the job is recorded against the credential that paid for it.
+    test "an assignment carries the job's credential, sealed for this worker and this job",
+         %{worker: worker, token: token, job: job, credential: credential} do
+      {:ok, _reply, _socket} = join_worker(worker, token)
+      {:ok, worker} = Workers.ready(worker, %{"memory_budget" => 8_000_000_000})
+
+      {:ok, _job} = Jobs.assign(job, worker)
+
+      job_id = job.id
+      assert_push "assign", %{"job_id" => ^job_id} = assignment
+
+      assert %{"harness" => "claude_code", "kind" => "oauth", "sealed" => sealed} =
+               assignment["credential"]
+
+      refute inspect(assignment, limit: :infinity) =~ "sk-ant-oat01-fixture"
+
+      {:ok, hash} = ForgeCore.Job.Credential.token_hash(token)
+      assert ForgeCore.Job.Credential.open(sealed, hash, job_id) == {:ok, "sk-ant-oat01-fixture"}
+      assert Jobs.get!(job_id).credential_id == credential.id
     end
 
     test "an event becomes a line in the timeline", %{worker: worker, token: token} = context do

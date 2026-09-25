@@ -59,6 +59,99 @@ defmodule Forge.ForgeFixtures do
     project
   end
 
+  @doc """
+  Lets `project` run its jobs on `worker`, as its owner assigning it would.
+
+  Explicit for the same reason `join!/3` is: a job runs only on a machine assigned to its project
+  (`docs/design/identity.md` § Workers), and a fixture that made every machine serve every project
+  would hide exactly the leak the tests about that rule exist to catch. The guard itself —
+  owner and member only — is `Forge.Workers.assign/3`'s and has tests of its own.
+  """
+  def serve!(worker, project) do
+    Repo.insert!(%Forge.Workers.ProjectWorker{project_id: project.id, worker_id: worker.id})
+    worker
+  end
+
+  @doc """
+  A live inference credential owned by `user`, inserted without asking the provider.
+
+  `Forge.Credentials.create/2` checks a credential against the provider before saving it, which
+  is its own subject with its own tests; a test about a job only needs one to exist. The secret is
+  sealed exactly as `create/2` seals it, so everything downstream opens it the real way.
+  """
+  def credential_fixture(user, attrs \\ %{}) do
+    attrs = Map.new(attrs)
+    now = DateTime.utc_now(:second)
+
+    Repo.insert!(%Forge.Credentials.Credential{
+      user_id: user.id,
+      name: Map.get(attrs, :name, "cred-#{System.unique_integer([:positive])}"),
+      harness: Map.get(attrs, :harness, "claude_code"),
+      kind: Map.get(attrs, :kind, "oauth"),
+      secret: Forge.Credentials.Credential.seal(Map.get(attrs, :secret, "sk-ant-oat01-fixture")),
+      models: Map.get(attrs, :models, []),
+      checked_at: now
+    })
+  end
+
+  @doc """
+  Puts `credential` in `project`'s pool, as its owner assigning it would.
+
+  Explicit, like `serve!/2`: a job runs only on a credential in its project's pool
+  (`docs/design/credentials.md` § How a job picks), and the guard on assigning one — owner and
+  member only — is `Forge.Credentials.assign/3`'s, with tests of its own.
+  """
+  def pool!(project, credential) do
+    Repo.insert!(%Forge.Credentials.ProjectCredential{
+      project_id: project.id,
+      credential_id: credential.id
+    })
+
+    credential
+  end
+
+  @doc """
+  A credential in `project`'s pool, owned by one of its members, unless the pool already has one.
+
+  For a test whose subject is not credentials but whose job still has to be paid for.
+  """
+  def funded!(%{id: project_id} = project) do
+    case Forge.Credentials.pool(project_id, "claude_code") do
+      [credential | _rest] ->
+        credential
+
+      [] ->
+        owner =
+          case Forge.Projects.members(project) do
+            [%{user_id: user_id} | _rest] -> Repo.get!(Forge.Accounts.User, user_id)
+            [] -> Forge.AccountsFixtures.user_fixture()
+          end
+
+        pool!(project, credential_fixture(owner))
+    end
+  end
+
+  @doc """
+  A run of `job`: one start of it, on `:credential` if given, started at `:started_at` (now by
+  default), costing `:cost` and closed at `:finished_at` if given.
+
+  Spend is read from runs, never from `jobs.cost_usd` (`docs/design/credentials.md` § Spend), so a
+  test that wants money spent writes a run. `Forge.Jobs.Runs` is the only writer in the product,
+  with tests of its own; this is for a test whose subject is what is read back.
+  """
+  def run!(job, attrs \\ []) do
+    attrs = Map.new(attrs)
+    credential = Map.get(attrs, :credential)
+
+    Repo.insert!(%Forge.Jobs.Run{
+      job_id: job.id,
+      credential_id: credential && credential.id,
+      started_at: Map.get_lazy(attrs, :started_at, fn -> DateTime.utc_now(:second) end),
+      cost_usd: Decimal.new(Map.get(attrs, :cost, "0")),
+      finished_at: Map.get(attrs, :finished_at)
+    })
+  end
+
   @doc "Joins a user to the project a ticket belongs to."
   def join_ticket!(ticket, user, role \\ :admin) do
     join!(Forge.Projects.get!(ticket.project_id), user, role)

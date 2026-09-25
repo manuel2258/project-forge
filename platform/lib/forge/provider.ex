@@ -20,10 +20,9 @@ defmodule Forge.Provider do
   """
 
   @typedoc """
-  What a machine is created with. `harness_env` is what the machine needs to run an agent at
-  all — the credential above everything — which is the machine's rather than any job's and so
-  is injected here rather than carried in an assignment; `docs/design/worker-tier.md` § The
-  worker image says why.
+  What a machine is created with. `harness_env` is what the machine is given for its harness —
+  the model, and no credential: a job brings its own in its assignment
+  (`docs/design/credentials.md` § The credential belongs to the job, not to the machine).
 
   `size` is opaque above the driver: the platform passes the string a template carried and never
   reads it, which is what keeps `"cpx32"` from meaning anything outside the Hetzner driver.

@@ -28,7 +28,11 @@ defmodule ForgeWeb.ProjectLive do
     {project, _scope} = ForgeWeb.Access.project_by_name!(socket.assigns.current_scope, name)
     if connected?(socket), do: Events.subscribe()
 
-    {:ok, socket |> assign(project_id: project.id, page_title: project.name) |> load()}
+    {:ok,
+     socket
+     |> assign(project_id: project.id, page_title: project.name)
+     |> ForgeWeb.Capacity.project(project)
+     |> load()}
   end
 
   defp load(%{assigns: %{project_id: id}} = socket) do
@@ -162,7 +166,13 @@ defmodule ForgeWeb.ProjectLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} active={:board} measure={nil}>
+    <Layouts.app
+      flash={@flash}
+      current_scope={@current_scope}
+      capacity={@capacity}
+      active={:board}
+      measure={nil}
+    >
       <.link navigate={~p"/board"} class="font-mono text-[12.5px] opacity-60 hover:opacity-100">
         ‹ Board
       </.link>

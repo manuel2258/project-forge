@@ -48,6 +48,23 @@ defmodule ForgeWeb.FormatTest do
     assert Format.ago(~N[2026-09-15 09:00:00], now) == "3h"
   end
 
+  # The countdown to a window's reset, `docs/design/capacity.md`'s `1h 12m`. Each span pinned with
+  # a duration whose answer differs in every clause, for the reason the moduledoc gives.
+  test "a countdown is minutes, then hours and minutes, then days and hours" do
+    now = ~U[2026-09-15 12:00:00Z]
+    until = &Format.until(DateTime.add(now, &1, :second), now)
+
+    assert until.(-5) == "now"
+    assert until.(59) == "now"
+    assert until.(60) == "1m"
+    assert until.(59 * 60 + 59) == "59m"
+    assert until.(3_600) == "1h 0m"
+    assert until.(72 * 60) == "1h 12m"
+    assert until.(23 * 3_600 + 59 * 60) == "23h 59m"
+    assert until.(86_400) == "1d 0h"
+    assert until.(2 * 86_400 + 3 * 3_600 + 59) == "2d 3h"
+  end
+
   # A job that never started has no started_at, and the column simply has nothing in it rather
   # than an age counted from the epoch.
   test "nothing is not a time" do

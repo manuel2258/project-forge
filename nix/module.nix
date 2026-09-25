@@ -87,8 +87,8 @@ in
       default = null;
       description = ''
         Secrets as KEY=VALUE lines, not in the Nix store: SECRET_KEY_BASE (required),
-        ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN, FORGE_VAPID_PUBLIC_KEY,
-        FORGE_VAPID_PRIVATE_KEY, FORGE_VAPID_SUBJECT.
+        FORGE_VAPID_PUBLIC_KEY, FORGE_VAPID_PRIVATE_KEY, FORGE_VAPID_SUBJECT. No agent
+        credential: each user adds their own in the product (docs/design/credentials.md).
       '';
     };
 

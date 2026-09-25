@@ -19,6 +19,9 @@ defmodule Forge.FlowTest do
       register_owned!(%{name: "game-#{System.unique_integer([:positive])}", repo_path: repo})
 
     user = member_fixture(project)
+    # Every job is paid for by a credential in its project's pool; these tests are about
+    # everything else (`docs/design/credentials.md` § How a job picks).
+    funded!(project)
 
     data_dir = tmp_dir("data")
     original = Application.get_env(:forge, Forge.Jobs)
@@ -363,7 +366,7 @@ defmodule Forge.FlowTest do
     # A worker with room for exactly one slice, so the second ticket has nowhere to go until
     # the first job is done with it. The setup's roomier worker steps aside.
     Registry.unregister(Forge.Workers.Registry, context.worker.id)
-    worker = FakeWorker.connect(memory_budget: Forge.Workers.slice_bytes())
+    worker = FakeWorker.connect(memory_budget: Forge.Workers.slice_bytes(), project: project)
     {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
     {:ok, ticket2} = Tickets.admit(project, %{title: "y"}, {:user, user.id})
     start_supervised!(Forge.Jobs.Scheduler)
@@ -399,7 +402,10 @@ defmodule Forge.FlowTest do
     user: user,
     worker: worker
   } do
+    # Out of touch but not destroyed, and serving this project: it is what makes a job that does
+    # not fit the small machine *wait* rather than stick, because it could hold it once back.
     Registry.unregister(Forge.Workers.Registry, worker.id)
+    Forge.ForgeFixtures.serve!(worker, project)
     previous = Application.get_env(:forge, Forge.Workers, [])
     on_exit(fn -> Application.put_env(:forge, Forge.Workers, previous) end)
 
@@ -409,7 +415,7 @@ defmodule Forge.FlowTest do
       Keyword.merge(previous, slice_bytes: 1_000)
     )
 
-    FakeWorker.connect(memory_budget: 4_000, cores: 4)
+    FakeWorker.connect(memory_budget: 4_000, cores: 4, project: project)
     {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
     start_supervised!(Forge.Jobs.Scheduler)
 
@@ -493,6 +499,558 @@ defmodule Forge.FlowTest do
     assert reason =~ "template"
   end
 
+  # **A placement stick used to be a dead end.** The ticket is stuck holding a pending job, and a
+  # transition is refused while a job for the current state is live, so once the missing
+  # template arrived there was nothing a person could do from the product. Assigning one is what
+  # the ticket was waiting for, and it comes back by itself (`docs/design/credentials.md` § How a
+  # job picks).
+  test "a ticket stuck for want of a machine comes back when one is assigned", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    Registry.unregister(Forge.Workers.Registry, worker.id)
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    start_supervised!(Forge.Jobs.Scheduler)
+
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert Tickets.get!(ticket.id).status == :stuck
+
+    assert %{"cause" => "placement"} =
+             Events.for_ticket(ticket.id)
+             |> Enum.find(&(&1.type == "ticket.stuck"))
+             |> Map.fetch!(:payload)
+
+    {:ok, template} =
+      Forge.Provisioning.create_template(user, %{
+        name: "enough",
+        provider: "fake",
+        memory: 64 * 1024 * 1024 * 1024,
+        cores: 64,
+        max_workers: 1
+      })
+
+    {:ok, _} = Forge.Provisioning.assign(user, template.id, project.id)
+
+    assert Tickets.get!(ticket.id).status == :active
+    assert "ticket.unstuck" in event_types(ticket)
+    assert job_status(ticket) == :pending
+  end
+
+  # The same for a permanent machine: its owner assigning it is as much the missing piece as a
+  # template is.
+  test "a ticket stuck for want of a machine comes back when a permanent one is assigned", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    Registry.unregister(Forge.Workers.Registry, worker.id)
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    start_supervised!(Forge.Jobs.Scheduler)
+
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert Tickets.get!(ticket.id).status == :stuck
+
+    {:ok, mine, _token} =
+      Forge.Workers.create(%{provider: "fake", managed: false, user_id: user.id})
+
+    {:ok, _} = Forge.Workers.assign(user, mine.id, project.id)
+
+    assert Tickets.get!(ticket.id).status == :active
+  end
+
+  # **The credential before the machine** (`docs/design/credentials.md` § How a job picks). A job
+  # nothing can pay for does not ask for capacity, so an empty pool makes no machine — here a
+  # template is assigned and would otherwise make one — and the ticket sticks saying who can fix
+  # it. The owner assigning a credential brings it back.
+  test "a project with nothing in its pool sticks its ticket and makes no machine", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    Forge.Provider.Fake.watch()
+    Registry.unregister(Forge.Workers.Registry, worker.id)
+
+    Repo.delete_all(
+      from a in Forge.Credentials.ProjectCredential, where: a.project_id == ^project.id
+    )
+
+    {:ok, template} =
+      Forge.Provisioning.create_template(user, %{
+        name: "would-make-one",
+        provider: "fake",
+        memory: 64 * 1024 * 1024 * 1024,
+        cores: 64,
+        max_workers: 1
+      })
+
+    {:ok, _} = Forge.Provisioning.assign(user, template.id, project.id)
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    start_supervised!(Forge.Jobs.Scheduler)
+
+    assert Forge.Jobs.Scheduler.tick() == 0
+    refute_receive {:provider_create, _opts}
+
+    assert Tickets.get!(ticket.id).status == :stuck
+
+    assert %{"cause" => "placement", "reason" => reason} =
+             Events.for_ticket(ticket.id)
+             |> Enum.find(&(&1.type == "ticket.stuck"))
+             |> Map.fetch!(:payload)
+
+    assert reason =~ "no credential is assigned to this project"
+
+    credential = credential_fixture(user)
+    {:ok, _} = Forge.Credentials.assign(user, credential.id, project.id)
+
+    assert Tickets.get!(ticket.id).status == :active
+  end
+
+  # Everything in the pool rate-limited is the other answer, and must not be mistaken for the
+  # first: time resolves it, so the ticket stays active rather than asking a person for something,
+  # and — as with an empty pool — no machine is made for a job that could not start on it.
+  test "a project whose every credential is rate-limited waits, active, and makes no machine", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    Forge.Provider.Fake.watch()
+    Registry.unregister(Forge.Workers.Registry, worker.id)
+    [credential] = Forge.Credentials.pool(project.id, "claude_code")
+
+    {:ok, template} =
+      Forge.Provisioning.create_template(user, %{
+        name: "would-make-one",
+        provider: "fake",
+        memory: 64 * 1024 * 1024 * 1024,
+        cores: 64,
+        max_workers: 1
+      })
+
+    {:ok, _} = Forge.Provisioning.assign(user, template.id, project.id)
+
+    earlier = chat_fixture(%{project: project})
+
+    Repo.update_all(from(j in Job, where: j.id == ^earlier.id),
+      set: [credential_id: credential.id]
+    )
+
+    :ok =
+      Jobs.record_harness_event(earlier.id, %{
+        type: "job.harness.rate_limit",
+        payload: %{status: "rejected", resets_at: System.os_time(:second) + 3600}
+      })
+
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    start_supervised!(Forge.Jobs.Scheduler)
+
+    assert Forge.Jobs.Scheduler.tick() == 0
+    refute_receive {:provider_create, _opts}
+
+    assert Tickets.get!(ticket.id).status == :active
+    refute "ticket.stuck" in event_types(ticket)
+    assert %Job{status: :pending, worker_id: nil} = only_pending(ticket)
+  end
+
+  # A credential this node cannot open — its `secret_key_base` rotated — is one no job can run on.
+  # The job is not sent to the worker without one; it stays pending and the reason names the
+  # credential, so the operator knows which to add again.
+  test "a credential this node cannot open sends nothing to the worker", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    [credential] = Forge.Credentials.pool(project.id, "claude_code")
+
+    Repo.update_all(from(c in Forge.Credentials.Credential, where: c.id == ^credential.id),
+      set: [secret: Forge.Provisioning.Vault.seal(%{"token" => "under-another-label"})]
+    )
+
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    job = only_job(ticket)
+
+    assert {:error, {:credential_unreadable, id}} = Jobs.assign(job, worker)
+    assert id == credential.id
+    assert Jobs.get!(job.id).status == :pending
+    refute_received {:assign, _assignment}
+  end
+
+  # The scheduler has to *ask* for the harness: testing `Workers.runs?/2` alone leaves the wiring
+  # unchecked. A machine of a release that would ignore the job's credential serves the project,
+  # has room, and is connected — and is given nothing.
+  test "a machine that predates per-job credentials is given none of its project's jobs", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    Registry.unregister(Forge.Workers.Registry, worker.id)
+
+    {:ok, old, _token} = Forge.Workers.create(%{provider: "fake", managed: false})
+
+    {:ok, old} =
+      Forge.Workers.ready(old, %{"memory_budget" => 64 * 1024 * 1024 * 1024, "cores" => 64})
+
+    :ok = Forge.Workers.connected(old.id)
+    serve!(old, project)
+
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    start_supervised!(Forge.Jobs.Scheduler)
+
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert Jobs.get!(only_job(ticket).id).worker_id == nil
+  end
+
+  # What paid for a job is on the job, which is what makes a credential's spend a query. It is
+  # kept while it is usable and moves only when it must — and the move is on the record, because
+  # the job's whole cost moves with it (`credentials.md` § How a job picks).
+  test "a job records the credential it runs on, and a change of credential is an event", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    [first] = Forge.Credentials.pool(project.id, "claude_code")
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    job = only_job(ticket)
+
+    FakeWorker.assign(job, worker)
+    assert Jobs.get!(job.id).credential_id == first.id
+    refute "job.credential_changed" in event_types(ticket)
+
+    # Its credential is revoked while it is back in the queue — a worker lost, say.
+    {:ok, _} = Jobs.requeue(job.id, :worker_lost)
+    owner = Forge.Repo.get!(Forge.Accounts.User, first.user_id)
+    {:ok, _} = Forge.Credentials.revoke(owner, first.id)
+    second = pool!(project, credential_fixture(user))
+
+    {:ok, _job} = Jobs.assign(Jobs.get!(job.id), worker)
+    assert Jobs.get!(job.id).credential_id == second.id
+
+    assert %{"from" => from, "to" => to} =
+             Events.for_ticket(ticket.id)
+             |> Enum.find(&(&1.type == "job.credential_changed"))
+             |> Map.fetch!(:payload)
+
+    assert {from, to} == {first.id, second.id}
+  end
+
+  # **Spend is per run** (`docs/design/credentials.md` § Spend). A job that ran on one credential,
+  # stopped for a question, and resumed on another after the first was revoked has spent on both,
+  # each what it spent there — summed by the job's current credential, all of it would have landed
+  # on the second.
+  test "a job that moved between credentials is on each one's figure for what it spent there", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    [first] = Forge.Credentials.pool(project.id, "claude_code")
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    job = only_job(ticket)
+
+    assignment = FakeWorker.assign(job, worker)
+    assert [%{credential_id: on_first, worker_id: on_worker, finished_at: nil}] = runs(job)
+    assert {on_first, on_worker} == {first.id, worker.id}
+
+    {:ok, _} =
+      FakeWorker.finish(assignment, "blocking",
+        doc: "refinement.md",
+        harness: %{"cost_usd" => 0.25}
+      )
+
+    {:ok, _} = Jobs.resume(Jobs.get!(job.id))
+    owner = Forge.Repo.get!(Forge.Accounts.User, first.user_id)
+    {:ok, _} = Forge.Credentials.revoke(owner, first.id)
+    second = pool!(project, credential_fixture(user))
+
+    assignment = FakeWorker.assign(Jobs.get!(job.id), worker)
+
+    {:ok, _} =
+      FakeWorker.finish(assignment, "success",
+        doc: "refinement.md",
+        harness: %{"cost_usd" => 0.5}
+      )
+
+    assert [%{finished_at: %DateTime{}}, %{finished_at: %DateTime{}}] = runs(job)
+
+    assert Forge.Credentials.spent_today([first.id, second.id]) == %{
+             first.id => Decimal.new("0.25"),
+             second.id => Decimal.new("0.5")
+           }
+
+    assert Decimal.equal?(Jobs.get!(job.id).cost_usd, Decimal.new("0.75"))
+  end
+
+  # A job has one open run at most, and every way a run can end closes it — a result, a failure,
+  # a cancel, a lost machine, a platform restart, a resume that never started, an assignment that
+  # never reached the worker. An open run under a job that is not running would be a run nothing
+  # will ever close, and the next start of the job would be a second open one.
+  test "every way a run can end closes it", %{project: project, user: user, worker: worker} do
+    started = fn ->
+      {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+      job = only_job(ticket)
+      {job, FakeWorker.assign(job, worker)}
+    end
+
+    {job, assignment} = started.()
+    {:ok, _} = FakeWorker.finish(assignment, "success", doc: "refinement.md")
+    assert open_runs(job) == 0
+
+    {job, _} = started.()
+    {:ok, _} = Jobs.fail(job.id, :runner_died)
+    assert open_runs(job) == 0
+
+    {job, _} = started.()
+    {:ok, _} = Jobs.hibernate(job.id, nil, "cancelled")
+    assert open_runs(job) == 0
+
+    {job, _} = started.()
+    {:ok, _} = Jobs.requeue(job.id, :worker_lost)
+    assert open_runs(job) == 0
+
+    {job, _} = started.()
+    assert Jobs.recover() >= 1
+    assert open_runs(job) == 0
+
+    {job, _} = started.()
+    {:ok, _} = Repo.update(Job.progress_changeset(Jobs.get!(job.id), %{status: :pending}))
+    {:ok, _} = Repo.update(Job.progress_changeset(Jobs.get!(job.id), %{harness_session_id: "s"}))
+    assignment = FakeWorker.assign(Jobs.get!(job.id), worker)
+    {:ok, %{status: :pending}} = FakeWorker.finish(assignment, "no_start", doc: "refinement.md")
+    assert open_runs(job) == 0
+
+    # The worker is gone between the run being opened and the assignment being sent.
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    job = only_job(ticket)
+    Registry.unregister(Forge.Workers.Registry, worker.id)
+    assert {:error, _} = Jobs.assign(job, worker)
+    assert [%{finished_at: %DateTime{}}] = runs(job)
+  end
+
+  # The migration leaves an open run under every job that had started and not finished, holding
+  # all the job had spent. The next start closes it rather than opening a second beside it, and a
+  # result arriving on a run the migration left open adds to what it holds, because it holds what
+  # the job had already spent.
+  test "a run left open is closed by the next start, and a result adds to what a run holds", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    job = only_job(ticket)
+    left_open = run!(job, cost: "0.7")
+
+    assignment = FakeWorker.assign(job, worker)
+    assert %{finished_at: %DateTime{}} = Repo.get!(Forge.Jobs.Run, left_open.id)
+    assert open_runs(job) == 1
+
+    # Now the other half: the job is running on a run the migration left open.
+    {:ok, _} = Jobs.requeue(job.id, :worker_lost)
+    {:ok, _} = Repo.update(Job.progress_changeset(Jobs.get!(job.id), %{status: :running}))
+    left_open = run!(job, cost: "0.7")
+
+    {:ok, _} =
+      FakeWorker.finish(assignment, "success",
+        doc: "refinement.md",
+        harness: %{"cost_usd" => 0.1}
+      )
+
+    assert Decimal.equal?(Repo.get!(Forge.Jobs.Run, left_open.id).cost_usd, Decimal.new("0.8"))
+  end
+
+  # **Stopped by its account's limit, not failed** (`docs/design/credentials.md` § A limit reached
+  # mid-run). The run is recorded, the job goes back to pending with its session, its machine is
+  # let go, and the workflow does not move — then the pick moves it to the free credential and
+  # the next start resumes the session there.
+  test "a run stopped by its limit resumes on a free credential, its session kept", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    pool!(project, credential_fixture(user))
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    job = only_job(ticket)
+
+    assignment = FakeWorker.assign(job, worker)
+    on = Jobs.get!(job.id).credential_id
+    {:ok, stopped} = FakeWorker.finish(assignment, "rate_limited", doc: "refinement.md")
+
+    assert %{status: :pending, outcome: nil, harness_session_id: "sess-42"} = stopped
+    assert Decimal.equal?(stopped.cost_usd, Decimal.new("0.2"))
+    assert [%{finished_at: %DateTime{}}] = runs(job)
+    assert Forge.Workers.get!(worker.id).status == :idle
+
+    ticket = Tickets.get!(ticket.id)
+    assert {ticket.status, ticket.state} == {:active, "refining"}
+    assert [_only_job] = Jobs.for_ticket(ticket.id)
+    refute "job.finished" in event_types(ticket)
+
+    # Recorded like any run: its cost on the ticket, its transcript kept, its git token gone.
+    assert Decimal.equal?(ticket.cost_usd, Decimal.new("0.2"))
+    assert Artifacts.latest(ticket.id, "transcript-refining-1.jsonl")
+    assert Forge.Git.Tokens.revoke_for_job(job.id) == 0
+
+    assert %{"credential_id" => limited, "rate_limit_type" => "five_hour"} =
+             Events.for_ticket(ticket.id)
+             |> Enum.find(&(&1.type == "job.rate_limited"))
+             |> Map.fetch!(:payload)
+
+    assert limited == on
+
+    resumed = FakeWorker.assign(Jobs.get!(job.id), worker)
+    assert resumed["resume_session"] == "sess-42"
+    refute Jobs.get!(job.id).credential_id in [nil, on]
+    assert "job.credential_changed" in event_types(ticket)
+  end
+
+  # With every credential limited the job waits, and nobody is asked for anything; once the
+  # window frees, the next pass starts it by itself. It frees here by a later report that
+  # permits — another job on the same account, say — since the event log is append-only and the
+  # reset cannot be moved into the past; that the reset passing frees it too is
+  # `Forge.CredentialsTest`'s.
+  test "a run stopped with every credential limited waits, and starts again after the reset", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    serve!(worker, project)
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    job = only_job(ticket)
+
+    assignment = FakeWorker.assign(job, worker)
+    {:ok, _} = FakeWorker.finish(assignment, "rate_limited", doc: "refinement.md")
+    start_supervised!(Forge.Jobs.Scheduler)
+
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert Jobs.get!(job.id).status == :pending
+    assert Tickets.get!(ticket.id).status == :active
+
+    :ok =
+      Jobs.record_harness_event(job.id, %{
+        type: "job.harness.rate_limit",
+        payload: %{
+          status: "allowed",
+          rate_limit_type: "five_hour",
+          resets_at: System.os_time(:second) + 18_000
+        }
+      })
+
+    assert Forge.Jobs.Scheduler.tick() == 1
+    assert %{"resume_session" => "sess-42"} = FakeWorker.take_assignment(job.id)
+  end
+
+  # A job waiting for a reset is not work waiting for a machine: it might wait a week, and a pass
+  # that counted it would keep every idle machine on the node alive while it did. The rule the
+  # test beside `a machine with work waiting is not destroyed` defends is about work that could
+  # run.
+  test "a job waiting for a reset keeps no idle machine alive", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    previous = Application.get_env(:forge, Forge.Workers, [])
+    on_exit(fn -> Application.put_env(:forge, Forge.Workers, previous) end)
+    Application.put_env(:forge, Forge.Workers, Keyword.merge(previous, idle_period_ms: 60_000))
+
+    serve!(worker, project)
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    assignment = FakeWorker.assign(only_job(ticket), worker)
+
+    {:ok, %{status: :pending}} =
+      FakeWorker.finish(assignment, "rate_limited", doc: "refinement.md")
+
+    {:ok, _worker} =
+      Forge.Workers.update(Forge.Workers.get!(worker.id), %{
+        idle_since: DateTime.add(DateTime.utc_now(:second), -120)
+      })
+
+    start_supervised!(Forge.Jobs.Scheduler)
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert Forge.Workers.get!(worker.id).status == :destroyed
+  end
+
+  # Only a run that *failed* can have been stopped by its limit. One that did its work is done,
+  # whatever its last report said, and one the wall clock killed was stopped by the wall clock.
+  test "a run that finished its work, or that something else stopped, is not a limit", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    blocking = %{
+      "rate_limit" => %{
+        "status" => "rejected",
+        "resets_at" => System.os_time(:second) + 3600,
+        "rate_limit_type" => "five_hour"
+      }
+    }
+
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    assignment = FakeWorker.assign(only_job(ticket), worker)
+
+    {:ok, done} =
+      FakeWorker.finish(assignment, "success", doc: "refinement.md", harness: blocking)
+
+    assert {done.status, done.outcome} == {:finished, :converged}
+
+    {:ok, ticket} = Tickets.admit(project, %{title: "y"}, {:user, user.id})
+    assignment = FakeWorker.assign(only_job(ticket), worker)
+    result = FakeWorker.result(assignment, "rate_limited", doc: "refinement.md")
+
+    {:ok, killed} = Jobs.complete(assignment["job_id"], %{result | killed: :wall_clock})
+    assert killed.status == :finished
+  end
+
+  # A resume the limit refused never got going either — no model, nothing done — and read as a
+  # failed resume it would be re-queued *fresh*, throwing away the session it is waiting to
+  # continue. The limit is asked first.
+  test "a resume refused by the limit keeps its session", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    job = only_job(ticket)
+    {:ok, job} = Repo.update(Job.progress_changeset(job, %{harness_session_id: "sess-41"}))
+
+    assignment = FakeWorker.assign(job, worker)
+
+    {:ok, stopped} =
+      FakeWorker.finish(assignment, "rate_limited",
+        doc: "refinement.md",
+        harness: %{"model" => nil, "session_id" => nil}
+      )
+
+    assert %{status: :pending, harness_session_id: "sess-41"} = stopped
+    refute "job.resume_failed" in event_types(ticket)
+  end
+
+  # Only a placement stick. A ticket stuck on anything else — its allowance, a rejected approval,
+  # a missing transition — was stuck for a reason no assignment answers, and one that holds no
+  # pending job has nothing for a machine to run.
+  test "an assignment brings back no ticket stuck for any other reason", %{
+    project: project,
+    user: user
+  } do
+    {:ok, other_reason} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    {:ok, _} = Engine.stick(Tickets.get!(other_reason.id), "ticket cost cap reached")
+
+    {:ok, nothing_pending} = Tickets.admit(project, %{title: "y"}, {:user, user.id})
+    {:ok, _} = Repo.update(Job.progress_changeset(only_job(nothing_pending), %{status: :running}))
+    {:ok, _} = Engine.stick(Tickets.get!(nothing_pending.id), "no template", :placement)
+
+    {:ok, template} =
+      Forge.Provisioning.create_template(user, %{
+        name: "any",
+        provider: "fake",
+        memory: 1_000,
+        cores: 1,
+        max_workers: 1
+      })
+
+    {:ok, _} = Forge.Provisioning.assign(user, template.id, project.id)
+
+    assert Tickets.get!(other_reason.id).status == :stuck
+    assert Tickets.get!(nothing_pending.id).status == :stuck
+  end
+
   # The same path reached by a **project chat**, which has no ticket to stick. Unguarded this
   # is not a wrong answer but a crash — `Tickets.get!(nil)` inside the scheduling pass — and
   # `init/1` explains what a crashed scheduler costs: every live conversation on the node goes
@@ -536,8 +1094,8 @@ defmodule Forge.FlowTest do
     Registry.unregister(Forge.Workers.Registry, worker.id)
 
     # Oldest first is what the gate falls back to, so `first` is what it would pick blind.
-    first = FakeWorker.connect()
-    second = FakeWorker.connect()
+    first = FakeWorker.connect(project: project)
+    second = FakeWorker.connect(project: project)
     refute first.id == second.id
 
     {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
@@ -581,6 +1139,7 @@ defmodule Forge.FlowTest do
 
     # The machine has been sitting there long enough to qualify; the clock is moved rather than
     # waited on.
+    Forge.ForgeFixtures.serve!(worker, project)
     :ok = Forge.Workers.release(worker.id)
 
     {:ok, _worker} =
@@ -614,6 +1173,11 @@ defmodule Forge.FlowTest do
   end
 
   defp only_job(ticket), do: hd(Jobs.for_ticket(ticket.id))
+
+  defp runs(job),
+    do: Repo.all(from r in Forge.Jobs.Run, where: r.job_id == ^job.id, order_by: r.started_at)
+
+  defp open_runs(job), do: job |> runs() |> Enum.count(&is_nil(&1.finished_at))
 
   defp job_status(ticket), do: Jobs.get!(only_job(ticket).id).status
 

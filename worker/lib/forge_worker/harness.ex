@@ -12,7 +12,9 @@ defmodule ForgeWorker.Harness do
   @typedoc """
   Options a runner passes through: `:executable`, `:credential`, `:resume_session`, `:model`,
   `:mode` and `:max_cost`. `:credential` is `{:api_key, value}`, `{:oauth, value}`, or a
-  zero-arity function returning one, so the secret never sits in process state or crash reports.
+  zero-arity function returning one, so the secret never sits in process state or crash reports —
+  which is how a job's own credential arrives, sealed until the function runs
+  (`ForgeWorker.Job.Credential`).
 
   `:mode` is `:prompt` (the default: one prompt on stdin, one result, the process exits) or
   `:streaming` (stdin stays open and takes many messages, one result each). A conversation is
@@ -35,29 +37,31 @@ defmodule ForgeWorker.Harness do
   @callback capabilities() :: %{atom() => boolean()}
 
   @typedoc """
-  What this machine can offer, as `ready` reports it: which harness, which version, whether the
-  credential is accepted, and the models it may use. See `docs/design/worker-channel.md`
-  § What a worker offers.
+  What this machine can offer, as `ready` reports it: which harness, which version, and the
+  aliases its CLI resolves. See `docs/design/worker-channel.md` § What a worker offers.
+
+  **Nothing about an account.** It used to carry `login` and `models`, both answered with the
+  machine's own token; a machine holds none now, and the platform asks the provider once per
+  credential when it is saved (`docs/design/credentials.md` § Checked on save).
   """
   @type offer :: %{
           driver: String.t(),
           name: String.t(),
           version: String.t() | nil,
-          login: :ok | :invalid | :unknown,
-          models: [%{id: String.t(), name: String.t()}],
           aliases: [String.t()]
         }
 
   @doc """
-  Asks the machine what it can offer. Takes the same opts as `command/3` — the credential above
-  all, since the model list is the credential's and not the machine's.
+  The harness's name on the wire — what a credential names as its `harness`, and what the
+  platform matches a job against. Its own callback, so it can be said when `probe/1` cannot.
+  """
+  @callback driver() :: String.t()
 
-  Must never raise and must always answer: a probe that could not reach anything reports
-  `login: :unknown` with no models, because a worker that cannot describe itself is still a
-  worker that can run work.
+  @doc """
+  Asks the machine what it can offer. Takes the same opts as `command/3`.
 
-  `:req_options` is merged into any HTTP request the probe makes, which is what lets a test
-  answer it from a plug instead of the network.
+  Must never raise and must always answer: a binary that is missing reports a `nil` version,
+  because a worker that cannot describe itself is still a worker that can run work.
   """
   @callback probe(opts()) :: offer()
 

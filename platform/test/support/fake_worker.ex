@@ -36,6 +36,10 @@ defmodule Forge.FakeWorker do
   @doc """
   Creates a ready worker and registers the calling process as its connection, so assignments
   arrive as `{:assign, payload}` messages in this process's mailbox.
+
+  `:project` assigns it to that project, which the scheduler needs before it will place that
+  project's jobs here (`docs/design/identity.md` § Workers). A test that hands a job to the worker
+  directly with `assign/2` does not go through the scheduler and does not need it.
   """
   @spec connect(keyword()) :: Forge.Workers.Worker.t()
   def connect(opts \\ []) do
@@ -44,16 +48,30 @@ defmodule Forge.FakeWorker do
     {:ok, worker} =
       Workers.ready(worker, %{
         "memory_budget" => Keyword.get(opts, :memory_budget, @big_budget),
-        "cores" => Keyword.get(opts, :cores, @cores)
+        "cores" => Keyword.get(opts, :cores, @cores),
+        # A current release: it runs Claude Code and takes each job's credential from the
+        # assignment, which is what the gate asks before it gives it an agent job
+        # (`Workers.runs?/2`).
+        "harness" => %{"driver" => "claude_code", "credential" => "per_job"}
       })
 
     :ok = Workers.connected(worker.id)
-    worker
+
+    case Keyword.get(opts, :project) do
+      nil -> worker
+      project -> Forge.ForgeFixtures.serve!(worker, project)
+    end
   end
 
-  @doc "Assigns `job` to `worker` and returns the assignment the worker was sent."
+  @doc """
+  Assigns `job` to `worker` and returns the assignment the worker was sent.
+
+  The job's project is given a credential first if its pool has none (`ForgeFixtures.funded!/1`):
+  every job is paid for by one, and a test that is about something else should not have to say so.
+  """
   @spec assign(Forge.Jobs.Job.t(), Forge.Workers.Worker.t()) :: map()
   def assign(job, worker) do
+    Forge.ForgeFixtures.funded!(Forge.Projects.get!(job.project_id))
     {:ok, _job} = Jobs.assign(job, worker)
     take_assignment(job.id)
   end
@@ -236,6 +254,23 @@ defmodule Forge.FakeWorker do
       "exit_status" => 1
     }
 
+  # Stopped by its account's limit mid-run: an error result, and the run's last window report —
+  # `rejected`, with its reset an hour ahead — carried in the summary the way the worker's runner
+  # carries it. Mirrors the `rate_limited` scenario in fake_claude.sh.
+  defp harness("rate_limited"),
+    do:
+      Map.merge(@harness, %{
+        "is_error" => true,
+        "turns" => 2,
+        "cost_usd" => 0.2,
+        "exit_status" => 1,
+        "rate_limit" => %{
+          "status" => "rejected",
+          "resets_at" => System.os_time(:second) + 3600,
+          "rate_limit_type" => "five_hour"
+        }
+      })
+
   defp harness(_scenario), do: @harness
 
   # What the agent left in `out/`, by scenario. The shapes come from fake_claude.sh.
@@ -267,9 +302,10 @@ defmodule Forge.FakeWorker do
     do: %{name => "---\noutcome: done\n---\n# Plan\n", "notes.md" => "scratch"}
 
   defp written("invalid_document", name), do: %{name => "---\noutcome: done\n"}
-  # Stopped before it wrote anything: the budget and the turn limit both cut in mid-run.
+  # Stopped before it wrote anything: the budget, the turn limit and the account's limit all cut
+  # in mid-run.
   defp written(scenario, _name)
-       when scenario in ["max_turns", "max_budget", "no_start", "nothing"],
+       when scenario in ["max_turns", "max_budget", "no_start", "nothing", "rate_limited"],
        do: %{}
 
   defp written(scenario, _name),

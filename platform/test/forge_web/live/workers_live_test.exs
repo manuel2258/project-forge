@@ -21,9 +21,15 @@ defmodule ForgeWeb.WorkersLiveTest do
     :ok
   end
 
-  defp worker(attrs \\ %{}) do
+  # Owned by the logged-in operator, because the page shows its viewer's own machines and nobody
+  # else's (`docs/design/identity.md` § Workers).
+  # A repository of the test's own, removed when it ends: `Projects.register/2` creates one on
+  # disk, and a fixed path would be shared by every test and every run that used it.
+  defp repo_path, do: Path.join(Forge.GitFixtures.tmp_dir("workers-live"), "p.git")
+
+  defp worker(owner, attrs \\ %{}) do
     {:ok, worker, _token} =
-      Workers.create(Map.merge(%{provider: "fake", managed: true}, attrs))
+      Workers.create(Map.merge(%{provider: "fake", managed: true, user_id: owner.id}, attrs))
 
     worker
   end
@@ -31,12 +37,12 @@ defmodule ForgeWeb.WorkersLiveTest do
   test "an empty fleet names what would fill it", %{conn: conn} do
     {:ok, _view, html} = live(conn, ~p"/workers")
 
-    assert html =~ "No machines"
+    assert html =~ "You have no machines"
     assert html =~ "mix forge.worker.new"
   end
 
-  test "a row that is ready but holds no channel says both", %{conn: conn} do
-    w = worker()
+  test "a row that is ready but holds no channel says both", %{conn: conn, user: user} do
+    w = worker(user)
     {:ok, w} = Workers.ready(w, %{"memory_budget" => 6 * 1024 * 1024 * 1024})
 
     {:ok, _view, html} = live(conn, ~p"/workers")
@@ -52,8 +58,8 @@ defmodule ForgeWeb.WorkersLiveTest do
   # A machine minted without a working credential joins, reports ready, and then fails every job
   # it is given with *Not logged in*. The probe at `ready` is what makes that visible before the
   # first job instead of after it — docs/design/worker-channel.md § What a worker offers.
-  test "a worker that is not logged in says so before it is given work", %{conn: conn} do
-    w = worker()
+  test "a worker that is not logged in says so before it is given work", %{conn: conn, user: user} do
+    w = worker(user)
 
     {:ok, _w} =
       Workers.ready(w, %{
@@ -73,10 +79,38 @@ defmodule ForgeWeb.WorkersLiveTest do
     assert html =~ "login invalid"
   end
 
+  # A machine that looks healthy everywhere and is given no agent job is the state worth saying:
+  # its release predates a job carrying its credential, so the gate passes it by
+  # (`docs/design/credentials.md` § What a worker offers now).
+  test "a machine whose release does not take a job's credential says it takes no agent job", %{
+    conn: conn,
+    user: user
+  } do
+    old = worker(user)
+
+    {:ok, _} =
+      Workers.ready(old, %{"memory_budget" => 8_000, "harness" => %{"driver" => "claude_code"}})
+
+    current = worker(user)
+
+    {:ok, _} =
+      Workers.ready(current, %{
+        "memory_budget" => 8_000,
+        "harness" => %{"driver" => "claude_code", "credential" => "per_job"}
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/workers")
+
+    assert view |> element("tr", String.slice(old.id, 0, 8)) |> render() =~ "takes no agent job"
+
+    refute view |> element("tr", String.slice(current.id, 0, 8)) |> render() =~
+             "takes no agent job"
+  end
+
   # A worker running a release older than the probe reports no harness at all, and is still a
   # worker: the column shows a dash rather than the page failing to render.
-  test "a worker that reported no harness still renders", %{conn: conn} do
-    w = worker()
+  test "a worker that reported no harness still renders", %{conn: conn, user: user} do
+    w = worker(user)
     {:ok, _w} = Workers.ready(w, %{"memory_budget" => 6 * 1024 * 1024 * 1024})
 
     {:ok, _view, html} = live(conn, ~p"/workers")
@@ -85,8 +119,8 @@ defmodule ForgeWeb.WorkersLiveTest do
     refute html =~ "login"
   end
 
-  test "a connected worker is shown as connected", %{conn: conn} do
-    w = worker()
+  test "a connected worker is shown as connected", %{conn: conn, user: user} do
+    w = worker(user)
     {:ok, _w} = Workers.ready(w, %{"memory_budget" => 6 * 1024 * 1024 * 1024})
 
     # Registering is what a channel does when it joins; this process stands in for one.
@@ -101,7 +135,7 @@ defmodule ForgeWeb.WorkersLiveTest do
   # Capacity is two figures now, because the gate reads two. It used to be a count of identical
   # slices, and every clause of that sentence stopped being true when a job could declare what
   # it needs — see `docs/design/ui.md` § The workers page.
-  test "capacity is shown in both dimensions the gate reads", %{conn: conn} do
+  test "capacity is shown in both dimensions the gate reads", %{conn: conn, user: user} do
     # Merged, not replaced: replacing drops every other key and silently changes what the page
     # reads the first time one of them stops having a call-site default.
     current = Application.get_env(:forge, Workers, [])
@@ -112,7 +146,7 @@ defmodule ForgeWeb.WorkersLiveTest do
       Keyword.put(current, :slice_bytes, 2 * 1024 * 1024 * 1024)
     )
 
-    w = worker()
+    w = worker(user)
     {:ok, _w} = Workers.ready(w, %{"memory_budget" => 6 * 1024 * 1024 * 1024, "cores" => 8})
 
     {:ok, _view, html} = live(conn, ~p"/workers")
@@ -128,8 +162,11 @@ defmodule ForgeWeb.WorkersLiveTest do
   # A machine that has never reported cores is not gated on them, so the page must not invent a
   # figure — saying "0 of 0" would read as a machine that can hold nothing, which is the exact
   # opposite of what the gate does with it.
-  test "a machine that has not reported cores says so rather than showing none", %{conn: conn} do
-    w = worker()
+  test "a machine that has not reported cores says so rather than showing none", %{
+    conn: conn,
+    user: user
+  } do
+    w = worker(user)
     {:ok, _w} = Workers.ready(w, %{"memory_budget" => 6 * 1024 * 1024 * 1024})
 
     {:ok, _view, html} = live(conn, ~p"/workers")
@@ -141,8 +178,8 @@ defmodule ForgeWeb.WorkersLiveTest do
   # The row governs the gate, so a machine reporting less than its row is one the platform will
   # overcommit — and the per-job ceiling cannot catch that, because what breaks is the sum.
   # Silently resolving it either way is what this refuses to do.
-  test "a machine whose report disagrees with its row shows both", %{conn: conn} do
-    w = worker()
+  test "a machine whose report disagrees with its row shows both", %{conn: conn, user: user} do
+    w = worker(user)
     {:ok, w} = Workers.ready(w, %{"memory_budget" => 6 * 1024 * 1024 * 1024, "cores" => 8})
     {:ok, w} = Workers.update(w, %{memory_budget: 2 * 1024 * 1024 * 1024, cores: 2})
 
@@ -159,8 +196,8 @@ defmodule ForgeWeb.WorkersLiveTest do
 
   # A machine that was never made is the row an operator most needs told about, and until this
   # was drawn a driver refusing to create was invisible on every surface they have.
-  test "a row that never became a machine says why", %{conn: conn} do
-    w = worker()
+  test "a row that never became a machine says why", %{conn: conn, user: user} do
+    w = worker(user)
     {:ok, _} = Workers.update(w, %{last_error: "no Hetzner image configured"})
 
     {:ok, _view, html} = live(conn, ~p"/workers")
@@ -168,8 +205,8 @@ defmodule ForgeWeb.WorkersLiveTest do
     assert html =~ "never made: no Hetzner image configured"
   end
 
-  test "a row that did become a machine says nothing of the sort", %{conn: conn} do
-    w = worker()
+  test "a row that did become a machine says nothing of the sort", %{conn: conn, user: user} do
+    w = worker(user)
     {:ok, _} = Workers.ready(w, %{"memory_budget" => 8_000, "cores" => 4})
 
     {:ok, _view, html} = live(conn, ~p"/workers")
@@ -181,9 +218,10 @@ defmodule ForgeWeb.WorkersLiveTest do
     # The edit the whole "row governs" rule exists to protect. Without a way to make one, the
     # rule defends something nobody can do.
     test "a permanent machine's figures are the operator's, and survive a reconnect", %{
-      conn: conn
+      conn: conn,
+      user: user
     } do
-      w = worker(%{managed: false})
+      w = worker(user, %{managed: false})
       {:ok, w} = Workers.ready(w, %{"memory_budget" => 6 * 1024 * 1024 * 1024, "cores" => 8})
 
       {:ok, view, _html} = live(conn, ~p"/workers")
@@ -216,9 +254,12 @@ defmodule ForgeWeb.WorkersLiveTest do
     # A machine the platform made is replaced rather than corrected, so an edit would have a
     # lifetime of one idle period. Refused on the server, not merely hidden — the id is off the
     # wire and `identity.md` § Sequencing records what hiding a form is worth.
-    test "a managed machine is refused even when the id is supplied by hand", %{conn: conn} do
-      permanent = worker(%{managed: false})
-      managed = worker(%{managed: true})
+    test "a managed machine is refused even when the id is supplied by hand", %{
+      conn: conn,
+      user: user
+    } do
+      permanent = worker(user, %{managed: false})
+      managed = worker(user, %{managed: true})
       {:ok, _} = Workers.ready(managed, %{"memory_budget" => 8_000, "cores" => 4})
       {:ok, _} = Workers.ready(permanent, %{"memory_budget" => 8_000, "cores" => 4})
 
@@ -239,8 +280,8 @@ defmodule ForgeWeb.WorkersLiveTest do
 
     # Blank must not be read as "nothing said" here: this form *sets* what a machine offers,
     # and an empty memory field would silently un-gate the machine it was meant to correct.
-    test "figures that are not figures are refused rather than stored", %{conn: conn} do
-      w = worker(%{managed: false})
+    test "figures that are not figures are refused rather than stored", %{conn: conn, user: user} do
+      w = worker(user, %{managed: false})
       {:ok, _} = Workers.ready(w, %{"memory_budget" => 8_000, "cores" => 4})
 
       {:ok, view, _html} = live(conn, ~p"/workers")
@@ -256,9 +297,97 @@ defmodule ForgeWeb.WorkersLiveTest do
     end
   end
 
-  test "managed and permanent are distinguished", %{conn: conn} do
-    kept = worker(%{managed: true})
-    permanent = worker(%{managed: false})
+  describe "whose machines, and which projects they serve" do
+    # Another person's row names the projects it serves, and a project a person is not in is not
+    # one they may learn exists.
+    test "only the viewer's own machines are listed", %{conn: conn, user: user} do
+      mine = worker(user)
+      theirs = worker(Forge.AccountsFixtures.user_fixture())
+
+      {:ok, _view, html} = live(conn, ~p"/workers")
+
+      assert html =~ String.slice(mine.id, 0, 8)
+      refute html =~ String.slice(theirs.id, 0, 8)
+    end
+
+    test "a permanent machine is assigned to a project and taken out again", %{
+      conn: conn,
+      user: user
+    } do
+      {:ok, project} = Forge.Projects.register(%{name: "served", repo_path: repo_path()}, user)
+      w = worker(user, %{managed: false})
+
+      {:ok, view, html} = live(conn, ~p"/workers")
+      assert html =~ "no project, so it takes no work"
+
+      html =
+        view
+        |> element("tr form[phx-submit=assign]")
+        |> render_submit(%{"worker" => w.id, "project" => project.id})
+
+      refute html =~ "takes no work"
+      assert [%{name: "served"}] = Workers.projects(w)
+
+      view
+      |> element(~s(button[phx-click=unassign][phx-value-project="#{project.id}"]))
+      |> render_click()
+
+      assert Workers.projects(w) == []
+    end
+
+    test "a machine the platform made names the template it serves through", %{
+      conn: conn,
+      user: user
+    } do
+      {:ok, project} = Forge.Projects.register(%{name: "through", repo_path: repo_path()}, user)
+
+      {:ok, template} =
+        Forge.Provisioning.create_template(user, %{
+          name: "agents",
+          provider: "fake",
+          memory: 8_000,
+          cores: 2
+        })
+
+      {:ok, _} = Forge.Provisioning.assign(user, template.id, project.id)
+      worker(user, Forge.Provisioning.Template.worker_attrs(template))
+
+      {:ok, _view, html} = live(conn, ~p"/workers")
+
+      assert html =~ "serves through template agents:"
+      assert html =~ "through"
+    end
+
+    # The ids are the client's. Neither another person's machine nor a project the viewer is not
+    # in is reachable by sending them by hand.
+    test "somebody else's machine is neither edited nor assigned from here", %{
+      conn: conn,
+      user: user
+    } do
+      {:ok, project} = Forge.Projects.register(%{name: "mine", repo_path: repo_path()}, user)
+      mine = worker(user, %{managed: false})
+      theirs = worker(Forge.AccountsFixtures.user_fixture(), %{managed: false})
+      {:ok, _} = Workers.ready(theirs, %{"memory_budget" => 8_000, "cores" => 4})
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+      view |> element("a[phx-click=edit][phx-value-id=\"#{mine.id}\"]") |> render_click()
+
+      html =
+        view
+        |> element("form[phx-submit=save]")
+        |> render_submit(%{"worker_id" => theirs.id, "memory" => "1GiB", "cores" => "1"})
+
+      assert html =~ "that machine is not here"
+      assert Workers.get!(theirs.id).memory_budget == 8_000
+
+      render_submit(view, "assign", %{"worker" => theirs.id, "project" => project.id})
+      assert Workers.projects(theirs) == []
+    end
+  end
+
+  test "managed and permanent are distinguished", %{conn: conn, user: user} do
+    kept = worker(user, %{managed: true})
+    permanent = worker(user, %{managed: false})
 
     {:ok, view, _html} = live(conn, ~p"/workers")
 
@@ -268,8 +397,8 @@ defmodule ForgeWeb.WorkersLiveTest do
     assert view |> element("tr", String.slice(permanent.id, 0, 8)) |> render() =~ "permanent"
   end
 
-  test "destroyed rows are history and are hidden until asked for", %{conn: conn} do
-    w = worker()
+  test "destroyed rows are history and are hidden until asked for", %{conn: conn, user: user} do
+    w = worker(user)
     {:ok, _w} = Workers.status(w, :destroyed)
 
     {:ok, view, html} = live(conn, ~p"/workers")

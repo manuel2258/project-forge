@@ -134,6 +134,7 @@ defmodule ForgeWeb.TemplatesLive do
       credential_form: to_form(%{"provider" => for_credential, "name" => ""}, as: :credential)
     )
     |> assign(credential_provider: for_credential)
+    |> assign(credential_seq: (socket.assigns[:credential_seq] || 0) + 1)
     |> assign(
       template_form:
         to_form(
@@ -192,11 +193,16 @@ defmodule ForgeWeb.TemplatesLive do
   defp ticked(accepts), do: Map.new(accepts, &{"accepts_#{&1}", "true"})
 
   @impl true
+  # **Only the name and the provider are kept.** A `phx-change` form sends every field on every
+  # keystroke, so what arrives here includes whatever has been typed into the secret, and
+  # assigning it whole put the token in this LiveView's state and — because `<.input>` renders a
+  # password field's value like any other — back into the page. The secret inputs are
+  # `phx-update="ignore"`, so the server rendering them empty does not wipe what was typed.
   def handle_event("credential-provider", %{"credential" => params}, socket) do
     {:noreply,
      socket
      |> assign(credential_provider: params["provider"])
-     |> assign(credential_form: to_form(params, as: :credential))}
+     |> assign(credential_form: to_form(Map.take(params, ["name", "provider"]), as: :credential))}
   end
 
   def handle_event("add-credential", %{"credential" => params}, socket) do
@@ -565,7 +571,13 @@ defmodule ForgeWeb.TemplatesLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} active={:workers} measure="60rem">
+    <Layouts.app
+      flash={@flash}
+      current_scope={@current_scope}
+      capacity={@capacity}
+      active={:workers}
+      measure="60rem"
+    >
       <header class="flex flex-wrap items-baseline gap-x-4 gap-y-2">
         <h1 class="text-2xl font-semibold -tracking-[.025em]">Templates</h1>
         <.link navigate={~p"/workers"} class="ml-auto text-sm text-primary hover:underline">
@@ -627,13 +639,26 @@ defmodule ForgeWeb.TemplatesLive do
           label="Provider"
           options={@credentialled}
         />
-        <.input
+        <%!-- Written out rather than `<.input>`, which renders a field's value into the page.
+              The id carries the provider and a sequence: a different provider's fields, or the
+              form after a successful add, are new elements rather than ignored old ones. --%>
+        <div
           :for={field <- Provider.credential_fields(@credential_provider)}
-          field={@credential_form[field.key]}
-          type="password"
-          label={field.label}
-          autocomplete="off"
-        />
+          class="fieldset mb-2"
+          id={"credential-secret-#{@credential_provider}-#{field.key}-#{@credential_seq}"}
+          phx-update="ignore"
+        >
+          <label for={"credential-secret-input-#{field.key}-#{@credential_seq}"}>
+            <span class="label mb-1">{field.label}</span>
+            <input
+              type="password"
+              name={"credential[#{field.key}]"}
+              id={"credential-secret-input-#{field.key}-#{@credential_seq}"}
+              autocomplete="off"
+              class="w-full input"
+            />
+          </label>
+        </div>
         <button
           type="submit"
           class="h-[52px] rounded-field bg-base-content px-4 text-sm font-medium text-base-100"

@@ -38,11 +38,17 @@ defmodule Forge.Engine do
   defp entered(_before, %Ticket{} = ticket),
     do: enter(ticket, Tickets.workflow(ticket), ticket.state, nil)
 
-  @doc "Sticks a ticket with a reason, in its own transaction."
-  @spec stick(Ticket.t(), String.t()) :: {:ok, Ticket.t()} | {:error, term()}
-  def stick(%Ticket{} = ticket, reason) do
+  @doc """
+  Sticks a ticket with a reason, in its own transaction.
+
+  `cause` is `:placement` when the scheduler could not place the ticket's job — nothing to make a
+  machine from, nothing to fund it with — and nil otherwise. It is recorded on the event so that
+  `resume_placement/2` can find the tickets that the arrival of an assignment may have unblocked.
+  """
+  @spec stick(Ticket.t(), String.t(), :placement | nil) :: {:ok, Ticket.t()} | {:error, term()}
+  def stick(%Ticket{} = ticket, reason, cause \\ nil) do
     Multi.new()
-    |> put_stuck(ticket, reason)
+    |> put_stuck(ticket, reason, cause)
     |> Repo.transaction()
     |> case do
       {:ok, %{ticket: ticket}} ->
@@ -176,7 +182,7 @@ defmodule Forge.Engine do
   # matches on `pending_transition` first) and the ticket page's chooser is behind
   # `!@ticket.pending_transition`. Leaving it set is a ticket that says "waiting for you to
   # choose" and offers nothing to choose from.
-  defp put_stuck(multi, ticket, reason) do
+  defp put_stuck(multi, ticket, reason, cause \\ nil) do
     multi
     |> Tickets.put_progress(:ticket, ticket, %{
       state: ticket.state,
@@ -186,8 +192,72 @@ defmodule Forge.Engine do
     })
     |> Events.log(:stuck_event, "ticket.stuck", :system, %{
       ticket_id: ticket.id,
-      payload: %{"reason" => reason}
+      payload: stuck_payload(reason, cause)
     })
+  end
+
+  defp stuck_payload(reason, nil), do: %{"reason" => reason}
+  defp stuck_payload(reason, cause), do: %{"reason" => reason, "cause" => to_string(cause)}
+
+  @doc """
+  Brings back the tickets of `project_id` that are stuck only because their job could not be
+  placed, now that an assignment has arrived that may place it.
+
+  **Without this a placement stick was a dead end.** The ticket is stuck holding a pending job,
+  and `choose/4` refuses a transition while a job for the current state is live, so once the
+  missing template, machine or credential was assigned there was nothing a person could do from
+  the product to get the job run (`docs/design/credentials.md` § How a job picks).
+
+  Only a ticket whose latest stick was for placement, and that still holds a pending job for its
+  state, comes back: a ticket stuck on its allowance, a rejected approval or a missing transition
+  was stuck for a reason no assignment answers. If the assignment was not the missing piece, the
+  next scheduling pass sticks it again — one event, not a loop.
+  """
+  @spec resume_placement(String.t(), Forge.Events.actor()) :: non_neg_integer()
+  def resume_placement(project_id, actor) do
+    from(t in Ticket, where: t.project_id == ^project_id and t.status == :stuck)
+    |> Repo.all()
+    |> Enum.filter(&(stuck_for_placement?(&1) and pending_job?(&1)))
+    |> Enum.count(&(unstick(&1, actor) == :ok))
+  end
+
+  defp stuck_for_placement?(%Ticket{id: id}) do
+    Repo.one(
+      from e in Event,
+        where: e.ticket_id == ^id and e.type == "ticket.stuck",
+        order_by: [desc: e.seq],
+        limit: 1,
+        select: e.payload["cause"]
+    ) == "placement"
+  end
+
+  defp pending_job?(%Ticket{id: id, state: state}) do
+    Repo.exists?(
+      from j in Job, where: j.ticket_id == ^id and j.state == ^state and j.status == :pending
+    )
+  end
+
+  defp unstick(ticket, actor) do
+    Multi.new()
+    |> Tickets.put_progress(:ticket, ticket, %{
+      state: ticket.state,
+      status: :active,
+      cost_usd: ticket.cost_usd,
+      pending_transition: nil
+    })
+    |> Events.log(:event, "ticket.unstuck", actor, %{
+      ticket_id: ticket.id,
+      payload: %{"reason" => "an assignment arrived that may place its job"}
+    })
+    |> Repo.transaction()
+    |> case do
+      {:ok, _changes} ->
+        Events.notify(ticket.id)
+        :ok
+
+      {:error, _step, _reason, _changes} ->
+        :error
+    end
   end
 
   defp stuck_reason({:no_transition, outcome}), do: "no transition from #{inspect(outcome)}"

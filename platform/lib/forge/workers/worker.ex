@@ -45,6 +45,12 @@ defmodule Forge.Workers.Worker do
     belongs_to :template, Forge.Provisioning.Template
     belongs_to :provider_credential, Forge.Provisioning.Credential
 
+    # Whose machine this is: its template's owner, or whoever provisioned it by hand. Only the
+    # owner assigns it to projects (`docs/design/identity.md` § Workers). Null only on rows no
+    # rule could give an owner, which take no work.
+    belongs_to :user, Forge.Accounts.User
+    has_many :project_workers, Forge.Workers.ProjectWorker
+
     has_many :jobs, Forge.Jobs.Job
 
     timestamps(type: :utc_datetime)
@@ -67,7 +73,8 @@ defmodule Forge.Workers.Worker do
       :idle_since,
       :managed,
       :template_id,
-      :provider_credential_id
+      :provider_credential_id,
+      :user_id
     ])
     |> validate_required([:provider, :status])
     # Zero is a real offer and not an error: `ForgeWorker.Config` reports nothing rather than

@@ -180,6 +180,13 @@ config :logger, :default_formatter,
 # Use Jason for JSON parsing in Phoenix
 config :phoenix, :json_library, Jason
 
+# What the request and LiveView event logs print as `[FILTERED]`: any parameter whose name
+# contains one of these. Phoenix's default is `password` alone, which let a provider credential's
+# `token` and an inference credential's `secret` through to the debug log of every form that
+# carries one — a LiveView logs the params of every event, and a form with `phx-change` sends
+# every field on every keystroke. See `docs/design/credentials.md` § Checked on save.
+config :phoenix, :filter_parameters, ["password", "secret", "token"]
+
 # The platform's own daily spend cap, in USD. `nil` means none. Unlike the ticket allowance, which
 # a human resolves by raising it or rerouting, this one is resolved by midnight — so it pauses the
 # node rather than sticking tickets, and never puts anything in the queue. See

@@ -13,8 +13,9 @@ defmodule Forge.Provisioning do
 
   import Ecto.Query, only: [from: 2]
 
+  alias Ecto.Multi
   alias Forge.Accounts.User
-  alias Forge.Projects
+  alias Forge.{Events, Projects}
   alias Forge.Provisioning.{Credential, ProjectTemplate, Template}
   alias Forge.Repo
 
@@ -118,9 +119,29 @@ defmodule Forge.Provisioning do
   def assign(%User{} = user, template_id, project_id) do
     with {:ok, template} <- owned(user, template_id),
          :ok <- member?(user, project_id) do
-      %ProjectTemplate{}
-      |> ProjectTemplate.changeset(%{project_id: project_id, template_id: template.id})
-      |> Repo.insert()
+      Multi.new()
+      |> Multi.insert(
+        :assignment,
+        ProjectTemplate.changeset(%ProjectTemplate{}, %{
+          project_id: project_id,
+          template_id: template.id
+        })
+      )
+      |> Events.log(:event, "template.assigned", {:user, user.id}, %{
+        project_id: project_id,
+        payload: %{"template_id" => template.id, "project_id" => project_id}
+      })
+      |> Repo.transaction()
+      |> case do
+        # A ticket stuck because nothing could make its job a machine may have been waiting for
+        # exactly this (`Forge.Engine.resume_placement/2`).
+        {:ok, %{assignment: assignment}} ->
+          Forge.Engine.resume_placement(project_id, {:user, user.id})
+          {:ok, assignment}
+
+        {:error, :assignment, changeset, _changes} ->
+          {:error, changeset}
+      end
     end
   end
 
@@ -129,10 +150,18 @@ defmodule Forge.Provisioning do
   def unassign(%User{} = user, template_id, project_id) do
     with {:ok, template} <- owned(user, template_id),
          :ok <- member?(user, project_id) do
-      Repo.delete_all(
-        from a in ProjectTemplate,
+      Multi.new()
+      |> Multi.delete_all(
+        :assignment,
+        from(a in ProjectTemplate,
           where: a.template_id == ^template.id and a.project_id == ^project_id
+        )
       )
+      |> Events.log(:event, "template.unassigned", {:user, user.id}, %{
+        project_id: project_id,
+        payload: %{"template_id" => template.id, "project_id" => project_id}
+      })
+      |> Repo.transaction()
 
       :ok
     end

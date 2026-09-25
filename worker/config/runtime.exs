@@ -6,19 +6,13 @@ import Config
 #
 # Tests configure themselves and never dial anything, so none of this applies to them.
 if config_env() != :test do
-  # Exactly one credential, and it is the machine's rather than any job's: see
-  # docs/design/worker-tier.md § The worker image.
-  credential =
-    cond do
-      key = System.get_env("ANTHROPIC_API_KEY") -> {:api_key, key}
-      token = System.get_env("CLAUDE_CODE_OAUTH_TOKEN") -> {:oauth, token}
-      true -> nil
-    end
-
+  # **No credential.** A job brings its own in the assignment, sealed for this machine, and it is
+  # opened only when the harness is spawned (docs/design/credentials.md § Delivery to the
+  # machine). `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` in this machine's environment are
+  # not read.
   harness_opts =
     Enum.reject(
       [
-        credential: credential,
         executable: System.get_env("FORGE_CLAUDE_EXECUTABLE"),
         model: System.get_env("FORGE_CLAUDE_MODEL")
       ],

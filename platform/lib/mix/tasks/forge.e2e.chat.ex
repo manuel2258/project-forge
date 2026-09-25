@@ -88,7 +88,37 @@ defmodule Mix.Tasks.Forge.E2e.Chat do
     # than coincidence.
     token = "ZEPHYR#{System.unique_integer([:positive])}"
 
+    # Asked before anything is opened: a conversation in a project with nothing in its pool waits
+    # for a credential, and five minutes of "it never started" would say the wrong thing about why.
+    case step("the project has a credential to run on", fn -> pooled(project) end) do
+      {:failed, _reason} -> :ok
+      _described -> converse(project, pool(project), token, opts)
+    end
+  end
+
+  defp pool(project), do: Forge.Credentials.pool(project.id, Jobs.harness(%Job{}))
+
+  # What `report/1` prints beside the tick, so a sentence and never the rows.
+  defp pooled(project) do
+    case pool(project) do
+      [] ->
+        fail(
+          "no credential is in #{project.name}'s pool; add one in /users/settings and " <>
+            "assign it to the project"
+        )
+
+      pool ->
+        "#{length(pool)} in its pool"
+    end
+  end
+
+  defp converse(project, pool, token, opts) do
     chat = step_start(project, token)
+
+    step("it runs on a credential from the project's pool", fn ->
+      unless Jobs.get!(chat.id).credential_id in Enum.map(pool, & &1.id),
+        do: fail("the job records no credential from the pool, so its spend is nobody's")
+    end)
 
     step("a reply arrives", fn -> reply_arrives(chat) end)
     step("the reply streamed rather than arriving at the end", fn -> streamed(chat) end)

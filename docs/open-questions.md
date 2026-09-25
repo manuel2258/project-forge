@@ -2,15 +2,17 @@
 
 These questions are open. They have not been answered and no recommendation is recorded.
 
-- ~~Which credential funds execution.~~ **Answered structurally.** A credential is owned by a
-  user and is either a subscription token or an API key; a worker carries one, and its owner
-  assigns the worker to projects they are a member of. Team use is real because each person
-  brings their own, so subscription authentication's individual-use constraint is respected
-  rather than worked around. Settled for the PoC as before: one operator, one subscription token
-  from the environment. See `design/identity.md` § Credentials and `decisions.md` § Security and
-  users. **Residual, narrower than the original:** a worker assigned to two projects runs other
-  people's jobs on its owner's subscription credential. That does not arise until a second person
-  exists on a node, and is undecided.
+- ~~Which credential funds execution.~~ **Answered structurally.** A credential is owned by a user
+  and is either a subscription token or an API key; its owner assigns it to projects they are a
+  member of, and a job picks one from its project's pool when it starts. Team use is real because
+  each person brings their own, so subscription authentication's individual-use constraint is
+  respected rather than worked around. The node's own token from the environment is not read.
+  See `design/credentials.md`, `design/identity.md`
+  § Credentials and `decisions.md` § Security and users. **Residual, narrower than the
+  original:** a subscription credential assigned to a project other people work in runs their jobs
+  on its owner's subscription. That is now an assignment its owner made rather than a side effect
+  of sharing a machine, it does not arise until a second person exists on a node, and it is
+  undecided.
 - How structured questions are represented in a document.
 - The idle period before a worker is destroyed.
 - Branch granularity: one branch per job, or one per ticket with rebasing on conflict.
@@ -112,9 +114,9 @@ on the stream-json channel, all on a subscription credential.
   page, but worth recording as the shape of failure this probe is looking for: the operator
   does not lose a message, they lose the whole queue.
 - **Unknown harness messages degrade rather than drop.** Claude Code emits message types the
-  event mapping does not know, `rate_limit_event` among them; these arrive as
-  `job.harness.unknown` carrying the raw line, as `claude-code-events.md` requires. Nothing
-  was dropped and nothing raised.
+  event mapping does not know — `rate_limit_event` was among them until
+  `design/credentials.md` mapped it — and these arrive as `job.harness.unknown` carrying the raw
+  line, as `claude-code-events.md` requires. Nothing was dropped and nothing raised.
 - **Client mistakes were reported as platform faults.** Several ordinary errors answered 500
   with no detail, which tells an API client nothing it can act on. Mapped to 4xx with a
   reason and a detail.

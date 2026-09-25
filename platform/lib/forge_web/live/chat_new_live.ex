@@ -39,7 +39,7 @@ defmodule ForgeWeb.ChatNewLive do
        # ticket's is.
        fixed: is_binary(named) and project != nil,
        error: nil,
-       offered: Workers.offered(),
+       offered: Workers.offered(project && project.id),
        defaults: defaults,
        # Empty means the platform's, which is what each placeholder says. All three are fixed
        # when the harness process starts, so this is the only moment they can be chosen.
@@ -77,10 +77,11 @@ defmodule ForgeWeb.ChatNewLive do
     if socket.assigns.fixed or params["project"] == name_of(socket.assigns.project) do
       {:noreply, socket}
     else
+      project = Enum.find(socket.assigns.projects, &(&1.name == params["project"]))
+
+      # The models are the chosen project's pool's, so choosing another project changes them.
       {:noreply,
-       assign(socket,
-         project: Enum.find(socket.assigns.projects, &(&1.name == params["project"]))
-       )}
+       assign(socket, project: project, offered: Workers.offered(project && project.id))}
     end
   end
 
@@ -164,7 +165,13 @@ defmodule ForgeWeb.ChatNewLive do
   def render(assigns) do
     ~H"""
     <%!-- The queue's measure: the first message is prose, not a form field. --%>
-    <Layouts.app flash={@flash} current_scope={@current_scope} active={:board} measure="34rem">
+    <Layouts.app
+      flash={@flash}
+      current_scope={@current_scope}
+      capacity={@capacity}
+      active={:board}
+      measure="34rem"
+    >
       <.link
         navigate={back(@fixed, @project, @ticket)}
         class="font-mono text-[12.5px] opacity-60 hover:opacity-100"

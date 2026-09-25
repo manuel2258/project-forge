@@ -42,6 +42,10 @@ defmodule ForgeWeb.Layouts do
 
   attr :queue_count, :integer, default: nil, doc: "decisions waiting, shown as the queue badge"
 
+  attr :capacity, :map,
+    default: nil,
+    doc: "the top bar's window gauge, from `ForgeWeb.Capacity`; nil on a page that has none"
+
   slot :inner_block, required: true
 
   def app(assigns) do
@@ -59,6 +63,8 @@ defmodule ForgeWeb.Layouts do
         <.nav_link navigate={~p"/chats"} active={@active == :chats}>Chats</.nav_link>
       </nav>
       <div class="ml-auto flex items-center gap-4">
+        <%!-- Nothing reported anywhere in the set draws nothing, not an empty gauge. --%>
+        <.capacity_gauge :if={@capacity not in [nil, %{}]} capacity={@capacity} />
         <%!-- An action, not a destination, so it sits beside the theme toggle rather than among
               the nav items. A project is made rarely and from nowhere in particular; a ticket is
               always made for a project and lives on that project's page. See docs/design/ui.md
@@ -118,6 +124,53 @@ defmodule ForgeWeb.Layouts do
 
     <.flash_group flash={@flash} />
     """
+  end
+
+  attr :capacity, :map, required: true
+
+  # Per window, five-hour then weekly: ten ticks of mean utilization when any credential reported
+  # one, and a countdown to the soonest reset whenever a window is known. Neutral, never accent —
+  # time resolves it, not a person (`docs/design/capacity.md` § Two objects). What it averages over
+  # is in the title, because a mean over the credentials that happened to report is a different
+  # claim from one over all of them.
+  defp capacity_gauge(assigns) do
+    ~H"""
+    <div id="capacity-gauge" class="flex items-center gap-4 font-mono text-[11.5px] opacity-70">
+      <span
+        :for={{type, label} <- [{"five_hour", "5h"}, {"seven_day", "week"}]}
+        :if={@capacity[type]}
+        id={"capacity-#{type}"}
+        title={gauge_title(label, @capacity[type])}
+        class="flex items-center gap-1.5"
+      >
+        <span>{label}</span>
+        <span
+          :if={@capacity[type].mean}
+          class="flex gap-px"
+          aria-label={"#{round(@capacity[type].mean * 100)}%"}
+        >
+          <span
+            :for={tick <- 1..10}
+            class={[
+              "h-2.5 w-[3px] rounded-[1px]",
+              if(tick <= round(@capacity[type].mean * 10),
+                do: "bg-base-content",
+                else: "bg-base-content/20"
+              )
+            ]}
+          />
+        </span>
+        <span>{ForgeWeb.Format.until(@capacity[type].soonest)}</span>
+      </span>
+    </div>
+    """
+  end
+
+  defp gauge_title(label, window) do
+    figure = if window.mean, do: "#{round(window.mean * 100)}% used on average, ", else: ""
+
+    "#{label} window: #{figure}#{window.reporting} of #{window.known} credentials reporting, " <>
+      "soonest reset #{Calendar.strftime(window.soonest, "%a %H:%M")} UTC"
   end
 
   attr :navigate, :string, required: true

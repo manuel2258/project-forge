@@ -103,7 +103,7 @@ defmodule ForgeWeb.AccountsLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} measure="48rem">
+    <Layouts.app flash={@flash} current_scope={@current_scope} capacity={@capacity} measure="48rem">
       <header class="flex flex-wrap items-baseline justify-between gap-3">
         <h1 class="text-2xl font-semibold -tracking-[.025em]">Accounts</h1>
         <span :if={@pending != []} class="font-mono text-[12.5px] opacity-60">

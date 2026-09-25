@@ -90,7 +90,13 @@ defmodule ForgeWeb.TicketNewLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} active={:queue} measure="34rem">
+    <Layouts.app
+      flash={@flash}
+      current_scope={@current_scope}
+      capacity={@capacity}
+      active={:queue}
+      measure="34rem"
+    >
       <.link
         navigate={if @fixed, do: ~p"/projects/#{@project.name}", else: ~p"/board"}
         class="font-mono text-[12.5px] opacity-60 hover:opacity-100"

@@ -33,6 +33,7 @@ defmodule Forge.RuntimeConfigTest do
   # is in the list because the mailer reads it for its trust anchors and a devshell sets it.
   @cleared ~w(FORGE_HTTP_IP PORT PHX_HOST FORGE_VAPID_PUBLIC_KEY SSL_CERT_FILE
               FORGE_MAX_WORKERS FORGE_MAIL_FROM FORGE_MAIL_FROM_NAME
+              ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN
               FORGE_SMTP_HOST FORGE_SMTP_PORT FORGE_SMTP_TLS FORGE_SMTP_CACERTFILE
               FORGE_SMTP_USERNAME FORGE_SMTP_PASSWORD
               FORGE_OIDC_PROVIDERS
@@ -106,6 +107,20 @@ defmodule Forge.RuntimeConfigTest do
 
     # The hosts are Plug.SSL's own default, which naming `:exclude` at all replaces.
     assert "localhost" in endpoint()[:force_ssl][:exclude][:hosts]
+  end
+
+  # **The node's own key is gone** (`docs/design/credentials.md`): not a fallback, not a seed. A
+  # node upgraded with either variable still set must not have it reach a machine or a job, so
+  # what a release reads is asserted with both set.
+  test "no node-wide agent credential is read, whatever the environment says" do
+    System.put_env("ANTHROPIC_API_KEY", "sk-ant-api03-node")
+    System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-node")
+
+    harness_opts = get_in(release(), [:forge, Forge.Jobs, :harness_opts]) || []
+
+    refute Keyword.has_key?(harness_opts, :credential)
+    refute inspect(release(), limit: :infinity) =~ "sk-ant-api03-node"
+    refute inspect(release(), limit: :infinity) =~ "sk-ant-oat01-node"
   end
 
   # `FORGE_MAX_WORKERS` was read into `Forge.Workers, :max_workers` long after its last reader

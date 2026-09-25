@@ -18,11 +18,22 @@ tickets to read.
 credential funds the work. Its first step is built: approval, `node_admin`, project membership,
 read scoping, and a guard on every human write. So is OIDC: providers from the environment, an
 `identities` table, and a pending account on first login that a node admin still has to approve.
-What is not built is the per-user `credential` that funds a job, worker ownership and
-`jobs.credential_id` — the rest of that step, `provider_credentials` and `worker_templates`,
-arrived with `docs/design/provisioning.md`. The note says in what order the remainder comes.
-Its § Sequencing records what an independent review found in the first attempt, which is worth
-reading before writing the next guard.
+The rest of that step arrived in two notes, and nothing of it remains: `provider_credentials` and
+`worker_templates` with `docs/design/provisioning.md`, and the inference `credential`, worker
+ownership, `jobs.credential_id` and per-credential spend with `docs/design/credentials.md`.
+`identity.md`'s § Sequencing records what an independent review found in the first attempt,
+which is worth reading before writing the next guard.
+
+`docs/design/credentials.md` is the standard for inference credentials: a user owns them, a
+job — not a machine — holds one, picked from its project's pool when it starts, and the node's own
+`ANTHROPIC_API_KEY` is not read. **It is built**: credentials checked on save and managed from
+`/users/settings`, machines owned and assigned by their owners, and each job running on a
+credential from its project's pool, sealed to the worker in its assignment — picked by passing
+over the rate-limited ones and preferring the one that has spent least today, moving off one that
+becomes limited, and resuming rather than failing when a limit stops it mid-run. Spend is
+recorded per run, and each credential's five-hour and weekly windows are drawn on its settings
+row and in the top bar. How a real limit reads is still third-party accounts, unobserved here.
+What it leaves out on purpose is in its § Deliberately not here.
 
 `docs/design/provisioning.md` is the standard for what a job asks for and where a machine comes
 from: resources declared per job, a gate on kind as well as memory and cores, worker templates as
@@ -31,7 +42,6 @@ of one global provider. It supersedes the single `slice_bytes` gate in
 `docs/design/worker-tier.md` § Scheduling and is read together with `docs/design/commands.md`,
 which holds the grammar half. **It is built**, apart from `resources` on a *command*, which
 waits for commands to be a job kind. The Hetzner driver exists and has never spoken to Hetzner.
-It is the newest note.
 
 ## Layout
 

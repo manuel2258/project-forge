@@ -9,6 +9,7 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
   use ForgeWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
+  import Forge.ForgeFixtures, only: [credential_fixture: 2, pool!: 2, project_fixture: 0]
   import Forge.GitFixtures
 
   alias Forge.Git.Tokens
@@ -177,24 +178,24 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
     assert {:error, :held_by_job} = Tokens.revoke(token.id)
   end
 
-  # The same field as the new-chat form, and the same rule: a dropdown of what is connected.
-  test "the default model is a dropdown of what the workers offer", %{
+  # The same field as the new-chat form, and the same rule: the models are this project's pool's —
+  # the accounts its jobs will actually run on — and not some other project's
+  # (`docs/design/credentials.md` § Checked on save).
+  test "the default model is a dropdown of what this project's credentials may use", %{
     conn: conn,
     project: project
   } do
-    {:ok, worker, _token} = Workers.create(%{provider: "fake"})
+    owner = Forge.AccountsFixtures.user_fixture()
+    models = [%{"id" => "claude-sonnet-5", "name" => "Claude Sonnet 5"}]
+    pool!(project, credential_fixture(owner, models: models))
 
-    {:ok, _worker} =
-      Workers.ready(worker, %{
-        "memory_budget" => 8_000,
-        "harness" => %{
-          "models" => [%{"id" => "claude-sonnet-5", "name" => "Claude Sonnet 5"}]
-        }
-      })
+    elsewhere = project_fixture()
+    pool!(elsewhere, credential_fixture(owner, models: [%{"id" => "not-this-projects"}]))
 
     {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
 
     assert has_element?(view, ~s(select#project_model option[value="claude-sonnet-5"]))
+    refute has_element?(view, ~s(select#project_model option[value="not-this-projects"]))
 
     view
     |> form("#model-form", %{"project" => %{"model" => "claude-sonnet-5"}})

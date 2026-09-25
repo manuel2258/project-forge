@@ -47,11 +47,16 @@ Not in the store; readable by root only. Lines of `KEY=VALUE`:
 
 ```
 SECRET_KEY_BASE=<mix phx.gen.secret>
-ANTHROPIC_API_KEY=<key>             # or CLAUDE_CODE_OAUTH_TOKEN=<claude setup-token>
 FORGE_VAPID_PUBLIC_KEY=...          # from `forge-admin eval Forge.Release.generate_vapid_keys`
 FORGE_VAPID_PRIVATE_KEY=...
 FORGE_VAPID_SUBJECT=mailto:you@example.org
 ```
+
+**No agent credential here.** `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` are not read by the
+platform or by a worker: a person adds their own token in `/users/settings` and assigns it to the
+projects it should pay for, and each job picks one from its project's pool
+(`design/credentials.md`). `SECRET_KEY_BASE` is what seals those tokens at rest, so rotating it
+makes every stored credential unreadable and each has to be added again.
 
 **Mail, which is optional and is what magic-link login costs.** With no relay named the node
 keeps the local adapter — a mailbox in memory that nothing reads — and password login is the only
@@ -197,8 +202,28 @@ The mirror is pushed by a `post-receive` hook and never fails a push: a failure 
 whoever pushed and recorded on the mirror itself, and the push stands.
 See `design/git-hosting.md`.
 
-Then log in at `https://forge.example.org`, admit a ticket through the API, and watch the
-queue. Everything the Mix tasks do in development is available through `/api/v1`.
+Then log in at `https://forge.example.org` and give the project something to pay for its jobs:
+in `/users/settings`, add your Anthropic API key or `claude setup-token` subscription token as a
+credential — it is tried against Anthropic before it is kept — and assign it to the project. A
+project with none sticks every ticket saying so, and the ticket comes back by itself when one is
+assigned. Then admit a ticket through the API and watch the queue. Everything the Mix tasks do
+in development is available through `/api/v1`.
+
+### Upgrading a node that ran on `ANTHROPIC_API_KEY`
+
+**It stops running jobs until a person adds a credential**, deliberately and loudly — the node's
+key is not read as a fallback and not turned into anybody's credential (`design/credentials.md`
+§ The node's own key is gone). After the upgrade every ticket sticks with *no credential is
+assigned to this project*. Add the token in `/users/settings`, assign it to the projects it
+should fund, and the tickets come back by themselves. The variables can then be removed from the
+secrets file; leaving them does nothing.
+
+Machines are the other half. A worker running a release from before this ignores the credential
+an assignment carries, so it is given no agent job, and `/workers` says so on its row: a managed
+one idles out and its replacement boots the current image, and a permanent one needs
+`bin/worker-update`. The same upgrade gives every machine an owner — its template's, or the
+node's only node admin — and on a node with more than one node admin, a permanent machine with no
+template is given to nobody until `Forge.Release.own_worker(worker_id, email)` names one.
 
 ## What the module sets
 
@@ -453,8 +478,10 @@ platform host no longer runs agent code. What neither mode yet has:
 - **The store only grows.** Nothing deletes a transcript or a superseded seed, so the host's disk
   is the ceiling — a number to watch on a real host, where a seed is hundreds of megabytes per
   project.
-- **Rotating the agent credential reaches no existing machine.** A worker keeps the credential
-  it was created with (issue #16).
+- **A credential is used for a job that has already started until the job ends.** Revoking one,
+  or taking it out of a project, reaches every job that has not started and every one that starts
+  again, on the next scheduling pass; a harness process already running keeps the token it was
+  spawned with. Rotating a token is therefore: add the new one, assign it, revoke the old.
 - **An OIDC account cannot be un-linked from here.** `Forge.Release.link_identity/3` attaches an
   identity and nothing detaches one; a person who changes issuer needs a node admin, a shell and
   a `DELETE`. It has not come up on a one-operator node, and the row is small enough that when it

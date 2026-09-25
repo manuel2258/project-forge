@@ -218,6 +218,23 @@ defmodule ForgeWorker.Job.RunnerTest do
     assert result.outcome == nil
   end
 
+  # The run's last window report goes in the result, where the platform reads it to tell a run
+  # stopped by its account's limit from one that failed (`docs/design/credentials.md` § A limit
+  # reached mid-run). The last one, not the first: the warning before it permitted.
+  test "a run stopped by its limit carries the report that stopped it", context do
+    {:ok, result} = context |> run("rate_limited") |> Runner.await(5_000)
+    assert result.outcome == :error
+
+    assert result.harness["rate_limit"] == %{
+             "status" => "rejected",
+             "resets_at" => 4_102_444_800,
+             "rate_limit_type" => "five_hour"
+           }
+
+    {:ok, result} = context |> run("success") |> Runner.await(5_000)
+    assert result.harness["rate_limit"] == nil
+  end
+
   test "harness budget stops are budget_exhausted", context do
     {:ok, result} = context |> run("max_turns") |> Runner.await(5_000)
     assert result.outcome == :budget_exhausted
@@ -351,6 +368,23 @@ defmodule ForgeWorker.Job.RunnerTest do
     assert events() == []
     assert result.exit_status == nil
     assert result.missing == ["plan.md"]
+  end
+
+  # The race the test above lost one run in several: a refused slice concludes within the call
+  # that started the runner, before anyone has asked. The runner has to still be there with the
+  # result, rather than having stopped and taken it along. Waiting for the conclusion first makes
+  # the late caller certain instead of likely.
+  test "a run that ended before anyone asked still answers the caller", context do
+    pid = run(context, "success", slice: RefusingSlice)
+
+    Enum.find_value(1..200, fn _ ->
+      :sys.get_state(pid).result || Process.sleep(5)
+    end)
+
+    ref = Process.monitor(pid)
+    assert {:ok, %{outcome: :error}} = Runner.await(pid)
+    # And having handed it over, it goes.
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
   end
 
   test "the runner exits after the job ends", context do

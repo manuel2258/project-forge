@@ -41,6 +41,7 @@ defmodule ForgeWeb.ChatLive do
        draft: "",
        page_title: title(project, ticket)
      )
+     |> ForgeWeb.Capacity.project(project)
      |> load()}
   end
 
@@ -193,7 +194,13 @@ defmodule ForgeWeb.ChatLive do
     assigns = assign(assigns, question: question(assigns.messages))
 
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} active={:board} measure="74rem">
+    <Layouts.app
+      flash={@flash}
+      current_scope={@current_scope}
+      capacity={@capacity}
+      active={:board}
+      measure="74rem"
+    >
       <.link
         navigate={back(@project, @ticket)}
         class="font-mono text-[12.5px] opacity-60 hover:opacity-100"

@@ -31,8 +31,9 @@ Expects, and says so rather than guessing:
   - a platform running as a named node, started like
         elixir --sname forge --cookie forge-e2e -S mix phx.server
     and reachable at FORGE_E2E_PLATFORM_URL (default http://localhost:4000)
-  - a worker connected to it, with a free slice
-  - CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY in the environment for that worker
+  - a worker connected to it, with a free slice, assigned to PROJECT
+  - a credential in PROJECT's pool: added in /users/settings and assigned to it
+    (the platform and the worker read no ANTHROPIC_API_KEY of their own)
 
 The node name matters and is not ceremony. Sending to a conversation reaches its worker through
 the registry of the node doing the sending, so a driver in a node of its own would write every
@@ -84,9 +85,8 @@ have git || fail_add "git is not on PATH"
 code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$platform_url/users/log-in" || echo 000)
 [ "$code" = 200 ] || fail_add "no platform at $platform_url (got $code); start it first"
 
-[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}${ANTHROPIC_API_KEY:-}" ] ||
-  fail_add "no CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY; the worker cannot run a harness"
-
+# Whether the project has a credential to run on is the platform's to answer, like whether a
+# worker is connected: `mix forge.e2e.chat` asks before it opens anything.
 fail_report
 
 info "platform $platform_url, node $node, project $project"

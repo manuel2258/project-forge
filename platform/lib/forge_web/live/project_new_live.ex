@@ -69,7 +69,13 @@ defmodule ForgeWeb.ProjectNewLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} active={:board} measure="26rem">
+    <Layouts.app
+      flash={@flash}
+      current_scope={@current_scope}
+      capacity={@capacity}
+      active={:board}
+      measure="26rem"
+    >
       <.link navigate={~p"/board"} class="font-mono text-[12.5px] opacity-60 hover:opacity-100">
         ‹ Board
       </.link>

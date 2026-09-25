@@ -275,8 +275,10 @@ clock and keeps the ticket out of the queue. That is the backstop, and it is the
 **For that backstop to exist at all, spend is recorded per turn.** Today it is recorded when a job
 ends, and a conversation does not end for hours — so `Spend.day_total/1` would read a live
 conversation as having cost nothing, and the only spend protection the product has would not apply
-to the one thing that can run unattended all day. Each turn writes its cost to the job row as it
-completes, and each turn is invoked with `--max-budget-usd` set to what is left of the day. The
+to the one thing that can run unattended all day. Each turn writes its cost to its run as it
+completes — the job row's cost is the sum of its runs, so a reopened conversation, a new process
+whose total starts again, adds to what it had rather than replacing it (`credentials.md` § Spend)
+— and each turn is invoked with `--max-budget-usd` set to what is left of the day. The
 cap is therefore enforced twice: by the harness, per turn, and by the node when the day is gone.
 
 **Cost is set, not added; turns are added.** The spike measured `total_cost_usd` as cumulative

@@ -20,7 +20,7 @@ defmodule Forge.Conversations do
   alias Forge.{Events, Git, Jobs, Projects, Proposals, Repo, Tickets, Workers}
   alias Forge.Events.Event
   alias Forge.Git.Tokens
-  alias Forge.Jobs.Job
+  alias Forge.Jobs.{Job, Runs}
   alias ForgeCore.Proposal
 
   require Logger
@@ -267,17 +267,20 @@ defmodule Forge.Conversations do
   defp do_record_turn(chat, turn, payload) do
     harness = payload["harness"] || %{}
 
+    # The turn's figure is the process's running total, so it is *set* on this run
+    # (`docs/design/conversations.md` § Spend) — and the conversation's cost is every run's, since
+    # a conversation reopened is a new process whose total starts again from nothing.
     Multi.new()
     |> put_proposals(chat, payload)
-    |> Multi.update(
-      :job,
+    |> Runs.cost(chat.id, decimal(harness["cost_usd"]))
+    |> Multi.update(:job, fn _changes ->
       Job.progress_changeset(chat, %{
         status: :running,
         turns: chat.turns + (harness["turns"] || 1),
-        cost_usd: decimal(harness["cost_usd"]),
+        cost_usd: Runs.total(chat.id),
         harness_session_id: harness["session_id"] || chat.harness_session_id
       })
-    )
+    end)
     |> Events.log(:turn, "chat.turn", {:job, chat.id}, %{
       ticket_id: chat.ticket_id,
       job_id: chat.id,
@@ -355,6 +358,7 @@ defmodule Forge.Conversations do
       :job,
       Job.progress_changeset(chat, %{status: status, finished_at: DateTime.utc_now(:second)})
     )
+    |> Runs.close(chat.id, DateTime.utc_now(:second))
     |> Events.log(:ended, "chat.ended", :system, %{
       ticket_id: chat.ticket_id,
       job_id: chat.id,

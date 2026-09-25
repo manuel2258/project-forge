@@ -42,6 +42,8 @@ defmodule ForgeWorker.Job.Runner do
   @default_wall_clock_ms :timer.hours(1)
   @default_grace_ms :timer.seconds(10)
   @eof_grace_ms :timer.seconds(5)
+  # How long a finished prompt-mode run keeps its result for a caller who has not asked yet.
+  @hold_ms :timer.seconds(5)
   @max_line 4 * 1024 * 1024
 
   # Cannot collide with a message: every line the runner writes to a streaming harness is JSON,
@@ -132,6 +134,7 @@ defmodule ForgeWorker.Job.Runner do
       transcript: File.open!(transcript_path, [:write, :binary]),
       finished_event: nil,
       started_event: nil,
+      rate_limit: nil,
       # A conversation produces one of these per turn. `finished_event` is the latest, which is
       # what the result is built from; `turns` is how many there have been, which is what tells
       # a second turn from a first.
@@ -301,7 +304,10 @@ defmodule ForgeWorker.Job.Runner do
   def handle_call(:await, from, %{result: nil} = state),
     do: {:noreply, %{state | waiters: [from | state.waiters]}}
 
-  def handle_call(:await, _from, %{result: result} = state), do: {:reply, {:ok, result}, state}
+  # The run ended before this caller asked, and the runner stayed to hand it over (`:conclude`).
+  # Having done that, it has nothing left to do.
+  def handle_call(:await, _from, %{result: result} = state),
+    do: {:stop, :normal, {:ok, result}, state}
 
   def handle_call(_request, _from, %{mode: :prompt} = state),
     do: {:reply, {:error, :unsupported}, state}
@@ -368,8 +374,16 @@ defmodule ForgeWorker.Job.Runner do
     # arrive. It goes before the stop, so it is in the mailbox ahead of the exit signal.
     if state.mode == :streaming, do: notify(state, {:ended, state.spec.job_id, result})
 
-    {:stop, :normal, %{state | result: result, waiters: []}}
+    stop_or_hold(%{state | result: result, waiters: []}, state.waiters)
   end
+
+  # The end is reached by more than one road — the exit status and the end of output each ask for
+  # it — and a runner holding its result for a late `await/1` (`stop_or_hold/2`) is still here to
+  # receive the second. The first conclusion is the one.
+  def handle_info(:conclude, state), do: {:noreply, state}
+
+  # Sent only once a result is held, so there is nothing left to wait for.
+  def handle_info(:release, state), do: {:stop, :normal, state}
 
   def handle_info(:wall_clock, %{result: nil} = state), do: {:noreply, kill(state, :wall_clock)}
   def handle_info(:wall_clock, state), do: {:noreply, state}
@@ -380,6 +394,21 @@ defmodule ForgeWorker.Job.Runner do
   end
 
   def handle_info(:force_kill, state), do: {:noreply, state}
+
+  # **A run can end before anyone has asked for it.** A slice refused at once concludes within the
+  # call that started the runner, and a runner that stopped on concluding took the result with
+  # it: `await/1` then exited with `:normal` instead of returning, the job was reported as a
+  # crash rather than as the error it was, and the suite failed on it one run in several. So a
+  # prompt-mode run nobody is waiting on yet holds its result for a caller who is about to ask —
+  # `Link` awaits straight after starting it — and not for ever: a runner nobody awaits is one
+  # somebody cancelled and walked away from, and it goes after `@hold_ms`. A conversation's owner
+  # is told by message instead, and stops it as before.
+  defp stop_or_hold(%{mode: :prompt} = state, []) do
+    Process.send_after(self(), :release, @hold_ms)
+    {:noreply, state}
+  end
+
+  defp stop_or_hold(state, _waiters), do: {:stop, :normal, state}
 
   # Writing to a port whose process has gone raises rather than returning an error, and a
   # conversation whose machine was lost is exactly the case that reaches here — so the failure
@@ -435,6 +464,7 @@ defmodule ForgeWorker.Job.Runner do
     case type do
       "finished" -> finished(state, event)
       "started" -> %{state | started_event: event}
+      "rate_limit" -> %{state | rate_limit: payload}
       _ -> state
     end
   end
@@ -526,7 +556,7 @@ defmodule ForgeWorker.Job.Runner do
       undeclared: collected.undeclared,
       proposals: collected.proposals,
       invalid_proposals: collected.invalid_proposals,
-      harness: harness_summary(started, finished, state.exit_status)
+      harness: harness_summary(started, finished, state.exit_status, state.rate_limit)
     }
 
     decide(state, spec, run, base)
@@ -549,7 +579,11 @@ defmodule ForgeWorker.Job.Runner do
     end
   end
 
-  defp harness_summary(started, finished, exit_status) do
+  # `rate_limit` is the last window report of the run, which is how the platform tells a run its
+  # account's limit stopped from one that failed at its work (`docs/design/credentials.md` § A
+  # limit reached mid-run). In the result rather than left to the timeline: timeline events are
+  # unacked, and a lost one would turn a limit back into a failure.
+  defp harness_summary(started, finished, exit_status, rate_limit) do
     started = started || %{}
     finished = finished || %{}
 
@@ -565,7 +599,16 @@ defmodule ForgeWorker.Job.Runner do
       "cost_usd" => Map.get(finished, :total_cost_usd),
       "duration_ms" => Map.get(finished, :duration_ms),
       "usage" => Map.get(finished, :usage),
-      "exit_status" => exit_status
+      "exit_status" => exit_status,
+      "rate_limit" => rate_limit && window_report(rate_limit)
+    }
+  end
+
+  defp window_report(report) do
+    %{
+      "status" => Map.get(report, :status),
+      "resets_at" => Map.get(report, :resets_at),
+      "rate_limit_type" => Map.get(report, :rate_limit_type)
     }
   end
 end

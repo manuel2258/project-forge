@@ -35,7 +35,7 @@ defmodule Forge.MixProject do
       # re-run — so 84 it is, and the next raise waits until the *lowest* observed figure clears
       # 85.
       test_coverage: [
-        summary: [threshold: 84],
+        summary: [threshold: 85],
         ignore_modules: [
           Forge.AccountsFixtures,
           Forge.DataCase,

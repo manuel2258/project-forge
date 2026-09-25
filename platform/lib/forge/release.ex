@@ -141,6 +141,40 @@ defmodule Forge.Release do
     end)
   end
 
+  @doc """
+  Gives a machine with no owner one, from the host.
+
+  The repair path for a permanent machine the move to owned machines could not place: on a node
+  with more than one node admin, `WorkersHaveOwners` would not guess whose it was, and a machine
+  nobody owns can be assigned to no project and takes no work (`docs/design/identity.md`
+  § Workers). The owner then assigns it on `/workers`.
+
+  **Only a machine with no owner.** Changing whose machine it is would move the right to put
+  work on it, which is not a repair and not something to do from a shell.
+  """
+  def own_worker(worker_id, email) do
+    with_app(fn ->
+      worker = Forge.Workers.get(worker_id)
+      user = Forge.Accounts.get_user_by_email(email)
+
+      cond do
+        is_nil(worker) -> fail("unknown worker #{worker_id}")
+        is_nil(user) -> fail("unknown user #{email}")
+        true -> own(worker, user)
+      end
+    end)
+  end
+
+  defp own(worker, user) do
+    case Forge.Workers.adopt(worker, user) do
+      {:ok, _worker} ->
+        IO.puts("worker #{worker.id} is now #{user.email}'s; assign it to projects on /workers")
+
+      {:error, :already_owned} ->
+        fail("worker #{worker.id} already has an owner")
+    end
+  end
+
   defp grant(project, user, role) do
     case Forge.Projects.grant_member(project, user, String.to_existing_atom(role)) do
       {:ok, _member} -> IO.puts("#{user.email} is now #{role} of #{project.name}")

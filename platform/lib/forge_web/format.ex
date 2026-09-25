@@ -30,6 +30,20 @@ defmodule ForgeWeb.Format do
   end
 
   @doc """
+  How long until `at`, compactly: `12m`, `1h 12m`, `2d 3h` — the countdown a window's reset is
+  drawn with (`docs/design/capacity.md` § Two objects). A moment already here is `now`.
+  """
+  @spec until(DateTime.t(), DateTime.t()) :: String.t()
+  def until(%DateTime{} = at, now \\ DateTime.utc_now()) do
+    case DateTime.diff(at, now, :second) do
+      s when s < 60 -> "now"
+      s when s < 3_600 -> "#{div(s, 60)}m"
+      s when s < 86_400 -> "#{div(s, 3_600)}h #{div(rem(s, 3_600), 60)}m"
+      s -> "#{div(s, 86_400)}d #{div(rem(s, 86_400), 3_600)}h"
+    end
+  end
+
+  @doc """
   A cost rendered as the capacity it consumed, or `nil` when the calibration constant is not
   configured. Dollars do not appear on an operator surface.
   """

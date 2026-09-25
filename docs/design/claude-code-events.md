@@ -41,9 +41,13 @@ worktree of the bare repository. That is not a sandbox: an agent could reach the
 or the data directory through the filesystem. The worker tier with a Unix user per job and
 its own machine is what closes this; until then the operator runs their own agents on their
 own machine. Documented precedence puts
-`ANTHROPIC_API_KEY` above the OAuth token, so both are never set. Which one is a per-project
-setting; the credential comparison in milestone 1 runs the same tickets under each. In v1 the
-value is the operator's; short-lived scoped credentials per job come with the worker tier.
+`ANTHROPIC_API_KEY` above the OAuth token, so both are never set. **Which one is the job's
+credential's `kind`**, not a project setting — this line said *per-project* from the day it was
+written, and nothing ever made it one. A job picks a credential from its project's pool when it starts
+(`docs/design/credentials.md` § How a job picks), the credential says whether it is an API key or
+a subscription token, and the driver sets that variable and unsets the other. A project gets one
+or the other, or both in turn, by what its members assign to it. The credential arrives with the
+assignment, sealed, and is opened only when the process is spawned.
 
 ## Input messages
 
@@ -88,9 +92,13 @@ total_cost_usd, usage, result, exit_status).
 `rate_limit_event` is not in the documentation but is emitted in practice, carrying a
 `rate_limit_info` object: `status`, `resetsAt` (unix epoch), `rateLimitType`, `isUsingOverage`,
 and — only once `surpassedThreshold` is crossed — `utilization`. It is the provider's own report
-of the five-hour window, and it is what `capacity.md` draws the operator's capacity readout from.
-Before it was mapped it fell through the catch-all into `harness.unknown`, which is the behaviour
-the unknown clause exists for and the reason nothing was lost.
+of the five-hour window. The platform stamps each one with the credential its job ran on, and the
+pick reads it to pass over a limited credential (`credentials.md` § Rate limits are per
+credential); `capacity.md`'s operator readout is designed to draw from it and is not built.
+
+This section said it was mapped before it was. Until `credentials.md` step 5 it fell through the
+catch-all into `harness.unknown`, which is the behaviour the unknown clause exists for and the
+reason nothing was lost — the samples in `capacity.md` were read back out of stored transcripts.
 
 The full raw stdout of each run is written to `transcript-<run>.jsonl` in the job directory
 and recorded as a blob version with its content hash. It is never rendered live; it exists

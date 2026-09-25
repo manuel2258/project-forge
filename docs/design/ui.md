@@ -374,6 +374,50 @@ and a human revoking one mid-run would fail that job for a reason nothing record
 Expired and revoked rows stay, behind the same disclosure the workers page uses for destroyed
 machines. They are the audit trail: what was issued, to what scope, and whether it was ever used.
 
+## Account settings
+
+`/users/settings` carries the caller's **inference credentials** below the email and the
+password, because they are the caller's in the same sense: nobody else sees them, a node admin
+included, and the page is already behind sudo mode, which is right for the one place a token is
+typed (`design/credentials.md`).
+
+**A token is typed once and never shown again, not even back into its own field.** The form is
+re-rendered on every change, and a password input's value is rendered like any other, so the
+field is written out rather than `<.input>` and is never given a value by the server. It is
+`phx-update="ignore"` so that re-rendering does not wipe what was typed, and it is replaced by an
+empty one when an add succeeds.
+
+A row is an identifier line — name, harness and kind, what the last check found, what it has
+spent today with the daily limit beside it if one was set — then a line per window the provider
+has reported, five-hour and weekly: its utilization when one was given, its reset, and
+*rate-limited* in warning colour while it blocks. Then two controls, **Check again** and
+**Revoke**. The limit says *not
+enforced* in the row itself, because it is not, and a figure next to a limit reads as a cap.
+
+**Spend is in dollars here**, an exception to `capacity.md`'s recommendation that dollars leave
+the operator's surfaces, and recorded there as one. A credential is its owner's money, an API key
+is billed in dollars and has no window to count in, and the limit beside the figure was typed in
+dollars. The figures are as of the page's last action, not live. Beneath it, **Funds**: the
+projects whose pool it is in, each with an `×`, and a select of the viewer's own projects to add
+one — the same shape as a template's projects on `/templates`, because it is the same decision
+about whose money reaches which project. Rows are separated by a rule,
+not boxed, because the row itself does nothing when tapped. Revoked rows stay, dimmed and without
+controls: what was spent through them is still attributed to them.
+
+## The capacity gauge in the top bar
+
+The laptop header carries a small gauge for the five-hour and the weekly window, first in the
+header's right-hand group: per window — `5h`, `week` — ten ticks of mean utilization and a mono
+countdown to the soonest reset, each only when there is something truthful to draw
+(`design/capacity.md` § Two objects). Neutral, never accent, because it is resolved by time. Its
+title says what it averages — *5h window: 95% used on average, 2 of 2 credentials reporting,
+soonest reset Fri 14:00 UTC* — and whose they are is the page's: a project's pool on a page about
+that project (the project, its settings, a ticket, its review, a job, a conversation), the
+viewer's own everywhere else (`design/credentials.md` § Showing the windows). A set in which
+nothing has reported a window draws nothing at all, rather than an empty gauge. It is redrawn
+every minute while the page is open, since the countdown is to a moment. Laptop only, like the
+header: it is not a decision.
+
 ## The workers page
 
 `/workers` lists the machines, and it exists for one reason the CLI cannot serve: **whether a
@@ -388,6 +432,17 @@ Two facts that look like one and are not:
 A row that is `ready` and not connected is the state that cost this project a day — a machine
 that looks healthy on every surface and cannot take work. The page puts the two side by side so
 that reads as what it is.
+
+**It lists the viewer's own machines and nobody else's.** A machine has an owner, and a row says
+which projects it serves — a permanent machine's own assignments, with a control to add one and
+an `×` on each, or for a machine the platform made, the template it serves through and that
+template's projects. A project a person is not in is not one they may learn exists, so another
+person's row is not drawn at all. A permanent machine that serves nothing says, in error colour,
+that it takes no work: it is the machine-shaped version of the row that is `ready` and not
+connected (`design/identity.md` § Workers). So does a machine whose release predates a job
+carrying its credential — it is given no agent job, and the row says to update it
+(`design/credentials.md` § What a worker offers now). The harness column no longer counts models:
+a machine holds no account, and the models are a credential's.
 
 `managed` is shown because it is the only thing that differs between a machine the platform may
 destroy and one it may not, and an unmanaged row sits against `max_workers` until somebody

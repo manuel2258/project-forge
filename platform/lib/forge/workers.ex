@@ -10,11 +10,12 @@ defmodule Forge.Workers do
 
   import Ecto.Query, only: [from: 2]
 
+  alias Ecto.Multi
+  alias Forge.Accounts.User
+  alias Forge.{Engine, Events, Projects, Provider, Provisioning, Repo}
   alias Forge.Jobs.Job
-  alias Forge.Provider
-  alias Forge.Provisioning
-  alias Forge.Repo
-  alias Forge.Workers.Worker
+  alias Forge.Provisioning.ProjectTemplate
+  alias Forge.Workers.{ProjectWorker, Worker}
 
   require Logger
 
@@ -57,8 +58,158 @@ defmodule Forge.Workers do
   @spec get!(String.t()) :: Worker.t()
   def get!(id), do: Repo.get!(Worker, id)
 
+  @doc "Every machine on the node, for the host's command line. No page reads this."
   @spec list() :: [Worker.t()]
   def list, do: Repo.all(from w in Worker, order_by: w.inserted_at)
+
+  @doc """
+  The machines this user owns, which is all a person is shown (`docs/design/ui.md` § The workers
+  page). Another person's machine names the projects it serves, and a project a person is not in
+  is not one they may learn exists.
+  """
+  @spec list(User.t()) :: [Worker.t()]
+  def list(%User{id: user_id}),
+    do: Repo.all(from w in Worker, where: w.user_id == ^user_id, order_by: w.inserted_at)
+
+  @doc "A machine of this user's, or nil. Never another user's, whatever the id."
+  @spec owned(User.t(), String.t() | nil) :: Worker.t() | nil
+  def owned(%User{id: user_id}, id) do
+    case id && Ecto.UUID.cast(id) do
+      {:ok, id} -> Repo.one(from w in Worker, where: w.id == ^id and w.user_id == ^user_id)
+      _other -> nil
+    end
+  end
+
+  @doc """
+  Gives a machine that has no owner one. `Forge.Release.own_worker/2` is the only caller: the host's
+  repair for a machine the move to owned machines could not place.
+
+  **Refused for a machine that already has an owner**, and in the statement that writes it, so two
+  of these racing cannot both succeed. Changing whose machine it is would move the right to put
+  work on it, which is not a repair.
+  """
+  @spec adopt(Worker.t(), User.t()) :: {:ok, Worker.t()} | {:error, :already_owned}
+  def adopt(%Worker{id: id}, %User{id: user_id}) do
+    case Repo.update_all(from(w in Worker, where: w.id == ^id and is_nil(w.user_id)),
+           set: [user_id: user_id, updated_at: now()]
+         ) do
+      {1, _rows} -> {:ok, get!(id)}
+      {0, _rows} -> {:error, :already_owned}
+    end
+  end
+
+  @doc """
+  Sets what a permanent machine offers the gate: its memory, cores and kinds.
+
+  **Only the owner's, and only a machine the platform did not make.** A managed machine was given
+  its figures by its template and is replaced rather than corrected, so an edit would last one
+  idle period; a permanent one is its owner's, and the row governing the gate
+  (`docs/design/provisioning.md` § What a worker offers) is what makes the edit survive a
+  reconnect.
+  """
+  @spec set_offer(User.t(), String.t(), map()) ::
+          {:ok, Worker.t()} | {:error, :not_found | :made_by_the_platform | Ecto.Changeset.t()}
+  def set_offer(%User{} = user, id, attrs) do
+    case owned(user, id) do
+      nil -> {:error, :not_found}
+      %Worker{managed: true} -> {:error, :made_by_the_platform}
+      worker -> update(worker, Map.take(attrs, [:memory_budget, :cores, :accepts]))
+    end
+  end
+
+  # -- assignment -----------------------------------------------------------------------------
+
+  @doc """
+  Lets `project` run its jobs on this permanent machine.
+
+  Refused unless the caller owns the machine *and* is a member of the project — the first stops
+  an admin spending somebody else's hardware, the second stops an owner pointing their machine at
+  a project they have nothing to do with (`docs/design/identity.md` § Workers). **A machine the
+  platform made is refused too**: it reaches projects through its template, and a second way
+  would be a machine still serving a project after its template was taken out of it.
+
+  Tickets stuck because nothing could be placed for this project are brought back, since this may
+  be what they were waiting for (`docs/design/credentials.md` § How a job picks).
+  """
+  @spec assign(User.t(), String.t(), String.t()) ::
+          {:ok, ProjectWorker.t()}
+          | {:error, :not_found | :not_a_member | :made_by_the_platform | Ecto.Changeset.t()}
+  def assign(%User{} = user, worker_id, project_id) do
+    with {:ok, worker} <- owned_permanent(user, worker_id),
+         :ok <- member(user, project_id) do
+      Multi.new()
+      |> Multi.insert(
+        :assignment,
+        ProjectWorker.changeset(%ProjectWorker{}, %{project_id: project_id, worker_id: worker.id})
+      )
+      |> Events.log(:event, "worker.assigned", {:user, user.id}, %{
+        project_id: project_id,
+        payload: %{"worker_id" => worker.id, "project_id" => project_id}
+      })
+      |> Repo.transaction()
+      |> case do
+        {:ok, %{assignment: assignment}} ->
+          Engine.resume_placement(project_id, {:user, user.id})
+          {:ok, assignment}
+
+        {:error, :assignment, changeset, _changes} ->
+          {:error, changeset}
+      end
+    end
+  end
+
+  @doc "Stops `project` running its jobs on this machine. The same two rules apply."
+  @spec unassign(User.t(), String.t(), String.t()) ::
+          :ok | {:error, :not_found | :not_a_member | :made_by_the_platform}
+  def unassign(%User{} = user, worker_id, project_id) do
+    with {:ok, worker} <- owned_permanent(user, worker_id),
+         :ok <- member(user, project_id) do
+      Multi.new()
+      |> Multi.delete_all(
+        :assignment,
+        from(a in ProjectWorker, where: a.worker_id == ^worker.id and a.project_id == ^project_id)
+      )
+      |> Events.log(:event, "worker.unassigned", {:user, user.id}, %{
+        project_id: project_id,
+        payload: %{"worker_id" => worker.id, "project_id" => project_id}
+      })
+      |> Repo.transaction()
+
+      :ok
+    end
+  end
+
+  @doc "The projects this machine was assigned to directly, by name."
+  @spec projects(Worker.t()) :: [Forge.Projects.Project.t()]
+  def projects(%Worker{id: id}) do
+    Repo.all(
+      from p in Forge.Projects.Project,
+        join: a in ProjectWorker,
+        on: a.project_id == p.id,
+        where: a.worker_id == ^id,
+        order_by: p.name
+    )
+  end
+
+  defp owned_permanent(user, worker_id) do
+    case owned(user, worker_id) do
+      nil -> {:error, :not_found}
+      %Worker{managed: true} -> {:error, :made_by_the_platform}
+      worker -> {:ok, worker}
+    end
+  end
+
+  defp member(%User{} = user, project_id) do
+    case Ecto.UUID.cast(project_id) do
+      {:ok, id} ->
+        if Projects.role(%Forge.Projects.Project{id: id}, user),
+          do: :ok,
+          else: {:error, :not_a_member}
+
+      :error ->
+        {:error, :not_a_member}
+    end
+  end
 
   @doc """
   The worker this token belongs to, if it is one and the machine has not been destroyed. A
@@ -173,23 +324,28 @@ defmodule Forge.Workers do
   defp accepts_from(_accepts), do: nil
 
   @doc """
-  What a person may pick from: the aliases the harness resolves, and the models the credential
-  may use.
+  What a person may pick from for a job in `project_id`: the aliases the harness resolves, and the
+  models the credentials in that project's pool may use.
 
   Two lists rather than one, because they are different kinds of name. An alias floats — `opus`
   is whatever the harness resolves it to today, which is usually what a workflow wants — and an
   id is exact and pins. A form shows them apart so that choosing between them is deliberate.
 
-  The union across live workers rather than the intersection: workers built by one driver share
-  an image and a credential and answer alike, so a union that is not a single set means an image
-  rollout is half done or the fleet holds more than one account. Refusing the models only some of
-  them have would then refuse work that would have run.
+  **The aliases are the machines'; the models are the accounts'.** An alias is a name the harness
+  binary resolves, so it is read from the live workers, the union across them — a union that is
+  not a single set is an image rollout half done. Which models may be called is a property of a
+  credential and not of a machine, which holds none, so it is read from the project's pool
+  (`docs/design/credentials.md` § Checked on save): the set a job there will actually run under.
 
-  Both empty when nothing is connected, which is a form with nothing to offer and never a reason
-  to stop one being submitted — `docs/design/workflow-grammar-v1.md` § Model.
+  Both empty when nothing is connected and nothing is pooled, which is a form with nothing to
+  offer and never a reason to stop one being submitted — `docs/design/workflow-grammar-v1.md`
+  § Model.
   """
-  @spec offered() :: %{aliases: [String.t()], models: [%{id: String.t(), name: String.t()}]}
-  def offered do
+  @spec offered(String.t() | nil) :: %{
+          aliases: [String.t()],
+          models: [%{id: String.t(), name: String.t()}]
+        }
+  def offered(project_id) do
     harnesses =
       Repo.all(
         from w in Worker,
@@ -197,7 +353,7 @@ defmodule Forge.Workers do
           select: w.harness
       )
 
-    %{aliases: aliases(harnesses), models: models(harnesses)}
+    %{aliases: aliases(harnesses), models: Forge.Credentials.models(project_id)}
   end
 
   defp aliases(harnesses) do
@@ -206,23 +362,6 @@ defmodule Forge.Workers do
     |> Enum.filter(&is_binary/1)
     |> Enum.uniq()
   end
-
-  defp models(harnesses) do
-    harnesses
-    |> Enum.flat_map(&(&1["models"] || []))
-    |> Enum.flat_map(fn
-      %{"id" => id} = model when is_binary(id) -> [%{id: id, name: model_name(model, id)}]
-      _other -> []
-    end)
-    |> Enum.uniq_by(& &1.id)
-  end
-
-  @doc "Just the models of `offered/0`, for a caller with no use for the aliases."
-  @spec models() :: [%{id: String.t(), name: String.t()}]
-  def models, do: offered().models
-
-  defp model_name(%{"name" => name}, _id) when is_binary(name), do: name
-  defp model_name(_model, id), do: id
 
   @doc "Records that we have heard from the worker."
   @spec touch(Worker.t()) :: {:ok, Worker.t()} | {:error, Ecto.Changeset.t()}
@@ -274,7 +413,13 @@ defmodule Forge.Workers do
   Three dimensions and not one, because a machine that will not run inference is as real a
   refusal as one with no room (`docs/design/provisioning.md` § The gate).
   """
-  @type demand :: %{kind: atom(), memory: non_neg_integer(), cores: non_neg_integer()}
+  @type demand :: %{
+          required(:kind) => atom(),
+          required(:memory) => non_neg_integer(),
+          required(:cores) => non_neg_integer(),
+          optional(:project_id) => String.t() | nil,
+          optional(:harness) => String.t() | nil
+        }
 
   @doc """
   A connected worker that will take `demand`, or nil. The rule `docs/vision.md` states: a job is
@@ -293,13 +438,46 @@ defmodule Forge.Workers do
     # Idle is the most assignable state there is: it means the machine is up with nothing to
     # do. It is only a step towards destruction if nothing arrives before the period is up.
     candidates =
-      from(w in Worker, where: w.status in [:ready, :busy, :idle], order_by: [asc: w.inserted_at])
+      from(w in serving(demand[:project_id]),
+        where: w.status in [:ready, :busy, :idle],
+        order_by: [asc: w.inserted_at]
+      )
       |> Repo.all()
       # One pass, and `and` short-circuits: `fits?/2` asks the database what a worker is
       # holding, and a worker nothing can reach is not worth asking about.
       |> Enum.filter(&(connected?(&1.id) and fits?(&1, demand)))
 
     Enum.find(candidates, &(&1.id == preferred)) || List.first(candidates)
+  end
+
+  @doc """
+  The machines that may run this project's jobs: those its owner assigned to it, and those made
+  from a template assigned to it (`docs/design/identity.md` § Workers).
+
+  **The template is read now, not copied at creation.** Which projects a machine may serve is its
+  owner's standing consent rather than a value of the machine, so unassigning a template stops its
+  machines taking that project's work on the next pass instead of when the last of them idles out.
+
+  A demand naming no project is served by nothing, for the reason `create_machine/1` makes
+  nothing for one: the scheduler always names the project, and the one path that did not would
+  be the one path left that ignores whose machine it is.
+  """
+  @spec serving(String.t() | nil) :: Ecto.Query.t()
+  def serving(nil), do: from(w in Worker, where: false)
+
+  def serving(project_id) do
+    from w in Worker,
+      as: :worker,
+      where:
+        exists(
+          from a in ProjectWorker,
+            where: a.worker_id == parent_as(:worker).id and a.project_id == ^project_id
+        ) or
+          exists(
+            from a in ProjectTemplate,
+              where:
+                a.template_id == parent_as(:worker).template_id and a.project_id == ^project_id
+          )
   end
 
   @doc """
@@ -310,7 +488,8 @@ defmodule Forge.Workers do
   """
   @spec fits?(Worker.t(), demand()) :: boolean()
   def fits?(%Worker{} = worker, demand) do
-    with true <- accepts?(worker, demand.kind) do
+    with true <- accepts?(worker, demand.kind),
+         true <- runs?(worker, demand[:harness]) do
       {memory, reserved} = promised(worker.id)
 
       (worker.memory_budget || 0) - memory >= demand.memory and
@@ -343,6 +522,26 @@ defmodule Forge.Workers do
   def accepts?(%Worker{accepts: nil}, _kind), do: true
   def accepts?(%Worker{accepts: []}, _kind), do: true
   def accepts?(%Worker{accepts: accepts}, kind), do: kind in accepts
+
+  @doc """
+  Whether this worker runs `harness` and takes its credential from the assignment.
+
+  **A worker that reported no harness runs none**, and that inverts what this platform did before
+  a job carried its credential (`docs/design/credentials.md` § What a worker offers now). A
+  release that does not say `"credential": "per_job"` ignores the assignment's credential and
+  runs the job on whatever its own environment holds — which the platform would then record
+  against a credential it did not spend. What remains of the probe makes no request and cannot
+  fail on the network, so a current release always says it.
+
+  A demand naming no harness is a job that runs none, and any machine will do for it.
+  """
+  @spec runs?(Worker.t(), String.t() | nil) :: boolean()
+  def runs?(%Worker{}, nil), do: true
+
+  def runs?(%Worker{harness: %{"driver" => harness, "credential" => "per_job"}}, harness),
+    do: true
+
+  def runs?(%Worker{}, _harness), do: false
 
   @doc "Memory not already promised to a job on this worker."
   @spec remaining(Worker.t()) :: integer()
@@ -474,14 +673,17 @@ defmodule Forge.Workers do
   # Whether any machine that exists could hold this **if it were empty**, which is a different
   # question from `fits?/2` — that one asks whether there is room now, and the answer to this
   # one does not change when a job ends.
+  # Only machines that may serve this project: one that exists and could hold the job but is not
+  # assigned here is not a queue for it, and answering `:at_capacity` would leave the ticket
+  # waiting for a machine that will never be given it.
   defp could_wait?(demand) do
-    from(w in Worker, where: w.status != :destroyed)
+    from(w in serving(demand[:project_id]), where: w.status != :destroyed)
     |> Repo.all()
     |> Enum.any?(&holds_when_empty?(&1, demand))
   end
 
   defp holds_when_empty?(%Worker{} = worker, demand) do
-    accepts?(worker, demand.kind) and
+    accepts?(worker, demand.kind) and runs?(worker, demand[:harness]) and
       (worker.memory_budget || 0) >= demand.memory and
       (is_nil(worker.cores) or worker.cores >= demand.cores)
   end
@@ -577,35 +779,25 @@ defmodule Forge.Workers do
   end
 
   @doc """
-  What the machine needs to run an agent at all, as `{name, value}` pairs.
+  What the machine is given for its harness at creation, as `{name, value}` pairs: the model, when
+  the node names one, and nothing else.
 
-  It is the machine's and not any job's, so it is injected at creation rather than carried in an
-  assignment (`docs/design/worker-tier.md` § The worker image), and it is the same environment
-  the platform read for itself while it still ran jobs. `executable` is deliberately not here:
-  it is a path on this host, and the worker image has its own.
+  **No credential, and that is the design rather than an omission.** A machine used to boot with
+  the node's `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` in its environment and spend it on
+  every job it ran; a job now brings its own credential in the assignment, sealed for that worker
+  (`docs/design/credentials.md` § The credential belongs to the job, not to the machine), and the
+  node's variables are not read at all. `executable` is not here either: it is a path on this
+  host, and the worker image has its own.
 
   Public because `mix forge.worker.new` mints the environment for a machine the operator is
-  provisioning by hand, and that machine needs exactly what the driver would have given it. A
-  worker minted without this joins and reports `ready` and then fails every job with *Not logged
-  in* — see § Managed and unmanaged.
+  provisioning by hand, and that machine needs exactly what the driver would have given it.
   """
+  @spec harness_env() :: [{String.t(), String.t()}]
   def harness_env do
-    opts = Forge.Jobs.config(:harness_opts, [])
-
-    credential =
-      case Keyword.get(opts, :credential) do
-        {:api_key, value} -> [{"ANTHROPIC_API_KEY", value}]
-        {:oauth, value} -> [{"CLAUDE_CODE_OAUTH_TOKEN", value}]
-        _other -> []
-      end
-
-    model =
-      case Keyword.get(opts, :model) do
-        model when is_binary(model) -> [{"FORGE_CLAUDE_MODEL", model}]
-        _other -> []
-      end
-
-    credential ++ model
+    case Keyword.get(Forge.Jobs.config(:harness_opts, []), :model) do
+      model when is_binary(model) -> [{"FORGE_CLAUDE_MODEL", model}]
+      _other -> []
+    end
   end
 
   @doc """

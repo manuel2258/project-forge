@@ -1,3 +1,36 @@
+defmodule ForgeWorker.LinkTest.CrashingHarness do
+  @moduledoc """
+  A driver that raises while the runner builds the command — the moment before the credential is
+  opened, and the one crash whose report would print whatever form the credential was carried in.
+  """
+
+  @behaviour ForgeWorker.Harness
+
+  @impl true
+  def capabilities, do: %{resume: true, streaming_input: true}
+
+  @impl true
+  def command(_spec, _job_dir, _opts) do
+    send(Application.get_env(:forge_worker, :crashing_harness_test), :crashing)
+    raise("this driver cannot build a command")
+  end
+
+  @impl true
+  def parse_line(_line), do: []
+
+  @impl true
+  def encode_message(text), do: [text, "\n"]
+
+  @impl true
+  def encode_interrupt(id), do: [id, "\n"]
+
+  @impl true
+  def driver, do: "claude_code"
+
+  @impl true
+  def probe(_opts), do: %{driver: "claude_code", name: "Crashing", version: nil, aliases: []}
+end
+
 defmodule ForgeWorker.LinkTest.RaisingHarness do
   @moduledoc """
   A driver whose probe blows up instead of answering. `ClaudeCode.probe/1` swallows its own
@@ -21,6 +54,9 @@ defmodule ForgeWorker.LinkTest.RaisingHarness do
 
   @impl true
   def encode_interrupt(id), do: [id, "\n"]
+
+  @impl true
+  def driver, do: "raising"
 
   @impl true
   def probe(_opts), do: raise("this driver cannot describe itself")
@@ -63,7 +99,7 @@ defmodule ForgeWorker.LinkTest do
   import ForgeWorker.Fixtures
 
   alias ForgeWorker.Link
-  alias ForgeWorker.LinkTest.{RaisingHarness, RecordingSlice}
+  alias ForgeWorker.LinkTest.{CrashingHarness, RaisingHarness, RecordingSlice}
 
   @topic "worker:w-1"
 
@@ -119,6 +155,7 @@ defmodule ForgeWorker.LinkTest do
       Application.delete_env(:forge_worker, :heartbeat_ms)
       Application.delete_env(:forge_worker, :slice)
       Application.delete_env(:forge_worker, :slice_reporter)
+      Application.delete_env(:forge_worker, :token)
     end)
 
     client =
@@ -279,70 +316,55 @@ defmodule ForgeWorker.LinkTest do
     assert running == [%{"job_id" => job_id, "attempt" => 1}]
   end
 
-  # `ready` is the message that says what this machine can offer, and until now it said only how
-  # much memory. The harness and the models its credential may use are the rest of that answer —
-  # the platform holds no credential and so can only be told. See docs/design/worker-channel.md
-  # § What a worker offers.
-  test "ready reports the harness, its capabilities and the models it may run", %{client: client} do
-    Application.put_env(:forge_worker, :harness_opts,
-      executable: fake_executable(),
-      credential: {:oauth, "tok"},
-      req_options: [
-        plug: &Req.Test.json(&1, %{"data" => [%{"id" => "m-1", "display_name" => "One"}]})
-      ]
-    )
-
+  # `ready` is the message that says what this machine can offer: its memory, and its harness.
+  # Nothing about an account — a machine holds none — and, said by the link rather than the
+  # harness, that this release takes a job's credential from the assignment, which is what the
+  # platform gates on (`docs/design/credentials.md` § What a worker offers now).
+  test "ready reports the harness, its capabilities, and that it takes a job's credential", %{
+    client: client
+  } do
     connect_and_assert_join(client, @topic, %{}, :ok)
 
     assert_push(@topic, "ready", %{"harness" => harness})
 
     assert harness["driver"] == "claude_code"
     assert harness["version"] == "9.9.9"
-    assert harness["models"] == [%{"id" => "m-1", "name" => "One"}]
+    assert harness["credential"] == "per_job"
+    refute Map.has_key?(harness, "login")
+    refute Map.has_key?(harness, "models")
 
-    # Every atom is a string on the wire, including the ones nested inside: a payload that
-    # reaches the platform as atoms would not survive the JSON it is encoded to.
-    assert harness["login"] == "ok"
-
-    # Computed since the first worker and never told to anyone until now.
+    # Computed since the first worker and never told to anyone until the probe existed.
     assert harness["capabilities"]["streaming_input"] == true
   end
 
-  # A machine whose probe answered nothing still goes ready. Refusing to would turn a network
-  # blip into a worker that takes no work at all, which is worse than one whose model list is
-  # briefly unknown.
-  test "a worker whose probe reaches nothing still goes ready", %{client: client} do
-    Application.put_env(:forge_worker, :harness_opts,
-      executable: "/nonexistent/claude",
-      credential: {:oauth, "tok"},
-      req_options: [plug: &Req.Test.transport_error(&1, :econnrefused)]
-    )
+  test "a worker whose harness binary is missing still goes ready, and says whose it is", %{
+    client: client
+  } do
+    Application.put_env(:forge_worker, :harness_opts, executable: "/nonexistent/claude")
 
     connect_and_assert_join(client, @topic, %{}, :ok)
 
     assert_push(@topic, "ready", %{"harness" => harness})
-    assert harness["login"] == "unknown"
-    assert harness["models"] == []
 
     # A version nobody could read is `nil` on the wire and not the string "nil": the offer is
     # encoded by walking it and turning atoms into strings, and `nil` is an atom. The platform
     # renders this figure straight onto the workers page, where "nil" would read as a version.
     assert harness["version"] == nil
+    assert harness["driver"] == "claude_code"
+    assert harness["credential"] == "per_job"
   end
 
-  # The rescue around the whole of `harness_offer/0`, which neither test above reaches:
-  # `ClaudeCode.probe/1` swallows its own failures, so only a driver that genuinely raises —
-  # a new one, a bad option, a bug — gets there. § What a worker offers: a probe that fails
-  # never prevents `ready`, because refusing to go ready turns one bad answer into a machine
-  # that takes no work at all.
+  # The rescue around the whole of `harness_offer/0`: `ClaudeCode.probe/1` swallows its own
+  # failures, so only a driver that genuinely raises — a new one, a bad option, a bug — gets
+  # there. It still says which driver this is and that it takes a job's credential, because a
+  # platform that heard neither would give it no agent job at all.
   test "a harness whose probe raises does not stop this machine going ready", %{client: client} do
     Application.put_env(:forge_worker, :harness, RaisingHarness)
 
     connect_and_assert_join(client, @topic, %{}, :ok)
 
     assert_push(@topic, "ready", %{"harness" => harness})
-    assert harness["login"] == "unknown"
-    assert harness["models"] == []
+    assert harness == %{"driver" => "raising", "credential" => "per_job"}
   end
 
   test "a dropped connection is retried rather than fatal", %{client: client} do
@@ -553,6 +575,116 @@ defmodule ForgeWorker.LinkTest do
     args = File.read!(Path.join([root, "jobs", spec["job_id"], "fake-args.txt"]))
     assert args =~ "--model the-specs"
     refute args =~ "the-machines"
+  end
+
+  # The job's credential, sealed for this machine and this job the way the platform seals it
+  # (`ForgeCore.Job.Credential`), with this machine's token configured to open it.
+  defp with_credential(job, secret, kind \\ "oauth", sealed_for \\ nil) do
+    token = Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
+    Application.put_env(:forge_worker, :token, token)
+    {:ok, hash} = ForgeCore.Job.Credential.token_hash(token)
+
+    Map.put(job, "credential", %{
+      "harness" => "claude_code",
+      "kind" => kind,
+      "sealed" => ForgeCore.Job.Credential.seal(secret, hash, sealed_for || job["job_id"])
+    })
+  end
+
+  defp harness_env(root, job) do
+    File.read!(Path.join([root, "jobs", job["spec"]["job_id"], "fake-env.txt"]))
+  end
+
+  # **The job's credential, and nothing else.** A machine used to boot with the node's token and
+  # spend it on every job; now the assignment carries the job's own, opened only at spawn
+  # (`docs/design/credentials.md` § Delivery to the machine).
+  test "a job runs on the credential its assignment carries", context do
+    %{client: client, origin: origin, root: root} = context
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    job = origin |> assignment() |> with_credential("sk-ant-oat01-the-jobs")
+    push(client, @topic, "assign", job)
+    {%{"result" => _result}, _events} = take_push("result")
+
+    env = harness_env(root, job)
+    assert env =~ "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-the-jobs"
+    assert env =~ "ANTHROPIC_API_KEY=unset"
+
+    # Nothing that outlived the run held it: the link only ever had it sealed.
+    refute inspect(:sys.get_state(client), limit: :infinity) =~ "sk-ant-oat01-the-jobs"
+  end
+
+  test "an api key is set as one", context do
+    %{client: client, origin: origin, root: root} = context
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    job = origin |> assignment() |> with_credential("sk-ant-api03-key", "api_key")
+    push(client, @topic, "assign", job)
+    {%{"result" => _result}, _events} = take_push("result")
+
+    assert harness_env(root, job) =~
+             "ANTHROPIC_API_KEY=sk-ant-api03-key\nCLAUDE_CODE_OAUTH_TOKEN=unset"
+  end
+
+  # **Opened at spawn and not before**, which is what keeps it out of the crash report of a runner
+  # that dies on the way there. The runner's report prints the message it was handling — the
+  # options it was started with — so a credential opened when the assignment arrived would be in
+  # the log in the clear. Carried as a function, it prints as one.
+  test "a runner that dies before it spawns logs no credential", context do
+    %{client: client, origin: origin} = context
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+    Application.put_env(:forge_worker, :harness, CrashingHarness)
+    Application.put_env(:forge_worker, :crashing_harness_test, self())
+    on_exit(fn -> Application.delete_env(:forge_worker, :crashing_harness_test) end)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        job = origin |> assignment() |> with_credential("sk-ant-oat01-never-in-a-log")
+        push(client, @topic, "assign", job)
+        assert_receive :crashing, 10_000
+        # The report is written by the process that died, after it died.
+        Process.sleep(300)
+      end)
+
+    # The crash was reported, or the refutation below proves nothing.
+    assert log =~ "this driver cannot build a command"
+    refute log =~ "sk-ant-oat01-never-in-a-log"
+  end
+
+  # A job the platform recorded against one credential must not run on another, and a machine's
+  # own configuration is exactly the other one that was there before.
+  test "a job with no credential runs with none, whatever the machine was configured with",
+       context do
+    %{client: client, origin: origin, root: root} = context
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    Application.put_env(:forge_worker, :harness_opts,
+      executable: fake_executable(),
+      credential: {:api_key, "the-machines-own"}
+    )
+
+    job = assignment(origin)
+    push(client, @topic, "assign", job)
+    {%{"result" => _result}, _events} = take_push("result")
+
+    assert harness_env(root, job) =~ "ANTHROPIC_API_KEY=unset\nCLAUDE_CODE_OAUTH_TOKEN=unset"
+  end
+
+  # The associated data at work: a credential sealed for one job does not open for another.
+  test "a credential sealed for another job opens as none", context do
+    %{client: client, origin: origin, root: root} = context
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    job = origin |> assignment() |> with_credential("sk-ant-oat01-elsewhere", "oauth", uuid())
+    push(client, @topic, "assign", job)
+    {%{"result" => _result}, _events} = take_push("result")
+
+    assert harness_env(root, job) =~ "ANTHROPIC_API_KEY=unset\nCLAUDE_CODE_OAUTH_TOKEN=unset"
   end
 
   # The agent gets the worker's own push credential, because it works in a real clone and may
@@ -938,6 +1070,32 @@ defmodule ForgeWorker.LinkTest do
 
       assert File.read!(Path.join([root, "jobs", job_id, "fake-args.txt"])) =~
                "--model the-machines"
+    end
+
+    # The conversation starts its runner through a path of its own (`Conversation.runner_opts/1`),
+    # so the credential reaching it is a separate claim from a workflow job's.
+    test "a conversation runs on the credential its assignment carries", context do
+      %{client: client, origin: origin, root: root} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = origin |> chat() |> with_credential("sk-ant-oat01-the-chats")
+      push(client, @topic, "assign", job)
+
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      assert File.read!(Path.join([root, "jobs", job["job_id"], "fake-env.txt"])) =~
+               "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-the-chats"
+
+      # Held for the life of the conversation, and still only sealed: in the link, in the
+      # conversation process, and in the runner it keeps — each of which a crash report prints.
+      conversation = :sys.get_state(client).assigns.jobs[job["job_id"]].task
+      runner = :sys.get_state(conversation).runner
+
+      for pid <- [client, conversation, runner] do
+        refute inspect(:sys.get_state(pid), limit: :infinity, printable_limit: :infinity) =~
+                 "sk-ant-oat01-the-chats"
+      end
     end
 
     test "a branch that is not there is reported as failed, not forgotten", context do

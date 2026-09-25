@@ -182,6 +182,7 @@ defmodule ForgeWeb.QueueLive do
     <Layouts.app
       flash={@flash}
       current_scope={@current_scope}
+      capacity={@capacity}
       active={:queue}
       queue_count={@decisions}
       measure="34rem"

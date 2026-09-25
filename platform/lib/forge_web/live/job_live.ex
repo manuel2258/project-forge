@@ -27,6 +27,7 @@ defmodule ForgeWeb.JobLive do
     {:ok,
      socket
      |> assign(project: project, ticket: ticket, job_id: job.id, shown: @page, notices: false)
+     |> ForgeWeb.Capacity.project(project)
      |> load()}
   end
 
@@ -97,7 +98,7 @@ defmodule ForgeWeb.JobLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} measure="74rem">
+    <Layouts.app flash={@flash} current_scope={@current_scope} capacity={@capacity} measure="74rem">
       <.link
         navigate={~p"/tickets/#{@project.name}/#{@ticket.number}"}
         class="font-mono text-[12.5px] opacity-60 hover:opacity-100"

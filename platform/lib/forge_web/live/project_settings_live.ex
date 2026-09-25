@@ -39,6 +39,7 @@ defmodule ForgeWeb.ProjectSettingsLive do
        manage: Forge.Access.can?(scope, :manage)
      )
      |> assign(form: to_form(%{"scope" => "read", "ticket" => "", "minutes" => "90"}, as: :token))
+     |> ForgeWeb.Capacity.project(project)
      |> load()}
   end
 
@@ -48,7 +49,7 @@ defmodule ForgeWeb.ProjectSettingsLive do
 
     assign(socket,
       model_form: to_form(%{"model" => project.model || ""}, as: :project),
-      offered: Workers.offered(),
+      offered: Workers.offered(project.id),
       tokens: Enum.map(tokens, &decorate(&1, now)),
       live_count: Enum.count(tokens, &Tokens.live?(&1, now)),
       tickets: Tickets.list(project),
@@ -280,7 +281,13 @@ defmodule ForgeWeb.ProjectSettingsLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} active={:board} measure="48rem">
+    <Layouts.app
+      flash={@flash}
+      current_scope={@current_scope}
+      capacity={@capacity}
+      active={:board}
+      measure="48rem"
+    >
       <.link
         navigate={~p"/projects/#{@project.name}"}
         class="font-mono text-[12.5px] opacity-60 hover:opacity-100"

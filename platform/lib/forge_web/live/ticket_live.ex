@@ -25,7 +25,11 @@ defmodule ForgeWeb.TicketLive do
     ForgeWeb.Access.project_scope!(socket.assigns.current_scope, project)
     if connected?(socket), do: Events.subscribe()
 
-    {:ok, socket |> assign(project: project, ticket_id: ticket.id) |> load()}
+    {:ok,
+     socket
+     |> assign(project: project, ticket_id: ticket.id)
+     |> ForgeWeb.Capacity.project(project)
+     |> load()}
   end
 
   defp load(%{assigns: %{ticket_id: id, project: project}} = socket) do
@@ -138,7 +142,7 @@ defmodule ForgeWeb.TicketLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} measure="74rem">
+    <Layouts.app flash={@flash} current_scope={@current_scope} capacity={@capacity} measure="74rem">
       <header class="flex flex-col gap-2">
         <div class="font-mono text-[12.5px] opacity-60">
           <.link navigate={~p"/projects/#{@project.name}"} class="hover:opacity-100">

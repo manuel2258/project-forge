@@ -44,9 +44,12 @@ defmodule Forge.WorkersTest do
     template
   end
 
+  # The repository under a directory of the test's own, removed when it ends. It was
+  # `<tmp>/forge-w-N.git` with N from `unique_integer/1`, which restarts with every run: a later
+  # run registering the same N found the repository an earlier one left behind.
   defp project_attrs do
     n = System.unique_integer([:positive])
-    %{name: "proj-#{n}", repo_path: Path.join(System.tmp_dir!(), "forge-w-#{n}.git")}
+    %{name: "proj-#{n}", repo_path: Path.join(Forge.GitFixtures.tmp_dir("w"), "p.git")}
   end
 
   # A project with a template on it, for a test whose subject is not templates at all.
@@ -106,6 +109,7 @@ defmodule Forge.WorkersTest do
       configure(slice_bytes: 1_000)
       {:ok, worker, _token} = Workers.create(%{provider: "fake"})
       {:ok, worker} = Workers.ready(worker, %{"memory_budget" => 8_000, "cores" => 8})
+      serve!(worker, gate_project())
 
       refute Workers.assignable(demand(memory: 1_000))
       :ok = Workers.connected(worker.id)
@@ -268,6 +272,210 @@ defmodule Forge.WorkersTest do
     end
   end
 
+  describe "which projects a machine serves" do
+    # The rule `docs/design/identity.md` § Workers exists for: a machine takes a project's jobs
+    # only because its owner assigned it there, however much room it has.
+    test "a machine not assigned to a project does not take its jobs" do
+      live_worker(%{"memory_budget" => 64_000, "cores" => 32})
+      {:ok, elsewhere} = register_owned!(project_attrs())
+
+      assert Workers.assignable(demand(memory: 1))
+      refute Workers.assignable(demand(memory: 1, project_id: elsewhere.id))
+      refute Workers.assignable(demand(memory: 1, project_id: nil))
+    end
+
+    # Read at placement, not copied at creation: taking the template out of the project is the
+    # owner withdrawing consent, and it has to reach the machines already running.
+    test "a machine made from a template serves its template's projects, until unassigned" do
+      %{user: user, project: project, template: template} = with_template()
+
+      {:ok, worker, _token} = Workers.create(Provisioning.Template.worker_attrs(template))
+      {:ok, _worker} = Workers.ready(worker, %{"memory_budget" => 8_000, "cores" => 4})
+      :ok = Workers.connected(worker.id)
+
+      assert %{id: id, user_id: owner} = Workers.assignable(demand(project_id: project.id))
+      assert id == worker.id
+      assert owner == user.id
+
+      :ok = Provisioning.unassign(user, template.id, project.id)
+      refute Workers.assignable(demand(project_id: project.id))
+    end
+
+    # A full machine that serves somebody else's project is not somewhere this job can wait,
+    # and answering `:at_capacity` would leave its ticket waiting for ever instead of sticking.
+    test "a machine serving another project is not a queue for this one" do
+      live_worker(%{"memory_budget" => 8_000, "cores" => 4})
+      {:ok, elsewhere} = register_owned!(project_attrs())
+
+      assert {:error, :at_capacity} = Workers.create_machine(demand(memory: 8_000))
+
+      assert {:error, {:no_template, :none_assigned}} =
+               Workers.create_machine(demand(memory: 8_000, project_id: elsewhere.id))
+    end
+  end
+
+  describe "which harness a machine runs" do
+    @per_job %{"driver" => "claude_code", "credential" => "per_job"}
+
+    # A job carries its credential now, and a release older than that would run it on whatever
+    # its own environment held — recorded against a credential it did not spend. So the gate asks
+    # (`docs/design/credentials.md` § What a worker offers now).
+    test "a machine that does not take a job's credential is given no agent job" do
+      live_worker(%{"memory_budget" => 8_000, "cores" => 4})
+
+      refute Workers.assignable(demand(memory: 1) |> Map.put(:harness, "claude_code"))
+    end
+
+    test "one that says it does is, and one running another harness is not" do
+      live_worker(%{"memory_budget" => 8_000, "cores" => 4, "harness" => @per_job})
+
+      assert Workers.assignable(demand(memory: 1) |> Map.put(:harness, "claude_code"))
+      refute Workers.assignable(demand(memory: 1) |> Map.put(:harness, "another"))
+    end
+
+    # The old half of the trap in the other direction: a release that reported a harness but not
+    # `per_job` is exactly the one that would ignore the assignment's credential.
+    test "a harness reported without per_job credentials is not enough" do
+      live_worker(%{
+        "memory_budget" => 8_000,
+        "cores" => 4,
+        "harness" => %{"driver" => "claude_code", "login" => "ok"}
+      })
+
+      refute Workers.assignable(demand(memory: 1) |> Map.put(:harness, "claude_code"))
+    end
+
+    # A job that runs no harness — the kind `commands.md` will add — needs no credential and so
+    # does not care which a machine takes.
+    test "a demand naming no harness is placed without asking" do
+      live_worker(%{"memory_budget" => 8_000, "cores" => 4})
+
+      assert Workers.assignable(demand(memory: 1))
+    end
+
+    # And a machine that cannot run the job is no queue for it either, whatever its size.
+    test "a machine that would never be given the job is not somewhere to wait for it" do
+      old = live_worker(%{"memory_budget" => 8_000, "cores" => 4})
+      running(old, memory_max: 8_000, cores: 4)
+
+      assert {:error, {:no_template, :none_assigned}} =
+               Workers.create_machine(demand(memory: 1) |> Map.put(:harness, "claude_code"))
+    end
+  end
+
+  describe "assigning a machine to a project" do
+    setup do
+      owner = Forge.AccountsFixtures.user_fixture()
+      {:ok, project} = Forge.Projects.register(project_attrs(), owner)
+
+      {:ok, worker, _token} =
+        Workers.create(%{provider: "fake", managed: false, user_id: owner.id})
+
+      %{owner: owner, project: project, worker: worker}
+    end
+
+    test "the owner may, for a project they are in, and it is recorded", context do
+      %{owner: owner, project: project, worker: worker} = context
+
+      assert {:ok, _assignment} = Workers.assign(owner, worker.id, project.id)
+      assert [%{id: id}] = Workers.projects(worker)
+      assert id == project.id
+
+      assert Forge.Repo.exists?(
+               Ecto.Query.from(e in Forge.Events.Event,
+                 where: e.type == "worker.assigned" and e.project_id == ^project.id
+               )
+             )
+
+      assert :ok = Workers.unassign(owner, worker.id, project.id)
+      assert Workers.projects(worker) == []
+    end
+
+    # The half of the rule a hidden form would otherwise be the only thing enforcing: an admin of
+    # the project is not the owner of the machine.
+    test "somebody else may not, even as an admin of the project", context do
+      %{project: project, worker: worker} = context
+      admin = member_fixture(project, :admin)
+
+      assert Workers.assign(admin, worker.id, project.id) == {:error, :not_found}
+      assert Workers.unassign(admin, worker.id, project.id) == {:error, :not_found}
+      assert Workers.projects(worker) == []
+    end
+
+    test "the owner may not, for a project they are not in", context do
+      %{owner: owner, worker: worker} = context
+      {:ok, elsewhere} = register_owned!(project_attrs())
+
+      assert Workers.assign(owner, worker.id, elsewhere.id) == {:error, :not_a_member}
+      assert Workers.assign(owner, worker.id, "not-a-uuid") == {:error, :not_a_member}
+      assert Workers.projects(worker) == []
+    end
+
+    # A machine the platform made reaches projects through its template; a second way would be a
+    # machine still serving a project after its template was taken out of it.
+    test "a machine the platform made is assigned through its template, not here", context do
+      %{owner: owner, project: project} = context
+      {:ok, made, _token} = Workers.create(%{provider: "fake", managed: true, user_id: owner.id})
+
+      assert Workers.assign(owner, made.id, project.id) == {:error, :made_by_the_platform}
+    end
+
+    test "only the owner sees it, and only the owner sets what it offers", context do
+      %{owner: owner, worker: worker} = context
+      outsider = Forge.AccountsFixtures.user_fixture()
+
+      assert [%{id: id}] = Workers.list(owner)
+      assert id == worker.id
+      assert Workers.list(outsider) == []
+
+      assert Workers.set_offer(outsider, worker.id, %{memory_budget: 1, cores: 1}) ==
+               {:error, :not_found}
+
+      assert {:ok, %{memory_budget: 4_000, cores: 2}} =
+               Workers.set_offer(owner, worker.id, %{memory_budget: 4_000, cores: 2})
+
+      {:ok, made, _token} = Workers.create(%{provider: "fake", managed: true, user_id: owner.id})
+
+      assert Workers.set_offer(owner, made.id, %{memory_budget: 1, cores: 1}) ==
+               {:error, :made_by_the_platform}
+    end
+  end
+
+  describe "leaving a project" do
+    # Assignment is only allowed to a member; without this the rule held on the way in and not
+    # afterwards, and a template kept making machines billed to someone who could no longer see
+    # the project they were made for.
+    test "takes the leaver's templates, machines and credentials out of it, and nobody else's" do
+      admin = Forge.AccountsFixtures.user_fixture()
+      {:ok, project} = Forge.Projects.register(project_attrs(), admin)
+      leaver = member_fixture(project, :member)
+
+      {:ok, theirs, _token} =
+        Workers.create(%{provider: "fake", managed: false, user_id: leaver.id})
+
+      {:ok, _} = Workers.assign(leaver, theirs.id, project.id)
+      their_template = assigned(leaver, project)
+
+      their_credential = credential_fixture(leaver)
+      {:ok, _} = Forge.Credentials.assign(leaver, their_credential.id, project.id)
+
+      {:ok, mine, _token} = Workers.create(%{provider: "fake", managed: false, user_id: admin.id})
+      {:ok, _} = Workers.assign(admin, mine.id, project.id)
+      my_template = assigned(admin, project)
+      my_credential = credential_fixture(admin)
+      {:ok, _} = Forge.Credentials.assign(admin, my_credential.id, project.id)
+
+      assert :ok = Forge.Projects.remove_member(project, leaver, admin)
+
+      assert Workers.projects(theirs) == []
+      assert Provisioning.for_projects(their_template) == []
+      assert Forge.Credentials.projects(their_credential) == []
+      assert [_still] = Workers.projects(mine)
+      assert [_still] = Provisioning.for_projects(my_template)
+      assert [_still] = Forge.Credentials.projects(my_credential)
+    end
+  end
+
   describe "creating a machine from a template" do
     setup do
       user = Forge.AccountsFixtures.user_fixture()
@@ -293,7 +501,9 @@ defmodule Forge.WorkersTest do
     # A demand with no project cannot name a template either, and that path must not be the one
     # left that can still make a machine out of node configuration.
     test "a demand naming no project makes nothing" do
-      assert {:error, {:no_template, :none_assigned}} = Workers.create_machine(demand(memory: 1))
+      assert {:error, {:no_template, :none_assigned}} =
+               Workers.create_machine(demand(memory: 1, project_id: nil))
+
       refute_receive {:provider_create, _opts}
     end
 
@@ -340,7 +550,8 @@ defmodule Forge.WorkersTest do
       {:ok, project} = Forge.Projects.register(project_attrs(), user)
 
       {:ok, worker, _token} = Workers.create(%{provider: "fake"})
-      {:ok, _worker} = Workers.ready(worker, %{"memory_budget" => 8_000, "cores" => 4})
+      {:ok, worker} = Workers.ready(worker, %{"memory_budget" => 8_000, "cores" => 4})
+      serve!(worker, project)
       running(Workers.get!(worker.id), memory_max: 8_000, cores: 4)
 
       # No template at all, and the machine is full: still a queue, because it will not be.
@@ -691,6 +902,7 @@ defmodule Forge.WorkersTest do
       {:ok, worker, _token} = Workers.create(%{provider: "fake"})
       {:ok, worker} = Workers.ready(worker, %{"memory_budget" => 8_000, "cores" => 4})
       :ok = Workers.connected(worker.id)
+      serve!(worker, gate_project())
 
       assert {:ok, %{id: id}} = Workers.provide(demand(memory: 1_000))
       assert id == worker.id
@@ -876,6 +1088,7 @@ defmodule Forge.WorkersTest do
       {:ok, worker, _token} = Workers.create(%{provider: "fake", managed: false})
       {:ok, worker} = Workers.ready(worker, %{"memory_budget" => 8_000_000_000})
       :ok = Workers.connected(worker.id)
+      funded!(project)
       {:ok, _job} = Forge.Jobs.assign(job, worker)
       assert Forge.Jobs.get!(job.id).status == :running
 
@@ -919,6 +1132,7 @@ defmodule Forge.WorkersTest do
       {:ok, worker, _token} = Workers.create(%{provider: "fake"})
       {:ok, worker} = Workers.ready(worker, %{"memory_budget" => 8_000_000_000})
       :ok = Workers.connected(worker.id)
+      funded!(project)
       {:ok, _job} = Forge.Jobs.assign(job, worker)
 
       assert Workers.get!(worker.id).status == :busy
@@ -940,13 +1154,13 @@ defmodule Forge.WorkersTest do
           "harness" => %{
             "driver" => "claude_code",
             "version" => "2.1.220",
-            "login" => "ok",
-            "models" => [%{"id" => "claude-opus-5", "name" => "Claude Opus 5"}]
+            "credential" => "per_job",
+            "aliases" => ["opus"]
           }
         })
 
       assert worker.harness["version"] == "2.1.220"
-      assert Workers.models() == [%{id: "claude-opus-5", name: "Claude Opus 5"}]
+      assert Workers.runs?(worker, "claude_code")
     end
 
     # A worker running a release older than the probe sends no `harness` at all. Clearing the
@@ -958,74 +1172,88 @@ defmodule Forge.WorkersTest do
       {:ok, worker} =
         Workers.ready(worker, %{
           "memory_budget" => 8_000,
-          "harness" => %{"models" => [%{"id" => "m", "name" => "M"}]}
+          "harness" => %{"driver" => "claude_code", "credential" => "per_job"}
         })
 
       {:ok, worker} = Workers.ready(worker, %{"memory_budget" => 8_000, "harness" => nil})
 
-      assert worker.harness["models"] == [%{"id" => "m", "name" => "M"}]
+      assert worker.harness["driver"] == "claude_code"
     end
 
-    test "the union of the live workers, each model once" do
+    # The aliases are a property of the harness binary, so they are the machines'. Union and not
+    # intersection: an alias only one worker resolves is a half-finished image rollout, not a name
+    # to refuse.
+    test "the aliases are the union of the live workers', each once" do
       {:ok, one, _t1} = Workers.create(%{provider: "fake"})
       {:ok, two, _t2} = Workers.create(%{provider: "fake"})
       {:ok, gone, _t3} = Workers.create(%{provider: "fake"})
 
       {:ok, _one} =
-        Workers.ready(one, %{
-          "memory_budget" => 8_000,
-          "harness" => %{"models" => [model("a"), model("shared")]}
-        })
+        Workers.ready(one, %{"memory_budget" => 8_000, "harness" => %{"aliases" => ~w(a shared)}})
 
       {:ok, _two} =
-        Workers.ready(two, %{
-          "memory_budget" => 8_000,
-          "harness" => %{"models" => [model("shared"), model("b")]}
-        })
+        Workers.ready(two, %{"memory_budget" => 8_000, "harness" => %{"aliases" => ~w(shared b)}})
 
       {:ok, gone} =
-        Workers.ready(gone, %{
-          "memory_budget" => 8_000,
-          "harness" => %{"models" => [model("only-on-the-dead-one")]}
-        })
+        Workers.ready(gone, %{"memory_budget" => 8_000, "harness" => %{"aliases" => ~w(dead)}})
 
       {:ok, _gone} = Workers.status(gone, :destroyed)
 
-      ids = Enum.map(Workers.models(), & &1.id)
-
-      # Union and not intersection: a model only one worker has is a model the fleet can run,
-      # and refusing it would refuse work that would have succeeded.
-      assert Enum.sort(ids) == ~w(a b shared)
-      assert Enum.count(ids, &(&1 == "shared")) == 1
+      aliases = Workers.offered(nil).aliases
+      assert Enum.sort(aliases) == ~w(a b shared)
     end
 
-    test "nothing connected offers nothing, and says so by being empty" do
-      {:ok, _worker, _token} = Workers.create(%{provider: "fake"})
+    # **The models are the accounts', not the machines'.** A machine holds no credential, so
+    # which models may be called is read from the credentials in the project's pool — the set a
+    # job there will actually run under (`docs/design/credentials.md` § Checked on save). What a
+    # machine of an older release still says about models is ignored.
+    test "the models are the project's pool's, and nobody else's" do
+      {:ok, here} = register_owned!(project_attrs())
+      {:ok, there} = register_owned!(project_attrs())
+      owner = Forge.AccountsFixtures.user_fixture()
 
-      assert Workers.models() == []
-    end
+      pool!(here, credential_fixture(owner, models: [model("a"), model("shared")]))
+      pool!(here, credential_fixture(owner, models: [model("shared"), model("b")]))
+      pool!(there, credential_fixture(owner, models: [model("elsewhere")]))
 
-    # A worker is free to report a model the platform has never heard of and one with no label
-    # at all. Neither is a reason to drop it: the list is an offer, and a missing label is not a
-    # missing model.
-    test "a malformed row is skipped and an unlabelled one keeps its id" do
-      {:ok, worker, _token} = Workers.create(%{provider: "fake"})
+      revoked = pool!(here, credential_fixture(owner, models: [model("revoked")]))
+      {:ok, _} = Forge.Credentials.revoke(owner, revoked.id)
 
-      {:ok, _worker} =
-        Workers.ready(worker, %{
+      {:ok, old, _t} = Workers.create(%{provider: "fake"})
+
+      {:ok, _old} =
+        Workers.ready(old, %{
           "memory_budget" => 8_000,
-          "harness" => %{
-            "models" => [%{"id" => "bare"}, %{"name" => "no id at all"}, "not even a map"]
-          }
+          "harness" => %{"models" => [model("from-a-machine")]}
         })
 
-      assert Workers.models() == [%{id: "bare", name: "bare"}]
+      ids = Enum.map(Workers.offered(here.id).models, & &1.id)
+      assert Enum.sort(ids) == ~w(a b shared)
+    end
+
+    test "no project, or a pool with nothing in it, offers no models" do
+      {:ok, empty} = register_owned!(project_attrs())
+
+      assert Workers.offered(nil).models == []
+      assert Workers.offered(empty.id).models == []
+    end
+
+    # A provider is free to list a model with no label, and a row with no id at all. Neither is
+    # a reason to drop what is usable: a missing label is not a missing model.
+    test "a model with no id is skipped and one with no name keeps its id" do
+      {:ok, project} = register_owned!(project_attrs())
+      owner = Forge.AccountsFixtures.user_fixture()
+      pool!(project, credential_fixture(owner, models: [%{"id" => "bare"}, %{"name" => "no id"}]))
+
+      assert Workers.offered(project.id).models == [%{id: "bare", name: "bare"}]
     end
   end
 
   defp model(id), do: %{"id" => id, "name" => String.upcase(id)}
 
   # A job's three questions, with room to spare in whichever dimension a test is not about.
+  # A demand is for a project, and the gate's own tests ask on behalf of `gate_project/0` unless
+  # they say otherwise. `project_id: nil` is a demand naming none, which is its own case.
   defp demand(opts) do
     base = %{
       kind: Keyword.get(opts, :kind, :workflow),
@@ -1033,9 +1261,25 @@ defmodule Forge.WorkersTest do
       cores: Keyword.get(opts, :cores, 1)
     }
 
-    case Keyword.get(opts, :project_id) do
-      nil -> base
-      project_id -> Map.put(base, :project_id, project_id)
+    case Keyword.fetch(opts, :project_id) do
+      {:ok, nil} -> base
+      {:ok, project_id} -> Map.put(base, :project_id, project_id)
+      :error -> Map.put(base, :project_id, gate_project().id)
+    end
+  end
+
+  # **Every machine a gate test makes serves a project**, because a job runs only on a machine
+  # assigned to its own (`docs/design/identity.md` § Workers). One per test, made on first use and
+  # kept in the test's process, so a test whose subject is memory or kinds need not name it.
+  defp gate_project do
+    case Process.get(:gate_project) do
+      nil ->
+        {:ok, project} = register_owned!(project_attrs())
+        Process.put(:gate_project, project)
+        project
+
+      project ->
+        project
     end
   end
 
@@ -1051,7 +1295,7 @@ defmodule Forge.WorkersTest do
     {:ok, worker, _token} = Workers.create(%{provider: "fake"})
     {:ok, worker} = Workers.ready(worker, report)
     :ok = Workers.connected(worker.id)
-    worker
+    serve!(worker, gate_project())
   end
 
   # A job occupying part of a worker. `:running` rather than pending, because that is what

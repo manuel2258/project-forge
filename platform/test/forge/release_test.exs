@@ -74,6 +74,23 @@ defmodule Forge.ReleaseTest do
     assert Forge.Projects.role(project, rescuer) == :admin
   end
 
+  # The repair for a permanent machine the upgrade could not give an owner — on a node with two
+  # node admins it would not guess — without which it takes no work and only SQL could fix it.
+  test "own_worker gives a machine with no owner one" do
+    {:ok, worker, _token} = Forge.Workers.create(%{provider: "fake", managed: false})
+    owner = Forge.AccountsFixtures.user_fixture()
+
+    output = capture_io(fn -> Release.own_worker(worker.id, owner.email) end)
+
+    assert output =~ owner.email
+    assert Forge.Workers.get(worker.id).user_id == owner.id
+
+    # And never takes one away from its owner: that would move the right to put work on it.
+    usurper = Forge.AccountsFixtures.user_fixture()
+    assert Forge.Workers.adopt(worker, usurper) == {:error, :already_owned}
+    assert Forge.Workers.get(worker.id).user_id == owner.id
+  end
+
   test "approve_user lets the first account in, with no node admin to approve it" do
     pending = Forge.AccountsFixtures.pending_user_fixture()
 

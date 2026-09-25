@@ -120,6 +120,36 @@ defmodule ForgeWorker.Harness.ClaudeCodeTest do
       assert [%{type: "notice", payload: %{subtype: "plugin_install"}}] =
                ClaudeCode.parse_line(~s({"type":"system","subtype":"plugin_install"}))
 
+      # The sample `docs/design/capacity.md` § What the provider reports records from the dev
+      # node. It used to fall through to `unknown`, and the platform's pick needs it by name.
+      line =
+        ~s({"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1789210800,"rateLimitType":"five_hour","utilization":0.96,"isUsingOverage":false,"surpassedThreshold":0.9},"session_id":"s"})
+
+      assert [%{type: "rate_limit", payload: payload}] = ClaudeCode.parse_line(line)
+
+      assert %{
+               status: "allowed_warning",
+               resets_at: 1_789_210_800,
+               rate_limit_type: "five_hour",
+               utilization: 0.96,
+               is_using_overage: false
+             } = payload
+
+      assert payload.raw["session_id"] == "s"
+      assert payload.windows == nil
+
+      # `unifiedWindows`, in the shape a third-party report shows newer releases sending: every
+      # window's figure on every event. A window that is not an object is no window.
+      line =
+        ~s({"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1790184000,"rateLimitType":"five_hour","unifiedWindows":{"five_hour":{"utilization":0.53,"resetsAt":1790184000},"seven_day":{"utilization":0.15,"resetsAt":1790222400},"odd":7}}})
+
+      assert [%{type: "rate_limit", payload: %{windows: windows}}] = ClaudeCode.parse_line(line)
+
+      assert windows == %{
+               "five_hour" => %{utilization: 0.53, resets_at: 1_790_184_000},
+               "seven_day" => %{utilization: 0.15, resets_at: 1_790_222_400}
+             }
+
       assert [
                %{type: "text", payload: %{text: "hi"}},
                %{type: "tool_use", payload: %{id: "t1", name: "Read", input: %{"path" => "x"}}}
@@ -193,128 +223,34 @@ defmodule ForgeWorker.Harness.ClaudeCodeTest do
   end
 
   describe "probe/1" do
-    # The models a credential may use cannot be got from the CLI — 2.1.220 has no models
-    # subcommand and `--model` rejects a name only once a turn is under way — so the driver asks
-    # the API, which is also what makes this free. See docs/design/worker-channel.md § What a
-    # worker offers.
-    test "reports the models the credential may use, and the harness running them" do
-      offer =
-        ClaudeCode.probe(
-          executable: fake_executable(),
-          credential: {:oauth, "tok"},
-          req_options: [plug: &models_plug(&1, self())]
-        )
+    # **A harness, not an account.** The probe used to ask the API which models the machine's
+    # token could use and whether it logged in; a machine holds no token now, and both questions
+    # are the platform's, asked once per credential when it is saved (`docs/design/credentials.md`
+    # § Checked on save). What is left makes no request and so cannot fail on the network.
+    test "reports the harness, its version and its aliases, and nothing about an account" do
+      offer = ClaudeCode.probe(executable: fake_executable(), credential: {:oauth, "tok"})
 
-      assert offer.driver == "claude_code"
-      assert offer.version == "9.9.9"
-      assert offer.login == :ok
-
-      assert offer.models == [
-               %{id: "claude-opus-5", name: "Claude Opus 5"},
-               # A model the API named without a display name is still offerable; its id stands
-               # in, because a missing label is not a missing model.
-               %{id: "claude-haiku-4-5-20251001", name: "claude-haiku-4-5-20251001"}
-             ]
-
-      assert_received {:probed, conn}
-      assert {"authorization", "Bearer tok"} in conn.req_headers
-      assert {"anthropic-beta", "oauth-2025-04-20"} in conn.req_headers
+      assert offer == %{
+               driver: "claude_code",
+               name: "Claude Code",
+               version: "9.9.9",
+               aliases: ~w(opus sonnet haiku fable)
+             }
     end
 
-    # The request itself, none of which was asserted anywhere: the test plug answers whatever
-    # it is asked, so a probe pointed at the wrong host or the wrong path went on reporting
-    # models. `anthropic-version` is not optional decoration — the real API refuses a request
-    # without it, which would make every worker in the fleet report `login: unknown` while this
-    # suite stayed green, and § What a worker offers is the note that says the login check is
-    # the point. `limit=100` is what makes one request enough to list an account's models.
-    test "the probe asks the documented endpoint, with the version header the API requires" do
-      ClaudeCode.probe(
-        executable: fake_executable(),
-        credential: {:oauth, "tok"},
-        req_options: [plug: &models_plug(&1, self())]
-      )
-
-      assert_received {:probed, conn}
-      assert conn.method == "GET"
-      assert conn.host == "api.anthropic.com"
-      assert conn.request_path == "/v1/models"
-      assert conn.query_string == "limit=100"
-      assert {"anthropic-version", "2023-06-01"} in conn.req_headers
-    end
-
-    # A subscription token is a bearer token and an API key is an `x-api-key`; sending either as
-    # the other is a 401, which is the whole reason the two are not one clause.
-    test "an api key authenticates as an api key" do
-      ClaudeCode.probe(
-        executable: fake_executable(),
-        credential: {:api_key, "sk-1"},
-        req_options: [plug: &models_plug(&1, self())]
-      )
-
-      assert_received {:probed, conn}
-      assert {"x-api-key", "sk-1"} in conn.req_headers
-      refute Enum.any?(conn.req_headers, fn {name, _value} -> name == "authorization" end)
-    end
-
-    # The point of the probe: a machine minted without a working credential is visibly not
-    # logged in at `ready`, rather than silently failing every job it is given.
-    #
-    # Both statuses, because the API uses both and they mean the same thing here: 401 for a
-    # credential it does not recognise, 403 for one it recognises and will not serve — a
-    # revoked subscription token, a key whose account is disabled. A driver that knew only
-    # about 401 would report the second as `:unknown`, which reads as a network blip and sends
-    # an operator looking for a problem the machine does not have.
-    for status <- [401, 403] do
-      test "a credential refused with #{status} is a bad login, not no models" do
-        offer =
-          ClaudeCode.probe(
-            executable: fake_executable(),
-            credential: {:oauth, "stale"},
-            req_options: [plug: &Plug.Conn.send_resp(&1, unquote(status), ~s({"error":"nope"}))]
-          )
-
-        assert offer.login == :invalid
-        assert offer.models == []
-      end
-    end
-
-    # Never `:invalid`: an unreachable API says nothing about the credential, and a worker that
-    # reported one as the other would send an operator looking for a login problem it does not
-    # have.
-    test "an unreachable api is unknown rather than refused" do
-      offer =
-        ClaudeCode.probe(
-          executable: fake_executable(),
-          credential: {:oauth, "tok"},
-          req_options: [plug: &Req.Test.transport_error(&1, :econnrefused)]
-        )
-
-      assert offer.login == :unknown
-      assert offer.models == []
-    end
-
-    # A worker that cannot describe itself is still a worker that can run work, so every one of
-    # these answers rather than raising.
-    test "no credential and a missing binary still answer" do
+    # A worker that cannot describe itself is still a worker that can run work, so this answers
+    # rather than raising.
+    test "a missing binary still answers" do
       offer = ClaudeCode.probe(executable: "/nonexistent/claude")
 
       assert offer.version == nil
-      assert offer.login == :unknown
-      assert offer.models == []
+      assert offer.driver == "claude_code"
       assert offer.aliases == ~w(opus sonnet haiku fable)
     end
-  end
 
-  defp models_plug(conn, test) do
-    send(test, {:probed, conn})
-
-    Req.Test.json(conn, %{
-      "data" => [
-        %{"id" => "claude-opus-5", "display_name" => "Claude Opus 5"},
-        %{"id" => "claude-haiku-4-5-20251001"},
-        %{"display_name" => "a row with no id at all"}
-      ]
-    })
+    test "names its driver on its own, for when the probe cannot" do
+      assert ClaudeCode.driver() == "claude_code"
+    end
   end
 
   test "declares its capabilities" do

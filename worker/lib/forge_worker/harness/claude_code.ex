@@ -85,30 +85,28 @@ defmodule ForgeWorker.Harness.ClaudeCode do
 
   # -- the probe ------------------------------------------------------------------------------
 
-  @models_url "https://api.anthropic.com/v1/models?limit=100"
-  @api_version "2023-06-01"
-  # The header that lets a Claude Code subscription token — the one `claude setup-token` mints —
-  # authenticate an ordinary API request. Without it the same token is refused as an API key.
-  @oauth_beta "oauth-2025-04-20"
   @probe_timeout_ms 10_000
 
   # Documented in `claude --help` as the aliases `--model` takes, and nowhere machine-readable.
-  # Declared rather than discovered, and marked as such on the wire: the driver knowing its own
-  # CLI's four shorthands is a different kind of claim from the model list, which is the
-  # credential's and is asked for.
+  # Declared rather than discovered: the driver knowing its own CLI's four shorthands is a
+  # different kind of claim from a model list, which is an account's and is asked of the provider
+  # by the platform when a credential is saved (`docs/design/credentials.md` § Checked on save).
   @aliases ~w(opus sonnet haiku fable)
 
   @impl true
+  def driver, do: "claude_code"
+
+  # **No request, and so nothing that fails on a network blip.** The probe used to ask
+  # `GET /v1/models` with the machine's own token to learn the models and whether the login
+  # worked; a machine holds no token now, and both questions moved to where the tokens are.
+  @impl true
   def probe(opts) do
     %{
-      driver: "claude_code",
+      driver: driver(),
       name: "Claude Code",
       version: version(Keyword.get(opts, :executable, "claude")),
       aliases: @aliases
     }
-    |> Map.merge(
-      catalogue(resolve(Keyword.get(opts, :credential)), Keyword.get(opts, :req_options, []))
-    )
   end
 
   # `claude --version` prints "2.1.220 (Claude Code)". Only the version is kept; the name is
@@ -133,46 +131,6 @@ defmodule ForgeWorker.Harness.ClaudeCode do
       _other -> nil
     end
   end
-
-  # The models a credential may use, asked of the API rather than of the CLI, which cannot
-  # answer. See `docs/design/worker-channel.md` § What a worker offers.
-  defp catalogue(nil, _req_options), do: %{login: :unknown, models: []}
-
-  defp catalogue(credential, req_options) do
-    [
-      url: @models_url,
-      headers: auth_headers(credential) ++ [{"anthropic-version", @api_version}],
-      receive_timeout: @probe_timeout_ms,
-      retry: false
-    ]
-    |> Keyword.merge(req_options)
-    |> Req.new()
-    |> Req.get()
-    |> case do
-      {:ok, %{status: 200, body: %{"data" => data}}} when is_list(data) ->
-        %{login: :ok, models: Enum.flat_map(data, &model/1)}
-
-      {:ok, %{status: status}} when status in [401, 403] ->
-        %{login: :invalid, models: []}
-
-      _other ->
-        %{login: :unknown, models: []}
-    end
-  rescue
-    _error -> %{login: :unknown, models: []}
-  end
-
-  # An OAuth subscription token is a bearer token and needs the beta header; an API key is an
-  # `x-api-key`. Sending one as the other is a 401, which is why the two are not merged.
-  defp auth_headers({:oauth, value}),
-    do: [{"authorization", "Bearer " <> value}, {"anthropic-beta", @oauth_beta}]
-
-  defp auth_headers({:api_key, value}), do: [{"x-api-key", value}]
-
-  defp model(%{"id" => id} = model) when is_binary(id),
-    do: [%{id: id, name: model["display_name"] || id}]
-
-  defp model(_other), do: []
 
   @impl true
   def encode_message(text) when is_binary(text) do
@@ -233,6 +191,30 @@ defmodule ForgeWorker.Harness.ClaudeCode do
 
   defp normalise(%{"type" => "system"} = m),
     do: [event("notice", %{subtype: m["subtype"], raw: m})]
+
+  # Undocumented, emitted in practice, and the provider's own report of the account's window
+  # (`docs/design/capacity.md` § What the provider reports). `claude-code-events.md` listed this
+  # mapping while the message was still falling through to `unknown` below; the platform's pick
+  # reads it now to pass over a limited credential (`docs/design/credentials.md` § Rate limits are
+  # per credential). `utilization` arrives only once the warning threshold is crossed, and is `nil`
+  # rather than zero until then.
+  #
+  # `windows` is `unifiedWindows`, which third-party reports show newer releases adding: every
+  # window's utilization and reset on every event. Nothing recorded here has it, so it is mapped
+  # when present and `nil` otherwise, and nothing decides on it — it carries no status.
+  defp normalise(%{"type" => "rate_limit_event", "rate_limit_info" => %{} = info} = m) do
+    [
+      event("rate_limit", %{
+        status: info["status"],
+        resets_at: info["resetsAt"],
+        rate_limit_type: info["rateLimitType"],
+        utilization: info["utilization"],
+        is_using_overage: info["isUsingOverage"],
+        windows: windows(info["unifiedWindows"]),
+        raw: m
+      })
+    ]
+  end
 
   defp normalise(%{"type" => "assistant"} = m) do
     parent = m["parent_tool_use_id"]
@@ -358,6 +340,14 @@ defmodule ForgeWorker.Harness.ClaudeCode do
 
   defp tool_result_content(nil), do: ""
   defp tool_result_content(other), do: Jason.encode!(other)
+
+  defp windows(%{} = windows) do
+    for {type, %{} = window} <- windows, into: %{} do
+      {type, %{utilization: window["utilization"], resets_at: window["resetsAt"]}}
+    end
+  end
+
+  defp windows(_absent), do: nil
 
   defp event(type, payload), do: %{type: type, payload: payload}
 end

@@ -73,7 +73,8 @@ Push notifications for blocking questions need VAPID keys once: run
 `FORGE_VAPID_SUBJECT` for the node; then tap "Notify me" on the queue page in each browser.
 Everything that is not a blocking question goes into one daily digest push.
 
-Jobs run Claude Code headless with `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` from the
-node's environment. `FORGE_DATA_DIR` holds worktrees and job directories; `FORGE_NIX_ENV=1`
-wraps each job in the project's `nix develop .#<env>`.
+Jobs run Claude Code headless on a credential its owner added in `/users/settings` and assigned
+to the job's project; the node's own `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` are not
+read (`docs/design/credentials.md`). `FORGE_DATA_DIR` holds worktrees and job directories;
+`FORGE_NIX_ENV=1` wraps each job in the project's `nix develop .#<env>`.
 

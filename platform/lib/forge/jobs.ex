@@ -18,6 +18,7 @@ defmodule Forge.Jobs do
     Artifacts,
     Backlog,
     Conversations,
+    Credentials,
     Engine,
     Events,
     Git,
@@ -31,7 +32,7 @@ defmodule Forge.Jobs do
   }
 
   alias Forge.Git.{Tokens, Url}
-  alias Forge.Jobs.Job
+  alias Forge.Jobs.{Job, Runs}
   alias Forge.Tickets.Ticket
   alias Forge.Workers.Worker
   alias ForgeCore.Job.{Result, Spec}
@@ -297,22 +298,53 @@ defmodule Forge.Jobs do
     # one place every billed invocation passes. A ticket over its allowance is stuck before a
     # machine is spoken to, not after.
     with :ok <- spend_gate(job, ticket),
+         {:ok, credential} <- Credentials.for_job(job),
+         {:ok, wire} <- sealed(credential, worker, job),
          {:ok, token, _row} <- Tokens.issue_for_job(job, ticket, project),
-         {:ok, started} <- mark_started(job, worker),
-         assignment = assignment(started, ticket, project, token),
+         {:ok, started} <- mark_started(job, worker, credential),
+         assignment = Map.put(assignment(started, ticket, project, token), "credential", wire),
          :ok <- Workers.push(worker.id, {:assign, assignment}) do
       {:ok, _worker} = Workers.busy(worker)
       log_backlog(started, assignment)
       {:ok, started}
     else
       {:error, reason} ->
-        # Nothing is running, so the job must not sit `running` until the next boot, and the
-        # credential it would have used is no good to anyone.
-        Repo.update(Job.progress_changeset(get!(job.id), %{status: :pending}))
+        # Nothing is running, so the job must not sit `running` until the next boot, the run it
+        # was marked with never happened, and the credential it would have used is no good to
+        # anyone.
+        Multi.new()
+        |> Multi.update(:job, Job.progress_changeset(get!(job.id), %{status: :pending}))
+        |> Runs.close(job.id, DateTime.utc_now(:second))
+        |> Repo.transaction()
+
         Tokens.revoke_for_job(job.id)
         {:error, reason}
     end
   end
+
+  # A credential whose secret this node cannot open — a rotated `secret_key_base` — is one no job
+  # can run on, and it is said once per attempt rather than crashing the pass
+  # (`Forge.Provisioning.Vault` records the same cost for provider credentials).
+  defp sealed(credential, worker, job) do
+    case Credentials.for_wire(credential, worker, job.id) do
+      {:ok, wire} ->
+        {:ok, wire}
+
+      {:error, :unreadable} ->
+        Logger.error("credential #{credential.id} cannot be decrypted on this node; add it again")
+        {:error, {:credential_unreadable, credential.id}}
+    end
+  end
+
+  @doc """
+  The harness a job runs, and so the harness its credential has to be for.
+
+  `claude_code` for both kinds that exist. The workflow grammar has no field for it yet; when it
+  does, this is where it is read and nothing downstream changes (`docs/design/credentials.md`
+  § What a worker offers now).
+  """
+  @spec harness(Job.t()) :: String.t()
+  def harness(%Job{}), do: "claude_code"
 
   # The backlog is the one thing a job is handed that is not an artifact version, so "what was
   # this built on?" is answered by the hash rather than by a manifest entry: the snapshot is
@@ -585,12 +617,14 @@ defmodule Forge.Jobs do
   """
   @spec record_harness_event(String.t(), ForgeCore.Job.Event.t()) :: :ok
   def record_harness_event(job_id, %{type: type, payload: payload}) do
-    ticket_id = Repo.one(from j in Job, where: j.id == ^job_id, select: j.ticket_id)
+    {ticket_id, credential_id} =
+      Repo.one(from j in Job, where: j.id == ^job_id, select: {j.ticket_id, j.credential_id}) ||
+        {nil, nil}
 
     case Events.append(type, {:job, job_id}, %{
            ticket_id: ticket_id,
            job_id: job_id,
-           payload: json_safe(payload)
+           payload: payload |> json_safe() |> stamp(type, credential_id)
          }) do
       {:ok, event} ->
         Events.notify_job(job_id, event)
@@ -603,7 +637,21 @@ defmodule Forge.Jobs do
 
   defp json_safe(term), do: term |> Jason.encode!() |> Jason.decode!()
 
-  defp mark_started(%Job{} = job, %Worker{} = worker) do
+  # **A limit is an account's**, so a `rate_limit` event is stamped with the credential the job ran
+  # on when it arrived — which is what `Forge.Credentials.limited/2` reads to know whose window it
+  # describes. Stamped here and not looked up later through the job: a job whose credential was
+  # replaced would otherwise move its old credential's window onto the new one
+  # (`docs/design/credentials.md` § Rate limits are per credential).
+  #
+  # **Always overwritten, nil included.** The payload arrives from the worker, and one carrying a
+  # `credential_id` of its own would otherwise mark somebody else's credential limited and steer
+  # every pick away from it.
+  defp stamp(payload, "job.harness.rate_limit", credential_id),
+    do: Map.put(payload, "credential_id", credential_id)
+
+  defp stamp(payload, _type, _credential_id), do: payload
+
+  defp mark_started(%Job{} = job, %Worker{} = worker, credential) do
     now = DateTime.utc_now(:second)
 
     Multi.new()
@@ -612,9 +660,12 @@ defmodule Forge.Jobs do
       Job.progress_changeset(job, %{
         status: :running,
         worker_id: worker.id,
+        credential_id: credential.id,
         started_at: job.started_at || now
       })
     )
+    |> Runs.open(job, worker, credential, now)
+    |> put_credential_changed(job, credential)
     |> Events.log(:event, "job.started", :system, %{
       ticket_id: job.ticket_id,
       job_id: job.id,
@@ -631,6 +682,21 @@ defmodule Forge.Jobs do
       {:error, failed, reason, _changes} ->
         {:error, {failed, reason}}
     end
+  end
+
+  # A job keeps its credential while it is usable, so a different one here means the first was
+  # revoked or taken out of the project mid-job — and the job's whole cost now lands on the new
+  # one. That is the one inexactness in a credential's spend, and this event is how anyone reading
+  # the figure later finds it (`docs/design/credentials.md` § How a job picks).
+  defp put_credential_changed(multi, %Job{credential_id: nil}, _credential), do: multi
+  defp put_credential_changed(multi, %Job{credential_id: id}, %{id: id}), do: multi
+
+  defp put_credential_changed(multi, %Job{} = job, credential) do
+    Events.log(multi, :credential_changed, "job.credential_changed", :system, %{
+      ticket_id: job.ticket_id,
+      job_id: job.id,
+      payload: %{"from" => job.credential_id, "to" => credential.id}
+    })
   end
 
   @doc """
@@ -657,8 +723,61 @@ defmodule Forge.Jobs do
       # The worker re-sends a result until it is acked, so the platform has to be able to
       # hear the same one twice. Keyed by the job: a job is recorded once.
       job.status == :finished -> {:error, :already_recorded}
+      # Before a failed resume: a resume refused by the limit never got going either, and must
+      # keep the session it will resume once there is a credential to resume it on.
+      stopped_by_limit(result) -> requeue_limited(job, ticket, result)
       resume_failed?(job, result) -> requeue_fresh(job, ticket, result)
       true -> record_and_follow_up(job, ticket, result)
+    end
+  end
+
+  # **Stopped by its account's limit, not failed** (`docs/design/credentials.md` § A limit reached
+  # mid-run): it ended in error, nobody killed it, and the last window report it saw blocks —
+  # read by `Forge.Credentials`' rule for every other report. The report is the result's own and
+  # not the timeline's, which is unacked.
+  defp stopped_by_limit(%Result{status: :finished, killed: nil, outcome: :error} = result),
+    do: Credentials.blocks_until(result.harness["rate_limit"], DateTime.utc_now())
+
+  defp stopped_by_limit(%Result{}), do: nil
+
+  # The run is recorded as any run is — its cost, its turns, its session, its transcript; its work
+  # is already on the branch — and the job goes back to pending with its session rather than on
+  # to its outcome. Its documents are not recorded: the job is not done, and its next run writes
+  # them. Its machine is let go, because a wait may be a week; the pick decides on the next pass
+  # whether it moves to a free credential or waits for the reset.
+  defp requeue_limited(job, ticket, result) do
+    report = result.harness["rate_limit"]
+    cost = decimal(result.harness["cost_usd"])
+
+    Multi.new()
+    |> put_transcript(ticket, job, result)
+    |> Multi.update(
+      :job,
+      Job.progress_changeset(job, Map.put(accounting(job, result), :status, :pending))
+    )
+    |> Runs.close(job.id, DateTime.utc_now(:second), cost)
+    |> Tickets.put_progress(:ticket_cost, ticket, %{cost_usd: Decimal.add(ticket.cost_usd, cost)})
+    |> Events.log(:event, "job.rate_limited", {:job, job.id}, %{
+      ticket_id: ticket.id,
+      job_id: job.id,
+      payload: %{
+        "credential_id" => job.credential_id,
+        "rate_limit_type" => report["rate_limit_type"],
+        "status" => report["status"],
+        "resets_at" => report["resets_at"],
+        "result" => result_payload(result)
+      }
+    })
+    |> Repo.transaction()
+    |> case do
+      {:ok, %{job: job}} ->
+        Tokens.revoke_for_job(job.id)
+        Workers.release(job.worker_id)
+        Events.notify(ticket.id)
+        {:ok, job}
+
+      {:error, step, reason, _} ->
+        {:error, {step, reason}}
     end
   end
 
@@ -676,6 +795,7 @@ defmodule Forge.Jobs do
       :job,
       Job.progress_changeset(job, %{status: :pending, harness_session_id: nil})
     )
+    |> Runs.close(job.id, DateTime.utc_now(:second))
     |> Events.log(:event, "job.resume_failed", {:job, job.id}, %{
       ticket_id: ticket.id,
       job_id: job.id,
@@ -719,6 +839,7 @@ defmodule Forge.Jobs do
     |> put_transcript(ticket, job, result)
     |> put_changeset(ticket, job, result)
     |> Multi.update(:job, Job.progress_changeset(job, progress_attrs(job, result)))
+    |> Runs.close(job.id, DateTime.utc_now(:second), decimal(result.harness["cost_usd"]))
     |> Tickets.put_progress(:ticket_cost, ticket, %{
       cost_usd: Decimal.add(ticket.cost_usd, decimal(result.harness["cost_usd"]))
     })
@@ -758,6 +879,7 @@ defmodule Forge.Jobs do
 
     Multi.new()
     |> Multi.update(:job, Job.progress_changeset(job, attrs))
+    |> Runs.close(job.id, DateTime.utc_now(:second))
     |> Events.log(:event, "job.finished", :system, %{
       ticket_id: job.ticket_id,
       job_id: job.id,
@@ -849,12 +971,17 @@ defmodule Forge.Jobs do
 
   defp put_changeset(multi, _ticket, _job, _result), do: multi
 
-  defp progress_attrs(job, %Result{} = result) do
-    base = %{
+  # What any run adds to its job, however it ended.
+  defp accounting(job, %Result{} = result) do
+    %{
       turns: job.turns + (result.harness["turns"] || 0),
       cost_usd: Decimal.add(job.cost_usd, decimal(result.harness["cost_usd"])),
       harness_session_id: result.harness["session_id"] || job.harness_session_id
     }
+  end
+
+  defp progress_attrs(job, %Result{} = result) do
+    base = accounting(job, result)
 
     case result.status do
       :waiting ->
@@ -910,6 +1037,7 @@ defmodule Forge.Jobs do
     else
       Multi.new()
       |> Multi.update(:job, Job.progress_changeset(job, %{status: :hibernated}))
+      |> Runs.close(job.id, DateTime.utc_now(:second))
       |> Events.log(:event, "job.hibernated", {:job, job.id}, %{
         ticket_id: job.ticket_id,
         job_id: job.id,
@@ -937,6 +1065,7 @@ defmodule Forge.Jobs do
 
     Multi.new()
     |> Multi.update(:job, Job.progress_changeset(job, %{status: interrupted_status(job)}))
+    |> Runs.close(job.id, DateTime.utc_now(:second))
     |> Events.log(:event, "job.interrupted", :system, %{
       ticket_id: job.ticket_id,
       job_id: job.id,
@@ -975,6 +1104,7 @@ defmodule Forge.Jobs do
       {:ok, _} =
         Multi.new()
         |> Multi.update(:job, Job.progress_changeset(job, %{status: interrupted_status(job)}))
+        |> Runs.close(job.id, DateTime.utc_now(:second))
         |> Events.log(:event, "job.interrupted", :system, %{
           ticket_id: job.ticket_id,
           job_id: job.id

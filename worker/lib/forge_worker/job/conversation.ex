@@ -203,8 +203,10 @@ defmodule ForgeWorker.Job.Conversation do
       |> Keyword.put(:mode, :streaming)
       |> put_max_cost(assignment)
       |> put_model(spec)
+      |> ForgeWorker.Job.Credential.put(assignment, ForgeWorker.Link.harness().driver())
 
     [
+      harness: ForgeWorker.Link.harness(),
       spec: spec,
       root: Path.join(state.root, "jobs"),
       worktree: state.worktree,

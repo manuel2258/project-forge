@@ -1,5 +1,5 @@
 defmodule Mix.Tasks.Forge.Worker.New do
-  @shortdoc "Mints a worker's credentials: mix forge.worker.new [PROJECT] [--out FILE]"
+  @shortdoc "Mints a worker's credentials: mix forge.worker.new [PROJECT] [--owner EMAIL] [--out FILE]"
 
   @moduledoc """
   Creates a worker row and prints what a machine needs to become that worker, as shell
@@ -15,10 +15,14 @@ defmodule Mix.Tasks.Forge.Worker.New do
   driver asks for one. Nothing is created on any provider: the row exists and the machine does
   not, and it is up to whoever ran this to make one.
 
-  **The agent's credential is printed too.** It is the machine's environment and not any job's,
-  and the driver injects it into every machine it creates; this command stands in for the driver
-  and so it does the same. That means this output is a secret in two ways rather than one — pipe
-  it somewhere with a sane umask, not into a shell history.
+  **No agent credential is printed**, because a machine holds none: each job brings its own in its
+  assignment (`docs/design/credentials.md`). The output is still a secret — the worker token is in
+  it — so pipe it somewhere with a sane umask, not into a shell history.
+
+  **The machine has an owner**, `--owner EMAIL` or the node's only node admin, and it takes a
+  project's jobs only once its owner has assigned it to that project (`docs/design/identity.md`
+  § Workers). With a PROJECT, the owner assigns it to that one here, which is refused unless they
+  are a member; otherwise it takes no work until they assign it on `/workers`.
 
   **The row is unmanaged, and so it is permanent.** Neither sweep will destroy it — not the idle
   period, and not the unreachable timeout, which re-queues its jobs and leaves the row so the
@@ -29,11 +33,11 @@ defmodule Mix.Tasks.Forge.Worker.New do
 
   use Mix.Task
 
-  alias Forge.{CLI, Jobs, Projects, Storage, Workers}
+  alias Forge.{Accounts, CLI, Jobs, Projects, Storage, Workers}
 
   @impl true
   def run(args) do
-    {opts, positional, _} = OptionParser.parse(args, strict: [out: :string])
+    {opts, positional, _} = OptionParser.parse(args, strict: [out: :string, owner: :string])
 
     case positional do
       [] -> mint(nil, opts)
@@ -46,12 +50,18 @@ defmodule Mix.Tasks.Forge.Worker.New do
     CLI.boot()
 
     project = name && (Projects.by_name(name) || CLI.fail("unknown project #{name}"))
+    owner = owner(Keyword.get(opts, :owner))
+
+    # Checked before the row exists, so a refusal leaves nothing behind to retire.
+    if project && !Projects.role(project, owner),
+      do: CLI.fail("#{owner.email} is not a member of #{project.name}, so cannot assign it")
 
     # Unmanaged, always: this command exists because somebody is provisioning the machine
     # themselves, and a machine the platform did not create is not the platform's to destroy.
     # It is skipped by both sweeps; see docs/design/worker-tier.md § Managed and unmanaged.
-    case Workers.create(%{provider: Forge.Provider.default(), managed: false}) do
+    case Workers.create(%{provider: Forge.Provider.default(), managed: false, user_id: owner.id}) do
       {:ok, worker, token} ->
+        if project, do: {:ok, _assignment} = Workers.assign(owner, worker.id, project.id)
         emit(Enum.join(assignments(worker, token, project), "\n"), Keyword.get(opts, :out))
 
       {:error, changeset} ->
@@ -59,17 +69,26 @@ defmodule Mix.Tasks.Forge.Worker.New do
     end
   end
 
-  # 0600 before anything is written to it: the file carries the platform's Anthropic credential,
-  # and a umask that would have made it readable is not the operator's mistake to discover later.
+  # Whose machine this is. The same resolution `register_project/2` uses: a named account, or the
+  # node's only node admin — and never a guess between several.
+  defp owner(email) do
+    case Accounts.owner_for(email) do
+      {:ok, user} -> user
+      {:error, :unknown_user} -> CLI.fail("unknown user #{email}")
+      {:error, :no_owner} -> CLI.fail("no node admin exists to own it; pass --owner EMAIL")
+      {:error, :ambiguous_owner} -> CLI.fail("more than one node admin: pass --owner EMAIL")
+    end
+  end
+
+  # 0600 before anything is written to it: the file carries the worker token, and a umask that
+  # would have made it readable is not the operator's mistake to discover later.
   defp emit(env, nil), do: Mix.shell().info(env)
 
   defp emit(env, path) do
     File.write!(path, env <> "\n")
     File.chmod!(path, 0o600)
 
-    Mix.shell().info(
-      "wrote #{path} (mode 0600); it holds this machine's token and the agent credential"
-    )
+    Mix.shell().info("wrote #{path} (mode 0600); it holds this machine's token")
   end
 
   defp assignments(worker, token, project) do
@@ -80,9 +99,8 @@ defmodule Mix.Tasks.Forge.Worker.New do
     ] ++ harness() ++ seed(project)
   end
 
-  # The agent's credential and model, which the driver injects into a machine it creates. This
-  # command stands in for the driver, so it injects them too: a machine minted without the
-  # credential joins, reports `ready`, is scheduled, and fails every job with "Not logged in".
+  # The model, which the driver injects into a machine it creates; this command stands in for the
+  # driver, so it does the same. No credential: a job brings its own.
   defp harness do
     Enum.map(Workers.harness_env(), fn {name, value} -> ~s(#{name}=#{value}) end)
   end

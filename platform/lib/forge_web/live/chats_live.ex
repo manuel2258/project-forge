@@ -57,7 +57,13 @@ defmodule ForgeWeb.ChatsLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} active={:chats} measure="34rem">
+    <Layouts.app
+      flash={@flash}
+      current_scope={@current_scope}
+      capacity={@capacity}
+      active={:chats}
+      measure="34rem"
+    >
       <header class="flex flex-wrap items-baseline gap-x-4 gap-y-2">
         <h1 class="text-2xl font-semibold -tracking-[.025em]">Chats</h1>
         <span :if={@live > 0} class="font-mono text-[12.5px] opacity-60">{@live} live</span>

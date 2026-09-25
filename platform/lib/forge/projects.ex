@@ -255,6 +255,7 @@ defmodule Forge.Projects do
           :member,
           from(m in Member, where: m.project_id == ^project.id and m.user_id == ^user.id)
         )
+        |> put_withdrawn(project, user)
         |> Events.log(:event, "project.member_removed", {:user, by.id}, %{
           project_id: project.id,
           payload: %{"project_id" => project.id, "user_id" => user.id}
@@ -265,6 +266,36 @@ defmodule Forge.Projects do
           {:error, _step, reason, _changes} -> {:error, reason}
         end
     end
+  end
+
+  # **A person who leaves a project stops funding it**, in the transaction that removes them: the
+  # templates, machines and credentials they assigned to it are unassigned with the membership
+  # (`docs/design/identity.md` § Workers). Assignment is only allowed to a member, and without
+  # this the rule held on the way in and not afterwards — a template kept making machines billed
+  # to someone who could no longer see the project they were made for.
+  defp put_withdrawn(multi, %Project{id: project_id}, %User{id: user_id}) do
+    multi
+    |> Multi.delete_all(
+      :withdrawn_templates,
+      from(a in Forge.Provisioning.ProjectTemplate,
+        join: t in assoc(a, :template),
+        where: a.project_id == ^project_id and t.user_id == ^user_id
+      )
+    )
+    |> Multi.delete_all(
+      :withdrawn_workers,
+      from(a in Forge.Workers.ProjectWorker,
+        join: w in assoc(a, :worker),
+        where: a.project_id == ^project_id and w.user_id == ^user_id
+      )
+    )
+    |> Multi.delete_all(
+      :withdrawn_credentials,
+      from(a in Forge.Credentials.ProjectCredential,
+        join: c in assoc(a, :credential),
+        where: a.project_id == ^project_id and c.user_id == ^user_id
+      )
+    )
   end
 
   # Membership is what `:manage` means, so changing it is guarded the same way the settings are.

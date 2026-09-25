@@ -53,13 +53,12 @@ appears for a machine the platform did not make — which is the choice `managed
 represents, and the reason `max_workers` moving onto a template does not change the sentence
 above: it is still how many machines of that shape exist.
 
-**"Everything else is the same" includes the harness credential**, and that is the part it is
-easy to get wrong. `mix forge.worker.new` prints the whole environment a machine needs, the
-credential included, because it stands in for the driver and the driver injects it — see below.
-A machine minted without it joins, reports `ready`, is scheduled, and then fails every job it is
-given with *Not logged in*: a worker that looks healthy on every surface the operator has and
-cannot do the one thing it exists for. Anything that mints a machine's environment mints all of
-it.
+**"Everything else is the same" includes what the machine is given at creation**, and that is
+the part it is easy to get wrong. `mix forge.worker.new` prints the whole environment a machine
+needs, because it stands in for the driver and the driver injects it — see below. Anything that
+mints a machine's environment mints all of it. **That no longer includes an inference
+credential**: a machine holds none, and each job brings its own (`docs/design/credentials.md`),
+so a permanent machine and a made one run a job on the same account — the one the job picked.
 
 **Why not infer it from `provider_id`.** A machine the platform did not create has no
 `provider_id`, and `destroy/1` already reads that to skip the driver — so it looks like the
@@ -204,8 +203,9 @@ rather than a dialect of YAML. In an appliance whose whole purpose is confining 
 wrote, that is worth 27 MiB of nothing.
 
 **The metadata service is closed after it is read.** On a provider, `169.254.169.254` answers any
-process on the machine, including the agent — so the user data holding the worker token and the
-harness credential would be one `curl` away from a job. The config unit drops the route to it once
+process on the machine, including the agent — so the user data holding the worker token would be
+one `curl` away from a job. (It used to hold the harness credential as well; a job's credential
+now arrives with its assignment, `docs/design/credentials.md`.) The config unit drops the route to it once
 it has what it needs. Locally there is nothing there to drop, and the rule is harmless.
 
 **What this gives up, and why it is worth it.** Cloud-init's other modules were free in the sense
@@ -242,18 +242,23 @@ A repart image carries the closure's files but not the Nix store's database, so 
 registers it once at first boot, as the installer images do. Without that a fresh machine's
 `nix` considers every path invalid and sets about fetching what it already has.
 
-**The harness's environment is the machine's, not the job's.** Claude Code needs an
-`ANTHROPIC_API_KEY` or a `CLAUDE_CODE_OAUTH_TOKEN`, and neither is scoped to one job nor short
-lived, so neither belongs in an assignment: `docs/design/worker-channel.md` reserves per-
-assignment tokens for credentials that are both. It is injected at creation by the same route that
-carries the worker token — § How a machine learns what it is — and the release reads it from its
-environment exactly as the platform did while it ran jobs itself. That is one route and not two:
-the driver writes it into the config the machine reads at boot, and `mix forge.worker.new` prints
-it beside the worker token for a machine the operator is provisioning by hand. The blast radius is
-one machine, which is already the blast radius of the worker token sitting beside it. The model
-rides along for the same reason — it is an operator setting, not a per-job one, until the workflow
-grammar has something to say about it. The executable does not: the platform's is a path on the
-platform's host, and the image has its own.
+**The harness's credential is the job's, not the machine's.** This paragraph said the opposite
+until `docs/design/credentials.md`: Claude Code's `ANTHROPIC_API_KEY` or
+`CLAUDE_CODE_OAUTH_TOKEN` was injected at creation, by the same route that carries the worker
+token (§ How a machine learns what it is), and every job on the machine spent it. The argument was
+that a credential neither scoped to one job nor short lived does not belong in an assignment,
+which `docs/design/worker-channel.md` reserves for credentials that are both. What it cost was
+pooling, a second harness, and revocation — a token on a machine's disk cannot be taken back from
+a machine that is already running — and the blast radius it protected was the job's slice, where
+the agent could always read the token anyway. So a job picks a credential when it starts, and
+the assignment carries it sealed for that worker and that job; the machine holds none between
+jobs.
+
+What is still injected at creation is what is still the machine's: the worker token and the
+platform's address, and the model, which is an operator setting until the workflow grammar says
+otherwise. The executable is not: the platform's is a path on the platform's host, and the image
+has its own. `mix forge.worker.new` prints the same set for a machine the operator is provisioning
+by hand.
 
 ## Scheduling
 

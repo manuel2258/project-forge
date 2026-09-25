@@ -117,9 +117,12 @@ defmodule Forge.ProvisioningTest do
     test "a template records what a machine made from it will be", %{user: user} do
       assert {:ok, template} = create_template(user, %{memory: 8_000, cores: 4})
 
+      # Its owner too: a machine made from a template is the template owner's
+      # (`identity.md` § Workers).
       assert Template.worker_attrs(template) == %{
                provider: "fake",
                template_id: template.id,
+               user_id: user.id,
                provider_credential_id: nil,
                memory_budget: 8_000,
                cores: 4,
@@ -141,6 +144,30 @@ defmodule Forge.ProvisioningTest do
                create_template(user, %{provider: "fake", provider_credential_id: credential.id})
 
       assert %{provider_credential_id: ["is for hetzner, not fake"]} = errors_on(changeset)
+    end
+
+    # The hole this closes: the form only *offers* the caller's own credentials, and the changeset
+    # checked the provider and nothing else, so an id off the wire made a template that created
+    # machines in somebody else's account. Editing is the same changeset and the same hole.
+    test "a template cannot name somebody else's credential, made or edited", %{user: user} do
+      {:ok, theirs} =
+        Provisioning.create_credential(user_fixture(), %{
+          name: "their account",
+          provider: "fake",
+          secret: %{"token" => "t"}
+        })
+
+      assert {:error, changeset} =
+               create_template(user, %{provider: "fake", provider_credential_id: theirs.id})
+
+      assert %{provider_credential_id: ["is not one of your credentials"]} = errors_on(changeset)
+
+      {:ok, mine} = create_template(user, %{provider: "fake"})
+
+      assert {:error, changeset} =
+               Provisioning.update_template(mine, %{provider_credential_id: theirs.id})
+
+      assert %{provider_credential_id: ["is not one of your credentials"]} = errors_on(changeset)
     end
 
     # A local template is the case that has no credential at all, and it must stay creatable:
@@ -175,7 +202,9 @@ defmodule Forge.ProvisioningTest do
       %{project: project, template: template}
     end
 
-    test "the owner may, for a project they are in", context do
+    # And both are in the event log: which account a project's machines are billed to is a
+    # decision about money, and `decisions.md` has every mutation audited.
+    test "the owner may, for a project they are in, and it is recorded", context do
       %{user: user, project: project, template: template} = context
 
       assert {:ok, _} = Provisioning.assign(user, template.id, project.id)
@@ -183,6 +212,19 @@ defmodule Forge.ProvisioningTest do
 
       assert :ok = Provisioning.unassign(user, template.id, project.id)
       assert Provisioning.for_project(project.id) == []
+
+      types =
+        Repo.all(
+          from e in Forge.Events.Event,
+            where: e.project_id == ^project.id and like(e.type, "template.%"),
+            order_by: e.seq,
+            select: {e.type, e.actor}
+        )
+
+      assert types == [
+               {"template.assigned", %{"kind" => "user", "id" => user.id}},
+               {"template.unassigned", %{"kind" => "user", "id" => user.id}}
+             ]
     end
 
     # `identity.md` § Workers, with the noun changed: a project admin cannot reach for somebody

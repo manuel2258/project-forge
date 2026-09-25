@@ -125,9 +125,24 @@ These decisions are settled. They are not to be reopened.
   execution for team use: each person brings their own, so individual-use licensing is respected.
 - **A credential's daily limit is tracked, not enforced.** The ticket allowance and the node-wide
   daily cap are untouched and keep enforcing.
-- **A user owns workers; a worker carries one credential; its owner assigns it to projects they
-  are a member of.** A project admin cannot reach for someone else's machine, because assigning
-  it spends its owner's credential. A job runs only on a worker assigned to its project.
+- **A job holds the credential, not the machine.** A job picks one from its project's pool when it
+  starts and the credential travels with the assignment, so a project can pool several tokens and
+  a machine is not tied to one account or one harness. A credential's owner assigns it to projects
+  they are a member of; nobody else can. The node's own `ANTHROPIC_API_KEY` and
+  `CLAUDE_CODE_OAUTH_TOKEN` stop being read — neither fallback nor seed. See
+  `design/credentials.md`.
+- **A job picks the credential that has spent least today among those not rate-limited, and keeps
+  it while it is not limited.** The oldest wins a tie. A job whose own credential is limited moves
+  to a free one; a pool that is all limited leaves the job pending and the ticket active until the
+  earliest reset, because time resolves it and nobody is being asked for anything.
+- **A job stopped by its credential's limit mid-run is not failed.** It goes back to pending with
+  its session, lets its machine go, and resumes — on another credential at once if one is free,
+  on its own after the reset if not. Spend is recorded per run, so a job that moved is on each
+  credential's figure for what it spent there. See `design/credentials.md`.
+- **A user owns workers; its owner assigns it to projects they are a member of.** A project admin
+  cannot reach for someone else's machine, because the machine is paid for by its owner. A machine
+  made from a template reaches the projects its template is assigned to, read at placement. A job
+  runs only on a worker assigned to its project.
 
 See `design/identity.md`.
 

@@ -45,6 +45,11 @@ defmodule Forge.Jobs.Job do
     belongs_to :project, Forge.Projects.Project
     belongs_to :parent_job, __MODULE__
     belongs_to :worker, Forge.Workers.Worker
+    # What pays for it: the credential it picked from its project's pool at its first start, and
+    # keeps while that is usable (`docs/design/credentials.md` § How a job picks). A credential's
+    # spend is a query over the jobs carrying it. Null for a job that has never started, and for
+    # every job before credentials existed, which the node's own key paid for.
+    belongs_to :credential, Forge.Credentials.Credential
     has_many :events, Forge.Events.Event
 
     # Sub-second, because the order jobs are read back in is the ticket's timeline and two jobs
@@ -120,6 +125,7 @@ defmodule Forge.Jobs.Job do
       :cost_usd,
       :harness_session_id,
       :worker_id,
+      :credential_id,
       :started_at,
       :finished_at
     ])

@@ -18,7 +18,8 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
   # How a surface is reached and what it must satisfy.
   #
   #   :public          — no credential. The login pages and the log-out.
-  #   :self            — authenticated; acts only on the caller's own account.
+  #   :self            — authenticated; acts only on the caller's own account, or on what it
+  #                      owns — a machine, a template, a credential.
   #   :pending_ok      — authenticated but deliberately reachable before approval.
   #   :approved        — authenticated and approved; no project involved.
   #   :member          — approved, and a member of the project the surface is about.
@@ -31,6 +32,8 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     # live_session :operator (on_mount :require_approved), then membership per page.
     "/" => :member,
     "/board" => :member,
+    # The caller's own machines only (`Workers.list/1`); what reaches a project is the assignment
+    # actions below.
     "/workers" => :approved,
     # Own credentials and own templates only; the assignment actions below are what reach a
     # project, and those are guarded by membership in `Forge.Provisioning`.
@@ -153,11 +156,14 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"workers_live.ex", "toggle-destroyed"} => :local,
     {"workers_live.ex", "edit"} => :local,
     {"workers_live.ex", "cancel-edit"} => :local,
-    # Sets what a machine offers the gate. A worker is node-level and has no owner yet
-    # (`docs/design/identity.md` § Workers is unbuilt), so `:approved` is what guards it — and
-    # a machine the platform *made* is refused here whatever id arrives, because it is replaced
-    # rather than corrected.
-    {"workers_live.ex", "save"} => :approved,
+    # Sets what a machine offers the gate: the caller's own machine only, read scoped to them by
+    # `Workers.set_offer/3` whatever id arrives — and a machine the platform *made* is refused,
+    # because it is replaced rather than corrected (`docs/design/identity.md` § Workers).
+    {"workers_live.ex", "save"} => :self,
+    # Both reach a project, and both are refused unless the caller owns the machine *and* is a
+    # member of that project — `Workers.assign/3` and `unassign/3`.
+    {"workers_live.ex", "assign"} => :member,
+    {"workers_live.ex", "unassign"} => :member,
     {"templates_live.ex", "add-credential"} => :self,
     {"templates_live.ex", "delete-credential"} => :self,
     {"templates_live.ex", "add-template"} => :self,
@@ -178,6 +184,17 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"user_live/confirmation.ex", "submit"} => :public,
     {"user_live/login.ex", "submit_magic"} => :public,
     {"user_live/login.ex", "submit_password"} => :public,
+    # Inference credentials. Each reads the row scoped to the caller before acting on it — the id
+    # is the client's — and `credential-change` only re-renders the form, with the typed secret
+    # dropped (`docs/design/credentials.md`).
+    {"user_live/settings.ex", "add-credential"} => :self,
+    {"user_live/settings.ex", "check-credential"} => :self,
+    {"user_live/settings.ex", "revoke-credential"} => :self,
+    {"user_live/settings.ex", "credential-change"} => :local,
+    # Both reach a project's pool, and both are refused unless the caller owns the credential *and*
+    # is a member of that project — `Credentials.assign/3` and `unassign/3`.
+    {"user_live/settings.ex", "assign-credential"} => :member,
+    {"user_live/settings.ex", "unassign-credential"} => :member,
     {"user_live/settings.ex", "update_email"} => :self,
     {"user_live/settings.ex", "update_password"} => :self,
     {"user_live/settings.ex", "validate_email"} => :self,

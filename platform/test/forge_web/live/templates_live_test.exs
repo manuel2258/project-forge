@@ -90,6 +90,23 @@ defmodule ForgeWeb.TemplatesLiveTest do
     refute html =~ "sekrit"
   end
 
+  # A `phx-change` form sends every field on every keystroke, and the handler used to assign all
+  # of it: the token sat in this LiveView's state, and `<.input>` rendered it back into the page
+  # as the password field's value.
+  test "a token being typed is in neither the page nor the state", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/templates")
+
+    html =
+      view
+      |> form("#credential-form",
+        credential: %{name: "typing", provider: "fake", token: "half-typed-sekrit"}
+      )
+      |> render_change()
+
+    refute html =~ "half-typed-sekrit"
+    refute inspect(:sys.get_state(view.pid), limit: :infinity) =~ "half-typed-sekrit"
+  end
+
   # The bug this was found as: the credential form offered `local`, which has no fields, so the
   # form had nothing to fill in and the changeset then refused the empty secret. A provider
   # reached without an account has no credential to make, and the form should not pretend

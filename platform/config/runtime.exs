@@ -46,17 +46,14 @@ if config_env() == :dev do
 end
 
 # Job execution settings for any environment, from the environment.
-credential =
-  cond do
-    key = System.get_env("ANTHROPIC_API_KEY") -> {:api_key, key}
-    token = System.get_env("CLAUDE_CODE_OAUTH_TOKEN") -> {:oauth, token}
-    true -> nil
-  end
-
+#
+# **No credential.** `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` are not read, as a fallback
+# or as anything else: a job picks a credential its owner assigned to the job's project and
+# carries it in the assignment (`docs/design/credentials.md` § The node's own key is gone). A node
+# that still sets them is setting variables nothing reads.
 harness_opts =
   Enum.reject(
     [
-      credential: credential,
       executable: System.get_env("FORGE_CLAUDE_EXECUTABLE"),
       model: System.get_env("FORGE_CLAUDE_MODEL")
     ],

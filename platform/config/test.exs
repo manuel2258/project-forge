@@ -25,6 +25,11 @@ config :forge, ForgeWeb.Endpoint,
   secret_key_base: "r9SkKtYQxa5nfNBAIjrrB0CK9osMfY223Mzy75zOxWYusuvAaHxPslIeH3VkiV8z",
   server: true
 
+# Where the credential check asks the provider. A `Req.Test` stub, whose ownership is per process:
+# each test answers the request itself, and nothing writes node-global configuration while other
+# modules run — which is how this suite has broken twice (`Forge.Harness.ClaudeCode`).
+config :forge, Forge.Harness.ClaudeCode, req_options: [plug: {Req.Test, Forge.Harness.ClaudeCode}]
+
 # Print only warnings and errors during test
 config :logger, level: :warning
 

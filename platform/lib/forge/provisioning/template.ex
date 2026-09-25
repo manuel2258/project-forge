@@ -97,17 +97,29 @@ defmodule Forge.Provisioning.Template do
   # A template naming one provider and holding another's credential would create a machine in
   # the wrong account, or fail at the API with a message about a token rather than about the
   # row that is wrong. The two are checked together because neither is wrong alone.
+  #
+  # **And the credential must be the template owner's.** This checked the provider and nothing
+  # else, so an id off the wire — the form only *offers* the caller's own, which is the page
+  # again — made a template that created machines in somebody else's Hetzner account and billed
+  # them for it. The same guard as `project_template` (`identity.md` § Workers): whose money a
+  # template spends is its owner's to decide, and only its owner's.
   defp validate_credential_provider(changeset) do
     credential_id = get_field(changeset, :provider_credential_id)
     provider = get_field(changeset, :provider)
+    owner = get_field(changeset, :user_id)
 
-    with true <- is_binary(credential_id),
-         true <- is_binary(provider),
-         %{provider: other} when other != provider <-
-           Forge.Repo.get(Forge.Provisioning.Credential, credential_id) do
-      add_error(changeset, :provider_credential_id, "is for #{other}, not #{provider}")
-    else
-      _ok -> changeset
+    case is_binary(credential_id) && Forge.Repo.get(Forge.Provisioning.Credential, credential_id) do
+      false ->
+        changeset
+
+      %{user_id: ^owner, provider: ^provider} ->
+        changeset
+
+      %{user_id: ^owner, provider: other} ->
+        add_error(changeset, :provider_credential_id, "is for #{other}, not #{provider}")
+
+      _someone_elses_or_none ->
+        add_error(changeset, :provider_credential_id, "is not one of your credentials")
     end
   end
 
@@ -122,6 +134,7 @@ defmodule Forge.Provisioning.Template do
     %{
       provider: template.provider,
       template_id: template.id,
+      user_id: template.user_id,
       provider_credential_id: template.provider_credential_id,
       memory_budget: template.memory,
       cores: template.cores,

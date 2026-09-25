@@ -29,7 +29,10 @@ defmodule ForgeWeb.Router do
   scope "/", ForgeWeb do
     pipe_through [:browser, :require_authenticated_user, :require_approved_user]
 
-    live_session :operator, on_mount: [{ForgeWeb.UserAuth, :require_approved}] do
+    # `ForgeWeb.Capacity` draws the top bar's window gauge over the viewer's own credentials; a
+    # page about one project switches it to that project's pool once it has allowed the viewer.
+    live_session :operator,
+      on_mount: [{ForgeWeb.UserAuth, :require_approved}, {ForgeWeb.Capacity, :own}] do
       live "/", QueueLive
       live "/board", BoardLive
       live "/workers", WorkersLive
@@ -57,7 +60,8 @@ defmodule ForgeWeb.Router do
   scope "/", ForgeWeb do
     pipe_through [:browser, :require_authenticated_user, :require_approved_user]
 
-    live_session :node_admin, on_mount: [{ForgeWeb.UserAuth, :require_node_admin}] do
+    live_session :node_admin,
+      on_mount: [{ForgeWeb.UserAuth, :require_node_admin}, {ForgeWeb.Capacity, :own}] do
       live "/accounts", AccountsLive
     end
   end
@@ -138,7 +142,7 @@ defmodule ForgeWeb.Router do
     pipe_through [:browser, :require_authenticated_user, :require_approved_user]
 
     live_session :require_authenticated_user,
-      on_mount: [{ForgeWeb.UserAuth, :require_approved}] do
+      on_mount: [{ForgeWeb.UserAuth, :require_approved}, {ForgeWeb.Capacity, :own}] do
       live "/users/settings", UserLive.Settings, :edit
       live "/users/settings/confirm-email/:token", UserLive.Settings, :confirm_email
     end

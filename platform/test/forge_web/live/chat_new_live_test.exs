@@ -117,8 +117,8 @@ defmodule ForgeWeb.ChatNewLiveTest do
   end
 
   # The names are never written down in the product: each worker reports what its harness
-  # resolves and what its credential may use (docs/design/worker-channel.md § What a worker
-  # offers), and the form shows the union.
+  # resolves, the credentials in the project's pool say which models they may use
+  # (docs/design/credentials.md § Checked on save), and the form shows both.
   describe "picking a model" do
     defp connected_worker(offer) do
       {:ok, worker, _token} = Workers.create(%{provider: "fake"})
@@ -126,11 +126,21 @@ defmodule ForgeWeb.ChatNewLiveTest do
       worker
     end
 
-    test "is a dropdown of what the connected workers report", %{conn: conn, project: project} do
-      connected_worker(%{
-        "aliases" => ["opus"],
-        "models" => [%{"id" => "claude-opus-5", "name" => "Claude Opus 5"}]
-      })
+    # The aliases are the machines' — names the harness binary resolves — and the models are the
+    # project's pool's, because a machine holds no credential and which models may be called is an
+    # account's (`docs/design/credentials.md` § Checked on save).
+    test "is a dropdown of the workers' aliases and the project's credentials' models", %{
+      conn: conn,
+      project: project
+    } do
+      connected_worker(%{"aliases" => ["opus"]})
+
+      Forge.ForgeFixtures.pool!(
+        project,
+        Forge.ForgeFixtures.credential_fixture(Forge.AccountsFixtures.user_fixture(),
+          models: [%{"id" => "claude-opus-5", "name" => "Claude Opus 5"}]
+        )
+      )
 
       {:ok, view, _html} = live(conn, ~p"/chats/new?project=#{project.name}")
 
@@ -217,6 +227,42 @@ defmodule ForgeWeb.ChatNewLiveTest do
                |> render_submit()
 
       assert [_chat] = Jobs.chats_for_project(elsewhere.id)
+    end
+
+    # The models are the chosen project's pool's, so choosing another project on this route changes
+    # them: a model offered for the wrong project is one its jobs would have no credential for.
+    test "choosing another project offers that project's models", %{
+      conn: conn,
+      user: user,
+      project: project
+    } do
+      {:ok, elsewhere} =
+        Projects.register(
+          %{name: "zz-other-#{System.unique_integer([:positive])}", repo_path: seeded_repo()},
+          user
+        )
+
+      owner = Forge.AccountsFixtures.user_fixture()
+
+      Forge.ForgeFixtures.pool!(
+        project,
+        Forge.ForgeFixtures.credential_fixture(owner, models: [%{"id" => "first-projects"}])
+      )
+
+      Forge.ForgeFixtures.pool!(
+        elsewhere,
+        Forge.ForgeFixtures.credential_fixture(owner, models: [%{"id" => "second-projects"}])
+      )
+
+      {:ok, view, _html} = live(conn, ~p"/chats/new")
+      assert has_element?(view, ~s(select#chat_model option[value="first-projects"]))
+
+      view
+      |> form("#chat-form", %{"chat" => %{"project" => elsewhere.name}})
+      |> render_change()
+
+      assert has_element?(view, ~s(select#chat_model option[value="second-projects"]))
+      refute has_element?(view, ~s(select#chat_model option[value="first-projects"]))
     end
 
     # The select offers only the projects you are in, so a name that is not in it is a project

@@ -9,8 +9,10 @@ defmodule Forge.Spend do
   the ticket stays `active` and out of the queue. A paused ticket in the inbox would train the
   operator to open items they cannot act on.
 
-  The day's total is the sum of job costs where the job *started* in that UTC day: monotonic, and
-  it matches what the operator watched happen. A job in flight has recorded nothing yet — cost
+  The day's total is the sum of the costs of the runs that *started* in that UTC day — each start
+  of a job is a run (`Forge.Jobs.Runs`): monotonic, and it matches what the operator watched
+  happen. Per run rather than per job, so a job that resumes the next day spends on the day it
+  ran, and so a credential's figure, read from the same rows, adds up with this one. A job in flight has recorded nothing yet — cost
   lands at completion — so `committed/0` adds the budget of every live job to what is already
   spent. Without that, several concurrent jobs each pass the gate on their own and together walk
   through the cap.
@@ -18,7 +20,7 @@ defmodule Forge.Spend do
 
   import Ecto.Query, only: [from: 2]
 
-  alias Forge.Jobs.Job
+  alias Forge.Jobs.{Job, Run}
   alias Forge.Repo
   alias Forge.Tickets.Ticket
   alias ForgeCore.Workflow
@@ -30,17 +32,27 @@ defmodule Forge.Spend do
   @typedoc "What the gate says about starting a job for this ticket."
   @type verdict :: :ok | {:stick, String.t()} | {:pause, String.t()}
 
-  @doc "Total cost of jobs that started on `date`, in UTC."
+  @doc "Total cost of the runs that started on `date`, in UTC."
   @spec day_total(Date.t()) :: Decimal.t()
   def day_total(date \\ Date.utc_today()) do
-    {:ok, from_time} = DateTime.new(date, ~T[00:00:00], "Etc/UTC")
-    until = DateTime.add(from_time, 86_400, :second)
+    {from_time, until} = day(date)
 
     Repo.one(
-      from j in Job,
-        where: j.started_at >= ^from_time and j.started_at < ^until,
-        select: coalesce(sum(j.cost_usd), 0)
+      from r in Run,
+        where: r.started_at >= ^from_time and r.started_at < ^until,
+        select: coalesce(sum(r.cost_usd), 0)
     )
+  end
+
+  @doc """
+  The UTC day `date` is, as `[from, until)`: what "spent today" means everywhere it is said — the
+  node's cap here and a credential's figure in `Forge.Credentials.spent_today/2` — so the two add
+  up rather than disagree about where a day ends.
+  """
+  @spec day(Date.t()) :: {DateTime.t(), DateTime.t()}
+  def day(date \\ Date.utc_today()) do
+    {:ok, from_time} = DateTime.new(date, ~T[00:00:00], "Etc/UTC")
+    {from_time, DateTime.add(from_time, 86_400, :second)}
   end
 
   @doc """

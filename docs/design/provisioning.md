@@ -8,9 +8,10 @@ and whose account the machine is billed to. It replaces three single numbers —
 its slices, its volumes. This note is about the tier becoming plural — more than one shape of
 machine, more than one provider, and more than one person paying.
 
-Nothing here is implemented. `docs/design/commands.md` § Resources drafted the job half of it and
-`worker-tier.md` § Open has carried the rest as *"`slice_memory` is one number for every job"*
-since the tier was written; this is where both land.
+It is built, apart from `resources` on a *command*, which waits for commands to be a job kind.
+`docs/design/commands.md` § Resources drafted the job half of it and `worker-tier.md` § Open had
+carried the rest as *"`slice_memory` is one number for every job"* since the tier was written;
+this is where both landed.
 
 ## There are no classes
 
@@ -57,7 +58,7 @@ worker_templates                     workers
   memory                               cores
   cores                                template_id     nullable
   accepts                              provider_credential_id
-  max_workers                          user_id, credential_id   (identity.md § Workers)
+  max_workers                          user_id                  (identity.md § Workers)
   idle_ms
   user_id
 ```
@@ -309,10 +310,11 @@ provider_credentials
 ```
 
 **A separate table from `identity.md`'s `credential`, and the reason is the spend query.** That
-note defines a credential's spend as *"a query over the jobs that used it"*, and `jobs` gains
-`credential_id` to make it one. Machine spend is not a query over jobs — it is hours times rate,
-and it accrues with nothing running. Folding both into one table makes every existing spend query
-carry a filter to stay correct, and makes `daily_limit_usd` mean two different things.
+note defines a credential's spend as *"a query over the jobs that used it"*, and `job_runs` records
+the credential each run of a job spent to make it one (`credentials.md` § Spend). Machine spend is
+not a query over jobs — it is hours times rate, and it accrues with nothing running. Folding both
+into one table makes every existing spend query carry a filter to stay correct, and makes
+`daily_limit_usd` mean two different things.
 
 **The secret is a map, not a string.** Hetzner needs one token; another provider needs a key pair;
 a third needs a service-account document. The driver owns the shape and validates it on save, so a
@@ -366,7 +368,8 @@ The scheduler, needing capacity for a job, looks at the templates assigned to th
 and creates from **the smallest** whose `accepts` includes the job's kind and whose resources fit.
 Smallest rather than first: creating a thirty-two core machine for a job that declared one core is
 how a fleet gets expensive without anybody deciding that it should. The machine inherits the
-template's owner, its provider credential and its harness credential.
+template's provider credential and its owner. It inherits **no inference credential**: a machine
+holds none, and a job brings its own in the assignment (`docs/design/credentials.md`).
 
 **A machine comes from a template or it does not come.** There is no node fallback: a project
 with nothing assigned creates nothing, and the scheduler says so.
@@ -556,6 +559,7 @@ system's expensive resource.
   refresh, is the obvious shape and is not designed here.
 - **Currency.** `capacity.md` § Spend caps is in dollars and Hetzner bills euros. A fleet spanning
   two providers has two currencies and nothing converts them.
-- **`identity.md`'s residual, widened.** That note records that a worker assigned to two projects
-  spends its owner's subscription on work other people authored. A *template* assigned to two
-  projects does the same for the hourly bill, and the answer is the same one: not decided here.
+- **`identity.md`'s residual, widened.** That note records that a subscription credential
+  assigned to a project other people work in spends its owner's subscription on work they
+  authored. A *template* assigned to two projects does the same for the hourly bill, and the
+  answer is the same one: not decided here.

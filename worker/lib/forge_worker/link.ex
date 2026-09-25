@@ -17,7 +17,7 @@ defmodule ForgeWorker.Link do
 
   alias ForgeCore.Job.Result
   alias ForgeWorker.{Config, Store}
-  alias ForgeWorker.Job.{Conversation, Dir, Runner, Seed, Workspace}
+  alias ForgeWorker.Job.{Conversation, Credential, Dir, Runner, Seed, Workspace}
 
   require Logger
 
@@ -393,10 +393,12 @@ defmodule ForgeWorker.Link do
       Application.get_env(:forge_worker, :harness_opts, [])
       |> Keyword.merge(resume_opts(assignment))
       |> put_model(spec)
+      |> Credential.put(assignment, harness().driver())
 
     slice = assignment["slice"] || %{}
 
     Runner.start_link(
+      harness: harness(),
       spec: spec,
       root: Path.join(root, "jobs"),
       worktree: worktree,
@@ -494,25 +496,33 @@ defmodule ForgeWorker.Link do
   # (`docs/design/worker-channel.md` § What a worker offers). It is asked here and not at boot so
   # that a rotated credential or a replaced binary is picked up on the next connection, and it
   # never prevents `ready`: a machine that cannot describe itself can still take work.
+  #
+  # **`"credential": "per_job"` is this release saying it takes a job's credential from the
+  # assignment**, and it is said by the link rather than by the harness because it is this code
+  # that does it (`ForgeWorker.Job.Credential`). The platform gives no agent job to a machine that
+  # does not say it: an older release would run the job on whatever its own environment held
+  # (`docs/design/credentials.md` § What a worker offers now). The driver's name is said even when
+  # the probe raises, which is why it is a callback of its own: a machine whose harness cannot
+  # describe itself can still run it.
   defp harness_offer do
-    harness = Application.get_env(:forge_worker, :harness, ForgeWorker.Harness.ClaudeCode)
+    harness = harness()
     opts = Application.get_env(:forge_worker, :harness_opts, [])
 
     offer = harness.probe(opts)
-
-    Logger.info(
-      "harness #{offer.name} #{offer.version || "?"}: login #{offer.login}, " <>
-        "#{length(offer.models)} models"
-    )
+    Logger.info("harness #{offer.name} #{offer.version || "?"}")
 
     offer
-    |> Map.put(:capabilities, harness.capabilities())
+    |> Map.merge(%{capabilities: harness.capabilities(), credential: "per_job"})
     |> Map.new(fn {key, value} -> {Atom.to_string(key), encode_offer(value)} end)
   rescue
     error ->
       Logger.warning("could not probe the harness: #{inspect(error)}")
-      %{"login" => "unknown", "models" => []}
+      %{"driver" => harness().driver(), "credential" => "per_job"}
   end
+
+  @doc "The harness this machine runs jobs with: `ForgeWorker.Harness.ClaudeCode` unless configured."
+  @spec harness() :: module()
+  def harness, do: Application.get_env(:forge_worker, :harness, ForgeWorker.Harness.ClaudeCode)
 
   defp encode_offer(value) when is_atom(value) and not is_boolean(value) and not is_nil(value),
     do: Atom.to_string(value)

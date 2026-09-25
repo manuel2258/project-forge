@@ -291,20 +291,29 @@ The IdP says who arrived. Forge says what they may do, in a row, with an event n
 
 Capacity and funding stop being node configuration and become things a user owns.
 
-**credential** — `user_id`, `name`, `kind` (`subscription | api_key`), the secret, and
-`daily_limit_usd` (nullable). Revoked rather than deleted, because jobs reference it.
+**credential** — `user_id`, `name`, `harness`, `kind` (`api_key | oauth` for Claude Code), the
+secret, and `daily_limit_usd` (nullable). Revoked rather than deleted, because jobs reference it.
+`docs/design/credentials.md` is the standard for it: what it is, how it is checked, how a job
+picks one and how it reaches a machine.
 
 One type covering both kinds, because the union already exists in the code: the worker harness
-takes `{:api_key, value} | {:oauth, value}` and `runtime.exs` builds exactly that from the
-environment. What changes is where it comes from — a row a person owns rather than one variable
-for the whole node.
+takes `{:api_key, value} | {:oauth, value}`. What changes is where it comes from — a row a person
+owns rather than one variable for the whole node — and, since `credentials.md`, **what holds it: a
+job, not a machine.** A job picks from its project's pool when it starts and the credential
+travels with the assignment, so one machine can run jobs on several accounts and several
+harnesses, and a pool of tokens is a thing a project can have.
+
+**The node-wide `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` stop being read**, neither kept
+as a fallback nor used as a seed; `credentials.md` § The node's own key is gone says why and what
+an upgrade costs.
 
 This is the answer to the standing open question of which credential funds execution. A
 subscription is individual-use, so team use works by each person bringing their own; nothing
 has to be decided centrally and no one is billed for anyone else by default.
 
-**The daily limit is recorded, not enforced.** A credential's spend is a query over the jobs
-that used it; the figure is shown, and nothing refuses a job on account of it.
+**The daily limit is recorded, not enforced.** A credential's spend is a query over the runs
+that used it (`credentials.md` § Spend); the figure is shown, and nothing refuses a job on account
+of it.
 
 Enforcement that exists today is untouched, and this is a deliberate reading rather than an
 omission: the **ticket allowance** from the pinned workflow still sticks a ticket, and the
@@ -326,12 +335,12 @@ provider_credentials
   secret     encrypted map, shape owned by the driver
 ```
 
-— rather than as a third `kind` here, and the reason is the sentence this section already
-committed to: *a credential's spend is a query over the jobs that used it*, which is what
-`jobs.credential_id` exists to make true. **Machine spend is not a query over jobs.** It is hours
-times a rate and it accrues with nothing running. One table would make every existing spend query
-carry a filter to stay correct, and would leave `daily_limit_usd` meaning two different things on
-one row.
+— rather than as a third `kind` here, and the reason is the sentence this section already committed
+to: *a credential's spend is a query over the jobs that used it* — over their runs, since a job may
+move between credentials (`credentials.md` § Spend). **Machine spend is not a query over jobs.** It
+is hours times a rate and it accrues with nothing running. One table would make every existing
+spend query carry a filter to stay correct, and would leave `daily_limit_usd` meaning two different
+things on one row.
 
 The secret is a map because providers disagree about how many fields they need — one token, a key
 pair, a service-account document — and the driver validates its own shape on save. A new provider
@@ -339,40 +348,59 @@ is then a module and a config line, not a migration.
 
 ## Workers
 
-**A worker is owned by a user and carries one credential.** `workers` gains `user_id` and
-`credential_id`. The `managed` flag already distinguishes a machine the platform may destroy
-from one the operator provisioned; ownership is orthogonal to it and both kinds have an owner.
+**A worker is owned by a user.** `workers` gains `user_id`. The `managed` flag already
+distinguishes a machine the platform may destroy from one the operator provisioned; ownership is
+orthogonal to it and both kinds have an owner. A machine made from a template is its template's
+owner's.
+
+It carries **no inference credential**. That is `credentials.md`'s reversal: the first version of
+this section gave a worker one credential and every job on it spent that, which made pooling
+impossible, tied a machine to one harness before any job existed, and left revocation unable to
+reach a machine that was already running.
 
 **project_worker** — `project_id`, `worker_id`. **The worker's owner creates this row, and only
 for a project they are a member of.** A project admin cannot reach for someone else's machine,
-because assigning it spends its owner's credential and the money stays with whoever spends it.
-The cost is that an admin who needs capacity has to ask for it out of band, which on a node with
-one operator is not a cost at all.
+because a machine is paid for by its owner — their hardware, or the hourly bill of the provider
+credential its template named — and the money stays with whoever spends it. The cost is that an
+admin who needs capacity has to ask for it out of band, which on a node with one operator is not
+a cost at all.
 
-A job runs only on a worker assigned to its project. A project with no worker assigned does not
-fail — its tickets stick with that as the reason, through the mechanism that already exists for
-an exhausted allowance, and the queue says so.
+A job runs only on a worker assigned to its project. **A machine made from a template is assigned
+through the template**, read when the job is placed rather than copied when the machine was made:
+while its template is assigned to a project, its machines may run that project's jobs, and
+unassigning the template stops them taking more at once. `provisioning.md` § Two tables says a
+template's values are copied rather than read through; which projects a machine may serve is not a
+value of the machine but its owner's standing consent, and consent withdrawn has to reach the
+machines already running. `project_worker` rows are for permanent machines, which have no template
+to be assigned through.
 
-`jobs` gains `credential_id`, copied from the worker's credential when the job starts and never
-rewritten, like `spec`. That is what makes spend per credential a query rather than a running
-total somebody has to maintain.
+A project with no worker and no template assigned does not fail — its tickets stick with that as
+the reason, through the mechanism that already exists for an exhausted allowance, and the queue
+says so. Assigning one brings them back (`credentials.md` § How a job picks).
+
+**When the owner leaves a project, their assignments to it go too** — templates, machines and
+credentials, in the transaction that removes the membership. A person no longer in a project does
+not keep funding it.
+
+`jobs` gains `credential_id`, the credential the job is on now, and every start of a job records
+the credential it ran on in `job_runs`. That is what makes spend per credential a query rather
+than a running total somebody has to maintain (`credentials.md` § Spend).
 
 **A worker template is owned and assigned the same way.** `docs/design/provisioning.md` adds a
 recipe the platform creates machines from, and it inherits this section whole: a template belongs
 to a user, carries their provider credential, and reaches a project through `project_template` —
 `project_id`, `template_id` — which only its owner may create and only for a project they are a
-member of. The paragraph above holds with one noun changed. *A project admin cannot reach for
-someone else's template, because creating from it spends its owner's credential and the money
-stays with whoever spends it.* It was true of a machine's inference bill; it is true of its hourly
-one for the same reason, and the residual below widens the same way.
+member of. *A project admin cannot reach for someone else's template, because creating from it
+spends its owner's credential and the money stays with whoever spends it.*
 
 ### The residual
 
-A worker assigned to two projects runs jobs authored by other people on its owner's
-subscription credential. That is the individual-use constraint returning through the back door,
-and this note does not answer it — it is narrower than the original question, and it does not
-arise until a second person exists on a node. Recorded in `open-questions.md` rather than
-decided here.
+A subscription credential assigned to a project other people work in runs jobs they authored on
+its owner's subscription. That is the individual-use constraint returning, and this note does
+not answer it. It is narrower than it was: when the credential was the machine's, it happened
+because a machine was shared; now it happens because the owner assigned their credential to that
+project, which is a decision with their name on it and an event beside it. It does not arise until
+a second person exists on a node. Recorded in `open-questions.md` rather than decided here.
 
 **A template assigned to two projects does the same for the hourly bill**, and it is worse in one
 respect: a machine created for another project's work bills its owner while it idles towards
@@ -401,7 +429,7 @@ The vocabulary:
 | | Means |
 |---|---|
 | `public` | No credential. The login pages and the log-out. |
-| `self` | Authenticated; acts only on the caller's own account. |
+| `self` | Authenticated; acts only on the caller's own account, or on what it owns. |
 | `pending_ok` | Authenticated but deliberately reachable before approval — the holding page. |
 | `approved` | Approved account; no project involved. |
 | `member` | Approved, and a member of the project the surface is about. |
@@ -415,11 +443,17 @@ What that comes to:
 - **`member`** is most of the product: the queue and board, every project, ticket, review, job,
   chat and artifact page, all fifteen ticket and proposal endpoints of the JSON API, and every
   conversation write.
-- **`manage`** is the four settings actions — the model, minting a token, revoking one, and
-  membership. Credentials are admin-only to *read* as well, because the token list names the ids
-  the revoke button needs.
-- **`approved`** is three: `/workers` (machines, no project identity), registering a project, and
-  listing the projects you are in.
+- **`manage`** is the settings actions — the model, minting a git token and revoking one,
+  membership, and mirrors. Those tokens are admin-only to *read* as well, because the token list
+  names the ids the revoke button needs.
+- **`approved`** is three: `/workers`, registering a project, and listing the projects you are
+  in. `/workers` lists the caller's own machines only, because a row names the projects its
+  machine serves.
+- **`self`** is the caller's own account, and since machines, templates and credentials have
+  owners it is theirs too: editing a machine's figures, a template, a credential. Every one reads
+  the row scoped to the caller whatever id arrives. **Assigning any of them to a project is
+  `member`**, and needs ownership as well — an admin of the project cannot reach for somebody
+  else's.
 - **`node_admin`** is one page.
 - **`token`** is four: `/git`, `/store/*key`, and the two sockets. None of them carries a person.
 - **`public`** is the three login routes, the two OIDC ones and the log-out — plus `/health`,
@@ -473,12 +507,13 @@ Two results of the audit worth keeping:
    test went through a LiveView route where `on_mount` caught it first; the socket-join direction
    then turned out to be the untested one. And `Projects.put_member/4` checked nothing about its
    caller — the page hid the form, and hiding it was the only thing stopping anyone.
-2. **Half built.** `provider_credentials`, `worker_templates`, `project_template` and the
-   provider registry that lets a credential name which driver it is for all arrived with
-   `docs/design/provisioning.md`, which is where that pass turned out to live. Still to come:
-   `credential`, worker ownership, `project_worker`, `jobs.credential_id` and per-credential
-   spend tracking — the half that answers *whose* money funds a job, as opposed to *which
-   provider* a machine is made at.
+2. **Built, across two notes.** `provider_credentials`, `worker_templates`, `project_template`
+   and the provider registry that lets a credential name which driver it is for all arrived with
+   `docs/design/provisioning.md`, which is where that pass turned out to live. The rest — the
+   inference `credential`, worker ownership, `project_worker`, the project's credential pool,
+   `jobs.credential_id` and per-credential spend — arrived with `docs/design/credentials.md`,
+   which moved the credential from the machine to the job; its own § Sequencing records what
+   landed in which order and what each step found on the way.
 3. **Built, once there was a real origin to redirect to.** OIDC: providers configured from the
    environment, the `identity` table, provisioning on first login, and § What the first
    implementation settled above for the five questions the design left open.

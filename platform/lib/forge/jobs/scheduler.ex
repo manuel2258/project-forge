@@ -12,7 +12,7 @@ defmodule Forge.Jobs.Scheduler do
 
   use GenServer
 
-  alias Forge.{Engine, Jobs, Projects, Tickets, Workers}
+  alias Forge.{Credentials, Engine, Jobs, Projects, Tickets, Workers}
 
   require Logger
 
@@ -60,13 +60,27 @@ defmodule Forge.Jobs.Scheduler do
     Workers.sweep_unreachable()
 
     # Nothing to run is the only moment a machine may be destroyed for being idle: a worker with
-    # work is not idle, and one without it has been idle since its last job ended.
-    if pending == [], do: Workers.sweep_idle()
+    # work is not idle, and one without it has been idle since its last job ended. A job waiting
+    # for its credentials' limits to reset is not something to run — it could wait a week, and
+    # would keep every idle machine on the node alive while it did
+    # (`docs/design/credentials.md` § A limit reached mid-run).
+    if Enum.all?(pending, &waiting_for_reset?/1), do: Workers.sweep_idle()
 
     Enum.reduce(pending, 0, fn job, assigned ->
-      case Workers.provide(demand(job), job.worker_id) do
-        {:ok, worker} ->
-          assigned + assign(job, worker)
+      # **The credential before the machine.** A job nothing can fund does not ask for capacity,
+      # so an empty pool never makes a machine that could run nothing — the loop a disabled
+      # template exists to stop, arriving by another door (`docs/design/credentials.md` § How a
+      # job picks). `Jobs.assign/2` resolves it again, which is the answer that counts; this one
+      # only decides whether to go looking for a machine at all.
+      with {:ok, _credential} <- Credentials.for_job(job),
+           {:ok, worker} <- Workers.provide(demand(job), job.worker_id) do
+        assigned + assign(job, worker)
+      else
+        # Nothing in the project's pool can pay for this job: a person has to assign one, which
+        # brings the ticket back by itself (`Engine.resume_placement/2`).
+        {:error, {:no_credential, why}} ->
+          stick(job, {:no_credential, why})
+          assigned
 
         # **No template can make this job a machine**, which is a different answer from "not
         # right now" and must not be queued as one: the ticket sticks with the reason, through
@@ -77,7 +91,7 @@ defmodule Forge.Jobs.Scheduler do
         # Three of them, because what the operator does about each is different and a single
         # sentence would send them at the wrong thing. Only `:at_capacity` below is a queue.
         {:error, {:no_template, why}} ->
-          stick(job, why)
+          stick(job, {:no_template, why})
           assigned
 
         # Being created, none allowed, or none that will take this kind: the job waits and is
@@ -85,11 +99,17 @@ defmodule Forge.Jobs.Scheduler do
         # therefore be jumped by small ones indefinitely, which
         # `docs/design/provisioning.md` § The gate records rather than solves — the fix is an
         # age-based reservation and the scheduler has no priority.
+        #
+        # So does a job whose every credential is rate-limited, `{:limited, until}`: time
+        # resolves that, not a person, so the ticket stays active and nothing is created for it
+        # (`docs/design/credentials.md` § How a job picks).
         {:error, _reason} ->
           assigned
       end
     end)
   end
+
+  defp waiting_for_reset?(job), do: match?({:error, {:limited, _until}}, Credentials.for_job(job))
 
   # A chat has no ticket to stick, and a chat that cannot be placed is a chat that stays
   # dormant — visible as such on the page it was opened from.
@@ -99,24 +119,31 @@ defmodule Forge.Jobs.Scheduler do
     ticket = Tickets.get!(job.ticket_id)
 
     if ticket.status == :active do
-      Logger.warning("#{why} for job #{job.id}; sticking ticket #{ticket.number}")
-      Engine.stick(ticket, reason(why))
+      Logger.warning("#{inspect(why)} for job #{job.id}; sticking ticket #{ticket.number}")
+
+      # A placement stick, which an assignment to the project brings back (`Engine.resume_placement/2`).
+      Engine.stick(ticket, reason(why), :placement)
     end
 
     :ok
   end
 
   # What the operator has to do about it, in the sentence they will read on the ticket.
-  defp reason(:none_assigned),
+  defp reason({:no_template, :none_assigned}),
     do:
       "no worker template is assigned to this project, so there is nothing to make a machine from"
 
-  defp reason(:all_disabled),
+  defp reason({:no_template, :all_disabled}),
     do:
       "every worker template assigned to this project is disabled after failing to make a machine"
 
-  defp reason(:none_fit),
+  defp reason({:no_template, :none_fit}),
     do: "no worker template assigned to this project is big enough for this job"
+
+  defp reason({:no_credential, :none_assigned}),
+    do:
+      "no credential is assigned to this project, so nothing can pay for its jobs; " <>
+        "a credential's owner assigns one to it from their account settings"
 
   # What this job was admitted with, resolved at creation and written on the row
   # (`docs/design/provisioning.md` § What a job asks for). The fallbacks are for rows that
@@ -129,7 +156,8 @@ defmodule Forge.Jobs.Scheduler do
       kind: job.kind,
       memory: job.memory_max || Workers.slice_bytes(),
       cores: job.cores || Workers.default_cores(),
-      project_id: job.project_id
+      project_id: job.project_id,
+      harness: Jobs.harness(job)
     }
   end
 

@@ -19,8 +19,10 @@ defmodule ForgeWorker.Job.RunnerStreamingTest.NoStreaming do
   def encode_interrupt(id), do: [id, "\n"]
 
   @impl true
-  def probe(_opts),
-    do: %{driver: "none", name: "None", version: nil, login: :unknown, models: [], aliases: []}
+  def driver, do: "none"
+
+  @impl true
+  def probe(_opts), do: %{driver: "none", name: "None", version: nil, aliases: []}
 end
 
 defmodule ForgeWorker.Job.RunnerStreamingTest do

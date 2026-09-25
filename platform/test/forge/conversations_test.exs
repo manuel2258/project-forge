@@ -108,8 +108,11 @@ defmodule Forge.ConversationsTest do
   end
 
   describe "recording a turn" do
+    # Started, as a conversation is by the time a turn arrives: `Forge.Jobs.assign/2` opened the
+    # run its turns are costed on.
     setup %{project: project} do
       {:ok, chat} = Conversations.open(project, "hello")
+      run!(chat)
       %{chat: chat}
     end
 
@@ -186,6 +189,40 @@ defmodule Forge.ConversationsTest do
       {:ok, _chat} = Conversations.record_turn(chat, turn(1, 0.25))
 
       assert Decimal.compare(Spend.day_total(), before) == :gt
+    end
+
+    # A reopened conversation is a new process, whose running total starts again from nothing. Its
+    # figure is set on the run it belongs to — the latest — and the conversation's cost is every
+    # run's; set on the job alone, as it was, a reopening forgot everything spent before it.
+    test "a turn is costed on its run, and the conversation's cost is every run's", %{chat: chat} do
+      [current] = Repo.all(from r in Forge.Jobs.Run, where: r.job_id == ^chat.id)
+      earlier = DateTime.add(current.started_at, -3600)
+
+      Repo.update_all(from(r in Forge.Jobs.Run, where: r.id == ^current.id),
+        set: [started_at: DateTime.add(current.started_at, 60)]
+      )
+
+      run!(chat, cost: "0.30", started_at: earlier, finished_at: earlier)
+
+      {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.1))
+      assert Decimal.equal?(chat.cost_usd, Decimal.new("0.4"))
+
+      assert Repo.all(
+               from r in Forge.Jobs.Run,
+                 where: r.job_id == ^chat.id,
+                 order_by: r.started_at,
+                 select: r.cost_usd
+             )
+             |> Enum.map(&Decimal.to_float/1) == [0.3, 0.1]
+    end
+
+    # Its run ends with it, whichever way it ended; a reopening is a new run.
+    test "a conversation's ending closes its run", %{chat: chat} do
+      {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.1))
+      {:ok, _} = Conversations.ended(chat, nil, "machine_lost")
+
+      assert [%{finished_at: %DateTime{}}] =
+               Repo.all(from r in Forge.Jobs.Run, where: r.job_id == ^chat.id)
     end
 
     # The worker re-sends a turn until it is acked, so the same one can arrive twice.

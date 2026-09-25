@@ -120,6 +120,24 @@ defmodule Forge.SpendTest do
       assert Spend.paused?()
     end
 
+    # **The day is the run's** (`docs/design/credentials.md` § Spend). A job that started one day
+    # and resumed the next spent on each day what it spent that day; read by the job's first start,
+    # all of it landed on the first. Days well away from today, so nothing else is in them.
+    test "a job that ran on two days is on each day's total for what it spent that day", %{
+      user: user
+    } do
+      job = only_pending(admit(user, ticket_cost: 25.0))
+      monday = ~U[2026-03-02 23:00:00Z]
+      tuesday = ~U[2026-03-03 01:00:00Z]
+
+      {:ok, _} = Repo.update(Ecto.Changeset.change(job, started_at: monday))
+      run!(job, cost: "1.00", started_at: monday, finished_at: monday)
+      run!(job, cost: "2.00", started_at: tuesday, finished_at: tuesday)
+
+      assert Decimal.equal?(Spend.day_total(~D[2026-03-02]), Decimal.new("1.00"))
+      assert Decimal.equal?(Spend.day_total(~D[2026-03-03]), Decimal.new("2.00"))
+    end
+
     test "no cap configured means nothing is ever paused", %{user: user} do
       ticket = admit(user, ticket_cost: 25.0)
       spend!(ticket, "1000.00", started: true)
@@ -184,6 +202,8 @@ defmodule Forge.SpendTest do
           finished_at: DateTime.utc_now(:second)
         )
         |> Repo.update()
+
+      run!(job, cost: amount, finished_at: DateTime.utc_now(:second))
     end
 
     :ok

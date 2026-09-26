@@ -51,7 +51,9 @@ defmodule ForgeWeb.Endpoint do
     cookie_key: "request_logger"
 
   plug Plug.RequestId
-  plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
+  # A container runtime probes `/health` every few seconds, and a line per probe buries every
+  # other request in the log. See `log_level/1`.
+  plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint], log: {__MODULE__, :log_level, []}
 
   # Git's smart HTTP is served here rather than from the router: it authenticates with a per-job
   # token over HTTP Basic rather than the session or the API bearer, and its request body is a
@@ -68,4 +70,15 @@ defmodule ForgeWeb.Endpoint do
   plug Plug.Head
   plug Plug.Session, @session_options
   plug ForgeWeb.Router
+
+  @doc """
+  The level `Phoenix.Logger` logs a request at: nothing for the liveness probe, `:info` for the
+  rest, which is Phoenix's own default. Matched on the whole path, so only the probe itself goes
+  quiet — `/health/deep` is a 404 worth seeing.
+
+  `request_path` and not `path_info`: this is asked again for the `Sent 200` line, after the
+  router's `forward` has stripped `path_info` down to what lies below the mount point.
+  """
+  def log_level(%Plug.Conn{request_path: "/health"}), do: false
+  def log_level(_conn), do: :info
 end

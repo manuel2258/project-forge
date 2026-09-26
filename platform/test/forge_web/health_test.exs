@@ -73,3 +73,40 @@ defmodule ForgeWeb.HealthTest do
     refute_receive :queried, 100
   end
 end
+
+defmodule ForgeWeb.HealthLogTest do
+  @moduledoc """
+  That the probe is not logged. A runtime probes every few seconds, and a line per probe buries
+  the requests an operator is reading the log for.
+
+  **Its own module, and not async**, for the reason `Forge.CredentialsLogTest` gives: the suite
+  runs at `:warning`, a request line is `:info`, and only the node-global `Logger.configure/1`
+  lowers the level far enough for a capture to see it.
+  """
+
+  use ForgeWeb.ConnCase, async: false
+
+  import ExUnit.CaptureLog
+
+  setup do
+    previous = Logger.level()
+    Logger.configure(level: :debug)
+    on_exit(fn -> Logger.configure(level: previous) end)
+  end
+
+  # Captured at debug so the router's dispatch line is in scope as well as the endpoint's. Only
+  # the probe is requested, so every line in the capture is one it caused.
+  test "a probe is not logged at all", %{conn: conn} do
+    log = capture_log([level: :debug], fn -> get(conn, "/health") end)
+
+    assert log == ""
+  end
+
+  # The other half: without it, the test above passes against a capture that saw nothing.
+  test "a request beside it still is", %{conn: conn} do
+    log = capture_log([level: :debug], fn -> get(conn, "/health/deep") end)
+
+    assert log =~ "GET /health/deep"
+    assert log =~ "Sent 404"
+  end
+end

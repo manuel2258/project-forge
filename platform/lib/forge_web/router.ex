@@ -113,8 +113,9 @@ defmodule ForgeWeb.Router do
   # Liveness for a container runtime and a proxy. Forwarded from the router rather than mounted
   # on the endpoint, though it needs nothing the router does: a way in that `Router.__routes__/0`
   # cannot enumerate is a way in `AuthorizationInventoryTest` cannot make anybody classify, and
-  # this one is reachable with no credential at all. It is piped through nothing.
-  forward "/health", ForgeWeb.Plugs.Health
+  # this one is reachable with no credential at all. It is piped through nothing, and logs
+  # nothing: see `ForgeWeb.Endpoint.log_level/1`.
+  forward "/health", ForgeWeb.Plugs.Health, [], log: false
 
   # The platform's repositories, over git's own smart HTTP, with a per-job token as the Basic
   # auth password. See docs/design/worker-tier.md § Git.

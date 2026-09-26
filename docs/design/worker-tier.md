@@ -243,17 +243,31 @@ that cannot be built or booted anywhere but the operator's machine.
 
 **It is an appliance, not a host.** `nix/worker-image.nix` builds it with `systemd-repart`: an
 ESP holding systemd-boot and one unified kernel image, and a btrfs root partition holding the
-closure. There is no system profile and nothing to `nixos-rebuild`, because a worker is replaced
+closure — plus a BIOS boot partition and Limine, for the firmware that is not UEFI (below). There is no system profile and nothing to `nixos-rebuild`, because a worker is replaced
 rather than updated. `make-disk-image.nix`, the usual route, was not taken: it can only make an
 ext4 root, and the volume layer needs btrfs.
 
 Two consequences the driver carries, and they are why `Forge.Provider.LocalVm` is not the
 three-argument QEMU invocation it looks like it should be:
 
-- **The machine boots UEFI**, so the driver passes QEMU an OVMF code image and gives each
+- **The local machine boots UEFI**, so the driver passes QEMU an OVMF code image and gives each
   machine its own writable copy of the variable store. The devshell exports both paths; nothing
   in the platform can guess them, so a driver without them refuses to create rather than
   starting a machine that hangs at the firmware.
+
+**The image boots under BIOS as well, because a Hetzner x86 server has nothing else.** Its
+firmware is SeaBIOS, which reads the disk's MBR and runs whatever boot code is there — and an
+image that was UEFI only had none. Every machine the Hetzner driver made stopped at *Booting
+from Hard Disk…*, was timed out by `sweep_unreachable/0` as *made a machine that never
+connected*, and was replaced by another that did the same. So the image carries two boot paths
+to the same system: systemd-boot and the unified kernel image under UEFI, and Limine under BIOS,
+with its boot code in the MBR, its second stage in a BIOS boot partition, and the same kernel,
+initrd and command line on the ESP. Limine rather than GRUB because `limine bios-install` writes
+to an image file in the build sandbox, where GRUB's installer wants a block device. The kernel
+and initrd are on the ESP twice, once inside the unified image and once beside it, which its
+128 MiB holds with about 40 MiB to spare. `nix build .#checks.x86_64-linux.worker-image-boots`
+boots the image under SeaBIOS and under OVMF and fails unless both reach a login prompt; it needs
+KVM, so `bin/check` does not run it.
 - **The image is small and the machine's disk is not.** repart minimises the root partition, so
   the overlay is created larger than the image it backs and the guest grows its partition and
   filesystem into it on the first boot. What has to fit is the Nix store, the seed and several

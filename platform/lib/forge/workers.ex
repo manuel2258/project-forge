@@ -616,18 +616,54 @@ defmodule Forge.Workers do
   defp count(%Decimal{} = sum), do: Decimal.to_integer(sum)
   defp count(sum) when is_integer(sum), do: sum
 
+  @typedoc """
+  What the jobs earlier in a scheduling pass were pointed at, per booting worker: the memory and
+  cores they will take of it once it is up. `provide/3` reads it and the scheduler adds to it.
+  """
+  @type claims :: %{optional(String.t()) => {non_neg_integer(), non_neg_integer()}}
+
   @doc """
   A worker that will take `demand`, or the reason there is not one. A worker being created is
   not an error and not a worker yet: the caller leaves the job pending and asks again on the
   next pass, which is what a queue is.
+
+  `{:creating, worker}` names the booting machine the job is waiting for — one already being
+  made that would hold it, or one made for it now — so the caller can add the job to `claims`
+  and the next job in the pass does not count on the same room
+  (`docs/design/provisioning.md` § The gate). **A booting machine that would hold the job is
+  asked before a new one is made**: a `creating` worker is not assignable, and without this
+  every pass until it booted made another, up to the template's `max_workers`.
   """
-  @spec provide(demand(), String.t() | nil) ::
-          {:ok, Worker.t()} | {:error, :creating | :at_capacity | term()}
-  def provide(demand, preferred \\ nil) do
-    case assignable(demand, preferred) do
+  @spec provide(demand(), String.t() | nil, claims()) ::
+          {:ok, Worker.t()} | {:creating, Worker.t()} | {:error, :at_capacity | term()}
+  def provide(demand, preferred \\ nil, claims \\ %{}) do
+    with nil <- assignable(demand, preferred),
+         nil <- booting(demand, claims) do
+      make_machine(demand)
+    else
+      %Worker{status: :creating} = worker -> {:creating, worker}
       %Worker{} = worker -> {:ok, worker}
-      nil -> create_machine(demand)
     end
+  end
+
+  # A machine the platform asked for that has not reported `ready`, and that this project may
+  # use, which would hold the job with what the pass has already pointed at it. Measured against
+  # the figures it was made with, since it has reported none of its own — the same figures the
+  # template was chosen by. A row the driver refused is not booting; it carries `last_error`
+  # and only holds its slot until `sweep_unreachable/0` retires it.
+  defp booting(demand, claims) do
+    from(w in serving(demand[:project_id]),
+      where: w.status == :creating and is_nil(w.last_error),
+      order_by: [asc: w.inserted_at]
+    )
+    |> Repo.all()
+    |> Enum.find(fn worker ->
+      {memory, cores} = Map.get(claims, worker.id, {0, 0})
+
+      accepts?(worker, demand.kind) and
+        (worker.memory_budget || 0) - memory >= demand.memory and
+        room_for_cores?(worker, cores, demand.cores)
+    end)
   end
 
   @doc """
@@ -655,9 +691,14 @@ defmodule Forge.Workers do
           | term()
 
   @spec create_machine(demand()) :: {:error, refusal()}
-  def create_machine(demand \\ %{kind: :workflow, memory: 0, cores: 0})
+  def create_machine(demand \\ %{kind: :workflow, memory: 0, cores: 0}) do
+    case make_machine(demand) do
+      {:creating, _worker} -> {:error, :creating}
+      refusal -> refusal
+    end
+  end
 
-  def create_machine(%{project_id: project_id} = demand) when is_binary(project_id) do
+  defp make_machine(%{project_id: project_id} = demand) when is_binary(project_id) do
     case Provisioning.for_demand(project_id, demand) do
       nil -> no_template(project_id, demand)
       template -> create_from(template)
@@ -668,7 +709,7 @@ defmodule Forge.Workers do
   # one — `Jobs.Scheduler` puts `project_id` on every demand and every job has one — so this is
   # the default argument and the tests that use it, and it must not be the one path left that
   # can still make a machine out of node configuration.
-  def create_machine(_demand), do: {:error, {:no_template, :none_assigned}}
+  defp make_machine(_demand), do: {:error, {:no_template, :none_assigned}}
 
   # Why nothing was made, in the order that tells the operator the most. Assigned-but-disabled
   # is asked before could-ever-hold, because a disabled template is invisible to the gate and
@@ -765,9 +806,9 @@ defmodule Forge.Workers do
     with {:ok, worker, token} <- create(attrs) do
       case Provider.create(machine_opts(worker, token, shape, credential)) do
         {:ok, machine} ->
-          {:ok, _worker} = update(worker, %{provider_id: machine.provider_id})
+          {:ok, worker} = update(worker, %{provider_id: machine.provider_id})
           Logger.info("created worker #{worker.id} (#{machine.provider_id})")
-          {:error, :creating}
+          {:creating, worker}
 
         {:error, reason} ->
           refused(worker, reason)

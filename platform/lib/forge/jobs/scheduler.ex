@@ -61,7 +61,10 @@ defmodule Forge.Jobs.Scheduler do
     # is a queue that never moves again.
     Workers.sweep_unreachable()
 
-    assigned = Enum.reduce(pending, 0, &offer/2)
+    # The claims are what the jobs so far in this pass were pointed at on machines still booting,
+    # so the next job does not count on the same room (`Workers.provide/3`). They start empty
+    # every pass: the jobs keep their order, so each pass divides the machines the same way.
+    {assigned, _claims} = Enum.reduce(pending, {0, %{}}, &offer/2)
 
     # **After the pass, not before it, and whatever is still pending.** Before it, the sweep
     # destroyed the very machine the pass was about to use — a machine that has just finished one
@@ -76,21 +79,28 @@ defmodule Forge.Jobs.Scheduler do
     assigned
   end
 
-  defp offer(job, assigned) do
+  defp offer(job, {assigned, claims}) do
     # **The credential before the machine.** A job nothing can fund does not ask for capacity,
     # so an empty pool never makes a machine that could run nothing — the loop a disabled
     # template exists to stop, arriving by another door (`docs/design/credentials.md` § How a
     # job picks). `Jobs.assign/2` resolves it again, which is the answer that counts; this one
     # only decides whether to go looking for a machine at all.
+    demand = demand(job)
+
     with {:ok, _credential} <- Credentials.for_job(job),
-         {:ok, worker} <- Workers.provide(demand(job), job.worker_id) do
-      assigned + assign(job, worker)
+         {:ok, worker} <- Workers.provide(demand, job.worker_id, claims) do
+      {assigned + assign(job, worker), claims}
     else
+      # A machine is being made that will hold it: this one, or one an earlier pass asked for.
+      {:creating, worker} ->
+        wait(job, :creating)
+        {assigned, claim(claims, worker.id, demand)}
+
       # Nothing in the project's pool can pay for this job: a person has to assign one, which
       # brings the ticket back by itself (`Engine.resume_placement/2`).
       {:error, {:no_credential, why}} ->
         stick(job, {:no_credential, why})
-        assigned
+        {assigned, claims}
 
       # **No template can make this job a machine**, which is a different answer from "not
       # right now" and must not be queued as one: the ticket sticks with the reason, through
@@ -102,9 +112,9 @@ defmodule Forge.Jobs.Scheduler do
       # sentence would send them at the wrong thing. Only `:at_capacity` below is a queue.
       {:error, {:no_template, why}} ->
         stick(job, {:no_template, why})
-        assigned
+        {assigned, claims}
 
-      # Being created, at capacity, or refused by the driver: the job waits and is offered again
+      # At capacity, or refused by the driver: the job waits and is offered again
       # next pass, and the pass continues to the jobs behind it. A large job can therefore be
       # jumped by small ones indefinitely, which `docs/design/provisioning.md` § The gate
       # records rather than solves — the fix is an age-based reservation and the scheduler has
@@ -115,9 +125,12 @@ defmodule Forge.Jobs.Scheduler do
       # (`docs/design/credentials.md` § How a job picks).
       {:error, reason} ->
         wait(job, reason)
-        assigned
+        {assigned, claims}
     end
   end
+
+  defp claim(claims, worker_id, %{memory: memory, cores: cores}),
+    do: Map.update(claims, worker_id, {memory, cores}, fn {m, c} -> {m + memory, c + cores} end)
 
   # A chat is not the ticket's work, so a chat that cannot be placed sticks nothing — not even a
   # ticket chat's ticket, whose own jobs may place perfectly well (a template can take workflow

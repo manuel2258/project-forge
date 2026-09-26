@@ -1008,21 +1008,90 @@ defmodule Forge.WorkersTest do
 
   describe "providing a worker" do
     test "creates a machine when there is none, and the job waits for it" do
-      %{project: project} = with_template(%{max_workers: 1})
+      # Room for more than one, so that only waiting for the first stops a second.
+      %{project: project} = with_template(%{max_workers: 4})
 
-      assert {:error, :creating} = Workers.provide(demand(memory: 1_000, project_id: project.id))
-      assert_receive {:provider_create, %{worker_id: worker_id, token: token}}
+      assert {:creating, %{id: worker_id}} =
+               Workers.provide(demand(memory: 1_000, project_id: project.id))
+
+      assert_receive {:provider_create, %{worker_id: ^worker_id, token: token}}
       assert is_binary(token)
 
       worker = Workers.get!(worker_id)
       assert worker.status == :creating
       assert worker.provider_id == "fake-" <> worker_id
 
-      # Still creating: nothing is offered, and no second machine is made.
-      assert {:error, :at_capacity} =
+      # Still creating: nothing is offered, the job waits for that one, and no second is made.
+      assert {:creating, %{id: ^worker_id}} =
                Workers.provide(demand(memory: 1_000, project_id: project.id))
 
       refute_receive {:provider_create, _opts}
+    end
+
+    # What the jobs earlier in the pass were pointed at is room a later one cannot count on,
+    # so two that fit one booting machine make one, and one that does not fit makes another.
+    test "a booting machine holds what fits after the pass's claims, and no more" do
+      %{project: project} = with_template(%{max_workers: 4, memory: 8_000, cores: 4})
+      want = demand(memory: 3_000, cores: 1, project_id: project.id)
+
+      assert {:creating, %{id: first}} = Workers.provide(want)
+      assert_receive {:provider_create, %{worker_id: ^first}}
+
+      assert {:creating, %{id: ^first}} = Workers.provide(want, nil, %{first => {3_000, 1}})
+      refute_receive {:provider_create, _opts}
+
+      # 8_000 less 6_000 claimed leaves too little memory for a third.
+      assert {:creating, %{id: second}} = Workers.provide(want, nil, %{first => {6_000, 2}})
+      assert second != first
+      assert_receive {:provider_create, %{worker_id: ^second}}
+
+      # And cores are claimed as well as memory.
+      assert {:creating, %{id: ^second}} = Workers.provide(want, nil, %{first => {0, 4}})
+    end
+
+    # A booting machine that will not take the kind is not waited for, any more than a running
+    # one would be offered it.
+    test "a booting machine that will not take the kind is not waited for" do
+      %{user: user, project: project} = with_template(%{max_workers: 4, accepts: [:workflow]})
+      assert {:creating, %{id: builds}} = Workers.provide(demand(project_id: project.id))
+
+      talks = assigned(user, project, %{accepts: [:chat]})
+
+      assert {:creating, %{id: made, template_id: from}} =
+               Workers.provide(demand(kind: :chat, project_id: project.id))
+
+      assert made != builds
+      assert from == talks.id
+    end
+
+    # A row the driver refused holds a slot against `max_workers` until it is swept, but no
+    # machine is coming to it, so a job must not wait for it.
+    test "a machine the driver refused is not waited for" do
+      %{project: project} = with_template(%{max_workers: 4})
+      want = demand(memory: 1_000, project_id: project.id)
+      Provider.Fake.refuse("no image")
+
+      assert {:error, {:create_failed, _}} = Workers.provide(want)
+      assert [%{id: refused, last_error: "no image"}] = Workers.list()
+
+      Provider.Fake.allow()
+      assert {:creating, %{id: made}} = Workers.provide(want)
+      assert made != refused
+      assert_receive {:provider_create, %{worker_id: ^made}}
+    end
+
+    # A booting machine is not waited for by a project its template does not serve.
+    test "another project's booting machine is not waited for" do
+      %{user: user, project: mine, template: template} = with_template(%{max_workers: 4})
+      {:ok, other} = Forge.Projects.register(project_attrs(), user)
+      assert {:creating, _} = Workers.provide(demand(memory: 1_000, project_id: mine.id))
+
+      assigned(user, other)
+
+      assert {:creating, %{template_id: made_from}} =
+               Workers.provide(demand(memory: 1_000, project_id: other.id))
+
+      assert made_from != template.id
     end
 
     # A machine made from a template runs on its owner's provider credential, so it serves the
@@ -1289,7 +1358,7 @@ defmodule Forge.WorkersTest do
       assert Workers.get!(worker.id).status == :destroyed
 
       # And the capacity it was holding is available again.
-      assert {:error, :creating} = Workers.provide(demand(memory: 1_000, project_id: project.id))
+      assert {:creating, _worker} = Workers.provide(demand(memory: 1_000, project_id: project.id))
     end
 
     test "a machine that never finished booting expires from when its row was made" do

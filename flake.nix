@@ -222,6 +222,11 @@
 
       # systemd-repart writes a raw image. The driver boots a qcow2 and overlays it, so the
       # conversion happens once here rather than on every machine.
+      #
+      # Before it, Limine's BIOS boot code goes into the MBR and its second stage into the BIOS
+      # boot partition, which repart made and cannot fill: a Hetzner x86 server boots SeaBIOS,
+      # and without this the image hangs at the firmware (nix/worker-image.nix). The partition
+      # is found by its type, so the order repart writes partitions in is not load-bearing.
       workerImage = system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
@@ -229,20 +234,36 @@
         in
         pkgs.runCommand "forge-worker-image"
           {
-            nativeBuildInputs = [ pkgs.qemu-utils ];
+            nativeBuildInputs = [ pkgs.qemu-utils pkgs.limine pkgs.util-linux pkgs.jq ];
             passthru.nixos = nixos;
           }
           ''
+            cp ${nixos.config.system.build.image}/${nixos.config.image.filePath} raw.img
+            chmod u+w raw.img
+
+            index=$(sfdisk --json raw.img | jq -r '
+              .partitiontable.partitions
+              | to_entries[]
+              | select(.value.type == "21686148-6449-6E6F-744E-656564454649")
+              | .key + 1')
+            [ -n "$index" ] || { echo "the image has no BIOS boot partition" >&2; exit 1; }
+
+            limine bios-install raw.img "$index"
+
             mkdir -p $out
-            qemu-img convert -f raw -O qcow2 \
-              ${nixos.config.system.build.image}/${nixos.config.image.filePath} \
-              $out/forge-worker.qcow2
+            qemu-img convert -f raw -O qcow2 raw.img $out/forge-worker.qcow2
           '';
     in
     {
       packages = forAllSystems (pkgs: let out = perSystem pkgs; in out.packages);
       devShells = forAllSystems (pkgs: let out = perSystem pkgs; in out.devShells);
       formatter = forAllSystems (pkgs: pkgs.nixpkgs-fmt);
+
+      # Needs KVM, which `bin/check` cannot assume; see nix/worker-image-boots.nix.
+      checks.x86_64-linux.worker-image-boots = import ./nix/worker-image-boots.nix {
+        pkgs = nixpkgs.legacyPackages.x86_64-linux;
+        image = self.packages.x86_64-linux.worker-image;
+      };
 
       # `services.forge` for a NixOS host; the package defaults to this flake's release.
       nixosModules.forge = { pkgs, ... }: {

@@ -620,6 +620,69 @@ defmodule Forge.FlowTest do
     assert Tickets.get!(ticket.id).status == :active
   end
 
+  # **One queued chat, one machine.** A machine being made is not assignable, so the chat is
+  # still pending on every pass until it boots — and each of those passes used to make another,
+  # until the template's `max_workers` stopped it (`docs/design/provisioning.md` § The gate).
+  test "a job waiting for a machine being made does not make another on the next pass", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    Forge.Provider.Fake.watch()
+    Registry.unregister(Forge.Workers.Registry, worker.id)
+
+    {:ok, template} =
+      Forge.Provisioning.create_template(user, %{
+        name: "four-at-most",
+        provider: "fake",
+        memory: 64 * 1024 * 1024 * 1024,
+        cores: 64,
+        max_workers: 4
+      })
+
+    {:ok, _} = Forge.Provisioning.assign(user, template.id, project.id)
+    chat = chat_fixture(%{project: project})
+    start_supervised!(Forge.Jobs.Scheduler)
+
+    for _pass <- 1..3, do: assert(Forge.Jobs.Scheduler.tick() == 0)
+
+    assert_receive {:provider_create, _opts}
+    refute_receive {:provider_create, _opts}
+    assert Forge.Provisioning.live_count(template) == 1
+    assert waits_and_starts(chat) == ["creating"]
+  end
+
+  # Within one pass the jobs ahead count against a booting machine, so what it cannot also hold
+  # makes another — and the next pass divides them the same way and makes none.
+  test "jobs queued together make as many machines as they need and no more", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    Forge.Provider.Fake.watch()
+    Registry.unregister(Forge.Workers.Registry, worker.id)
+    %{memory: memory} = Jobs.default_resources()
+
+    {:ok, template} =
+      Forge.Provisioning.create_template(user, %{
+        name: "two-chats-each",
+        provider: "fake",
+        memory: 2 * memory,
+        cores: 64,
+        max_workers: 4
+      })
+
+    {:ok, _} = Forge.Provisioning.assign(user, template.id, project.id)
+    for _chat <- 1..3, do: chat_fixture(%{project: project})
+    start_supervised!(Forge.Jobs.Scheduler)
+
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert Forge.Provisioning.live_count(template) == 2
+
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert Forge.Provisioning.live_count(template) == 2
+  end
+
   # Everything in the pool rate-limited is the other answer, and must not be mistaken for the
   # first: time resolves it, so the ticket stays active rather than asking a person for something,
   # and — as with an empty pool — no machine is made for a job that could not start on it.
@@ -1161,10 +1224,19 @@ defmodule Forge.FlowTest do
     job = only_pending(ticket)
     start_supervised!(Forge.Jobs.Scheduler)
 
-    # The template makes a machine, and while it boots the template is at its ceiling.
+    # The template makes a machine, and while it boots the job waits for that one.
     assert Forge.Jobs.Scheduler.tick() == 0
     assert waits_and_starts(job) == ["creating"]
     assert Jobs.current_wait(Jobs.get!(job.id)) |> Events.summary() =~ "one is being made"
+
+    # Asked again while it boots, the answer is the same, and nothing is written.
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert waits_and_starts(job) == ["creating"]
+
+    # The machine reports ready and drops out of touch: it is no longer being made, and it
+    # still fills the template's ceiling — a changed reason, and another event.
+    [booted] = Forge.Workers.list() |> Enum.filter(&(&1.template_id == template.id))
+    {:ok, _} = Forge.Workers.ready(booted, %{"memory_budget" => 64_000_000_000})
     assert Forge.Jobs.Scheduler.tick() == 0
     assert waits_and_starts(job) == ["creating", "at_capacity"]
 
@@ -1329,7 +1401,7 @@ defmodule Forge.FlowTest do
     # is compared with is that job's own latest, not the ticket's: read by ticket, each pass
     # found the other job's reason, took it for a change, and wrote its own again.
     job = Enum.find(Jobs.for_ticket(ticket.id), &(&1.status == :pending))
-    assert waits_and_starts(job) == ["creating", "at_capacity"]
+    assert waits_and_starts(job) == ["creating"]
     assert waits_and_starts(chat) == ["none_fit"]
   end
 

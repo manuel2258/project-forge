@@ -55,6 +55,13 @@ in
   # An appliance image: no system profile, nothing to `nixos-rebuild`. The bootloader is
   # installed by putting systemd-boot and one unified kernel image into the ESP, because the
   # image is built offline and there is no machine to run an installer on.
+  #
+  # **And Limine, for BIOS.** A Hetzner x86 server boots SeaBIOS, which runs the MBR's boot code
+  # and nothing else; a UEFI-only image has none and hangs at "Booting from Hard Disk...". So the
+  # ESP also holds Limine's config and second stage, and the same kernel, initrd and command
+  # line the unified image carries. `flake.nix` writes the MBR and the BIOS boot partition with
+  # `limine bios-install`, which is the one step repart cannot do. UEFI never reads any of it.
+  # See docs/design/worker-tier.md § The worker image.
   boot.loader.grub.enable = false;
   boot.loader.timeout = 0;
 
@@ -66,6 +73,18 @@ in
     compression.enable = false;
 
     partitions = {
+      # Where `limine bios-install` puts its second stage: GPT leaves no gap after the MBR for
+      # one, so a BIOS machine's boot code needs a partition of its own to jump to. Unformatted,
+      # and named so it sorts first: `flake.nix` finds it by type rather than by position.
+      bios-boot = {
+        repartConfig = {
+          Type = "21686148-6449-6e6f-744e-656564454649";
+          Label = "bios-boot";
+          SizeMinBytes = "1M";
+          SizeMaxBytes = "1M";
+        };
+      };
+
       esp = {
         contents =
           let
@@ -76,6 +95,24 @@ in
               "${config.systemd.package}/lib/systemd/boot/efi/systemd-boot${efiArch}.efi";
             "/EFI/Linux/${config.system.boot.loader.ukiFile}".source =
               "${config.system.build.uki}/${config.system.boot.loader.ukiFile}";
+
+            # The BIOS path. The command line is the unified image's own, so the two firmwares
+            # boot the same system with the same parameters.
+            "/limine/limine-bios.sys".source = "${pkgs.limine}/share/limine/limine-bios.sys";
+            "/limine/kernel".source =
+              "${config.system.build.kernel}/${config.system.boot.loader.kernelFile}";
+            "/limine/initrd".source =
+              "${config.system.build.initialRamdisk}/${config.system.boot.loader.initrdFile}";
+            "/limine/limine.conf".source = pkgs.writeText "limine.conf" ''
+              timeout: 0
+              serial: yes
+
+              /forge-worker
+                  protocol: linux
+                  path: boot():/limine/kernel
+                  module_path: boot():/limine/initrd
+                  cmdline: ${config.boot.uki.settings.UKI.Cmdline}
+            '';
           };
 
         repartConfig = {

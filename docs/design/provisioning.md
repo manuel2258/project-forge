@@ -204,6 +204,20 @@ Open is where it waits. **A pass is the ten oldest pending jobs** (`Jobs.pending
 conversations in a project with no template or no credential, jobs waiting out a week's limit — are
 the whole of every pass, and nothing younger on the node is offered at all. § Open records it.
 
+**A machine being made is capacity already asked for.** A `creating` worker is not assignable,
+so a job that asked for one is still pending on the next pass two seconds later — and when that
+pass only asked `assignable/…`, it made another machine, and another, until the template's
+`max_workers` stopped it: one queued chat, four machines. So between *assignable* and *create*,
+`Workers.provide/3` asks whether a `creating` machine this project may use would hold the job,
+and the job waits for it (`creating`) rather than making another. What each booting machine will
+hold is its template's figures less what the jobs ahead of this one in the same pass have already
+been pointed at it, which the scheduler carries through the pass; it starts empty every pass, and
+the jobs keep their queue order, so each pass arrives at the same division. Two jobs that fit one
+machine make one machine, and a third that does not fit makes a second. The harness is not asked
+of a booting machine, because it has not reported one — the same reason template selection does
+not ask it. A row the driver refused carries `last_error` and is not waited for: it is holding a
+slot against `max_workers`, not booting.
+
 **The skip is recorded, once per reason.** The alternative is a job that never runs and no surface
 saying why, which is what there was: `Scheduler` dropped the reason on the floor, with no event, log
 line or count. A pending job the pass cannot place now gets a `job.waiting` event carrying the

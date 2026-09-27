@@ -8,9 +8,11 @@ defmodule Forge.Jobs.Job do
   use Ecto.Schema
   import Ecto.Changeset
 
-  @statuses [:pending, :running, :waiting, :hibernated, :finished]
+  # `:parked` is a job waiting on commands it invoked: it holds no slice, unlike `:waiting`, and
+  # is live for its ticket (`docs/design/commands.md` § Always park).
+  @statuses [:pending, :running, :waiting, :parked, :hibernated, :finished]
   @outcomes [:converged, :did_not_converge, :budget_exhausted, :error, :cancelled]
-  @kinds [:workflow, :chat]
+  @kinds [:workflow, :chat, :command]
 
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id
@@ -33,6 +35,8 @@ defmodule Forge.Jobs.Job do
     field :status, Ecto.Enum, values: @statuses, default: :pending
     field :outcome, Ecto.Enum, values: @outcomes
     field :declared_outcome, :string
+    # A command's exit status; nil for every other kind, and for a command that ended without one.
+    field :exit_status, :integer
     field :turns, :integer, default: 0
     field :cost_usd, :decimal, default: Decimal.new(0)
     field :harness_session_id, :string
@@ -99,7 +103,7 @@ defmodule Forge.Jobs.Job do
   defp validate_shape(changeset) do
     case get_field(changeset, :kind) do
       :chat -> validate_absent(changeset, [:state, :spec])
-      _workflow -> validate_required(changeset, [:ticket_id, :state, :spec])
+      _workflow_or_command -> validate_required(changeset, [:ticket_id, :state, :spec])
     end
   end
 
@@ -127,7 +131,8 @@ defmodule Forge.Jobs.Job do
       :worker_id,
       :credential_id,
       :started_at,
-      :finished_at
+      :finished_at,
+      :exit_status
     ])
     |> validate_required([:status])
     |> validate_number(:turns, greater_than_or_equal_to: 0)

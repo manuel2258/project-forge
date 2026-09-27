@@ -21,6 +21,8 @@ defmodule ForgeWorker.Job.Runner do
     * `:extra_env` - additional `{name, value}` pairs for the process environment.
     * `:backlog` - the project's tickets, as the platform composed them at assignment. Written
       to `tickets/` in the job directory; see `ForgeWorker.Job.Dir.prepare/3`.
+    * `:command_logs` - `[{file, path}]`, the logs of the commands a parked job invoked, copied
+      to `commands/` in the job directory; see `ForgeWorker.Job.Dir.prepare/3`.
     * `:head` - the commit the worktree is at. Named in the continuation a resumed run is
       handed; see `ForgeCore.Prompt.continuation/3`.
     * `:hold_prompt` - streaming only. When true nothing is delivered at start: the composed
@@ -41,7 +43,7 @@ defmodule ForgeWorker.Job.Runner do
 
   alias ForgeCore.Job.{Outcome, Result, Spec}
   alias ForgeCore.Prompt
-  alias ForgeWorker.Job.Dir
+  alias ForgeWorker.Job.{Dir, Exec}
 
   require Logger
 
@@ -120,7 +122,8 @@ defmodule ForgeWorker.Job.Runner do
     job_dir =
       Dir.prepare(Keyword.fetch!(opts, :root), spec,
         resume: resume?,
-        backlog: Keyword.get(opts, :backlog)
+        backlog: Keyword.get(opts, :backlog),
+        command_logs: Keyword.get(opts, :command_logs, [])
       )
 
     # Held, the prompt is composed when the message it opens with arrives, and written then:
@@ -191,12 +194,12 @@ defmodule ForgeWorker.Job.Runner do
   @impl true
   def handle_continue({:spawn, opts}, %{spec: spec, job_dir: job_dir, harness: harness} = state) do
     {executable, args, env} = harness.command(spec, job_dir, Keyword.get(opts, :harness_opts, []))
-    {executable, args} = maybe_nix(executable, args, spec, Keyword.get(opts, :nix_env, false))
+    {executable, args} = Exec.nix(executable, args, spec.env, Keyword.get(opts, :nix_env, false))
 
     # The environment is composed before the slice is made, not after, because a slice that
     # starts the process somewhere else has to be told what it is.
     {plain, secrets} = split_env(env ++ Keyword.get(opts, :extra_env, []))
-    plain = inherited_env() ++ [{"HOME", Dir.home_dir(job_dir)}] ++ plain
+    plain = Exec.inherited_env() ++ [{"HOME", Dir.home_dir(job_dir)}] ++ plain
 
     case slice(opts, spec, job_dir, plain, secrets) do
       {:ok, slice, context} ->
@@ -316,19 +319,6 @@ defmodule ForgeWorker.Job.Runner do
     end)
   end
 
-  @inherited ~w(PATH LANG LC_ALL TERM TMPDIR SSL_CERT_FILE NIX_SSL_CERT_FILE NIX_PATH NIX_REMOTE
-                NIX_CONFIG HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy)
-
-  defp inherited_env do
-    for key <- @inherited, value = System.get_env(key), do: {key, value}
-  end
-
-  defp maybe_nix(executable, args, %Spec{env: env}, true) when is_binary(env) do
-    {"nix", ["develop", ".##{env}", "--command", executable | args]}
-  end
-
-  defp maybe_nix(executable, args, _spec, _nix), do: {executable, args}
-
   # -- calls --------------------------------------------------------------------------------
 
   @impl true
@@ -434,7 +424,7 @@ defmodule ForgeWorker.Job.Runner do
   def handle_info(:wall_clock, state), do: {:noreply, state}
 
   def handle_info(:force_kill, %{port: port, result: nil} = state) do
-    signal(port, "KILL")
+    Exec.signal(port, "KILL")
     {:noreply, state}
   end
 
@@ -542,7 +532,7 @@ defmodule ForgeWorker.Job.Runner do
   # -- ending -------------------------------------------------------------------------------
 
   defp kill(%{killed: nil, port: port} = state, reason) do
-    signal(port, "TERM")
+    Exec.signal(port, "TERM")
     Process.send_after(self(), :force_kill, state.grace_ms)
     # A harness that already produced its result finished on its own; the signal only
     # hurries the exit and must not relabel the outcome. That holds for a single-turn run,
@@ -555,19 +545,6 @@ defmodule ForgeWorker.Job.Runner do
   end
 
   defp kill(state, _reason), do: state
-
-  # The wrapper shell is a process group leader, so signalling the negative pid reaches the
-  # harness and everything it spawned. Killing only the leader would leave children holding
-  # the output pipe open and the port would never report an exit.
-  defp signal(port, name) do
-    case Port.info(port, :os_pid) do
-      {:os_pid, os_pid} ->
-        System.cmd("kill", ["-#{name}", "--", "-#{os_pid}"], stderr_to_stdout: true)
-
-      nil ->
-        :ok
-    end
-  end
 
   defp conclude(%{spec: spec, job_dir: job_dir} = state) do
     collected = Dir.collect(job_dir, spec)
@@ -604,8 +581,17 @@ defmodule ForgeWorker.Job.Runner do
       harness: harness_summary(started, finished, state.exit_status, state.rate_limit)
     }
 
-    decide(state, spec, run, base)
+    state |> decide(spec, run, base) |> stage(state)
   end
+
+  # A finished run's groups of files, copied out for the link to upload
+  # (`docs/design/job-prompt.md` § Groups of files). Only a finished one's: a run that parks or
+  # stops on a question keeps `out/` for its resume, and the run that finishes is the one whose
+  # files count.
+  defp stage(%Result{status: :finished} = result, %{spec: spec, job_dir: job_dir}),
+    do: ForgeWorker.Job.Blobs.stage(result, job_dir, Spec.group_outputs(spec))
+
+  defp stage(result, _state), do: result
 
   # A conversation has no outcome, ever, and nothing asks it for one: there is no state to leave
   # and no transition to select. Running `Outcome.decide/2` over it would invent a `declared`
@@ -614,7 +600,37 @@ defmodule ForgeWorker.Job.Runner do
   # belonging at the one place jobs complete.
   defp decide(%{mode: :streaming}, _spec, _run, base), do: base
 
-  defp decide(_state, spec, run, base) do
+  # A run that asked for commands is parked, not finished: nothing it wrote is collected as
+  # final and no outcome is decided, because it has not stopped working — it is waiting on a
+  # build (`docs/design/commands.md` § How an agent invokes). Only a run that ended cleanly may
+  # park: one the platform killed, or one the harness stopped for its budget or an error, is over
+  # whatever it asked for. And only a job whose state may invoke; any other's `invoke.json` is
+  # removed unread, so a stray file cannot turn a finished run into a round of refusals.
+  defp decide(state, spec, run, base) do
+    case invocations(state.job_dir, spec, run) do
+      :none -> outcome(spec, run, base)
+      {:ok, invocations} -> %{base | status: :parked, invocations: invocations}
+      {:error, reason} -> %{base | status: :parked, invocation_error: reason}
+    end
+  end
+
+  defp invocations(job_dir, %Spec{may_invoke: grants}, run) do
+    # `run.killed == nil` is an equivalent mutant here: a run that invokes is a single-turn run,
+    # and `kill/2` leaves `killed` nil on one that already has its result — so a killed run is
+    # one with no result, which `run.result != nil` already refuses. Kept for what it says.
+    clean? =
+      run.killed == nil and run.result != nil and run.result.subtype == "success" and
+        not run.result.is_error
+
+    if clean? and map_size(grants) > 0 do
+      Dir.invocations(job_dir)
+    else
+      File.rm_rf(Dir.invoke_path(job_dir))
+      :none
+    end
+  end
+
+  defp outcome(spec, run, base) do
     case Outcome.decide(spec, run) do
       {:waiting, questions} ->
         %{base | status: :waiting, questions: questions}

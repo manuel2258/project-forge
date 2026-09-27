@@ -645,9 +645,13 @@ destruction collected them. Each has a rule, and the rules are retention rather 
 purpose: a worker cannot always tell whether a job will be resumed, and a sweep that only has to
 know an age is a sweep that cannot get that wrong.
 
-- **Job directories.** `<root>/jobs/<job_id>` holds the prompt, stderr, the transcripts and the
-  agent's private `HOME` — which is where Claude Code keeps the session a resume needs, so it
-  cannot simply go when the job ends. Directories untouched for `job_retention_ms` are removed
+- **Job directories.** `<root>/jobs/<job_id>` holds the prompt, stderr and the agent's private
+  `HOME` — which is where Claude Code keeps the session a resume needs, so it cannot simply go
+  when the job ends. Beside it, `<root>/jobs/<job_id>.worker` holds what the worker writes and
+  reads back: the transcripts, a command's log, the groups of files staged for upload. Not inside
+  the job directory, whose every name the job's Unix user owns and could replace with a link to a
+  file only the worker may read, which the worker would then upload; mode 0700, so no other job
+  reads it either. Both are swept together. Directories untouched for `job_retention_ms` are removed
   when a job finishes, which is a moment the worker is already doing filesystem work. A crash
   leaves nothing behind that the next job's sweep will not collect.
 - **Ticket volumes.** `<root>/volumes/ticket/<n>`, one per ticket this machine has run a job for
@@ -775,7 +779,7 @@ ticket.
   single number cost something: a command declaring the same 2.2 GiB as a prose-refining agent is
   the gate doing nothing. What stays open is evidence: nothing has shown that a refine job and a
   build job need different ceilings, `slice_bytes` is still what a workflow job declaring nothing
-  gets, and `resources` on a command waits for commands.
+  gets. `resources` on a command is built with commands.
 - **The 2 GiB reserve is traced to nothing.** `ForgeWorker.Config`'s `@reserve` is what a worker
   holds back from `memory_budget` for the system and the Nix daemon, and unlike every other
   constant here it has no measurement behind it, no comment, and no note. It is a fixed tax per

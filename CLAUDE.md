@@ -40,9 +40,18 @@ from: resources declared per job, a gate on kind as well as memory and cores, wo
 a recipe the platform creates from, per-user provider credentials, and a driver registry in place
 of one global provider. It supersedes the single `slice_bytes` gate in
 `docs/design/worker-tier.md` § Scheduling and is read together with `docs/design/commands.md`,
-which holds the grammar half. **It is built**, apart from `resources` on a *command*, which
-waits for commands to be a job kind. The Hetzner driver has created and destroyed real Hetzner
-machines; none has yet connected to a platform and run a job.
+which holds the grammar half. **It is built**, `resources` on a *command* included. The Hetzner
+driver has created and destroyed real Hetzner machines; none has yet connected to a platform and
+run a job.
+
+`docs/design/commands.md` is the standard for commands: a fixed script a workflow declares once,
+run as a job of its own — by a command state on entry, its exit statuses mapped to an outcome, or
+by an agent that writes `$FORGE_JOB/invoke.json` and parks until its commands are done. **It is
+built**, and so are groups of files (`name/*` in `produces`, for an agent or a command): each file a
+blob on the ticket, uploaded under a prefix token of the job's own, and downloaded rather than shown
+unless it is small text. What a real build looks like on a real command pool is unobserved here:
+the worker's side is tested against scripts in a temporary directory, not against `nix develop` on
+a machine.
 
 ## Layout
 

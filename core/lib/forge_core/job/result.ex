@@ -28,6 +28,22 @@ defmodule ForgeCore.Job.Result do
     :transcript_path,
     :transcript,
     :stderr_path,
+    # A parked run: the commit it pushed before it stopped, which every command it asked for runs
+    # against (`docs/design/commands.md` § The ensured commit), and a file it wrote that could not
+    # be read as invocations.
+    :commit,
+    :invocation_error,
+    # A command's run: the store key its combined output was uploaded to, and how long it took.
+    :log,
+    :duration_ms,
+    # What a parked run asked to invoke: `%{"command" => name, "args" => [string]}` each.
+    invocations: [],
+    # A run's groups of files, by artifact name (`package/app.tar.gz`): `%{"key", "size"}` once
+    # uploaded — or `%{"path"}`, the worker's own staged copy, between collecting and uploading,
+    # which the worker replaces before the result leaves it. And the files that could not be
+    # kept, with why (`docs/design/job-prompt.md` § Groups of files).
+    blobs: %{},
+    invalid_blobs: %{},
     questions: [],
     documents: %{},
     invalid: %{},
@@ -50,7 +66,14 @@ defmodule ForgeCore.Job.Result do
   ]
 
   @type t :: %__MODULE__{
-          status: :waiting | :finished,
+          status: :waiting | :finished | :parked,
+          commit: String.t() | nil,
+          invocation_error: String.t() | nil,
+          log: String.t() | nil,
+          duration_ms: non_neg_integer() | nil,
+          invocations: [%{String.t() => term()}],
+          blobs: %{String.t() => %{String.t() => term()}},
+          invalid_blobs: %{String.t() => String.t()},
           outcome: ForgeCore.Job.Outcome.outcome() | nil,
           declared_outcome: String.t() | nil,
           reason: String.t() | nil,
@@ -90,7 +113,14 @@ defmodule ForgeCore.Job.Result do
       "proposals" =>
         Map.new(result.proposals, fn {name, proposal} -> {name, proposal_to_map(proposal)} end),
       "invalid_proposals" => result.invalid_proposals,
-      "harness" => result.harness
+      "harness" => result.harness,
+      "commit" => result.commit,
+      "invocation_error" => result.invocation_error,
+      "invocations" => result.invocations,
+      "log" => result.log,
+      "duration_ms" => result.duration_ms,
+      "blobs" => result.blobs,
+      "invalid_blobs" => result.invalid_blobs
     }
   end
 
@@ -109,23 +139,35 @@ defmodule ForgeCore.Job.Result do
       transcript: get.(:transcript),
       transcript_path: get.(:transcript_path),
       stderr_path: get.(:stderr_path),
-      questions: Enum.map(get.(:questions) || [], &question_from_map/1),
+      questions: Enum.map(or_default(get, :questions, []), &question_from_map/1),
       documents:
-        Map.new(get.(:documents) || %{}, fn {name, doc} -> {name, doc_from_map(doc)} end),
-      invalid: get.(:invalid) || %{},
-      missing: get.(:missing) || [],
-      undeclared: get.(:undeclared) || [],
+        Map.new(or_default(get, :documents, %{}), fn {name, doc} -> {name, doc_from_map(doc)} end),
+      invalid: or_default(get, :invalid, %{}),
+      missing: or_default(get, :missing, []),
+      undeclared: or_default(get, :undeclared, []),
       proposals:
-        Map.new(get.(:proposals) || %{}, fn {name, p} -> {name, proposal_from_map(p)} end),
-      invalid_proposals: get.(:invalid_proposals) || %{},
-      harness: get.(:harness) || %{}
+        Map.new(or_default(get, :proposals, %{}), fn {name, p} -> {name, proposal_from_map(p)} end),
+      invalid_proposals: or_default(get, :invalid_proposals, %{}),
+      harness: or_default(get, :harness, %{}),
+      commit: get.(:commit),
+      invocation_error: get.(:invocation_error),
+      invocations: or_default(get, :invocations, []),
+      log: get.(:log),
+      duration_ms: get.(:duration_ms),
+      blobs: or_default(get, :blobs, %{}),
+      invalid_blobs: or_default(get, :invalid_blobs, %{})
     }
   end
+
+  # A key the map leaves out comes back as its empty value, never nil: every caller folds over it.
+  # A function rather than `||` inline, which Credo counts as a branch each.
+  defp or_default(get, key, default), do: get.(key) || default
 
   # `status` decides what the platform does with the row, so an unrecognised one is a bug to
   # hear about rather than a value to carry.
   defp status(status) when status in ["waiting", :waiting], do: :waiting
   defp status(status) when status in ["finished", :finished], do: :finished
+  defp status(status) when status in ["parked", :parked], do: :parked
   defp status(other), do: raise(ArgumentError, "unknown job result status: #{inspect(other)}")
 
   # Atoms are listed rather than converted: `String.to_existing_atom/1` would depend on what
@@ -157,10 +199,10 @@ defmodule ForgeCore.Job.Result do
     get = fn key -> Map.get(doc, to_string(key), Map.get(doc, key)) end
 
     %Document{
-      front_matter: get.(:front_matter) || %{},
+      front_matter: or_default(get, :front_matter, %{}),
       outcome: get.(:outcome),
       body: get.(:body) || "",
-      questions: Enum.map(get.(:questions) || [], &question_from_map/1),
+      questions: Enum.map(or_default(get, :questions, []), &question_from_map/1),
       raw: get.(:raw) || ""
     }
   end
@@ -188,7 +230,7 @@ defmodule ForgeCore.Job.Result do
       key: get.(:key),
       text: get.(:text),
       anchor: get.(:anchor),
-      options: get.(:options) || [],
+      options: or_default(get, :options, []),
       default: get.(:default),
       blocking: get.(:blocking) || false,
       assumption: get.(:assumption),

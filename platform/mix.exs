@@ -35,7 +35,7 @@ defmodule Forge.MixProject do
       # at random is a gate people learn to re-run — so 87 it is, and the next raise waits until
       # the *lowest* observed figure clears 88 by more than that spread.
       test_coverage: [
-        summary: [threshold: 87],
+        summary: [threshold: 88],
         ignore_modules: [
           Forge.AccountsFixtures,
           Forge.DataCase,

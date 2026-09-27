@@ -703,7 +703,8 @@ defmodule Forge.Workers do
           required(:memory) => non_neg_integer(),
           required(:cores) => non_neg_integer(),
           optional(:project_id) => String.t() | nil,
-          optional(:harness) => String.t() | nil
+          optional(:harness) => String.t() | nil,
+          optional(:protocol) => non_neg_integer()
         }
 
   @doc """
@@ -718,8 +719,8 @@ defmodule Forge.Workers do
   (`docs/design/provisioning.md` § Affinity on resume). When that machine is gone, or full, or
   will not take the kind, any other that fits is taken instead — which is what makes this free.
   """
-  @spec assignable(demand(), String.t() | nil) :: Worker.t() | nil
-  def assignable(demand, preferred \\ nil) do
+  @spec assignable(demand(), String.t() | nil, MapSet.t()) :: Worker.t() | nil
+  def assignable(demand, preferred \\ nil, reserved \\ MapSet.new()) do
     # Idle is the most assignable state there is: it means the machine is up with nothing to
     # do. It is only a step towards destruction if nothing arrives before the period is up.
     candidates =
@@ -729,10 +730,30 @@ defmodule Forge.Workers do
       )
       |> Repo.all()
       # One pass, and `and` short-circuits: `fits?/2` asks the database what a worker is
-      # holding, and a worker nothing can reach is not worth asking about.
-      |> Enum.filter(&(connected?(&1.id) and fits?(&1, demand)))
+      # holding, and a worker nothing can reach is not worth asking about. A machine held for an
+      # older job is not offered at all (`docs/design/provisioning.md` § The gate).
+      |> Enum.filter(
+        &(not MapSet.member?(reserved, &1.id) and connected?(&1.id) and fits?(&1, demand))
+      )
 
     Enum.find(candidates, &(&1.id == preferred)) || List.first(candidates)
+  end
+
+  @doc """
+  The machines that could hold `demand` once empty: serving its project, taking its kind, running
+  its harness, speaking its protocol, and with the memory and cores it asks for in total. What a
+  job that has waited long enough reserves (`docs/design/provisioning.md` § The gate), so the room
+  that frees up on them goes to it and not to younger work.
+  """
+  @spec holders(demand()) :: MapSet.t()
+  def holders(demand) do
+    # The status filter is an equivalent mutant: a machine in any other state is not assignable
+    # either, so holding it back from younger jobs changes nothing. It keeps the set to machines
+    # that could empty.
+    from(w in serving(demand[:project_id]), where: w.status in [:ready, :busy, :idle])
+    |> Repo.all()
+    |> Enum.filter(&holds_when_empty?(&1, demand))
+    |> MapSet.new(& &1.id)
   end
 
   @doc """
@@ -773,13 +794,20 @@ defmodule Forge.Workers do
   """
   @spec fits?(Worker.t(), demand()) :: boolean()
   def fits?(%Worker{} = worker, demand) do
-    with true <- accepts?(worker, demand.kind),
-         true <- runs?(worker, demand[:harness]) do
+    with true <- takes?(worker, demand) do
       {memory, reserved} = promised(worker.id)
 
       (worker.memory_budget || 0) - memory >= demand.memory and
         room_for_cores?(worker, reserved, demand.cores)
     end
+  end
+
+  # What the demand is, against what the machine is — its kind, protocol and harness — as against
+  # how big it is. One conjunction for `fits?/2` and `holds_when_empty?/2`, so a gate dimension
+  # added to one is in the other.
+  defp takes?(%Worker{} = worker, demand) do
+    accepts?(worker, demand.kind) and speaks?(worker, demand[:protocol]) and
+      runs?(worker, demand[:harness])
   end
 
   # **A worker that has not said how many cores it has is not gated on cores**, for the same
@@ -827,6 +855,17 @@ defmodule Forge.Workers do
     do: true
 
   def runs?(%Worker{}, _harness), do: false
+
+  @doc """
+  Whether this worker speaks at least `protocol`: what it said at its last join, and nothing for a
+  worker that has not said. A command reaching a release from before commands would be run as an
+  agent job (`docs/design/commands.md` § Worker pools), so unknown is not enough here — unlike
+  `accepts?/2`, where an old release taking anything was the safe reading.
+  """
+  @spec speaks?(Worker.t(), non_neg_integer() | nil) :: boolean()
+  def speaks?(%Worker{}, need) when need in [nil, 0], do: true
+  def speaks?(%Worker{protocol: protocol}, need) when is_integer(protocol), do: protocol >= need
+  def speaks?(%Worker{}, _need), do: false
 
   @doc "Memory not already promised to a job on this worker."
   @spec remaining(Worker.t()) :: integer()
@@ -883,10 +922,10 @@ defmodule Forge.Workers do
   asked before a new one is made**: a `creating` worker is not assignable, and without this
   every pass until it booted made another, up to the template's `max_workers`.
   """
-  @spec provide(demand(), String.t() | nil, claims()) ::
+  @spec provide(demand(), String.t() | nil, claims(), MapSet.t()) ::
           {:ok, Worker.t()} | {:creating, Worker.t()} | {:error, :at_capacity | term()}
-  def provide(demand, preferred \\ nil, claims \\ %{}) do
-    with nil <- assignable(demand, preferred),
+  def provide(demand, preferred \\ nil, claims \\ %{}, reserved \\ MapSet.new()) do
+    with nil <- assignable(demand, preferred, reserved),
          nil <- booting(demand, claims) do
       make_machine(demand)
     else
@@ -1008,9 +1047,10 @@ defmodule Forge.Workers do
     |> Enum.any?(&holds_when_empty?(&1, demand))
   end
 
+  # Every dimension of `fits?/2` but the room: a machine that could never speak the job's protocol
+  # is no more a queue for it than one too small, and waiting on it is waiting for ever.
   defp holds_when_empty?(%Worker{} = worker, demand) do
-    accepts?(worker, demand.kind) and runs?(worker, demand[:harness]) and
-      (worker.memory_budget || 0) >= demand.memory and
+    takes?(worker, demand) and (worker.memory_budget || 0) >= demand.memory and
       (is_nil(worker.cores) or worker.cores >= demand.cores)
   end
 

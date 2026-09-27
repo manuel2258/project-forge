@@ -47,6 +47,128 @@ defmodule ForgeCore.PromptTest do
     assert manifest =~ "- Turns: 40\n- Cost: 2.0 USD"
   end
 
+  # `docs/design/job-prompt.md` § Commands: a job is told what it may run and how to ask, and a
+  # resumed one what came back — in the manifest, so a cold start knows too.
+  describe "commands" do
+    test "a job that may invoke is told what, how many remain, and how to ask" do
+      spec = %{
+        spec()
+        | may_invoke: %{
+            "test" => %{"max" => 20, "concurrent" => 4, "remaining" => 17},
+            "build" => %{"max" => 40, "concurrent" => nil}
+          }
+      }
+
+      manifest = Prompt.manifest(spec, "/j")
+
+      assert manifest =~ "## Commands you may run"
+
+      assert manifest =~
+               "- `build`: 40 of 40 invocations left\n- `test`: 17 of 20 invocations left, at most 4 at once"
+
+      assert manifest =~ "write `/j/invoke.json`"
+      assert manifest =~ ~s([{"command": "build", "args": ["--release"]}, {"command": "test"}])
+    end
+
+    test "a group of files is told where its files go and what they are kept as" do
+      manifest = Prompt.manifest(%{spec() | produces: ["plan.md", "shots/*"]}, "/j")
+
+      assert manifest =~
+               "- `shots/*` -> any number of files in `/j/out/shots/`, each kept as `shots/<file>`"
+    end
+
+    test "a job that may not invoke is not told the file exists" do
+      manifest = Prompt.manifest(spec(), "/j")
+      refute manifest =~ "invoke.json"
+      refute manifest =~ "Commands you"
+    end
+
+    test "a resumed job is told what each command did, and where its log is" do
+      results = [
+        %{
+          "command" => "build",
+          "args" => ["--release", "a b"],
+          "at" => String.duplicate("c", 40),
+          "exit_status" => 0,
+          "outcome" => "converged",
+          "duration_ms" => 42_300,
+          "log" => "1-build.log"
+        },
+        %{
+          "command" => "test",
+          "args" => [],
+          "exit_status" => nil,
+          "outcome" => "error",
+          "log" => "2-test.log"
+        },
+        %{"command" => "bench", "args" => [], "outcome" => "cancelled"},
+        %{"command" => "lint", "args" => [], "refused" => "this state may not run lint"}
+      ]
+
+      manifest = Prompt.manifest(%{spec() | command_results: results}, "/j")
+
+      assert manifest =~
+               "- `build` `[\"--release\",\"a b\"]` at `cccccccccccc`: exit 0 in 42s; log `/j/commands/1-build.log`"
+
+      assert manifest =~
+               "- `test`: no exit status — it outlived its timeout or could not be run; log `/j/commands/2-test.log`"
+
+      assert manifest =~ "- `bench`: cancelled before it finished"
+      assert manifest =~ "- `lint`: refused — this state may not run lint"
+    end
+  end
+
+  # `docs/design/job-prompt.md` § How the job arrived: a job sent back has to be told by what, and
+  # a person's note on the way is the reason itself.
+  describe "how the job arrived" do
+    test "names the state, the outcome and who took it, with what they wrote" do
+      manifest = Prompt.manifest(spec(), "/j")
+
+      assert manifest =~
+               "The ticket came from `refining` on `done`; a person took the transition."
+
+      assert manifest =~ "They wrote:\n\n```text\nKeep the table local.\n```"
+    end
+
+    test "the engine's transition carries no note" do
+      entered = %{"from" => "reviewing", "outcome" => "changes_requested", "by" => "engine"}
+      manifest = Prompt.manifest(%{spec() | entered: entered}, "/j")
+
+      assert manifest =~ "came from `reviewing` on `changes_requested`; the engine took"
+      refute manifest =~ "They wrote"
+    end
+
+    # Out of a human state there is no job's outcome to name, and inventing the transition's
+    # default `done` would say a job finished that never ran.
+    test "a person's choice with no job behind it names no outcome" do
+      entered = %{"from" => "human_testing", "outcome" => nil, "by" => "person"}
+
+      assert Prompt.manifest(%{spec() | entered: entered}, "/j") =~
+               "The ticket came from `human_testing`; a person took the transition."
+    end
+
+    test "the first state says so" do
+      assert Prompt.manifest(%{spec() | entered: nil}, "/j") =~
+               "This is the ticket's first state."
+    end
+
+    test "a note is fenced past any backticks in it" do
+      entered = %{spec().entered | "comment" => "run ```mix test``` first"}
+
+      assert Prompt.manifest(%{spec() | entered: entered}, "/j") =~
+               "````text\nrun ```mix test``` first\n````"
+    end
+
+    test "an optional input not written yet is named as such" do
+      manifest = Prompt.manifest(spec(), "/j")
+
+      assert manifest =~
+               "- `implementation.md`: not written on this ticket yet; it may be on a later visit"
+
+      refute Prompt.manifest(%{spec() | absent_inputs: []}, "/j") =~ "not written on this ticket"
+    end
+  end
+
   # Both affordances are files, and a file an agent is never told about is a file it never
   # opens. These are the four things it has to know: where to read, where to write, that a
   # proposal is a suggestion rather than a ticket, and that the format has no front matter —

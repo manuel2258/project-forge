@@ -12,8 +12,26 @@ questions. The interface is files, not tools, so any harness with a filesystem c
    written. Read at the pinned commit.
 3. **Job manifest.** Rendered from the spec as assigned — the immutable one, with `answers.md`
    appended once there are answers and the cost budget perhaps lowered (`capacity.md` § Spend
-   caps): ticket title and number, each input with its path and version, each `produces` entry
-   with its target path, the allowed outcomes, the budgets.
+   caps): ticket title and number, how the job came to be in this state (§ How the job
+   arrived), each input with its path and version, each optional input not yet written, each
+   `produces` entry with its target path, the allowed outcomes, the budgets.
+
+## How the job arrived
+
+A job whose state can be entered more than once has to be told which time this is and why. A
+second `implementing` job is there because something sent it back, and until this section it
+learnt that only by noticing its inputs had changed.
+
+The spec carries `entered`: the state the ticket came from, the outcome that selected the
+transition, whether the engine or a person took it, and the person's comment when they gave one —
+the note a tester leaves when sending a build back is exactly what the next job needs. The first
+job of a ticket has none, and the manifest says it is the ticket's first state. Like the rest of
+the spec it is written once, when the job is created, from the transition that created it.
+
+**An optional input not yet written is named, not silently absent** (`workflow-grammar-v1.md`
+§ Inputs). `implementing` on its first entry is told that `review.md` does not exist yet; on its
+second, it is an input with a version like any other. An agent that could not tell those apart
+would have to guess whether a missing file was a failure.
 
 The repository's own `CLAUDE.md` is read by Claude Code as usual; project conventions need no
 special handling.
@@ -30,6 +48,9 @@ $FORGE_JOB/inputs/refinement.md          # pinned version, read-only
 $FORGE_JOB/inputs/answers.md             # present after any question was answered
 $FORGE_JOB/out/plan.md                   # written by the agent
 $FORGE_JOB/out/proposals/<name>.md       # ticket proposals, optional (ticket-proposals.md)
+$FORGE_JOB/out/<group>/<file>            # a declared group's files, any number, any bytes
+$FORGE_JOB/invoke.json                   # commands to run, written by an agent that may invoke
+$FORGE_JOB/commands/<n>-<command>.log    # a resumed run's command logs, read-only
 $FORGE_JOB/tickets/index.md              # the project's tickets and open proposals, read-only
 $FORGE_JOB/tickets/<number>.md           # one ticket's body
 $FORGE_JOB/conversation.md               # a reopened conversation's past, read-only
@@ -81,8 +102,10 @@ ticket's branch against its base, taken when the job was created.
 - Read `tickets/index.md` before proposing. It lists every ticket on the project and every open
   proposal, as a snapshot; each ticket's file holds its body and nothing else.
 - Budgets are fixed. Stop when told to; the platform enforces them regardless.
-- Do not edit `.forge/workflow.yml` or anything under `.forge/agents/` in this job.
-- Do not write outside the repository and `$FORGE_JOB/out/`.
+- Do not edit `.forge/workflow.yml`, anything under `.forge/agents/` or anything under
+  `.forge/commands/` in this job.
+- Do not write outside the repository and `$FORGE_JOB/out/` — and `$FORGE_JOB/invoke.json`, when
+  the manifest lists commands this job may run.
 
 ## Output format
 
@@ -122,6 +145,24 @@ enters the queue. On answer, the platform writes a new version of the `answers.m
 adds it to the job's inputs, and resumes the same job, same attempt, with the harness session it
 recorded. Front matter written before the block is ignored until the job ends without open
 blocking questions. There is no timeout and no automatic fallback.
+
+## Commands
+
+A job whose state has `may_invoke` is told so in its manifest: each command it may run, how many
+invocations of it remain, and how to ask — write `$FORGE_JOB/invoke.json`, a JSON array of
+`{"command": …, "args": […]}`, and end the run. The run is then *parked*, not finished: its outputs
+are not collected and no outcome is decided (`commands.md` § How an agent invokes). A job whose
+state may not invoke is not told how: the preamble names the file only as one to leave alone
+unless the manifest lists commands, and `platform.md` says what commands are without the format.
+One it writes anyway is removed and ignored, so a stray file cannot turn a finished run into an
+endless round of refusals.
+
+**The results come back in the manifest, under *Commands you ran*.** Each invocation of the batch
+that parked it: the command and its arguments, the commit it ran at, its exit status or why it has
+none, how long it took, and where its log is — `$FORGE_JOB/commands/<n>-<command>.log`, fetched
+from the store before the run starts. A refused invocation is listed with its reason. The section
+is in the manifest rather than the continuation alone because a resume whose session did not
+survive gets a cold start, and a cold start has to know what it asked for too.
 
 ### The continuation prompt
 
@@ -195,7 +236,17 @@ edit is the one way left to get there. A conversation about the ticket was the o
 the ticket's documents every turn — and it is refused that document while the job waits, and
 never raises a question of its own (`conversations.md` § Commits).
 
-## Reserved for later
+## Groups of files
 
-Prefix groups (`screenshots/*`) for blob outputs with an open member count. The validator
-rejects the form in v1 with a message saying it is reserved.
+A state producing `package/*` is told, in its manifest's outputs, to write any number of files to
+`$FORGE_JOB/out/package/` (`workflow-grammar-v1.md` § Semantics). Each is kept as a blob, uploaded
+when the run finishes — not when it parks or stops on a question, since `out/` is kept for the
+resume and the run that finishes is the one whose files count. What cannot be kept is reported
+with why: a file larger than the worker's cap (`max_blob_bytes`, a gibibyte unless configured), one
+past the group's count cap (`max_blob_files`, a hundred), anything not a regular file the job owns,
+and a name that is not an artifact name. None of those fails the job; a group has no minimum.
+
+Only the group's directory is declared, as a directory: a *file* straight in `out/` named
+`package` is kept out of `undeclared` like the directory would be, and reported instead under the
+group, `package/*`, as "must be a directory, not a file". A directory under `out/` that is not a
+declared group is undeclared.

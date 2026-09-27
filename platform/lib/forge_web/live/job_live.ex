@@ -19,7 +19,10 @@ defmodule ForgeWeb.JobLive do
     ForgeWeb.Access.project_scope!(socket.assigns.current_scope, project)
 
     job =
-      Enum.find(Jobs.for_ticket(ticket.id), &(&1.id == job_id)) ||
+      Enum.find(
+        Jobs.for_ticket(ticket.id) ++ Jobs.commands_for_ticket(ticket.id),
+        &(&1.id == job_id)
+      ) ||
         raise Ecto.NoResultsError, queryable: Jobs.Job
 
     if connected?(socket) do
@@ -80,15 +83,119 @@ defmodule ForgeWeb.JobLive do
   def handle_event("notices", params, socket),
     do: JobStream.handle_event("notices", params, socket)
 
-  defp duration(%{started_at: nil}), do: "—"
-  defp duration(%{finished_at: nil}), do: "running"
+  # Why there is no log to link, which is three different things.
+  defp no_log(command, job) do
+    cond do
+      command["produces"] == nil ->
+        "not recorded on the ticket: the command declares no artifact for it"
 
-  defp duration(%{started_at: started, finished_at: finished}) do
-    case DateTime.diff(finished, started, :second) do
-      s when s < 60 -> "#{s}s"
-      s when s < 3_600 -> "#{div(s, 60)}m #{rem(s, 60)}s"
-      s -> "#{div(s, 3_600)}h #{div(rem(s, 3_600), 60)}m"
+      job.status == :finished ->
+        "not recorded on the ticket: no log came back from the machine"
+
+      true ->
+        "recorded on the ticket once the command ends"
     end
+  end
+
+  # `docs/design/ui.md` § Decide and Timeline: a command's page is the job page with what a command
+  # has — its exit status, the script as it ran, its argument vector, its commit, its timeout, the
+  # job that invoked it and its log — and none of an agent's turns, budget or prompt.
+  defp command_page(assigns) do
+    command = assigns.spec.command
+
+    assigns =
+      assign(assigns,
+        command: command,
+        log:
+          Enum.find(assigns.written, fn {artifact, _v} -> artifact.name == command["produces"] end),
+        no_log: no_log(command, assigns.job)
+      )
+
+    ~H"""
+    <div class="mt-4 flex flex-col gap-8 lg:flex-row lg:gap-0">
+      <div class="lg:min-w-0 lg:flex-1 lg:pr-8">
+        <header class="flex flex-col gap-2">
+          <div class="font-mono text-[12.5px] opacity-60">
+            $ {@command["name"]} · {@job.state}
+          </div>
+          <div class="flex flex-wrap items-baseline gap-3 text-3xl">
+            <.exit_status job={@job} />
+          </div>
+          <p class="text-sm/[1.55] opacity-60">
+            The script's exit status, or the engine's reason it has none.
+          </p>
+        </header>
+
+        <dl class="mt-6 grid grid-cols-2 gap-4 border-y border-base-300 py-4">
+          <div class="min-w-0">
+            <dt class="font-mono text-[11px] tracking-[.14em] uppercase opacity-50">Duration</dt>
+            <dd class="mt-1 font-mono text-[17px]">{Format.duration(@job)}</dd>
+          </div>
+          <div class="min-w-0">
+            <dt class="font-mono text-[11px] tracking-[.14em] uppercase opacity-50">Timeout</dt>
+            <dd class="mt-1 font-mono text-[17px]">{div(@command["timeout_ms"] || 0, 1000)}s</dd>
+          </div>
+        </dl>
+
+        <section class="mt-8">
+          <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Script</h2>
+          <pre
+            id="command-script"
+            class="mt-2 overflow-x-auto rounded-box bg-base-200 p-3 text-[12.5px]"
+          >{@command["script"]}</pre>
+        </section>
+      </div>
+
+      <aside class="lg:w-[21rem] lg:shrink-0 lg:border-l lg:border-base-300 lg:pl-8">
+        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">As it ran</h2>
+        <dl class="mt-3 flex flex-col gap-2 text-[12.5px]">
+          <div class="flex min-w-0 justify-between gap-3">
+            <dt class="opacity-50">arguments</dt>
+            <dd id="command-args" class="truncate font-mono">
+              {ForgeCore.Workflow.Command.argv(@command["args"])}
+            </dd>
+          </div>
+          <div class="flex min-w-0 justify-between gap-3">
+            <dt class="opacity-50">commit</dt>
+            <dd class="truncate font-mono">{String.slice(@command["at"] || "", 0, 12)}</dd>
+          </div>
+          <div class="flex min-w-0 justify-between gap-3">
+            <dt class="opacity-50">script</dt>
+            <dd class="truncate font-mono">{@command["run"]}</dd>
+          </div>
+          <div class="flex min-w-0 justify-between gap-3">
+            <dt class="opacity-50">environment</dt>
+            <dd class="font-mono">{@spec.env || "none"}</dd>
+          </div>
+        </dl>
+
+        <.link
+          :if={@job.parent_job_id}
+          navigate={~p"/tickets/#{@project.name}/#{@ticket.number}/jobs/#{@job.parent_job_id}"}
+          class="mt-4 flex min-h-[46px] items-center gap-2 border-b border-base-300/60 font-mono text-[12.5px] hover:bg-base-200"
+        >
+          <span class="min-w-0 flex-1 truncate">invoked by {@job.state}</span>
+          <span class="shrink-0 opacity-40" aria-hidden="true">›</span>
+        </.link>
+
+        <h3 class="mt-6 font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Log</h3>
+        <.link
+          :if={@log}
+          href={
+            ~p"/tickets/#{@project.name}/#{@ticket.number}/artifacts/#{elem(@log, 0).name}/#{elem(@log, 1).version}"
+          }
+          class="mt-2 flex min-h-[46px] items-center gap-2 border-b border-base-300/60 font-mono text-[12.5px] hover:bg-base-200"
+        >
+          <span class="min-w-0 flex-1 truncate">{elem(@log, 0).name}</span>
+          <span class="shrink-0 opacity-60">v{elem(@log, 1).version}</span>
+          <span class="shrink-0 opacity-40" aria-hidden="true">›</span>
+        </.link>
+        <p :if={!@log} class="mt-2 font-mono text-[12.5px] opacity-50">
+          {@no_log}
+        </p>
+      </aside>
+    </div>
+    """
   end
 
   @impl true
@@ -102,7 +209,9 @@ defmodule ForgeWeb.JobLive do
         ‹ {@project.name}#{@ticket.number} · {@ticket.title}
       </.link>
 
-      <div class="mt-4 flex flex-col gap-8 lg:flex-row lg:gap-0">
+      <.command_page :if={@job.kind == :command} {assigns} />
+
+      <div :if={@job.kind != :command} class="mt-4 flex flex-col gap-8 lg:flex-row lg:gap-0">
         <div class="lg:min-w-0 lg:flex-1 lg:pr-8">
           <header class="flex flex-col gap-2">
             <div class="font-mono text-[12.5px] opacity-60">{@job.state} #{@job.attempt}</div>
@@ -140,7 +249,7 @@ defmodule ForgeWeb.JobLive do
             </div>
             <div class="min-w-0">
               <dt class="font-mono text-[11px] tracking-[.14em] uppercase opacity-50">Duration</dt>
-              <dd class="mt-1 font-mono text-[17px]">{duration(@job)}</dd>
+              <dd class="mt-1 font-mono text-[17px]">{Format.duration(@job)}</dd>
             </div>
           </dl>
 

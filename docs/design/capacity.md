@@ -110,7 +110,7 @@ Both caps live in `Forge.Spend` and are asked in `Forge.Jobs.assign/2` (its `spe
 every billed invocation passes through: a job reaches a machine only by being assigned to one, so
 a ticket over its allowance is stuck before a worker is spoken to. It was `start/1` while the
 platform ran jobs itself. A conversation has no ticket allowance and meets the daily cap alone. A
-ticket over its allowance is stuck, which also drops it out of `Forge.Jobs.pending/1` so the
+ticket over its allowance is stuck, which also drops it out of `Forge.Jobs.pending/2` so the
 scheduler stops retrying it every tick.
 
 **The day's total** is the sum of the costs of the runs that *started* in that UTC day — each start

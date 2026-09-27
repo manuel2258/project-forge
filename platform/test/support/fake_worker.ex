@@ -55,6 +55,13 @@ defmodule Forge.FakeWorker do
         "harness" => %{"driver" => "claude_code", "credential" => "per_job"}
       })
 
+    # What a current release says at its join: the gate gives commands, and jobs that may invoke
+    # them, only to a machine that speaks the protocol they arrived in (`Workers.speaks?/2`).
+    {:ok, worker} =
+      Workers.update(worker, %{
+        protocol: Keyword.get(opts, :protocol, ForgeCore.WorkerProtocol.current())
+      })
+
     :ok = Workers.connected(worker.id)
 
     case Keyword.get(opts, :project) do
@@ -95,7 +102,8 @@ defmodule Forge.FakeWorker do
   @doc """
   Answers an assignment: uploads a transcript to the key the platform minted a token for, and
   records the result `scenario` produces. Options: `:doc` (the document the agent writes,
-  default `plan.md`), `:harness` (overrides), `:transcript` (false to send none).
+  default `plan.md`), `:written` (every file the agent wrote, by name, in place of what the
+  scenario writes), `:harness` (overrides), `:transcript` (false to send none).
   """
   @spec finish(map(), String.t(), keyword()) :: {:ok, Forge.Jobs.Job.t()} | {:error, term()}
   def finish(assignment, scenario \\ "success", opts \\ []) do
@@ -123,6 +131,48 @@ defmodule Forge.FakeWorker do
           {:ok, Forge.Jobs.Job.t()} | {:error, term()}
   def run(job, worker, scenario \\ "success", opts \\ []) do
     job |> assign(worker) |> finish(scenario, opts)
+  end
+
+  @doc """
+  Answers a command assignment as the worker does (`ForgeWorker.Job.Command`): uploads `log` to
+  the key the platform minted, and records the result. `status` nil is a command that ended with
+  no status; `:outcome` overrides how it ended.
+  """
+  @spec finish_command(map(), integer() | nil, keyword()) ::
+          {:ok, Forge.Jobs.Job.t()} | {:error, term()}
+  def finish_command(assignment, status, opts \\ []) do
+    assert assignment["kind"] == "command"
+    key = assignment["store"]["log_key"]
+    {:ok, _info} = Storage.put(key, Keyword.get(opts, :log, "ran #{assignment["job_id"]}\n"))
+
+    outcome = Keyword.get(opts, :outcome, if(status, do: :converged, else: :error))
+
+    Jobs.complete(assignment["job_id"], %Result{
+      status: :finished,
+      outcome: outcome,
+      exit_status: status,
+      duration_ms: Keyword.get(opts, :duration_ms, 1_500),
+      log: Keyword.get(opts, :log_key, key)
+    })
+  end
+
+  @doc """
+  Answers an agent's assignment with a parked run that asked for `invocations`
+  (`%{"command" => name, "args" => [...]}` each), as the worker reports one — with the commit it
+  pushed, which is the branch head here unless `:commit` says otherwise.
+  """
+  @spec park(map(), [map()], keyword()) :: {:ok, Forge.Jobs.Job.t()} | {:error, term()}
+  def park(assignment, invocations, opts \\ []) do
+    put_transcript(assignment)
+
+    Jobs.complete(assignment["job_id"], %Result{
+      status: :parked,
+      invocations: invocations,
+      invocation_error: Keyword.get(opts, :invocation_error),
+      commit: Keyword.get(opts, :commit),
+      transcript: assignment["store"]["transcript_key"],
+      harness: @harness
+    })
   end
 
   @doc "Uploads a transcript, as the worker does before it sends a result."
@@ -180,7 +230,11 @@ defmodule Forge.FakeWorker do
   def result(assignment, scenario \\ "success", opts \\ []) do
     spec = Spec.from_map(assignment["spec"])
     harness = Map.merge(harness(scenario), Keyword.get(opts, :harness, %{}))
-    written = written(scenario, Keyword.get(opts, :doc, "plan.md"))
+    # `:written` names exactly what the agent left in `out/`, for an outcome no scenario writes.
+    written =
+      Keyword.get_lazy(opts, :written, fn ->
+        written(scenario, Keyword.get(opts, :doc, "plan.md"))
+      end)
 
     run =
       Map.merge(collect(spec, written), %{

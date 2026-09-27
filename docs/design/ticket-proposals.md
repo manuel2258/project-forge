@@ -98,8 +98,9 @@ subtracted there rather than named as a declared output. That subtraction is loa
 than tidy: an undeclared output ends a job with `error`, so without it a job that proposed
 anything would fail for having done so.
 
-A reserved *directory* is a cleaner carve-out than a reserved filename, and it keeps proposals
-out of the `name/*` artifact-name form the v1 validator rejects.
+A reserved *directory* is a cleaner carve-out than a reserved filename. It is also why no group
+of files may be called `proposals/*`: `out/proposals/` is this directory
+(`workflow-grammar-v1.md` § Semantics).
 
 **Stored as `proposal-<file>`, and the prefix is the discriminator.** A job-scoped artifact is a
 proposal because its name says so, and nothing else does — job scope alone cannot say it, because

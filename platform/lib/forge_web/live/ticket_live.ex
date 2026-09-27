@@ -63,6 +63,10 @@ defmodule ForgeWeb.TicketLive do
     jobs = Jobs.for_ticket(ticket.id)
     current = List.last(jobs)
 
+    # Commands are the ticket's work too, and sit in the step their state is in: an agent's beneath
+    # it, a command state's as that state's (`docs/design/ui.md` § Decide and Timeline).
+    work = Enum.sort_by(jobs ++ Jobs.commands_for_ticket(ticket.id), & &1.inserted_at, DateTime)
+
     # Approval state is shown only where approval is possible: an artifact no transition lists in
     # `approve:` would otherwise be marked `unapproved` for ever, flagging a job the operator does
     # not have. See docs/design/ui.md § Semantics that must not be lost.
@@ -97,8 +101,8 @@ defmodule ForgeWeb.TicketLive do
       decisions: ticket |> Queue.for_ticket() |> Enum.count(&Queue.waiting?/1),
       jobs: jobs,
       current: current,
-      steps: steps(jobs, artifacts, ticket, workflow),
-      waits: waits(jobs),
+      steps: steps(work, artifacts, ticket, workflow),
+      waits: waits(work),
       artifacts: artifacts,
       docs: docs(project, ticket, artifacts),
       diff: diff,
@@ -110,7 +114,8 @@ defmodule ForgeWeb.TicketLive do
         workflow |> Workflow.transitions_from(ticket.state) |> Enum.map(& &1.to) |> Enum.uniq(),
       human_state:
         ticket.status in [:active, :stuck] and
-          not Workflow.State.job?(Workflow.state(workflow, ticket.state)),
+          Workflow.State.human?(Workflow.state(workflow, ticket.state)),
+      writable: writable(ticket, workflow),
       proposals: Proposals.open_for_ticket(ticket.id),
       reviewable: reviewable?(ticket, workflow),
       changeset: Artifacts.latest(ticket.id, Workflow.changeset_artifact()),
@@ -118,6 +123,19 @@ defmodule ForgeWeb.TicketLive do
       until_midnight: until_midnight(),
       now: DateTime.utc_now()
     )
+  end
+
+  # The documents the state the ticket rests in declares, for a person to write: a human state's
+  # `produces`, with the latest version of each when there is one (`docs/design/ui.md` § Decide
+  # and Timeline). A job state's are the job's to write, so it offers none.
+  defp writable(ticket, workflow) do
+    case Workflow.state(workflow, ticket.state) do
+      %Workflow.State{prompt: nil, invoke: [], produces: produces} ->
+        Enum.map(produces, &{&1, Artifacts.latest(ticket.id, &1)})
+
+      _job_or_gone ->
+        []
+    end
   end
 
   # The one job whose topic the page listens on: the ticket's current one. When the ticket moves
@@ -433,6 +451,17 @@ defmodule ForgeWeb.TicketLive do
             version_id={version_id}
           />
         </div>
+        <div
+          :if={!@ticket.pending_transition and @writable != []}
+          class="mb-6 flex flex-col gap-6"
+        >
+          <.document_editor
+            :for={{name, latest} <- @writable}
+            ticket={@ticket}
+            name={name}
+            latest={latest}
+          />
+        </div>
         <.transition_card
           :if={!@ticket.pending_transition and blocking(assigns) == [] and stuck_or_human?(assigns)}
           ticket={@ticket}
@@ -497,9 +526,19 @@ defmodule ForgeWeb.TicketLive do
           <%!-- The whole row is the target, at the full 46px: hunting for a 20px `#3` is the
                 failure docs/design/ui.md § The affordance rule names. Nothing inside a job row
                 commits anything, so the row may be a link. --%>
+          <%!-- One list in the order the work was made, so an agent's commands follow the row
+                of the agent that invoked them rather than all sitting above it. --%>
           <ol :if={step.jobs != []} class="mt-2 flex flex-col">
             <li :for={job <- step.jobs}>
+              <.command_row
+                :if={job.kind == :command}
+                job={job}
+                project={@project}
+                ticket={@ticket}
+                wait={@waits[job.id]}
+              />
               <.link
+                :if={job.kind != :command}
                 navigate={~p"/tickets/#{@project.name}/#{@ticket.number}/jobs/#{job.id}"}
                 class="flex min-h-[46px] items-center gap-3 border-b border-base-300/60 py-1.5 text-[12.5px] hover:bg-base-200"
               >
@@ -561,6 +600,43 @@ defmodule ForgeWeb.TicketLive do
         empty="No conversation about this ticket yet."
       />
     </section>
+    """
+  end
+
+  # `docs/design/ui.md` § Decide and Timeline: `$` where an attempt goes, the command and its
+  # arguments, the exit status where an outcome goes, the duration where turns and cost go. One an
+  # agent invoked is indented beneath it.
+  attr :job, :map, required: true
+  attr :project, :map, required: true
+  attr :ticket, :map, required: true
+  attr :wait, :string, default: nil
+
+  defp command_row(assigns) do
+    command = Jobs.spec(assigns.job).command
+    assigns = assign(assigns, name: command["name"], args: command["args"] || [])
+
+    ~H"""
+    <.link
+      navigate={~p"/tickets/#{@project.name}/#{@ticket.number}/jobs/#{@job.id}"}
+      id={"command-#{@job.id}"}
+      class={[
+        "flex min-h-[46px] items-center gap-3 border-b border-base-300/60 py-1.5 text-[12.5px] hover:bg-base-200",
+        @job.parent_job_id && "pl-8"
+      ]}
+    >
+      <span class="w-8 shrink-0 font-mono opacity-60" aria-hidden="true">$</span>
+      <span class="min-w-0 flex-1">
+        <span class="font-mono">
+          {@name}<span :if={@args != []} class="opacity-60">{ForgeCore.Workflow.Command.argv(@args)}</span>
+        </span>
+        <.exit_status job={@job} />
+        <span :if={@wait} id={"job-#{@job.id}-waiting"} class="block text-sm/[1.4] opacity-60">
+          {@wait}
+        </span>
+      </span>
+      <span class="shrink-0 font-mono opacity-60">{Format.duration(@job)}</span>
+      <span class="shrink-0 font-mono opacity-40" aria-hidden="true">›</span>
+    </.link>
     """
   end
 

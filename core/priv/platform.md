@@ -23,10 +23,22 @@ Every document a job writes becomes a new **version** of an **artifact** named b
 `plan.md` version 3, and so on. Versions are immutable and never overwritten. A later state that
 lists `plan.md` in its inputs is handed an exact version, pinned when the job was created.
 
+A state can be entered more than once: a later state may send the ticket back with its reasons,
+and a person resting the ticket in a state of theirs may write a document for the next job to
+read. An input written only on such a return is absent the first time and named as such.
+
 `changeset` is not a file: it is the diff of the branch's commits, recorded as a commit id.
 
 A person can **approve** an exact version. That is what authorises a merge, and it is why nothing
 in this product says "approve whatever is latest".
+
+## Commands
+
+A project may declare **commands**: fixed scripts, read from the workflow's pinned commit, that run
+as jobs of their own on their own machines. A state may run them on entry, and a job's manifest
+may list commands its agent may run — by writing `$FORGE_JOB/invoke.json` and ending the run, which
+parks the job until they are done and resumes it with their exit statuses and logs. The format is
+in the manifest of a job that may; a job whose manifest lists none needs nothing from this section.
 
 ## Questions
 

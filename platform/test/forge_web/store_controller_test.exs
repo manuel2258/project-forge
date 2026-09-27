@@ -181,6 +181,55 @@ defmodule ForgeWeb.StoreControllerTest do
       assert {:ok, "first"} = Storage.get(key)
     end
 
+    # `docs/design/storage.md` § Serving: a job's groups of files go under one prefix of its own,
+    # whose member keys are not known when the token is minted.
+    test "a prefix token writes any key under its prefix, and nothing else", %{conn: conn} do
+      token = Token.sign_prefix("job/j1/out-abc/")
+
+      put_with = fn key ->
+        build_conn()
+        |> put_req_header("content-type", "application/octet-stream")
+        |> with_token(token)
+        |> put("/store/" <> key, "bytes")
+      end
+
+      assert %{"key" => "job/j1/out-abc/1"} = json_response(put_with.("job/j1/out-abc/1"), 200)
+
+      assert %{"key" => "job/j1/out-abc/2/x"} =
+               json_response(put_with.("job/j1/out-abc/2/x"), 200)
+
+      for outside <- [
+            "job/j1/out-abc",
+            "job/j1/out-abcd/1",
+            "job/j1/transcript-1.jsonl",
+            "seed/p/s"
+          ] do
+        assert %{"error" => %{"reason" => "wrong_key"}} = json_response(put_with.(outside), 403),
+               "wrote #{outside}"
+      end
+
+      # It reads nothing, not even what it wrote.
+      conn = get(with_token(conn, token), ~p"/store/job/j1/out-abc/1")
+      assert %{"error" => %{"reason" => "wrong_key"}} = json_response(conn, 403)
+
+      # And overwrites nothing: the store refuses an existing key whatever the token.
+      assert %{"error" => %{"reason" => "exists"}} =
+               json_response(put_with.("job/j1/out-abc/1"), 409)
+    end
+
+    # The key is checked as the store checks it before it is compared, so a traversal that starts
+    # with the prefix as a string is not under it.
+    test "a prefix token refuses a key that only looks as if it is under the prefix" do
+      assert Token.verify(
+               Token.sign_prefix("job/j1/out-abc/"),
+               :put,
+               "job/j1/out-abc/../../seed/p/s"
+             ) ==
+               {:error, :wrong_key}
+
+      assert_raise ArgumentError, fn -> Token.sign_prefix("job/j1/out-abc") end
+    end
+
     test "refuses a get token used to write", %{conn: conn} do
       key = "job/j1/transcript-1.jsonl"
 

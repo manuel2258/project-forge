@@ -636,6 +636,218 @@ defmodule ForgeWorker.LinkTest do
     assert git!(nil, ["-C", origin, "show", "refs/heads/ticket/1:CHANGED.md"]) =~ "by the agent"
   end
 
+  # `docs/design/commands.md`: a command is checked out at its commit, runs the script its spec
+  # carries, and reports its status and where its log went — and pushes nothing.
+  describe "a command" do
+    defp command_assignment(origin, script) do
+      at =
+        origin
+        |> then(&git!(nil, ["-C", &1, "rev-parse", "refs/heads/ticket/1"]))
+        |> String.trim()
+
+      job_id = uuid()
+
+      spec = %ForgeCore.Job.Spec{
+        job_id: job_id,
+        kind: :command,
+        branch: "ticket/1",
+        commit: at,
+        command: %{
+          "name" => "build",
+          "args" => ["--all"],
+          "script" => script,
+          "at" => at,
+          "timeout_ms" => 10_000
+        }
+      }
+
+      %{
+        "job_id" => job_id,
+        "kind" => "command",
+        "spec" => spec |> ForgeCore.Job.Spec.to_json() |> Jason.decode!(),
+        "wall_clock_ms" => 10_000,
+        "git" => %{"url" => origin, "branch" => "ticket/1", "base" => nil},
+        "store" => %{"log_key" => "job/#{job_id}/log-1.txt", "log_token" => "log-token"}
+      }
+    end
+
+    test "runs at its commit and reports its status and log", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      before = git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"])
+      job = command_assignment(origin, "#!/bin/sh\ncat README.md\necho \"args: $*\"\nexit 4\n")
+      job_id = job["job_id"]
+      log_key = job["store"]["log_key"]
+      push(client, @topic, "assign", job)
+
+      {%{"job_id" => ^job_id, "result" => result}, _before} = take_push("result")
+
+      assert %{"status" => "finished", "outcome" => "converged", "exit_status" => 4} = result
+      assert result["log"] == log_key
+      assert is_integer(result["duration_ms"])
+
+      path = "/store/" <> log_key
+      assert_receive {:uploaded, ^path, ["Bearer log-token"], _query, "# Game\nargs: --all\n"}
+
+      # A command writes its log, not the branch.
+      assert git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"]) == before
+    end
+
+    # A packaging command's build, uploaded as a workflow job's groups are: without the upload the
+    # result would carry a path on this machine, which the platform drops.
+    test "uploads the groups of files its script wrote", context do
+      %{client: client, origin: origin, root: root} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      script =
+        "#!/bin/sh\nmkdir -p \"$FORGE_OUT/pkg\"\nprintf built > \"$FORGE_OUT/pkg/app.bin\"\n"
+
+      job = command_assignment(origin, script)
+      job = put_in(job, ["spec", "command", "outputs"], ["pkg/*"])
+      job = Map.put(job, "outputs", %{"prefix" => "job/j1/out-abc/", "token" => "prefix-token"})
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      {%{"job_id" => ^job_id, "result" => result}, _before} = take_push("result")
+
+      assert result["blobs"] == %{"pkg/app.bin" => %{"key" => "job/j1/out-abc/1", "size" => 5}}
+      assert_receive {:uploaded, "/store/job/j1/out-abc/1", ["Bearer prefix-token"], _q, "built"}
+      refute File.exists?(ForgeWorker.Job.Dir.blobs_dir(Path.join([root, "jobs", job_id])))
+    end
+
+    test "a commit that is not one is refused before anything runs", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = command_assignment(origin, "#!/bin/sh\necho ran\n")
+      job = put_in(job, ["spec", "command", "at"], "HEAD~1; rm -rf /")
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      {%{"job_id" => ^job_id, "reason" => reason}, _before} = take_push("failed")
+      assert reason =~ "not_a_commit"
+    end
+
+    test "is stopped by a cancel, and says so", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = command_assignment(origin, "#!/bin/sh\nexec sleep 30\n")
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      wait_until(fn ->
+        match?(%{runner: pid} when is_pid(pid), :sys.get_state(client).assigns.jobs[job_id])
+      end)
+
+      push(client, @topic, "cancel", %{"job_id" => job_id})
+
+      {%{"job_id" => ^job_id, "result" => result}, _before} = take_push("result")
+      assert %{"outcome" => "cancelled", "exit_status" => nil} = result
+    end
+  end
+
+  # `docs/design/commands.md` § How an agent invokes: the run parks, and what it asked for runs at
+  # the commit it pushed.
+  test "an agent that invokes pushes its work and parks with what it asked for", context do
+    %{client: client, origin: origin} = context
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    job =
+      origin
+      |> assignment(scenario: "invokes")
+      |> put_in(["spec", "may_invoke"], %{"build" => %{"max" => 2}, "test" => %{"max" => 2}})
+
+    job_id = job["job_id"]
+    push(client, @topic, "assign", job)
+
+    {%{"job_id" => ^job_id, "result" => result}, _before} = take_push("result")
+
+    assert result["status"] == "parked"
+    assert [%{"command" => "build"}, %{"command" => "test"}] = result["invocations"]
+
+    assert result["commit"] ==
+             String.trim(git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"]))
+  end
+
+  # `docs/design/storage.md` § Serving: each staged file goes to the assignment's prefix with its
+  # prefix token, and the result names keys — never a path on this machine.
+  test "a job's groups of files are uploaded under its prefix", context do
+    %{client: client, origin: origin, root: root} = context
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    job =
+      origin
+      |> assignment(scenario: "shots")
+      |> put_in(["spec", "produces"], ["plan.md", "shots/*"])
+      |> Map.put("outputs", %{"prefix" => "job/j1/out-abc/", "token" => "prefix-token"})
+
+    job_id = job["job_id"]
+    push(client, @topic, "assign", job)
+
+    {%{"job_id" => ^job_id, "result" => result}, _before} = take_push("result")
+
+    assert result["blobs"] == %{
+             "shots/home.png" => %{"key" => "job/j1/out-abc/1", "size" => 10},
+             "shots/menu.png" => %{"key" => "job/j1/out-abc/2", "size" => 6}
+           }
+
+    assert result["invalid_blobs"]["shots/.hidden"] =~ "is not a name"
+    assert_receive {:uploaded, "/store/job/j1/out-abc/1", ["Bearer prefix-token"], _q, body}
+    assert body == <<137, 80, 78, 71, 13, 10, 26, 10, 0, 1>>
+    assert_receive {:uploaded, "/store/job/j1/out-abc/2", _auth, _q, "second"}
+    refute File.exists?(ForgeWorker.Job.Dir.blobs_dir(Path.join([root, "jobs", job_id])))
+  end
+
+  test "a group with nowhere to be uploaded is reported, not lost silently", context do
+    %{client: client, origin: origin} = context
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    job =
+      origin
+      |> assignment(scenario: "shots")
+      |> put_in(["spec", "produces"], ["plan.md", "shots/*"])
+
+    push(client, @topic, "assign", job)
+    {%{"result" => result}, _before} = take_push("result")
+
+    assert result["blobs"] == %{}
+
+    assert result["invalid_blobs"]["shots/home.png"] ==
+             "the assignment named nowhere to upload it"
+
+    assert result["outcome"] == "converged"
+  end
+
+  test "a resumed job is handed the logs of what it invoked", context do
+    %{client: client, origin: origin} = context
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    job =
+      origin
+      |> assignment(scenario: "reads_logs")
+      |> Map.put("commands", [
+        %{"file" => "1-build.log", "key" => "job/c1/log-1.txt", "token" => "get-token"}
+      ])
+
+    job_id = job["job_id"]
+    push(client, @topic, "assign", job)
+
+    {%{"job_id" => ^job_id, "result" => result}, _before} = take_push("result")
+
+    # The store here answers every request with where it was asked; the agent read that back.
+    assert result["documents"]["plan.md"]["raw"] =~ "/store/job/c1/log-1.txt"
+  end
+
   test "a result is held until the platform acks it on the channel", context do
     %{client: client, origin: origin} = context
     connect_and_assert_join(client, @topic, %{}, :ok)

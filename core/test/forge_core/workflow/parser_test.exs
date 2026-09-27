@@ -266,13 +266,13 @@ defmodule ForgeCore.Workflow.ParserTest do
                messages(Map.put(map, "initial", "merged"))
     end
 
-    test "job states need a budget; human states carry nothing else", %{map: map} do
+    test "job states need a budget; human states carry nothing a job would", %{map: map} do
       map =
         map
         |> update_in(["states", "refining"], &Map.delete(&1, "budget"))
         |> put_in(["states", "merged"], %{
           "env" => "x",
-          "produces" => ["y"],
+          "inputs" => ["ticket"],
           "model" => "opus",
           "resources" => %{"memory" => "1GiB"}
         })
@@ -281,10 +281,42 @@ defmodule ForgeCore.Workflow.ParserTest do
       # nothing.
       assert messages(map) == [
                {"states.merged.env", "not allowed on a human state (no prompt)"},
+               {"states.merged.inputs", "not allowed on a human state (no prompt)"},
                {"states.merged.model", "not allowed on a human state (no prompt)"},
-               {"states.merged.produces", "not allowed on a human state (no prompt)"},
                {"states.merged.resources", "not allowed on a human state (no prompt)"},
                {"states.refining.budget", "is required on a job state"}
+             ]
+    end
+
+    # `docs/design/workflow-grammar-v1.md` § Semantics: a human state may declare the documents a
+    # person writes while the ticket rests there, and a later state reads them like any other.
+    test "a human state may produce documents a later state reads", %{map: map} do
+      map =
+        map
+        |> put_in(["states", "review_ready", "produces"], ["test-report.md"])
+        |> put_in(["states", "implementing", "inputs"], ["plan.md", "test-report.md"])
+        |> update_in(
+          ["transitions"],
+          &(&1 ++ [%{"from" => "review_ready", "to" => "implementing"}])
+        )
+
+      assert {:ok, workflow} = Parser.from_map(map)
+      assert workflow.states["review_ready"].produces == ["test-report.md"]
+      assert Workflow.producers(workflow, "test-report.md") == ["review_ready"]
+    end
+
+    test "a human state writes documents, never the changeset", %{map: map} do
+      map = put_in(map, ["states", "review_ready", "produces"], ["changeset"])
+      groups = put_in(map, ["states", "review_ready", "produces"], ["shots/*"])
+
+      assert messages(groups) == [
+               {"states.review_ready.produces",
+                "a human state writes documents, not changeset or groups of files"}
+             ]
+
+      assert messages(map) == [
+               {"states.review_ready.produces",
+                "a human state writes documents, not changeset or groups of files"}
              ]
     end
 
@@ -314,11 +346,55 @@ defmodule ForgeCore.Workflow.ParserTest do
              ]
     end
 
-    test "the prefix group form is reserved", %{map: map} do
+    # `docs/design/workflow-grammar-v1.md` § Semantics: `name/*` is a group of files.
+    test "a group of files is produced, and is not a document", %{map: map} do
       map = put_in(map, ["states", "verifying", "produces"], ["report.md", "screenshots/*"])
 
-      assert [{"states.verifying.produces[1]", "prefix groups (name/*) are reserved" <> _}] =
-               messages(map)
+      assert {:ok, workflow} = Parser.from_map(map)
+      assert Workflow.producers(workflow, "screenshots/*") == ["verifying"]
+      refute Workflow.document?("screenshots/*")
+      assert State.outcome_document(workflow.states["verifying"]) == "report.md"
+    end
+
+    test "a group is one state's, under a name nothing else produces or keeps", %{map: map} do
+      map =
+        map
+        |> put_in(["states", "verifying", "produces"], ["report.md", "shots/*", "plan.md/*"])
+        |> put_in(["states", "planning", "produces"], ["plan.md", "shots/*", "proposals/*"])
+
+      assert messages(map) == [
+               {"states.planning.produces[1]",
+                "\"shots/*\" is produced by more than one state: planning, verifying"},
+               {"states.planning.produces[2]", "\"proposals\" is reserved for ticket proposals"},
+               {"states.verifying.produces[1]",
+                "\"shots/*\" is produced by more than one state: planning, verifying"},
+               {"states.verifying.produces[2]", "\"plan.md\" is also produced as a document"}
+             ]
+    end
+
+    test "a group is not yet an input, and is never approved", %{map: map} do
+      map =
+        map
+        |> put_in(["states", "verifying", "produces"], ["report.md", "shots/*"])
+        |> put_in(["states", "review_ready", "produces"], [])
+        |> update_in(["transitions"], fn transitions ->
+          List.update_at(transitions, 6, &Map.put(&1, "approve", ["changeset", "shots/*"]))
+        end)
+        |> put_in(["states", "implementing", "inputs"], ["plan.md", "shots/*"])
+
+      assert messages(map) == [
+               {"states.implementing.inputs[1]", "a group of files is not an input yet"},
+               {"transitions[6].approve[1]", "a group of files cannot be approved"}
+             ]
+    end
+
+    test "a group is named as an artifact is", %{map: map} do
+      map = put_in(map, ["states", "verifying", "produces"], ["report.md", "../up/*"])
+
+      assert {"states.verifying",
+              "artifact name \"../up\" must be a single path segment: letters, digits, . _ -"} in messages(
+               map
+             )
     end
 
     test "the names ticket proposals use are reserved, produced or consumed", %{map: map} do

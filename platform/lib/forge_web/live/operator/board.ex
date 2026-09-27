@@ -78,7 +78,8 @@ defmodule ForgeWeb.Operator.Board do
 
     cond do
       is_nil(state) -> :unknown
-      Workflow.State.job?(state) -> :job
+      # A command state runs work on entry as a job state does, and draws as one: `▸`.
+      Workflow.State.runs?(state) -> :job
       Workflow.terminal?(workflow, name) -> :terminal
       true -> :human
     end

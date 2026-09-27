@@ -53,7 +53,16 @@ defmodule Forge.Jobs.Scheduler do
   end
 
   defp assign_pending do
-    pending = Jobs.pending(Jobs.config(:max_pending_per_pass, 10))
+    # One instant for the pass: the order the jobs are fetched in and which of them reserve are
+    # the same question (`Jobs.pending/2`, `reserving?/2`), and must get the same answer.
+    waited_since =
+      DateTime.add(
+        DateTime.utc_now(),
+        -Jobs.config(:reservation_after_ms, :timer.minutes(10)),
+        :millisecond
+      )
+
+    pending = Jobs.pending(Jobs.config(:max_pending_per_pass, 10), waited_since)
 
     # First, before anything asks for capacity: a worker the platform cannot reach still counts
     # against its template's `max_workers`, so one machine it has lost track of is one machine's
@@ -64,7 +73,12 @@ defmodule Forge.Jobs.Scheduler do
     # The claims are what the jobs so far in this pass were pointed at on machines still booting,
     # so the next job does not count on the same room (`Workers.provide/3`). They start empty
     # every pass: the jobs keep their order, so each pass divides the machines the same way.
-    {assigned, _claims} = Enum.reduce(pending, {0, %{}}, &offer/2)
+    #
+    # The reservations are the machines held for a job that has waited too long, which the jobs
+    # after it in the pass may not use (`docs/design/provisioning.md` § The gate). They start empty
+    # too: the old job is offered first in every pass, before it holds anything against itself.
+    {assigned, _claims, _reserved} =
+      Enum.reduce(pending, {0, %{}, MapSet.new()}, &offer(&1, &2, waited_since))
 
     # **After the pass, not before it, and whatever is still pending.** Before it, the sweep
     # destroyed the very machine the pass was about to use — a machine that has just finished one
@@ -79,7 +93,7 @@ defmodule Forge.Jobs.Scheduler do
     assigned
   end
 
-  defp offer(job, {assigned, claims}) do
+  defp offer(job, {assigned, claims, reserved}, waited_since) do
     # **The credential before the machine.** A job nothing can fund does not ask for capacity,
     # so an empty pool never makes a machine that could run nothing — the loop a disabled
     # template exists to stop, arriving by another door (`docs/design/credentials.md` § How a
@@ -87,20 +101,27 @@ defmodule Forge.Jobs.Scheduler do
     # only decides whether to go looking for a machine at all.
     demand = demand(job)
 
-    with {:ok, _credential} <- Credentials.for_job(job),
-         {:ok, worker} <- Workers.provide(demand, job.worker_id, claims) do
-      {assigned + assign(job, worker), claims}
+    with :ok <- its_turn(job),
+         {:ok, _credential} <- credential(job),
+         {:ok, worker} <- Workers.provide(demand, job.worker_id, claims, reserved) do
+      {assigned + assign(job, worker), claims, reserved}
     else
       # A machine is being made that will hold it: this one, or one an earlier pass asked for.
       {:creating, worker} ->
         wait(job, :creating)
-        {assigned, claim(claims, worker.id, demand)}
+        {assigned, claim(claims, worker.id, demand), reserved}
 
       # Nothing in the project's pool can pay for this job: a person has to assign one, which
       # brings the ticket back by itself (`Engine.resume_placement/2`).
       {:error, {:no_credential, why}} ->
         stick(job, {:no_credential, why})
-        {assigned, claims}
+        {assigned, claims, reserved}
+
+      # No room, and no machine to be made. A job that has waited long enough holds the machines
+      # that could take it once they empty, for the rest of the pass; one that would have fitted
+      # on a held machine is told it is behind an older job rather than that nothing has room.
+      {:error, :at_capacity} ->
+        {assigned, claims, at_capacity(job, demand, reserved, waited_since)}
 
       # **No template can make this job a machine**, which is a different answer from "not
       # right now" and must not be queued as one: the ticket sticks with the reason, through
@@ -109,25 +130,62 @@ defmodule Forge.Jobs.Scheduler do
       # that will never exist is the failure this distinction prevents.
       #
       # Three of them, because what the operator does about each is different and a single
-      # sentence would send them at the wrong thing. Only `:at_capacity` below is a queue.
+      # sentence would send them at the wrong thing. Only `:at_capacity` above is a queue.
       {:error, {:no_template, why}} ->
         stick(job, {:no_template, why})
-        {assigned, claims}
+        {assigned, claims, reserved}
 
-      # At capacity, or refused by the driver: the job waits and is offered again
-      # next pass, and the pass continues to the jobs behind it. A large job can therefore be
-      # jumped by small ones indefinitely, which `docs/design/provisioning.md` § The gate
-      # records rather than solves — the fix is an age-based reservation and the scheduler has
-      # no priority. What it does now is say why, which it used to drop on the floor.
+      # Refused by the driver, or held by `concurrent`: the job waits and is offered again next
+      # pass, and the pass continues to the jobs behind it. What it does is say why, which it
+      # used to drop on the floor.
       #
       # So does a job whose every credential is rate-limited, `{:limited, until}`: time
       # resolves that, not a person, so the ticket stays active and nothing is created for it
       # (`docs/design/credentials.md` § How a job picks).
       {:error, reason} ->
         wait(job, reason)
-        {assigned, claims}
+        {assigned, claims, reserved}
     end
   end
+
+  defp at_capacity(job, demand, reserved, waited_since) do
+    cond do
+      reserving?(job, waited_since) ->
+        wait(job, :reserving)
+        MapSet.union(reserved, Workers.holders(demand))
+
+      Workers.assignable(demand, job.worker_id) != nil ->
+        wait(job, :behind)
+        reserved
+
+      true ->
+        wait(job, :at_capacity)
+        reserved
+    end
+  end
+
+  # How long it has been pending, not how old it is: a resumed job that has just come back to the
+  # queue has not waited, whatever its first run was. `updated_at` is when its status last
+  # changed, and nothing writes the row while it is pending.
+  #
+  # `<=` against `<` is an equivalent mutant: the two differ only in the microsecond the row was
+  # written at exactly the pass's instant, and the clock has moved between the two.
+  defp reserving?(job, waited_since), do: DateTime.compare(job.updated_at, waited_since) != :gt
+
+  # A command runs on no credential (`docs/design/commands.md` § An invocation is a job).
+  defp credential(%{kind: :command}), do: {:ok, nil}
+  defp credential(job), do: Credentials.for_job(job)
+
+  # `may_invoke`'s `concurrent` is the scheduler's to hold: a command whose invoking job already
+  # has that many of the same command running waits for one of them (`commands.md` § Limits).
+  defp its_turn(%{kind: :command, parent_job_id: parent, spec: %{"command" => command}})
+       when is_binary(parent) and is_integer(:erlang.map_get("concurrent", command)) do
+    if Jobs.running_commands(parent, command["name"]) >= command["concurrent"],
+      do: {:error, {:concurrent, command["concurrent"]}},
+      else: :ok
+  end
+
+  defp its_turn(_job), do: :ok
 
   defp claim(claims, worker_id, %{memory: memory, cores: cores}),
     do: Map.update(claims, worker_id, {memory, cores}, fn {m, c} -> {m + memory, c + cores} end)
@@ -236,6 +294,23 @@ defmodule Forge.Jobs.Scheduler do
       {"limited",
        "Waiting for a limit to reset: every credential this project may use is rate-limited."}
 
+  defp waiting(:reserving),
+    do:
+      {"reserving",
+       "Waiting for room, and first in line: the machines that could take it are taking no " <>
+         "younger work until it fits."}
+
+  defp waiting(:behind),
+    do:
+      {"behind",
+       "Waiting behind an older job: the machine it would fit on is being kept free for a job " <>
+         "that has waited longer."}
+
+  defp waiting({:concurrent, n}),
+    do:
+      {"concurrent",
+       "Waiting its turn: the job that invoked it may run #{n} of this command at once."}
+
   defp waiting({:spend_paused, :day}),
     do: {"spend_paused", "Waiting for midnight UTC: the node has spent its daily cap."}
 
@@ -266,7 +341,8 @@ defmodule Forge.Jobs.Scheduler do
       memory: job.memory_max || Workers.slice_bytes(),
       cores: job.cores || Workers.default_cores(),
       project_id: job.project_id,
-      harness: Jobs.harness(job)
+      harness: Jobs.harness(job),
+      protocol: Jobs.protocol(job)
     }
   end
 

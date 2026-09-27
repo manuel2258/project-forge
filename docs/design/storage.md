@@ -50,6 +50,10 @@ at most 512 bytes. The behaviour validates; implementations do not have to. The 
 - `artifact/<sha256>` — content-addressed blobs an artifact version points at that are not tied
   to one job.
 
+A job's groups of files are under its own prefix: `job/<job_id>/out-<nonce>/<n>`, the nonce one per
+assignment as a transcript's is, and `<n>` a counter rather than the file's name — the name is
+the artifact's, carried in the result, and needs to be neither lowercase nor a key.
+
 Keys are opaque above `Forge.Storage.Key`, which builds them. Nothing parses a key to recover a
 job id; the database already knows.
 
@@ -87,7 +91,11 @@ Three properties this must have, and why:
 
 - **Scoped to one key and one verb.** A token that says "you may read the store" is a token that
   reads every ticket's transcripts. A worker holding a `put` token for its own job's transcript
-  cannot overwrite the seed.
+  cannot overwrite the seed. **The one exception is a job's groups of files**, whose names are
+  not known when the token is minted: a `put` token scoped to a *prefix*, the job's own
+  `job/<job_id>/out-<nonce>/`, and to nothing above or beside it. It cannot read, and it cannot
+  overwrite either — a `put` to a key that exists is refused below — and the platform records a
+  member only when its key is under the job's own `job/<job_id>/`, whatever the worker reports.
 - **Short-lived, minted per assignment, and sized to their use.** The lifetime is signed into the
   token (`Forge.Storage.Token.sign/3`), so a verifier does not apply one number to all of them.
   Most live `token_max_age`, fifteen minutes. The transcript `put` is minted at assignment and

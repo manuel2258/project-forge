@@ -19,14 +19,15 @@ defmodule Forge.Jobs.Runs do
   alias Forge.Repo
 
   @doc "Opens a run of `job` on `worker` and `credential`, closing any run the job left open."
-  @spec open(Multi.t(), Job.t(), map(), map(), DateTime.t()) :: Multi.t()
+  @spec open(Multi.t(), Job.t(), map(), map() | nil, DateTime.t()) :: Multi.t()
   def open(multi, %Job{id: job_id}, worker, credential, now) do
     multi
     |> close(job_id, now)
     |> Multi.insert(:run, %Run{
       job_id: job_id,
       worker_id: worker.id,
-      credential_id: credential.id,
+      # A command runs on no credential (`docs/design/commands.md` § An invocation is a job).
+      credential_id: credential && credential.id,
       started_at: now
     })
   end

@@ -60,6 +60,47 @@ defmodule Forge.EventsTest do
              errors_on(Event.changeset(%Event{}, %{type: "a.b", actor: %{"kind" => "ghost"}}))
   end
 
+  describe "summary/1 of commands" do
+    test "reads as what ran and how it ended" do
+      sha = String.duplicate("a", 40)
+
+      assert Events.summary(%Event{
+               type: "command.invoked",
+               payload: %{"command" => "build", "args" => ["--release", "a b"], "commit" => sha}
+             }) == ~s($ build ["--release","a b"] at aaaaaaaaaaaa)
+
+      assert Events.summary(%Event{
+               type: "command.finished",
+               payload: %{
+                 "command" => "test",
+                 "args" => [],
+                 "exit_status" => 2,
+                 "outcome" => "converged"
+               }
+             }) == "test: exit 2"
+
+      assert Events.summary(%Event{
+               type: "command.finished",
+               payload: %{"command" => "test", "exit_status" => nil, "outcome" => "error"}
+             }) == "test: error"
+
+      assert Events.summary(%Event{
+               type: "job.parked",
+               payload: %{"invocations" => [%{"job_id" => "x"}, %{"refused" => "no"}]}
+             }) == "parked on 1 command, 1 refused"
+
+      assert Events.summary(%Event{
+               type: "commands.started",
+               payload: %{"jobs" => ["a", "b"], "at" => sha}
+             }) == "2 commands at aaaaaaaaaaaa"
+
+      assert Events.summary(%Event{
+               type: "commands.decided",
+               payload: %{"statuses" => [0, nil], "outcome" => "checks_failed"}
+             }) == "statuses 0, none → checks_failed"
+    end
+  end
+
   describe "summary/1" do
     # The clause order is the whole design of this function: the typed clauses render the events
     # a reader actually follows, the empty-payload clause keeps a bare event from rendering as

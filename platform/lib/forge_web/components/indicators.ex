@@ -131,18 +131,54 @@ defmodule ForgeWeb.Indicators do
   def bucket(_other), do: :neutral
 
   @doc """
+  A command's result where a job's outcome goes (`docs/design/ui.md` § Decide and Timeline): its
+  exit status — `exit 0` in success, any other in error — or, when it ended with none, the engine
+  outcome that says why; its status while it has not ended.
+  """
+  attr :job, :map, required: true
+
+  def exit_status(
+        %{job: %{status: :finished, outcome: :converged, exit_status: status}} = assigns
+      )
+      when is_integer(status) do
+    assigns = assign(assigns, value: "exit #{status}", ok: status == 0)
+
+    ~H"""
+    <.outcome value={@value} bucket={if @ok, do: :success, else: :failure} />
+    """
+  end
+
+  def exit_status(%{job: %{status: :finished, outcome: outcome}} = assigns) do
+    assigns = assign(assigns, value: to_string(outcome))
+
+    ~H"""
+    <.outcome value={@value} />
+    """
+  end
+
+  def exit_status(assigns) do
+    ~H"""
+    <.job_status status={@job.status} />
+    """
+  end
+
+  @doc """
   A job status. Plain mono, never boxed — nothing on any axis is boxed.
   """
   attr :status, :atom, required: true
 
   def job_status(assigns) do
     ~H"""
-    <span class={[
-      "font-mono text-[12.5px]",
-      @status == :running && "text-info",
-      @status == :waiting && "text-accent",
-      @status not in [:running, :waiting] && "opacity-70"
-    ]}>
+    <span class={
+      [
+        "font-mono text-[12.5px]",
+        @status == :running && "text-info",
+        @status == :waiting && "text-accent",
+        # Waiting on its own commands, not on a person: no accent (`ui.md` § The three axes).
+        @status == :parked && "text-info",
+        @status not in [:running, :waiting, :parked] && "opacity-70"
+      ]
+    }>
       {@status}
     </span>
     """

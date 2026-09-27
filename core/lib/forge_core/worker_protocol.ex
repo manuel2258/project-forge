@@ -6,8 +6,9 @@ defmodule ForgeCore.WorkerProtocol do
   **One number, in one file.** `core/priv/worker_protocol` is read here at compile time and by
   `flake.nix` with `builtins.readFile`, which is how `bin/hetzner-image` labels a snapshot; the
   worker sends it in its join and the platform checks it, both through this module. Nothing
-  else may write the number down, and `ForgeCore.WorkerProtocolTest` fails if `flake.nix` stops
-  reading the file.
+  else may write the current number down, and `ForgeCore.WorkerProtocolTest` fails if `flake.nix`
+  stops reading the file. A version something *arrived in* is a different fact, fixed once it is
+  true — the platform's `@commands_protocol` is one — and does not move when this does.
 
   **It moves only for a breaking change** — `worker-channel.md` § What needs a bump says which
   those are. An addition the other side may ignore is not one: a platform refuses a worker newer

@@ -304,6 +304,49 @@ defmodule Forge.Artifacts do
   def content(%Version{blob_uri: "git:" <> _sha}), do: {:error, :not_a_file}
   def content(%Version{}), do: {:error, :not_found}
 
+  @doc """
+  A version as the addressable-version route serves it (`docs/design/ui.md` § Addressable artifact
+  versions): `{:text, bytes}` for a document, or a blob that is text no larger than a document
+  may be; `{:bytes, bytes}` for a small blob that is not text; and `{:file, path}` for a larger
+  blob, fetched from the store into `dir` rather than read into memory — a build, a package. The
+  caller removes the file once it is sent.
+  """
+  @spec served(Version.t(), Path.t()) ::
+          {:text, binary()} | {:bytes, binary()} | {:file, Path.t()} | {:error, term()}
+  def served(%Version{blob_uri: "store:" <> _rest = uri} = version, dir) do
+    with {:ok, key} <- key(uri),
+         {:ok, %{size: size}} <- Storage.stat(key) do
+      if size <= ForgeCore.Document.max_bytes(),
+        do: small(version),
+        else: fetched(key, dir)
+    end
+  end
+
+  def served(%Version{} = version, _dir), do: small(version)
+
+  defp small(version) do
+    with {:ok, bytes} <- content(version) do
+      if ForgeCore.Document.text?(bytes), do: {:text, bytes}, else: {:bytes, bytes}
+    end
+  end
+
+  defp fetched(key, dir) do
+    File.mkdir_p!(dir)
+    path = Path.join(dir, Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false))
+
+    case Storage.fetch(key, path) do
+      {:ok, _info} -> {:file, path}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp key(uri) do
+    case Storage.key_from_uri(uri) do
+      {:ok, key} -> {:ok, key}
+      :error -> {:error, :not_found}
+    end
+  end
+
   defp read_inside_data_dir(path) do
     root = Path.expand(Forge.Jobs.config(:data_dir, "tmp/forge"))
     full = Path.expand(path)

@@ -145,7 +145,8 @@ This section said it was mapped before it was. Until `credentials.md` step 5 it 
 catch-all into `harness.unknown`, which is the behaviour the unknown clause exists for and the
 reason nothing was lost — the samples in `capacity.md` were read back out of stored transcripts.
 
-The full raw stdout of each run is written to `transcript-<run>.jsonl` in the job directory. A
+The full raw stdout of each run is written to `transcript-<run>.jsonl` beside the job directory,
+in the worker's own (`worker-tier.md` § What a machine that never dies accumulates). A
 workflow job's is uploaded to the store and recorded as a blob version with its content hash; a
 conversation's is uploaded when it ends and recorded nowhere (`conversations.md` § Lifetime). It
 is never rendered live; it exists for debugging after the fact.

@@ -233,9 +233,13 @@ defmodule ForgeCore.Prompt do
     - Job directory: `#{job_dir}`
     - Branch: `#{spec.branch}` (workflow pinned at commit `#{spec.commit}`)
 
+    ## How you got here
+
+    #{arrival(spec.entered)}
+
     ## Inputs (read-only)
 
-    #{inputs(spec, job_dir)}
+    #{inputs(spec, job_dir)}#{absent(spec)}
 
     ## Outputs to write
 
@@ -244,6 +248,7 @@ defmodule ForgeCore.Prompt do
     ## Allowed outcomes
 
     #{outcomes(spec)}
+    #{may_invoke(spec, job_dir)}#{command_results(spec, job_dir)}
 
     ## Budget
 
@@ -260,11 +265,48 @@ defmodule ForgeCore.Prompt do
     end)
   end
 
+  # `docs/design/job-prompt.md` § How the job arrived. A second visit to a state is there because
+  # something sent it back, and the job has to be told what and why rather than infer it from
+  # which inputs changed.
+  defp arrival(nil), do: "This is the ticket's first state."
+
+  defp arrival(%{"from" => from, "by" => by} = entered) do
+    who = if by == "person", do: "a person", else: "the engine"
+    on = if entered["outcome"], do: " on `#{entered["outcome"]}`", else: ""
+
+    "The ticket came from `#{from}`#{on}; #{who} took the transition." <>
+      comment(entered["comment"])
+  end
+
+  defp comment(text) when is_binary(text) and text != "" do
+    fence = fence(text)
+    "\n\nThey wrote:\n\n#{fence}text\n#{String.trim(text)}\n#{fence}"
+  end
+
+  defp comment(_none), do: ""
+
+  # Optional inputs not written yet: named, so a missing file is not mistaken for a failure
+  # (`docs/design/workflow-grammar-v1.md` § Inputs).
+  defp absent(%Spec{absent_inputs: []}), do: ""
+
+  defp absent(%Spec{absent_inputs: names}) do
+    "\n" <>
+      Enum.map_join(names, "\n", fn name ->
+        "- `#{name}`: not written on this ticket yet; it may be on a later visit to this state"
+      end)
+  end
+
   defp outputs(%Spec{produces: produces} = spec, job_dir) do
     outcome_document = Spec.outcome_document(spec)
 
     Enum.map_join(produces, "\n", fn name ->
       cond do
+        Workflow.group?(name) ->
+          dir = Path.join([job_dir, "out", Workflow.group_name(name)])
+
+          "- `#{name}` -> any number of files in `#{dir}/`, each kept as " <>
+            "`#{Workflow.group_name(name)}/<file>`; names are letters, digits, `.`, `_` and `-`"
+
         not Workflow.document?(name) ->
           "- `#{name}`: the diff of your commits on `#{spec.branch}`; no file to write"
 
@@ -276,6 +318,81 @@ defmodule ForgeCore.Prompt do
       end
     end)
   end
+
+  # `docs/design/job-prompt.md` § Commands: what this job's agent may run, how many remain, and
+  # the one way to ask. Absent for a state that may not invoke, so no other job is told how to use
+  # a file the preamble names only as one to leave alone.
+  defp may_invoke(%Spec{may_invoke: grants}, _job_dir) when map_size(grants) == 0, do: ""
+
+  defp may_invoke(%Spec{may_invoke: grants}, job_dir) do
+    lines =
+      grants
+      |> Enum.sort_by(&elem(&1, 0))
+      |> Enum.map_join("\n", fn {name, grant} ->
+        remaining = grant["remaining"] || grant["max"]
+        at_once = if grant["concurrent"], do: ", at most #{grant["concurrent"]} at once", else: ""
+        "- `#{name}`: #{remaining} of #{grant["max"]} invocations left#{at_once}"
+      end)
+
+    """
+
+    ## Commands you may run
+
+    #{lines}
+
+    To run them, write `#{Path.join(job_dir, "invoke.json")}` — a JSON array such as
+    `[{"command": "build", "args": ["--release"]}, {"command": "test"}]` — and end your run
+    without writing your outputs. Your work is committed and pushed, the commands run against
+    that commit on another machine, and you are resumed with their exit statuses and logs. Ask
+    for everything you need at once: every round is a resume. Run quick checks yourself; commands
+    are for what is expensive, shared or decides whether the work is done.
+    """
+  end
+
+  defp command_results(%Spec{command_results: []}, _job_dir), do: ""
+
+  defp command_results(%Spec{command_results: results}, job_dir) do
+    lines = Enum.map_join(results, "\n", &command_result(&1, job_dir))
+
+    """
+
+    ## Commands you ran
+
+    What you asked for when you last stopped, as it came back:
+
+    #{lines}
+    """
+  end
+
+  defp command_result(%{"refused" => reason} = result, _job_dir) when is_binary(reason),
+    do: "- #{invocation(result)}: refused — #{reason}"
+
+  defp command_result(result, job_dir) do
+    at = if result["at"], do: " at `#{String.slice(result["at"], 0, 12)}`", else: ""
+
+    log =
+      if result["log"], do: "; log `#{Path.join([job_dir, "commands", result["log"]])}`", else: ""
+
+    "- #{invocation(result)}#{at}: #{ended(result)}#{took(result["duration_ms"])}#{log}"
+  end
+
+  # The argument vector as JSON, because it reached `exec` as a vector: joined with spaces, two
+  # arguments and one containing a space would read the same.
+  defp invocation(%{"command" => command} = result) do
+    case result["args"] do
+      [_ | _] = args -> "`#{command}` `#{ForgeCore.Workflow.Command.argv(args)}`"
+      _none -> "`#{command}`"
+    end
+  end
+
+  defp ended(%{"exit_status" => status}) when is_integer(status), do: "exit #{status}"
+  defp ended(%{"outcome" => "cancelled"}), do: "cancelled before it finished"
+
+  defp ended(_result),
+    do: "no exit status — it outlived its timeout or could not be run"
+
+  defp took(ms) when is_integer(ms), do: " in #{max(div(ms, 1000), 1)}s"
+  defp took(_none), do: ""
 
   defp outcomes(%Spec{outcomes: outcomes}) do
     listed = Enum.map_join(outcomes, ", ", &"`#{&1}`")

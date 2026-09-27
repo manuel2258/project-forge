@@ -446,6 +446,47 @@ defmodule ForgeWeb.Operator.Components do
     """
   end
 
+  @doc """
+  One document a human state declares, written by the person while the ticket rests there
+  (`docs/design/ui.md` § Decide and Timeline): the latest version to start from, and a filled
+  *Save* that records what was typed as a new version. Not a decision, so no accent.
+  """
+  attr :ticket, :map, required: true
+  attr :name, :string, required: true
+  attr :latest, :map, default: nil
+
+  def document_editor(assigns) do
+    ~H"""
+    <form
+      phx-submit="write_document"
+      id={"write-#{@name}"}
+      class="flex flex-col gap-2"
+    >
+      <input type="hidden" name="ticket" value={@ticket.id} />
+      <input type="hidden" name="name" value={@name} />
+      <label for={"write-#{@name}-content"} class="font-mono text-[12.5px]">
+        {@name}
+        <span :if={@latest} class="opacity-60">v{@latest.version}</span>
+        <span :if={!@latest} class="opacity-60">not written yet</span>
+      </label>
+      <textarea
+        id={"write-#{@name}-content"}
+        name="content"
+        rows="6"
+        required
+        class="w-full rounded-field border border-base-300 bg-transparent px-3 py-2 text-sm placeholder:opacity-40 focus:outline-none focus:border-base-content/40"
+      >{@latest && @latest.content}</textarea>
+      <button
+        type="submit"
+        phx-disable-with="Saving…"
+        class="h-12 self-end rounded-field bg-base-content px-4 text-sm font-medium text-base-100"
+      >
+        Save {@name}
+      </button>
+    </form>
+    """
+  end
+
   @doc "The mono footer of identifiers under a queue item."
   attr :project, :string, required: true
   attr :ticket, :map, required: true

@@ -72,6 +72,14 @@ defmodule ForgeWeb.Operator.Actions do
     end
   end
 
+  # A document a human state declares, written from the ticket's Decide tab. The same write the
+  # API's `POST …/artifacts/:name` makes (`docs/design/workflow-grammar-v1.md` § Semantics).
+  defp act("write_document", %{"ticket" => id, "name" => name, "content" => content}, socket) do
+    with {:ok, ticket} <- Operator.edit(ticket(id), user(socket), name, content) do
+      {:ok, "Saved #{name}; #{ticket.state} is where it waits"}
+    end
+  end
+
   defp act(_event, _params, _socket), do: :unknown
 
   defp ticket(id) do

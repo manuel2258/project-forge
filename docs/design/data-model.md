@@ -23,11 +23,16 @@ the project row), `title`, `body`, `base_commit`, `branch` (`ticket/<number>`), 
 workflow), `status` (`active | stuck | done | cancelled`), `cost_usd` (denormalised sum
 over jobs), `pending_transition` (set while a transition waits for approval).
 
-**job** — one execution of one job state, or one conversation. `kind` (`workflow | chat`),
-`project_id`, `ticket_id`, `state`, `attempt` (per ticket and state), `parent_job_id` (null in v1),
+**job** — one execution of one job state, one command invocation, or one conversation. `kind`
+(`workflow | command | chat`), `project_id`, `ticket_id`, `state`, `attempt` (per ticket and state
+for a workflow job, per ticket for a command), `parent_job_id` (the job that invoked a command;
+null otherwise),
 `spec` (immutable, JSON: prompt text and path, inputs with name, version and content inlined, `env`,
 `commit`, budgets, permitted children, which is empty in v1; `answers.md` and the answered keys are
-added at run time, not stored), `status` (`pending | running | waiting | hibernated | finished`),
+added at run time, not stored; a command's is its script, argv, commit, env and timeout),
+`status` (`pending | running | waiting | parked | hibernated | finished` — `parked` is a job waiting
+on commands it invoked, holding no slice: `design/commands.md` § Always park), `exit_status` (a
+command's, null for every other kind and for a command that ended without one),
 `outcome` (`converged | did_not_converge | budget_exhausted | error | cancelled`, null until
 finished), `declared_outcome` (the workflow outcome the agent selected, null unless converged),
 `turns`, `cost_usd` (what its runs have cost between them — a conversation's read from them with
@@ -43,7 +48,7 @@ timeline, so two jobs created within one second must still be ordered.
 A chat is a job with a project, no state and no spec, and a ticket only when it is a ticket
 chat — `design/conversations.md` § Shape. `ticket_id`, `state` and `spec` are therefore nullable,
 and the CHECK constraint `jobs_kind_shape` is what says which shape a row must have: a workflow
-row carries all three, a chat row has no state and no spec. The `(ticket_id, state, attempt)`
+row and a command row carry all three, a chat row has no state and no spec. The `(ticket_id, state, attempt)`
 unique index is partial, over workflow rows, because Postgres treats NULLs as distinct and would
 otherwise constrain nothing.
 

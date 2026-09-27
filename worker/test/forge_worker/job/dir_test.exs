@@ -587,4 +587,224 @@ defmodule ForgeWorker.Job.DirTest do
       assert File.read!(path) =~ "The platform you are running on"
     end
   end
+
+  # `docs/design/commands.md` § How an agent invokes: read like `out/`, then removed.
+  describe "invoke.json" do
+    setup %{root: root, spec: spec} do
+      job_dir = Dir.prepare(root, spec)
+      %{job_dir: job_dir, path: Dir.invoke_path(job_dir), owner: File.stat!(job_dir).uid}
+    end
+
+    test "is nothing when the agent asked for nothing", %{job_dir: job_dir} do
+      assert Dir.invocations(job_dir) == :none
+    end
+
+    test "is read once, then gone", %{job_dir: job_dir, path: path} do
+      File.write!(path, ~s([{"command": "build", "args": ["--release"]}, {"command": "test"}]))
+
+      assert Dir.invocations(job_dir) ==
+               {:ok,
+                [
+                  %{"command" => "build", "args" => ["--release"]},
+                  %{"command" => "test", "args" => []}
+                ]}
+
+      refute File.exists?(path)
+      assert Dir.invocations(job_dir) == :none
+    end
+
+    test "that is not a list of invocations says why, and is gone too", %{
+      job_dir: job_dir,
+      path: path
+    } do
+      for {content, why} <- [
+            {"not json", "invoke.json is not valid JSON"},
+            {"[]", "invoke.json must be a non-empty JSON array"},
+            {~s({"command": "build"}), "invoke.json must be a non-empty JSON array"},
+            {~s([{"args": []}]), "invoke.json has an entry with no command name"},
+            {~s([{"command": ""}]), "invoke.json has an entry with no command name"},
+            {~s([{"command": "t", "args": [1]}]),
+             "invoke.json has arguments that are not strings"},
+            {~s([{"command": "t", "args": "x"}]), "invoke.json has args that are not a list"}
+          ] do
+        File.write!(path, content)
+        assert {:error, reason} = Dir.invocations(job_dir)
+        assert String.starts_with?(reason, why), "#{content}: #{reason}"
+        refute File.exists?(path)
+      end
+    end
+
+    # The same model as `out/`: what is read is the file the handle opened, owned by the job.
+    test "a file the job does not own, or a link, is refused", %{
+      job_dir: job_dir,
+      path: path,
+      owner: owner
+    } do
+      File.write!(path, ~s([{"command": "build"}]))
+      assert {:error, reason} = Dir.invocations(job_dir, owner + 1)
+      assert reason =~ "the job's own file"
+
+      target = Path.join(job_dir, "elsewhere.json")
+      File.write!(target, ~s([{"command": "build"}]))
+      File.ln_s!(target, path)
+      assert {:error, reason} = Dir.invocations(job_dir)
+      assert reason =~ "regular file"
+    end
+
+    test "a request left from the run that parked is gone before the next one starts", %{
+      root: root,
+      spec: spec,
+      path: path
+    } do
+      File.write!(path, ~s([{"command": "build"}]))
+      Dir.prepare(root, spec, resume: true)
+      refute File.exists?(path)
+    end
+  end
+
+  describe "the command logs folder" do
+    test "holds a resumed run's logs, read-only, and nothing named off the pattern", %{
+      root: root,
+      spec: spec
+    } do
+      source = Path.join(tmp_dir("logs"), "log")
+      File.write!(source, "ok\n")
+
+      job_dir =
+        Dir.prepare(root, spec,
+          command_logs: [
+            {"1-build.log", source},
+            {"../escape.log", source},
+            {"1-../../escape.log", source},
+            {"2-test.txt", source}
+          ]
+        )
+
+      assert File.ls!(Path.join(job_dir, "commands")) == ["1-build.log"]
+      assert File.read!(Path.join([job_dir, "commands", "1-build.log"])) == "ok\n"
+
+      log = Path.join([job_dir, "commands", "1-build.log"])
+      assert Bitwise.band(File.stat!(log).mode, 0o777) == 0o444
+    end
+
+    test "is gone when the run has none, so an old log is never read as new", %{
+      root: root,
+      spec: spec
+    } do
+      source = Path.join(tmp_dir("logs"), "log")
+      File.write!(source, "old\n")
+      job_dir = Dir.prepare(root, spec, command_logs: [{"1-build.log", source}])
+      Dir.prepare(root, spec, resume: true)
+      refute File.exists?(Path.join(job_dir, "commands"))
+    end
+  end
+
+  # `docs/design/job-prompt.md` § Groups of files: staged through the guarded read, capped, and
+  # refused with why rather than dropped.
+  describe "stage_groups/4" do
+    setup %{root: root, spec: spec} do
+      job_dir = Dir.prepare(root, spec)
+      shots = Path.join([job_dir, "out", "shots"])
+      File.mkdir_p!(shots)
+
+      %{
+        job_dir: job_dir,
+        shots: shots,
+        staging: tmp_dir("staging"),
+        owner: File.stat!(job_dir).uid
+      }
+    end
+
+    defp stage(job_dir, staging, opts \\ []) do
+      Dir.stage_groups(
+        job_dir,
+        Keyword.get(opts, :groups, ["shots"]),
+        staging,
+        Keyword.merge([max_bytes: 1024, max_files: 3], opts)
+      )
+    end
+
+    test "copies each file out, bytes and all, named as its artifact", context do
+      File.write!(Path.join(context.shots, "home.png"), <<137, 80, 78, 71, 0, 255>>)
+      File.write!(Path.join(context.shots, "menu.png"), "menu")
+
+      assert %{staged: [{"shots/home.png", home}, {"shots/menu.png", menu}], invalid: %{}} =
+               stage(context.job_dir, context.staging)
+
+      assert File.read!(home) == <<137, 80, 78, 71, 0, 255>>
+      assert File.read!(menu) == "menu"
+      assert String.starts_with?(home, context.staging)
+    end
+
+    test "a group with nothing in it, or no directory at all, keeps nothing", context do
+      assert stage(context.job_dir, context.staging) == %{staged: [], invalid: %{}}
+
+      assert stage(context.job_dir, context.staging, groups: ["absent"]) == %{
+               staged: [],
+               invalid: %{}
+             }
+    end
+
+    test "refuses what it cannot keep, with why, and keeps the rest", context do
+      File.write!(Path.join(context.shots, "a.png"), "ok")
+      File.write!(Path.join(context.shots, "b.bin"), String.duplicate("x", 2048))
+      File.write!(Path.join(context.shots, ".hidden"), "x")
+      File.mkdir_p!(Path.join(context.shots, "nested"))
+      File.ln_s!("/etc/hostname", Path.join(context.shots, "link"))
+
+      assert %{staged: [{"shots/a.png", _path}], invalid: invalid} =
+               stage(context.job_dir, context.staging, max_files: 10)
+
+      assert invalid["shots/b.bin"] == "is larger than 1024 bytes"
+      assert invalid["shots/.hidden"] =~ "is not a name"
+      assert invalid["shots/nested"] =~ "must be a regular file, got directory"
+      assert invalid["shots/link"] =~ "must be a regular file, got symlink"
+    end
+
+    test "keeps no more than the count, in name order", context do
+      for name <- ~w(a b c d e), do: File.write!(Path.join(context.shots, name), name)
+
+      assert %{staged: staged, invalid: invalid} = stage(context.job_dir, context.staging)
+      assert Enum.map(staged, &elem(&1, 0)) == ["shots/a", "shots/b", "shots/c"]
+      assert Map.keys(invalid) == ["shots/d", "shots/e"]
+      assert invalid["shots/d"] =~ "one more than the 3 files"
+    end
+
+    test "a file the job does not own is refused", context do
+      File.write!(Path.join(context.shots, "a.png"), "ok")
+
+      assert %{staged: [], invalid: %{"shots/a.png" => reason}} =
+               stage(context.job_dir, context.staging, owner: context.owner + 1)
+
+      assert reason =~ "the job's own file"
+    end
+
+    # Not listed through a link: that would name the files of a directory the job cannot read.
+    test "a group's directory that is a link is reported, not followed", context do
+      elsewhere = tmp_dir("elsewhere")
+      File.write!(Path.join(elsewhere, "secret.png"), "not the job's")
+      File.rm_rf!(context.shots)
+      File.ln_s!(elsewhere, context.shots)
+
+      assert %{staged: [], invalid: %{"shots/*" => "must be a directory, not a symlink"}} =
+               stage(context.job_dir, context.staging)
+    end
+
+    test "a group's name standing for a file, not a directory, is reported", context do
+      File.rm_rf!(context.shots)
+      File.write!(context.shots, "not a directory")
+
+      assert %{staged: [], invalid: %{"shots/*" => "must be a directory, not a file"}} =
+               stage(context.job_dir, context.staging)
+    end
+
+    test "a declared group's directory is not an undeclared output", %{root: root} do
+      spec = spec(%{produces: ["plan.md", "shots/*"]})
+      job_dir = Dir.prepare(root, spec)
+      File.mkdir_p!(Path.join([job_dir, "out", "shots"]))
+      File.write!(Path.join([job_dir, "out", "plan.md"]), "---\noutcome: done\n---\n# P\n")
+
+      assert %{undeclared: []} = Dir.collect(job_dir, spec)
+    end
+  end
 end

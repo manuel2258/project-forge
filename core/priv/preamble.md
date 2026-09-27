@@ -11,7 +11,10 @@ The job directory is `$FORGE_JOB` (its absolute path is in the manifest below). 
 the repository and nothing in it is committed.
 
 - `$FORGE_JOB/inputs/<name>` — your inputs, read-only. `ticket` (no extension) is the ticket itself.
-  `answers.md` is present when a person has answered questions on this ticket.
+  `answers.md` is present when a person has answered questions on this ticket. An input the
+  manifest names as not written yet is one a later state writes when it sends work back: its
+  absence is not a failure. The manifest's *How you got here* says whether this run is such a
+  return, and what the person who sent it wrote.
 - `$FORGE_JOB/out/<name>` — where you write each declared output. Nothing else may be
   written there; an undeclared file ends the job with outcome `error`. The one exception is
   `proposals/`, below.
@@ -111,6 +114,8 @@ when "is this already tracked?" is the question.
 ## Rules
 
 - Budgets are fixed. The platform enforces the turn and cost limits regardless of what you do.
-- Do not edit `.forge/workflow.yml` or anything under `.forge/agents/` in this job.
-- Do not write outside the repository and `$FORGE_JOB/out/`.
+- Do not edit `.forge/workflow.yml`, anything under `.forge/agents/` or anything under
+  `.forge/commands/` in this job.
+- Do not write outside the repository and `$FORGE_JOB/out/` — and `$FORGE_JOB/invoke.json`,
+  when your manifest lists commands you may run.
 - When the work is done and the outputs are written, stop. Nothing else is required.

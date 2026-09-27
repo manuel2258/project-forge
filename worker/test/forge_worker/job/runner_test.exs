@@ -149,7 +149,7 @@ defmodule ForgeWorker.Job.RunnerTest do
   test "the harness receives the composed prompt, the credential and the budget flags", context do
     pid = run(context, "success")
     {:ok, result} = Runner.await(pid, 5_000)
-    job_dir = Path.dirname(result.transcript_path)
+    job_dir = Path.dirname(result.stderr_path)
 
     prompt = File.read!(Path.join(job_dir, "fake-prompt.txt"))
     assert prompt =~ "# You are one job in a ticket lifecycle"
@@ -169,7 +169,7 @@ defmodule ForgeWorker.Job.RunnerTest do
     on_exit(fn -> System.delete_env("FORGE_TEST_LEAK") end)
 
     {:ok, result} = context |> run("success") |> Runner.await(5_000)
-    job_dir = Path.dirname(result.transcript_path)
+    job_dir = Path.dirname(result.stderr_path)
     env = File.read!(Path.join(job_dir, "fake-env-all.txt"))
 
     refute env =~ "FORGE_TEST_LEAK"
@@ -184,7 +184,7 @@ defmodule ForgeWorker.Job.RunnerTest do
   test "a credential given as a function is resolved at spawn time", context do
     opts = [harness_opts: [executable: fake_executable(), credential: fn -> {:oauth, "tok"} end]]
     {:ok, result} = context |> run("success", opts) |> Runner.await(5_000)
-    job_dir = Path.dirname(result.transcript_path)
+    job_dir = Path.dirname(result.stderr_path)
 
     assert File.read!(Path.join(job_dir, "fake-env.txt")) ==
              "ANTHROPIC_API_KEY=unset\nCLAUDE_CODE_OAUTH_TOKEN=tok\n"
@@ -204,6 +204,18 @@ defmodule ForgeWorker.Job.RunnerTest do
     assert Path.basename(first.transcript_path) == "transcript-1.jsonl"
     assert Path.basename(second.transcript_path) == "transcript-2.jsonl"
     assert File.exists?(first.transcript_path)
+  end
+
+  # The link uploads the transcript by its path, and the job's user owns every name in the job
+  # directory: there, it could be a link to a file only the worker may read by the time it is.
+  test "the transcript is written where the job cannot reach, not in its directory", context do
+    {:ok, result} = context |> run("success") |> Runner.await(5_000)
+    job_dir = Path.dirname(result.stderr_path)
+
+    refute String.starts_with?(result.transcript_path, job_dir <> "/")
+    assert Path.dirname(result.transcript_path) == ForgeWorker.Job.Dir.worker_dir(job_dir)
+    assert %File.Stat{mode: mode} = File.stat!(Path.dirname(result.transcript_path))
+    assert Bitwise.band(mode, 0o777) == 0o700
   end
 
   test "a declared outcome other than done is reported as such", context do
@@ -304,7 +316,7 @@ defmodule ForgeWorker.Job.RunnerTest do
         )
 
       {:ok, result} = Runner.await(pid, 5_000)
-      job_dir = Path.dirname(result.transcript_path)
+      job_dir = Path.dirname(result.stderr_path)
       prompt = File.read!(Path.join(job_dir, "fake-prompt.txt"))
 
       assert File.read!(Path.join(job_dir, "fake-args.txt")) =~ "--resume sess-42"
@@ -320,7 +332,7 @@ defmodule ForgeWorker.Job.RunnerTest do
 
     test "a cold start gets the whole prompt, and no --resume", %{spec: spec} = context do
       {:ok, result} = context |> run("success", spec: spec, head: "c0ffee") |> Runner.await(5_000)
-      job_dir = Path.dirname(result.transcript_path)
+      job_dir = Path.dirname(result.stderr_path)
       prompt = File.read!(Path.join(job_dir, "fake-prompt.txt"))
 
       refute File.read!(Path.join(job_dir, "fake-args.txt")) =~ "--resume"
@@ -333,6 +345,100 @@ defmodule ForgeWorker.Job.RunnerTest do
     out = Path.join([root, spec.job_id, "out"])
     File.mkdir_p!(out)
     File.write!(Path.join(out, "plan.md"), content)
+  end
+
+  # `docs/design/commands.md` § How an agent invokes.
+  describe "an agent that invokes commands" do
+    defp invoking_spec,
+      do: spec(%{may_invoke: %{"build" => %{"max" => 3}, "test" => %{"max" => 1}}})
+
+    test "parks with what it asked for, and nothing is decided", context do
+      pid = run(context, "invokes", spec: invoking_spec())
+      assert {:ok, %Result{} = result} = Runner.await(pid, 5_000)
+
+      assert result.status == :parked
+      assert result.outcome == nil
+
+      assert result.invocations == [
+               %{"command" => "build", "args" => ["--release", "a b"]},
+               %{"command" => "test", "args" => []}
+             ]
+
+      # Read once: the request has been handed on, and a resume must not find it again.
+      assert Path.wildcard(Path.join([context.root, "*", "invoke.json"])) == []
+    end
+
+    test "a file that is not a list of invocations is reported, not dropped", context do
+      pid = run(context, "invokes_badly", spec: invoking_spec())
+
+      assert {:ok, %Result{status: :parked, invocations: [], invocation_error: reason}} =
+               Runner.await(pid, 5_000)
+
+      assert reason =~ "invoke.json must be a non-empty JSON array"
+    end
+
+    # A state that may not invoke is never told the file exists; one written anyway is removed
+    # and the run ends as if it were not there.
+    test "is ignored where the state may not invoke", context do
+      pid = run(context, "invokes")
+      assert {:ok, %Result{status: :finished, outcome: :converged}} = Runner.await(pid, 5_000)
+      assert Path.wildcard(Path.join([context.root, "*", "invoke.json"])) == []
+    end
+
+    # A run the harness stopped is over, whatever it asked for.
+    test "does not park a run that did not end cleanly", context do
+      pid = run(context, "invokes_over_budget", spec: invoking_spec())
+
+      assert {:ok, %Result{status: :finished, outcome: :budget_exhausted}} =
+               Runner.await(pid, 5_000)
+    end
+
+    # Each half of "clean" on its own: an error flag on a success, and an error subtype without
+    # the flag.
+    test "does not park a run that errored, whichever way it says so", context do
+      for scenario <- ["invokes_is_error", "invokes_error_subtype"] do
+        pid = run(context, scenario, spec: invoking_spec())
+        assert {:ok, %Result{status: :finished}} = Runner.await(pid, 5_000), scenario
+      end
+    end
+
+    test "a resumed run finds the logs of what it invoked", context do
+      source = Path.join(tmp_dir("logs"), "fetched")
+      File.write!(source, "compiled 3 files\n")
+
+      pid =
+        run(context, "reads_logs", spec: invoking_spec(), command_logs: [{"1-build.log", source}])
+
+      assert {:ok, %Result{documents: %{"plan.md" => plan}}} = Runner.await(pid, 5_000)
+      assert plan.raw =~ "compiled 3 files"
+    end
+  end
+
+  # `docs/design/job-prompt.md` § Groups of files: a finished run's files are staged for the link.
+  describe "a group of files" do
+    test "is staged when the run finishes, and a bad name is refused", context do
+      spec = spec(%{produces: ["plan.md", "shots/*"]})
+      pid = run(context, "shots", spec: spec)
+
+      assert {:ok, %Result{status: :finished, outcome: :converged} = result} =
+               Runner.await(pid, 5_000)
+
+      assert %{"shots/home.png" => %{"path" => home}, "shots/menu.png" => %{"path" => _menu}} =
+               result.blobs
+
+      assert File.read!(home) == <<137, 80, 78, 71, 13, 10, 26, 10, 0, 1>>
+      assert Path.dirname(home) == ForgeWorker.Job.Dir.blobs_dir(Path.dirname(result.stderr_path))
+      assert result.invalid_blobs["shots/.hidden"] =~ "is not a name"
+      assert result.undeclared == []
+    end
+
+    test "is not staged for a run that parks", context do
+      spec = spec(%{produces: ["plan.md", "shots/*"], may_invoke: %{"build" => %{"max" => 1}}})
+      pid = run(context, "invokes_with_shots", spec: spec)
+
+      assert {:ok, %Result{status: :parked, blobs: blobs}} = Runner.await(pid, 5_000)
+      assert blobs == %{}
+    end
   end
 
   test "a crash without a result is an error, and odd lines still become events", context do

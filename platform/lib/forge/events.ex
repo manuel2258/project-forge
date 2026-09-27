@@ -170,6 +170,30 @@ defmodule Forge.Events do
   # `reason="at_capacity" text="Waiting for room: …"` under a job.
   def summary(%Event{type: "job.waiting", payload: %{"text" => text}}), do: text
 
+  # Commands (`docs/design/commands.md` § Events and the timeline), as the sentence a person reads
+  # rather than the inspected map the fallback would draw.
+  def summary(%Event{type: "command.invoked", payload: %{"command" => command} = p}),
+    do: "$ #{command}#{argv(p["args"])} at #{short(p["commit"])}"
+
+  def summary(%Event{type: "command.finished", payload: %{"command" => command} = p}),
+    do: "#{command}#{argv(p["args"])}: #{ended(p)}"
+
+  def summary(%Event{type: "job.parked", payload: %{"invocations" => invocations}}) do
+    {refused, run} = Enum.split_with(invocations, &Map.has_key?(&1, "refused"))
+
+    "parked on #{count(length(run), "command")}" <>
+      if(refused == [], do: "", else: ", #{length(refused)} refused")
+  end
+
+  def summary(%Event{type: "commands.started", payload: %{"jobs" => jobs} = p}),
+    do: "#{count(length(jobs), "command")} at #{short(p["at"])}"
+
+  def summary(%Event{
+        type: "commands.decided",
+        payload: %{"statuses" => statuses, "outcome" => outcome}
+      }),
+      do: "statuses #{Enum.map_join(statuses, ", ", &(&1 || "none"))} → #{outcome}"
+
   def summary(%Event{payload: payload}) when map_size(payload) == 0, do: ""
 
   def summary(%Event{payload: payload}) do
@@ -178,6 +202,18 @@ defmodule Forge.Events do
     |> Enum.map_join(" ", fn {k, v} -> "#{k}=#{inspect(v)}" end)
     |> String.slice(0, 160)
   end
+
+  defp argv([_ | _] = args), do: " " <> ForgeCore.Workflow.Command.argv(args)
+  defp argv(_none), do: ""
+
+  defp short(sha) when is_binary(sha), do: String.slice(sha, 0, 12)
+  defp short(_none), do: "?"
+
+  defp ended(%{"exit_status" => status}) when is_integer(status), do: "exit #{status}"
+  defp ended(%{"outcome" => outcome}), do: to_string(outcome)
+
+  defp count(1, noun), do: "1 #{noun}"
+  defp count(n, noun), do: "#{n} #{noun}s"
 
   @spec encode_actor(actor()) :: map()
   def encode_actor(:system), do: %{"kind" => "system", "id" => nil}

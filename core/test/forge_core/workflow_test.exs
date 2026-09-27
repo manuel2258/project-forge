@@ -217,4 +217,204 @@ defmodule ForgeCore.WorkflowTest do
       assert Workflow.resources(workflow, "a") == %Resources{memory: nil, cpu: nil}
     end
   end
+
+  # `docs/design/workflow-grammar-v1.md` § Inputs. The flow this was written for: a review that
+  # sends work back with its reasons, a build that fails, and a tester who writes a note. Each
+  # reason is read by a state that also runs before any reason exists.
+  describe "required_input?/3" do
+    setup do
+      yaml = """
+      version: 1
+      initial: refining
+      states:
+        refining:
+          prompt: r.md
+          inputs: [ticket]
+          produces: [refinement.md]
+          budget: { turns: 1, cost: 1 }
+        planning:
+          prompt: p.md
+          inputs: [ticket, refinement.md, implementation.md]
+          produces: [plan.md]
+          budget: { turns: 1, cost: 1 }
+        implementing:
+          prompt: i.md
+          inputs: [plan.md, review.md, test-report.md]
+          produces: [implementation.md, changeset]
+          outcomes: [done, plan_invalid]
+          budget: { turns: 1, cost: 1 }
+        reviewing:
+          prompt: v.md
+          inputs: [plan.md, implementation.md, changeset]
+          produces: [review.md]
+          outcomes: [done, changes_requested]
+          budget: { turns: 1, cost: 1 }
+        human_testing:
+          produces: [test-report.md]
+        merged:
+          on_enter: merge
+      transitions:
+        - { from: refining, to: planning, approve: [refinement.md] }
+        - { from: planning, to: implementing }
+        - { from: implementing, to: reviewing }
+        - { from: implementing, to: planning, when: plan_invalid, max: 2 }
+        - { from: reviewing, to: human_testing }
+        - { from: reviewing, to: implementing, when: changes_requested, max: 3 }
+        - { from: human_testing, to: merged, approve: [changeset] }
+        - { from: human_testing, to: implementing }
+      limits:
+        ticket_cost: 10
+      """
+
+      %{workflow: ForgeCore.Workflow.Parser.parse!(yaml)}
+    end
+
+    test "an input every way in passes the producer of is required", %{workflow: workflow} do
+      assert Workflow.required_input?(workflow, "planning", "refinement.md")
+      assert Workflow.required_input?(workflow, "implementing", "plan.md")
+      assert Workflow.required_input?(workflow, "reviewing", "implementation.md")
+    end
+
+    test "a reason a later state sends back is optional", %{workflow: workflow} do
+      refute Workflow.required_input?(workflow, "implementing", "review.md")
+      refute Workflow.required_input?(workflow, "planning", "implementation.md")
+    end
+
+    # Dominance, not reachability: `test-report.md`'s producer comes before `implementing` on one
+    # way in, and a person may leave it unwritten on that way too.
+    test "a document a person writes is never required", %{workflow: workflow} do
+      refute Workflow.required_input?(workflow, "implementing", "test-report.md")
+    end
+
+    test "the ticket and the changeset always exist", %{workflow: workflow} do
+      assert Workflow.required_input?(workflow, "refining", "ticket")
+      assert Workflow.required_input?(workflow, "reviewing", "changeset")
+      # Where no state that commits dominates it: the branch exists from admission.
+      assert Workflow.required_input?(workflow, "planning", "changeset")
+    end
+
+    # The case the one above cannot tell apart from "no producer on this way in": here the human
+    # state is on every way in, and it still guarantees nothing.
+    test "a person's document is optional even where every way in passes them" do
+      yaml = """
+      version: 1
+      initial: a
+      states:
+        a:
+          prompt: a.md
+          budget: { turns: 1, cost: 1 }
+        h:
+          produces: [note.md]
+        c:
+          prompt: c.md
+          inputs: [note.md]
+          budget: { turns: 1, cost: 1 }
+      transitions:
+        - { from: a, to: h }
+        - { from: h, to: c }
+      limits:
+        ticket_cost: 1
+      """
+
+      refute yaml
+             |> ForgeCore.Workflow.Parser.parse!()
+             |> Workflow.required_input?("c", "note.md")
+    end
+
+    # A job that ended on an engine outcome may not have written what it declares — a missing
+    # document is `error` — so a state reached that way reads it as optional. The declared
+    # outcome and the default guarantee it: the job could not have ended on them without it.
+    test "an edge a producer leaves on an engine outcome guarantees nothing" do
+      yaml = """
+      version: 1
+      initial: implementing
+      states:
+        implementing:
+          prompt: i.md
+          produces: [implementation.md]
+          outcomes: [done, stuck]
+          budget: { turns: 1, cost: 1 }
+        triage:
+          prompt: t.md
+          inputs: [implementation.md]
+          budget: { turns: 1, cost: 1 }
+        after_stuck:
+          prompt: s.md
+          inputs: [implementation.md]
+          budget: { turns: 1, cost: 1 }
+        done: {}
+      transitions:
+        - { from: implementing, to: triage, when: error }
+        - { from: implementing, to: after_stuck, when: stuck }
+        - { from: implementing, to: done }
+        - { from: triage, to: done }
+        - { from: after_stuck, to: done }
+      limits:
+        ticket_cost: 1
+      """
+
+      workflow = ForgeCore.Workflow.Parser.parse!(yaml)
+
+      refute Workflow.required_input?(workflow, "triage", "implementation.md")
+      assert Workflow.required_input?(workflow, "after_stuck", "implementation.md")
+    end
+
+    # A job reads its inputs before it writes anything, so its own earlier output is there only
+    # from its second run on.
+    test "a state reading what it wrote last time finds nothing the first time" do
+      yaml = """
+      version: 1
+      initial: a
+      states:
+        a:
+          prompt: a.md
+          inputs: [notes.md]
+          produces: [notes.md]
+          outcomes: [done, again]
+          budget: { turns: 1, cost: 1 }
+        b: {}
+      transitions:
+        - { from: a, to: b }
+        - { from: a, to: a, when: again }
+      limits:
+        ticket_cost: 1
+      """
+
+      refute yaml
+             |> ForgeCore.Workflow.Parser.parse!()
+             |> Workflow.required_input?("a", "notes.md")
+    end
+
+    # A producer on only one of two ways in guarantees nothing on the other.
+    test "one way in that skips the producer makes it optional" do
+      yaml = """
+      version: 1
+      initial: a
+      states:
+        a:
+          prompt: a.md
+          produces: [x.md]
+          outcomes: [done, skip]
+          budget: { turns: 1, cost: 1 }
+        b:
+          prompt: b.md
+          produces: [y.md]
+          budget: { turns: 1, cost: 1 }
+        c:
+          prompt: c.md
+          inputs: [y.md]
+          budget: { turns: 1, cost: 1 }
+      transitions:
+        - { from: a, to: b }
+        - { from: a, to: c, when: skip }
+        - { from: b, to: c }
+      limits:
+        ticket_cost: 1
+      """
+
+      workflow = ForgeCore.Workflow.Parser.parse!(yaml)
+      refute Workflow.required_input?(workflow, "c", "y.md")
+      assert Workflow.required_input?(workflow, "b", "x.md")
+    end
+  end
 end

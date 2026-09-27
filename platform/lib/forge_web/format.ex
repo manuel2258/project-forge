@@ -55,6 +55,23 @@ defmodule ForgeWeb.Format do
   def build_hint(_build, _current), do: "other build"
 
   @doc """
+  How long a job ran, from its start to its finish: `42s`, `3m 5s`, `1h 12m`; `running` for one
+  that has not finished and `—` for one that never started. One definition for the job page and
+  a command's timeline row, which say the same thing about the same row.
+  """
+  @spec duration(%{started_at: DateTime.t() | nil, finished_at: DateTime.t() | nil}) :: String.t()
+  def duration(%{started_at: nil}), do: "—"
+  def duration(%{finished_at: nil}), do: "running"
+
+  def duration(%{started_at: started, finished_at: finished}) do
+    case DateTime.diff(finished, started, :second) do
+      s when s < 60 -> "#{s}s"
+      s when s < 3_600 -> "#{div(s, 60)}m #{rem(s, 60)}s"
+      s -> "#{div(s, 3_600)}h #{div(rem(s, 3_600), 60)}m"
+    end
+  end
+
+  @doc """
   A cost rendered as the capacity it consumed, or `nil` when the calibration constant is not
   configured. Dollars do not appear on an operator surface.
   """

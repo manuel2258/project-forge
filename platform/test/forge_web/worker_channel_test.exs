@@ -526,6 +526,32 @@ defmodule ForgeWeb.WorkerChannelTest do
       assert ticket.id |> Events.for_ticket() |> length() == before
     end
 
+    # The rest of the log is the platform's record, read back as such: a `job.finished` names the
+    # log a parent is handed a token for, a `job.parked` the batch it resumes on. A worker may
+    # write its harness's events for its own job, and nothing else.
+    test "an event outside the harness's namespace is not recorded, even for its own job",
+         context do
+      %{worker: worker, token: token, job: job} = context
+      {:ok, _reply, socket} = join_worker(worker, token)
+
+      for type <- ["job.finished", "job.parked", "commands.decided", "job.harness"] do
+        push(socket, "event", %{
+          "job_id" => job.id,
+          "event" => %{"type" => type, "payload" => %{"forged" => true}}
+        })
+      end
+
+      push(socket, "event", %{
+        "job_id" => job.id,
+        "event" => %{"type" => "job.harness.text", "payload" => %{"text" => "thinking"}}
+      })
+
+      Process.sleep(200)
+      events = Events.for_job(job.id)
+      refute Enum.any?(events, &(&1.payload["forged"] == true))
+      assert Enum.any?(events, &(&1.type == "job.harness.text"))
+    end
+
     test "a result is recorded, and a second one is acked and dropped", context do
       %{worker: worker, token: token, job: job, ticket: ticket} = context
       {:ok, _reply, socket} = join_worker(worker, token)

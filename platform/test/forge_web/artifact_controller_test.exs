@@ -123,6 +123,50 @@ defmodule ForgeWeb.ArtifactControllerTest do
     assert response(conn, 200) == ~s({"type":"result"}\n)
   end
 
+  # `docs/design/ui.md` § Addressable artifact versions: anything that is not small text is a
+  # download, never laid out — and a group's file is addressed by its name, slash and all.
+  describe "a blob that is not text" do
+    test "is an attachment, bytes as they are", %{conn: conn, project: project, user: user} do
+      ticket = admitted(project, user)
+      key = "job/#{Ecto.UUID.generate()}/out-a/1"
+      png = <<137, 80, 78, 71, 13, 10, 26, 10, 0, 1>>
+      {:ok, _info} = Storage.put(key, png)
+      write_blob(ticket, "shots/home.png", Storage.uri(key), user)
+
+      # The form every page links with: `~p` encodes the slash inside the one segment.
+      name = "shots/home.png"
+      path = ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/#{name}/1"
+      assert path =~ "/artifacts/shots%2Fhome.png/1"
+      conn = get(conn, path)
+
+      assert response(conn, 200) == png
+      assert get_resp_header(conn, "content-type") == ["application/octet-stream"]
+      assert get_resp_header(conn, "x-content-type-options") == ["nosniff"]
+
+      assert [~s(attachment; filename="home-v1.png")] =
+               get_resp_header(conn, "content-disposition")
+    end
+
+    test "larger than a document is streamed from a file, text or not", %{
+      conn: conn,
+      project: project,
+      user: user
+    } do
+      ticket = admitted(project, user)
+      key = "job/#{Ecto.UUID.generate()}/out-a/1"
+      big = String.duplicate("a", ForgeCore.Document.max_bytes() + 1)
+      {:ok, _info} = Storage.put(key, big)
+      write_blob(ticket, "pkg", Storage.uri(key), user)
+
+      conn = get(conn, ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/pkg/1")
+
+      assert response(conn, 200) == big
+      assert get_resp_header(conn, "content-type") == ["application/octet-stream"]
+      assert [~s(attachment; filename="pkg-v1")] = get_resp_header(conn, "content-disposition")
+      assert Path.wildcard(Path.join(System.tmp_dir!(), "forge-download/*")) == []
+    end
+  end
+
   test "a changeset is a commit, so it goes to the diff instead", %{
     conn: conn,
     project: project,

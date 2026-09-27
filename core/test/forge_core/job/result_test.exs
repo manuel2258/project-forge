@@ -100,6 +100,59 @@ defmodule ForgeCore.Job.ResultTest do
     refute proceeded.blocking
   end
 
+  # `docs/design/commands.md` § How an agent invokes: a parked run is reported with what it asked
+  # for and the commit every command runs against, and neither may be lost on the way.
+  test "carries a parked run's invocations and the commit it pushed" do
+    parked = %Result{
+      status: :parked,
+      commit: String.duplicate("c", 40),
+      invocations: [
+        %{"command" => "build", "args" => ["--release"]},
+        %{"command" => "test", "args" => []}
+      ],
+      invocation_error: nil
+    }
+
+    assert ^parked =
+             parked |> Result.to_map() |> Jason.encode!() |> Jason.decode!() |> Result.from_map()
+
+    unreadable = %Result{status: :parked, invocation_error: "invoke.json is not a JSON array"}
+
+    assert %Result{status: :parked, invocations: [], invocation_error: "invoke.json" <> _} =
+             unreadable
+             |> Result.to_map()
+             |> Jason.encode!()
+             |> Jason.decode!()
+             |> Result.from_map()
+  end
+
+  test "carries a run's groups of files, kept and refused" do
+    result = %Result{
+      status: :finished,
+      outcome: :converged,
+      blobs: %{"pkg/app.tar.gz" => %{"key" => "job/j/out-x/1", "size" => 12}},
+      invalid_blobs: %{"pkg/big.bin" => "is larger than 1024 bytes"}
+    }
+
+    assert ^result =
+             result |> Result.to_map() |> Jason.encode!() |> Jason.decode!() |> Result.from_map()
+
+    assert %Result{blobs: %{}, invalid_blobs: %{}} = Result.from_map(%{"status" => "finished"})
+  end
+
+  test "carries a command's exit status, log and duration" do
+    command = %Result{
+      status: :finished,
+      outcome: :converged,
+      exit_status: 3,
+      log: "job/abc/log-1-x.txt",
+      duration_ms: 4200
+    }
+
+    assert ^command =
+             command |> Result.to_map() |> Jason.encode!() |> Jason.decode!() |> Result.from_map()
+  end
+
   test "refuses a status or an outcome it does not know" do
     assert_raise ArgumentError, fn -> Result.from_map(%{"status" => "sideways"}) end
 
@@ -122,6 +175,7 @@ defmodule ForgeCore.Job.ResultTest do
     assert result.missing == []
     assert result.undeclared == []
     assert result.harness == %{}
+    assert result.invocations == []
   end
 
   test "accepts atom keys, so an in-process result needs no encoding" do

@@ -54,7 +54,7 @@ Three orthogonal axes must never render as three colours of one badge. They get 
 
 | Axis | Form | Rules |
 |---|---|---|
-| workflow state | plain mono, leading topology glyph, no box | `▸` job state (info) · `●` human state with outgoing transitions (primary) · `■` terminal (muted). Never coloured by status, never abbreviated. |
+| workflow state | plain mono, leading topology glyph, no box | `▸` job or command state (info) · `●` human state with outgoing transitions (primary) · `■` terminal (muted). Never coloured by status, never abbreviated. |
 | ticket status | filled uppercase flag, beside the state | Rendered only when not `active`. `stuck` carries its age (`STUCK 19h`) in accent. Never replaces the state; never a board column. |
 | job outcome | bare mono, coloured, at type scale | The **declared** outcome is the largest thing on the job page. The engine outcome is demoted to smaller mono beside it, with a caption naming which is which. |
 | worker reachability | a dot and a word, beside the status | Whether the platform is holding a channel to the machine *now*. Orthogonal to `status`, which is what the database last recorded — a `ready` row that is not connected is the interesting case, not a contradiction. |
@@ -456,9 +456,30 @@ nothing waiting it says so and names what would put something there. Beneath, wi
 under no count, is what an agent **assumed and carried on from**: the non-blocking questions the
 queue's digest sends here to be answered (§ Not waiting on you).
 
+**A human state's documents are written here**, above its transition card: one editor per name
+the state declares in `produces` (`workflow-grammar-v1.md` § Semantics), holding the latest version
+when there is one, and a filled *Save* that records what was typed as a new version by the person.
+Writing one is not a decision and adds nothing to the count. It sits beside the transition because
+the person deciding where the ticket goes next — a tester sending a build back — is the person the
+next job needs to hear from, and a note that lived anywhere else would be skipped on the way to the
+button.
+
 **Timeline** is the ticket's body, the steps and job rows, and then **the ticket's
 conversations**, live first, with *New chat* beside their heading — a conversation started from a
 ticket used to be findable from the project page and not from the ticket it is about.
+
+**A command is a job row like any other** (`docs/design/commands.md`): the whole row the target,
+leading with `$` where an agent job's row has its attempt, the command and its arguments as an
+identifier, its exit status where a job's outcome goes — `exit 0` in success, any other in error,
+none as the engine outcome that says why — and its duration where a job's turns and cost go, since
+it has neither. One an agent invoked is indented beneath the job that invoked it, in the step that
+job is in; a command state's commands are that state's step. A command state's glyph is a job
+state's, `▸`: entering it starts work that ends in an outcome.
+
+**A command's page** is the job page with what a command has: its exit status as the largest thing
+on it, the script as it ran, the argument vector as JSON — it reached `exec` as a vector, and
+joined with spaces two arguments would read as one — the commit it ran at, its timeout, the job
+that invoked it, and its log.
 
 ## The phone
 
@@ -887,7 +908,11 @@ name.
 - A **document** serves its stored text as `text/plain`, front matter included. The rendered view
   is a work screen's Docs tab — the ticket's or the conversation's; this route is the source
   behind it.
-- A **blob** is fetched from the store by its key and served as `text/plain` when it is text.
+- A **blob** is fetched from the store by its key and served as `text/plain` when it is text no
+  larger than a document may be. Anything else — a package, a screenshot, a large log — is served
+  as `application/octet-stream` with `content-disposition: attachment`, copied from the store to a
+  temporary file and sent from there rather than read into memory: a download, never rendered. A group's file is named `group/file`,
+  and its address carries the name as one encoded segment.
 - A **changeset** is not a file. `git:<sha>` names a commit, so the changeset links to `…/review`,
   which is the rendering of a diff. Nothing tries to serve it as bytes.
 

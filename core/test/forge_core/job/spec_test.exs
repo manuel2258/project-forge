@@ -16,6 +16,17 @@ defmodule ForgeCore.Job.SpecTest do
     assert Spec.from_map(map) == spec()
   end
 
+  test "knows its groups of files, an agent's and a command's" do
+    spec = %{spec() | produces: ["plan.md", "shots/*", "changeset", "pkg/*"]}
+    assert Spec.group_outputs(spec) == ["shots", "pkg"]
+    assert Spec.document_outputs(spec) == ["plan.md"]
+    assert Spec.outcome_document(%{spec | produces: ["shots/*", "plan.md"]}) == "plan.md"
+
+    command = %Spec{job_id: "c", branch: "b", kind: :command, command: %{"outputs" => ["pkg/*"]}}
+    assert Spec.group_outputs(command) == ["pkg"]
+    assert Spec.group_outputs(%{command | command: nil}) == []
+  end
+
   test "knows its outcome document and document outputs" do
     assert Spec.outcome_document(spec()) == "plan.md"
     assert Spec.document_outputs(spec()) == ["plan.md"]
@@ -87,6 +98,14 @@ defmodule ForgeCore.Job.SpecTest do
       assert Spec.from_map(%{"job_id" => "job-1", "branch" => "ticket/7"}).kind == :workflow
     end
 
+    test "a kind nobody knows is refused, not guessed" do
+      for bad <- ["bogus", :bogus, 3] do
+        assert_raise ArgumentError, ~r/unknown job kind/, fn ->
+          Spec.from_map(%{"job_id" => "job-1", "branch" => "ticket/7", "kind" => bad})
+        end
+      end
+    end
+
     # Every list field defaults to a list rather than to nil. A `nil` here is not merely untidy:
     # `permitted_children` is read by the slice builder and `answered_keys` by `Outcome`, and
     # both iterate it. The `|| []` that guarantees this survived a mutation sweep, which means
@@ -98,10 +117,81 @@ defmodule ForgeCore.Job.SpecTest do
       assert spec.produces == []
       assert spec.permitted_children == []
       assert spec.answered_keys == []
+      assert spec.absent_inputs == []
+      assert spec.may_invoke == %{}
+      assert spec.command_results == []
+
+      # And the one that is not a list: a ticket's first job came from nowhere.
+      assert spec.entered == nil
 
       # The one that is not empty: a job with nothing declared may still end with `done`.
       assert spec.outcomes == ["done"]
     end
+  end
+
+  describe "a command's spec" do
+    defp command_spec do
+      %Spec{
+        job_id: "cmd-1",
+        kind: :command,
+        ticket: %{number: 7, title: "Persist the high score table"},
+        state: "checking",
+        attempt: 3,
+        branch: "ticket/7",
+        commit: String.duplicate("a", 40),
+        env: "build",
+        command: %{
+          "name" => "test",
+          "args" => ["--all"],
+          "run" => ".forge/commands/test.sh",
+          "script" => "#!/bin/sh\nexec mix test \"$@\"\n",
+          "at" => String.duplicate("b", 40),
+          "timeout_ms" => 1_800_000,
+          "produces" => "test.log",
+          "batch" => "batch-1",
+          "concurrent" => 4
+        }
+      }
+    end
+
+    test "round-trips, keeping its kind and its command" do
+      assert {:ok, command_spec()} == command_spec() |> Spec.to_json() |> Spec.from_json()
+    end
+
+    test "needs a script and a commit to run it at" do
+      assert Spec.validate(command_spec()) == :ok
+
+      spec = %{command_spec() | command: Map.drop(command_spec().command, ["script", "at"])}
+      assert Spec.validate(spec) == {:error, [:script, :at]}
+      assert Spec.validate(%{command_spec() | command: nil}) == {:error, [:script, :at]}
+      assert Spec.validate(%{command_spec() | branch: nil}) == {:error, [:branch]}
+    end
+
+    # A spec built in memory has atom keys and one read back from the row has strings; the
+    # manifest reads strings, and the two must render the same.
+    test "an arrival reads the same whichever way its keys came" do
+      entered = %{from: "reviewing", outcome: "changes_requested", by: "job", comment: nil}
+      decoded = Spec.from_map(%{"job_id" => "c", "branch" => "b", "entered" => entered})
+
+      assert decoded.entered == %{
+               "from" => "reviewing",
+               "outcome" => "changes_requested",
+               "by" => "job",
+               "comment" => nil
+             }
+    end
+  end
+
+  test "a workflow job's grant and a resume's results survive the wire" do
+    spec = %{
+      spec()
+      | may_invoke: %{"build" => %{"max" => 40, "concurrent" => nil, "remaining" => 38}},
+        command_results: [
+          %{"command" => "build", "args" => [], "exit_status" => 0, "log" => "1-build.log"}
+        ]
+    }
+
+    assert {:ok, ^spec} = spec |> Spec.to_json() |> Spec.from_json()
   end
 
   # `validate/1` exists because the struct no longer can: a conversation has no state, outcomes

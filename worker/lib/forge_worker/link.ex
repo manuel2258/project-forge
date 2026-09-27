@@ -18,7 +18,7 @@ defmodule ForgeWorker.Link do
   alias ForgeCore.Job.Result
   alias ForgeCore.WorkerProtocol
   alias ForgeWorker.{Checkout, Config, Log, Stats, Store}
-  alias ForgeWorker.Job.{Conversation, Credential, Dir, Runner, Seed, Workspace}
+  alias ForgeWorker.Job.{Blobs, Command, Conversation, Credential, Dir, Runner, Seed, Workspace}
 
   require Logger
 
@@ -156,7 +156,10 @@ defmodule ForgeWorker.Link do
   end
 
   def handle_message(_topic, "cancel", %{"job_id" => job_id}, socket) do
+    # Two clauses that do the same today — both casts `:cancel` — and so an equivalent mutant:
+    # kept apart because they are two modules' APIs, and one may come to mean more.
     case socket.assigns.jobs[job_id] do
+      %{runner: runner, kind: :command} when is_pid(runner) -> Command.cancel(runner)
       %{runner: runner} when is_pid(runner) -> Runner.cancel(runner)
       _other -> Logger.info("asked to cancel #{job_id}, which is not running here")
     end
@@ -374,7 +377,7 @@ defmodule ForgeWorker.Link do
       task: task,
       runner: nil,
       attempt: assignment["spec"]["attempt"],
-      kind: :workflow,
+      kind: if(assignment["kind"] == "command", do: :command, else: :workflow),
       started: System.monotonic_time(:millisecond)
     })
   end
@@ -422,11 +425,38 @@ defmodule ForgeWorker.Link do
       )
   end
 
+  # `docs/design/commands.md`: the checkout at the recorded commit, the script the spec carries,
+  # the log to the store under the key the platform minted a token for. Nothing is committed or
+  # pushed — a command's write is its log — and nothing is promoted: its tree is a commit, not a
+  # ticket's work in progress.
+  defp prepare_and_run(link, %{"kind" => "command"} = assignment, root) do
+    job_id = assignment["job_id"]
+    spec = ForgeCore.Job.Spec.from_map(assignment["spec"])
+
+    with {:ok, worktree} <- Workspace.prepare(assignment, root),
+         :ok <- ForgeWorker.Checkout.detach(worktree, spec.command["at"]),
+         {:ok, command} <- start_command(assignment, spec, root, worktree) do
+      send(link, {:runner, job_id, command})
+      {:ok, result} = Command.await(command)
+
+      result =
+        result
+        |> upload_log(assignment, job_dir(root, job_id))
+        |> Blobs.upload(assignment, Dir.blobs_dir(job_dir(root, job_id)))
+
+      Workspace.discard(assignment, root)
+      {:ok, {"result", Result.to_map(result)}}
+    end
+  end
+
   defp prepare_and_run(link, assignment, root) do
     job_id = assignment["job_id"]
 
     with {:ok, worktree} <- Workspace.prepare(assignment, root),
-         {:ok, runner} <- start_runner(link, assignment, root, worktree) do
+         {:ok, logs} <- fetch_command_logs(assignment, root),
+         {:ok, runner} <- start_runner(link, assignment, root, worktree, logs) do
+      # Copied into the job directory by the time the runner has started (`Dir.prepare/3`).
+      File.rm_rf(Dir.fetched_dir(job_dir(root, job_id)))
       send(link, {:runner, job_id, runner})
       {:ok, result} = Runner.await(runner)
 
@@ -434,7 +464,13 @@ defmodule ForgeWorker.Link do
       # branch head as the changeset artifact the moment it hears from us, and a job that is
       # stopping must not lose what it did (`docs/decisions.md`).
       {:ok, head} = Workspace.commit_and_push(assignment, worktree, commit_message(assignment))
-      terminal = {:ok, result |> upload_transcript(assignment) |> terminal(head)}
+
+      terminal =
+        {:ok,
+         result
+         |> upload_transcript(assignment)
+         |> Blobs.upload(assignment, Dir.blobs_dir(job_dir(root, job_id)))
+         |> terminal(head)}
 
       # What this run compiled is kept as the ticket's template, so its next job starts here
       # rather than at the project's seed. After the push, never before: that is what leaves the
@@ -470,9 +506,84 @@ defmodule ForgeWorker.Link do
       {"hibernated",
        %{"commit" => head, "reason" => "cancelled", "result" => Result.to_map(result)}}
 
+  # A parked run pushed before it said so, and the commands it asked for run at that push
+  # (`docs/design/commands.md` § The ensured commit).
+  defp terminal(%Result{status: :parked} = result, head),
+    do: {"result", Result.to_map(%{result | commit: head})}
+
   defp terminal(%Result{} = result, _head), do: {"result", Result.to_map(result)}
 
-  defp start_runner(link, assignment, root, worktree) do
+  defp job_dir(root, job_id), do: Path.join([root, "jobs", job_id])
+
+  defp start_command(assignment, spec, root, worktree) do
+    slice = assignment["slice"] || %{}
+
+    Command.start_link(
+      spec: spec,
+      root: Path.join(root, "jobs"),
+      worktree: worktree,
+      slice_opts: %{memory_max: slice["memory_max"], cpu_weight: slice["cpu_weight"]},
+      nix_env: Application.get_env(:forge_worker, :nix_env, true)
+    )
+  end
+
+  # A command whose log will not upload has still run: its status is the result, and a missing
+  # log is a line here rather than a failed job the platform would run again.
+  defp upload_log(result, assignment, job_dir) do
+    store = assignment["store"] || %{}
+    path = Command.log_path(job_dir)
+
+    cond do
+      is_nil(Config.platform_url()) or is_nil(store["log_key"]) ->
+        Logger.warning("nowhere to put the command's log: no platform url or no key")
+        result
+
+      not File.exists?(path) ->
+        result
+
+      true ->
+        case Store.put(Config.platform_url(), store["log_key"], store["log_token"], path) do
+          {:ok, _info} ->
+            %{result | log: store["log_key"]}
+
+          {:error, reason} ->
+            Logger.warning("could not upload the command's log: #{inspect(reason)}")
+            result
+        end
+    end
+  end
+
+  # A parked job's resume is handed the logs of what it invoked, each by a key and a `get` token
+  # (`docs/design/job-prompt.md` § Commands). Fetched before the run starts, into a staging
+  # folder `Dir.prepare/3` copies from. A log that will not download is left out rather than
+  # failing the resume: the results in the manifest still say what happened.
+  defp fetch_command_logs(%{"commands" => [_ | _] = logs, "job_id" => job_id}, root) do
+    job_dir = job_dir(root, job_id)
+    Dir.worker_dir!(job_dir)
+    staging = Dir.fetched_dir(job_dir)
+    File.rm_rf!(staging)
+    File.mkdir_p!(staging)
+
+    fetched =
+      Enum.flat_map(logs, fn %{"file" => file, "key" => key, "token" => token} ->
+        path = Path.join(staging, Integer.to_string(:erlang.unique_integer([:positive])))
+
+        case Store.fetch(Config.platform_url(), key, token, path) do
+          :ok ->
+            [{file, path}]
+
+          {:error, reason} ->
+            Logger.warning("could not fetch the log #{file}: #{inspect(reason)}")
+            []
+        end
+      end)
+
+    {:ok, fetched}
+  end
+
+  defp fetch_command_logs(_assignment, _root), do: {:ok, []}
+
+  defp start_runner(link, assignment, root, worktree, logs) do
     job_id = assignment["job_id"]
     spec = ForgeCore.Job.Spec.from_map(assignment["spec"])
 
@@ -496,6 +607,7 @@ defmodule ForgeWorker.Link do
       sink: fn event -> send(link, {:event, job_id, event}) end,
       harness_opts: harness_opts,
       backlog: assignment["backlog"],
+      command_logs: logs,
       # Named in the continuation a resumed run is handed, read from the tree it is about to run
       # in rather than taken from the platform: what the agent will find is what it is told
       # (`docs/design/job-prompt.md` § The continuation prompt).
@@ -741,7 +853,10 @@ defmodule ForgeWorker.Link do
 
   defp accepted(%{"kind" => "chat"}), do: "took on a chat"
 
-  # Anything that is not a chat is a workflow job: those are the two kinds there are.
+  defp accepted(%{"kind" => "command"} = assignment),
+    do: "took on a command: #{get_in(assignment, ["spec", "command", "name"])}"
+
+  # Anything that is neither is a workflow job: those are the three kinds there are.
   defp accepted(assignment),
     do: "took on a workflow job, attempt #{assignment["spec"]["attempt"]}"
 

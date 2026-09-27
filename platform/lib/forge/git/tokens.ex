@@ -64,7 +64,8 @@ defmodule Forge.Git.Tokens do
   def default_ref(%Project{default_branch: branch}), do: "refs/heads/" <> branch
 
   @doc """
-  Issues the write token a job works with: scoped to the project, the ticket and its branch.
+  Issues the token a job works with: for an agent, a write token scoped to the project, the ticket
+  and its branch; for a command, a read-only one.
 
   A conversation gets one scoped to `chat/<id>` and to no ticket — its work goes to its own
   branch, never the ticket's, so a token that could write the ticket's branch would be a token
@@ -77,6 +78,17 @@ defmodule Forge.Git.Tokens do
       job_id: job.id,
       ref: "refs/heads/" <> Forge.Jobs.chat_branch(job),
       write: true,
+      ttl_minutes: job_ttl_minutes(job)
+    )
+  end
+
+  # A command reads its commit and writes nothing: its token carries no ref and no write
+  # (`docs/design/commands.md` § How a command gets the code).
+  def issue_for_job(%Job{kind: :command} = job, %Ticket{} = ticket, %Project{} = project) do
+    issue(project,
+      ticket_id: ticket.id,
+      job_id: job.id,
+      write: false,
       ttl_minutes: job_ttl_minutes(job)
     )
   end

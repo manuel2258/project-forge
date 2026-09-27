@@ -511,6 +511,22 @@ defmodule Forge.ProvisioningTest do
       refute Provisioning.for_demand(project.id, demand(kind: :workflow))
     end
 
+    # An image labelled older than the job needs would make a machine that joins and cannot take
+    # it, every pass, up to `max_workers`. Unlabelled is asked once: its join says.
+    test "a template whose image speaks too old a protocol is not chosen", context do
+      %{user: user, project: project} = context
+      assigned(user, project, %{memory: 9_000, cores: 16, image: "snap-1", image_protocol: 1})
+      needs_two = Map.put(demand(), :protocol, 2)
+
+      refute Provisioning.for_demand(project.id, needs_two)
+      refute Provisioning.could_ever_hold?(project.id, needs_two)
+      assert Provisioning.for_demand(project.id, Map.put(demand(), :protocol, 1))
+      assert Provisioning.for_demand(project.id, demand())
+
+      assigned(user, project, %{memory: 9_000, cores: 16, image: "snap-2", image_protocol: nil})
+      assert %{image: "snap-2"} = Provisioning.for_demand(project.id, needs_two)
+    end
+
     # The distinction the design insists on: does not fit *now* is a queue, and could never fit
     # is a ticket that sticks. Reading the second as the first queues a job for ever.
     test "could-never-fit is a different answer from does-not-fit-now", context do

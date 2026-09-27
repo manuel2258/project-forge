@@ -4,18 +4,16 @@ Scope: the subset of the RFC sketch that milestone 1 executes. Blocks, fan-out, 
 experiments are not in v1 and are rejected by the validator if present, so nothing silently
 half-works.
 
-**Commands are specified here and not yet implemented.** § Commands, and the `commands`,
-`invoke`, `may_invoke` and `exit` keys in the example below, describe milestone 4. The validator
-does not accept them yet and rejects them as unknown keys, so a workflow written today must not
-use them. They are in this file rather than a separate one because this file is what the
-validator is written against and what an agent is handed; the note moves first and the parser
-follows, which is this repository's order.
+**Commands are live.** § Commands, and the `commands`, `invoke`, `may_invoke` and `exit` keys in the
+example below, are what the validator accepts and the platform runs (`docs/design/commands.md`).
+They are in this file rather than a separate one because this file is what the validator is
+written against and what an agent is handed; the note moved first and the parser followed, which
+is this repository's order.
 
-**`resources` and `defaults` are live**, on a state and at the top level. They arrived ahead of
-commands because they are what `docs/design/provisioning.md` gates on and neither needs a command
-to exist — a refine job and a build job wanting different ceilings is the same problem whether or
-not the build runs as a command. `resources` on a *command* waits for commands, and nothing else
-about § Resources changes when it lands. Everything else on this page is live.
+**`resources` and `defaults` are live**, on a state, on a command and at the top level. They
+arrived ahead of commands because they are what `docs/design/provisioning.md` gates on and neither
+needs a command to exist — a refine job and a build job wanting different ceilings is the same
+problem whether or not the build runs as a command. Everything on this page is live.
 
 **This file is compiled into the release.** `ForgeCore.Workflow` reads it at compile time and
 serves it as `grammar/0` — a conversation asked to bootstrap a project is handed *this note*
@@ -125,6 +123,14 @@ the ticket waits there, holding no process, until a transition is taken by a hum
 engine. `initial` names the state a ticket enters at admission. A
 state with no outgoing transitions is terminal.
 
+**A human state may declare `produces`: documents a person writes while the ticket rests there**,
+on the ticket's Decide tab or through `POST …/artifacts/:name`. `human_testing` declaring
+`test-report.md` is the case: the person who tried the build is the one the next job needs to
+hear from, and a document is how every other state hears from the one before it. Nothing requires
+one before a transition out is taken — a tester who approves the changeset has nothing to report —
+so a state that reads it takes it as an optional input (§ Inputs, below). It is a document and
+nothing else: not `changeset`, which only a job's commits make.
+
 **A job is the state's ongoing activity, not its entry action.** The distinction is in the
 grammar: `on_enter` is the entry-action slot and a job is deliberately not in it. The engine sets
 the ticket's state to the target and creates the job in the same transaction, so the ticket
@@ -154,14 +160,44 @@ skip it silently. `on_enter` is not allowed on a job state, whose entry already 
 
 **Inputs** are artifact names. `ticket` is reserved and means the ticket body as a document. Every
 other name must be produced by a state that can run before the consumer (one from which the
-consumer is reachable), so a job never starts with a missing input. At job start the engine
-resolves each input to the latest version of that artifact on the ticket and pins it in the job's
-manifest.
+consumer is reachable). At job start the engine resolves each input to the latest version of that
+artifact on the ticket and pins it in the job's manifest.
+
+**An input is required when every way into the consumer passes through a job state that produces
+it, and leaves that state on an outcome the job could not have reached without writing it —
+`done` or one it declared — and optional otherwise.** An edge taken on an engine outcome (`error`,
+`did_not_converge`, `budget_exhausted`, `cancelled`) guarantees nothing, because a job ends on one
+exactly when it may not have written what it declared. A required input always exists by the time
+the job starts. An
+optional one exists only once its producer has run: `review.md` read by `implementing` when
+`reviewing` can send work back is the case — `implementing` runs first, before any review exists,
+and again after one. An optional input that exists is pinned like any other; one that does not is
+left out, and the manifest names it as not yet written, so the agent knows what may appear on a
+later attempt. A document a human state produces (below) is always optional, because nothing makes
+a person write it. Which kind an input is follows from the transitions and needs no mark.
+
+This paragraph replaces a sentence that said the reachability rule meant "a job never starts with a
+missing input". It did not: the rule accepted `review.md` as an input of `implementing`, and the
+job then could not be created on its first entry, which undid the transition into it and stuck the
+ticket. A loop is how a later state sends work back with its reasons, so the reasons have to be
+readable on the way back round — and absent on the way in.
 
 **Produces** are the artifacts the job must write. `changeset` is reserved and means the diff
-of the job's branch against the ticket's base. Every other name is a document the job writes
-to the platform's artifact store. A job that finishes without producing what it declared has
-outcome `error`.
+of the job's branch against the ticket's base. A name ending `/*` is a group of files (below).
+Every other name is a document the job writes to the platform's artifact store. A job that
+finishes without producing a document or the changeset it declared has outcome `error`.
+
+**A name ending `/*` is a group of files** — `package/*`, `screenshots/*` — for what is not a
+document: a build to try, a screenshot, anything whose bytes are not text. The job writes any
+number of files into `$FORGE_JOB/out/package/`, each a regular file named as an artifact is named,
+and each becomes a version of a blob artifact `package/<file>` on the ticket, which a person
+downloads from the ticket (`docs/design/ui.md` § Addressable artifact versions). The count is open
+and may be zero, so a group is never missing; a file that cannot be kept — too large, one too
+many, not a regular file, a name that is not a name — is reported with why and does not fail the
+job. A group is not a document: it carries no outcome and no questions. **It is not yet an input
+and cannot be approved**: nothing on the reading side exists, and the validator says so rather
+than accept a declaration nothing honours. A command produces groups the same way
+(§ Commands).
 
 **Outcomes.** A job ends with exactly one outcome. Engine outcomes always exist and cannot be
 declared: `did_not_converge`, `budget_exhausted`, `error`, `cancelled`. Declared outcomes are
@@ -252,7 +288,7 @@ the form has a list.
 
 A **command** is a fixed script the project declares once and two callers run: a state that names
 it in `invoke`, and an agent whose state allows it in `may_invoke`. `docs/design/commands.md` is
-the note; this section is the grammar. **Not implemented yet** — see the head of this file.
+the note; this section is the grammar.
 
 ```yaml
 commands:
@@ -263,6 +299,14 @@ commands:
     timeout: 20m                     # required
     resources: { memory: 4GiB, cpu: 4 }
 ```
+
+**`timeout` is a duration**: a whole number and one unit — `90s`, `20m`, `2h` — or a bare number of
+seconds, and at most a day. One unit only; `1h30m` is written `90m`. A command that outlives it is
+stopped, and ends with no exit status. `run` and `timeout` are required; `env`, `produces` and `resources` are not.
+`produces` is where the combined output is recorded on the ticket, as a blob: without it the
+output is still kept with the command's own job, and still handed to an agent that invoked it.
+It may instead be a list of at most one such name and any number of groups of files —
+`produces: [package.log, package/*]` — whose files the script writes into `$FORGE_OUT/package/`.
 
 **The script is read at the ticket's pinned base commit**, like this file, never from the branch a
 job is working on. Otherwise an agent that edits `build.sh` changes what `build` means for the
@@ -277,21 +321,32 @@ parameter declaration to validate against, and the exact vector is recorded on t
 because it is no longer derivable from this file.
 
 **`invoke` makes a command state.** It lists commands to run on entry, and the state has no
-`prompt`, `inputs`, `produces`, `outcomes`, `budget`, `model` or `may_invoke`. Commands in the
-list run concurrently and the state waits for all of them.
+`prompt`, `inputs`, `produces`, `outcomes`, `budget`, `model`, `env` or `may_invoke` — each command
+brings its own environment. It may carry `resources`, which its commands fall back to (§ Resources).
+Commands in the list run concurrently, at the ticket branch's head when the state was entered, and
+the state waits for all of them.
 
-**`exit` maps exit statuses to outcomes** and is required on a command state. Keys are integers or
+**`exit` maps exit statuses to outcomes** and is required on a command state. Keys are integers —
+quoted or not, since the pinned definition is stored as JSON and every key comes back a string — or
 `"*"` for the default; the value is the outcome the transitions out are selected by. The status a
-state maps is the *first non-zero* status among its commands, or zero when all succeeded. A
-command state's declared outcomes are the values of its `exit` map, so `when:` on its edges is
-checked against them exactly as for a job state.
+state maps is the *first non-zero* status among its commands, in `invoke` order, or zero when all
+succeeded. A command that ended with no status — its timeout, a slice that could not be made —
+counts as non-zero and matches only `"*"`, and a status no key matches is the engine outcome
+`error`. A command state's declared outcomes are the values of its `exit` map, so `when:` on its
+edges is checked against them exactly as for a job state; an engine outcome is not a value `exit`
+may name.
 
-**`may_invoke` grants a job state's agent the right to invoke**, with `max` invocations and
-`concurrent` in flight. It is the workflow half of `spec.permitted_children`: an allowlist
-resolved at job creation and carried on the spec. A breach is refused and reported to the agent,
-which is not a job failure — `commands.md` § Limits says why.
+**`may_invoke` grants a job state's agent the right to invoke**, with `max` invocations over the
+job's life — required — and at most `concurrent` in flight, optional and unbounded when absent. It
+is the workflow half of `spec.permitted_children`: an allowlist resolved at job creation and
+carried on the spec. A breach is refused and reported to the agent, which is not a job failure —
+`commands.md` § Limits says why.
 
-**A job waiting on a command is parked**, always. It hibernates, its slice is released, and it
+**An agent invokes by writing `$FORGE_JOB/invoke.json` and ending its run**: a JSON array of
+`{"command": "build", "args": ["--release"]}`. The job's manifest names what it may invoke and how
+many remain. `commands.md` § How an agent invokes has the mechanism.
+
+**A job waiting on a command is parked**, always. It holds no process, its slice is released, and it
 resumes when every command it invoked has finished. There is no inline form and nothing in the
 grammar selects between them.
 
@@ -302,10 +357,9 @@ defaults:
   resources: { memory: 2200MiB, cpu: 1 }
 ```
 
-`resources` is valid on a command, on a job state, and under `defaults`. **The state and
-`defaults` halves are implemented; the command half waits for commands** — see the head of this
-file. It is resolved nearest-first: the command's, then the state's, then `defaults`, then the
-platform's configured slice. `memory` is the slice's hard ceiling and what the scheduler's gate
+`resources` is valid on a command, on a job or command state, and under `defaults`. It is resolved
+nearest-first: the command's, then the invoking state's, then `defaults`, then the platform's
+configured slice. `memory` is the slice's hard ceiling and what the scheduler's gate
 counts; `cpu` is how many cores the scheduler reserves when placing the job — **a reservation,
 not a quota**, because capping a slice would throw away the proportional CPU sharing
 `decisions.md` chose. There is no `disk` key. `commands.md` § Resources has the reasoning and the
@@ -336,9 +390,11 @@ file do not affect that ticket. Re-pinning is a human action and not in v1.
 ## Validation (rejects the file, never partially runs it)
 
 - `version` is `1`; `initial` names a job state; every state name is unique.
-- A job state has `prompt` and `budget`. A command state has `invoke` and `exit` and none of
-  `prompt`, `inputs`, `produces`, `outcomes`, `budget`, `model` or `may_invoke`. A human state has
-  none of those and no `invoke` either; `on_enter` is the one key it may carry.
+- A job state has `prompt` and `budget`, and neither `invoke` nor `exit`. A command state has
+  `invoke` and `exit` and none of `prompt`, `inputs`, `produces`, `outcomes`, `budget`, `model`,
+  `env` or `may_invoke`. A human state has
+  none of those but `produces`, and no `invoke` either; `on_enter` and `produces` are the keys it
+  may carry, and what it produces is documents — never `changeset`.
 - `model`, where present, is a non-empty string. Its value is not checked against anything.
 - State and artifact names are single path segments: letters, digits, `.`, `_`, `-`.
 - Every `inputs` entry is `ticket` or produced by a state that can run before the consumer; every
@@ -354,8 +410,8 @@ produced; `answers.md` is platform-managed and never declared.
   is a name or a list whose head is a name; `may_invoke` values are maps of `max` and
   `concurrent`, both positive integers.
 - Every command has `run` and `timeout`; `run` is a path under `.forge/` that exists at the pinned
-  commit, and `produces`, where present, is a single artifact name produced by no state and by no
-  other command.
+  commit, and `produces`, where present, is an artifact name — or a list of at most one and any
+  number of groups — produced by no state and by no other command.
 - `resources`, where present, is a mapping of `memory` (a byte size) and `cpu` (a positive
   integer), each optional and each falling back through the chain on its own. Any other key is an
   error, and `disk` is rejected with a message saying it is *reserved* rather than unknown, so it
@@ -363,8 +419,10 @@ produced; `answers.md` is platform-managed and never declared.
 - A command's `env`, where present, is subject to the same rule as a state's.
 - `approve` entries are produced by `from` or an earlier state.
 - Prompt files exist at the pinned commit.
-- Artifact names are fixed. The prefix form `name/*` is reserved for blob groups and is
-  rejected in v1 with a message saying so.
+- Artifact names are fixed, and a group `name/*` names its files, not them: `name` is an artifact
+  name, and the group is produced by exactly one job state or command, never by a human state,
+  and never under a name something produces as a document. A group is neither an input nor
+  approved.
 - Every `on_enter` entry is a known action (`merge` alone in v1); `on_enter` is absent from every
   job state and every command state; at most one state in a workflow merges; `initial` does not merge; and a workflow that
   merges has a state producing `changeset`.

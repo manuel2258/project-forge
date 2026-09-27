@@ -114,6 +114,24 @@ defmodule ForgeWorker.Checkout do
     end
   end
 
+  @doc """
+  Puts the checkout on `sha`, detached, with the working tree reset to it and the untracked files
+  kept — what a command runs against (`docs/design/commands.md` § The ensured commit). The commit
+  is on the branch `ensure/1` fetched, because the job that invoked it pushed it there before it
+  parked; a sha the fetch did not bring is refused rather than looked for elsewhere.
+  """
+  @spec detach(String.t(), String.t()) :: :ok | {:error, term()}
+  def detach(dir, sha) do
+    if Regex.match?(~r/^[0-9a-f]{40}$/, sha) do
+      with {:ok, _out} <- git(dir, ["checkout", "--quiet", "--detach", sha], []),
+           {:ok, _out} <- git(dir, ["reset", "--quiet", "--hard", sha], []) do
+        :ok
+      end
+    else
+      {:error, {:not_a_commit, sha}}
+    end
+  end
+
   @doc "The commit the checkout is on."
   @spec head(String.t()) :: {:ok, String.t()} | {:error, term()}
   def head(dir) do

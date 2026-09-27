@@ -55,7 +55,7 @@ defmodule Forge.Tickets do
     with {:ok, base} <- Git.resolve(repo, project.default_branch),
          {:ok, yaml} <- workflow_yaml(repo, base),
          {:ok, workflow} <-
-           Parser.parse(yaml, prompt_exists: &Git.exists?(repo, base, ".forge/" <> &1)),
+           Parser.parse(yaml, at_commit(repo, base)),
          {:ok, yaml_map} <- YamlElixir.read_from_string(yaml) do
       {:ok, %{repo: repo, base: base, workflow: workflow, yaml_map: yaml_map}}
     end
@@ -136,8 +136,17 @@ defmodule Forge.Tickets do
 
     with {:ok, base} <- Git.resolve(repo, project.default_branch),
          {:ok, yaml} <- workflow_yaml(repo, base) do
-      Parser.parse(yaml, prompt_exists: &Git.exists?(repo, base, ".forge/" <> &1))
+      Parser.parse(yaml, at_commit(repo, base))
     end
+  end
+
+  # What the validator asks of the repository, answered at the commit the workflow is read at:
+  # a prompt file under `.forge/`, and a command's script by its full path.
+  defp at_commit(repo, base) do
+    [
+      prompt_exists: &Git.exists?(repo, base, ".forge/" <> &1),
+      file_exists: &Git.exists?(repo, base, &1)
+    ]
   end
 
   defp workflow_yaml(repo, base) do

@@ -5,16 +5,20 @@ job on its own machine against a named commit. Two things invoke one: an agent, 
 state allows it; and a state that is nothing but commands. `docs/design/workflow-grammar-v1.md`
 carries the grammar; this note carries the mechanism and the reasoning.
 
-**Commands are not built.** The grammar note marks `commands`, `invoke`, `may_invoke` and `exit`
-as unimplemented, the parser rejects all four as unknown keys, and no `kind: :command` job exists
-— `jobs.kind` is `:workflow | :chat`. What is settled is the shape.
+**Commands are built.** `commands`, `invoke`, `may_invoke` and `exit` are live in the grammar,
+`kind: :command` is the third job kind, a command state runs its commands and maps their exit
+statuses to an outcome, and an agent whose state allows it invokes them by writing
+`$FORGE_JOB/invoke.json` and ending its run (§ How an agent invokes). Three things changed on the
+way, each recorded where it happened: a command fetches its code with a read-only per-job token
+rather than the worker's own (§ How a command gets the code), a job waiting on its commands has a
+status of its own rather than `waiting` (§ Always park), and a machine is given commands only when
+it speaks the protocol that added them (§ Worker pools).
 
-**What this note argued for on the way is built**, because `docs/design/provisioning.md` took it:
-`resources` on a state and under the workflow's `defaults`, with `cpu` as a gate dimension
+**What this note argued for on the way was built first**, because `docs/design/provisioning.md`
+took it: `resources` on a state and under the workflow's `defaults`, with `cpu` as a gate dimension
 (§ Resources); the cores and `accepts` a worker reports at `ready` (§ Worker pools); affinity on
 resume (§ Always park); and the worker templates, `shapes/1` and driver registry that gave
-`opts.size` a consumer. `resources` on a *command* is the one piece of that which waits for
-commands.
+`opts.size` a consumer. `resources` on a *command* arrived with commands.
 
 **This is a resource-optimisation feature, not a sandbox.** An agent has a shell inside its slice
 and can already run anything the environment provides. Nothing here takes that away, and a note
@@ -93,8 +97,8 @@ from the workflow file.
 ## An invocation is a job
 
 A command invocation is a row in `jobs` with `kind: :command` and `parent_job_id` set to the
-invoking job, or null when a state invoked it directly. `spec.kind` already carries
-`:workflow | :chat` and `parent_job_id` already exists for subagents
+invoking job, or null when a state invoked it directly. `spec.kind` carried `:workflow | :chat`
+before this, and `parent_job_id` already existed for subagents
 (`docs/design/data-model.md` § Not in v1, but shaped for), so this is a third kind rather than a
 new object.
 
@@ -109,13 +113,70 @@ each a real execution with a real result — and the surfaces group them under t
 them.
 
 A command job carries no harness, no credential, no model and no budget in turns or dollars. Its
-spec is the script, the argv, the env, the commit, the resources and the timeout. Its outcome is
-its exit status, mapped by the invoking state's `exit` map when a state invoked it, and returned
-raw to the agent when an agent did.
+spec is the script, the argv, the env, the commit, the resources and the timeout. What it reports
+is its exit status, mapped by the invoking state's `exit` map when a state invoked it, and returned
+raw to the agent when an agent did; its own outcome says only whether it ran to one (below).
+
+**What the row holds, as built.** Its `state` is the invoking state's — the command state's own
+name, or the agent's — so `Jobs.live?/2`, which refuses a person's transition while the state has
+live work, covers it without learning a new kind. Its `attempt` counts the ticket's command jobs:
+the unique `(ticket, state, attempt)` index is partial over workflow jobs, and a batch of two
+commands entered together has one state and would otherwise have one attempt. Its `outcome` is
+`converged` when the script ran to an exit status, *whatever the status* — a failing test suite is
+a command that worked — `error` when it could not be run or outlived its timeout, and `cancelled`
+when stopped. The status itself is `jobs.exit_status`, nil when there was none. A script that
+would not start is not one of those: it is exec'd through `env`, which exits 127 for a missing
+file or interpreter, so it ends *with* a status — `converged`, exit 127. Only a slice that could
+not be made, a timeout or a cancel ends with none.
+
+**A command state's outcome** is its batch's: the first non-zero status in `invoke` order, or zero
+when every command exited zero, looked up in `exit`. A command that ended with no status — its
+timeout, a slice that could not be made — counts as non-zero and matches only `"*"`. A status that
+no key matches is the engine outcome `error`, which is what an `exit` map without `"*"` asks for.
+The batch is decided when its last command finishes, and not before: the second command's status
+may be the first non-zero one.
+
+## How an agent invokes
+
+**The agent writes `$FORGE_JOB/invoke.json` and ends its run.** The file is a JSON array of
+`{"command": "<name>", "args": ["<string>", …]}`, one entry per invocation, `args` optional. It is
+a file and not a tool for the reason every other part of the agent's interface is
+(`job-prompt.md`): any harness that can write a file can invoke, and ending the run *is* the park,
+so nothing has to interrupt a running agent or keep one waiting.
+
+The worker reads it the way it reads `out/` — opened once, the handle's owner checked, a size cap —
+removes it, commits and pushes the worktree (§ The ensured commit), and reports the run as
+`parked` with the invocations and the commit it pushed. A file that is not a JSON array of such
+entries is reported as an invocation error, not dropped, and reaches the agent on its resume like
+a refusal. What the run left in `out/` stays there for the resume, which is the one `out/` has
+always kept.
+
+**The platform decides each entry against the job's `may_invoke`.** A command the state may not
+invoke, or one whose `max` this job has spent, is refused with the sentence the agent will read
+(§ Limits); the rest become command jobs with the job as their parent, all at the pushed commit.
+The job becomes `parked`. A batch with nothing left to run — every entry refused — resumes at
+once, with only the refusals to read, because a job parked on nothing would never be woken.
 
 ## Always park
 
-**A job waiting on a command is hibernated, never held open.** There is no inline mode.
+**A job waiting on a command is parked, never held open.** There is no inline mode.
+
+**It is `parked`, a status of its own, and not `waiting`.** `waiting` is a job stopped on a
+question, and it keeps its slice on its worker — `Workers.promised/1` counts it — because the
+question may be answered in a minute and the resume should land where the session is. Holding the
+slice is exactly what parking exists not to do, so a parked job counts against no machine, releases
+its worker when it parks, and keeps `worker_id` only as the affinity hint for its resume. It is
+live for its ticket all the same: a person cannot take the ticket out of the state while its agent
+waits on a build.
+
+**The resume.** When the last command of a batch finishes, the parked job goes back to pending
+with the harness session it had. Its runtime spec gains the batch's results — each command, its
+arguments, the commit it ran at, its exit status and outcome, how long it took, and a refusal's
+reason where there was one — and the assignment carries a store `get` token for each log, which
+the worker writes to `$FORGE_JOB/commands/<n>-<command>.log` before the run starts. The
+continuation prompt names them in its own section; a cold start, whose session did not survive,
+gets the same section in its manifest. Neither is told "see the timeline": the results are in the
+prompt and the logs are on disk.
 
 The reason is the whole feature: a parked job holds no process, so its slice is freed. The agent's
 memory and CPU share return to the worker for the length of the command, and the worker can take
@@ -126,9 +187,9 @@ The machinery exists. `docs/design/job-prompt.md` § Blocking questions and `wai
 refreshes its inputs and resumes the same job and attempt. This note relied on a continuation
 prompt there, and one is built for answers (`job-prompt.md` § The continuation prompt): a run
 that resumes its session is handed the answers, the branch and the manifest rather than the whole
-prompt. It names answers and nothing else, so a resume after a command needs a section naming the
-command's result beside them — the manifest would list the result as an input, but a session
-that is not told an input is new has no reason to read it. `worker-tier.md` has
+prompt. It named answers and nothing else, so a resume after a command got a section of its own,
+*Commands you ran*, carried whole by the continuation — not an input in the manifest, which a
+session not told an input is new has no reason to read (`job-prompt.md` § Commands). `worker-tier.md` has
 commit-and-hibernate with resume from branch and manifest; the channel already has `hibernated`
 (`docs/design/worker-channel.md` § Messages). A command result is structurally what an answered
 question is: an input appears, the job resumes. Only the party satisfying the wait differs — a
@@ -136,14 +197,14 @@ machine in seconds rather than a person in hours.
 
 Waiting on many is the same park. The agent invokes *n* commands, the job parks once, and it
 resumes when all *n* have landed. That is fan-out inside a job without the workflow-level fan-out
-v1 rejects, and it is why the preamble tells the agent to invoke in batches rather than one at a
-time.
+v1 rejects, and it is why the manifest of a job that may invoke tells the agent to ask for
+everything at once rather than one command at a time.
 
 **What always-park costs is tokens, not seconds.** Every resume is a harness resume, and
 `docs/design/claude-code-events.md` § Resume says the session is reused where available and a
 freshly composed prompt used otherwise. The fallback re-sends context, and context is the
 expensive resource in this system — `docs/measurements.md` § M1 puts a warm build at 984 ms, so
-the wall clock of a park is not what to watch. Two things follow: the preamble asks for batched
+the wall clock of a park is not what to watch. Two things follow: the manifest asks for batched
 invocations, and `may_invoke`'s `max` is a cap on park cycles as much as on compute, so it should
 be set with that in mind rather than as a generous safety number.
 
@@ -197,13 +258,21 @@ The command worker fetches the ticket's branch from the platform's git host at t
 commit, into a checkout on a snapshot of its warm seed, and runs the script in `nix develop
 .#<env>` inside its slice.
 
-**No per-job git token, and no write credential.** The `assign` message for a workflow job carries
-a git endpoint with a per-job token scoped to the ticket branch; a command job carries neither.
-What authorises the fetch is the **worker token the machine already holds** for the channel,
-accepted by the platform's git host as a read credential. That is not a new secret and not one the
-script ever sees. Saying "a command needs no credential" would be false — bytes do not arrive
-unauthenticated — but the true statement is nearly as good: a command pool holds no Claude
-credential, no write credential and nothing per job.
+**A read-only per-job token, and no write credential.** This paragraph first argued for no per-job
+token at all: the worker token the machine already holds for the channel, accepted by the git host
+as a read credential. What was built is a per-job token with `write: false`, minted at assignment
+and revoked when the job ends, exactly as a workflow job's write token is. It keeps the property
+that mattered — a command pool holds no Claude credential and no write credential, and the script
+never sees either — and it costs a row per invocation. Accepting the worker token would have made
+a machine's identity a repository credential for every project the machine serves, taught the git
+endpoint a second kind of secret to look up, and left no row to revoke or audit. The rows are the
+audit trail, as every other git credential's are.
+
+**The script comes in the spec, from the pinned commit.** The platform reads `run` at the ticket's
+`workflow_commit` when it creates the command job, and the spec carries its text; the worker writes
+it into the job directory and executes that copy. The checkout at the invocation's commit supplies
+everything else, and never the script — which is what "read at the pinned base commit" (§ The
+shape) needs to mean when the branch holds an edited `build.sh`.
 
 **A command worker is warm or it is not worth having.** The fetch is a delta against a checkout it
 already has, on a snapshot of a seed it already holds. `docs/measurements.md` § M1 variant (c) is
@@ -230,8 +299,8 @@ that can satisfy one comes from. What is written here did not change when that n
 which is the useful part: the declaration was designed without knowing how it would be matched,
 and it survived contact.
 
-A `resources` map, valid on a job state and under the workflow's `defaults` — both built — and on
-a command, which waits for commands:
+A `resources` map, valid on a job state, on a command state and under the workflow's `defaults`,
+and on a command — all built:
 
 ```yaml
 defaults:
@@ -302,6 +371,11 @@ a per-job allowlist, resolved at job creation from the pinned workflow and carri
 | `max` | How many invocations of this command this job may make. |
 | `concurrent` | How many may be in flight at once. |
 
+**`concurrent` is the scheduler's to hold.** A pending command job whose invoking job already has
+that many of the same command running is skipped for the pass, and the rest of its batch runs as
+room allows. `max` is counted over the job's whole life, resumes included, from its command jobs;
+a refusal is not an invocation and does not count.
+
 **A breach is a refusal the agent reads, not a job that dies.** An invocation past `max` returns
 an error result — "no invocations of `build` remain" — and the agent decides what to do about it.
 A killed job would throw away everything it had done for a limit it could have worked around, and
@@ -309,15 +383,36 @@ the budget model already behaves this way: budgets are enforced by the platform 
 told, rather than being trusted or being shot.
 
 **`concurrent` is the first thing that can starve an agent job.** Four concurrent commands are
-four slices the gate has to find, and the scheduler currently has one queue and no notion of
-priority. Until it does, the honest position is that a workflow which sets `concurrent` high on a
-busy fleet will delay agent work, and the ordering policy is § Open.
+four slices the gate has to find, and the scheduler has one queue and no notion of priority. What
+keeps a waiting agent job from being jumped for ever is the age-based reservation
+(`docs/design/provisioning.md` § The gate): once it has waited long enough, the machines that
+could hold it take no younger work until it fits, commands included. Before that age, a workflow
+which sets `concurrent` high on a busy fleet delays agent work, and that is the trade the age
+decides.
 
 ## Events and the timeline
 
-Each invocation writes events on the invoking job's timeline as well as its own:
-`command.invoked` (name, argv, commit), `command.started` (worker), `command.finished` (exit,
-duration), with the log arriving as an artifact version named by `produces`.
+An agent's invocation writes events on the invoking job's timeline: `command.invoked` (name,
+argv, commit) when it parks, and `command.finished` (exit, duration) when each command ends. The
+command's own row has what every job has — `job.started`, which names the worker, and
+`job.finished` — with the log arriving as an artifact version named by `produces`; a
+`command.started` beside `job.started` would have said the same thing twice. A refusal is on the
+invoking job's `job.parked` event, with its reason. A command state's batch has no invoking job,
+so its events are the ticket's: `commands.started` (the batch, its commit, its jobs) on entry,
+and `commands.decided` (the statuses in `invoke` order and the outcome they map to) once, when the
+last command ends — which is also what stops a second follow-up deciding it again.
+
+**A command may produce groups of files as well** — `produces: [package.log, package/*]` — which
+its script writes into `$FORGE_OUT/package/`, and which are kept as an agent's are
+(`workflow-grammar-v1.md` § Semantics): a blob per file, uploaded under the command job's own
+prefix. This is what makes a packaging state a command: the build the tester downloads is the
+script's output, not an agent's.
+
+**The log is a blob.** A build's output is not a document: it is often larger than a document may
+be, and a compiler's bytes are not always UTF-8. It is uploaded to the store under the command
+job's own key and recorded, when the command declares `produces`, as a `blob` version of that
+artifact on the ticket, served by the addressable-version route like any other
+(`docs/design/ui.md` § Addressable artifact versions).
 
 The argv is on the event because with freeform arguments it is no longer derivable from the
 workflow file. That is the cost of dropping the parameter schema, and it is cheap: one field, and
@@ -354,6 +449,19 @@ named class was drafted and dropped: the name carries nothing the job's `kind` a
 `accepts` do not already carry, and a misspelt class name is a job that schedules nowhere and
 errors never.
 
+**A machine is given commands only when it speaks the protocol that added them.** An absent
+`accepts` reads as *takes anything*, which was safe while every kind was an agent. It is not now:
+a release from before commands would take a command job's spec for an agent job's and run it as
+one. So commands are protocol 2 (`docs/design/worker-channel.md` § Versions), and
+`Workers.fits?/2` asks a worker's recorded protocol before it gives it a command — and before it
+gives it a workflow job whose state may invoke, since an older release would leave
+`invoke.json` unread and the agent waiting for results that never come, or one that writes a group
+of files, which an older release reads as a document it never finds and ends `error` however well
+the job went. The same question is asked wherever the gate is: of a machine that could take the
+job once it is free, so an older one is not a queue to wait in, and of a template, so an image
+labelled older than the job needs is not made into machine after machine that cannot take it. A
+command job needs no harness and no credential, so the gate's harness clause does not apply to it.
+
 ## What this gives up
 
 - **An agent that cannot invoke is unaffected, and that is deliberate.** A state with no
@@ -361,21 +469,20 @@ errors never.
   a workflow that never adopts it never pays for it.
 - **Local iteration is still faster than a command.** A warm local build is 984 ms (M1); a command
   is a commit, a dispatch, a fetch and a park. An agent told to use `build` for a one-line syntax
-  check is being made slower and more expensive. The preamble should say what commands are *for* —
-  the expensive, the shared, the verdict-bearing — rather than presenting them as the way to run
-  anything.
+  check is being made slower and more expensive. So the manifest of a job that may invoke says what
+  commands are *for* — the expensive, the shared, the verdict-bearing — rather than presenting them
+  as the way to run anything.
 - **Two execution paths now exist for the same work**, and they can disagree if a project's local
   environment and its command script diverge. The single definition removes the script from that
   risk; it does not remove the environment from it.
 
 ## Open
 
-- **Ordering between agent jobs and command jobs** when the gate is full. `concurrent` makes
-  starvation possible and the scheduler has no priority. `docs/design/provisioning.md` § The gate
-  removes the half that mattered — a per-template `max_workers` stops one kind of work eating the
-  fleet — and leaves the other: an unplaceable job is skipped and the pass continues, so a large
-  job can be jumped by small ones indefinitely. An age-based reservation is the fix and neither
-  note builds it.
+- **Ordering between agent jobs and command jobs** when the gate is full is age, and nothing
+  else: a per-template `max_workers` stops one kind of work eating the fleet, and the age-based
+  reservation (`docs/design/provisioning.md` § The gate) stops a large job being jumped by small
+  ones indefinitely. Whether an agent waiting on its own commands should outrank a stranger's is a
+  priority, which the scheduler still has none of.
 - **Whether affinity on resume pays.** It is built (§ Always park), and § Always park no longer
   asks whether the harness session survives a park, because the topology answers it. What is open
   is the size of the prize — how many tokens a re-composed prompt costs against a resumed
@@ -386,6 +493,11 @@ errors never.
 - **`arch` in `resources`.** A project whose toolchain is x86-only cannot run commands on an Arm
   pool, while its agents could. Nothing needs it until a fleet is mixed, and the place it would go
   is here.
+- **A log nothing declares is out of the operator's reach.** A command without `produces` still
+  uploads its output under its own job's key, and an agent that invoked it is handed it, but no
+  page links it: the addressable-version route serves artifacts, and this is not one. Declaring
+  `produces` is the fix today; a job-scoped route would be the fix if that turns out to be the
+  common case.
 - **Re-running a command on the same commit** is currently a new invocation with the same sha and
   no caching. Whether a repeat should be answered from the previous result is a dogfooding
   question; answering it wrongly hides a flaky test.

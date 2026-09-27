@@ -216,6 +216,56 @@ case "${FAKE_SCENARIO:-success}" in
     printf -- '---\noutcome: done\n---\n# Plan\n' > "$doc"
     printf '%s' "$result_success"
     ;;
+  invokes)
+    # Asks for a build and a test run and stops, as docs/design/commands.md § How an agent
+    # invokes describes: the file, then a clean end. What it wrote to out/ is kept for the resume.
+    printf -- '---\noutcome: done\n---\n# Plan\n\nHalf done.\n' > "$doc"
+    printf '[{"command": "build", "args": ["--release", "a b"]}, {"command": "test"}]' \
+      > "$FORGE_JOB/invoke.json"
+    emit "$result_success"
+    ;;
+  invokes_badly)
+    printf '{"command": "build"}' > "$FORGE_JOB/invoke.json"
+    emit "$result_success"
+    ;;
+  invokes_over_budget)
+    printf '[{"command": "build"}]' > "$FORGE_JOB/invoke.json"
+    emit '{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":40,"duration_ms":99,"total_cost_usd":1.5,"session_id":"sess-42"}'
+    exit 1
+    ;;
+  invokes_with_shots)
+    # Parks having written into a group: the files are kept for the resume, not staged now.
+    printf -- '---\noutcome: done\n---\n# Plan\n' > "$doc"
+    mkdir -p "$out/shots"
+    printf 'first' > "$out/shots/home.png"
+    printf '[{"command": "build"}]' > "$FORGE_JOB/invoke.json"
+    emit "$result_success"
+    ;;
+  invokes_is_error)
+    # A success subtype that is still an error: the run did not end cleanly.
+    printf '[{"command": "build"}]' > "$FORGE_JOB/invoke.json"
+    emit '{"type":"result","subtype":"success","is_error":true,"num_turns":1,"duration_ms":9,"total_cost_usd":0.1,"result":"failed","session_id":"sess-42"}'
+    ;;
+  invokes_error_subtype)
+    # An error subtype that does not say is_error: not clean either.
+    printf '[{"command": "build"}]' > "$FORGE_JOB/invoke.json"
+    emit '{"type":"result","subtype":"error_during_execution","is_error":false,"num_turns":1,"duration_ms":9,"total_cost_usd":0.1,"session_id":"sess-42"}'
+    ;;
+  reads_logs)
+    # A resumed run proving it can read what its commands left it.
+    printf -- '---\noutcome: done\n---\n# Plan\n\n' > "$doc"
+    cat "$FORGE_JOB"/commands/*.log >> "$doc"
+    emit "$result_success"
+    ;;
+  shots)
+    # A group of files beside the document: bytes that are not text, and a name that is not one.
+    printf -- '---\noutcome: done\n---\n# Plan\n' > "$doc"
+    mkdir -p "$out/shots"
+    printf '\211PNG\r\n\032\n\000\001' > "$out/shots/home.png"
+    printf 'second' > "$out/shots/menu.png"
+    printf 'hidden' > "$out/shots/.hidden"
+    emit "$result_success"
+    ;;
   hang)
     sleep 60
     ;;

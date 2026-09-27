@@ -42,12 +42,31 @@ defmodule ForgeCore.Job.Spec do
     # job. Inlined like an input's content, and for the same reason: the worker needs no further
     # round trip (`docs/design/conversations.md` § Lifetime).
     :replay,
+    # How the ticket came into this job's state: `%{"from", "outcome", "by", "comment"}`, from the
+    # transition that created the job, or nil for the ticket's first state
+    # (`docs/design/job-prompt.md` § How the job arrived).
+    :entered,
+    # A command job's whole description, string keys: `name`, `args`, `run`, `script` (the text of
+    # `run` at the pinned commit), `at` (the commit to run against), `timeout_ms`, `produces` and
+    # `batch`, and `concurrent` when its invoker's grant limits it (`docs/design/commands.md`).
+    :command,
     kind: :workflow,
     inputs: [],
+    # Optional inputs that had not been written when the job was created, by name. Named so the
+    # manifest can say so rather than leave the agent to guess whether a missing file is a failure
+    # (`docs/design/workflow-grammar-v1.md` § Inputs).
+    absent_inputs: [],
     produces: [],
     outcomes: ["done"],
     permitted_children: [],
-    answered_keys: []
+    answered_keys: [],
+    # What this job's agent may invoke, by command: `%{"max", "concurrent"}` from the state, and
+    # `"remaining"` added at run time (`docs/design/workflow-grammar-v1.md` § Commands).
+    may_invoke: %{},
+    # The batch a parked job invoked, filled at run time for its resume: each entry's `command`,
+    # `args`, `at`, `exit_status`, `outcome`, `duration_ms`, `log` (the file name under
+    # `$FORGE_JOB/commands/`) or `refused` (`docs/design/job-prompt.md` § Commands).
+    command_results: []
   ]
 
   @workflow_keys [
@@ -64,7 +83,10 @@ defmodule ForgeCore.Job.Spec do
 
   @type t :: %__MODULE__{
           job_id: String.t(),
-          kind: :workflow | :chat,
+          kind: :workflow | :chat | :command,
+          command: %{String.t() => term()} | nil,
+          may_invoke: %{String.t() => %{String.t() => pos_integer() | nil}},
+          command_results: [%{String.t() => term()}],
           ticket: %{number: pos_integer(), title: String.t()} | nil,
           state: String.t() | nil,
           attempt: pos_integer() | nil,
@@ -77,7 +99,9 @@ defmodule ForgeCore.Job.Spec do
           budget: %{turns: pos_integer(), cost: number()},
           preamble_hash: String.t() | nil,
           replay: String.t() | nil,
+          entered: %{String.t() => String.t() | nil} | nil,
           inputs: [Input.t()],
+          absent_inputs: [String.t()],
           produces: [String.t()],
           outcomes: [String.t()],
           permitted_children: [String.t()],
@@ -109,6 +133,17 @@ defmodule ForgeCore.Job.Spec do
   @spec document_outputs(t()) :: [String.t()]
   def document_outputs(%__MODULE__{produces: produces}),
     do: Enum.filter(produces, &Workflow.document?/1)
+
+  @doc """
+  The groups of files this job writes, by directory name: an agent's declared `name/*`, a
+  command's `outputs` (`docs/design/workflow-grammar-v1.md` § Semantics).
+  """
+  @spec group_outputs(t()) :: [String.t()]
+  def group_outputs(%__MODULE__{kind: :command, command: command}),
+    do: Enum.map((command || %{})["outputs"] || [], &Workflow.group_name/1)
+
+  def group_outputs(%__MODULE__{produces: produces}),
+    do: for(name <- produces, Workflow.group?(name), do: Workflow.group_name(name))
 
   @spec to_json(t()) :: String.t()
   def to_json(%__MODULE__{} = spec) do
@@ -145,13 +180,22 @@ defmodule ForgeCore.Job.Spec do
       budget: budget_from_map(get.(:budget)),
       preamble_hash: get.(:preamble_hash),
       replay: get.(:replay),
-      inputs: Enum.map(get.(:inputs) || [], &input_from_map/1),
-      produces: get.(:produces) || [],
-      outcomes: get.(:outcomes) || ["done"],
-      permitted_children: get.(:permitted_children) || [],
-      answered_keys: get.(:answered_keys) || []
+      entered: entered_from_map(get.(:entered)),
+      inputs: Enum.map(or_default(get, :inputs, []), &input_from_map/1),
+      absent_inputs: or_default(get, :absent_inputs, []),
+      command: get.(:command),
+      may_invoke: or_default(get, :may_invoke, %{}),
+      command_results: or_default(get, :command_results, []),
+      produces: or_default(get, :produces, []),
+      outcomes: or_default(get, :outcomes, ["done"]),
+      permitted_children: or_default(get, :permitted_children, []),
+      answered_keys: or_default(get, :answered_keys, [])
     }
   end
+
+  # A key the map leaves out comes back as its empty value, never nil: every caller folds over it.
+  # A function rather than `||` inline, which Credo counts as a branch each.
+  defp or_default(get, key, default), do: get.(key) || default
 
   # A conversation's spec carries no ticket and no budget, and a round trip must give back the
   # nil rather than a map of nils — `%{number: nil, title: nil}` is truthy, and every `if
@@ -159,13 +203,29 @@ defmodule ForgeCore.Job.Spec do
   defp ticket_from_map(nil), do: nil
   defp ticket_from_map(map), do: %{number: nested(map, :number), title: nested(map, :title)}
 
+  # String keys whichever way it arrived, because the manifest reads it by string and a spec built
+  # in memory and one read back from the row must render the same.
+  defp entered_from_map(nil), do: nil
+
+  defp entered_from_map(map) do
+    %{
+      "from" => nested(map, :from),
+      "outcome" => nested(map, :outcome),
+      "by" => nested(map, :by),
+      "comment" => nested(map, :comment)
+    }
+  end
+
   defp budget_from_map(nil), do: nil
   defp budget_from_map(map), do: %{turns: nested(map, :turns), cost: nested(map, :cost)}
 
+  # Named rather than converted, and a kind nobody knows is refused as `Result` refuses a status it
+  # does not know: a spec whose kind is guessed runs the wrong job.
   defp kind(nil), do: :workflow
-  defp kind("chat"), do: :chat
-  defp kind("workflow"), do: :workflow
-  defp kind(kind) when is_atom(kind), do: kind
+  defp kind(kind) when kind in ["chat", :chat], do: :chat
+  defp kind(kind) when kind in ["workflow", :workflow], do: :workflow
+  defp kind(kind) when kind in ["command", :command], do: :command
+  defp kind(other), do: raise(ArgumentError, "unknown job kind: #{inspect(other)}")
 
   @doc """
   Checks that a workflow spec has everything a workflow job needs, now that the struct cannot.
@@ -176,6 +236,18 @@ defmodule ForgeCore.Job.Spec do
   @spec validate(t()) :: :ok | {:error, [atom()]}
   def validate(%__MODULE__{kind: :chat} = spec) do
     if spec.job_id && spec.branch, do: :ok, else: {:error, [:job_id, :branch]}
+  end
+
+  # A command runs a script at a commit, and neither can be guessed on the machine.
+  def validate(%__MODULE__{kind: :command} = spec) do
+    command = spec.command || %{}
+
+    missing =
+      [job_id: spec.job_id, branch: spec.branch, script: command["script"], at: command["at"]]
+      |> Enum.filter(fn {_key, value} -> is_nil(value) end)
+      |> Enum.map(&elem(&1, 0))
+
+    if missing == [], do: :ok, else: {:error, missing}
   end
 
   def validate(%__MODULE__{} = spec) do

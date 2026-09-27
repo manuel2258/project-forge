@@ -101,14 +101,21 @@ defmodule Forge.Engine do
     })
   end
 
-  @doc "Adds taking `transition` to `multi`: ticket state, event, next job or done."
+  @doc """
+  Adds taking `transition` to `multi`: ticket state, event, next job or done.
+
+  `comment` is what a person wrote as they took it, if anything. It is recorded on the event and
+  handed to the job the transition creates, which is how a tester's note on sending a build back
+  reaches the job that has to act on it (`docs/design/job-prompt.md` § How the job arrived).
+  """
   @spec put_transition(
           Multi.t(),
           Ticket.t(),
           Workflow.t(),
           Transition.t(),
           String.t() | nil,
-          Events.actor()
+          Events.actor(),
+          String.t() | nil
         ) :: Multi.t()
   def put_transition(
         multi,
@@ -116,10 +123,21 @@ defmodule Forge.Engine do
         %Workflow{} = workflow,
         %Transition{} = transition,
         outcome,
-        actor
+        actor,
+        comment \\ nil
       ) do
     target = Workflow.state(workflow, transition.to)
     terminal = Workflow.terminal?(workflow, transition.to)
+
+    # The outcome a job ended with, or nil when a person chose the transition with no job's outcome
+    # behind it — out of a human state, or to unstick a ticket. The event has always recorded the
+    # transition's own `when` in that case; the job is told only what actually happened.
+    entered = %{
+      "from" => transition.from,
+      "outcome" => outcome,
+      "by" => if(actor == :system, do: "engine", else: "person"),
+      "comment" => blank_to_nil(comment)
+    }
 
     multi
     |> Tickets.put_progress(:ticket, ticket, %{
@@ -130,30 +148,61 @@ defmodule Forge.Engine do
     })
     |> Events.log(:transition_event, "transition.taken", actor, %{
       ticket_id: ticket.id,
-      payload: %{
-        "from" => transition.from,
-        "to" => transition.to,
-        "outcome" => outcome || Transition.outcome(transition)
-      }
+      payload:
+        %{
+          "from" => transition.from,
+          "to" => transition.to,
+          "outcome" => outcome || Transition.outcome(transition)
+        }
+        |> put_comment(entered["comment"])
     })
-    |> put_follow_up(ticket, workflow, transition, target, terminal)
+    |> put_follow_up(ticket, workflow, transition, target, terminal, entered)
   end
 
-  defp put_follow_up(multi, ticket, _workflow, transition, _target, true) do
+  defp put_comment(payload, nil), do: payload
+  defp put_comment(payload, comment), do: Map.put(payload, "comment", comment)
+
+  defp blank_to_nil(text) when is_binary(text) do
+    case String.trim(text) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp blank_to_nil(_none), do: nil
+
+  defp put_follow_up(multi, ticket, _workflow, transition, _target, true, _entered) do
     Events.log(multi, :done_event, "ticket.done", :system, %{
       ticket_id: ticket.id,
       payload: %{"state" => transition.to}
     })
   end
 
-  defp put_follow_up(multi, _ticket, workflow, transition, %State{prompt: prompt}, false)
+  defp put_follow_up(multi, _ticket, workflow, transition, %State{prompt: prompt}, false, entered)
        when is_binary(prompt) do
     Multi.merge(multi, fn %{ticket: ticket} ->
-      Jobs.put_create(Multi.new(), :next_job, ticket, workflow, transition.to)
+      Jobs.put_create(Multi.new(), :next_job, ticket, workflow, transition.to, entered)
     end)
   end
 
-  defp put_follow_up(multi, _ticket, _workflow, _transition, _human_state, false), do: multi
+  # A command state's entry runs its commands (`docs/design/commands.md`).
+  defp put_follow_up(
+         multi,
+         _ticket,
+         workflow,
+         transition,
+         %State{invoke: [_ | _]},
+         false,
+         _entered
+       ) do
+    # How the ticket came in is for an agent to read; a command has no manifest to put it in.
+    Multi.merge(multi, fn %{ticket: ticket} ->
+      Forge.Jobs.Commands.put_for_state(Multi.new(), :next_job, ticket, workflow, transition.to)
+    end)
+  end
+
+  defp put_follow_up(multi, _ticket, _workflow, _transition, _human_state, false, _entered),
+    do: multi
 
   defp put_pending_approval(multi, ticket, %Transition{} = transition, outcome) do
     pending = %{
@@ -400,7 +449,7 @@ defmodule Forge.Engine do
     multi =
       case decision do
         :approved ->
-          put_transition(multi, ticket, workflow, transition, outcome, {:user, user_id})
+          put_transition(multi, ticket, workflow, transition, outcome, {:user, user_id}, comment)
 
         # `docs/design/workflow-grammar-v1.md` § Approval: "Rejection keeps the ticket in `from`
         # and the operator chooses what happens next, including editing the artifact (which

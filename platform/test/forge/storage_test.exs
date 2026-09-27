@@ -39,6 +39,17 @@ defmodule Forge.StorageTest do
       assert {:ok, "job/x/transcript-1.jsonl"} = Key.validate("job/x/transcript-1.jsonl")
     end
 
+    # Ownership is decided on the key the store would take, not on the string: `..` is not under
+    # the job, and neither is a sibling whose id merely starts the same.
+    test "a job's own keys are its, and nothing that only reads like one" do
+      assert Key.job?("job/a1/log-1.txt", "a1")
+      assert Key.job?("job/a1/out-x/1", "a1")
+      refute Key.job?("job/a1/../b2/log-1.txt", "a1")
+      refute Key.job?("job/a10/log-1.txt", "a1")
+      refute Key.job?("job/a1", "a1")
+      refute Key.job?(nil, "a1")
+    end
+
     test "are checked before any implementation sees them" do
       assert {:error, :invalid_key} = Storage.put("job/../escape", "x")
       assert {:error, :invalid_key} = Storage.get("job/../escape")

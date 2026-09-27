@@ -25,15 +25,20 @@ defmodule ForgeCore.Engine do
     * `{:approval, t}` - `t` matches but needs human approval of the listed artifacts.
     * `{:stuck, reason}` - no transition applies; the operator chooses one with `choose/3`.
 
-  `outcome` is the job's engine outcome, or its declared outcome when it converged.
+  `outcome` is the job's engine outcome, or its declared outcome when it converged; for a command
+  state, what its batch's exit statuses map to (`ForgeCore.Workflow.exit_outcome/2`).
   """
   @spec step(Workflow.t(), Workflow.state_name(), Workflow.outcome(), counts()) ::
           decision() | {:error, {:unknown_state, String.t()} | {:human_state, String.t()}}
   def step(%Workflow{} = workflow, state_name, outcome, counts) when is_map(counts) do
     case Workflow.state(workflow, state_name) do
-      nil -> {:error, {:unknown_state, state_name}}
-      %State{prompt: nil} -> {:error, {:human_state, state_name}}
-      %State{} -> decide(workflow, state_name, outcome, counts)
+      nil ->
+        {:error, {:unknown_state, state_name}}
+
+      %State{} = state ->
+        if State.human?(state),
+          do: {:error, {:human_state, state_name}},
+          else: decide(workflow, state_name, outcome, counts)
     end
   end
 

@@ -12,10 +12,23 @@ defmodule ForgeCore.Workflow.Parser do
 
   alias ForgeCore.Error
   alias ForgeCore.Workflow
-  alias ForgeCore.Workflow.{Budget, Defaults, Limits, Resources, State, Transition, Validator}
 
-  @top_keys ~w(version initial states transitions limits defaults)
-  @state_keys ~w(prompt env model inputs produces outcomes budget on_enter resources)
+  alias ForgeCore.Workflow.{
+    Budget,
+    Command,
+    Defaults,
+    Limits,
+    Resources,
+    State,
+    Transition,
+    Validator
+  }
+
+  @top_keys ~w(version initial states transitions limits defaults commands)
+  @state_keys ~w(prompt env model inputs produces outcomes budget on_enter resources invoke exit
+                 may_invoke)
+  @command_keys ~w(run env produces timeout resources)
+  @grant_keys ~w(max concurrent)
   @transition_keys ~w(from to when approve max)
   @budget_keys ~w(turns cost)
   @limit_keys ~w(ticket_cost)
@@ -90,6 +103,7 @@ defmodule ForgeCore.Workflow.Parser do
     {transitions, e4} = transitions(map)
     {limits, e5} = limits(map)
     {defaults, e6} = defaults(map)
+    {commands, e7} = commands(map)
 
     workflow = %Workflow{
       version: version,
@@ -97,10 +111,105 @@ defmodule ForgeCore.Workflow.Parser do
       states: states,
       transitions: transitions,
       limits: limits,
-      defaults: defaults
+      defaults: defaults,
+      commands: commands
     }
 
-    {workflow, unknown_keys(map, @top_keys, "") ++ e1 ++ e2 ++ e3 ++ e4 ++ e5 ++ e6}
+    {workflow, unknown_keys(map, @top_keys, "") ++ e1 ++ e2 ++ e3 ++ e4 ++ e5 ++ e6 ++ e7}
+  end
+
+  # `docs/design/workflow-grammar-v1.md` § Commands. A mapping of names, each a mapping of its own;
+  # absent is no commands at all, which is every workflow written before they existed.
+  defp commands(map) do
+    case Map.get(map, "commands") do
+      nil ->
+        {%{}, []}
+
+      commands when is_map(commands) ->
+        commands
+        |> Enum.map(fn {name, definition} -> command(to_string(name), definition) end)
+        |> collect(%{}, fn command, acc -> Map.put(acc, command.name, command) end)
+
+      _ ->
+        {%{}, [Error.new("commands", "must be a mapping of command names")]}
+    end
+  end
+
+  defp command(name, definition) when is_map(definition) do
+    path = Error.join("commands", name)
+    {run, e1} = required_string(definition, "run", path)
+    {env, e2} = optional_string(definition, "env", path)
+    {{produces, outputs}, e3} = command_produces(definition, path)
+    {timeout_ms, e4} = duration(definition, "timeout", path)
+    {resources, e5} = resources(definition, path)
+
+    command = %Command{
+      name: name,
+      run: run,
+      env: env,
+      produces: produces,
+      outputs: outputs,
+      timeout_ms: timeout_ms,
+      resources: resources
+    }
+
+    {command, unknown_keys(definition, @command_keys, path) ++ e1 ++ e2 ++ e3 ++ e4 ++ e5}
+  end
+
+  defp command(name, _definition) do
+    {%Command{name: name}, [Error.new(Error.join("commands", name), "must be a mapping")]}
+  end
+
+  # A name — the log — or a list of at most one name and any number of groups of files.
+  defp command_produces(definition, path) do
+    produces_path = Error.join(path, "produces")
+
+    case Map.get(definition, "produces") do
+      nil ->
+        {{nil, []}, []}
+
+      name when is_binary(name) and name != "" ->
+        split_produces([name], produces_path)
+
+      list when is_list(list) and list != [] ->
+        if Enum.all?(list, &(is_binary(&1) and &1 != "")),
+          do: split_produces(list, produces_path),
+          else: {{nil, []}, [Error.new(produces_path, "must be a list of non-empty strings")]}
+
+      _other ->
+        {{nil, []},
+         [Error.new(produces_path, "must be an artifact name, or a list of one and groups")]}
+    end
+  end
+
+  defp split_produces(names, path) do
+    case Enum.split_with(names, &Workflow.group?/1) do
+      {groups, []} -> {{nil, groups}, []}
+      {groups, [log]} -> {{log, groups}, []}
+      {_groups, _many} -> {{nil, []}, [Error.new(path, "names at most one log")]}
+    end
+  end
+
+  defp duration(map, key, path) do
+    case Map.get(map, key) do
+      nil ->
+        {nil, [Error.new(Error.join(path, key), "is required")]}
+
+      value ->
+        case Command.parse_duration(value) do
+          {:ok, ms} ->
+            {ms, []}
+
+          :error ->
+            {nil,
+             [
+               Error.new(
+                 Error.join(path, key),
+                 "must be a duration of at most a day: a whole number and one of s, m or h, like 20m"
+               )
+             ]}
+        end
+    end
   end
 
   defp defaults(map) do
@@ -149,6 +258,9 @@ defmodule ForgeCore.Workflow.Parser do
     {on_enter, e7} = on_enter(definition, path)
     {model, e8} = optional_string(definition, "model", path)
     {resources, e9} = resources(definition, path)
+    {invoke, e10} = invoke(definition, path)
+    {exit, e11} = exit_map(definition, path)
+    {may_invoke, e12} = may_invoke(definition, path)
 
     state = %State{
       name: name,
@@ -160,18 +272,134 @@ defmodule ForgeCore.Workflow.Parser do
       outcomes: outcomes,
       budget: budget,
       resources: resources,
-      on_enter: on_enter
+      on_enter: on_enter,
+      invoke: invoke,
+      exit: exit,
+      may_invoke: may_invoke
     }
 
     {state,
      unknown_keys(definition, @state_keys, path) ++
-       e1 ++ e2 ++ e3 ++ e4 ++ e5 ++ e6 ++ e7 ++ e8 ++ e9}
+       e1 ++ e2 ++ e3 ++ e4 ++ e5 ++ e6 ++ e7 ++ e8 ++ e9 ++ e10 ++ e11 ++ e12}
   end
 
   defp state(name, _definition) do
     {%State{name: name},
      [Error.new(Error.join("states", name), "must be a mapping ({} for a human state)")]}
   end
+
+  # Each entry is a command's name, or a list whose head is the name and whose tail is the argument
+  # vector. A whole number in the tail is taken as its digits — `[test, --jobs, 4]` is what anyone
+  # writes — and anything else that is not a string is refused rather than guessed at, because the
+  # vector reaches `exec` exactly as written.
+  defp invoke(definition, path) do
+    invoke_path = Error.join(path, "invoke")
+
+    case Map.get(definition, "invoke") do
+      nil ->
+        {[], []}
+
+      entries when is_list(entries) and entries != [] ->
+        entries
+        |> Enum.with_index()
+        |> Enum.map(fn {entry, index} -> invocation(entry, Error.join(invoke_path, index)) end)
+        |> collect([], fn invocation, acc -> acc ++ [invocation] end)
+
+      _ ->
+        {[], [Error.new(invoke_path, "must be a non-empty list of commands")]}
+    end
+  end
+
+  defp invocation(name, _path) when is_binary(name) and name != "",
+    do: {%{command: name, args: []}, []}
+
+  defp invocation([name | args], path) when is_binary(name) and name != "" do
+    if Enum.all?(args, &(is_binary(&1) or is_integer(&1))),
+      do: {%{command: name, args: Enum.map(args, &to_string/1)}, []},
+      else: {nil, [Error.new(path, "arguments must be strings")]}
+  end
+
+  defp invocation(_entry, path),
+    do:
+      {nil, [Error.new(path, "must be a command name, or a list of the name and its arguments")]}
+
+  # Keys are exit statuses or `"*"`; values are outcome names. A status may arrive as its digits:
+  # the pinned definition is stored as JSON, where every key is a string, and `{0: done}` comes
+  # back as `{"0": done}` — refusing that would make every command state's pinning unreadable
+  # the first time it is read back.
+  defp exit_map(definition, path) do
+    exit_path = Error.join(path, "exit")
+
+    case Map.get(definition, "exit") do
+      nil ->
+        {nil, []}
+
+      exit when is_map(exit) and map_size(exit) > 0 ->
+        entries =
+          exit
+          |> Enum.sort_by(fn {key, _value} -> to_string(key) end)
+          |> Enum.map(fn {key, value} -> exit_entry(key, value, exit_path) end)
+
+        errors = Enum.flat_map(entries, &elem(&1, 1))
+        {if(errors == [], do: Map.new(entries, &elem(&1, 0))), errors}
+
+      _ ->
+        {nil, [Error.new(exit_path, "must be a mapping of exit statuses to outcomes")]}
+    end
+  end
+
+  defp exit_entry(key, value, path) do
+    {status, key_errors} =
+      case exit_key(key) do
+        {:ok, status} -> {status, []}
+        :error -> {key, [Error.new(path, "#{inspect(key)} is not an exit status or \"*\"")]}
+      end
+
+    value_errors =
+      if is_binary(value) and value != "",
+        do: [],
+        else: [Error.new(Error.join(path, to_string(key)), "must name an outcome")]
+
+    {{status, value}, key_errors ++ value_errors}
+  end
+
+  defp exit_key("*"), do: {:ok, "*"}
+  defp exit_key(key) when is_integer(key) and key >= 0, do: {:ok, key}
+
+  defp exit_key(key) when is_binary(key) do
+    if Regex.match?(~r/^[0-9]+$/, key), do: {:ok, String.to_integer(key)}, else: :error
+  end
+
+  defp exit_key(_key), do: :error
+
+  defp may_invoke(definition, path) do
+    grants_path = Error.join(path, "may_invoke")
+
+    case Map.get(definition, "may_invoke") do
+      nil ->
+        {%{}, []}
+
+      grants when is_map(grants) ->
+        grants
+        |> Enum.map(fn {name, grant} -> grant(to_string(name), grant, grants_path) end)
+        |> collect(%{}, fn {name, grant}, acc -> Map.put(acc, name, grant) end)
+
+      _ ->
+        {%{}, [Error.new(grants_path, "must be a mapping of command names")]}
+    end
+  end
+
+  defp grant(name, grant, path) when is_map(grant) do
+    path = Error.join(path, name)
+    {max, e1} = positive_integer(grant, "max", path, required: true)
+    {concurrent, e2} = positive_integer(grant, "concurrent", path, required: false)
+
+    {{name, %{max: max, concurrent: concurrent}},
+     unknown_keys(grant, @grant_keys, path) ++ e1 ++ e2}
+  end
+
+  defp grant(name, _grant, path),
+    do: {{name, nil}, [Error.new(Error.join(path, name), "must be a mapping with max")]}
 
   # One action or a list of them. Unknown actions are named here rather than in the validator,
   # because the struct holds atoms and an unknown one has nowhere to go.

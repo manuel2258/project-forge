@@ -43,15 +43,31 @@ defmodule ForgeWeb.ArtifactController do
     serve(conn, artifact, version({:job, chat.id}, artifact, params["version"]))
   end
 
-  defp serve(conn, artifact, {:ok, bytes, version}) do
-    conn
-    |> put_resp_content_type("text/plain")
-    |> put_resp_header("x-content-type-options", "nosniff")
-    |> put_resp_header(
-      "content-disposition",
-      ~s(inline; filename="#{filename(artifact, version)}")
-    )
-    |> send_resp(200, bytes)
+  # Text is shown; anything else is a download, never laid out: `nosniff` on both, and the bytes of
+  # something that is not text are `attachment`, so the browser saves them rather than guessing
+  # what they are (`docs/design/ui.md` § Addressable artifact versions).
+  defp serve(conn, artifact, {:ok, version}) do
+    case Artifacts.served(version, Path.join(System.tmp_dir!(), "forge-download")) do
+      {:text, bytes} ->
+        conn |> headers("text/plain", "inline", artifact, version) |> send_resp(200, bytes)
+
+      {:bytes, bytes} ->
+        conn
+        |> headers("application/octet-stream", "attachment", artifact, version)
+        |> send_resp(200, bytes)
+
+      {:file, path} ->
+        try do
+          conn
+          |> headers("application/octet-stream", "attachment", artifact, version)
+          |> send_file(200, path)
+        after
+          File.rm(path)
+        end
+
+      {:error, reason} ->
+        serve(conn, artifact, {:error, reason})
+    end
   end
 
   defp serve(conn, _artifact, {:error, _reason}) do
@@ -61,16 +77,24 @@ defmodule ForgeWeb.ArtifactController do
     |> render(:"404")
   end
 
-  # The version and its bytes, or why not. `:not_a_file` is a changeset, which only a ticket has.
+  # The version, or why not. `:not_a_file` is a changeset, which only a ticket has.
   defp version(scope, name, requested) do
     with {n, ""} when n > 0 <- Integer.parse(requested),
-         %{} = version <- Enum.find(Artifacts.versions(scope, name), &(&1.version == n)),
-         {:ok, bytes} <- Artifacts.content(version) do
-      {:ok, bytes, version}
+         %{} = version <- Enum.find(Artifacts.versions(scope, name), &(&1.version == n)) do
+      if match?("git:" <> _sha, version.blob_uri), do: {:error, :not_a_file}, else: {:ok, version}
     else
-      {:error, reason} -> {:error, reason}
       _other -> {:error, :not_found}
     end
+  end
+
+  defp headers(conn, type, disposition, artifact, version) do
+    conn
+    |> put_resp_content_type(type, if(type == "text/plain", do: "utf-8"))
+    |> put_resp_header("x-content-type-options", "nosniff")
+    |> put_resp_header(
+      "content-disposition",
+      ~s(#{disposition}; filename="#{filename(artifact, version)}")
+    )
   end
 
   # The version is in the name a browser saves, because two versions of one artifact are two

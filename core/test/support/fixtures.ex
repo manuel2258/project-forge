@@ -23,7 +23,14 @@ defmodule ForgeCore.Fixtures do
         %Input{name: "refinement.md", version: 2, content: "---\noutcome: done\n---\nRefined."}
       ],
       produces: ["plan.md", "changeset"],
-      outcomes: ["done", "plan_invalid"]
+      outcomes: ["done", "plan_invalid"],
+      entered: %{
+        "from" => "refining",
+        "outcome" => "done",
+        "by" => "person",
+        "comment" => "Keep the table local."
+      },
+      absent_inputs: ["implementation.md"]
     }
   end
 end

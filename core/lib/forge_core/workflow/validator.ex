@@ -16,6 +16,8 @@ defmodule ForgeCore.Workflow.Validator do
       state_shapes(workflow),
       entry_actions(workflow),
       artifact_names(workflow),
+      commands(workflow, Keyword.get(opts, :file_exists)),
+      invocations(workflow),
       outcome_declarations(workflow),
       transitions(workflow),
       reachability(workflow),
@@ -39,7 +41,8 @@ defmodule ForgeCore.Workflow.Validator do
 
       artifact_errors =
         (state.inputs ++ state.produces)
-        |> Enum.reject(&(valid_name?(&1) or reserved_prefix?(&1)))
+        |> Enum.map(&Workflow.group_name/1)
+        |> Enum.reject(&valid_name?/1)
         |> Enum.uniq()
         |> Enum.map(
           &Error.new(
@@ -58,9 +61,17 @@ defmodule ForgeCore.Workflow.Validator do
 
   defp initial(%Workflow{initial: initial} = workflow) do
     case Workflow.state(workflow, initial) do
-      %State{prompt: nil} -> [Error.new("initial", "must name a job state, not a human state")]
-      %State{} -> []
-      nil -> [Error.new("initial", "names an unknown state #{inspect(initial)}")]
+      %State{prompt: nil, invoke: [_ | _]} ->
+        [Error.new("initial", "must name a job state, not a command state")]
+
+      %State{prompt: nil} ->
+        [Error.new("initial", "must name a job state, not a human state")]
+
+      %State{} ->
+        []
+
+      nil ->
+        [Error.new("initial", "names an unknown state #{inspect(initial)}")]
     end
   end
 
@@ -68,32 +79,116 @@ defmodule ForgeCore.Workflow.Validator do
     Enum.flat_map(states, fn {name, state} -> state_shape(Error.join("states", name), state) end)
   end
 
+  # Three shapes (`docs/design/workflow-grammar-v1.md` § Validation). A state with a prompt runs
+  # an agent, one with `invoke` runs commands, and one with neither waits for a person; a state
+  # with both would be two things on one entry.
+  defp state_shape(path, %State{prompt: prompt, invoke: [_ | _]}) when is_binary(prompt),
+    do: [
+      Error.new(
+        Error.join(path, "invoke"),
+        "a state runs an agent or commands, not both: it has a prompt"
+      )
+    ]
+
+  # A command's environment, model and size are the command's own; the state has nothing to run
+  # them with but `resources`, which its commands fall back to.
+  defp state_shape(path, %State{prompt: nil, invoke: [_ | _]} = command) do
+    present =
+      [
+        env: command.env,
+        model: command.model,
+        inputs: command.inputs,
+        produces: command.produces,
+        outcomes: command.outcomes,
+        budget: command.budget,
+        may_invoke: command.may_invoke
+      ]
+      |> Enum.reject(fn {_key, value} -> value in [nil, [], %{}] end)
+      |> Enum.map(
+        &Error.new(Error.join(path, to_string(elem(&1, 0))), "not allowed on a command state")
+      )
+
+    exit =
+      if command.exit == nil,
+        do: [Error.new(Error.join(path, "exit"), "is required on a command state")],
+        else: []
+
+    present ++ exit ++ engine_exits(path, command.exit)
+  end
+
+  # A human state may produce documents a person writes while the ticket rests there, and nothing
+  # else: the changeset is the branch a job's commits make, and a person does not commit through
+  # a state (`docs/design/workflow-grammar-v1.md` § Semantics).
   defp state_shape(path, %State{prompt: nil} = human) do
+    changeset =
+      if Enum.any?(human.produces, &(not Workflow.document?(&1))),
+        do: [
+          Error.new(
+            Error.join(path, "produces"),
+            "a human state writes documents, not #{Workflow.changeset_artifact()} or groups of files"
+          )
+        ],
+        else: []
+
     present =
       [
         env: human.env,
         model: human.model,
         inputs: human.inputs,
-        produces: human.produces,
         outcomes: human.outcomes,
         budget: human.budget,
         # Nothing runs, so there is nothing to size — and a declaration nothing reads is one the
         # author believes is doing something.
-        resources: human.resources
+        resources: human.resources,
+        exit: human.exit,
+        may_invoke: human.may_invoke
       ]
-      |> Enum.reject(fn {_key, value} -> value in [nil, []] end)
+      |> Enum.reject(fn {_key, value} -> value in [nil, [], %{}] end)
       |> Enum.map(fn {key, _value} -> to_string(key) end)
 
-    Enum.map(
-      present,
-      &Error.new(Error.join(path, &1), "not allowed on a human state (no prompt)")
-    )
+    changeset ++
+      Enum.map(
+        present,
+        &Error.new(Error.join(path, &1), "not allowed on a human state (no prompt)")
+      )
   end
 
-  defp state_shape(path, %State{budget: nil}),
-    do: [Error.new(Error.join(path, "budget"), "is required on a job state")]
+  defp state_shape(path, %State{} = job) do
+    budget =
+      if job.budget == nil,
+        do: [Error.new(Error.join(path, "budget"), "is required on a job state")],
+        else: []
 
-  defp state_shape(_path, %State{}), do: []
+    exit =
+      if job.exit == nil,
+        do: [],
+        else: [
+          Error.new(
+            Error.join(path, "exit"),
+            "not allowed on a job state: its agent declares outcomes"
+          )
+        ]
+
+    budget ++ exit
+  end
+
+  # An engine outcome is the engine's to decide — a command state's `exit` naming `error` would let
+  # a failing build pass for a platform fault.
+  defp engine_exits(_path, nil), do: []
+
+  defp engine_exits(path, exit) do
+    exit
+    |> Map.values()
+    |> Enum.uniq()
+    |> Enum.filter(&(&1 in Workflow.engine_outcomes()))
+    |> Enum.sort()
+    |> Enum.map(
+      &Error.new(
+        Error.join(path, "exit"),
+        "#{inspect(&1)} is an engine outcome and cannot be mapped to"
+      )
+    )
+  end
 
   # `on_enter` is a state's entry, and a job state's entry already runs a job: two things on one
   # entry would leave their order undefined. A ticket has one branch and merges once, so at most
@@ -114,15 +209,17 @@ defmodule ForgeCore.Workflow.Validator do
   end
 
   defp entry_action_shape({name, %State{on_enter: [_ | _]} = state}) do
-    if State.job?(state) do
-      [
-        Error.new(
-          Error.join(Error.join("states", name), "on_enter"),
-          "not allowed on a job state: entering it already runs a job"
-        )
-      ]
-    else
-      []
+    path = Error.join(Error.join("states", name), "on_enter")
+
+    cond do
+      State.job?(state) ->
+        [Error.new(path, "not allowed on a job state: entering it already runs a job")]
+
+      State.command?(state) ->
+        [Error.new(path, "not allowed on a command state: entering it already runs its commands")]
+
+      true ->
+        []
     end
   end
 
@@ -185,11 +282,8 @@ defmodule ForgeCore.Workflow.Validator do
     producers = Workflow.producers(workflow, name)
 
     cond do
-      reserved_prefix?(name) ->
-        Error.new(
-          Error.join(path, index),
-          "prefix groups (name/*) are reserved for a later version"
-        )
+      Workflow.group?(name) ->
+        Error.new(Error.join(path, index), "a group of files is not an input yet")
 
       name == Workflow.answers_artifact() ->
         Error.new(Error.join(path, index), "answers.md is platform-managed and never declared")
@@ -223,11 +317,8 @@ defmodule ForgeCore.Workflow.Validator do
     producers = Workflow.producers(workflow, name)
 
     cond do
-      reserved_prefix?(name) ->
-        Error.new(
-          Error.join(path, index),
-          "prefix groups (name/*) are reserved for a later version"
-        )
+      Workflow.group?(name) ->
+        group_error(workflow, Error.join(path, index), name, producers)
 
       name in [Workflow.ticket_artifact(), Workflow.answers_artifact()] ->
         Error.new(Error.join(path, index), "#{inspect(name)} is reserved and cannot be produced")
@@ -249,7 +340,185 @@ defmodule ForgeCore.Workflow.Validator do
     end
   end
 
-  defp reserved_prefix?(name), do: String.ends_with?(name, "/*")
+  # A group names a directory under `out/`, so it may not be one the platform keeps there, nor share
+  # its name with a document — `out/package` cannot be a file and a directory at once — and it is
+  # one state's or one command's (`docs/design/workflow-grammar-v1.md` § Validation).
+  defp group_error(workflow, path, group, producers) do
+    name = Workflow.group_name(group)
+
+    cond do
+      reserved = Workflow.document_name_error(name) ->
+        Error.new(path, reserved)
+
+      Workflow.producers(workflow, name) != [] ->
+        Error.new(path, "#{inspect(name)} is also produced as a document")
+
+      length(producers) > 1 ->
+        Error.new(
+          path,
+          "#{inspect(group)} is produced by more than one state: #{Enum.join(Enum.sort(producers), ", ")}"
+        )
+
+      command_producing(workflow, group) != [] ->
+        Error.new(path, "#{inspect(group)} is also produced by a command")
+
+      true ->
+        nil
+    end
+  end
+
+  defp command_producing(%Workflow{commands: commands}, group) do
+    for {name, command} <- commands, group in command.outputs, do: name
+  end
+
+  # -- commands -----------------------------------------------------------------------------
+
+  # `docs/design/workflow-grammar-v1.md` § Validation: a command has a script under `.forge/` that
+  # exists at the pinned commit, and what it produces is a name nobody else produces.
+  defp commands(%Workflow{commands: commands} = workflow, exists) do
+    commands
+    |> Enum.sort_by(fn {name, _command} -> name end)
+    |> Enum.flat_map(fn {name, command} ->
+      path = Error.join("commands", name)
+
+      List.flatten([
+        if(valid_name?(name),
+          do: [],
+          else: [
+            Error.new(path, "command name must be a single path segment: letters, digits, . _ -")
+          ]
+        ),
+        run_errors(Error.join(path, "run"), command.run, exists),
+        command_produces_errors(workflow, name, Error.join(path, "produces"), command.produces),
+        command_outputs_errors(workflow, name, Error.join(path, "produces"), command.outputs)
+      ])
+    end)
+  end
+
+  # Lexical, and it has to be: the check runs against a commit, not a filesystem, and the platform
+  # reads the script out of git by this path rather than opening it. There is no symlink between
+  # the check and the read for a lexical rule to be wrong about.
+  defp run_errors(_path, nil, _exists), do: []
+
+  defp run_errors(path, run, exists) do
+    segments = String.split(run, "/")
+
+    cond do
+      not String.starts_with?(run, ".forge/") or Enum.any?(segments, &(&1 in ["", ".", ".."])) ->
+        [Error.new(path, "must be a path under .forge/, like .forge/commands/build.sh")]
+
+      is_function(exists, 1) and not exists.(run) ->
+        [Error.new(path, "file #{inspect(run)} does not exist at the pinned commit")]
+
+      true ->
+        []
+    end
+  end
+
+  defp command_outputs_errors(workflow, name, path, outputs) do
+    Enum.flat_map(outputs, fn group ->
+      group_name = Workflow.group_name(group)
+
+      others =
+        for {other, command} <- workflow.commands,
+            other != name,
+            group in command.outputs,
+            do: other
+
+      cond do
+        not valid_name?(group_name) ->
+          [Error.new(path, "#{inspect(group)} must name its files with a single path segment")]
+
+        reserved = Workflow.document_name_error(group_name) ->
+          [Error.new(path, reserved)]
+
+        Workflow.producers(workflow, group) != [] or
+            Workflow.producers(workflow, group_name) != [] ->
+          [Error.new(path, "#{inspect(group)} is already produced by a state")]
+
+        others != [] ->
+          [
+            Error.new(
+              path,
+              "#{inspect(group)} is also produced by #{Enum.join(Enum.sort(others), ", ")}"
+            )
+          ]
+
+        true ->
+          []
+      end
+    end)
+  end
+
+  defp command_produces_errors(_workflow, _name, _path, nil), do: []
+
+  defp command_produces_errors(workflow, name, path, produces) do
+    other_commands =
+      for {other, command} <- workflow.commands,
+          other != name,
+          command.produces == produces,
+          do: other
+
+    cond do
+      not valid_name?(produces) ->
+        [Error.new(path, "artifact name must be a single path segment: letters, digits, . _ -")]
+
+      produces in [
+        Workflow.ticket_artifact(),
+        Workflow.answers_artifact(),
+        Workflow.changeset_artifact()
+      ] ->
+        [Error.new(path, "#{inspect(produces)} is reserved and cannot be produced")]
+
+      reserved = Workflow.reserved_name_error(produces) ->
+        [Error.new(path, reserved)]
+
+      Workflow.producers(workflow, produces) != [] ->
+        [Error.new(path, "#{inspect(produces)} is already produced by a state")]
+
+      other_commands != [] ->
+        [
+          Error.new(
+            path,
+            "#{inspect(produces)} is also produced by #{Enum.join(Enum.sort(other_commands), ", ")}"
+          )
+        ]
+
+      true ->
+        []
+    end
+  end
+
+  # Every command a state invokes or lets its agent invoke is one the workflow declares.
+  defp invocations(%Workflow{states: states, commands: commands}) do
+    states
+    |> Enum.sort_by(fn {name, _state} -> name end)
+    |> Enum.flat_map(fn {name, state} ->
+      path = Error.join("states", name)
+
+      invoked =
+        state.invoke
+        |> Enum.with_index()
+        |> Enum.reject(fn {%{command: command}, _index} -> Map.has_key?(commands, command) end)
+        |> Enum.map(fn {%{command: command}, index} ->
+          Error.new(
+            Error.join(Error.join(path, "invoke"), index),
+            "#{inspect(command)} is not a declared command"
+          )
+        end)
+
+      granted =
+        state.may_invoke
+        |> Map.keys()
+        |> Enum.sort()
+        |> Enum.reject(&Map.has_key?(commands, &1))
+        |> Enum.map(
+          &Error.new(Error.join(Error.join(path, "may_invoke"), &1), "is not a declared command")
+        )
+
+      invoked ++ granted
+    end)
+  end
 
   defp outcome_declarations(%Workflow{states: states}) do
     Enum.flat_map(states, fn {name, state} ->
@@ -317,14 +586,18 @@ defmodule ForgeCore.Workflow.Validator do
     ])
   end
 
-  defp when_errors(_workflow, path, %State{prompt: nil}, %Transition{when: outcome})
-       when outcome != nil do
-    [Error.new(Error.join(path, "when"), "not allowed on a transition from a human state")]
+  defp when_errors(workflow, path, %State{} = from, %Transition{} = transition) do
+    if State.human?(from),
+      do: human_when(path, transition),
+      else: runs_when(workflow, path, from, transition)
   end
 
-  defp when_errors(_workflow, _path, %State{prompt: nil}, _transition), do: []
+  defp human_when(path, %Transition{when: outcome}) when outcome != nil,
+    do: [Error.new(Error.join(path, "when"), "not allowed on a transition from a human state")]
 
-  defp when_errors(workflow, path, %State{name: name}, %Transition{} = transition) do
+  defp human_when(_path, _transition), do: []
+
+  defp runs_when(workflow, path, %State{name: name}, %Transition{} = transition) do
     outcome = Transition.outcome(transition)
 
     if outcome in Workflow.outcomes(workflow, name) do
@@ -344,14 +617,24 @@ defmodule ForgeCore.Workflow.Validator do
 
     approve
     |> Enum.with_index()
-    |> Enum.reject(fn {artifact, _index} ->
-      Enum.any?(Workflow.producers(workflow, artifact), &MapSet.member?(allowed, &1))
-    end)
-    |> Enum.map(fn {artifact, index} ->
-      Error.new(
-        Error.join(Error.join(path, "approve"), index),
-        "#{inspect(artifact)} is not produced by #{inspect(from)} or a state before it"
-      )
+    |> Enum.flat_map(fn {artifact, index} ->
+      at = Error.join(Error.join(path, "approve"), index)
+
+      cond do
+        Workflow.group?(artifact) ->
+          [Error.new(at, "a group of files cannot be approved")]
+
+        Enum.any?(Workflow.producers(workflow, artifact), &MapSet.member?(allowed, &1)) ->
+          []
+
+        true ->
+          [
+            Error.new(
+              at,
+              "#{inspect(artifact)} is not produced by #{inspect(from)} or a state before it"
+            )
+          ]
+      end
     end)
   end
 
@@ -375,7 +658,7 @@ defmodule ForgeCore.Workflow.Validator do
 
   defp job_state?(workflow, name) do
     case Workflow.state(workflow, name) do
-      %State{} = state -> State.job?(state)
+      %State{} = state -> State.runs?(state)
       nil -> false
     end
   end

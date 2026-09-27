@@ -10,7 +10,7 @@ defmodule Forge.Jobs do
   the worker in since milestone 3.
   """
 
-  import Ecto.Query, only: [from: 2]
+  import Ecto.Query, only: [from: 2, dynamic: 2]
 
   alias Ecto.Multi
 
@@ -33,7 +33,7 @@ defmodule Forge.Jobs do
 
   alias Forge.Events.Event
   alias Forge.Git.{Tokens, Url}
-  alias Forge.Jobs.{Job, Runs}
+  alias Forge.Jobs.{Blobs, Commands, Job, Runs}
   alias Forge.Tickets.Ticket
   alias Forge.Workers.Worker
   alias ForgeCore.Job.{Result, Spec}
@@ -43,14 +43,31 @@ defmodule Forge.Jobs do
 
   require Logger
 
+  # The worker protocol commands arrived in (`docs/design/worker-channel.md` § Versions).
+  @commands_protocol 2
+
   # -- creation -------------------------------------------------------------------------------
 
-  @doc "Adds the creation of a pending job for `state_name` to `multi` under `key`."
-  @spec put_create(Multi.t(), term(), Ticket.t(), Workflow.t(), String.t()) :: Multi.t()
-  def put_create(multi, key, %Ticket{} = ticket, %Workflow{} = workflow, state_name) do
+  @doc """
+  Adds the creation of a pending job for `state_name` to `multi` under `key`.
+
+  `entered` is how the ticket came into the state — `%{"from", "outcome", "by", "comment"}` from
+  the transition that is creating the job — and nil for the ticket's first state. It goes into the
+  spec so the job is told why it is here (`docs/design/job-prompt.md` § How the job arrived).
+  """
+  @spec put_create(Multi.t(), term(), Ticket.t(), Workflow.t(), String.t(), map() | nil) ::
+          Multi.t()
+  def put_create(
+        multi,
+        key,
+        %Ticket{} = ticket,
+        %Workflow{} = workflow,
+        state_name,
+        entered \\ nil
+      ) do
     multi
     |> Multi.run(key, fn repo, _ ->
-      with {:ok, spec} <- build_spec(repo, ticket, workflow, state_name),
+      with {:ok, spec} <- build_spec(repo, ticket, workflow, state_name, entered),
            # The one place a workflow spec is built, and so the one place the keys the struct
            # can no longer enforce are checked. A spec that reaches the worker incomplete is a
            # job that fails on the machine, after a credential has been minted and a slice made.
@@ -95,9 +112,19 @@ defmodule Forge.Jobs do
   sums. The assignment carries them to the worker from the row.
   """
   @spec resources(Workflow.t(), String.t()) :: %{memory: pos_integer(), cores: pos_integer()}
-  def resources(%Workflow{} = workflow, state_name) do
-    declared = Workflow.resources(workflow, state_name)
+  def resources(%Workflow{} = workflow, state_name),
+    do: admitted(Workflow.resources(workflow, state_name))
 
+  @doc """
+  A declaration's figures with the platform's last link filled in: what a field nobody declared
+  is admitted as. `resources/2` for a job state, and a command's chain for a command
+  (`ForgeCore.Workflow.command_resources/3`).
+  """
+  @spec admitted(ForgeCore.Workflow.Resources.t()) :: %{
+          memory: pos_integer(),
+          cores: pos_integer()
+        }
+  def admitted(declared) do
     %{
       memory: declared.memory || Workers.slice_bytes(),
       cores: declared.cpu || Workers.default_cores()
@@ -117,14 +144,14 @@ defmodule Forge.Jobs do
   def default_resources,
     do: %{memory: Workers.chat_slice_bytes(), cores: Workers.default_cores()}
 
-  defp build_spec(repo, %Ticket{} = ticket, %Workflow{} = workflow, state_name) do
+  defp build_spec(repo, %Ticket{} = ticket, %Workflow{} = workflow, state_name, entered) do
     %State{} = state = Workflow.state(workflow, state_name)
     project = Projects.get!(ticket.project_id)
     repo_path = Projects.repo_path(project)
     job_id = Ecto.UUID.generate()
 
     with {:ok, prompt} <- Git.show(repo_path, ticket.workflow_commit, ".forge/" <> state.prompt),
-         {:ok, inputs} <- inputs(repo, ticket, repo_path, state.inputs) do
+         {:ok, inputs, absent} <- inputs(repo, ticket, repo_path, workflow, state) do
       {:ok,
        %Spec{
          job_id: job_id,
@@ -140,6 +167,9 @@ defmodule Forge.Jobs do
          budget: %{turns: state.budget.turns, cost: state.budget.cost},
          preamble_hash: Prompt.preamble_hash(),
          inputs: inputs,
+         absent_inputs: absent,
+         entered: entered,
+         may_invoke: grants(state),
          produces: state.produces,
          outcomes: state.outcomes,
          permitted_children: []
@@ -147,14 +177,36 @@ defmodule Forge.Jobs do
     end
   end
 
-  defp inputs(repo, ticket, repo_path, names) do
-    Enum.reduce_while(names, {:ok, []}, fn name, {:ok, acc} ->
+  # String keys, as the spec crosses the wire in JSON and is read back from the row.
+  defp grants(%State{may_invoke: grants}) do
+    Map.new(grants, fn {name, grant} ->
+      {name, %{"max" => grant.max, "concurrent" => grant.concurrent}}
+    end)
+  end
+
+  # An optional input that has not been written is left out and named, and a required one that
+  # is missing still fails the creation — it is the platform's guarantee that it exists, so its
+  # absence is a bug to hear about rather than a state to run in
+  # (`docs/design/workflow-grammar-v1.md` § Inputs).
+  defp inputs(repo, ticket, repo_path, workflow, %State{name: state_name, inputs: names}) do
+    Enum.reduce_while(names, {:ok, [], []}, fn name, {:ok, found, absent} ->
       case input(repo, ticket, repo_path, name) do
-        {:ok, input} -> {:cont, {:ok, acc ++ [input]}}
-        {:error, reason} -> {:halt, {:error, reason}}
+        {:ok, input} ->
+          {:cont, {:ok, found ++ [input], absent}}
+
+        {:error, {:missing_input, ^name}} = error ->
+          missing(Workflow.required_input?(workflow, state_name, name), error, found, absent)
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
       end
     end)
   end
+
+  defp missing(true = _required, error, _found, _absent), do: {:halt, error}
+
+  defp missing(false, {:error, {:missing_input, name}}, found, absent),
+    do: {:cont, {:ok, found, absent ++ [name]}}
 
   defp input(_repo, ticket, repo_path, "changeset") do
     with {:ok, head} <- Git.resolve(repo_path, "refs/heads/" <> ticket.branch),
@@ -177,10 +229,12 @@ defmodule Forge.Jobs do
     end
   end
 
+  # An agent's attempts, not its commands': they share its state, and count their own
+  # (`Forge.Jobs.Commands`).
   defp next_attempt(repo, ticket_id, state_name) do
     (repo.one(
        from j in Job,
-         where: j.ticket_id == ^ticket_id and j.state == ^state_name,
+         where: j.ticket_id == ^ticket_id and j.state == ^state_name and j.kind == :workflow,
          select: max(j.attempt)
      ) || 0) + 1
   end
@@ -221,6 +275,20 @@ defmodule Forge.Jobs do
     )
   end
 
+  @doc """
+  A ticket's command jobs, oldest first (`docs/design/commands.md`). Apart from `for_ticket/1`,
+  whose callers name what they build by a job's state and attempt, and a command's attempt counts
+  the ticket's commands rather than its state's visits.
+  """
+  @spec commands_for_ticket(String.t()) :: [Job.t()]
+  def commands_for_ticket(ticket_id) do
+    Repo.all(
+      from j in Job,
+        where: j.ticket_id == ^ticket_id and j.kind == :command,
+        order_by: j.inserted_at
+    )
+  end
+
   @doc "Conversations about a ticket, newest first."
   @spec chats_for_ticket(String.t()) :: [Job.t()]
   def chats_for_ticket(ticket_id) do
@@ -248,16 +316,33 @@ defmodule Forge.Jobs do
   dropped it from the queue without saying so — the conversation would sit pending for ever and
   nothing anywhere would report a problem. A chat is not filtered by a ticket's status either:
   a chat about a stuck ticket is the conversation you most want to be able to have.
+
+  **Ahead of them, the jobs pending since before `waited_since`**, longest-waiting first: the ones
+  old enough to reserve the machines they need (`docs/design/provisioning.md` § The gate). By
+  insertion alone, a job made earlier and pending again only just now — a parked agent back from
+  its commands — was offered before one that had waited half an hour, and took the room it was
+  holding out for; and a window of ten could hold no room for it at all.
   """
-  @spec pending(pos_integer()) :: [Job.t()]
-  def pending(limit \\ 10) do
+  @spec pending(pos_integer(), DateTime.t() | nil) :: [Job.t()]
+  def pending(limit \\ 10, waited_since \\ nil) do
     Repo.all(
       from j in Job,
         left_join: t in assoc(j, :ticket),
         where: j.status == :pending and (j.kind == :chat or t.status == :active),
-        order_by: j.inserted_at,
+        order_by: ^pending_order(waited_since),
         limit: ^limit
     )
+  end
+
+  defp pending_order(nil), do: [asc: :inserted_at]
+
+  defp pending_order(since) do
+    [
+      asc: dynamic([j], j.updated_at > ^since),
+      asc:
+        dynamic([j], fragment("CASE WHEN ? <= ? THEN ? END", j.updated_at, ^since, j.updated_at)),
+      asc: :inserted_at
+    ]
   end
 
   @doc """
@@ -278,14 +363,14 @@ defmodule Forge.Jobs do
   def waiting_job(%Ticket{id: ticket_id, state: state}),
     do: Enum.find(for_ticket(ticket_id), &(&1.status == :waiting and &1.state == state))
 
-  @doc "Whether a job for `state` on the ticket is pending, running or waiting."
+  @doc "Whether a job for `state` on the ticket is pending, running, waiting or parked."
   @spec live?(String.t(), String.t()) :: boolean()
   def live?(ticket_id, state) do
     Repo.exists?(
       from j in Job,
         where:
           j.ticket_id == ^ticket_id and j.state == ^state and
-            j.status in [:pending, :running, :waiting]
+            j.status in [:pending, :running, :waiting, :parked]
     )
   end
 
@@ -306,6 +391,8 @@ defmodule Forge.Jobs do
   worker that never gets the message is reconciled on its next join.
   """
   @spec assign(Job.t(), Worker.t()) :: {:ok, Job.t()} | {:error, term()}
+  def assign(%Job{kind: :command} = job, %Worker{} = worker), do: assign_command(job, worker)
+
   def assign(%Job{} = job, %Worker{} = worker) do
     # A workflow job reaches its project through its ticket; a chat has a project of its own and
     # may have no ticket at all. `Tickets.get!(nil)` raises, so the nil is answered here rather
@@ -334,17 +421,76 @@ defmodule Forge.Jobs do
         changed
 
       {:error, reason} ->
-        # Nothing is running, so the job must not sit `running` until the next boot, the run it
-        # was marked with never happened, and the credential it would have used is no good to
-        # anyone.
-        Multi.new()
-        |> Multi.update(:job, Job.progress_changeset(get!(job.id), %{status: :pending}))
-        |> Runs.close(job.id, DateTime.utc_now(:second))
-        |> Repo.transaction()
-
-        Tokens.revoke_for_job(job.id)
-        {:error, reason}
+        unassign(job, reason)
     end
+  end
+
+  # Nothing is running, so the job must not sit `running` until the next boot, the run it was
+  # marked with never happened, and the credential or token it would have used is no good to
+  # anyone.
+  defp unassign(job, reason) do
+    Multi.new()
+    |> Multi.update(:job, Job.progress_changeset(get!(job.id), %{status: :pending}))
+    |> Runs.close(job.id, DateTime.utc_now(:second))
+    |> Repo.transaction()
+
+    Tokens.revoke_for_job(job.id)
+    {:error, reason}
+  end
+
+  # A command carries no harness, no credential, no model and no budget
+  # (`docs/design/commands.md` § An invocation is a job): no spend gate, no pick from the pool, and
+  # a git token that can read and not write (§ How a command gets the code).
+  defp assign_command(%Job{} = job, %Worker{} = worker) do
+    ticket = Tickets.get!(job.ticket_id)
+    project = Projects.get!(job.project_id)
+
+    with {:ok, token, _row} <- Tokens.issue_for_job(job, ticket, project),
+         {:ok, started} <- mark_started(job, worker, nil),
+         assignment = command_assignment(started, ticket, project, token),
+         :ok <- Workers.push(worker.id, {:assign, assignment}) do
+      {:ok, _worker} = Workers.busy(worker)
+      {:ok, started}
+    else
+      {:error, {:changed, _now}} = changed ->
+        Tokens.revoke_for_job(job.id)
+        changed
+
+      {:error, reason} ->
+        unassign(job, reason)
+    end
+  end
+
+  @doc "What the worker is told when a command is assigned. See `docs/design/worker-channel.md`."
+  @spec command_assignment(Job.t(), Ticket.t(), Forge.Projects.Project.t(), String.t()) :: map()
+  def command_assignment(%Job{kind: :command} = job, %Ticket{} = ticket, project, git_token) do
+    log = Storage.Key.job(job.id, "log-#{job.attempt}-#{Storage.Key.nonce()}.txt")
+
+    %{
+      "job_id" => job.id,
+      "kind" => "command",
+      "spec" => job.spec,
+      "git" => %{
+        "url" => Url.for_worker(project),
+        "token" => git_token,
+        "branch" => ticket.branch,
+        "base" => ticket.base_commit
+      },
+      "store" => %{
+        "log_key" => log,
+        "log_token" =>
+          Storage.Token.sign(:put, log,
+            outlasting_ms: wall_clock_ms(job) + preparation_margin_ms()
+          )
+      },
+      "seed" => seed(project),
+      "slice" => %{
+        "memory_max" => job.memory_max || Workers.slice_bytes(),
+        "cpu_weight" => Workers.config(:cpu_weight, 100)
+      },
+      "wall_clock_ms" => wall_clock_ms(job)
+    }
+    |> Map.merge(group_outputs(job))
   end
 
   # A credential whose secret this node cannot open — a rotated `secret_key_base` — is one no job
@@ -368,8 +514,40 @@ defmodule Forge.Jobs do
   does, this is where it is read and nothing downstream changes (`docs/design/credentials.md`
   § What a worker offers now).
   """
-  @spec harness(Job.t()) :: String.t()
+  @spec harness(Job.t()) :: String.t() | nil
+  def harness(%Job{kind: :command}), do: nil
   def harness(%Job{}), do: "claude_code"
+
+  @doc """
+  The worker protocol a job needs, or 0 for any: commands and groups of files arrived in protocol
+  2, and a release from before them would run a command's spec as an agent job's, leave an
+  agent's `invoke.json` unread, and read a group `name/*` as a document it never finds — every
+  such job ending `error` however well it did (`docs/design/commands.md` § Worker pools).
+  """
+  @spec protocol(Job.t()) :: non_neg_integer()
+  def protocol(%Job{kind: :command}), do: @commands_protocol
+
+  def protocol(%Job{kind: :workflow} = job) do
+    decoded = spec(job)
+
+    if decoded.may_invoke != %{} or Spec.group_outputs(decoded) != [],
+      do: @commands_protocol,
+      else: 0
+  end
+
+  def protocol(%Job{}), do: 0
+
+  @doc "How many of `parent_id`'s invocations of `command` are running now."
+  @spec running_commands(String.t(), String.t()) :: non_neg_integer()
+  def running_commands(parent_id, command) do
+    Repo.one(
+      from j in Job,
+        where:
+          j.parent_job_id == ^parent_id and j.kind == :command and j.status == :running and
+            fragment("?->'command'->>'name'", j.spec) == ^command,
+        select: count()
+    )
+  end
 
   # The backlog is the one thing a job is handed that is not an artifact version, so "what was
   # this built on?" is answered by the hash rather than by a manifest entry: the snapshot is
@@ -395,8 +573,7 @@ defmodule Forge.Jobs do
   def assignment(%Job{} = job, ticket, project, git_token) do
     # Per assignment, not per job: a resumed run uploads its own transcript, and the store
     # refuses to overwrite one that is already there.
-    nonce = Base.url_encode64(:crypto.strong_rand_bytes(6), padding: false) |> String.downcase()
-    transcript = Storage.Key.job(job.id, "transcript-#{job.attempt}-#{nonce}.jsonl")
+    transcript = Storage.Key.job(job.id, "transcript-#{job.attempt}-#{Storage.Key.nonce()}.jsonl")
 
     %{
       "job_id" => job.id,
@@ -435,7 +612,40 @@ defmodule Forge.Jobs do
       "wall_clock_ms" => wall_clock_ms(job)
     }
     |> Map.merge(chat_assignment(job))
+    |> Map.merge(command_logs(job))
+    |> Map.merge(group_outputs(job))
   end
+
+  # Where a job's groups of files go, for a job that declares one (`Forge.Jobs.Blobs`). Uploaded
+  # when the job stops, so the token lives as long as a transcript's does.
+  defp group_outputs(%Job{kind: :chat}), do: %{}
+
+  defp group_outputs(%Job{} = job),
+    do: Blobs.outputs(job, spec(job), wall_clock_ms(job) + preparation_margin_ms())
+
+  # A resume after commands is handed each command's log, by key and a `get` token, to fetch into
+  # `$FORGE_JOB/commands/` before it starts (`docs/design/job-prompt.md` § Commands). Spent while
+  # the worktree is prepared, so it lives the preparation margin and not the clock.
+  defp command_logs(%Job{kind: :workflow} = job) do
+    case Commands.results(job) do
+      {_results, []} ->
+        %{}
+
+      {_results, logs} ->
+        %{
+          "commands" =>
+            Enum.map(logs, fn %{file: file, key: key} ->
+              %{
+                "file" => file,
+                "key" => key,
+                "token" => Storage.Token.sign(:get, key, outlasting_ms: preparation_margin_ms())
+              }
+            end)
+        }
+    end
+  end
+
+  defp command_logs(%Job{}), do: %{}
 
   @doc """
   How long a job may run once assigned: an hour for a workflow job, a day for a conversation.
@@ -444,6 +654,13 @@ defmodule Forge.Jobs do
   """
   @spec wall_clock_ms(Job.t()) :: pos_integer()
   def wall_clock_ms(%Job{kind: :chat}), do: config(:chat_wall_clock_ms, :timer.hours(24))
+
+  # A command's own timeout, which the worker enforces; the credentials it is handed are sized to
+  # it the way an agent job's are sized to the hour.
+  def wall_clock_ms(%Job{kind: :command, spec: %{"command" => %{"timeout_ms" => ms}}})
+      when is_integer(ms),
+      do: ms
+
   def wall_clock_ms(%Job{}), do: config(:wall_clock_ms, :timer.hours(1))
 
   @doc """
@@ -507,7 +724,7 @@ defmodule Forge.Jobs do
 
   # Every billed invocation passes through `assign/2`, so this is where both caps are asked
   # rather than in the scheduler alone. A ticket over its own
-  # allowance is stuck, which also takes it out of `pending/1` and stops the scheduler retrying it
+  # allowance is stuck, which also takes it out of `pending/2` and stops the scheduler retrying it
   # every tick; the daily cap only pauses, and the ticket stays active and out of the queue.
   # A conversation has no ticket allowance and no workflow to take one from: the note says the
   # daily cap is its only ceiling, and this is where that is true rather than merely intended.
@@ -582,6 +799,13 @@ defmodule Forge.Jobs do
     # project's answer now rather than the one it had then.
     spec = %{spec(job) | answered_keys: Artifacts.answered_keys(ticket_id), model: model_for(job)}
     spec = lower_budget(spec, job, ticket)
+    {results, _logs} = Commands.results(job)
+
+    spec = %{
+      spec
+      | may_invoke: Commands.remaining(job, spec.may_invoke),
+        command_results: results
+    }
 
     case Artifacts.latest(ticket_id, Workflow.answers_artifact()) do
       nil ->
@@ -735,7 +959,7 @@ defmodule Forge.Jobs do
   failing anything.
   """
   @spec record_harness_event(String.t(), ForgeCore.Job.Event.t()) :: :ok
-  def record_harness_event(job_id, %{type: type, payload: payload}) do
+  def record_harness_event(job_id, %{type: "job.harness." <> _rest = type, payload: payload}) do
     {ticket_id, credential_id} =
       Repo.one(from j in Job, where: j.id == ^job_id, select: {j.ticket_id, j.credential_id}) ||
         {nil, nil}
@@ -752,6 +976,14 @@ defmodule Forge.Jobs do
       {:error, changeset} ->
         Logger.warning("dropped harness event #{type}: #{inspect(changeset.errors)}")
     end
+  end
+
+  # **Only the harness's own namespace.** The rest of the log is the platform's record of what
+  # happened, and is read back as such: a `job.finished` names the log a parent's next spec is
+  # handed a token for, a `job.parked` the batch it resumes on, a `commands.decided` whether a
+  # command state has been decided. A worker holding a job could write any of them for it.
+  def record_harness_event(job_id, %{type: type}) do
+    Logger.warning("dropped an event of type #{inspect(type)} for job #{job_id}: not a harness's")
   end
 
   defp json_safe(term), do: term |> Jason.encode!() |> Jason.decode!()
@@ -780,7 +1012,7 @@ defmodule Forge.Jobs do
       Job.progress_changeset(job, %{
         status: :running,
         worker_id: worker.id,
-        credential_id: credential.id,
+        credential_id: credential && credential.id,
         started_at: job.started_at || now
       })
     )
@@ -807,7 +1039,7 @@ defmodule Forge.Jobs do
     end
   end
 
-  # **The row is still pending, whatever the struct says.** A pass holds the rows `pending/1` gave
+  # **The row is still pending, whatever the struct says.** A pass holds the rows `pending/2` gave
   # it for as long as the pass takes, and a conversation can be closed in the meantime; writing
   # `running` from the old struct started a chat that had ended, on a branch already deleted.
   # Asked of the row, not compared with the struct, because pending is the only status a job is
@@ -857,8 +1089,14 @@ defmodule Forge.Jobs do
       # it would run the whole workflow follow-up over a job with no state to leave.
       job.kind == :chat -> {:error, :not_a_workflow_job}
       # The worker re-sends a result until it is acked, so the platform has to be able to
-      # hear the same one twice. Keyed by the job: a job is recorded once.
+      # hear the same one twice. Keyed by the job: a job is recorded once. Not "is it running":
+      # a worker that rejoins before its result is acked has the job re-queued under it
+      # (`WorkerChannel.reconcile/2`), and the result that follows is still the run's answer.
       job.status == :finished -> {:error, :already_recorded}
+      # A command's result is its exit status and its log (`docs/design/commands.md`).
+      job.kind == :command -> Commands.complete(job, ticket, result)
+      # An agent that asked for commands: the run is over and the job is not.
+      result.status == :parked -> park(job, ticket, result)
       # Before a failed resume: a resume refused by the limit never got going either, and must
       # keep the session it will resume once there is a credential to resume it on.
       stopped_by_limit(result) -> requeue_limited(job, ticket, result)
@@ -950,6 +1188,105 @@ defmodule Forge.Jobs do
     end
   end
 
+  # `docs/design/commands.md` § How an agent invokes. The run is recorded as any run is — its cost,
+  # its turns, its session, its transcript — and nothing it wrote is collected: it is not done.
+  # What it asked for is decided against its grant, the allowed invocations become command jobs
+  # at the commit it pushed, and the job parks on them. With nothing to run it goes straight back
+  # to pending, with only the refusals to read, because a job parked on nothing is never woken.
+  defp park(job, ticket, %Result{} = result) do
+    workflow = Tickets.workflow(ticket)
+    decided = Commands.decide(job, spec(job), workflow, result)
+    runs? = Enum.any?(decided, &match?({:run, _invocation}, &1))
+    batch = Ecto.UUID.generate()
+    cost = decimal(result.harness["cost_usd"])
+
+    with {:ok, at} <- parked_at(ticket, result) do
+      # Once per run, under the row's lock: a parked result re-sent after its ack was lost would
+      # otherwise park the job again — a second batch of commands, its cost counted twice. Not
+      # by status, which a park with nothing to run has already put back to `pending`.
+      Multi.new()
+      |> Multi.run(:running, fn repo, _changes -> unparked_run(repo, job.id) end)
+      |> put_transcript(ticket, job, result)
+      |> Multi.update(
+        :job,
+        Job.progress_changeset(
+          job,
+          Map.put(accounting(job, result), :status, if(runs?, do: :parked, else: :pending))
+        )
+      )
+      |> Runs.close(job.id, DateTime.utc_now(:second), cost)
+      |> Tickets.put_progress(:ticket_cost, ticket, %{
+        cost_usd: Decimal.add(ticket.cost_usd, cost)
+      })
+      |> Commands.put_invoked(ticket, workflow, job, decided, at, batch)
+      |> Events.log(:event, "job.parked", {:job, job.id}, fn changes ->
+        %{
+          ticket_id: ticket.id,
+          job_id: job.id,
+          payload: %{
+            "batch" => batch,
+            "commit" => at,
+            "invocations" => Commands.invocation_entries(decided, at, changes),
+            "result" => result_payload(result)
+          }
+        }
+      end)
+      |> put_immediate_resume(runs?, job, batch)
+      |> Repo.transaction()
+      |> case do
+        {:ok, %{job: job}} ->
+          Tokens.revoke_for_job(job.id)
+          Workers.release(job.worker_id)
+          Events.notify(ticket.id)
+          {:ok, job}
+
+        {:error, :running, :already_recorded, _changes} ->
+          {:error, :already_recorded}
+
+        {:error, step, reason, _changes} ->
+          {:error, {step, reason}}
+      end
+    end
+  end
+
+  # A run starts with `job.started` (`mark_started/3`) and parks at most once, so a `job.parked`
+  # later than the latest start is this run's, already recorded.
+  defp unparked_run(repo, job_id) do
+    job = repo.one!(from j in Job, where: j.id == ^job_id, lock: "FOR UPDATE")
+
+    latest =
+      repo.all(
+        from e in Event,
+          where: e.job_id == ^job_id and e.type in ["job.started", "job.parked"],
+          order_by: [desc: e.seq],
+          limit: 1,
+          select: e.type
+      )
+
+    case latest do
+      ["job.parked"] -> {:error, :already_recorded}
+      _started_or_never -> {:ok, job}
+    end
+  end
+
+  # The commit the worker pushed before it parked, which is the one its commands run at. A worker
+  # that did not say is answered from the branch, which it pushed to before it reported.
+  defp parked_at(_ticket, %Result{commit: commit}) when is_binary(commit), do: {:ok, commit}
+
+  defp parked_at(ticket, %Result{}) do
+    ticket
+    |> Tickets.project_of()
+    |> Projects.repo_path()
+    |> Git.resolve("refs/heads/" <> ticket.branch)
+  end
+
+  # A park with nothing to run is back in the queue in the same update that parks it, and says
+  # which batch it resumes on (`Commands.results/1`).
+  defp put_immediate_resume(multi, true = _runs?, _job, _batch), do: multi
+
+  defp put_immediate_resume(multi, false, job, batch),
+    do: Commands.put_resumed_event(multi, job, batch)
+
   defp record_and_follow_up(job, ticket, result) do
     with {:ok, %{job: job, ticket_cost: ticket}} <- record(job, ticket, result) do
       case job.status do
@@ -976,6 +1313,7 @@ defmodule Forge.Jobs do
   defp record(job, ticket, result) do
     Multi.new()
     |> put_documents(ticket, job, result)
+    |> put_blobs(ticket, job, result)
     |> put_proposals(job, result)
     |> put_transcript(ticket, job, result)
     |> put_changeset(ticket, job, result)
@@ -1014,7 +1352,15 @@ defmodule Forge.Jobs do
   @doc "Marks a job whose runner died as finished with an error, then lets the engine decide."
   @spec fail(String.t(), term()) :: {:ok, Job.t()} | {:error, term()}
   def fail(job_id, reason) do
-    job = get!(job_id)
+    case get!(job_id) do
+      # A failure reported twice, or after the result: finished is finished, and a second
+      # follow-up would run the engine — or wake a command's parent — over a job already done.
+      %Job{status: :finished} -> {:error, :already_recorded}
+      job -> fail_job(job, reason)
+    end
+  end
+
+  defp fail_job(job, reason) do
     ticket = job.ticket_id && Tickets.get!(job.ticket_id)
     attrs = fail_attrs(job)
 
@@ -1039,6 +1385,9 @@ defmodule Forge.Jobs do
         if job.kind == :workflow and ticket do
           follow_up(ticket, job, %Result{status: :finished, outcome: :error})
         end
+
+        # A command that failed is finished all the same: its batch is looked at as for any other.
+        if job.kind == :command, do: Commands.follow_up(job)
 
         Events.notify(job.ticket_id)
         {:ok, job}
@@ -1071,16 +1420,29 @@ defmodule Forge.Jobs do
     end)
   end
 
+  # A finished run's groups of files; a waiting one's are still in its `out/` for the resume.
+  defp put_blobs(multi, ticket, job, %Result{status: :finished} = result),
+    do: Blobs.put(multi, ticket.id, job, spec(job), result)
+
+  defp put_blobs(multi, _ticket, _job, %Result{}), do: multi
+
   # The transcript is in the store before the worker sends its result: it uploaded it with a
   # token for exactly that key. What crosses the wire is the key, and the platform asks the
   # store what it holds rather than trusting a size or a hash the worker reported.
   #
   # A transcript that never arrived is logged and skipped rather than failing the job. The
   # documents and the outcome are the contract; the conversation never was.
+  # Only one of this job's own keys (`Storage.Key.job?/2`): the worker names the key, and one it
+  # names from somewhere else — another project's transcript, a seed — would be recorded on this
+  # ticket as this job's, readable by everyone who can read the ticket.
   defp put_transcript(multi, ticket, job, %Result{transcript: key}) when is_binary(key) do
     name = "transcript-#{job.state}-#{job.attempt}.jsonl"
 
-    case Storage.stat(key) do
+    case Storage.Key.job?(key, job.id) && Storage.stat(key) do
+      false ->
+        Logger.warning("job #{job.id} reported transcript #{key}, which is not one of its keys")
+        multi
+
       {:ok, %{hash: hash}} ->
         attrs = %{blob_uri: Storage.uri(key), content_hash: hash}
         Artifacts.put_version(multi, :transcript, ticket.id, name, :blob, {:job, job.id}, attrs)
@@ -1146,7 +1508,8 @@ defmodule Forge.Jobs do
       "killed" => result.killed,
       "exit_status" => result.exit_status,
       "questions" => Enum.map(result.questions, & &1.key),
-      "harness" => json_safe(result.harness)
+      "harness" => json_safe(result.harness),
+      "invalid_blobs" => result.invalid_blobs
     }
   end
 
@@ -1268,6 +1631,7 @@ defmodule Forge.Jobs do
       Events.notify(job.ticket_id)
     end)
 
+    Commands.recover()
     length(jobs)
   end
 

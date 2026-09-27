@@ -1,7 +1,9 @@
 defmodule ForgeCore.Workflow.State do
   @moduledoc """
-  One state of a workflow. A job state has a `prompt` and runs one job per entry; a human
-  state has none and waits for a transition taken by a person or the engine.
+  One state of a workflow. A job state has a `prompt` and runs one job per entry; a command
+  state has `invoke` and runs the commands it names, mapping their exit statuses through `exit`
+  (`docs/design/commands.md`); a human state has neither and waits for a transition taken by a
+  person or the engine.
 
   `on_enter` names actions the platform takes when a ticket arrives in the state. `merge` is
   the only one in v1: entering the state merges the ticket's approved changeset into the
@@ -22,10 +24,19 @@ defmodule ForgeCore.Workflow.State do
     :budget,
     :outcomes,
     :resources,
+    :exit,
     inputs: [],
     produces: [],
-    on_enter: []
+    on_enter: [],
+    invoke: [],
+    may_invoke: %{}
   ]
+
+  @typedoc "One entry of `invoke`: the command's name and the argument vector it is run with."
+  @type invocation :: %{command: String.t(), args: [String.t()]}
+
+  @typedoc "What `may_invoke` grants for one command. `concurrent` nil is no limit of its own."
+  @type grant :: %{max: pos_integer(), concurrent: pos_integer() | nil}
 
   @type action :: :merge
 
@@ -45,7 +56,13 @@ defmodule ForgeCore.Workflow.State do
           # workflow's defaults, then the platform's — `ForgeCore.Workflow.resources/2` walks
           # the part of that chain this project can see.
           resources: Resources.t() | nil,
-          on_enter: [action()]
+          on_enter: [action()],
+          # A command state's: what it runs on entry, and the outcome each exit status selects —
+          # keyed by the status, or `"*"` for any other.
+          invoke: [invocation()],
+          exit: %{(non_neg_integer() | String.t()) => String.t()} | nil,
+          # A job state's: which commands its agent may run, and how many.
+          may_invoke: %{String.t() => grant()}
         }
 
   @doc "The entry actions v1 knows."
@@ -55,11 +72,24 @@ defmodule ForgeCore.Workflow.State do
   @spec merges?(t()) :: boolean()
   def merges?(%__MODULE__{on_enter: on_enter}), do: :merge in on_enter
 
+  @doc "Whether the state runs an agent: it has a prompt."
   @spec job?(t()) :: boolean()
   def job?(%__MODULE__{prompt: prompt}), do: prompt != nil
 
+  @doc "Whether the state runs commands on entry and nothing else."
+  @spec command?(t()) :: boolean()
+  # `prompt: nil` is an equivalent mutant for any validated workflow, which refuses a state with
+  # both a prompt and `invoke`; kept so the three shapes stay exclusive by definition.
+  def command?(%__MODULE__{prompt: nil, invoke: [_ | _]}), do: true
+  def command?(%__MODULE__{}), do: false
+
+  @doc "Whether entering the state starts work — an agent or commands — that ends in an outcome."
+  @spec runs?(t()) :: boolean()
+  def runs?(state), do: job?(state) or command?(state)
+
+  @doc "Whether the state waits for a person: it runs nothing."
   @spec human?(t()) :: boolean()
-  def human?(state), do: not job?(state)
+  def human?(state), do: not runs?(state)
 
   @doc "The document whose front matter carries the job's outcome, or nil if none."
   @spec outcome_document(t()) :: String.t() | nil

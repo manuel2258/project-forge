@@ -278,10 +278,17 @@ defmodule Forge.Provisioning do
   # rule in the same words, because a template that said nothing and a machine that said
   # nothing must not mean different things.
   defp holds?(%Template{} = template, demand) do
-    accepts?(template, demand.kind) and
+    accepts?(template, demand.kind) and speaks?(template, demand[:protocol]) and
       template.memory >= demand.memory and
       template.cores >= demand.cores
   end
+
+  # A labelled image older than the job needs makes a machine that joins and cannot take it — and
+  # then another, every pass, up to `max_workers`. An unlabelled one is asked once: its first
+  # machine's join says what it speaks (`Workers` holds the rest back while that one probes).
+  defp speaks?(_template, need) when need in [nil, 0], do: true
+  defp speaks?(%Template{image_protocol: nil}, _need), do: true
+  defp speaks?(%Template{image_protocol: protocol}, need), do: protocol >= need
 
   defp accepts?(%Template{accepts: nil}, _kind), do: true
   defp accepts?(%Template{accepts: []}, _kind), do: true

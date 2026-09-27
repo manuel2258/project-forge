@@ -623,4 +623,75 @@ defmodule ForgeWeb.TicketWorkScreenTest do
     tool(job, "b1", "mix test")
     assert view |> element("#job-events") |> render() =~ "$ mix test"
   end
+
+  # `docs/design/ui.md` § Decide and Timeline: a human state's documents are written where the
+  # person deciding where the ticket goes next already is.
+  describe "a human state's documents" do
+    setup %{user: user} do
+      workflow =
+        File.read!(Path.expand("../../../../core/test/fixtures/workflow_example.yml", __DIR__))
+        |> String.replace(
+          "  review_ready: {}",
+          "  review_ready:\n    produces: [test-report.md]"
+        )
+
+      {:ok, project} =
+        Projects.register(
+          %{
+            name: "hd-#{System.unique_integer([:positive])}",
+            repo_path: seeded_repo(%{".forge/workflow.yml" => workflow})
+          },
+          user
+        )
+
+      {:ok, ticket} = Tickets.admit(project, %{title: "Try it"}, {:user, user.id})
+      %{project: project, ticket: ticket}
+    end
+
+    defp rest_in_review(ticket) do
+      {:ok, ticket} =
+        ticket |> Ecto.Changeset.change(state: "review_ready") |> Forge.Repo.update()
+
+      ticket
+    end
+
+    test "are offered where the ticket rests, and saved as a person's version", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      ticket = rest_in_review(ticket)
+      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=decide"))
+
+      assert has_element?(view, "#write-test-report\\.md", "not written yet")
+
+      view
+      |> form("#write-test-report\\.md", %{content: "The save button does nothing.\n"})
+      |> render_submit()
+
+      assert %{
+               version: 1,
+               content: "The save button does nothing.\n",
+               author: %{"kind" => "user"}
+             } =
+               Artifacts.latest(ticket.id, "test-report.md")
+
+      assert has_element?(view, "#write-test-report\\.md", "v1")
+    end
+
+    # A job state's documents are its job's to write; offering them here would be a person
+    # overwriting the contract between two states from a form that does not say so. Stuck, so
+    # Decide is drawing its transition card and would draw an editor beside it.
+    test "are not offered while a job state holds the ticket", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      {:ok, ticket} = ticket |> Ecto.Changeset.change(status: :stuck) |> Forge.Repo.update()
+      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=decide"))
+
+      assert has_element?(view, "#transitions-#{ticket.id}")
+      refute has_element?(view, ~s(form[phx-submit="write_document"]))
+    end
+  end
 end

@@ -117,6 +117,8 @@ Platform → worker:
 | Message | Payload | Meaning |
 |---|---|---|
 | `assign` | `job_id`, `kind`, spec JSON, slice limits (`memory_max`, `cpu_weight`), git endpoint + per-job token + branch + base, transcript key + token, seed key + token, the backlog, `resume_session`, wall clock, the job's inference credential sealed for this worker (`credentials.md` § Delivery to the machine); a chat adds `idle_ms`, `max_cost_usd` and `history` and a longer wall clock, and its spec a `replay` once it has been reopened | Run this job. |
+| `assign` for a command | `job_id`, `kind: "command"`, its spec (the script's text, argv, commit, env, timeout), slice limits, git endpoint + a read-only per-job token + branch + base, the log's store key + `put` token, seed key + token, wall clock | Run this command (`docs/design/commands.md`). No credential, no backlog, no session. |
+| — and for either, when it declares a group of files | `outputs`: a store prefix and a `put` token scoped to it (`docs/design/storage.md` § Serving) | Where the group's files go. |
 | `cancel` | `job_id`, reason | Stop it. The worker still sends a terminal message. |
 | `message` | `job_id`, `message_id`, text | A chat only: write this to the harness's stdin. |
 | `interrupt` | `job_id` | A chat only: end this turn, keep the process. |
@@ -143,7 +145,7 @@ Worker → platform:
 | `log` | `at`, `type`, `level`, `message`, and `job_id` on a line about a job | no |
 | `event` | `job_id`, normalised harness event | no |
 | `turn` | `job_id`, turn index, commit, the turn's proposals and documents, and a harness summary carrying its cost | yes |
-| `result` | `job_id`, `ForgeCore.Job.Result` as JSON | yes |
+| `result` | `job_id`, `ForgeCore.Job.Result` as JSON — `status` `parked` for an agent that invoked commands, with the invocations and the commit it pushed; a command's with its exit status, duration and log key; either's `blobs` (name → key and size) and `invalid_blobs` (name → why) for its groups of files | yes |
 | `hibernated` | `job_id`, commit sha, reason, the result as far as it got; a chat adds its turn count | yes |
 | `failed` | `job_id`, reason | yes |
 
@@ -368,6 +370,13 @@ Bumping `current` without raising `minimum` keeps every older worker taking work
 newer worker on an older platform — which is why additions do not bump it: the platform is
 deployed first, and a snapshot built from a newer checkout would otherwise be turned away for a
 field its platform could have ignored.
+
+**Protocol 2 is commands** (`docs/design/commands.md`): a `kind: "command"` assignment, and a
+`result` whose `status` is `parked`. It is a bump and not an addition because both directions need
+acting on to be correct — a protocol 1 worker would run a command's spec as an agent job's, and a
+protocol 1 platform would refuse a `parked` result it cannot read. The minimum stays 0: a
+protocol 1 worker still takes every agent job whose state may not invoke, and the gate keeps the
+rest from it by its recorded protocol (`Workers.fits?/2`).
 
 **Raising `minimum`** is the platform dropping an older protocol: the day it stops handling the
 shape older workers send. It is the one edit here that refuses running machines, so, before it

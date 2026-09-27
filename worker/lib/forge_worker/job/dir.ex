@@ -12,9 +12,17 @@ defmodule ForgeWorker.Job.Dir do
       <root>/<job_id>/out/<name>
       <root>/<job_id>/out/proposals/<file> ticket proposals, written by the agent
       <root>/<job_id>/out/<file>           a conversation's documents; see documents/1
+      <root>/<job_id>/invoke.json          commands an agent asks to run, then removed
+      <root>/<job_id>/commands/<n>-<name>.log  a resumed run's command logs, read-only
       <root>/<job_id>/home                 HOME for the harness process
-      <root>/<job_id>/transcript-<run>.jsonl
       <root>/<job_id>/stderr.log
+
+  And beside it, the worker's own (`worker_dir/1`), which the job cannot reach:
+
+      <root>/<job_id>.worker/transcript-<run>.jsonl
+      <root>/<job_id>.worker/command.log   a command job's combined output
+      <root>/<job_id>.worker/blobs/<n>     a run's groups of files, staged for upload
+      <root>/<job_id>.worker/fetched/<n>   command logs fetched for a resume, before `commands/`
   """
 
   alias ForgeCore.{Document, Proposal, Workflow}
@@ -36,13 +44,15 @@ defmodule ForgeWorker.Job.Dir do
   `:backlog` is the project's tickets as the platform composed them at assignment, written to
   `tickets/`. It is rewritten on every call, resume included, for the same reason the platform
   documents are: a run that starts today should read what is true today.
+
+  `:command_logs` is `[{file, path}]`: the logs of the commands a parked job invoked, already
+  fetched from the store, copied into `commands/` read-only (`docs/design/job-prompt.md`
+  § Commands). `commands/` and any `invoke.json` are removed on every call first — a request left
+  from the run that parked has been acted on, and one read again would be run twice.
   """
   @spec prepare(String.t(), Spec.t(), keyword()) :: String.t()
   def prepare(root, %Spec{job_id: job_id} = spec, opts \\ []) do
-    unless Regex.match?(@uuid, job_id) do
-      raise ArgumentError, "job id must be a UUID, got #{inspect(job_id)}"
-    end
-
+    check_id!(job_id)
     job_dir = Path.join(root, job_id)
     inputs = Path.join(job_dir, "inputs")
     out = Path.join(job_dir, "out")
@@ -55,6 +65,8 @@ defmodule ForgeWorker.Job.Dir do
     write_platform_docs(job_dir)
     write_backlog(job_dir, Keyword.get(opts, :backlog))
     write_replay(job_dir, spec.replay)
+    File.rm_rf!(invoke_path(job_dir))
+    write_command_logs(job_dir, Keyword.get(opts, :command_logs, []))
 
     Enum.each(spec.inputs, fn input ->
       path = Path.join(inputs, input.name)
@@ -80,6 +92,111 @@ defmodule ForgeWorker.Job.Dir do
       File.chmod!(path, 0o444)
     end)
   end
+
+  # Named by the platform, so matched rather than trusted before they become paths: `<n>-<name>.log`,
+  # a name being a command's, which the validator holds to one path segment. The directory is made
+  # fresh here, so there is nothing an agent planted in it for a lexical check to miss.
+  defp write_command_logs(job_dir, logs) do
+    dir = Path.join(job_dir, "commands")
+    File.rm_rf!(dir)
+
+    unless logs == [] do
+      File.mkdir_p!(dir)
+      Enum.each(logs, &write_command_log(dir, &1))
+    end
+  end
+
+  defp write_command_log(dir, {file, source}) do
+    if Regex.match?(~r/^[0-9]+-[A-Za-z0-9][A-Za-z0-9._-]*\.log$/, file) do
+      target = Path.join(dir, file)
+      File.cp!(source, target)
+      File.chmod!(target, 0o444)
+    else
+      Logger.warning("commands: refusing a log named #{inspect(file)}")
+    end
+  end
+
+  @doc """
+  Raises unless `job_id` is a UUID. It becomes a directory name under the worker's root, and one
+  the platform got wrong — or `../x` — would be a directory somewhere else.
+  """
+  @spec check_id!(String.t()) :: :ok
+  def check_id!(job_id) do
+    if Regex.match?(@uuid, job_id),
+      do: :ok,
+      else: raise(ArgumentError, "job id must be a UUID, got #{inspect(job_id)}")
+  end
+
+  @doc "Where an agent writes the commands it asks to run (`docs/design/commands.md`)."
+  @spec invoke_path(String.t()) :: String.t()
+  def invoke_path(job_dir), do: Path.join(job_dir, "invoke.json")
+
+  @doc """
+  What the agent asked to run, read from `invoke.json` and then removed: `:none` when it asked for
+  nothing, `{:ok, invocations}` as `%{"command" => name, "args" => [string]}`, or `{:error, reason}`
+  for a file that is there but is not a list of them — which is reported rather than dropped, so
+  the agent hears why nothing ran (`docs/design/commands.md` § How an agent invokes).
+
+  Read as `out/` is read (`read_text/2`): one open, the handle's owner and type checked, a size cap.
+  """
+  @spec invocations(String.t()) :: :none | {:ok, [map()]} | {:error, String.t()}
+  def invocations(job_dir), do: invocations(job_dir, owner(job_dir))
+
+  @doc false
+  def invocations(job_dir, owner) do
+    path = invoke_path(job_dir)
+
+    case File.lstat(path) do
+      {:error, :enoent} ->
+        :none
+
+      {:ok, _stat} ->
+        read = read_text(path, owner)
+        File.rm_rf(path)
+
+        with {:ok, raw} <- read,
+             {:ok, decoded} <- decode_invocations(raw) do
+          {:ok, decoded}
+        else
+          {:error, reason} -> {:error, "invoke.json " <> reason}
+        end
+
+      {:error, reason} ->
+        {:error, "invoke.json is unreadable: #{inspect(reason)}"}
+    end
+  end
+
+  defp decode_invocations(raw) do
+    case Jason.decode(raw) do
+      {:ok, list} when is_list(list) and list != [] ->
+        list
+        |> Enum.map(&invocation/1)
+        |> Enum.reduce_while({:ok, []}, fn
+          {:ok, entry}, {:ok, acc} -> {:cont, {:ok, acc ++ [entry]}}
+          {:error, reason}, _acc -> {:halt, {:error, reason}}
+        end)
+
+      {:ok, _other} ->
+        {:error, "must be a non-empty JSON array of {\"command\": …, \"args\": […]}"}
+
+      {:error, _reason} ->
+        {:error, "is not valid JSON"}
+    end
+  end
+
+  defp invocation(%{"command" => command} = entry) when is_binary(command) and command != "" do
+    case Map.get(entry, "args", []) do
+      args when is_list(args) ->
+        if Enum.all?(args, &is_binary/1),
+          do: {:ok, %{"command" => command, "args" => args}},
+          else: {:error, "has arguments that are not strings for #{inspect(command)}"}
+
+      _other ->
+        {:error, "has args that are not a list for #{inspect(command)}"}
+    end
+  end
+
+  defp invocation(_entry), do: {:error, "has an entry with no command name"}
 
   # What a reopened conversation had already said, for the new process to read. Removed when the
   # spec carries none: the directory is keyed by job id and outlives a process, so a file left
@@ -159,7 +276,7 @@ defmodule ForgeWorker.Job.Dir do
 
   @doc """
   Removes job directories under `root` that nothing has touched for `older_than_ms`, and says
-  how many went.
+  how many went — the worker's own beside each (`worker_dir/1`) counted as one of them.
 
   Retention rather than lifecycle, and that is the point. A job directory holds the agent's
   private `HOME`, which is where Claude Code keeps the session a resume needs, so it cannot go
@@ -230,6 +347,7 @@ defmodule ForgeWorker.Job.Dir do
     out = Path.join(job_dir, "out")
     declared = Spec.document_outputs(spec)
     reserved = Workflow.proposals_dir()
+    groups = Spec.group_outputs(spec)
     written = out |> list_dir() |> Enum.sort()
 
     parsed =
@@ -243,10 +361,159 @@ defmodule ForgeWorker.Job.Dir do
       documents: for({name, {:ok, doc}} <- parsed, into: %{}, do: {name, doc}),
       invalid: for({name, {:error, errors}} <- parsed, into: %{}, do: {name, errors}),
       missing: declared -- written,
-      undeclared: (written -- declared) -- [reserved],
+      # A declared group's directory is declared, and its files are `stage_groups/4`'s to read.
+      undeclared: (written -- declared) -- [reserved | groups],
       proposals: for({name, {:ok, p}} <- proposals, into: %{}, do: {name, p}),
       invalid_proposals: for({name, {:error, why}} <- proposals, into: %{}, do: {name, why})
     }
+  end
+
+  @doc """
+  Copies the files of each declared group out of `out/<group>/` into `staging`, a directory only
+  the worker writes, and says which could not be kept and why (`docs/design/job-prompt.md`
+  § Groups of files). Returns `%{staged: [{artifact_name, path}], invalid: %{name => reason}}`.
+
+  Each file is read the way `out/` always is (`read_text/2`, less the text): opened once, and the
+  *handle's* stat decides — a regular file the job owns, no larger than `:max_bytes` — and the
+  copy is made through that handle, so what is uploaded is what was checked. A group's count is
+  capped at `:max_files`; a name that is not an artifact name is refused, not rewritten.
+  """
+  @spec stage_groups(String.t(), [String.t()], String.t(), keyword()) :: %{
+          staged: [{String.t(), String.t()}],
+          invalid: %{String.t() => String.t()}
+        }
+  def stage_groups(job_dir, groups, staging, opts \\ []) do
+    owner = Keyword.get_lazy(opts, :owner, fn -> owner(job_dir) end)
+
+    limits = %{
+      max_bytes: Keyword.fetch!(opts, :max_bytes),
+      max_files: Keyword.fetch!(opts, :max_files)
+    }
+
+    groups
+    |> Enum.reduce(%{staged: [], invalid: %{}, n: 0}, fn group, acc ->
+      stage_group(Path.join([job_dir, "out", group]), group, staging, owner, limits, acc)
+    end)
+    |> Map.delete(:n)
+  end
+
+  defp stage_group(dir, group, staging, owner, limits, acc) do
+    case File.lstat(dir) do
+      {:ok, %File.Stat{type: :directory}} ->
+        dir
+        |> list_dir()
+        |> Enum.sort()
+        |> Enum.with_index()
+        |> Enum.reduce(acc, &stage_entry(&1, &2, dir, group, staging, owner, limits))
+
+      # Not there: a group with nothing in it this time, which is allowed.
+      {:error, _reason} ->
+        acc
+
+      {:ok, %File.Stat{type: type}} ->
+        refuse(acc, Workflow.member(group, "*"), "must be a directory, not a #{describe(type)}")
+    end
+  end
+
+  defp stage_entry({file, index}, acc, dir, group, staging, owner, limits) do
+    name = Workflow.member(group, file)
+
+    cond do
+      not Workflow.valid_name?(file) ->
+        refuse(
+          acc,
+          name,
+          "is not a name: letters, digits, . _ -, starting with one of the first two"
+        )
+
+      index >= limits.max_files ->
+        refuse(acc, name, "is one more than the #{limits.max_files} files a group may keep")
+
+      true ->
+        stage_file(Path.join(dir, file), name, staging, owner, limits, acc)
+    end
+  end
+
+  defp refuse(acc, name, reason), do: %{acc | invalid: Map.put(acc.invalid, name, reason)}
+
+  defp stage_file(path, name, staging, owner, limits, acc) do
+    target = Path.join(staging, Integer.to_string(acc.n + 1))
+
+    case copy_owned(path, target, owner, limits.max_bytes) do
+      :ok -> %{acc | staged: acc.staged ++ [{name, target}], n: acc.n + 1}
+      {:error, reason} -> refuse(acc, name, reason)
+    end
+  end
+
+  # The same guard as `read_text/2`: `lstat` names a link as a link and keeps a FIFO from being
+  # opened at all, and then the handle's own stat decides, because the job is alive to swap the
+  # path between the two.
+  #
+  # The stat's `size <= max_bytes` and the copy's own cap (`copy_chunks/4`) are each an equivalent
+  # mutant for a file that does not change: either refuses it with the same words. They differ for
+  # a file still being appended to, which is past the stat by the time it is read — the copy's cap
+  # is the one that holds then, and no test can arrange a file growing mid-copy.
+  #
+  # The handle's `type: :regular` is out of a test's reach for the reason `read_open/2` gives: only
+  # something swapped in between the `lstat` and the open arrives as anything else.
+  defp copy_owned(path, target, owner, max_bytes) do
+    with {:ok, %File.Stat{type: :regular}} <- File.lstat(path),
+         {:ok, io} <- :file.open(path, [:read, :binary, :raw]) do
+      try do
+        with {:ok, info} <- :file.read_file_info(io),
+             %File.Stat{type: :regular, uid: ^owner, size: size} when size <= max_bytes <-
+               File.Stat.from_record(info) do
+          File.mkdir_p!(Path.dirname(target))
+          copy_handle(io, target, max_bytes)
+        else
+          %File.Stat{type: :regular, uid: ^owner} ->
+            {:error, "is larger than #{max_bytes} bytes"}
+
+          %File.Stat{type: :regular, uid: uid} ->
+            {:error, "must be the job's own file, not one owned by uid #{uid}"}
+
+          %File.Stat{type: type} ->
+            {:error, "must be a regular file, got #{type}"}
+
+          {:error, reason} ->
+            {:error, "unreadable: #{inspect(reason)}"}
+        end
+      after
+        :file.close(io)
+      end
+    else
+      {:ok, %File.Stat{type: type}} -> {:error, "must be a regular file, got #{type}"}
+      {:error, reason} -> {:error, "unreadable: #{inspect(reason)}"}
+    end
+  end
+
+  # Capped as it is copied, not only by the stat: a file the job is still appending to is read no
+  # further than the cap.
+  defp copy_handle(io, target, max_bytes) do
+    {:ok, out} = :file.open(target, [:write, :binary, :raw])
+
+    try do
+      copy_chunks(io, out, 0, max_bytes)
+    after
+      :file.close(out)
+    end
+  end
+
+  defp copy_chunks(io, out, copied, max_bytes) do
+    case :file.read(io, 1024 * 1024) do
+      :eof ->
+        :ok
+
+      {:ok, chunk} when copied + byte_size(chunk) > max_bytes ->
+        {:error, "is larger than #{max_bytes} bytes"}
+
+      {:ok, chunk} ->
+        :ok = :file.write(out, chunk)
+        copy_chunks(io, out, copied + byte_size(chunk), max_bytes)
+
+      {:error, reason} ->
+        {:error, "unreadable: #{inspect(reason)}"}
+    end
   end
 
   @doc """
@@ -471,11 +738,46 @@ defmodule ForgeWorker.Job.Dir do
   @spec prompt_path(String.t()) :: String.t()
   def prompt_path(job_dir), do: Path.join(job_dir, "prompt.md")
 
+  @doc """
+  The worker's own directory for a job, beside the job directory rather than inside it: what the
+  worker writes and later reads back or uploads — a run's transcript, a command's log, the groups
+  of files staged for upload, the logs fetched for a resume.
+
+  **Not inside the job directory, because the job's Unix user owns that** and can replace any
+  name in it with a link. This process runs as a more privileged user, so a transcript uploaded
+  from `<job_dir>/transcript-1.jsonl` could be `/etc/forge-worker.env` by the time it is read —
+  the threat `read_text/2` answers for `out/`, arriving by a file the worker wrote itself. Here
+  the job cannot reach at all: the parent is the worker's, and this is made mode 0700.
+
+  Swept with the job directories (`sweep/2`), which is also what collects a stage the link never
+  uploaded because the job failed between the two.
+  """
+  @spec worker_dir(String.t()) :: String.t()
+  def worker_dir(job_dir), do: job_dir <> ".worker"
+
+  @doc "`worker_dir/1`, made if it is not there yet and closed to every other user."
+  @spec worker_dir!(String.t()) :: String.t()
+  def worker_dir!(job_dir) do
+    dir = worker_dir(job_dir)
+    File.mkdir_p!(dir)
+    File.chmod!(dir, 0o700)
+    dir
+  end
+
+  @doc "Where a run's groups of files are staged for upload (`ForgeWorker.Job.Blobs`)."
+  @spec blobs_dir(String.t()) :: String.t()
+  def blobs_dir(job_dir), do: Path.join(worker_dir(job_dir), "blobs")
+
+  @doc "Where the logs a resume is handed are fetched to, before `prepare/3` copies them in."
+  @spec fetched_dir(String.t()) :: String.t()
+  def fetched_dir(job_dir), do: Path.join(worker_dir(job_dir), "fetched")
+
   @doc "A fresh transcript path for this run: `transcript-1.jsonl`, `transcript-2.jsonl`, ..."
   @spec new_transcript_path(String.t()) :: String.t()
   def new_transcript_path(job_dir) do
-    run = job_dir |> File.ls!() |> Enum.count(&String.starts_with?(&1, "transcript-"))
-    Path.join(job_dir, "transcript-#{run + 1}.jsonl")
+    dir = worker_dir!(job_dir)
+    run = dir |> File.ls!() |> Enum.count(&String.starts_with?(&1, "transcript-"))
+    Path.join(dir, "transcript-#{run + 1}.jsonl")
   end
 
   @spec stderr_path(String.t()) :: String.t()

@@ -8,7 +8,7 @@ and whose account the machine is billed to. It replaces three single numbers —
 its slices, its volumes. This note is about the tier becoming plural — more than one shape of
 machine, more than one provider, and more than one person paying.
 
-**It is built**, apart from `resources` on a *command*, which waits for commands to be a job kind
+**It is built**, `resources` on a *command* included, which arrived with commands
 (`docs/design/commands.md` § An invocation is a job). The schema is migrations `20260919140000`
 to `20260920190000`, templates and provider credentials are `Forge.Provisioning`, the gate is
 `Forge.Workers.fits?/2`, and the Hetzner driver has created and destroyed real machines but none
@@ -24,8 +24,8 @@ It was drafted and dropped, because the bucket turns out to carry no information
 not already have.
 
 **A job knows what it needs and what it is.** What it needs is memory and cores. What it is, is
-already a column: `jobs.kind`, today `:workflow | :chat`, gaining `:command`
-(`commands.md` § An invocation is a job).
+already a column: `jobs.kind`, `:workflow | :chat | :command` (`commands.md` § An invocation is
+a job).
 
 **A worker knows what it has and what it will take.** What it has is memory and cores. What it
 will take is a list of kinds.
@@ -197,12 +197,34 @@ and `:waiting` jobs, which is what the denormalised columns above are for.
 
 **An unplaceable job is skipped and the pass continues** — within the pass. A job that fits nothing
 is offered again next pass, which is a queue. Per template `max_workers` already removes the
-starvation that mattered — one kind of work cannot eat the fleet — and what remains is that a large
-job can be jumped by small ones indefinitely. An age-based reservation is the standard fix and §
-Open is where it waits. **A pass is the ten oldest pending jobs** (`Jobs.pending/1`,
-`max_pending_per_pass`), so the skip does not reach past them: ten jobs that can never be placed —
-conversations in a project with no template or no credential, jobs waiting out a week's limit — are
-the whole of every pass, and nothing younger on the node is offered at all. § Open records it.
+starvation that mattered — one kind of work cannot eat the fleet — and what remained was that a
+large job could be jumped by small ones indefinitely: every pass it is offered first and fits
+nowhere, and the room freed since the last pass goes to the small jobs behind it.
+
+**So a job that has waited long enough is reserved for.** A job at capacity that has been pending
+for longer than `reservation_after_ms` — ten minutes unless configured, counted from when it last
+became pending — reserves the machines that could hold it when empty: those that serve its
+project, take its kind, run its harness, speak its protocol, and have the memory and cores it asks
+for in total. For the rest of the pass a younger job is not placed on a reserved machine, so what
+frees up there accumulates until the old job fits, and the younger job waits with a sentence that
+says it is behind an older one. The old job itself is offered first in every pass, before it has
+reserved anything, so the reservation never stands in its own way: the pass is fetched with the
+jobs old enough to reserve ahead of the rest, longest-waiting first (`Jobs.pending/2`). By
+insertion alone, a job made earlier and pending again only just now — an agent back from its
+commands — came first and took the room, and a window of ten could hold no room for the old job at
+all.
+
+Only room reserves. A job waiting for a credential's limit to reset, for midnight, or for its
+invoker's `concurrent` is not waiting for a machine, and holding machines for it would idle them
+for nothing. A reservation makes nothing, either: a younger job may still have a machine made for
+it from a template with room, which is room the old job never had. What it does not reach is the
+number of jobs in a pass — ten are offered, below — and a job so large that no machine
+could ever hold it reserves nothing, since it sticks its ticket instead (`{:no_template,
+:none_fit}`). **A pass is ten pending jobs** — those old enough to reserve, then the oldest by
+insertion (`Jobs.pending/2`, `max_pending_per_pass`) — so the skip does not reach past them: ten
+jobs that can never be placed — conversations in a project with no template or no credential, jobs
+waiting out a week's limit, one agent's eleven invocations of a command it may run one at a time —
+are the whole of every pass, and nothing younger on the node is offered at all. § Open records it.
 
 **A machine being made is capacity already asked for.** A `creating` worker is not assignable,
 so a job that asked for one is still pending on the next pass two seconds later — and when that
@@ -223,7 +245,9 @@ saying why, which is what there was: `Scheduler` dropped the reason on the floor
 line or count. A pending job the pass cannot place now gets a `job.waiting` event carrying the
 reason — `creating`, `at_capacity`, `create_failed`, `credential_refused`, `image_refused`,
 `limited` when every credential in the project's pool is rate-limited (`docs/design/credentials.md`
-§ How a job picks), and for a chat the three template answers below and `no_credential` — beside
+§ How a job picks), `reserving` and `behind` for a job holding machines and one waiting behind it
+(below), `concurrent` for a command its invoker's grant holds back (`commands.md` § Limits), and
+for a chat the three template answers below and `no_credential` — beside
 the sentence the operator reads. The refusals are separate because their reasons are in two
 places: `create_failed` is the driver saying no, and its words are on the worker row it made, so
 the sentence sends the operator to the workers page; `credential_refused` is the platform refusing
@@ -777,11 +801,11 @@ resource.
   they are one piece of work rather than two.
 - **Fractional cores.** Shared vCPU makes `cpu: 0.5` meaningful and the gate would work in
   millicores. Not in the first pass.
-- **An age-based reservation**, so a large job stops being jumped by small ones. § The gate says
-  why it is not here yet; the trigger is the first time a job is jumped for long enough to
-  matter. Skips are recorded now, but as changes of reason rather than as a count — the dedup is
-  what keeps the log readable — so the figure to watch is how long a job's latest `at_capacity`
-  has stood while jobs admitted after it started. Nothing reads it yet.
+- **Whether ten minutes is the right age.** The reservation (§ The gate) waits
+  `reservation_after_ms` before it holds anything, which trades a large job's wait against the
+  small jobs' throughput. Nothing has measured either side; the figure to watch is how long a
+  reserving job's `reserving` wait stands before it starts, against how many younger jobs waited
+  `behind` it meanwhile.
 - **A pass that only ever sees the oldest ten.** § The gate: ten pending jobs that can never be
   placed fill every pass, and every younger job on the node waits behind them — which any member
   can bring about by opening ten conversations in a project with no template. The fixes are a

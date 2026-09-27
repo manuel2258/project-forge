@@ -654,10 +654,13 @@ defmodule ForgeWorker.Link do
   Twelve because that is what `nix build .#forge-worker` shows an operator, what `flake.nix`
   labels a snapshot with and builds the platform knowing (`docs/design/worker-tier.md`
   § Updating a worker), and what the join line has always logged.
+
+  Only a `forge-worker` store path counts. Run from `mix`, the root is the Erlang the devshell
+  put on the path — also in the store — and its hash names that Erlang, not this worker.
   """
   @spec build(charlist() | String.t()) :: String.t() | nil
   def build(root_dir \\ :code.root_dir()) do
-    case Regex.run(~r"^/nix/store/([a-z0-9]{32})-", to_string(root_dir)) do
+    case Regex.run(~r"^/nix/store/([a-z0-9]{32})-forge-worker-", to_string(root_dir)) do
       [_all, hash] -> binary_part(hash, 0, 12)
       nil -> nil
     end

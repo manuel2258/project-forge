@@ -260,6 +260,9 @@ defmodule ForgeWorker.LinkTest do
     assert Link.build("/usr/lib/forge_worker") == nil
     assert Link.build("/nix/store/short-forge-worker") == nil
     assert Link.build("/home/me/nix/store/#{hash}-forge-worker") == nil
+
+    # The Erlang a `mix` run starts from is in the store too, and is not this worker's build.
+    assert Link.build("/nix/store/#{hash}-erlang-28.5.0.6/lib/erlang") == nil
   end
 
   describe "what ready says about the gate's other two dimensions" do

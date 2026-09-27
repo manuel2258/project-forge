@@ -14,41 +14,63 @@ defmodule ForgeWeb.Conversations do
   alias ForgeWeb.Format
 
   @doc """
-  The box you say things in.
+  The box you say things in, wherever a message is typed (`docs/design/ui.md` § Talk).
 
-  **Enter sends and shift-enter makes a newline**, which is what every chat client does and so
-  what a person's hands already expect. A textarea does neither on its own, so both surfaces
-  share this rather than each growing its own handler — and its own subtly different one.
+  **Enter sends where the primary pointer is fine; on a coarse one it is a new line**, and only
+  Send sends. A phone keyboard has no shift-enter, so a composer that sent on Enter there could
+  not take a second line — and a message typed on a phone is shaped by its line breaks. The
+  query is on the element (`data-newline-on`) rather than inside the hook, so it can be read in
+  the markup. The hint names the gesture and is drawn only for a fine pointer, which is the only
+  one it is true for — by `pointer-coarse:hidden`, the same query written as CSS, since a media
+  query cannot be read from an attribute. The two say `(pointer: coarse)` and must keep saying
+  the same thing.
+
+  It grows from `rows` lines to six and then scrolls inside itself. With `send`, a 46px Send
+  square sits beside it, labelled for assistive technology.
   """
   attr :id, :string, required: true
   attr :name, :string, required: true
   attr :value, :string, default: ""
-  attr :rows, :string, default: "3"
+  attr :rows, :string, default: "1"
   attr :placeholder, :string, default: "Say something"
   attr :label, :string, default: nil
+  attr :send, :boolean, default: false, doc: "draw the Send square beside the box"
 
   def message_box(assigns) do
     ~H"""
     <div>
       <label :if={@label} for={@id} class="text-sm font-medium">{@label}</label>
-      <textarea
-        id={@id}
-        name={@name}
-        rows={@rows}
-        phx-hook=".SendOnEnter"
-        phx-debounce="200"
-        placeholder={@placeholder}
-        class={[
-          "w-full rounded-box border border-base-300 bg-base-100 p-3 text-sm/[1.6]",
-          @label && "mt-2"
-        ]}
-      >{@value}</textarea>
-      <p class="mt-1 font-mono text-[11px] opacity-40">Enter sends · shift-enter for a new line</p>
+      <div class={["flex items-end gap-2", @label && "mt-2"]}>
+        <textarea
+          id={@id}
+          name={@name}
+          rows={@rows}
+          phx-hook=".Composer"
+          phx-debounce="200"
+          data-newline-on="(pointer: coarse)"
+          data-max-lines="6"
+          placeholder={@placeholder}
+          class="min-h-[46px] w-full min-w-0 resize-none rounded-box border border-base-300 bg-base-100 px-3 py-[11px] text-sm/[1.6]"
+        >{@value}</textarea>
+        <button
+          :if={@send}
+          type="submit"
+          aria-label="Send"
+          class="flex size-[46px] shrink-0 items-center justify-center rounded-field bg-base-content text-base-100"
+        >
+          <span aria-hidden="true" class="text-lg leading-none">↑</span>
+        </button>
+      </div>
+      <p class="mt-1 font-mono text-[11px] opacity-40 pointer-coarse:hidden" data-hint>
+        Enter sends · shift-enter for a new line
+      </p>
     </div>
 
-    <script :type={Phoenix.LiveView.ColocatedHook} name=".SendOnEnter">
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".Composer">
       export default {
         mounted() {
+          this.coarse = window.matchMedia(this.el.dataset.newlineOn)
+
           this.el.addEventListener("keydown", (event) => {
             if (event.key !== "Enter" || event.shiftKey) return
 
@@ -56,9 +78,33 @@ defmodule ForgeWeb.Conversations do
             // then would send half a word, so composition always wins.
             if (event.isComposing || event.keyCode === 229) return
 
+            // A phone: Enter is how a line is ended, and Send is how a message is sent. No
+            // ExUnit test can press a key, so deleting this line fails nothing there; what the
+            // tests pin is the query it reads, `data-newline-on`.
+            if (this.coarse.matches) return
+
             event.preventDefault()
             this.el.form?.requestSubmit()
           })
+
+          this.el.addEventListener("input", () => this.fit())
+          this.fit()
+        },
+
+        updated() { this.fit() },
+
+        // From one line to six, then it scrolls inside itself.
+        fit() {
+          const style = getComputedStyle(this.el)
+          const edges = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom) +
+            parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth)
+          const most = parseFloat(style.lineHeight) * Number(this.el.dataset.maxLines) + edges
+
+          this.el.style.height = "auto"
+          const wanted = this.el.scrollHeight + parseFloat(style.borderTopWidth) +
+            parseFloat(style.borderBottomWidth)
+          this.el.style.height = `${Math.min(wanted, most)}px`
+          this.el.style.overflowY = wanted > most ? "auto" : "hidden"
         }
       }
     </script>

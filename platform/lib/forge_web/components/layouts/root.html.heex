@@ -2,7 +2,10 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, interactive-widget=resizes-content"
+    />
     <meta name="csrf-token" content={get_csrf_token()} />
     <.live_title default="forge" suffix=" · forge" phx-no-format>{assigns[:page_title]}</.live_title>
     <link rel="manifest" href={~p"/manifest.webmanifest"} />
@@ -39,8 +42,9 @@
     </script>
   </head>
   <body>
-    <%!-- Navigation lives in Layouts.app, which every page uses: one top row on a laptop and
-          one bottom bar on a phone. No hamburger at any width. --%>
+    <%!-- Navigation lives in Layouts.app, which every page uses: one top row on a laptop, and
+          on a phone a bottom bar whose More opens a sheet with the rest of what the laptop
+          reaches from that row. The places stay on the bar (docs/design/ui.md § The phone). --%>
     {@inner_content}
   </body>
 </html>

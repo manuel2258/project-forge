@@ -22,6 +22,36 @@ defmodule Forge.PushTest do
     }
   end
 
+  defp item(kind, ticket, fields \\ %{}) do
+    Map.merge(
+      %{
+        kind: kind,
+        ticket: ticket,
+        project: Forge.Projects.get!(ticket.project_id),
+        since: DateTime.utc_now(),
+        question: nil,
+        detail: %{}
+      },
+      fields
+    )
+  end
+
+  defp question(ticket, key, text),
+    do: item(:question, ticket, %{question: %{key: key, text: text}, detail: %{key: key}})
+
+  defp stuck!(ticket) do
+    {:ok, ticket} =
+      Repo.update(
+        Forge.Tickets.Ticket.progress_changeset(ticket, %{
+          state: ticket.state,
+          status: :stuck,
+          cost_usd: ticket.cost_usd
+        })
+      )
+
+    ticket
+  end
+
   test "is enabled in test through the configured keys" do
     assert Push.enabled?()
     assert Push.public_key() == "test-public"
@@ -76,7 +106,7 @@ defmodule Forge.PushTest do
 
     log =
       capture_log(fn ->
-        assert :ok = Push.blocking_question(ticket, %{key: "backend", text: "Which backend?"})
+        assert :ok = Push.waiting(question(ticket, "backend", "Which backend?"))
         Push.flush()
       end)
 
@@ -112,6 +142,285 @@ defmodule Forge.PushTest do
 
     assert [%{last_sent_at: nil}] =
              Enum.filter(Push.subscriptions(), &(&1.endpoint == "https://push.example/broken"))
+  end
+
+  describe "what waits" do
+    setup %{user: user} do
+      {:ok, _} = Push.subscribe(user, browser_subscription("https://push.example/a"))
+      %{ticket: ticket_fixture() |> join_ticket!(user)}
+    end
+
+    # Every kind the queue says is waiting pushes, and each links to the work screen on the tab
+    # that holds it: Decide for a ticket.
+    test "pushes every waiting kind, linked to Decide", %{ticket: ticket} do
+      decide = "?tab=decide"
+
+      # Each tagged per thing waiting, so a later push about the same thing replaces this one
+      # on the phone and one about another thing does not.
+      for {item, title, body, tag} <- [
+            {question(ticket, "backend", "Which backend?"), "Question on", "Which backend?",
+             "question-#{ticket.id}-backend"},
+            {item(:approval, ticket, %{detail: %{"to" => "planning"}}), "Approval on",
+             "#{ticket.title} — to planning", "approval-#{ticket.id}"},
+            {item(:stuck, ticket), "Stuck:", ticket.title, "stuck-#{ticket.id}"},
+            {item(:review, ticket), "Waiting on you:", "#{ticket.title} — in #{ticket.state}",
+             "review-#{ticket.id}"}
+          ] do
+        assert :ok = Push.waiting(item)
+        Push.flush()
+
+        assert_receive {:push, "https://push.example/a", payload, _opts}
+        assert payload["title"] =~ title
+        assert payload["body"] == body
+        assert payload["tag"] == tag
+        assert payload["url"] == "/tickets/#{item.project.name}/#{ticket.number}" <> decide
+      end
+    end
+
+    # A conversation's reply is linked to Talk, and tagged per conversation: its next reply
+    # replaces this one.
+    test "pushes a conversation's reply, linked to Talk", %{ticket: ticket} do
+      project = Forge.Projects.get!(ticket.project_id)
+
+      reply = %{
+        kind: :chat,
+        ticket: nil,
+        project: project,
+        since: DateTime.utc_now(),
+        question: nil,
+        detail: %{chat_id: "c-1", text: "Done — the parser is fixed."}
+      }
+
+      assert :ok = Push.waiting(reply)
+      Push.flush()
+
+      assert_receive {:push, "https://push.example/a", payload, _opts}
+      assert payload["title"] == "Reply on #{project.name}"
+      assert payload["body"] == "Done — the parser is fixed."
+      assert payload["tag"] == "chat-c-1"
+      assert payload["url"] == "/chats/c-1?tab=talk"
+    end
+
+    # An assumption is in the queue and waits on nobody: the queue's own rule says so, and the
+    # push reads that rule rather than a list of its own.
+    test "does not push an assumption", %{ticket: ticket} do
+      assumption =
+        item(:assumption, ticket, %{
+          question: %{key: "naming", text: "Which naming?"},
+          detail: %{key: "naming"}
+        })
+
+      assert :ok = Push.waiting(assumption)
+      Push.flush()
+
+      refute_receive {:push, _endpoint, _payload, _opts}
+    end
+  end
+
+  describe "the watch" do
+    setup %{user: user} do
+      {:ok, _} = Push.subscribe(user, browser_subscription("https://push.example/a"))
+      %{ticket: ticket_fixture() |> join_ticket!(user)}
+    end
+
+    # Once when it starts waiting — not again every time the ticket's row changes while it
+    # waits — and again if it stops and starts again.
+    test "pushes a ticket once each time it starts waiting", %{ticket: ticket} do
+      seen = Push.Watch.changed(%{}, ticket.id)
+      Push.flush()
+      refute_receive {:push, _endpoint, _payload, _opts}
+
+      stuck!(ticket)
+      seen = Push.Watch.changed(seen, ticket.id)
+      Push.flush()
+      assert_receive {:push, _endpoint, %{"title" => "Stuck: " <> _}, _opts}
+
+      # Its row moving while it waits — what it has spent, say — is not it starting to wait.
+      {:ok, _ticket} =
+        Repo.update(
+          Ecto.Changeset.change(Forge.Tickets.get!(ticket.id),
+            cost_usd: Decimal.new("1.5"),
+            updated_at: DateTime.add(DateTime.utc_now(:second), 60)
+          )
+        )
+
+      seen = Push.Watch.changed(seen, ticket.id)
+      Push.flush()
+      refute_receive {:push, _endpoint, _payload, _opts}
+
+      {:ok, active} =
+        Repo.update(Ecto.Changeset.change(Forge.Tickets.get!(ticket.id), status: :active))
+
+      seen = Push.Watch.changed(seen, active.id)
+      stuck!(active)
+      _seen = Push.Watch.changed(seen, active.id)
+      Push.flush()
+      assert_receive {:push, _endpoint, %{"title" => "Stuck: " <> _}, _opts}
+    end
+
+    # What was waiting when the node started is not news: a restart does not push the queue.
+    test "takes what already waits as seen when it starts", %{ticket: ticket} do
+      stuck!(ticket)
+      start_supervised!(Push.Watch)
+      # Read the queue before anything changes: what waits when it starts is seen.
+      Push.Watch.sync()
+
+      Forge.Events.notify(ticket.id)
+      Push.Watch.sync()
+      Push.flush()
+
+      refute_receive {:push, _endpoint, _payload, _opts}
+    end
+
+    # A question's key is unique only within its document: two documents asking with the same
+    # key are two questions, and each is pushed.
+    test "pushes the same key asked by two documents as two questions", %{ticket: ticket} do
+      job = job_fixture(%{ticket: ticket})
+
+      ask = fn doc ->
+        {:ok, _version} =
+          Forge.Artifacts.record_version(ticket.id, doc, :document, {:job, job.id}, %{
+            content:
+              "---\noutcome: done\n---\n\n```question\nkey: backend\ntext: Which one?\n" <>
+                "options: [a, b]\nblocking: true\n```\n"
+          })
+      end
+
+      ask.("refinement.md")
+      seen = Push.Watch.changed(%{}, ticket.id)
+      Push.flush()
+      assert_receive {:push, _endpoint, %{"title" => "Question on " <> _}, _opts}
+
+      ask.("plan.md")
+      _seen = Push.Watch.changed(seen, ticket.id)
+      Push.flush()
+      assert_receive {:push, _endpoint, %{"title" => "Question on " <> _}, _opts}
+    end
+
+    # A wait is its kind and what it waits at, so the same kind waiting at something else is
+    # a new wait: stuck in the next state, another question in the same document, another
+    # transition held for approval.
+    test "pushes a ticket stuck again in another state", %{ticket: ticket} do
+      stuck = stuck!(ticket)
+      seen = Push.Watch.changed(%{}, ticket.id)
+      Push.flush()
+      assert_receive {:push, _endpoint, %{"title" => "Stuck: " <> _}, _opts}
+
+      {:ok, _ticket} = Repo.update(Ecto.Changeset.change(stuck, state: "planning"))
+      _seen = Push.Watch.changed(seen, ticket.id)
+      Push.flush()
+      assert_receive {:push, _endpoint, %{"title" => "Stuck: " <> _}, _opts}
+    end
+
+    test "pushes a new question in a document it has pushed one from", %{ticket: ticket} do
+      job = job_fixture(%{ticket: ticket})
+
+      ask = fn keys ->
+        blocks =
+          for key <- keys,
+              do:
+                "```question\nkey: #{key}\ntext: Which #{key}?\noptions: [a, b]\n" <>
+                  "blocking: true\n```\n"
+
+        {:ok, _version} =
+          Forge.Artifacts.record_version(ticket.id, "refinement.md", :document, {:job, job.id}, %{
+            content: "---\noutcome: done\n---\n\n" <> Enum.join(blocks, "\n")
+          })
+      end
+
+      ask.(["backend"])
+      seen = Push.Watch.changed(%{}, ticket.id)
+      Push.flush()
+      assert_receive {:push, _endpoint, %{"body" => "Which backend?"}, _opts}
+
+      ask.(["backend", "frontend"])
+      _seen = Push.Watch.changed(seen, ticket.id)
+      Push.flush()
+      assert_receive {:push, _endpoint, %{"body" => "Which frontend?"}, _opts}
+      refute_receive {:push, _endpoint, _payload, _opts}
+    end
+
+    test "pushes another transition held for approval", %{ticket: ticket} do
+      pend = fn to ->
+        {:ok, _ticket} =
+          Repo.update(
+            Ecto.Changeset.change(Forge.Tickets.get!(ticket.id),
+              pending_transition: %{
+                "from" => "refining",
+                "to" => to,
+                "outcome" => nil,
+                "approve" => ["refinement.md"]
+              }
+            )
+          )
+      end
+
+      pend.("planning")
+      seen = Push.Watch.changed(%{}, ticket.id)
+      Push.flush()
+      assert_receive {:push, _endpoint, %{"title" => "Approval on " <> _}, _opts}
+
+      pend.("done")
+      _seen = Push.Watch.changed(seen, ticket.id)
+      Push.flush()
+      assert_receive {:push, _endpoint, %{"body" => body}, _opts}
+      assert body =~ "to done"
+    end
+
+    # A ticket that cannot be read leaves what is seen as it was, so the next change looks again,
+    # rather than the watch crashing and starting over with everything taken as seen.
+    test "leaves what is seen alone when a ticket cannot be read" do
+      seen = %{"elsewhere" => MapSet.new([{:stuck, "refining"}])}
+
+      assert capture_log(fn ->
+               assert Push.Watch.changed(seen, "not-a-ticket-id") == seen
+             end) =~ "could not read ticket"
+    end
+
+    # The watch is on the global topic, where a project conversation's changes are announced
+    # under no ticket, and it starts on a node whose queue has project conversations in it.
+    test "starts beside a waiting project conversation and ignores changes under no ticket" do
+      chat = chat_fixture(%{project: project_fixture()})
+
+      :ok =
+        Forge.Jobs.record_harness_event(chat.id, %{
+          type: "job.harness.text",
+          payload: %{text: "Done."}
+        })
+
+      {:ok, _chat} =
+        Forge.Conversations.record_turn(chat, %{
+          "turn" => 1,
+          "harness" => %{"turns" => 1, "cost_usd" => 0.01, "subtype" => "success"}
+        })
+
+      assert Enum.any?(Forge.Queue.items(), &(&1.kind == :chat and &1.ticket == nil))
+
+      pid = start_supervised!(Push.Watch)
+      Push.Watch.sync()
+
+      # Filtered before any work: not a ticket read that fails and says so in the log.
+      refute capture_log(fn ->
+               Forge.Events.notify(nil)
+               Push.Watch.sync()
+             end) =~ "push watch"
+
+      assert Process.alive?(pid)
+      assert %{seen: %{}} = :sys.get_state(pid)
+    end
+
+    test "hears a ticket change and pushes what started waiting", %{ticket: ticket} do
+      start_supervised!(Push.Watch)
+      # Read the queue before anything changes: what waits when it starts is seen.
+      Push.Watch.sync()
+
+      stuck!(ticket)
+      Forge.Events.notify(ticket.id)
+      Push.Watch.sync()
+      Push.flush()
+
+      assert_receive {:push, _endpoint, %{"title" => "Stuck: " <> _}, _opts}
+    end
   end
 
   test "the digest summarises the queue and stays silent when it is empty", %{user: user} do
@@ -178,7 +487,7 @@ defmodule Forge.PushTest do
     {:ok, _} = Push.subscribe(suspended, browser_subscription("https://push.example/suspended"))
     {:ok, _} = Forge.Accounts.suspend_user(suspended, admin)
 
-    assert :ok = Push.blocking_question(ticket, %{key: "backend", text: "Which backend?"})
+    assert :ok = Push.waiting(question(ticket, "backend", "Which backend?"))
     Push.flush()
 
     # Suspension refuses sessions and tokens. A phone that keeps buzzing with questions about a
@@ -218,7 +527,7 @@ defmodule Forge.PushTest do
     {:ok, _} = Push.subscribe(user, browser_subscription("https://push.example/member"))
     {:ok, _} = Push.subscribe(outsider, browser_subscription("https://push.example/outsider"))
 
-    assert :ok = Push.blocking_question(ticket, %{key: "backend", text: "Which backend?"})
+    assert :ok = Push.waiting(question(ticket, "backend", "Which backend?"))
     Push.flush()
 
     assert_receive {:push, "https://push.example/member", _payload, _opts}

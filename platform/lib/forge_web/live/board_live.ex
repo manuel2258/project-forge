@@ -76,7 +76,7 @@ defmodule ForgeWeb.BoardLive do
           </span>
         </header>
 
-        <div class="flex gap-px overflow-x-auto bg-base-300">
+        <div class="flex flex-col gap-px bg-base-300 sm:flex-row sm:overflow-x-auto">
           <Board.column
             :for={column <- board.columns}
             column={column}

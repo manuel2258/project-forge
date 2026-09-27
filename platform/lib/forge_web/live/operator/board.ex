@@ -15,6 +15,7 @@ defmodule ForgeWeb.Operator.Board do
   alias Forge.Tickets
   alias ForgeCore.Workflow
   alias ForgeWeb.Format
+  alias Phoenix.LiveView.JS
 
   @type column :: %{
           name: String.t(),
@@ -120,46 +121,94 @@ defmodule ForgeWeb.Operator.Board do
   Both boards render this. Extracting only the arithmetic and leaving thirty-five lines of
   markup copied between two pages would have left them free to drift in every way an operator
   can actually see, which is the drift that matters.
+
+  **Below `sm` a column is a section** of a board that stacks (`docs/design/ui.md` § The phone):
+  full width, in the order the columns take on a laptop, so the workflow reads top to bottom as
+  it reads left to right. A state with nothing in it is its heading and a muted 0.
+
+  **"N more" is a control, at every width**, and the tickets it reveals are already on the page:
+  it shows them in place. The cap exists so a column never grows its own scrollbar; expanding one
+  lets the page scroll instead.
   """
   attr :column, :map, required: true
   attr :project, :string, required: true
   attr :now, :any, required: true
 
   def column(assigns) do
+    assigns = assign(assigns, id: column_id(assigns.project, assigns.column.name))
+
     ~H"""
-    <div class={[
-      "flex w-60 shrink-0 flex-col gap-3 p-3",
-      if(@column.topology == :human, do: "bg-base-200", else: "bg-base-100"),
-      @column.topology == :terminal && "opacity-60"
-    ]}>
+    <div
+      id={@id}
+      class={[
+        "flex w-full shrink-0 flex-col gap-3 p-3 sm:w-60",
+        if(@column.topology == :human, do: "bg-base-200", else: "bg-base-100"),
+        @column.topology == :terminal && "opacity-60"
+      ]}
+    >
       <div class="flex items-baseline justify-between gap-2">
         <.state name={@column.name} topology={@column.topology} />
-        <span class="font-mono text-[11px] opacity-50">{length(@column.tickets)}</span>
-      </div>
-
-      <p :if={@column.tickets == []} class="text-[13px] opacity-40">nothing in this state</p>
-
-      <div
-        :for={ticket <- @column.shown}
-        class={[
-          "flex flex-col gap-1 pl-2",
-          if(ticket.status == :stuck,
-            do: "border-l-2 border-accent",
-            else: "border-l border-base-300"
-          )
-        ]}
-      >
-        <.ticket_link ticket={ticket} project={@project} />
-        <span
-          :if={ticket.status == :stuck}
-          class="font-mono text-[11px] tracking-[.14em] uppercase text-accent"
-        >
-          stuck {Format.ago(ticket.updated_at, @now)}
+        <span class={[
+          "font-mono text-[11px]",
+          if(@column.tickets == [], do: "opacity-30", else: "opacity-50")
+        ]}>
+          {length(@column.tickets)}
         </span>
       </div>
 
-      <span :if={@column.more > 0} class="font-mono text-[11px] opacity-50">
-        {@column.more} more →
+      <.board_ticket :for={ticket <- @column.shown} ticket={ticket} project={@project} now={@now} />
+
+      <div :if={@column.more > 0} id={@id <> "-more"} class="hidden flex-col gap-3">
+        <.board_ticket
+          :for={ticket <- Enum.drop(@column.tickets, length(@column.shown))}
+          ticket={ticket}
+          project={@project}
+          now={@now}
+        />
+      </div>
+
+      <button
+        :if={@column.more > 0}
+        type="button"
+        id={@id <> "-expand"}
+        phx-click={JS.show(to: "#" <> @id <> "-more", display: "flex") |> JS.hide()}
+        class="flex min-h-[46px] items-center font-mono text-[11px] text-primary hover:underline"
+      >
+        {@column.more} more ↓
+      </button>
+    </div>
+    """
+  end
+
+  @doc """
+  A column's id: the project and the state, encoded, because "N more" finds the column's hidden
+  tickets by it and a state name may hold what a CSS selector reads as syntax — `code.review` is
+  an id and a class. Unpadded URL-safe base64 is letters, digits, `-` and `_`, which a selector
+  takes as they are after the prefix.
+  """
+  @spec column_id(String.t(), String.t()) :: String.t()
+  def column_id(project, state),
+    do: "column-" <> Base.url_encode64(project <> "\0" <> state, padding: false)
+
+  attr :ticket, :map, required: true
+  attr :project, :string, required: true
+  attr :now, :any, required: true
+
+  defp board_ticket(assigns) do
+    ~H"""
+    <div class={[
+      "flex flex-col gap-1 pl-2",
+      if(@ticket.status == :stuck,
+        do: "border-l-2 border-accent",
+        else: "border-l border-base-300"
+      )
+    ]}>
+      <.ticket_link ticket={@ticket} project={@project} />
+      <span
+        :if={@ticket.status == :stuck}
+        class="font-mono text-[11px] tracking-[.14em] uppercase text-accent"
+      >
+        stuck {Format.ago(@ticket.updated_at, @now)}
       </span>
     </div>
     """

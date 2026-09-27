@@ -218,16 +218,23 @@ defmodule ForgeWeb.OperatorLiveTest do
     scenario("success", "refinement.md")
     run_pending(ticket.id)
 
+    # Waiting on an approval, so it opens on Decide; the rest is a tab away.
     {:ok, view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
     assert html =~ "Persist scores"
+    assert html =~ "Last four events"
+    assert has_element?(view, "#hoisted-decision")
+
+    {:ok, _timeline, html} =
+      live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=timeline")
+
     assert html =~ "They vanish."
     assert html =~ "refining"
     assert html =~ "#1"
     assert html =~ "refinement.md"
     assert html =~ "v1"
+
+    {:ok, _docs, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=docs")
     assert html =~ "<h1>Plan</h1>"
-    assert html =~ "Last four events"
-    assert has_element?(view, "#hoisted-decision")
 
     view |> form("#approval-#{ticket.id} form") |> render_submit(%{"decision" => "rejected"})
     assert render(view) =~ "rejected; now in refining"

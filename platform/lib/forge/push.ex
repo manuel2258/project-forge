@@ -1,8 +1,8 @@
 defmodule Forge.Push do
   @moduledoc """
-  Web push to the operator's browsers. Blocking questions are pushed as they appear, and so is
-  a conversation's reply when its turn completes (`chat_reply/2`); everything else goes into
-  one daily digest. Enabled only when VAPID keys are configured.
+  Web push to the operator's browsers. Whatever starts waiting on a person is pushed as it does
+  (`waiting/1`, fed by `Forge.Push.Watch` for tickets and by `chat_reply/1` for a conversation's
+  turn); the rest goes into one daily digest. Enabled only when VAPID keys are configured.
 
   Delivery runs in a supervised task so a slow or failing push service never blocks the
   caller, and one bad subscription never prevents the others from being served.
@@ -12,12 +12,10 @@ defmodule Forge.Push do
 
   alias Forge.Accounts.User
   alias Forge.Jobs.Job
-  alias Forge.Projects
   alias Forge.Proposals
   alias Forge.Push.Subscription
   alias Forge.Queue
   alias Forge.Repo
-  alias Forge.Tickets.Ticket
 
   require Logger
 
@@ -64,7 +62,7 @@ defmodule Forge.Push do
   @doc """
   The subscriptions of the people who are members of `project_id`.
 
-  A blocking question is pushed to the phones that can answer it and no others — the push fan-out
+  What waits is pushed to the phones that can answer it and no others — the push fan-out
   is a read like any other, and it was the one that leaked to every device on the node.
   See `docs/design/identity.md` § Read scoping is the half that leaks.
   """
@@ -85,20 +83,28 @@ defmodule Forge.Push do
     )
   end
 
-  @doc "Pushes one blocking question to every subscription."
-  @spec blocking_question(Ticket.t(), map()) :: :ok
-  def blocking_question(%Ticket{} = ticket, question) do
-    project = Projects.get!(ticket.project_id)
-    label = "#{project.name}##{ticket.number}"
-    tag = "question-#{ticket.id}-#{question.key}"
+  @doc """
+  Pushes one queue item that has started waiting on a person, to the phones of the people in its
+  project — or nothing, when `Forge.Queue.waiting?/1` says it waits on nobody.
 
-    deliver(
-      %{
-        title: "Question on #{label}",
-        body: question.text,
-        url: "/tickets/#{project.name}/#{ticket.number}",
-        tag: tag
-      },
+  **The rule is the queue's, not a list kept beside it** (`docs/design/ui.md` § The phone): a
+  blocking question, an approval, a stuck ticket, a ticket resting where only a person can move
+  it, and a conversation's reply all push; an assumption does not, and a kind added to the queue
+  later pushes or does not for the same reason. Each links to the work screen on the tab that
+  holds it: Decide for a ticket, Talk for a conversation.
+
+  Tagged per thing waiting, so a re-ask or a later reply replaces its notification instead of
+  stacking another.
+  """
+  @spec waiting(Queue.item()) :: :ok
+  def waiting(item) do
+    if Queue.waiting?(item), do: deliver_item(item), else: :ok
+  end
+
+  defp deliver_item(%{project: project} = item) do
+    {title, body, url, tag} = describe(item)
+
+    deliver(%{title: title, body: String.slice(body || "", 0, 200), url: url, tag: tag},
       ttl: 86_400,
       urgency: :high,
       topic: topic(tag),
@@ -106,35 +112,46 @@ defmodule Forge.Push do
     )
   end
 
+  defp describe(%{kind: :chat, project: project, detail: detail}) do
+    {"Reply on #{project.name}", detail.text || "It replied.",
+     "/chats/#{detail.chat_id}?tab=talk", "chat-#{detail.chat_id}"}
+  end
+
+  defp describe(%{kind: kind, project: project, ticket: ticket} = item) do
+    label = "#{project.name}##{ticket.number}"
+    url = "/tickets/#{project.name}/#{ticket.number}?tab=decide"
+
+    case kind do
+      :question ->
+        {"Question on #{label}", item.question.text, url,
+         "question-#{ticket.id}-#{item.question.key}"}
+
+      :approval ->
+        {"Approval on #{label}", "#{ticket.title} — to #{item.detail["to"]}", url,
+         "approval-#{ticket.id}"}
+
+      :stuck ->
+        {"Stuck: #{label}", ticket.title, url, "stuck-#{ticket.id}"}
+
+      _review ->
+        {"Waiting on you: #{label}", "#{ticket.title} — in #{ticket.state}", url,
+         "#{kind}-#{ticket.id}"}
+    end
+  end
+
   @doc """
-  Pushes a conversation's completed reply.
+  Pushes a conversation's completed reply, if its conversation is now waiting on a person.
 
-  **Every completed reply pushes**, not every token: a turn ending is the event. This is a
-  deliberate widening of `docs/decisions.md`'s "push notification for blocking questions,
-  everything else digested" — a reply to a question you asked is the same shape of thing as an
-  answer you are owed, and the product's premise is that you asked it from a train platform.
-  See `docs/design/conversations.md` § In the queue, and on the phone.
-
-  Tagged per conversation rather than per turn, so a chat you are having replaces its own
-  notification instead of stacking one per exchange.
+  **Every completed reply pushes**, not every token: a turn ending is the event.
+  `docs/decisions.md`'s push rule names a conversation's reply among what waits on a human — a
+  reply to a question you asked is the same shape of thing as an answer you are owed, and the
+  product's premise is that you asked it from a train platform. See `docs/design/conversations.md`
+  § In the queue, and on the phone. It goes through `waiting/1`, so it is the queue's item and
+  the queue's rule.
   """
-  @spec chat_reply(Job.t(), String.t() | nil) :: :ok
-  def chat_reply(%Job{kind: :chat} = chat, text) do
-    project = Projects.get!(chat.project_id)
-    tag = "chat-#{chat.id}"
-
-    deliver(
-      %{
-        title: "Reply on #{project.name}",
-        body: String.slice(text || "It replied.", 0, 200),
-        url: "/chats/#{chat.id}",
-        tag: tag
-      },
-      ttl: 86_400,
-      urgency: :high,
-      topic: topic(tag),
-      to: project.id
-    )
+  @spec chat_reply(Job.t()) :: :ok
+  def chat_reply(%Job{kind: :chat} = chat) do
+    chat |> Queue.for_chat() |> Enum.each(&waiting/1)
   end
 
   @doc """

@@ -72,6 +72,21 @@ defmodule Forge.EventsTest do
       assert Events.summary(%Event{type: "ticket.noted", payload: %{}}) == ""
     end
 
+    # The agent wrote the call, and a name in the wrong type stays in the log for ever: the
+    # line leaves it out rather than raising on it wherever the log is listed.
+    test "summarises a call as its name and its input, bounded" do
+      call = fn name, input ->
+        Events.summary(%Event{
+          type: "job.harness.tool_use",
+          payload: %{"name" => name, "input" => input}
+        })
+      end
+
+      assert call.("Bash", %{"command" => "mix test"}) == ~s(Bash {"command":"mix test"})
+      assert call.(%{"not" => "a name"}, %{}) == " {}"
+      assert call.("Write", %{"content" => String.duplicate("x", 500)}) |> String.length() == 166
+    end
+
     test "an event with a payload says what is in it" do
       summary =
         Events.summary(%Event{type: "job.interrupted", payload: %{"reason" => "worker_lost"}})

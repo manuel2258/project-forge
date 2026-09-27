@@ -299,7 +299,7 @@ defmodule ForgeWeb.ProjectSettingsLive do
     >
       <.link
         navigate={~p"/projects/#{@project.name}"}
-        class="font-mono text-[12.5px] opacity-60 hover:opacity-100"
+        class="flex min-h-[46px] items-center font-mono text-[12.5px] opacity-60 hover:opacity-100"
       >
         ‹ {@project.name}
       </.link>
@@ -406,7 +406,7 @@ defmodule ForgeWeb.ProjectSettingsLive do
           None yet. One issued above appears here, described but never shown again.
         </p>
 
-        <table :if={@tokens != []} class="mt-3 w-full text-left text-[12.5px]">
+        <table :if={@tokens != []} id="tokens" class="reflow mt-3 w-full text-left text-[12.5px]">
           <thead class="font-mono text-[11px] tracking-[.14em] uppercase opacity-50">
             <tr class="border-b border-base-300">
               <th class="py-2 pr-3 font-normal">May</th>
@@ -425,12 +425,12 @@ defmodule ForgeWeb.ProjectSettingsLive do
                 <div class="break-all">{row.capability}</div>
                 <div :if={row.held_by_job} class="text-[11px] opacity-50">held by a job</div>
               </td>
-              <td class="py-3 pr-3 font-mono">
+              <td data-label="Expires" class="py-3 pr-3 font-mono">
                 {if row.live,
                   do: "in " <> Format.ago(DateTime.utc_now(), row.token.expires_at),
                   else: spent(row.token, @now)}
               </td>
-              <td class="py-3 pr-3 font-mono opacity-70">
+              <td data-label="Last used" class="py-3 pr-3 font-mono opacity-70">
                 {(row.token.last_used_at && Format.ago(row.token.last_used_at, @now)) || "never"}
               </td>
               <td class="py-3 text-right">
@@ -440,7 +440,7 @@ defmodule ForgeWeb.ProjectSettingsLive do
                   phx-click="revoke"
                   phx-value-id={row.token.id}
                   data-confirm="Revoke this token? Anything using it stops working."
-                  class="min-h-[46px] text-sm text-primary hover:underline"
+                  class="min-h-[46px] text-sm text-primary hover:underline reflow-control"
                 >
                   Revoke
                 </button>
@@ -540,7 +540,7 @@ defmodule ForgeWeb.ProjectSettingsLive do
           None yet. One added below appears here, with what the last push said.
         </p>
 
-        <table :if={@mirrors != []} class="mt-3 w-full text-left text-[12.5px]">
+        <table :if={@mirrors != []} id="mirrors" class="reflow mt-3 w-full text-left text-[12.5px]">
           <thead class="font-mono text-[11px] tracking-[.14em] uppercase opacity-50">
             <tr class="border-b border-base-300">
               <th class="py-2 pr-3 font-normal">Name</th>
@@ -552,8 +552,8 @@ defmodule ForgeWeb.ProjectSettingsLive do
           <tbody>
             <tr :for={m <- @mirrors} class="border-b border-base-300/60 align-top">
               <td class="py-3 pr-3 font-mono">{m.name}</td>
-              <td class="py-3 pr-3 font-mono break-all">{m.url}</td>
-              <td class="py-3 pr-3 font-mono">
+              <td data-label="URL" class="py-3 pr-3 font-mono break-all">{m.url}</td>
+              <td data-label="Last push" class="py-3 pr-3 font-mono">
                 <div>{m.last_status || "never pushed"}</div>
                 <div :if={m.last_at} class="text-[11px] opacity-50">{m.last_at}</div>
                 <div
@@ -570,7 +570,7 @@ defmodule ForgeWeb.ProjectSettingsLive do
                   phx-click="remove-mirror"
                   phx-value-name={m.name}
                   data-confirm={"Remove the #{m.name} mirror? Nothing further is pushed there."}
-                  class="min-h-[46px] text-sm text-primary hover:underline"
+                  class="min-h-[46px] text-sm text-primary hover:underline reflow-control"
                 >
                   Remove
                 </button>

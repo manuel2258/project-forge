@@ -963,8 +963,9 @@ defmodule Forge.Jobs do
 
         :waiting ->
           # Stopped on a question: the run is over, and the answer resumes it with a new one.
+          # The question is pushed by `Forge.Push.Watch`, which hears the notice below and
+          # pushes whatever on the ticket has started waiting — this is one of those.
           Tokens.revoke_for_job(job.id)
-          Enum.each(result.questions, &Forge.Push.blocking_question(ticket, &1))
       end
 
       Events.notify(ticket.id)

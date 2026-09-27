@@ -525,12 +525,7 @@ defmodule Forge.Conversations do
     end
   end
 
-  defp push_reply(chat) do
-    case chat.id |> messages() |> List.last() do
-      %{role: :assistant, text: text} -> Forge.Push.chat_reply(chat, text)
-      _other -> :ok
-    end
-  end
+  defp push_reply(chat), do: Forge.Push.chat_reply(chat)
 
   # `IS NOT DISTINCT FROM` so that a turn with no session matches another with none: a harness
   # that never reported one is one session as far as this can tell, which is what it was before
@@ -719,25 +714,82 @@ defmodule Forge.Conversations do
 
   @typedoc """
   One entry in a conversation. A `:user` message carries the state of its delivery; an
-  `:assistant` message is the text of one turn, which arrives in pieces and is joined here.
+  `:assistant` message is one turn: its `items` in the order they happened, and its `text`, which
+  is only what it said — the text blocks, a blank line between each.
   """
   @type message ::
           %{role: :user, text: String.t(), at: DateTime.t(), delivered: boolean(), id: String.t()}
-          | %{role: :assistant, text: String.t(), at: DateTime.t(), turn: pos_integer() | nil}
+          | %{
+              role: :assistant,
+              text: String.t(),
+              items: [item()],
+              at: DateTime.t(),
+              turn: pos_integer() | nil
+            }
+
+  @typedoc """
+  One thing in a turn: a block of what the agent said, or something it did.
+  """
+  @type item :: {:text, String.t()} | {:action, action()}
+
+  @typedoc """
+  One tool call, paired with its result. `result` is nil until the result arrives, which is
+  what makes a call the one the agent is in the middle of. `children` are the calls a `Task`'s
+  subagent made, found by their `parent_tool_use_id`.
+  """
+  @type action :: %{
+          id: String.t() | nil,
+          name: String.t() | nil,
+          input: map(),
+          at: DateTime.t(),
+          result:
+            nil | %{is_error: boolean(), excerpt: String.t(), bytes: non_neg_integer() | nil},
+          children: [action()]
+        }
 
   @doc """
-  The conversation, folded out of the event log.
+  The conversation as a person reads it: what each side *said*.
 
-  Assistant text arrives as several `job.harness.text` events within one turn and is joined into
-  one message per turn, because that is what a person sees: a reply, not the four pieces it was
-  streamed in.
+  A turn that only acted and said nothing is left out. It is in `transcript/1`, which is what the
+  page draws; the readers of this one — the queue, the replay a reopened process reads, the
+  push — are asking what was said, and a turn that said nothing said nothing.
   """
   @spec messages(String.t()) :: [message()]
-  def messages(job_id) do
-    {done, open} =
-      job_id
-      |> Events.for_job()
-      |> Enum.reduce({[], nil}, &fold/2)
+  def messages(job_id), do: job_id |> transcript() |> said()
+
+  @doc """
+  A transcript without the turns that said nothing: what `messages/1` is, for a caller that
+  already has the transcript. The page asks whether a conversation waits on its person from
+  this, which is what the queue asks it from.
+  """
+  @spec said([message()]) :: [message()]
+  def said(transcript), do: Enum.reject(transcript, &silent?/1)
+
+  defp silent?(%{role: :assistant, text: ""}), do: true
+  defp silent?(_message), do: false
+
+  @doc """
+  The conversation, folded out of the event log: each turn as the sequence it happened in.
+
+  **A turn is a sequence, not a string.** Each `job.harness.text` event is one content block of
+  the agent's reply, and each is its own item; each `tool_use` is an item between them, paired
+  with its `tool_result` by id. They used to be joined into one string with nothing between the
+  blocks, so the sentence before a tool call ran into the one after it, and the calls were
+  dropped on the way (`docs/design/conversations.md` § The page). Nothing new is recorded: this
+  stops throwing away what was.
+
+  A subagent's calls — a `parent_tool_use_id` naming a `Task` — fold under that call rather than
+  interleaving with the agent's own, and a subagent's text is not the agent's reply. Notices and
+  the rest of the harness's bookkeeping are not in it; they are the Activity tab's.
+
+  Takes the job's id, or its events when the caller already has them — the page keeps the log
+  it has read and appends to it as events arrive, rather than reading it again for each one.
+  """
+  @spec transcript(String.t() | [Event.t()]) :: [message()]
+  def transcript(job_id) when is_binary(job_id), do: job_id |> Events.for_job() |> transcript()
+
+  def transcript(events) when is_list(events) do
+    %{done: done, open: open} = Enum.reduce(events, %{done: [], open: nil, round: 0}, &fold/2)
 
     # The reply being spoken right now, which has had no `chat.turn` to close it yet. Dropping it
     # would mean a conversation showed nothing at all until each turn finished — which is the
@@ -748,7 +800,13 @@ defmodule Forge.Conversations do
     |> Enum.map(&finish_message/1)
   end
 
-  defp fold(%Event{type: "chat.message"} = event, {acc, open}) do
+  # The fold's state: the messages finished so far, newest first; the agent's reply being
+  # accumulated; and `round`, which counts the turns the log has closed and the processes it has
+  # started. Every piece of an agent reply carries the round it was spoken in, so that a turn
+  # split by a message sent in the middle of it is still one turn: `chat.turn` closes both
+  # halves, and nothing from an earlier round.
+
+  defp fold(%Event{type: "chat.message"} = event, state) do
     message = %{
       role: :user,
       id: to_string(event.seq),
@@ -757,33 +815,173 @@ defmodule Forge.Conversations do
       delivered: false
     }
 
-    {[message | flush(acc, open)], nil}
+    %{state | done: [message | flush(state.done, state.open)], open: nil}
   end
 
   # The harness echoes a message when it takes it, which for one sent mid-turn is after the
   # current turn's result — so this is delivery, not receipt (§ The wire).
-  defp fold(%Event{type: "job.harness.delivered"} = event, {acc, open}) do
+  defp fold(%Event{type: "job.harness.delivered"} = event, state) do
     id = event.payload["message_id"]
-    {Enum.map(acc, &mark_delivered(&1, id)), open}
+    %{state | done: Enum.map(state.done, &mark_delivered(&1, id))}
   end
 
-  defp fold(%Event{type: "job.harness.text"} = event, {acc, open}) do
-    text = event.payload["text"] || ""
+  # A subagent's words are its report to the agent, which the agent then says — or does not —
+  # in its own. They are in the Activity tab like every other event.
+  defp fold(%Event{type: "job.harness.text", payload: %{"parent_tool_use_id" => parent}}, state)
+       when is_binary(parent),
+       do: state
 
-    case open do
-      nil -> {acc, %{role: :assistant, text: [text], at: event.inserted_at, turn: nil}}
-      %{text: pieces} = open -> {acc, %{open | text: pieces ++ [text]}}
+  defp fold(%Event{type: "job.harness.text"} = event, state),
+    do: add_item(state, {:text, string(event.payload["text"])}, event)
+
+  defp fold(%Event{type: "job.harness.tool_use", payload: payload} = event, state) do
+    action = action(payload, event.inserted_at)
+
+    # A child whose parent is nowhere in the log is drawn at the top level rather than dropped.
+    case update_action(
+           state,
+           payload["parent_tool_use_id"],
+           &%{&1 | children: [action | &1.children]}
+         ) do
+      {:ok, state} -> state
+      :none -> add_item(state, {:action, action}, event)
     end
   end
 
-  defp fold(%Event{type: "chat.turn"} = event, {acc, open}) do
-    case open do
-      nil -> {acc, nil}
-      open -> {[%{open | turn: event.payload["turn"]} | acc], nil}
+  # A result for a call that is nowhere in the log has nothing to pair with. It is still in the
+  # log, and in the Activity tab.
+  defp fold(%Event{type: "job.harness.tool_result", payload: payload}, state) do
+    case update_action(state, payload["tool_use_id"], &%{&1 | result: result(payload)}) do
+      {:ok, state} -> state
+      :none -> state
     end
   end
+
+  defp fold(%Event{type: "chat.turn"} = event, %{round: round} = state) do
+    turn = event.payload["turn"]
+    stamp = fn message -> stamp(message, round, turn) end
+
+    %{
+      state
+      | done: state.done |> flush(state.open) |> Enum.map(stamp),
+        open: nil,
+        round: round + 1
+    }
+  end
+
+  # A new process: whatever reply was still open was cut off with the one before it, and what
+  # the new one says is its own.
+  defp fold(%Event{type: "job.started"}, state),
+    do: %{state | done: flush(state.done, state.open), open: nil, round: state.round + 1}
 
   defp fold(%Event{}, state), do: state
+
+  @doc """
+  One tool call as the transcript holds it, from a `tool_use` event's payload. The agent wrote the
+  input, so nothing in it is trusted to have the type its tool's schema says: a name that is not
+  text has none, and an input that is not a map is empty.
+  """
+  @spec action(map(), DateTime.t()) :: action()
+  def action(payload, at) do
+    %{
+      id: payload["id"],
+      name: if(is_binary(payload["name"]), do: payload["name"]),
+      input: if(is_map(payload["input"]), do: payload["input"], else: %{}),
+      at: at,
+      result: nil,
+      children: []
+    }
+  end
+
+  @doc "A call's result, from a `tool_result` event's payload."
+  @spec result(map()) :: map()
+  def result(payload) do
+    %{
+      is_error: payload["is_error"] == true,
+      excerpt: string(payload["excerpt"]),
+      bytes: payload["bytes"]
+    }
+  end
+
+  defp string(text) when is_binary(text), do: text
+  defp string(_other), do: ""
+
+  # Items are kept newest first while the turn is folded, and put in order when it is finished.
+  defp add_item(%{open: nil} = state, item, event),
+    do: %{
+      state
+      | open: %{
+          role: :assistant,
+          items: [item],
+          at: event.inserted_at,
+          turn: nil,
+          round: state.round
+        }
+    }
+
+  defp add_item(%{open: open} = state, item, _event),
+    do: %{state | open: %{open | items: [item | open.items]}}
+
+  # The call `id`, wherever it is: the reply being spoken, a half of it that a message sent
+  # mid-turn closed, or an earlier turn a late result or a subagent still reporting belongs to.
+  # Tool ids are unique, so the first match is the call.
+  defp update_action(_state, nil, _fun), do: :none
+
+  defp update_action(state, id, fun) do
+    case update_message(state.open, id, fun) do
+      {:ok, open} ->
+        {:ok, %{state | open: open}}
+
+      :none ->
+        with {:ok, done} <- update_done(state.done, id, fun), do: {:ok, %{state | done: done}}
+    end
+  end
+
+  defp update_done([], _id, _fun), do: :none
+
+  defp update_done([%{role: :assistant} = message | rest], id, fun) do
+    case update_message(message, id, fun) do
+      {:ok, message} -> {:ok, [message | rest]}
+      :none -> with {:ok, rest} <- update_done(rest, id, fun), do: {:ok, [message | rest]}
+    end
+  end
+
+  defp update_done([message | rest], id, fun) do
+    with {:ok, rest} <- update_done(rest, id, fun), do: {:ok, [message | rest]}
+  end
+
+  defp update_message(nil, _id, _fun), do: :none
+
+  defp update_message(message, id, fun) do
+    case update_in_items(message.items, id, fun) do
+      {:ok, items} -> {:ok, %{message | items: items}}
+      :none -> :none
+    end
+  end
+
+  defp update_in_items([], _id, _fun), do: :none
+
+  defp update_in_items([{:action, %{id: id} = action} | rest], id, fun),
+    do: {:ok, [{:action, fun.(action)} | rest]}
+
+  defp update_in_items([{:action, action} = item | rest], id, fun) do
+    case update_in_items(Enum.map(action.children, &{:action, &1}), id, fun) do
+      {:ok, children} ->
+        {:ok, [{:action, %{action | children: Enum.map(children, &elem(&1, 1))}} | rest]}
+
+      :none ->
+        with {:ok, rest} <- update_in_items(rest, id, fun), do: {:ok, [item | rest]}
+    end
+  end
+
+  defp update_in_items([item | rest], id, fun) do
+    with {:ok, rest} <- update_in_items(rest, id, fun), do: {:ok, [item | rest]}
+  end
+
+  defp stamp(%{role: :assistant, round: round, turn: nil} = message, round, turn),
+    do: %{message | turn: turn}
+
+  defp stamp(message, _round, _turn), do: message
 
   # A user message arriving mid-reply ends the assistant message being accumulated.
   defp flush(acc, nil), do: acc
@@ -792,10 +990,102 @@ defmodule Forge.Conversations do
   defp mark_delivered(%{role: :user, id: id} = message, id), do: %{message | delivered: true}
   defp mark_delivered(message, _id), do: message
 
-  defp finish_message(%{role: :assistant, text: pieces} = message),
-    do: %{message | text: pieces |> Enum.join() |> String.trim()}
+  defp finish_message(%{role: :assistant, items: items} = message) do
+    items = items |> Enum.reverse() |> Enum.map(&finish_item/1)
+
+    text =
+      for({:text, text} <- items, do: String.trim(text))
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.join("\n\n")
+
+    message |> Map.delete(:round) |> Map.merge(%{items: items, text: text})
+  end
 
   defp finish_message(message), do: message
+
+  defp finish_item({:action, action}), do: {:action, finish_action(action)}
+  defp finish_item(item), do: item
+
+  defp finish_action(action),
+    do: %{action | children: action.children |> Enum.reverse() |> Enum.map(&finish_action/1)}
+
+  @typedoc """
+  What the agent is doing right now, when a turn is open: the call with no result yet, a retry,
+  or a limit that stopped it and when it lifts.
+  """
+  @type now ::
+          {:action, action()}
+          | {:retrying, integer() | nil, integer() | nil}
+          | {:rate_limited, DateTime.t() | nil}
+          | nil
+
+  @doc """
+  What the now line says (`docs/design/ui.md` § Talk): the call the agent is in the middle of, or
+  — when the latest thing the harness reported since was a retry or a limit that refused it — that.
+
+  Nil when no turn is open. A retry or a limit is not a line in the transcript, because it is not
+  something the agent did; it is what is happening instead, until something else is reported.
+  """
+  @now_types ~w(job.harness.retry job.harness.rate_limit job.harness.text job.harness.tool_use
+                job.harness.tool_result)
+
+  @spec now([Event.t()]) :: now()
+  def now(events) do
+    open =
+      events |> Enum.reverse() |> Enum.take_while(&(&1.type not in ["chat.turn", "job.started"]))
+
+    case Enum.find(open, &(&1.type in @now_types)) do
+      %Event{type: "job.harness.retry", payload: payload} ->
+        {:retrying, payload["attempt"], payload["max_retries"]}
+
+      %Event{type: "job.harness.rate_limit", payload: %{"status" => "rejected"} = payload} ->
+        {:rate_limited, epoch(payload["resets_at"])}
+
+      # The agent's side of the turn, both halves of it if a message sent mid-turn split it:
+      # that message is queued behind the call in flight, which is still what the agent is doing.
+      _other ->
+        open
+        |> Enum.reverse()
+        |> transcript()
+        |> Enum.flat_map(fn
+          %{role: :assistant, items: items} -> items
+          _said -> []
+        end)
+        |> pending()
+    end
+  end
+
+  # The worker's integer, and `DateTime.from_unix!/1` raises on one outside the calendar — a
+  # milliseconds value, say. A reset that cannot be read is said as a limit without a time, the
+  # way `Forge.Credentials` reads the same field, rather than a page that cannot mount.
+  defp epoch(seconds) when is_integer(seconds) do
+    case DateTime.from_unix(seconds) do
+      {:ok, at} -> at
+      {:error, _outside} -> nil
+    end
+  end
+
+  defp epoch(_other), do: nil
+
+  # The last call with no result, innermost first: a `Task` is waiting on its subagent, and what
+  # the subagent is doing is the more useful thing to say.
+  defp pending(items) do
+    items
+    |> Enum.reverse()
+    |> Enum.find_value(fn
+      {:action, action} -> open_action(action)
+      _text -> nil
+    end)
+    |> case do
+      nil -> nil
+      action -> {:action, action}
+    end
+  end
+
+  defp open_action(%{result: nil} = action),
+    do: action.children |> Enum.reverse() |> Enum.find_value(&open_action/1) || action
+
+  defp open_action(_resolved), do: nil
 
   @doc """
   What a conversation's next process starts with: what was said before it, and what it answers.
@@ -906,9 +1196,9 @@ defmodule Forge.Conversations do
   @doc """
   Conversations for a list, live ones first and newest within that.
 
-  `:project_id` narrows it to one project; `:for` narrows it to the projects one user is a member
-  of, which is what every operator surface passes. Without either this is every conversation on
-  the node, and only the command line may ask for that.
+  `:ticket_id` narrows it to one ticket's, `:project_id` to one project's; `:for` narrows it to
+  the projects one user is a member of, which is what every operator surface passes. Without any
+  of them this is every conversation on the node, and only the command line may ask for that.
 
   Live first because that is the one costing something and holding a machine. The rest are a
   record — a conversation is kept for ever, so this list only grows, and what it is for is
@@ -918,6 +1208,7 @@ defmodule Forge.Conversations do
   def summaries(opts \\ []) do
     chats =
       cond do
+        id = Keyword.get(opts, :ticket_id) -> Jobs.chats_for_ticket(id)
         id = Keyword.get(opts, :project_id) -> Jobs.chats_for_project(id)
         user = Keyword.get(opts, :for) -> for_user(user)
         true -> Repo.all(node_wide())
@@ -976,6 +1267,9 @@ defmodule Forge.Conversations do
     Repo.all(
       from e in Event,
         where: e.job_id in ^job_ids and e.type in ["chat.message", "job.harness.text"],
+        # A subagent's text is its report to the agent, not the agent speaking — the rule
+        # `transcript/1` follows.
+        where: fragment("(? ->> 'parent_tool_use_id') IS NULL", e.payload),
         distinct: e.job_id,
         order_by: [asc: e.job_id, desc: e.seq],
         select: {e.job_id, e.type, e.payload}

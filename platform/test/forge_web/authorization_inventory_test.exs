@@ -130,6 +130,9 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"chat_live.ex", "reopen"} => :member,
     {"chat_live.ex", "merge"} => :member,
     {"chat_live.ex", "draft"} => :local,
+    {"chat_live.ex", "ask"} => :local,
+    {"chat_live.ex", "more"} => :local,
+    {"chat_live.ex", "notices"} => :local,
     {"chat_new_live.ex", "open"} => :member,
     {"chat_new_live.ex", "validate"} => :local,
     # The id is the client's, so the chat is read and then authorised: being able to see the
@@ -137,6 +140,10 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"chats_live.ex", "end-chat"} => :member,
     {"job_live.ex", "more"} => :local,
     {"job_live.ex", "notices"} => :local,
+    # Navigates to a conversation with the reference in the address; sends nothing.
+    {"ticket_live.ex", "ask"} => :local,
+    {"ticket_live.ex", "more"} => :local,
+    {"ticket_live.ex", "notices"} => :local,
     {"project_new_live.ex", "create"} => :approved,
     {"project_new_live.ex", "validate"} => :local,
     {"project_settings_live.ex", "issue"} => :manage,

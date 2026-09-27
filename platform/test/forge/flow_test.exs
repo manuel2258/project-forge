@@ -140,8 +140,11 @@ defmodule Forge.FlowTest do
     planning = only_pending(ticket)
     assert Enum.map(Jobs.spec(planning).inputs, & &1.name) == ["ticket", "refinement.md"]
 
-    # planning: blocks on a question, which is pushed to subscribed browsers
+    # planning: blocks on a question, which is pushed to subscribed browsers — by the watch,
+    # which hears the ticket change and pushes what started waiting on it.
     Forge.Push.TestSender.watch()
+    start_supervised!(Forge.Push.Watch)
+    Forge.Push.Watch.sync()
 
     {:ok, _} =
       Forge.Push.subscribe(user, %{
@@ -156,6 +159,7 @@ defmodule Forge.FlowTest do
     assert job.status == :waiting
     # The run is over; the answer resumes the job on a new one with its own git credential.
     assert Forge.Git.Tokens.revoke_for_job(job.id) == 0
+    Forge.Push.Watch.sync()
     Forge.Push.flush()
     assert_receive {:push, "https://push.example/phone", %{"body" => "Which backend?"}, _opts}
     assert job.harness_session_id == "sess-42"

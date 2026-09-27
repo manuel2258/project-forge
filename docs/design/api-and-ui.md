@@ -132,14 +132,19 @@ operation completes anywhere, including from the API or a running job.
 ## Push
 
 Web Push through the browser's push service, with VAPID keys the operator generates once.
-A subscription is stored per browser endpoint for the logged-in user. Blocking questions are
-pushed as they appear, tagged per question so a re-ask replaces rather than stacks, and so is a
-conversation's reply when a turn completes (`Forge.Push.chat_reply/2`). Everything else waits for
+A subscription is stored per browser endpoint for the logged-in user. Whatever starts waiting on
+a person is pushed as it starts — a blocking question, an approval, a stuck ticket, a ticket
+resting where only a person can move it, a conversation's reply — and the rule is the queue's
+`waiting?/1` (`Forge.Push.waiting/1`), so an assumption is not. `Forge.Push.Watch` hears each
+ticket change and pushes what on it has started waiting since it last looked, once per time it
+starts; a conversation's reply is pushed when its turn completes (`Forge.Push.chat_reply/1`).
+Each is tagged per thing waiting, so a re-ask replaces rather than stacks. Everything else waits for
 one digest push a day at a configured UTC hour, sent when the reader has something waiting, an
 open non-blocking question or an open ticket proposal. The last two are counted separately in it
 (`N assumed`, `N proposed`) and never in its title's `N waiting on you`, because they are not
 waiting on anyone. Subscriptions the push service reports gone are deleted. The service worker
-shows the notification and opens the ticket page on tap.
+shows the notification and opens its link on tap: the work screen, on Decide for a ticket and on
+Talk for a conversation.
 
 ## Message state
 

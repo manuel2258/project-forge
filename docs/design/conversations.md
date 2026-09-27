@@ -606,10 +606,11 @@ so closing a conversation is closing the pipe, not killing anything.
 ticket it belongs to. It is literally what the queue is for: something that will not move until a
 person acts.
 
-**Every completed reply pushes.** Not every token — a turn ending is the event. This is a
-deliberate widening of `decisions.md`'s "push notification for blocking questions; everything
-else digested": a reply to a question you asked is the same shape of thing as an answer you are
-owed, and the product's premise is that you asked it from a train platform.
+**Every completed reply pushes.** Not every token — a turn ending is the event. This is where
+`decisions.md`'s push rule first widened past blocking questions, and it now names a
+conversation's reply among everything that starts waiting on a human: a reply to a question you
+asked is the same shape of thing as an answer you are owed, and the product's premise is that you
+asked it from a train platform.
 
 The cost of both together, stated so that it is visible rather than discovered: a conversation
 you are in the middle of is an item in your inbox and a notification on your phone, and the
@@ -661,12 +662,41 @@ be answered without opening the conversation.
 ## The page
 
 A conversation's page is shaped like a ticket's, because it is the same kind of thing: work with
-a branch, a cost and a record. The conversation on one side; on the other the diff of
-`chat/<id>` against the default branch, what it has written — every version, each a link to
-itself (`docs/design/ui.md` § Addressable artifact versions), and what the last turn wrote that
-was not recorded, with why (§ Commits) — what it has spent, and the merge affordance. Its reply
-streams — see `docs/design/ui.md` § Motion and structure, which used to forbid that and no longer
-does.
+a branch, a cost and a record. The conversation is its Talk tab; the diff of `chat/<id>` against
+the default branch, its commits and the merge affordance are Changes; what it has written —
+rendered, every version a link to itself (`docs/design/ui.md` § Addressable artifact versions),
+and what the last turn wrote that was not recorded, with why (§ Commits) — is Docs; what it has
+spent is the rail. Its reply and its tool calls stream — see `docs/design/ui.md` § Motion and
+structure, which used to forbid that and no longer does.
+
+**The page is a work screen** (`docs/design/ui.md` § The work screen): tabs for Talk, Changes,
+Docs and Activity, a composer that never leaves the viewport, and the rail as a sheet on a phone.
+Two things it adds are this note's to state:
+
+- **A transcript turn carries what the agent did, not only what it said.** The fold that builds
+  the transcript from the event log used to keep four event types and drop the rest, and joined a
+  turn's text blocks with nothing between them — so a turn was one run-on message in which the
+  sentence before a tool call ran into the one after it. It now keeps the turn as a sequence:
+  each text block as its own item, and each `tool_use` paired with its `tool_result` between
+  them, in event order. The page draws that sequence (`docs/design/ui.md` § Talk). Nothing new is
+  recorded; what was already recorded stops being thrown away on the way to the page. Notices and
+  the other harness bookkeeping stay out of the transcript, and in the Activity tab behind their
+  count. A subagent's calls fold under the `Task` that made them (`parent_tool_use_id`), and a
+  subagent's text is not the agent's reply. A result pairs with its call by id wherever the call
+  is, and a message sent mid-turn — recorded at once, and drawn where it was sent — splits the
+  reply on the page without splitting the turn: the turn's end closes both halves. A new process
+  closes a reply the last one was cut off in. The agent wrote every tool input, so a field in the
+  wrong type is read as absent rather than trusted.
+
+  **What was said and what was done are two readings of it.** `Conversations.transcript/1` is the
+  whole sequence and is what the page draws, including a turn that has so far only acted — which
+  is what a live line is. `Conversations.messages/1` is the same fold without the turns that said
+  nothing, because its readers — the queue, the replay a reopened process reads, the reply push —
+  are asking what was *said*: a turn that only acted is not a reply to wait on or to replay. Its
+  `text` is the turn's text blocks with a blank line between each, where it used to be the blocks
+  run together.
+- **The conversation's job is read on its own page, not the job page's.** The job page is a
+  workflow job's, reached from a ticket's timeline; a conversation's events are its Activity tab.
 
 ## Open
 

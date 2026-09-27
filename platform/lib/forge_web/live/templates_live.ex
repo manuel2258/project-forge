@@ -857,7 +857,7 @@ defmodule ForgeWeb.TemplatesLive do
             <span class="text-sm opacity-60">Projects:</span>
             <span
               :for={project <- Map.get(@assignments, template.id, [])}
-              class="flex items-center gap-2 rounded-field border border-base-300 px-3 py-1 text-sm"
+              class="flex items-center gap-1 rounded-field border border-base-300 pl-3 text-sm"
             >
               {project.name}
               <button
@@ -865,7 +865,7 @@ defmodule ForgeWeb.TemplatesLive do
                 phx-click="unassign"
                 phx-value-template={template.id}
                 phx-value-project={project.id}
-                class="opacity-60 hover:opacity-100"
+                class="min-h-[46px] min-w-[46px] opacity-60 hover:opacity-100"
                 aria-label={"Unassign #{project.name}"}
               >
                 ×
@@ -882,11 +882,11 @@ defmodule ForgeWeb.TemplatesLive do
               <input type="hidden" name="template" value={template.id} />
               <select
                 name="project"
-                class="h-[40px] rounded-field border border-base-300 bg-base-100 px-2 text-sm"
+                class="h-[46px] rounded-field border border-base-300 bg-base-100 px-2 text-sm"
               >
                 <option :for={project <- @projects} value={project.id}>{project.name}</option>
               </select>
-              <button type="submit" class="min-h-[40px] text-sm text-primary hover:underline">
+              <button type="submit" class="min-h-[46px] text-sm text-primary hover:underline">
                 Assign
               </button>
             </form>

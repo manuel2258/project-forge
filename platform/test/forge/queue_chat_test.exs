@@ -131,6 +131,18 @@ defmodule Forge.QueueChatTest do
     assert item.detail.question.options == ["postgres", "sqlite"]
   end
 
+  # One conversation's item is the one the queue would list for it — and the queue lists only a
+  # live conversation, whatever its last message says.
+  test "a conversation's own item is the queue's", %{chat: chat} do
+    chat = reply(chat, "It is a game.")
+    assert [%{kind: :chat, detail: %{chat_id: id}}] = Queue.for_chat(chat)
+    assert id == chat.id
+
+    {:ok, ended} = Conversations.ended(chat, nil, "idle")
+    refute :chat in kinds()
+    assert Queue.for_chat(ended) == []
+  end
+
   describe "the notification" do
     setup %{user: user} do
       {:ok, _subscription} =
@@ -152,7 +164,8 @@ defmodule Forge.QueueChatTest do
 
       assert_receive {:push, "https://push.example/a", payload, _opts}, 2_000
       assert payload["body"] == "It is a game about scores."
-      assert payload["url"] == "/chats/#{chat.id}"
+      # To the conversation's work screen, on the tab that holds the reply.
+      assert payload["url"] == "/chats/#{chat.id}?tab=talk"
     end
 
     # The person who interrupted the turn is the person who would be notified about it.

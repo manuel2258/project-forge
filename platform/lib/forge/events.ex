@@ -125,7 +125,21 @@ defmodule Forge.Events do
   @spec subscribe_job(String.t()) :: :ok | {:error, term()}
   def subscribe_job(job_id), do: Phoenix.PubSub.subscribe(Forge.PubSub, job_topic(job_id))
 
+  @doc "Stops the caller hearing one job's events, when a page moves on to another job."
+  @spec unsubscribe_job(String.t()) :: :ok
+  def unsubscribe_job(job_id), do: Phoenix.PubSub.unsubscribe(Forge.PubSub, job_topic(job_id))
+
   defp job_topic(job_id), do: "job:" <> job_id
+
+  @doc """
+  A tool call as one bounded line: its tool's name, then its input as the harness sent it. The
+  agent wrote both, so a name that is not text is left out rather than raised on.
+  """
+  @spec tool_summary(term(), term()) :: String.t()
+  def tool_summary(name, input) do
+    name = if is_binary(name), do: name, else: ""
+    "#{name} #{input |> Jason.encode!() |> String.slice(0, 160)}"
+  end
 
   @doc "A one-line, bounded rendering of an event's payload for lists and logs."
   @spec summary(Event.t()) :: String.t()
@@ -133,7 +147,7 @@ defmodule Forge.Events do
     do: String.slice(text, 0, 200)
 
   def summary(%Event{type: "job.harness.tool_use", payload: %{"name" => name, "input" => input}}),
-    do: "#{name} #{input |> Jason.encode!() |> String.slice(0, 160)}"
+    do: tool_summary(name, input)
 
   def summary(%Event{type: "job.harness.tool_result", payload: %{"bytes" => bytes} = p}),
     do: "#{bytes} bytes#{if p["is_error"], do: " (error)"}"

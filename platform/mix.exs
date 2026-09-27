@@ -29,13 +29,13 @@ defmodule Forge.MixProject do
       #
       # **The floor follows the lowest figure a run produces, not the highest.** The queue, the
       # scheduler and the worker sweeps run on timers, so which of their branches a run reaches
-      # depends on how it was scheduled and the total moves between runs: measured five times on
-      # this tree it reads 86.15% to 86.17%. A floor set from the top of that range would fail
-      # runs with nothing wrong, and a gate that fails at random is a gate people learn to
-      # re-run — so 86 it is, and the next raise waits until the *lowest* observed figure clears
-      # 87.
+      # depends on how it was scheduled and the total moves between runs, by as much as 0.07
+      # points on one tree: measured three times on this one it reads 88.01% to 88.04%. A floor
+      # set from the top of that range would fail runs with nothing wrong, and a gate that fails
+      # at random is a gate people learn to re-run — so 87 it is, and the next raise waits until
+      # the *lowest* observed figure clears 88 by more than that spread.
       test_coverage: [
-        summary: [threshold: 86],
+        summary: [threshold: 87],
         ignore_modules: [
           Forge.AccountsFixtures,
           Forge.DataCase,

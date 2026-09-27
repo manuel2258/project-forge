@@ -46,12 +46,42 @@ defmodule Forge.GitTest do
         "add file"
       ])
 
-    assert {:ok, [_sha]} = Git.commits_since(repo, base, "ticket/1")
+    assert {:ok, [sha]} = Git.commits_since(repo, base, "ticket/1")
+
+    assert {:ok, [%{sha: ^sha, subject: "add file", at: %DateTime{}}]} =
+             Git.log(repo, base, "ticket/1")
+
     assert {:ok, diff} = Git.diff(repo, base, "ticket/1")
     assert diff =~ "+hello"
     assert :ok = Git.worktree_remove(repo, worktree)
     refute File.exists?(worktree)
     assert {:ok, [_sha]} = Git.commits_since(repo, base, "ticket/1")
+  end
+
+  # The Changes tab lists a branch's commits the way `git log` does: the latest on top, which is
+  # the one a person is most likely looking for.
+  test "log/3 lists a branch's commits newest first", %{repo: repo, scratch: scratch} do
+    {:ok, base} = Git.resolve(repo, "main")
+    :ok = Git.create_branch(repo, "ticket/2", base)
+    worktree = Path.join(scratch, "log")
+    :ok = Git.worktree_add(repo, worktree, "ticket/2")
+
+    for subject <- ["first", "second"] do
+      {:ok, _out} =
+        Git.run(worktree, [
+          "-c",
+          "user.name=t",
+          "-c",
+          "user.email=t@t",
+          "commit",
+          "-q",
+          "--allow-empty",
+          "-m",
+          subject
+        ])
+    end
+
+    assert {:ok, [%{subject: "second"}, %{subject: "first"}]} = Git.log(repo, base, "ticket/2")
   end
 
   describe "ensure_initial_commit/2" do

@@ -161,6 +161,15 @@ defmodule ForgeWeb.UserLive.SettingsCredentialsTest do
     assert [%{id: pooled}] = Credentials.pool(project.id, "claude_code")
     assert pooled == credential.id
 
+    # The × is a target like any other: the 46px floor has no phone exception.
+    remove =
+      view
+      |> element(~s(#credential-#{credential.id} button[phx-click=unassign-credential]))
+      |> render()
+
+    assert remove =~ "min-h-[46px]"
+    assert remove =~ "min-w-[46px]"
+
     view
     |> element(~s(#credential-#{credential.id} button[phx-click=unassign-credential]))
     |> render_click()

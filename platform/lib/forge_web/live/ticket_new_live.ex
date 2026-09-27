@@ -99,7 +99,7 @@ defmodule ForgeWeb.TicketNewLive do
     >
       <.link
         navigate={if @fixed, do: ~p"/projects/#{@project.name}", else: ~p"/board"}
-        class="font-mono text-[12.5px] opacity-60 hover:opacity-100"
+        class="flex min-h-[46px] items-center font-mono text-[12.5px] opacity-60 hover:opacity-100"
       >
         ‹ {if @fixed, do: @project.name, else: "Board"}
       </.link>

@@ -179,12 +179,50 @@ defmodule Forge.Git do
     end
   end
 
+  # A path is printed as it is written, not with every byte outside ASCII escaped: `résumé.md`
+  # and not `"r\303\251sum\303\251.md"`. Only a path with a quote, a backslash or a control
+  # character in it is still quoted, the same way in the patch and in `--numstat`, and
+  # `unquote/1` reads it back.
+  @paths_as_written ["-c", "core.quotePath=false"]
+
   @doc "The diff from `base` to `head`, as a patch. `paths` narrows it to those files."
   @spec diff(repo(), sha(), String.t(), [String.t()]) :: {:ok, String.t()} | {:error, term()}
   def diff(repo, base, head, paths \\ []) do
-    args = ["diff", "#{base}..#{head}"]
-    run(repo, if(paths == [], do: args, else: args ++ ["--"] ++ paths))
+    args = @paths_as_written ++ ["diff", "#{base}..#{head}"]
+    run(repo, if(paths == [], do: args, else: args ++ ["--"] ++ paths), stderr: :separate)
   end
+
+  @doc """
+  A path as git prints it, unquoted: git wraps one containing a quote, a backslash or a control
+  character in double quotes with C escapes (`\"`, `\\`, `\t`, octal bytes), and prints any
+  other as it is.
+  """
+  @spec unquote_path(String.t()) :: String.t()
+  def unquote_path("\"" <> quoted) do
+    quoted |> String.trim_trailing("\"") |> unescape(<<>>)
+  end
+
+  def unquote_path(path), do: path
+
+  defp unescape(<<>>, acc), do: acc
+
+  defp unescape(<<"\\", a, b, c, rest::binary>>, acc)
+       when a in ?0..?3 and b in ?0..?7 and c in ?0..?7,
+       do: unescape(rest, <<acc::binary, (a - ?0) * 64 + (b - ?0) * 8 + (c - ?0)>>)
+
+  defp unescape(<<"\\", char, rest::binary>>, acc),
+    do: unescape(rest, <<acc::binary, escaped(char)>>)
+
+  defp unescape(<<char, rest::binary>>, acc), do: unescape(rest, <<acc::binary, char>>)
+
+  defp escaped(?t), do: ?\t
+  defp escaped(?n), do: ?\n
+  defp escaped(?r), do: ?\r
+  defp escaped(?a), do: 7
+  defp escaped(?b), do: ?\b
+  defp escaped(?f), do: ?\f
+  defp escaped(?v), do: ?\v
+  defp escaped(char), do: char
 
   @doc """
   Per-file line counts from `base` to `head`: `{path, added, removed}`, binary files as `:binary`.
@@ -193,14 +231,17 @@ defmodule Forge.Git do
           {:ok, [{String.t(), non_neg_integer() | :binary, non_neg_integer() | :binary}]}
           | {:error, term()}
   def diff_stat(repo, base, head) do
-    with {:ok, out} <- run(repo, ["diff", "--numstat", "#{base}..#{head}"]) do
+    with {:ok, out} <-
+           run(repo, @paths_as_written ++ ["diff", "--numstat", "#{base}..#{head}"],
+             stderr: :separate
+           ) do
       {:ok, out |> String.split("\n", trim: true) |> Enum.map(&numstat_line/1)}
     end
   end
 
   defp numstat_line(line) do
     case String.split(line, "\t", parts: 3) do
-      [added, removed, path] -> {path, count(added), count(removed)}
+      [added, removed, path] -> {unquote_path(path), count(added), count(removed)}
       _other -> {line, :binary, :binary}
     end
   end
@@ -227,6 +268,31 @@ defmodule Forge.Git do
   def commits_since(repo, base, head) do
     with {:ok, out} <- run(repo, ["rev-list", "#{base}..#{head}"]) do
       {:ok, String.split(out, "\n", trim: true)}
+    end
+  end
+
+  @doc """
+  The commits on `head` since `base`, newest first: sha, subject, and when each was committed.
+  The same range as `commits_since/3`, with what a list of commits shows a person.
+  """
+  @spec log(repo(), String.t(), String.t()) ::
+          {:ok, [%{sha: sha(), subject: String.t(), at: DateTime.t()}]} | {:error, term()}
+  def log(repo, base, head) do
+    with {:ok, out} <-
+           run(repo, ["log", "--format=%H%x1f%ct%x1f%s", "#{base}..#{head}"], stderr: :separate) do
+      {:ok, out |> String.split("\n", trim: true) |> Enum.flat_map(&log_line/1)}
+    end
+  end
+
+  # A line that is not one of ours is skipped rather than raised on: the list is for reading,
+  # and a page that shows it should not be the thing a surprise from git takes down.
+  defp log_line(line) do
+    with [sha, time, subject] <- String.split(line, "\x1f", parts: 3),
+         {seconds, ""} <- Integer.parse(time),
+         {:ok, at} <- DateTime.from_unix(seconds) do
+      [%{sha: sha, subject: subject, at: at}]
+    else
+      _other -> []
     end
   end
 

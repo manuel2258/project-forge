@@ -97,18 +97,22 @@ defmodule ForgeWeb.Operator.Components do
   The list inside carries `data-scroll-items`; its children are what gets counted.
   """
   attr :id, :string, required: true
-  attr :height, :string, default: "60vh", doc: "max height; the pane scrolls past it"
+
+  attr :height, :any,
+    default: "60vh",
+    doc: "max height; the pane scrolls past it. Nil fills what its flex parent leaves"
+
   attr :class, :string, default: nil
   slot :inner_block, required: true
 
   def scroll_pane(assigns) do
     ~H"""
-    <div class="relative">
+    <div class={["relative", is_nil(@height) && "flex min-h-0 flex-1 flex-col"]}>
       <div
         id={@id}
         phx-hook=".StickToBottom"
-        class={["overflow-y-auto overscroll-contain", @class]}
-        style={"max-height: #{@height}"}
+        class={["overflow-y-auto overscroll-contain", is_nil(@height) && "min-h-0 flex-1", @class]}
+        style={@height && "max-height: #{@height}"}
       >
         {render_slot(@inner_block)}
       </div>
@@ -261,6 +265,33 @@ defmodule ForgeWeb.Operator.Components do
           Send
         </button>
       </form>
+    </div>
+    """
+  end
+
+  @doc """
+  One document's blocking questions, answered where they are: a card each, and — when every one
+  has a recommendation — one row that accepts them all. The queue draws a stopped job with this,
+  and so does a ticket's Decide tab, so the two are the same gesture.
+  """
+  attr :questions, :list, required: true
+  attr :ticket_id, :string, required: true
+  attr :version_id, :string, required: true
+
+  def questions(assigns) do
+    ~H"""
+    <div class="flex flex-col gap-4">
+      <.answer_row
+        :if={length(@questions) > 1 and Enum.all?(@questions, & &1.default)}
+        phx-click="answer_all"
+        phx-disable-with="Sending…"
+        phx-value-ticket={@ticket_id}
+        phx-value-version={@version_id}
+      >
+        Accept all {length(@questions)} recommendations
+      </.answer_row>
+
+      <.question_card :for={question <- @questions} question={question} ticket_id={@ticket_id} />
     </div>
     """
   end

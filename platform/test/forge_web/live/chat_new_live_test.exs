@@ -103,8 +103,18 @@ defmodule ForgeWeb.ChatNewLiveTest do
   test "the first message box sends on enter too", %{conn: conn, project: project} do
     {:ok, _view, html} = live(conn, ~p"/chats/new?project=#{project.name}")
 
-    assert html =~ "SendOnEnter"
+    assert html =~ ~s(phx-hook="ForgeWeb.Conversations.Composer")
+    assert html =~ ~s|data-newline-on="(pointer: coarse)"|
     assert html =~ "Enter sends"
+  end
+
+  # The first message can arrive in the address; only text is taken from it.
+  test "takes the first message from the address, and only text", %{conn: conn, project: project} do
+    {:ok, view, _html} = live(conn, ~p"/chats/new?project=#{project.name}&text=lib/a.ex:3")
+    assert view |> element("#chat_text") |> render() =~ "lib/a.ex:3"
+
+    {:ok, view, _html} = live(conn, "/chats/new?project=#{project.name}&text[a]=b")
+    refute view |> element("#chat_text") |> render() =~ "%{"
   end
 
   test "it will not start one with nothing said", %{conn: conn, project: project} do

@@ -9,6 +9,13 @@ queue is an inbox rather than a dashboard. Exactly one thing in the interface is
 loud — an item waiting on a human — and it is marked in accent, which is used for nothing else.
 Everything else is ruled, monochrome and quiet.
 
+**A phone can do everything a laptop can.** The layout changes with the width; what an operator
+can reach and do does not. This reverses an earlier reading — *the phone is where decisions are
+answered*, and so Workers, Chats, the create actions, settings and the capacity gauge were laptop
+only — which held while the phone was an inbox and stopped holding once it became the client an
+operator develops from when away from the laptop. Where a rule below still says *laptop*, it is
+about arrangement, never about reach. See § The phone and § The work screen.
+
 Source material for this note is the redesign handoff vendored under `docs/design/ui/`:
 `forge Spec.html` is the specification and `forge Mockups.html` is the evidence. Where this note
 and those files differ, this note wins — it is the one that tracks what was built.
@@ -67,7 +74,8 @@ on these two faces — the system stack is a supported fallback.
 
 | Role | Tailwind | Used for |
 |---|---|---|
-| Page title | `text-3xl/tight -tracking-[.03em] font-semibold` | Ticket title |
+| Page title | `text-[23px] sm:text-3xl -tracking-[.03em] font-semibold` | A ticket's title on its review page |
+| Work-screen title | `text-xl sm:text-2xl -tracking-[.03em] font-semibold`, truncated | A ticket's title on its work screen, whose header gives way first when the frame is short (§ The work screen) |
 | Section title | `text-2xl -tracking-[.025em] font-semibold` | Queue, Board |
 | Decision sentence | `text-xl/[1.3] font-medium` | The one sentence per queue item stating what is asked |
 | Declared outcome | `font-mono text-3xl` / `text-xs` | Job page headline / jobs-table column |
@@ -131,11 +139,11 @@ measure; each route sets its own:
 | `/workers/:id` | 74rem | One machine: its header line and its log, newest first. The workers page's measure, because it is that page's row, looked at alone. |
 | `/templates` | 60rem | Two lists with a form each — provider credentials, then templates. Not one wide table, so narrower than `/workers`; a template row carries its shape, figures, count and actions, and wraps where they do not fit. |
 | `/projects/:name/settings` | 48rem | Forms and tables — tokens, people, mirrors. Narrower loses the row; wider is a rail with nothing to put in it. |
-| `/tickets/:project/:number` | 74rem | 53rem timeline column plus a 21rem facts rail, divided by a 1px rule. Below `lg` the rail moves under the timeline. |
-| `…/review` | 74rem | Same frame. The diff needs the width; the rail carries the evidence. |
-| `…/jobs/:job_id` | 74rem | Same frame. Manifest in the rail, the recorded harness stream in the column — not live (§ Motion and structure). |
+| `/tickets/:project/:number` | 74rem | A work screen (§ The work screen): 53rem tabbed column plus a 21rem facts rail, divided by a 1px rule. Below `lg` the rail is the details sheet, opened from the context strip. |
+| `…/review` | 74rem | Not a work screen: a page that scrolls, its column beside a 21rem rail at `lg` and above it below. The diff needs the width; the rail carries the evidence. |
+| `…/jobs/:job_id` | 74rem | Laid out as the review page is. Manifest in the rail, the harness stream in the column — a bounded pane, since no tab body bounds it here — tailed while the job runs (§ Motion and structure). |
 | `/chats` | 34rem | One ordered list, so the queue's measure and for the queue's reason: width only lets a second row compete for the same glance. |
-| `/chats/:id` | 74rem | Same frame again: a conversation is work with a branch, a cost and a record. The talking is the column; what it cost and what it wrote is the rail. |
+| `/chats/:id` | 74rem | The same work screen: a conversation is work with a branch, a cost and a record. The tabs are the column; what it cost and its facts are the rail, or the details sheet below `lg`. |
 | `/chats/new` | 34rem | The first message is prose and needs the queue's measure, not a form field's — the same reason `/tickets/new` has it. |
 | `/projects/new` | 26rem | A short form. Same frame as log-in, for the same reason. |
 | `/tickets/new` | 34rem | The body is prose and needs the queue's measure, not a form field's. |
@@ -143,41 +151,38 @@ measure; each route sets its own:
 | `/accounts` | 48rem | Two lists of addresses with a row of decisions each, so the settings page's measure and for its reason: the row is what has to fit. |
 | `/users/pending` | 34rem | A sentence and one button. The queue's measure because it is a single column of prose, and the only route that draws the layout **without its nav** — every link in it leads somewhere this account is redirected away from. |
 
-Navigation is a fixed bottom bar on a phone (56px plus safe-area inset, each item a full-height
-tap target, Queue carrying the only badge in the product) and a hairline-ruled top row on a
-laptop. **No hamburger at any width.** The phone bar carries Queue and Board; it gains Tickets as
-a third item when `/tickets` exists, and not before. **The laptop row carries Workers and Chats as
-well, and the phone bar does not** — the phone is where decisions are answered and a machine is
-never a decision. Nothing on `/workers` waits on a human, which is also why nothing on it is
-accent.
+Navigation is a hairline-ruled top row on a laptop and a fixed bottom bar on a phone (56px plus
+safe-area inset, each item a full-height tap target, Queue carrying the only badge in the
+product). The laptop row carries Queue, Board, Workers and Chats; the phone bar carries Queue,
+Board, Chats and **More**, and everything else the laptop header holds is in the sheet More
+opens (§ The phone). Tickets joins both when `/tickets` exists, and not before. Nothing on
+`/workers` waits on a human, which is why nothing on it is accent.
 
-**Accounts is not in either.** It is one link beside the address in the laptop header, shown
-only to a node admin, because account governance is not a place work happens and most accounts
-never reach it. It needs *a* link all the same: it is the only surface the approval perimeter
-has, and without one nobody can discover that somebody is waiting. See
-`design/identity.md` § Approval.
+**Accounts is not a nav item.** It is one link beside the address in the laptop header and one
+row in the phone's sheet, shown only to a node admin, because account governance is not a place
+work happens and most accounts never reach it. It needs *a* link all the same: it is the only
+surface the approval perimeter has, and without one nobody can discover that somebody is
+waiting. See `design/identity.md` § Approval.
 
-**Chats is on the laptop row for a different reason, and it is worth separating them.** A
-conversation *does* wait on a human — but when it does it is already in the queue, with its
-question and its answer rows, which is where an operator meets it on a phone. `/chats` is for
-finding a conversation again: the one you had about the parser last week, the one still running
-that you closed the tab on. That is a laptop errand. A conversation that needs you does not wait
-for you to go looking.
+**Chats is a destination on both.** A conversation that waits on a human is already in the
+queue with its answer rows; `/chats` is for finding one again — the one about the parser last
+week, the one still running whose tab was closed. That used to be called a laptop errand. It is
+not: on a phone it is how you get back to the work you were doing.
+
 Ticket, job and artifact are pushed views with a back affordance naming where you came from, not
-tabs.
+tabs in the nav. (The work screen has tabs *inside* it — § The work screen — which is a different
+thing: they are views of one piece of work, not places.)
 
 ## Motion and structure
 
 Motion is minimal and respects `prefers-reduced-motion`. **Nothing pulses and nothing is
 decorative.** No spinner that conveys nothing, no shimmer, no animation that exists to look busy.
 
-**Live output is allowed where a person is waiting for it.** This reverses a rule that said
-otherwise — see the note below — so: a conversation streams its reply as it arrives, and a job
-may show its stream while it runs. Neither auto-scrolls away from something you are reading; a
-view that has been scrolled up stays there and says how much arrived beneath. **Only the
-conversation does so today.** The job page draws what was recorded and re-reads it when its
-ticket changes; it does not subscribe to a running job's events, so a live job stream is not
-built.
+**Live output is allowed where a person is looking at the work.** This reverses a rule that said
+otherwise — see the note below — so: a conversation streams its reply and its tool calls as they
+arrive, and a ticket's running job streams its activity to the ticket's work screen and to its
+job page (§ The work screen). None of them auto-scrolls away from something you are reading; a
+view that has been scrolled up stays there and says how much arrived beneath.
 
 **Output that accumulates scrolls inside itself rather than growing the page.** A conversation's
 messages and a job's stream are both bounded panes, because a page that grows downwards moves the
@@ -190,9 +195,10 @@ beneath. A job's stream is newest first and needs no pinning at all: what arrive
 top, where the reader already is, and pinning it to the bottom would scroll away from the newest
 entry to reach the oldest.
 
-Where nobody is waiting, nothing streams. The board does not animate, the queue does not
-rearrange itself under a thumb, and a finished job's stream is paged, newest first, headed by its
-completion state and entry count.
+Where nobody is looking at the work, nothing streams. The board does not animate, the queue does
+not rearrange itself under a thumb, and a finished job's stream is paged, newest first, headed by
+its completion state and entry count. Live is a property of a page about *one* piece of work that
+the operator opened, never of a list of many.
 
 **The stream shows what the job did, not what the harness said about itself.** Claude Code turns
 every `system` message into a `notice` event, and `thinking_tokens` alone can outnumber
@@ -209,6 +215,15 @@ streaming log, no activity feed — nothing that invites watching agents work", 
 operator's attention on nothing. It was overstated into a prohibition on live output as such,
 which also forbids the case where the operator is the one who asked the question and is waiting
 for the answer. The distinction is who is waiting, not whether bytes move.
+
+**It was then narrowed a second time, to "who is looking".** The first reversal still kept a
+workflow job's stream recorded-only, on the grounds that a workflow job runs unattended. That is
+true of the job and not of the operator who has opened its ticket: someone reading a ticket
+whose job is running is deciding whether to wait, answer, or steer, and a stream that only
+refreshes on reload makes them guess. What `vision.md` warns against is a surface that *invites*
+watching — a feed of many agents, or one that pulls you in. A ticket nobody opens streams to
+nobody, and no list, board or queue ever streams, so the budget the rule protected is still
+protected.
 
 ## Semantics that must not be lost
 
@@ -295,6 +310,204 @@ and the end of the queue:
   next on the ticket; a waiting job resumes only once no *blocking* question is open, and a
   non-blocking answer closes none (`job-prompt.md` § Non-blocking questions).
 
+## The work screen
+
+A conversation and a ticket are both *one piece of work*: a branch, a record, a cost, and something
+that may be waiting on you. `/chats/:id` and `/tickets/:project/:number` are drawn in one frame,
+from one set of components, so that steering a conversation and steering a workflow are the same
+gesture on the same screen. The frame exists
+because the phone is where an operator develops when away from the laptop, and developing needs the
+change, the documents and what the agent actually did within a tap of the place you type — not
+three pages away, and not below a pane that will not let you scroll past it.
+
+**The frame fills the viewport exactly, at every width.** `100dvh`, less nothing: a fixed header,
+a fixed tab row, a body that is the page's only scroller, and on a conversation a fixed composer.
+The page never scrolls as a whole, so the box you type in is never below the fold. On a phone the
+bottom bar is not drawn on a work screen — the header's back affordance and the composer take its
+place, as in any messaging app — and the composer sits above the safe-area inset. The viewport
+declares `interactive-widget=resizes-content`, and a hook sizes the frame from `visualViewport`
+where the browser ignores that, so the on-screen keyboard pushes the composer up rather than
+covering it.
+
+**Header.** The back affordance naming where you came from, the title (*Conversation*, or the
+ticket's title on one line), and the state, status and flags per § The three axes. On a phone a
+conversation's back affordance and status share one line and *Conversation* is for assistive
+technology only: every line of header is a line the transcript does not have. When the frame is
+shorter than everything fixed in it — the keyboard is up — the header and the strip are what
+give way, clipped, so the tabs and the composer stay. Beneath it, one
+line — the **context strip** — of identifiers: the branch, `+added −removed` over N files, turns,
+what it has spent in the same form the rail uses, and the compact capacity gauge for the page's
+pool. On a phone, tapping the strip opens the **details sheet** (the More sheet's component,
+§ The phone): everything the laptop rail holds, including *End it* and its confirm. At `lg` and up
+the rail is drawn beside the body as it is today and the strip opens nothing: it is still the
+same button in the markup, taking no pointer and reachable from the keyboard, and the sheet
+declines to open where it is the rail. One element at every width keeps the strip's identifiers
+drawn once; the cost is a tab stop that does nothing on a laptop.
+
+**Tabs.** A row of 46px tabs under the header, each with a count where one is meaningful; a
+count of zero is drawn muted, never hidden, so tabs never move. The tab is in the URL
+(`?tab=changes`, by patch) so back, reload and a pushed link land on it.
+
+| | Conversation | Ticket |
+|---|---|---|
+| first tab | **Talk** — default | **Decide** (open decisions) — default while anything waits |
+| | **Changes** (files) | **Timeline** — default otherwise |
+| | **Docs** (documents written) | **Changes** (files) |
+| | **Activity** | **Docs** |
+| | | **Activity** |
+
+### Talk
+
+The transcript, pinned to the bottom per § Motion and structure, then from the bottom up: the
+composer, the now line, and any open question's answer rows.
+
+- **The transcript is the turn in the order it happened**, not one message per speaker. A turn
+  is its text blocks with the agent's actions between them, read from the event log in sequence.
+  Every block is its own box, full width on both sides: a micro label naming the speaker
+  (*you · 3m*, *agent · turn 4*) heads each speaker's run, your messages on `base-200`, the
+  agent's on `base-100` with a border, and one agent box per text block — two blocks are two
+  things said on either side of some work, and joining them ran the last sentence of one into
+  the first of the next.
+- **Actions sit between the boxes**, unboxed, one mono line each, in info colour per § Colour:
+
+  | Call | Line |
+  |---|---|
+  | `Edit`, `MultiEdit`, `Write`, `NotebookEdit` | `✎ path +n −m`; expands to the change as a small diff |
+  | `Bash` | `$ command` and ✓ or ✗; a failure shows its excerpt's first lines unasked |
+  | `Read`, `Grep`, `Glob`, `LS` in a row | one line for the run — *read 6 files · searched 2×* — expanding to the list |
+  | `TodoWrite` | the agent's plan as a checklist, redrawn in place rather than repeated |
+  | `Task` | `⤷ description`, the subagent's own calls (by `parent_tool_use_id`) folded under it |
+  | `WebFetch`, `WebSearch` | `↗ url`, `? query` |
+  | anything else | `name` and its summary as the job page draws it |
+
+  Any result with `is_error` is in error colour with its excerpt shown. A retry or a rate limit is
+  not a line: it is what the now line says (below). Notices, `control` and `delivered` are not
+  drawn, per § Motion and structure.
+- **Live, every line; finished, each run folded.** While a turn is open its action lines appear as
+  their events arrive. When it ends, each run of actions between two text boxes folds into one
+  line — *11 actions · edited parser.ex, lexer.ex · mix test ✗→✓* — that expands in place. An
+  error in a folded run keeps its line visible, so a scroll back through the transcript is the
+  conversation plus whatever went wrong.
+- **A message keeps the line breaks it was written with.** A chat message is not a document: a
+  single newline is a break, where Markdown would join the lines into one paragraph. On a phone,
+  Enter is how a line is ended, so a transcript that drops single newlines drops the shape of
+  every message typed there. This is a rule of the transcript's styles; § Documents is unchanged.
+- **The now line** is drawn only while a turn is open: the call that has no result yet, in
+  words — *running mix test*, *editing lexer.ex*, *reading router.ex* — or *retrying (2 of 10)*,
+  or *rate limited, resumes 14:00 UTC*; with no call in flight, while the agent is writing, an
+  ellipsis; static text, nothing pulsing, with **Stop** and **Interrupt and send** beside it. The agent's latest `TodoWrite` list sits above it, collapsed to its
+  current item, so where the agent is in its own plan is visible without scrolling. When no turn is open the composer is the box
+  and Send alone.
+- **Answer rows** for the last message's question dock directly above the composer while it is
+  open, so a one-tap answer is under the thumb. Free text is the composer itself.
+- **The composer** grows from one line to six and then scrolls inside itself. Send is a 46px
+  square with a label for assistive technology. Enter sends where the primary pointer is fine; on
+  a coarse pointer (`(pointer: coarse)`) Enter is a new line and only Send sends, because a phone
+  keyboard has no shift-enter and a composer that cannot take a second line cannot take a
+  message. The hint names the gesture that applies and is drawn only for a fine pointer. This is
+  `message_box`'s behaviour, so it holds everywhere a message is typed.
+- **A stopped conversation** replaces the composer, in the same place, with the reopen sentence
+  and **Reopen**.
+
+### Changes
+
+What the branch holds against its base, bounded per § Semantics that must not be lost.
+
+- The file table, never truncated; a row expands to its own patch in place.
+- **The commits on the branch** since its base: short sha, subject, age.
+- **Ask about this** on each file row and each hunk header: a control beside the row, never inside
+  a navigating region (§ The affordance rule), which puts `path:line` into the composer's draft
+  and switches to Talk. On a ticket there is no composer, so it goes to the ticket's most recent
+  live conversation with the reference in its draft, or to `/chats/new` for the ticket with it in
+  the first message when none is live — the reference travels in the URL and nothing is sent
+  until the operator sends it.
+- A conversation's **merge** and its conflict sentence are here, as they were beneath the diff.
+  A ticket's changeset approval is here too, *when it is what is waiting*: the same approval card
+  Decide draws, from the same component and the same event, at the foot of the diff it approves.
+  Reading a change and approving it are adjacent; they are still two gestures.
+- The review page stays: it is where *what it was built from* and *questions answered* sit beside
+  the diff, and the queue's review items link there. Changes links to it when the ticket has a
+  changeset.
+
+### Docs
+
+Every document written, **rendered** per § Documents — a conversation's included, which until
+now could only be opened as source. Latest version of each first, earlier versions as links to
+their addresses, approval marks only where approval is possible. What the last turn wrote that
+was not recorded is listed beneath, with why.
+
+### Activity
+
+The event stream of the conversation's job, or of the ticket's current job with its earlier jobs
+linked to their pages, newest first, notices behind their count. Its tool calls are drawn with
+the action lines of § Talk, each carrying its result — a result is not a row of its own — the same component, so an edit, a command and a failure read the
+same whether a conversation or a workflow job made them — and the job page draws them the same
+way; every other event keeps the job page's row. **Live while the job runs**, on a conversation and on a ticket alike (§ Motion
+and structure). A conversation's job is not opened on the job page; this tab is where it is read.
+The job page itself tails its job while it runs, for the same reason.
+
+### Decide and Timeline (ticket)
+
+**Decide** is the ticket's *Waiting on you*: its blocking questions, approval card and
+transition card, drawn with the queue's components — a document's questions with *Accept all*
+when every one has a recommendation — answering in place and never navigating. Its count is what
+the queue would count for this ticket (`Queue.for_ticket/1`), and it shows what it counts. With
+nothing waiting it says so and names what would put something there. Beneath, without accent and
+under no count, is what an agent **assumed and carried on from**: the non-blocking questions the
+queue's digest sends here to be answered (§ Not waiting on you).
+
+**Timeline** is the ticket's body, the steps and job rows, and then **the ticket's
+conversations**, live first, with *New chat* beside their heading — a conversation started from a
+ticket used to be findable from the project page and not from the ticket it is about.
+
+## The phone
+
+Below `sm` the shell is the bottom bar — Queue, Board, Chats, More — and every page reflows to one
+column. Nothing is removed at this width; § The work screen is the one page with its own frame.
+
+**More opens a sheet**, a native `<dialog>` drawn as a bottom sheet, opened with `showModal()`
+from a dispatched event and closed by Escape, a tap on the backdrop, or navigating. Focus and
+inertness come from the element rather than from code. In order: the capacity gauge with its
+detail written out (§ The capacity gauge in the top bar); Workers, Templates, New project, and
+Accounts for a node admin; then the account's address, which opens settings, the theme toggle,
+and Log out. Every row is a 46px target. Logged out there is no More, and so no theme toggle
+where a laptop's top row has one: what a logged-out phone reaches is the log-in forms, and the
+theme there is the system's, as it is everywhere until someone picks one.
+
+**This is the menu the note used to forbid** — *no hamburger at any width*. The objection was to
+hiding the product's places behind a control, and it was right for the places that matter most:
+Queue, Board and Chats stay one tap away on the bar. What the sheet holds is the rest of what a
+laptop reaches from its top row — Workers from its nav, Templates from the Workers page, the
+gauge, New project, Accounts and the account from the header's right-hand group — and the
+alternative was not having them on a phone at all.
+
+**The board stacks below `sm`.** Each state is a section — its name with the topology glyph and
+count, then its tickets — in the same order the columns take on a laptop, so the workflow still
+reads top to bottom as it reads left to right. A state with nothing in it is its heading and a
+muted 0, not a placeholder sentence. **"N more" expands its column in place**, at every width: it
+is a control, not a caption, and the tickets it reveals are already on the page. The four-row cap
+exists so a column never grows its own scrollbar; expanding one lets the page scroll instead,
+which is § The project page's reasoning applied to one column on request.
+
+**Tables reflow below `sm`.** A project's tokens and mirrors, and a project's workflow table,
+become one block per row: the row's identity on the first line, then label and value pairs. A
+control stays in the cell it acts on — a token's *Revoke*, a mirror's *Remove* — and there it is
+a full-width bordered 46px button (`reflow-control` in `app.css`). From `sm` up they are tables.
+A table that scrolls sideways hides its controls off the right edge, which on a row whose last
+column is the decision is hiding the decision. The workers page is not a table at all: a
+machine is a block at every width (§ The workers page).
+
+**The 46px floor has no phone exception** (§ Space, measure and targets): an `×` that removes an
+assignment or a credential, the theme toggle's buttons, and a form's select are targets like any
+other.
+
+**Push follows the queue.** Anything that starts waiting on a human pushes to the phones of the
+people in its project — a blocking question, an approval, a stuck ticket, a ticket ready for
+review, a conversation's reply — and links to the work screen on the tab that holds it: Decide
+for a ticket, Talk for a conversation. An assumption, which waits on nobody, is digested. The rule
+is `Queue.waiting?/1`, not a list kept beside it, so a queue kind added later pushes or does not
+for the same reason.
+
 ## Creating things
 
 **Where the two create actions live, and why they are not in the same place.** A project is made
@@ -304,9 +517,9 @@ always made *for a project*, so it is offered on the project page — and on the
 has just made one — and nowhere else: the queue is an inbox and the board is every project at
 once, and neither has a project to make a ticket for.
 
-Both are laptop-only, because the header is. That is the same reasoning as the workers page: the
-phone is where decisions are answered, and creating a project is not a decision waiting on
-anyone.
+On a phone, New project is a row in the More sheet, and the project page offers New ticket and
+New chat exactly as it does on a laptop. They used to be laptop-only, on the reasoning that the
+phone is where decisions are answered; § The phone records why that no longer holds.
 
 **A ticket form reached from a project does not ask which project.** It says which one, as an
 identifier, and the select appears only on the bare `/tickets/new` — a route nothing links to,
@@ -332,7 +545,7 @@ A project and a ticket are made in the product. A **workflow is not**: it is
 `.forge/workflow.yml` in the project's own repository, read at the ticket's base commit and
 pinned at admission, so it versions with the code it governs and there is nothing for a form to
 edit. The two create views are pushed views with a back affordance. A project's is reached from
-the laptop top bar, and from the board and the ticket form only when there are no projects at
+the laptop top bar or the phone's More sheet, and from the board and the ticket form only when there are no projects at
 all; a ticket's from the project page, and from the project's create view once it exists. The
 queue links to neither.
 
@@ -465,8 +678,12 @@ soonest reset Fri 14:00 UTC* — and whose they are is the page's: a project's p
 that project (the project, its settings, a ticket, its review, a job, a conversation), the
 viewer's own everywhere else (`design/credentials.md` § Showing the windows). A set in which
 nothing has reported a window draws nothing at all, rather than an empty gauge. It is redrawn
-every minute while the page is open, since the countdown is to a moment. Laptop only, like the
-header: it is not a decision.
+every minute while the page is open, since the countdown is to a moment.
+
+**On a phone it is the first thing in the More sheet**, and there its title is written out as a
+line of text under each window, because a phone has no hover and a figure whose meaning lives in
+a tooltip is a figure without one there. The work screen's context strip carries the compact
+form (§ The work screen).
 
 ## The workers page
 
@@ -668,7 +885,8 @@ appears nowhere in this product for the same reason approval attaches to a versi
 name.
 
 - A **document** serves its stored text as `text/plain`, front matter included. The rendered view
-  is on the ticket; this route is the source behind it.
+  is a work screen's Docs tab — the ticket's or the conversation's; this route is the source
+  behind it.
 - A **blob** is fetched from the store by its key and served as `text/plain` when it is text.
 - A **changeset** is not a file. `git:<sha>` names a commit, so the changeset links to `…/review`,
   which is the rendering of a diff. Nothing tries to serve it as bytes.
@@ -685,4 +903,4 @@ Named so their absence is a decision rather than an oversight. Each is specified
 - Message state (queued, retrying, failed, confirmed) and the client outbox with an idempotency
   key per answer. Until it lands, a send is confirmed by the flash the framework already shows.
 - Document-with-margin-questions at laptop width.
-- The `/tickets` finder. Until it exists the phone bar carries two items, not three.
+- The `/tickets` finder. Until it exists neither the laptop row nor the phone bar has Tickets.

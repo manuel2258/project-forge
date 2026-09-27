@@ -72,15 +72,21 @@ These decisions are settled. They are not to be reopened.
 
 - A mobile-first web application; a native client is possible later. The API is the product surface.
 - The home screen is a queue, not a dashboard: blocking questions, transition approvals, experiment requests, promotion decisions and review-ready tickets in one ordered list, answerable in sequence.
-- Push notification for blocking questions and for a conversation's completed replies; everything
-  else digested. *The conversation half widens an earlier decision: a reply to a question you
-  asked is the same shape of thing as an answer you are owed. See `docs/design/conversations.md`
-  § In the queue, and on the phone.*
+- Push notification for everything that starts waiting on a human — a blocking question, an
+  approval, a stuck ticket, a ticket ready for review, a conversation's completed reply — and
+  nothing else; assumptions and the rest are digested. The rule is the queue's own
+  `waiting?/1`. *Widens an earlier decision twice: first for a conversation's replies, a reply to a
+  question you asked being the same shape of thing as an answer you are owed
+  (`docs/design/conversations.md` § In the queue, and on the phone); then to every waiting kind,
+  once the phone became a client the operator develops from rather than an inbox for questions.
+  See `docs/design/ui.md` § The phone.*
 - Additional views: ticket timeline, job view showing the pinned input manifest, board, and merge approval showing the diff alongside the verification report, the documents the change was built from, the questions answered, and total cost.
-- Live output is shown where the operator is waiting for it — a conversation's reply, and a
-  running job's stream — and nowhere else. *Reverses an earlier decision ("there is no live
-  transcript view"), which generalised a true point about unattended work into a ban on live
-  output as such. `docs/design/ui.md` § Motion and structure carries the distinction.*
+- Live output is shown on a page about one piece of work that the operator has opened — a
+  conversation's reply and tool calls, a ticket's running job, a job's stream — and never on a
+  list, board or queue. *Reverses an earlier decision ("there is no live transcript view"), which
+  generalised a true point about unattended work into a ban on live output as such, and then
+  narrows its first replacement ("where the operator is waiting for it") from who is waiting to
+  who is looking. `docs/design/ui.md` § Motion and structure carries the distinction.*
 - Ticket proposals are digested, never queued: the queue's decisions are what will not move until
   a person acts, and a proposal blocks nothing. *The queue also serves open non-blocking
   questions, beneath its decisions and in no count of what is waiting (`docs/design/ui.md` § Not

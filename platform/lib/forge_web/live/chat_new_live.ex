@@ -42,13 +42,20 @@ defmodule ForgeWeb.ChatNewLive do
        offered: Workers.offered(project && project.id),
        defaults: defaults,
        # Empty means the platform's, which is what each placeholder says. All three are fixed
-       # when the harness process starts, so this is the only moment they can be chosen.
+       # when the harness process starts, so this is the only moment they can be chosen. The
+       # first message may arrive in the address — *Ask about this* on a ticket's Changes — and
+       # is only put in the box: nothing starts until Start (`docs/design/ui.md` § Changes).
        form:
-         to_form(%{"project" => project && project.name, "text" => "", "model" => ""},
+         to_form(
+           %{"project" => project && project.name, "text" => text(params["text"]), "model" => ""},
            as: :chat
          )
      )}
   end
+
+  # Only text: `?text[a]=b` is a map, and a box cannot hold one.
+  defp text(text) when is_binary(text), do: text
+  defp text(_absent_or_not_text), do: ""
 
   # A named project is resolved through `Access` so that naming one you are not in is a 404 and
   # not a form you can submit; an unnamed one falls to the first you are in, the way the bare
@@ -174,7 +181,7 @@ defmodule ForgeWeb.ChatNewLive do
     >
       <.link
         navigate={back(@fixed, @project, @ticket)}
-        class="font-mono text-[12.5px] opacity-60 hover:opacity-100"
+        class="flex min-h-[46px] items-center font-mono text-[12.5px] opacity-60 hover:opacity-100"
       >
         ‹ {where(@fixed, @project, @ticket)}
       </.link>

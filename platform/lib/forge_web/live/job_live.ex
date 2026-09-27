@@ -6,12 +6,12 @@ defmodule ForgeWeb.JobLive do
   import ForgeWeb.Indicators
 
   alias Forge.{Artifacts, Events, Jobs, Tickets}
-  alias ForgeWeb.{Format, Indicators}
+  alias ForgeWeb.{Format, Indicators, JobStream, WorkScreen}
 
-  # Newest first, 50 at a time. A finished job's stream is read backwards from its outcome, not
-  # watched forwards — see docs/design/ui.md § Motion and structure, which now permits live
-  # output where someone is waiting for it and still does not want it here.
-  @page 50
+  # Newest first, a page at a time (`ForgeWeb.JobStream`). A finished job's stream is read
+  # backwards from its outcome; a running one's is tailed, because someone who opened it is
+  # looking at that one piece of work (`docs/design/ui.md` § Motion and structure). Newest first
+  # needs no pinning: what arrives appears at the top, where the reader already is.
 
   @impl true
   def mount(%{"project" => name, "number" => number, "job_id" => job_id}, _session, socket) do
@@ -22,11 +22,15 @@ defmodule ForgeWeb.JobLive do
       Enum.find(Jobs.for_ticket(ticket.id), &(&1.id == job_id)) ||
         raise Ecto.NoResultsError, queryable: Jobs.Job
 
-    if connected?(socket), do: Events.subscribe()
+    if connected?(socket) do
+      Events.subscribe()
+      Events.subscribe_job(job.id)
+    end
 
     {:ok,
      socket
-     |> assign(project: project, ticket: ticket, job_id: job.id, shown: @page, notices: false)
+     |> assign(project: project, ticket: ticket, job_id: job.id)
+     |> JobStream.init()
      |> ForgeWeb.Capacity.project(project)
      |> load()}
   end
@@ -46,43 +50,35 @@ defmodule ForgeWeb.JobLive do
     )
   end
 
+  # Per job, so the subscription is the filter. What the harness streams is added to the log the
+  # page holds (`ForgeWeb.JobStream`); anything else on the topic — a wait, the run ending —
+  # reloads. Adding rather than reloading is a saving and not a behaviour — this page holds
+  # nothing a reload takes away — so the `streamed?/1` test answering false here is an
+  # equivalent mutant: what it saves is the job, its spec and its log read again per event.
   @impl true
+  def handle_info({:job_event, id, event}, %{assigns: %{job_id: id}} = socket) do
+    if JobStream.streamed?(event) do
+      case JobStream.add(socket.assigns.events, event) do
+        :seen -> {:noreply, socket}
+        {:ok, events} -> {:noreply, assign(socket, events: events)}
+      end
+    else
+      {:noreply, load(socket)}
+    end
+  end
+
+  def handle_info({:job_event, _id, _event}, socket), do: {:noreply, socket}
+
   def handle_info({:ticket_changed, id}, %{assigns: %{ticket: %{id: id}}} = socket),
     do: {:noreply, load(socket)}
 
   def handle_info({:ticket_changed, _}, socket), do: {:noreply, socket}
 
   @impl true
-  def handle_event("more", _params, socket),
-    do: {:noreply, update(socket, :shown, &(&1 + @page))}
+  def handle_event("more", params, socket), do: JobStream.handle_event("more", params, socket)
 
-  def handle_event("notices", _params, socket),
-    do: {:noreply, update(socket, :notices, &(not &1))}
-
-  # What the harness says about itself rather than about the work: Claude Code turns every
-  # `system` message into one of these, and `thinking_tokens` alone can outnumber everything else
-  # in a job. They are recorded, because the event log is the record and nothing may quietly drop
-  # what a job did; they are not drawn, because a stream that is mostly telemetry is the
-  # "streaming log, no activity feed — nothing that invites watching agents work" that
-  # `docs/design/ui.md` § Motion rules out.
-  #
-  # One type and not a guessed list: a notice is the harness's own chatter by definition, and
-  # every other type is something that happened to the ticket.
-  @telemetry ["job.harness.notice"]
-
-  # Newest first, which is the order the stream is drawn in either way.
-  defp stream(events, true), do: Enum.reverse(events)
-
-  defp stream(events, false),
-    do: events |> Enum.reject(&(&1.type in @telemetry)) |> Enum.reverse()
-
-  defp telemetry_count(events), do: Enum.count(events, &(&1.type in @telemetry))
-
-  # A run that has ended says so; one still going says how far it has got. Neither tails.
-  defp stream_heading(%{status: :finished}, events),
-    do: "complete · #{length(events)} #{if length(events) == 1, do: "entry", else: "entries"}"
-
-  defp stream_heading(job, events), do: "#{job.status} · #{length(events)} so far"
+  def handle_event("notices", params, socket),
+    do: JobStream.handle_event("notices", params, socket)
 
   defp duration(%{started_at: nil}), do: "—"
   defp duration(%{finished_at: nil}), do: "running"
@@ -101,7 +97,7 @@ defmodule ForgeWeb.JobLive do
     <Layouts.app flash={@flash} current_scope={@current_scope} capacity={@capacity} measure="74rem">
       <.link
         navigate={~p"/tickets/#{@project.name}/#{@ticket.number}"}
-        class="font-mono text-[12.5px] opacity-60 hover:opacity-100"
+        class="flex min-h-[46px] items-center font-mono text-[12.5px] opacity-60 hover:opacity-100"
       >
         ‹ {@project.name}#{@ticket.number} · {@ticket.title}
       </.link>
@@ -149,60 +145,19 @@ defmodule ForgeWeb.JobLive do
           </dl>
 
           <section class="mt-8">
-            <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
-              {stream_heading(@job, @events)}
-            </h2>
-            <%!-- Scrolls inside itself rather than growing the page, and deliberately without
-                  the conversation's pin-to-bottom: this stream is newest first, so what arrives
-                  appears at the top, where the reader already is. Pinning it to the bottom would
-                  scroll away from the newest entry to reach the oldest. --%>
-            <ol
-              class="mt-3 flex max-h-[60vh] flex-col overflow-y-auto overscroll-contain"
-              id="job-events"
-            >
-              <%!-- Two rows narrow, one row wide. The type column is 196px because the longest
-                    type in the product, `artifact.version_written`, is 24 mono characters and
-                    a column narrower than its content does not clip — it overlaps the next one,
-                    which is what a vertical screen showed. --%>
-              <li
-                :for={event <- Enum.take(stream(@events, @notices), @shown)}
-                class="grid grid-cols-[64px_1fr] gap-x-2 border-b border-base-300/60 py-1.5 font-mono text-[12.5px] sm:grid-cols-[64px_196px_1fr]"
-              >
-                <span class="opacity-50">{Calendar.strftime(event.inserted_at, "%H:%M:%S")}</span>
-                <span class={[
-                  "min-w-0 truncate",
-                  String.ends_with?(event.type, "tool_use") && "text-info",
-                  String.ends_with?(event.type, "error") && "text-error"
-                ]}>
-                  {String.replace_prefix(event.type, "job.harness.", "")}
-                </span>
-                <span class="col-start-2 min-w-0 truncate opacity-70 sm:col-start-3">
-                  {Events.summary(event)}
-                </span>
-              </li>
-            </ol>
-            <div class="mt-3 flex flex-wrap items-center gap-2">
-              <button
-                :if={length(stream(@events, @notices)) > @shown}
-                type="button"
-                phx-click="more"
-                class="min-h-[46px] rounded-field border border-base-300 px-4 text-sm hover:border-base-content/30"
-              >
-                Load 50 more
-              </button>
-
-              <%!-- Only when there is something behind it. A job whose harness said nothing about
-                    itself should not carry a control that reveals nothing. --%>
-              <button
-                :if={telemetry_count(@events) > 0}
-                type="button"
-                phx-click="notices"
-                id="job-notices"
-                class="min-h-[46px] rounded-field px-4 text-sm opacity-60 hover:opacity-100"
-              >
-                {if @notices, do: "Hide", else: "Show"} {telemetry_count(@events)} harness notices
-              </button>
-            </div>
+            <%!-- Tool calls as the action lines a conversation draws them with, and notices
+                  behind their count: `WorkScreen.activity/1`, the same stream a work screen's
+                  Activity tab draws. --%>
+            <%!-- Scrolls inside itself rather than growing the page (`ui.md` § Motion and
+                  structure): this page is not a work screen, so no tab body bounds it. Newest
+                  first, so it needs no pinning. --%>
+            <WorkScreen.activity
+              class="max-h-[60vh] overflow-y-auto overscroll-contain"
+              events={@events}
+              shown={@shown}
+              notices={@notices}
+              heading={WorkScreen.stream_heading(@job, @events)}
+            />
           </section>
         </div>
 
@@ -289,7 +244,7 @@ defmodule ForgeWeb.JobLive do
           </ul>
 
           <details class="mt-6">
-            <summary class="cursor-pointer font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
+            <summary class="flex min-h-[46px] cursor-pointer items-center font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
               State prompt
             </summary>
             <pre class="mt-2 whitespace-pre-wrap text-[12.5px] opacity-70">{@spec.prompt}</pre>

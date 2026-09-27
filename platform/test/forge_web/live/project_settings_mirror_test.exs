@@ -57,6 +57,10 @@ defmodule ForgeWeb.ProjectSettingsMirrorTest do
     assert html =~ "github"
     assert html =~ "https://github.com/x/y.git"
     assert [%{name: "github"}] = Projects.list_mirrors(project)
+
+    # One block per row below `sm`, keeping its control (`docs/design/ui.md` § The phone).
+    assert has_element?(lv, ~s(table#mirrors.reflow td[data-label="Last push"]))
+    assert has_element?(lv, ~s(table#mirrors tbody tr button[phx-click="remove-mirror"]))
   end
 
   test "a refused URL says so and stores nothing", %{conn: conn, project: project} do

@@ -76,7 +76,10 @@ defmodule ForgeWeb.ProjectNewLive do
       active={:board}
       measure="26rem"
     >
-      <.link navigate={~p"/board"} class="font-mono text-[12.5px] opacity-60 hover:opacity-100">
+      <.link
+        navigate={~p"/board"}
+        class="flex min-h-[46px] items-center font-mono text-[12.5px] opacity-60 hover:opacity-100"
+      >
         ‹ Board
       </.link>
 

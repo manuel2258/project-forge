@@ -76,6 +76,20 @@ defmodule Forge.QueueTest do
     assert Queue.waiting?(%{kind: :question})
   end
 
+  # A ticket's own page counts what is waiting on it from this, so it has to be the queue's
+  # reading of that ticket and not a second one.
+  test "a ticket's items are the queue's items for it" do
+    ticket = ticket_fixture()
+    job = job_fixture(%{ticket: ticket})
+    ask(ticket, job, [blocking("backend"), non_blocking("naming")])
+
+    assert Enum.map(Queue.for_ticket(ticket), &{&1.kind, &1.question.key}) ==
+             Enum.map(of(ticket), &{&1.kind, &1.question.key})
+
+    # A finished ticket is in no queue, whatever it still holds.
+    assert Queue.for_ticket(%{ticket | status: :done}) == []
+  end
+
   # Oldest first is the queue's order, and an assumption does not take part in it: an age sorted
   # in beside a held job would compete with it for the same glance. They follow the decisions,
   # oldest first among themselves.

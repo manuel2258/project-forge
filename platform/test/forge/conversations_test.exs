@@ -717,16 +717,20 @@ defmodule Forge.ConversationsTest do
       %{chat: chat}
     end
 
-    # The text of one reply arrives as several events and is one message to a person: a reply,
-    # not the four pieces it was streamed in.
-    test "a turn's text is one assistant message", %{chat: chat} do
-      text(chat, "Thinking about ")
-      text(chat, "your question. ")
-      text(chat, "Here is the answer.")
+    # Each `text` event is one content block of the agent's reply — the harness emits one per
+    # block, not one per streamed fragment (`claude-code-events.md` § Emitted events). Joined
+    # with nothing between them, the sentence before a tool call ran into the one after it:
+    # "…the parser.Found it". The blocks stay apart in the turn's items, and the text a reader
+    # of the whole reply gets — the replay, the queue, a question's parse — has a blank line
+    # between them.
+    test "a turn's text blocks stay apart", %{chat: chat} do
+      text(chat, "Let me look at the parser.")
+      text(chat, "Found it.")
       {:ok, _} = Conversations.record_turn(chat, turn(1, 0.01))
 
       assert [%{role: :user}, %{role: :assistant} = reply] = Conversations.messages(chat.id)
-      assert reply.text == "Thinking about your question. Here is the answer."
+      assert reply.text == "Let me look at the parser.\n\nFound it."
+      assert reply.items == [{:text, "Let me look at the parser."}, {:text, "Found it."}]
       assert reply.turn == 1
     end
 
@@ -754,17 +758,320 @@ defmodule Forge.ConversationsTest do
                Conversations.messages(chat.id)
     end
 
-    test "tool calls and the rest of the stream stay out of the conversation", %{chat: chat} do
+    # The turn in the order it happened: what it said, what it did, what it said next. The text
+    # of the reply is still only what it said — the actions are items between the blocks.
+    test "a turn is its text blocks with the actions between them, in order", %{chat: chat} do
+      text(chat, "Reading the parser.")
+      tool_use(chat, "t1", "Read", %{"file_path" => "lib/parser.ex"})
+      tool_result(chat, "t1", false, "defmodule Parser")
+      tool_use(chat, "t2", "Bash", %{"command" => "mix test"})
+      tool_result(chat, "t2", true, "1 failure")
+      text(chat, "One test fails.")
+      {:ok, _} = Conversations.record_turn(chat, turn(1, 0.01))
+
+      assert [%{role: :user}, %{role: :assistant, text: text, items: items}] =
+               Conversations.messages(chat.id)
+
+      assert text == "Reading the parser.\n\nOne test fails."
+
+      assert [
+               {:text, "Reading the parser."},
+               {:action, %{id: "t1", name: "Read", result: %{is_error: false}}},
+               {:action,
+                %{id: "t2", name: "Bash", result: %{is_error: true, excerpt: "1 failure"}}},
+               {:text, "One test fails."}
+             ] = items
+    end
+
+    # A call whose result has not arrived is the call the agent is in the middle of: it is what
+    # the now line says, and it has no result to show yet.
+    test "a call with no result yet is open", %{chat: chat} do
+      tool_use(chat, "t1", "Bash", %{"command" => "mix test"})
+
+      assert [%{role: :user}, %{role: :assistant, turn: nil, items: [{:action, action}]}] =
+               Conversations.transcript(chat.id)
+
+      assert action.result == nil
+    end
+
+    # A subagent's calls carry the `Task` that started them as their parent, and fold under it
+    # rather than interleaving with the agent's own. Its words are not the agent's reply.
+    test "a subagent's calls fold under the task that started them", %{chat: chat} do
+      tool_use(chat, "task", "Task", %{"description" => "find the lexer"})
+      tool_use(chat, "sub", "Grep", %{"pattern" => "lex"}, "task")
+      text(chat, "subagent musing", "task")
+      tool_result(chat, "sub", false, "lib/lexer.ex", "task")
+      tool_result(chat, "task", false, "It is in lib/lexer.ex")
+      text(chat, "The lexer is in lib/lexer.ex.")
+      {:ok, _} = Conversations.record_turn(chat, turn(1, 0.01))
+
+      [_user, reply] = Conversations.messages(chat.id)
+
+      assert [{:action, task}, {:text, "The lexer is in lib/lexer.ex."}] = reply.items
+      assert task.name == "Task"
+      assert [%{id: "sub", name: "Grep", result: %{is_error: false}}] = task.children
+      refute reply.text =~ "subagent musing"
+    end
+
+    # The page draws a turn that has only acted so far — that is what live lines are — but a
+    # reply that said nothing is not a reply to anyone reading the conversation as words: the
+    # queue, the replay and the push read `messages/1`, which is what it was before.
+    test "a turn that only acted is in the transcript and not in the messages", %{chat: chat} do
+      tool_use(chat, "t1", "Read", %{"file_path" => "README.md"})
+      tool_result(chat, "t1", false, "# readme")
+      {:ok, _} = Conversations.record_turn(chat, turn(1, 0.01))
+
+      assert [%{role: :user}, %{role: :assistant, text: ""}] = Conversations.transcript(chat.id)
+      assert [%{role: :user}] = Conversations.messages(chat.id)
+    end
+
+    # A message sent mid-turn is recorded at once and splits the reply on the page, but the turn
+    # is still one turn: the call made before it gets its result after it, and the turn's end
+    # closes both halves.
+    test "a turn split by a message sent mid-turn is still one turn", %{chat: chat} do
+      text(chat, "Running the tests.")
+      tool_use(chat, "k1", "Task", %{"description" => "find the lexer"})
+      tool_use(chat, "t1", "Bash", %{"command" => "mix test"})
+      {:ok, _event} = Conversations.send(chat, "also check the lexer")
+      tool_use(chat, "k1a", "Grep", %{"pattern" => "lex"}, "k1")
+      tool_result(chat, "t1", true, "1 failure")
+      tool_result(chat, "k1", false, "found it")
+      text(chat, "One failure.")
+      {:ok, _} = Conversations.record_turn(chat, turn(1, 0.01))
+
+      assert [_first, before, %{role: :user}, later] = Conversations.transcript(chat.id)
+
+      assert [
+               {:text, "Running the tests."},
+               {:action, %{id: "k1", result: %{}, children: [%{id: "k1a"}]}},
+               {:action, %{id: "t1", result: %{is_error: true, excerpt: "1 failure"}}}
+             ] = before.items
+
+      assert [{:text, "One failure."}] = later.items
+      assert before.turn == 1
+      assert later.turn == 1
+    end
+
+    # Tool ids are unique, so a result pairs with its call wherever the call is — here one that
+    # arrives after the turn it belongs to was closed.
+    test "a result pairs with its call in an earlier turn", %{chat: chat} do
+      tool_use(chat, "t1", "Bash", %{"command" => "mix test"})
+      text(chat, "Started it.")
+      {:ok, _} = Conversations.record_turn(chat, turn(1, 0.01))
+      tool_result(chat, "t1", false, "ok")
+
+      assert [_user, %{items: [{:action, %{id: "t1", result: %{excerpt: "ok"}}}, _text]}] =
+               Conversations.transcript(chat.id)
+    end
+
+    # A reply cut off when its process stopped is closed by the next process starting: what
+    # the new one says is its own, and the cut-off one stays unfinished.
+    test "a new process closes the reply the last one was cut off in", %{chat: chat} do
+      text(chat, "I was say")
+
+      {:ok, _started} =
+        Events.append("job.started", :system, %{job_id: chat.id, payload: %{}})
+
+      text(chat, "Back again.")
+      {:ok, _} = Conversations.record_turn(chat, turn(1, 0.01))
+
+      assert [_user, cut_off, reply] = Conversations.transcript(chat.id)
+      assert %{text: "I was say", turn: nil} = cut_off
+      assert %{text: "Back again.", turn: 1} = reply
+    end
+
+    # The agent wrote the input, and a model sometimes sends a field in the wrong type — the
+    # harness answers with an error, but the call is in the log for ever. The fold gives each
+    # field the type the page reads it as, rather than a page that raises on every mount.
+    test "takes a call whose fields have the wrong types", %{chat: chat} do
+      harness(chat, "job.harness.tool_use", %{
+        id: "x1",
+        name: %{"not" => "a name"},
+        input: "a string"
+      })
+
+      harness(chat, "job.harness.tool_result", %{tool_use_id: "x1", is_error: true, excerpt: 42})
+      harness(chat, "job.harness.text", %{text: 7})
+
+      assert [_user, %{items: [{:action, action}, {:text, ""}]}] =
+               Conversations.transcript(chat.id)
+
+      assert %{name: nil, input: %{}, result: %{excerpt: ""}} = action
+    end
+
+    # Calls made together come back together, and each result is its own call's, whichever of
+    # them it arrives after.
+    test "calls made at once each pair with their own result", %{chat: chat} do
+      tool_use(chat, "a", "Bash", %{"command" => "mix test"})
+      tool_use(chat, "b", "Bash", %{"command" => "mix format"})
+      tool_result(chat, "a", true, "a failed")
+      tool_result(chat, "b", false, "b ok")
+
+      assert [
+               _user,
+               %{
+                 items: [
+                   {:action, %{id: "a", result: %{excerpt: "a failed"}}},
+                   {:action, %{id: "b", result: %{excerpt: "b ok"}}}
+                 ]
+               }
+             ] = Conversations.transcript(chat.id)
+    end
+
+    test "a subagent's calls stay in the order it made them", %{chat: chat} do
+      tool_use(chat, "task", "Task", %{"description" => "find the lexer"})
+      tool_use(chat, "s1", "Grep", %{"pattern" => "lex"}, "task")
+      tool_use(chat, "s2", "Read", %{"file_path" => "lib/lexer.ex"}, "task")
+      tool_use(chat, "s3", "Bash", %{"command" => "mix compile"}, "task")
+
+      assert [_user, %{items: [{:action, %{children: children}}]}] =
+               Conversations.transcript(chat.id)
+
+      assert Enum.map(children, & &1.id) == ~w(s1 s2 s3)
+    end
+
+    # The log was written out of order, or the task's own call was lost: the child is still a
+    # call the agent made, and drawn where it can be seen.
+    test "a subagent's call whose task is nowhere is drawn at the top level", %{chat: chat} do
+      tool_use(chat, "orphan", "Grep", %{"pattern" => "lex"}, "missing")
+
+      assert [_user, %{items: [{:action, %{id: "orphan"}}]}] = Conversations.transcript(chat.id)
+    end
+
+    # The words of a reply, as the queue and the replay read them: each block trimmed, and a
+    # block that is only whitespace — a model's trailing newline — not a paragraph.
+    test "a reply's text is its blocks trimmed, without the empty ones", %{chat: chat} do
+      text(chat, "  Hello.  \n")
+      text(chat, "   \n ")
+      text(chat, "World.")
+      {:ok, _} = Conversations.record_turn(chat, turn(1, 0.01))
+
+      assert [_user, %{text: "Hello.\n\nWorld."}] = Conversations.messages(chat.id)
+    end
+
+    test "notices and the harness's bookkeeping stay out of the conversation", %{chat: chat} do
       :ok =
         Jobs.record_harness_event(chat.id, %{
-          type: "job.harness.tool_use",
-          payload: %{name: "Read"}
+          type: "job.harness.notice",
+          payload: %{subtype: "thinking_tokens"}
         })
 
       text(chat, "done")
       {:ok, _} = Conversations.record_turn(chat, turn(1, 0.01))
 
-      assert [%{role: :user}, %{role: :assistant, text: "done"}] = Conversations.messages(chat.id)
+      assert [%{role: :user}, %{role: :assistant, text: "done", items: [{:text, "done"}]}] =
+               Conversations.messages(chat.id)
+    end
+  end
+
+  describe "the now line" do
+    setup %{project: project} do
+      {:ok, chat} = Conversations.open(project, "first")
+      %{chat: chat}
+    end
+
+    test "is the call that has no result yet", %{chat: chat} do
+      tool_use(chat, "t1", "Read", %{"file_path" => "lib/router.ex"})
+      tool_result(chat, "t1", false, "ok")
+      tool_use(chat, "t2", "Bash", %{"command" => "mix test"})
+
+      assert {:action, %{id: "t2"}} = Conversations.now(Events.for_job(chat.id))
+    end
+
+    # Calls made at once are all open; the one made last is what the agent is waiting on now.
+    test "is the last call made, of several with no result", %{chat: chat} do
+      tool_use(chat, "t1", "Read", %{"file_path" => "lib/router.ex"})
+      tool_use(chat, "t2", "Bash", %{"command" => "mix test"})
+
+      assert {:action, %{id: "t2"}} = Conversations.now(Events.for_job(chat.id))
+    end
+
+    test "is a subagent's latest call, of several with no result", %{chat: chat} do
+      tool_use(chat, "task", "Task", %{"description" => "find the lexer"})
+      tool_use(chat, "s1", "Grep", %{"pattern" => "lex"}, "task")
+      tool_use(chat, "s2", "Read", %{"file_path" => "lib/lexer.ex"}, "task")
+
+      assert {:action, %{id: "s2"}} = Conversations.now(Events.for_job(chat.id))
+    end
+
+    # A `Task` is open for as long as its subagent works, so it is always the outer answer.
+    # What the subagent is doing inside it is the one worth saying.
+    test "is the subagent's call, inside a task that is waiting on it", %{chat: chat} do
+      tool_use(chat, "task", "Task", %{"description" => "find the lexer"})
+      tool_use(chat, "sub", "Grep", %{"pattern" => "lex"}, "task")
+
+      assert {:action, %{id: "sub"}} = Conversations.now(Events.for_job(chat.id))
+    end
+
+    # A message sent mid-turn is queued behind the call in flight; the call is still what the
+    # agent is doing.
+    test "is still the call in flight after a message is sent mid-turn", %{chat: chat} do
+      tool_use(chat, "t1", "Bash", %{"command" => "mix test"})
+      {:ok, _event} = Conversations.send(chat, "also check the lexer")
+
+      assert {:action, %{id: "t1"}} = Conversations.now(Events.for_job(chat.id))
+    end
+
+    test "is a retry, while the harness is retrying", %{chat: chat} do
+      tool_use(chat, "t1", "Bash", %{"command" => "mix test"})
+      harness(chat, "job.harness.retry", %{attempt: 2, max_retries: 10})
+
+      assert {:retrying, 2, 10} = Conversations.now(Events.for_job(chat.id))
+    end
+
+    test "is a limit that stopped it, with when it resumes", %{chat: chat} do
+      harness(chat, "job.harness.rate_limit", %{status: "rejected", resets_at: 1_790_000_000})
+
+      assert {:rate_limited, %DateTime{}} = Conversations.now(Events.for_job(chat.id))
+    end
+
+    # A reset outside the calendar — a milliseconds value — is a limit without a time, not a
+    # page that cannot mount.
+    test "is a limit without a time when its reset cannot be read", %{chat: chat} do
+      harness(chat, "job.harness.rate_limit", %{status: "rejected", resets_at: 1_790_000_000_000})
+
+      assert {:rate_limited, nil} = Conversations.now(Events.for_job(chat.id))
+    end
+
+    # Once its result has arrived, a call split from the rest of its turn by a message is not
+    # what the agent is doing any more.
+    test "is not a call whose result arrived after a message was sent", %{chat: chat} do
+      tool_use(chat, "t1", "Bash", %{"command" => "mix test"})
+      {:ok, _event} = Conversations.send(chat, "also")
+      tool_result(chat, "t1", false, "ok")
+
+      assert Conversations.now(Events.for_job(chat.id)) == nil
+    end
+
+    # A limit that did not stop anything is the provider saying how full the window is. It is
+    # not what the agent is doing.
+    test "is not a limit that allowed the request", %{chat: chat} do
+      harness(chat, "job.harness.rate_limit", %{status: "allowed", resets_at: 1_790_000_000})
+
+      assert Conversations.now(Events.for_job(chat.id)) == nil
+    end
+
+    # Once something has come back since, the retry is over — the now line says what is
+    # happening, not the last thing that went wrong.
+    test "is no longer a retry once the turn has moved on", %{chat: chat} do
+      harness(chat, "job.harness.retry", %{attempt: 1, max_retries: 10})
+      text(chat, "Back.")
+
+      assert Conversations.now(Events.for_job(chat.id)) == nil
+    end
+
+    test "is the call made after a retry, not the retry", %{chat: chat} do
+      harness(chat, "job.harness.retry", %{attempt: 1, max_retries: 10})
+      tool_use(chat, "t1", "Bash", %{"command" => "mix test"})
+
+      assert {:action, %{id: "t1"}} = Conversations.now(Events.for_job(chat.id))
+    end
+
+    test "is nothing once the turn has ended", %{chat: chat} do
+      tool_use(chat, "t1", "Bash", %{"command" => "mix test"})
+      {:ok, _} = Conversations.record_turn(chat, turn(1, 0.01))
+
+      assert Conversations.now(Events.for_job(chat.id)) == nil
     end
   end
 
@@ -922,6 +1229,16 @@ defmodule Forge.ConversationsTest do
       assert [summary] = Conversations.summaries(project_id: project.id)
       assert summary.said == {:agent, "It is a workflow engine."}
       assert summary.waiting
+    end
+
+    # A subagent's text is its report to the agent, not the agent speaking: the list says what
+    # the agent last said, as the transcript does.
+    test "what was said last is not a subagent's report", %{project: project} do
+      {:ok, chat} = Conversations.open(project, "find the lexer")
+      text(chat, "Looking.")
+      text(chat, "found it in lib/lexer.ex", "task-1")
+
+      assert [%{said: {:agent, "Looking."}}] = Conversations.summaries(project_id: project.id)
     end
 
     # And the other half of the `and`: a conversation that has stopped cannot be waiting on
@@ -1387,10 +1704,30 @@ defmodule Forge.ConversationsTest do
     }
   end
 
-  defp text(chat, text),
+  defp text(chat, text, parent \\ nil),
+    do: harness(chat, "job.harness.text", %{text: text, parent_tool_use_id: parent})
+
+  defp tool_use(chat, id, name, input, parent \\ nil),
     do:
-      :ok =
-        Jobs.record_harness_event(chat.id, %{type: "job.harness.text", payload: %{text: text}})
+      harness(chat, "job.harness.tool_use", %{
+        id: id,
+        name: name,
+        input: input,
+        parent_tool_use_id: parent
+      })
+
+  defp tool_result(chat, id, error?, excerpt, parent \\ nil),
+    do:
+      harness(chat, "job.harness.tool_result", %{
+        tool_use_id: id,
+        is_error: error?,
+        bytes: byte_size(excerpt),
+        excerpt: excerpt,
+        parent_tool_use_id: parent
+      })
+
+  defp harness(chat, type, payload),
+    do: :ok = Jobs.record_harness_event(chat.id, %{type: type, payload: payload})
 
   defp delivered(chat, message_id) do
     :ok =

@@ -68,6 +68,9 @@ defmodule ForgeWeb.DiffTest do
     assert length(diff.files) == 61
     assert diff.bytes < 512 * 1024
     refute diff.inline
+    # The table still names every file, and no row expands to a patch.
+    assert diff |> Diff.files() |> length() == 61
+    assert diff |> Diff.files() |> Enum.all?(&is_nil(&1.lines))
   end
 
   # And the other way round: one file, well under the file limit, whose patch is past the byte
@@ -81,6 +84,66 @@ defmodule ForgeWeb.DiffTest do
     assert length(diff.files) == 1
     assert diff.bytes > 512 * 1024
     refute diff.inline
+    assert [%{path: "dump.sql", lines: nil}] = Diff.files(diff)
+  end
+
+  # Each row of the Changes table expands to its own patch. With a space in a path the
+  # `diff --git` header has more than one reading, and keying by it put `a b/c`'s patch under
+  # `c b/a b/c` — on the tab that carries the changeset approval. A path git has to quote, and
+  # one outside ASCII, are read back to the name `--numstat` gives the row.
+  test "every file's row carries its own patch, whatever its path" do
+    {repo, base, head} =
+      change(%{
+        "a b/c" => "benign\n",
+        "c b/a b/c" => "evil\n",
+        "résumé.md" => "cv\n",
+        ~s(we"ird.md) => "odd\n"
+      })
+
+    rows = repo |> Diff.build(base, head) |> Diff.files() |> Map.new(&{&1.path, &1.lines})
+
+    assert Map.keys(rows) |> Enum.sort() ==
+             Enum.sort(["a b/c", "c b/a b/c", "résumé.md", ~s(we"ird.md)])
+
+    assert {:line, "+benign"} in rows["a b/c"]
+    assert {:line, "+evil"} in rows["c b/a b/c"]
+    refute {:line, "+evil"} in rows["a b/c"]
+    assert {:line, "+cv"} in rows["résumé.md"]
+    assert {:line, "+odd"} in rows[~s(we"ird.md)]
+  end
+
+  # A file the change deletes has no new side; its row is keyed by the old one.
+  test "a deleted file's row carries its patch" do
+    work = tmp_dir("diff-delete")
+    git!(work, ["init", "-q", "-b", "main"])
+    commit!(work, %{"gone.ex" => "bye\n"})
+    {:ok, base} = Git.run(work, ["rev-parse", "HEAD"])
+    git!(work, ["rm", "-q", "gone.ex"])
+    git!(work, ["-c", "user.name=t", "-c", "user.email=t@forge", "commit", "-q", "-m", "rm"])
+    {:ok, head} = Git.run(work, ["rev-parse", "HEAD"])
+
+    [row] = work |> Diff.build(String.trim(base), String.trim(head)) |> Diff.files()
+
+    assert row.path == "gone.ex"
+    assert {:line, "-bye"} in row.lines
+  end
+
+  # A binary file has no patch to key: its row is named and does not expand, and the rows
+  # beside it still do.
+  test "a binary file's row is named and does not expand" do
+    {repo, base, head} = change(%{"logo.png" => <<0, 1, 2, 0, 255>>, "a.ex" => "a\n"})
+
+    rows = repo |> Diff.build(base, head) |> Diff.files() |> Map.new(&{&1.path, &1})
+
+    assert %{lines: nil, hunks: []} = rows["logo.png"]
+    assert {:line, "+a"} in rows["a.ex"].lines
+  end
+
+  test "a quoted path is read back to the name it quotes" do
+    assert Git.unquote_path(~s("we\\"ird.md")) == ~s(we"ird.md)
+    assert Git.unquote_path(~s("tab\\there")) == "tab\there"
+    assert Git.unquote_path(~s("r\\303\\251sum\\303\\251.md")) == "résumé.md"
+    assert Git.unquote_path("plain name") == "plain name"
   end
 
   # The sentence that replaces the patch names the two commits, and names them at the length a

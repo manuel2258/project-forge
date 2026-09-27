@@ -46,20 +46,143 @@ defmodule ForgeWeb.Layouts do
     default: nil,
     doc: "the top bar's window gauge, from `ForgeWeb.Capacity`; nil on a page that has none"
 
+  attr :frame, :atom,
+    default: :page,
+    values: [:page, :work],
+    doc: """
+    `:work` for a work screen (`docs/design/ui.md` § The work screen): the viewport exactly, the
+    body its only scroller, and no bottom bar on a phone — its back affordance and its composer
+    take the bar's place.
+    """
+
   slot :inner_block, required: true
 
   def app(assigns) do
     ~H"""
-    <header class="hidden sm:flex items-center gap-6 border-b border-base-300 px-6 lg:px-[30px] h-14">
+    <.top_bar
+      :if={@frame == :page}
+      nav={@nav}
+      active={@active}
+      queue_count={@queue_count}
+      capacity={@capacity}
+      current_scope={@current_scope}
+    />
+
+    <main
+      :if={@frame == :page}
+      class={[
+        "px-5 sm:px-6 lg:px-[30px] pt-6 sm:pt-8",
+        "pb-[calc(4rem+56px+env(safe-area-inset-bottom))] sm:pb-16"
+      ]}
+    >
+      <div class={@measure && "mx-auto"} style={@measure && "max-width: #{@measure}"}>
+        {render_slot(@inner_block)}
+      </div>
+    </main>
+
+    <div
+      :if={@frame == :work}
+      id="work-frame"
+      phx-hook=".ViewportFrame"
+      class="fixed inset-x-0 top-0 flex h-dvh flex-col"
+    >
+      <.top_bar
+        nav={@nav}
+        active={@active}
+        queue_count={@queue_count}
+        capacity={@capacity}
+        current_scope={@current_scope}
+      />
+      <main class="flex min-h-0 flex-1 flex-col px-5 pt-3 pb-[env(safe-area-inset-bottom)] sm:px-6 sm:pt-5 lg:px-[30px]">
+        <div class="mx-auto flex min-h-0 w-full flex-1 flex-col" style={"max-width: #{@measure}"}>
+          {render_slot(@inner_block)}
+        </div>
+      </main>
+    </div>
+
+    <%!-- The viewport a work screen fills. Where the browser honours the viewport's
+          `interactive-widget=resizes-content`, the layout viewport shrinks with the on-screen
+          keyboard and `100dvh` is already right. Where it does not — Safari — the keyboard
+          covers the bottom of a layout viewport that stays the same height, and what is left
+          above it is the visual viewport: so the frame is sized to that, and moved to where it
+          is, and the composer rises with the keyboard instead of going under it. --%>
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".ViewportFrame">
+      export default {
+        mounted() {
+          const viewport = window.visualViewport
+          if (!viewport) return
+
+          this.fit = () => {
+            const covered = window.innerHeight - viewport.height > 1
+
+            this.el.style.height = covered ? `${viewport.height}px` : ""
+            this.el.style.transform = covered ? `translateY(${viewport.offsetTop}px)` : ""
+          }
+
+          viewport.addEventListener("resize", this.fit)
+          viewport.addEventListener("scroll", this.fit)
+          this.fit()
+        },
+
+        destroyed() {
+          window.visualViewport?.removeEventListener("resize", this.fit)
+          window.visualViewport?.removeEventListener("scroll", this.fit)
+        }
+      }
+    </script>
+
+    <%!-- The phone's shell: the three places that matter most one tap away, and More for the
+          rest of what a laptop reaches from its top row (docs/design/ui.md § The phone). --%>
+    <nav
+      :if={@nav and @frame == :page}
+      class={[
+        "sm:hidden fixed inset-x-0 bottom-0 z-20 grid auto-cols-fr grid-flow-col",
+        "border-t border-base-300 bg-base-100 pb-[env(safe-area-inset-bottom)]"
+      ]}
+    >
+      <.bar_link navigate={~p"/"} active={@active == :queue} count={@queue_count}>Queue</.bar_link>
+      <.bar_link navigate={~p"/board"} active={@active == :board}>Board</.bar_link>
+      <.bar_link navigate={~p"/chats"} active={@active == :chats}>Chats</.bar_link>
+      <button
+        :if={@current_scope}
+        type="button"
+        id="more-button"
+        phx-click={ForgeWeb.Sheet.open("more")}
+        class="flex h-14 items-center justify-center gap-2 text-sm opacity-60"
+      >
+        More
+      </button>
+    </nav>
+
+    <ForgeWeb.Sheet.sheet :if={@nav and @frame == :page and @current_scope} id="more" label="More">
+      <.more capacity={@capacity} current_scope={@current_scope} />
+    </ForgeWeb.Sheet.sheet>
+
+    <.flash_group flash={@flash} />
+    """
+  end
+
+  attr :nav, :boolean, required: true
+  attr :active, :atom, required: true
+  attr :queue_count, :integer, required: true
+  attr :capacity, :map, required: true
+  attr :current_scope, :map, required: true
+
+  # The laptop's top row. Hidden below `sm`, where the bottom bar is the shell.
+  defp top_bar(assigns) do
+    ~H"""
+    <header class="hidden sm:flex shrink-0 items-center gap-6 border-b border-base-300 px-6 lg:px-[30px] h-14">
       <.link navigate={~p"/"} class="font-semibold -tracking-[.02em]">forge</.link>
       <nav :if={@nav} class="flex items-center gap-5 text-sm">
         <.nav_link navigate={~p"/"} active={@active == :queue} count={@queue_count}>Queue</.nav_link>
         <.nav_link navigate={~p"/board"} active={@active == :board}>Board</.nav_link>
-        <%!-- Laptop only, and deliberately: the phone is where decisions are answered and a
-              machine is never a decision. See docs/design/ui.md. --%>
+        <%!-- Nothing on it waits on a human, which is why nothing on it is accent. On a phone it
+              is a row in the More sheet: a phone reaches everything a laptop does
+              (docs/design/ui.md § The phone). --%>
         <.nav_link navigate={~p"/workers"} active={@active == :workers}>Workers</.nav_link>
-        <%!-- Laptop only too, but for a different reason: a conversation that needs you is
-              already in the queue. This is for finding one again, which is a laptop errand. --%>
+        <%!-- A destination on both: a conversation that needs you is already in the queue, and
+              this is for finding one again — on a phone, how you get back to the work you were
+              doing. --%>
         <.nav_link navigate={~p"/chats"} active={@active == :chats}>Chats</.nav_link>
       </nav>
       <div class="ml-auto flex items-center gap-4">
@@ -101,45 +224,111 @@ defmodule ForgeWeb.Layouts do
         </.link>
       </div>
     </header>
-
-    <main class={[
-      "px-5 sm:px-6 lg:px-[30px] pt-6 sm:pt-8",
-      "pb-[calc(4rem+56px+env(safe-area-inset-bottom))] sm:pb-16"
-    ]}>
-      <div class={@measure && "mx-auto"} style={@measure && "max-width: #{@measure}"}>
-        {render_slot(@inner_block)}
-      </div>
-    </main>
-
-    <nav
-      :if={@nav}
-      class={[
-        "sm:hidden fixed inset-x-0 bottom-0 z-20 grid grid-cols-2",
-        "border-t border-base-300 bg-base-100 pb-[env(safe-area-inset-bottom)]"
-      ]}
-    >
-      <.bar_link navigate={~p"/"} active={@active == :queue} count={@queue_count}>Queue</.bar_link>
-      <.bar_link navigate={~p"/board"} active={@active == :board}>Board</.bar_link>
-    </nav>
-
-    <.flash_group flash={@flash} />
     """
   end
 
   attr :capacity, :map, required: true
+  attr :current_scope, :map, required: true
 
-  # Per window, five-hour then weekly: ten ticks of mean utilization when any credential reported
-  # one, and a countdown to the soonest reset whenever a window is known. Neutral, never accent —
-  # time resolves it, not a person (`docs/design/capacity.md` § Two objects). What it averages over
-  # is in the title, because a mean over the credentials that happened to report is a different
-  # claim from one over all of them.
-  defp capacity_gauge(assigns) do
+  # What the More sheet holds, in the order `docs/design/ui.md` § The phone gives: the gauge with
+  # its detail written out, the places, then the account. Every row a 46px target.
+  defp more(assigns) do
     ~H"""
-    <div id="capacity-gauge" class="flex items-center gap-4 font-mono text-[11.5px] opacity-70">
-      <span
-        :for={{type, label} <- [{"five_hour", "5h"}, {"seven_day", "week"}]}
+    <.capacity_written
+      :if={@capacity not in [nil, %{}]}
+      capacity={@capacity}
+      prefix="more-capacity"
+      class="border-b border-base-300 pb-3"
+    />
+
+    <nav class="flex flex-col" aria-label="More">
+      <.more_row navigate={~p"/workers"}>Workers</.more_row>
+      <.more_row navigate={~p"/templates"}>Templates</.more_row>
+      <.more_row navigate={~p"/projects/new"}>New project</.more_row>
+      <.more_row :if={@current_scope.user.node_admin} navigate={~p"/accounts"}>Accounts</.more_row>
+    </nav>
+
+    <div class="mt-2 flex flex-col border-t border-base-300 pt-2">
+      <.more_row navigate={~p"/users/settings"}>
+        <span class="font-mono text-[12.5px]">{@current_scope.user.email}</span>
+      </.more_row>
+      <div class="flex min-h-[46px] items-center justify-between gap-3">
+        <span class="text-sm opacity-70">Theme</span>
+        <.theme_toggle />
+      </div>
+      <.link
+        href={~p"/users/log-out"}
+        method="delete"
+        class="flex min-h-[46px] items-center text-sm opacity-70"
+      >
+        Log out
+      </.link>
+    </div>
+    """
+  end
+
+  attr :capacity, :map, required: true
+  attr :prefix, :string, required: true
+  attr :class, :any, default: nil
+
+  @doc """
+  The gauge with its title written out as a line under each window: a phone has no hover, and a
+  figure whose meaning lives in a tooltip is a figure without one there (`docs/design/ui.md`
+  § The capacity gauge in the top bar). The More sheet draws it, and so does a work screen's
+  details sheet, whose strip carries the gauge in its compact form.
+  """
+  def capacity_written(assigns) do
+    ~H"""
+    <div id={@prefix} class={@class}>
+      <.capacity_gauge capacity={@capacity} prefix={@prefix} />
+      <p
+        :for={{type, label} <- windows()}
         :if={@capacity[type]}
-        id={"capacity-#{type}"}
+        class="mt-1 text-[12.5px]/[1.5] opacity-70"
+      >
+        {gauge_title(label, @capacity[type])}
+      </p>
+    </div>
+    """
+  end
+
+  # The two windows a gauge draws, five-hour then weekly, and what each is called on it.
+  defp windows, do: [{"five_hour", "5h"}, {"seven_day", "week"}]
+
+  attr :navigate, :string, required: true
+  slot :inner_block, required: true
+
+  defp more_row(assigns) do
+    ~H"""
+    <.link
+      navigate={@navigate}
+      class="flex min-h-[46px] items-center justify-between gap-3 border-b border-base-300/60 text-sm"
+    >
+      {render_slot(@inner_block)}
+      <span aria-hidden="true" class="opacity-40">›</span>
+    </.link>
+    """
+  end
+
+  attr :capacity, :map, required: true
+  attr :prefix, :string, default: "capacity", doc: "the ids' prefix: one gauge per prefix"
+
+  @doc """
+  Per window, five-hour then weekly: ten ticks of mean utilization when any credential reported
+  one, and a countdown to the soonest reset whenever a window is known. Neutral, never accent —
+  time resolves it, not a person (`docs/design/capacity.md` § Two objects). What it averages over
+  is in the title, because a mean over the credentials that happened to report is a different
+  claim from one over all of them.
+
+  The top bar draws it, and so does a work screen's context strip, in the same compact form.
+  """
+  def capacity_gauge(assigns) do
+    ~H"""
+    <div id={"#{@prefix}-gauge"} class="flex items-center gap-4 font-mono text-[11.5px] opacity-70">
+      <span
+        :for={{type, label} <- windows()}
+        :if={@capacity[type]}
+        id={"#{@prefix}-#{type}"}
         title={gauge_title(label, @capacity[type])}
         class="flex items-center gap-1.5"
       >
@@ -263,7 +452,8 @@ defmodule ForgeWeb.Layouts do
   end
 
   @doc """
-  Provides dark vs light theme toggle based on themes defined in app.css.
+  Provides dark vs light theme toggle based on themes defined in app.css. Each button is a 46px
+  target: the floor has no phone exception (`docs/design/ui.md` § The phone).
 
   See <head> in root.html.heex which applies the theme before page load.
   """
@@ -273,7 +463,7 @@ defmodule ForgeWeb.Layouts do
       <div class="absolute w-1/3 h-full rounded-full bg-base-200 left-0 [[data-theme=light]_&]:left-1/3 [[data-theme=dark]_&]:left-2/3 [[data-theme-source=system]_&]:!left-0 transition-[left] motion-reduce:transition-none" />
 
       <button
-        class="flex p-2 cursor-pointer w-1/3"
+        class="flex min-h-[46px] min-w-[46px] cursor-pointer items-center justify-center w-1/3"
         phx-click={JS.dispatch("phx:set-theme")}
         data-phx-theme="system"
       >
@@ -281,7 +471,7 @@ defmodule ForgeWeb.Layouts do
       </button>
 
       <button
-        class="flex p-2 cursor-pointer w-1/3"
+        class="flex min-h-[46px] min-w-[46px] cursor-pointer items-center justify-center w-1/3"
         phx-click={JS.dispatch("phx:set-theme")}
         data-phx-theme="light"
       >
@@ -289,7 +479,7 @@ defmodule ForgeWeb.Layouts do
       </button>
 
       <button
-        class="flex p-2 cursor-pointer w-1/3"
+        class="flex min-h-[46px] min-w-[46px] cursor-pointer items-center justify-center w-1/3"
         phx-click={JS.dispatch("phx:set-theme")}
         data-phx-theme="dark"
       >

@@ -212,3 +212,42 @@
 
 .doc hr { border-color: var(--color-base-300); }
 .doc img { max-width: 100%; height: auto; }
+
+/* A chat message is not a document: a single newline is a break, where Markdown would join the
+   lines into one paragraph. On a phone Enter is how a line is ended, so a transcript that drops
+   single newlines drops the shape of every message typed there. Only the transcript's boxes
+   carry `msg`; a document is rendered as a document. See docs/design/ui.md § Talk. */
+.msg p, .msg li { white-space: pre-line; }
+
+/* A table is a table from `sm` up and one block per row below it (docs/design/ui.md § The phone):
+   the row's identity on the first line, then each labelled cell as its label over its value. A
+   control stays in the cell it acts on, and there it is a full-width bordered button — the
+   `reflow-control` class — where on a laptop it is a link. A table that scrolls sideways on a
+   phone hides its last column off the right edge, and on these rows the last column is the
+   decision. A cell carries its label as `data-label`, so the markup says it once and the
+   laptop's header row is the same words. */
+@media (width < 40rem) {
+  table.reflow,
+  table.reflow > tbody,
+  table.reflow > tbody > tr,
+  table.reflow > tbody > tr > td { display: block; }
+  table.reflow > thead { display: none; }
+  table.reflow > tbody > tr { padding: 0.75rem 0; }
+  table.reflow > tbody > tr > td { padding: 0.25rem 0; text-align: left; }
+  .reflow-control { @apply w-full rounded-field border border-base-300; }
+  table.reflow > tbody > tr > td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    opacity: 0.5;
+  }
+}
+
+/* Code is drawn as it is written. JetBrains Mono's ligatures turn `|>` into a triangle and `->`
+   into an arrow, which is not what the file says — in a patch, an agent's edit, a failure's
+   output or a document's code block alike. The Changes table's patch is `div`s rather than a
+   `pre`, and says the same in its own class. */
+pre, code { font-variant-ligatures: none; }

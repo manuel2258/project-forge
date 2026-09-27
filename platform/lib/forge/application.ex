@@ -31,12 +31,14 @@ defmodule Forge.Application do
 
   # Tell Phoenix to update the endpoint configuration
   # whenever the application is updated.
-  # The daily digest goes out from the node that runs jobs, and only when push is configured.
+  # The daily digest goes out from the node that runs jobs, and only when push is configured; so
+  # does the push for whatever starts waiting on a person.
   defp digest do
     if Forge.Jobs.config(:run_jobs, true) and Forge.Push.enabled?() do
       [
         {Forge.Push.Digest,
-         hour_utc: Application.get_env(:forge, Forge.Push, [])[:digest_hour_utc] || 9}
+         hour_utc: Application.get_env(:forge, Forge.Push, [])[:digest_hour_utc] || 9},
+        Forge.Push.Watch
       ]
     else
       []

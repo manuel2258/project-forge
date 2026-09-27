@@ -1,16 +1,15 @@
 defmodule ForgeWeb.ChatLive do
   @moduledoc """
-  One conversation: what was said, what is being said now, and what it has written.
+  One conversation, as a work screen (`docs/design/ui.md` § The work screen): Talk, Changes, Docs
+  and Activity, a composer that never leaves the viewport, and its facts as the rail — or the
+  details sheet below `lg`.
 
-  The frame is the ticket's and the job's — a column and a 21rem rail divided by a rule — because
-  a conversation is the same kind of thing: work with a branch, a cost and a record
-  (`docs/design/ui.md` § Space, measure and targets).
-
-  **The reply streams.** This is the case `ui.md` § Motion and structure was rewritten to allow:
-  the operator asked the question and is waiting for the answer, so the text appears as it
-  arrives. It is subscribed per job, so a page open on one conversation is not woken by every
-  event on the node, and it appends rather than reloading — a reload would be a page that flickers
-  four times a sentence.
+  **The reply streams, and so does what the agent does.** This is the case `ui.md` § Motion and
+  structure allows: the operator is looking at this one piece of work. It is subscribed per job,
+  so a page open on one conversation is not woken by every event on the node, and a harness
+  event is appended to the log the page already holds and the transcript folded again from it —
+  rather than every event reading the log, the diff and the documents again, several times a
+  sentence.
   """
 
   use ForgeWeb, :live_view
@@ -18,8 +17,10 @@ defmodule ForgeWeb.ChatLive do
   import ForgeWeb.Indicators
   import ForgeWeb.Operator.Components
 
-  alias Forge.{Artifacts, Conversations, Events, Git, Jobs, Merge, Operator, Projects}
-  alias ForgeWeb.{Diff, Format, Markdown}
+  alias Forge.{Artifacts, Conversations, Events, Git, Jobs, Merge, Operator, Projects, Tickets}
+  alias ForgeWeb.{Actions, Diff, Format, JobStream, Transcript, WorkScreen}
+
+  @tabs ~w(talk changes docs activity)
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
@@ -39,8 +40,10 @@ defmodule ForgeWeb.ChatLive do
        project: project,
        ticket: ticket,
        draft: "",
+       tab: "talk",
        page_title: title(project, ticket)
      )
+     |> JobStream.init()
      |> ForgeWeb.Capacity.project(project)
      |> load()}
   end
@@ -48,26 +51,59 @@ defmodule ForgeWeb.ChatLive do
   defp title(project, nil), do: "Chat · #{project.name}"
   defp title(project, ticket), do: "Chat · #{project.name}##{ticket.number}"
 
-  defp load(%{assigns: %{chat_id: id, project: project}} = socket) do
-    chat = Conversations.get!(id)
+  # `ask` is a reference sent from a ticket's Changes tab, which has no composer of its own: it
+  # lands in the draft, and nothing is sent until the person sends it (`ui.md` § Changes).
+  @impl true
+  def handle_params(params, _uri, socket) do
+    tab = if params["tab"] in @tabs, do: params["tab"], else: "talk"
 
-    assign(socket,
+    socket =
+      case params["ask"] do
+        ref when is_binary(ref) and ref != "" -> assign(socket, draft: with_ref(socket, ref))
+        _none -> socket
+      end
+
+    {:noreply, assign(socket, tab: tab)}
+  end
+
+  defp load(%{assigns: %{chat_id: id, project: project, ticket: ticket}} = socket) do
+    chat = Conversations.get!(id)
+    repo = Projects.repo_path(project)
+    branch = Jobs.chat_branch(chat)
+
+    socket
+    |> assign(
       chat: chat,
-      messages: Conversations.messages(id),
-      written: Artifacts.written_by(id),
+      events: Events.for_job(id),
+      docs: docs(chat, project, ticket),
       unrecorded: Conversations.unrecorded(id),
       diff: chat_diff(project, chat),
-      branch_exists: Git.branch_exists?(Projects.repo_path(project), Jobs.chat_branch(chat)),
+      commits: commits(project, chat),
+      branch_exists: Git.branch_exists?(repo, branch),
       # Where a reopen makes a deleted branch again, from the definition the reopen uses.
-      base_branch: Conversations.base_branch(project, socket.assigns.ticket),
+      base_branch: Conversations.base_branch(project, ticket),
       merged: Merge.merged_chat?(chat),
       waiting: Jobs.current_wait(chat),
       conflict: nil
     )
+    |> fold()
   end
 
-  # Against the default branch, which is where a merge would put it — the same question the
-  # review page asks about a ticket, so it is the same diff and the same drawing of it.
+  # The projection, from the log the page holds. Pure, so an appended event costs a fold and no
+  # query.
+  defp fold(%{assigns: %{events: events}} = socket) do
+    messages = Conversations.transcript(events)
+
+    assign(socket,
+      messages: messages,
+      now: Conversations.now(events),
+      plan: Transcript.plan(messages),
+      at: DateTime.utc_now()
+    )
+  end
+
+  # Against the default branch, which is where a merge would put it — the question the review
+  # page asks about a ticket, read the same way (`ForgeWeb.Diff`).
   defp chat_diff(project, chat) do
     repo = Projects.repo_path(project)
 
@@ -79,12 +115,55 @@ defmodule ForgeWeb.ChatLive do
     end
   end
 
+  defp commits(project, chat),
+    do:
+      Diff.commits(
+        Projects.repo_path(project),
+        "refs/heads/" <> project.default_branch,
+        "refs/heads/" <> Jobs.chat_branch(chat)
+      )
+
+  # Every version it wrote, whichever scope it is in — a ticket chat's documents are the
+  # ticket's — grouped by document, the latest rendered and the rest linked
+  # (`docs/design/ui.md` § Docs). Approval is possible only for a ticket's document that the
+  # ticket's workflow approves, so only those carry a mark.
+  defp docs(chat, project, ticket) do
+    approvable =
+      if ticket, do: ticket |> Tickets.workflow() |> Artifacts.approvable(), else: MapSet.new()
+
+    chat.id
+    |> Artifacts.written_by()
+    |> Enum.chunk_by(fn {artifact, _version} -> artifact.id end)
+    |> Enum.map(fn [{artifact, _} | _] = written ->
+      WorkScreen.doc(
+        artifact,
+        Enum.map(written, &elem(&1, 1)),
+        &version_href(chat, project, ticket, artifact, &1),
+        is_nil(artifact.job_id) and artifact.kind != :presentation and
+          MapSet.member?(approvable, artifact.name)
+      )
+    end)
+  end
+
   # Per job, so the filtering is the subscription rather than a check — CLAUDE.md's rule about a
-  # handler on a global topic. A reload per event would flicker several times a sentence, so the
-  # projection is recomputed from the log, which is cheap and is the only copy there is.
+  # handler on a global topic. What the harness streams is added to the log the page holds and
+  # folded again (`ForgeWeb.JobStream`), and after a call's result the branch is read again
+  # shortly, since that is how a commit arrives; anything else on this job's topic — a turn
+  # ending, a wait, a message — changes more than the transcript, and reloads.
   @impl true
-  def handle_info({:job_event, id, _event}, %{assigns: %{chat_id: id}} = socket),
-    do: {:noreply, load(socket)}
+  def handle_info({:job_event, id, event}, %{assigns: %{chat_id: id}} = socket) do
+    if JobStream.streamed?(event) do
+      case JobStream.add(socket.assigns.events, event) do
+        :seen ->
+          {:noreply, socket}
+
+        {:ok, events} ->
+          {:noreply, socket |> assign(events: events) |> fold() |> JobStream.catch_up(event)}
+      end
+    else
+      {:noreply, load(socket)}
+    end
+  end
 
   def handle_info({:job_event, _id, _event}, socket), do: {:noreply, socket}
 
@@ -99,6 +178,17 @@ defmodule ForgeWeb.ChatLive do
     do: {:noreply, load(socket)}
 
   def handle_info({:ticket_changed, _other}, socket), do: {:noreply, socket}
+
+  # What the branch holds, read again after a call that may have committed to it — without the
+  # rest of a reload, which would also take away a merge's conflict sentence mid-turn.
+  def handle_info(:catch_up, %{assigns: %{project: project, chat: chat}} = socket) do
+    {:noreply,
+     assign(socket,
+       diff: chat_diff(project, chat),
+       commits: commits(project, chat),
+       catching_up: false
+     )}
+  end
 
   @impl true
   def handle_event("draft", %{"text" => text}, socket),
@@ -170,6 +260,27 @@ defmodule ForgeWeb.ChatLive do
   # record, and a second one would be a second truth (§ Asking a question).
   def handle_event("answer", %{"choice" => choice}, socket), do: say(socket, choice, force: false)
 
+  # *Ask about this* on the Changes tab: the reference goes into the draft, beside anything
+  # already typed, and the page moves to where the draft is. Nothing is sent.
+  def handle_event("ask", %{"ref" => ref}, socket) do
+    {:noreply,
+     socket
+     |> assign(draft: with_ref(socket, ref))
+     |> push_patch(to: ~p"/chats/#{socket.assigns.chat_id}?tab=talk")}
+  end
+
+  def handle_event("more", params, socket), do: JobStream.handle_event("more", params, socket)
+
+  def handle_event("notices", params, socket),
+    do: JobStream.handle_event("notices", params, socket)
+
+  defp with_ref(socket, ref) do
+    case String.trim_trailing(socket.assigns.draft) do
+      "" -> ref <> " "
+      typed -> typed <> "\n" <> ref <> " "
+    end
+  end
+
   defp say(socket, text, opts) do
     case String.trim(text || "") do
       "" ->
@@ -200,17 +311,18 @@ defmodule ForgeWeb.ChatLive do
   # The queue asks the same thing of the same reply, so the asking lives in `Conversations`.
   defp question(messages), do: messages |> List.last() |> Conversations.question()
 
-  # Waiting on *you*: the agent finished a turn and said something. A reply still being spoken
-  # is not waiting on anyone.
+  # Waiting on *you*: the agent finished a turn and said something — the queue's reading, from
+  # the same messages (`Conversations.said/1`), so the page and the queue agree. A reply still
+  # being spoken is not waiting on anyone, and neither is a turn that only acted.
   defp waiting?(%{status: status}, messages) do
-    case {status, List.last(messages)} do
+    case {status, messages |> Conversations.said() |> List.last()} do
       {status, %{role: :assistant, turn: turn}} when status in [:running, :pending] -> turn != nil
       _other -> false
     end
   end
 
-  # The agent has the ball: either it has not started this turn's reply, or it is still speaking
-  # it — an assistant message with no turn number on it is one no `chat.turn` has closed.
+  # The agent has the ball: either it has not started this turn's reply, or it is still in it —
+  # an assistant turn no `chat.turn` has closed.
   defp responding?(%{status: status}, messages) do
     status == :running and
       case List.last(messages) do
@@ -224,246 +336,277 @@ defmodule ForgeWeb.ChatLive do
   # while `Conversations.send/3` disagreed would offer a send box that refuses.
   defp live?(chat), do: Conversations.live?(chat)
 
+  defp tabs(assigns) do
+    [
+      {"talk", "Talk", nil},
+      {"changes", "Changes", Diff.file_count(assigns.diff)},
+      {"docs", "Docs", length(assigns.docs)},
+      {"activity", "Activity", WorkScreen.activity_count(assigns.events)}
+    ]
+  end
+
   @impl true
   def render(assigns) do
-    assigns = assign(assigns, question: question(assigns.messages))
+    assigns =
+      assign(assigns,
+        question: question(assigns.messages),
+        responding: responding?(assigns.chat, assigns.messages),
+        live: live?(assigns.chat)
+      )
 
     ~H"""
     <Layouts.app
       flash={@flash}
       current_scope={@current_scope}
       capacity={@capacity}
-      active={:board}
+      active={:chats}
       measure="74rem"
+      frame={:work}
     >
-      <.link
-        navigate={back(@project, @ticket)}
-        class="font-mono text-[12.5px] opacity-60 hover:opacity-100"
+      <WorkScreen.frame
+        tabs={tabs(assigns)}
+        tab={@tab}
+        path={~p"/chats/#{@chat.id}"}
+        capacity={@capacity}
       >
-        ‹ {where(@project, @ticket)}
-      </.link>
-
-      <div class="mt-4 flex flex-col gap-8 lg:flex-row lg:gap-0">
-        <div class="lg:min-w-0 lg:flex-1 lg:pr-8">
-          <header class="flex flex-wrap items-baseline gap-3">
-            <h1 class="text-2xl font-semibold -tracking-[.025em]">Conversation</h1>
-            <.job_status status={@chat.status} />
-          </header>
-
-          <p class="mt-2 text-sm/[1.55] opacity-60">
-            {context_line(@ticket)} Its work is on <span class="font-mono text-[12.5px]">chat/{@chat.id}</span>.
-          </p>
-
-          <.scroll_pane id="messages-pane" height="62vh" class="mt-8">
-            <ol class="flex flex-col gap-6" id="messages" data-scroll-items>
-              <li :for={message <- @messages} class="flex flex-col gap-1">
-                <div class="flex items-baseline gap-2 font-mono text-[11px] tracking-[.14em] uppercase opacity-50">
-                  <span>{if message.role == :user, do: "you", else: "agent"}</span>
-                  <span :if={message.role == :user and not message.delivered} class="opacity-80">
-                    · queued
-                  </span>
-                  <span :if={message[:turn]}>· turn {message.turn}</span>
-                  <span>· {Format.ago(message.at, DateTime.utc_now())}</span>
-                </div>
-
-                <div class={[
-                  "rounded-box border border-base-300 px-4 py-3",
-                  message.role == :user && "bg-base-200"
-                ]}>
-                  <div class="doc text-sm/[1.6] break-words">{Markdown.to_html(message.text)}</div>
-                </div>
-              </li>
-            </ol>
-          </.scroll_pane>
-
-          <p :if={@messages == []} class="mt-8 text-sm opacity-60">
-            Nothing said yet.
-          </p>
-
-          <%!-- Where the reply will appear, so the wait has a place rather than a spinner
-                somewhere else. Static: ui.md § Motion and structure says nothing pulses, and a
-                conversation you are waiting on is exactly where a decorative animation would be
-                most tempting and least honest. --%>
-          <p :if={responding?(@chat, @messages)} class="mt-6 flex items-center gap-2">
-            <span class="font-mono text-[11px] tracking-[.14em] uppercase opacity-50">agent</span>
-            <span class="font-mono text-[17px] leading-none opacity-40">…</span>
-          </p>
-
-          <%!-- A conversation that has not started yet says why, in the same place: the
-                scheduler's sentence, the latest since it last started (docs/design/ui.md § A job
-                waiting for a machine). A chat sticks nothing, so this is the only surface that
-                says a template is missing. --%>
-          <p :if={@waiting} id="chat-waiting" class="mt-6 text-sm/[1.55] opacity-70">
-            {Events.summary(@waiting)}
-          </p>
-
-          <%!-- A reply that asked something gets one-tap answers, which is the difference
-                between answering from a phone and not. Free text stays valid and is the box
-                below, not an escape hatch behind a link.
-
-                Gone when the conversation is, for the same reason the box below is: an answer
-                row *is* a send button, and one offered on a dead conversation takes a tap and
-                loses it. What it asked stays legible — the reply is in the transcript above. --%>
-          <section
-            :if={@question && live?(@chat)}
-            class="mt-8 rounded-box border border-base-300 p-4"
-          >
-            <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
-              It asked you
-            </h2>
-            <p class="mt-2 text-sm/[1.55]">{@question.text}</p>
-            <div class="mt-3 flex flex-col gap-2">
-              <.answer_row
-                :for={option <- @question.options}
-                phx-click="answer"
-                phx-value-choice={option}
-              >
-                {option}
-              </.answer_row>
-            </div>
-          </section>
-
-          <section :if={live?(@chat)} class="mt-8">
-            <form id="say" phx-change="draft" phx-submit="send" class="flex flex-col gap-3">
-              <ForgeWeb.Conversations.message_box id="draft" name="text" value={@draft} />
-
-              <div class="flex flex-wrap gap-3">
-                <button
-                  type="submit"
-                  class="min-h-[52px] rounded-field bg-base-content px-4 text-sm font-medium text-base-100"
-                >
-                  Send
-                </button>
-                <%!-- Deliberate, and named for what it costs: the tokens already spent on the
-                      interrupted turn are spent. --%>
-                <button
-                  type="button"
-                  phx-click="force"
-                  phx-value-text={@draft}
-                  class="min-h-[52px] rounded-field border border-base-300 px-4 text-sm"
-                >
-                  Interrupt and send
-                </button>
-                <button
-                  type="button"
-                  phx-click="stop"
-                  class="min-h-[52px] rounded-field border border-base-300 px-4 text-sm"
-                >
-                  Stop
-                </button>
-              </div>
-            </form>
-
-            <p :if={waiting?(@chat, @messages)} class="mt-3 text-sm opacity-60">
-              It is waiting on you.
-            </p>
-          </section>
-
-          <section :if={@diff} class="mt-10 border-t border-base-300 pt-8">
-            <Diff.section diff={@diff} id="chat-diff" title="What it changed" />
-
-            <p :if={@conflict} class="mt-4 text-sm/[1.55] text-error">
-              It does not merge cleanly: {Enum.join(@conflict, ", ")}. Ask it to rebase, or take
-              the change by hand.
-            </p>
-
-            <p :if={@merged} class="mt-4 text-sm/[1.55] opacity-70">
-              Already on {@project.default_branch}.
-            </p>
-
-            <button
-              :if={not @merged and @diff[:files] not in [nil, []]}
-              type="button"
-              phx-click="merge"
-              data-confirm="Merge this into the default branch?"
-              class="mt-4 min-h-[52px] rounded-field bg-base-content px-4 text-sm font-medium text-base-100"
+        <%!-- On a phone the back affordance and the status share one line, and the title is
+              for assistive technology only: every line of header is a line the transcript
+              does not have. --%>
+        <:header>
+          <div class="flex items-center gap-3">
+            <.link
+              navigate={back(@project, @ticket)}
+              class="flex min-h-[46px] min-w-0 items-center font-mono text-[12.5px] opacity-60 hover:opacity-100 sm:min-h-0"
             >
-              Merge into {@project.default_branch}
-            </button>
-          </section>
+              <span class="truncate">‹ {where(@project, @ticket)}</span>
+            </.link>
+            <span class="ml-auto shrink-0 sm:hidden"><.job_status status={@chat.status} /></span>
+          </div>
+          <div class="flex flex-wrap items-baseline gap-3">
+            <h1 class="sr-only text-2xl font-semibold -tracking-[.025em] sm:not-sr-only">
+              Conversation
+            </h1>
+            <span class="hidden sm:inline"><.job_status status={@chat.status} /></span>
+          </div>
+        </:header>
 
-          <section :if={not live?(@chat)} class="mt-8">
-            <p id="reopen-copy" class="text-sm/[1.55] opacity-70">
-              This conversation has stopped. Reopening starts a new process on a new machine: it
-              is given everything said here to read, and answers the next thing you say.
-              <%= if @branch_exists do %>
-                It works on its branch as it stands.
-              <% else %>
-                Its branch is gone — a merge deletes it, and so does ending — so it starts one
-                again from <span class="font-mono text-[12.5px]">{@base_branch}</span>
-                as it stands now.
-              <% end %>
-            </p>
-            <button
-              type="button"
-              phx-click="reopen"
-              class="mt-3 min-h-[52px] rounded-field bg-base-content px-4 text-sm font-medium text-base-100"
-            >
-              Reopen
-            </button>
-          </section>
-        </div>
+        <:strip>
+          <span>chat/{String.slice(@chat.id, 0, 8)}</span>
+          <Diff.stat diff={@diff} />
+          <span>{@chat.turns} {if @chat.turns == 1, do: "turn", else: "turns"}</span>
+          <span>{Format.windows(@chat.cost_usd) || "—"}</span>
+        </:strip>
 
-        <aside class="lg:w-[21rem] lg:shrink-0 lg:border-l lg:border-base-300 lg:pl-8">
-          <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">This chat</h2>
+        <.talk :if={@tab == "talk"} {assigns} />
 
-          <dl class="mt-3 flex flex-col gap-2 text-[12.5px]">
-            <.fact label="project" value={@project.name} />
-            <.fact :if={@ticket} label="ticket" value={"##{@ticket.number} #{@ticket.title}"} />
-            <.fact label="model" value={Jobs.model_for(@chat) || "the platform's"} />
-            <.fact label="turns" value={to_string(@chat.turns)} />
-            <.fact label="spent" value={Format.windows(@chat.cost_usd) || "—"} />
-            <.fact label="branch" value={"chat/" <> @chat.id} />
-          </dl>
+        <WorkScreen.body :if={@tab == "changes"} id="changes">
+          <.changes {assigns} />
+        </WorkScreen.body>
 
-          <%!-- Every version it wrote, whichever scope it is in — a ticket chat's documents are
-                the ticket's — and each is a link to itself: ui.md § Addressable artifact
-                versions. The row is the link, as on a job page's produced list. --%>
-          <section class="mt-8">
-            <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Written</h2>
-            <p :if={@written == [] and @unrecorded == %{}} class="mt-3 text-sm opacity-60">
-              Nothing yet.
-            </p>
-            <ul id="written" class="mt-3 flex flex-col">
-              <li :for={{artifact, version} <- @written}>
-                <.link
-                  href={version_href(@chat, @project, @ticket, artifact, version)}
-                  class="flex min-h-[46px] items-center gap-2 border-b border-base-300/60 font-mono text-[12.5px] hover:bg-base-200"
-                >
-                  <span class="min-w-0 flex-1 truncate">{artifact.name}</span>
-                  <span class="shrink-0 opacity-60">v{version.version}</span>
-                  <span class="shrink-0 opacity-40" aria-hidden="true">›</span>
-                </.link>
-              </li>
-            </ul>
-            <%!-- What the last turn left in out/ that was not recorded, and why. Without this a
-                  document that did not arrive is only absent, which reads the same as one
-                  that was never written. --%>
-            <ul :if={@unrecorded != %{}} id="unrecorded" class="mt-3 flex flex-col gap-2">
-              <li :for={{name, why} <- Enum.sort(@unrecorded)} class="text-[12.5px]">
-                <span class="font-mono break-all">{name}</span>
-                <span class="text-error">not recorded:</span>
-                <span class="opacity-70">{why}</span>
-              </li>
-            </ul>
-          </section>
+        <WorkScreen.body :if={@tab == "docs"} id="docs">
+          <WorkScreen.docs docs={@docs} unrecorded={@unrecorded} />
+        </WorkScreen.body>
 
-          <section :if={live?(@chat)} class="mt-8">
-            <button
-              type="button"
-              phx-click="close"
-              data-confirm={ForgeWeb.Conversations.ending_confirm()}
-              class="min-h-[46px] text-sm text-primary hover:underline"
-            >
-              End it
-            </button>
-            <p id="ending-copy" class="mt-1 text-sm/[1.55] opacity-60">
-              It holds a worker until it ends or goes idle. If you end it, {ForgeWeb.Conversations.ending_rule()}; going idle does not.
-            </p>
-          </section>
-        </aside>
-      </div>
+        <WorkScreen.body :if={@tab == "activity"} id="activity">
+          <WorkScreen.activity
+            events={@events}
+            shown={@shown}
+            notices={@notices}
+            heading={WorkScreen.stream_heading(@chat, @events)}
+          />
+        </WorkScreen.body>
+
+        <:footer :if={@tab == "talk"}>
+          <.footer {assigns} />
+        </:footer>
+
+        <:rail>
+          <.rail {assigns} />
+        </:rail>
+      </WorkScreen.frame>
     </Layouts.app>
+    """
+  end
+
+  defp talk(assigns) do
+    ~H"""
+    <.scroll_pane id="messages-pane" height={nil} class="py-4">
+      <ol class="flex flex-col gap-4" id="messages" data-scroll-items>
+        <Transcript.transcript messages={@messages} live={@live} now={@at} />
+      </ol>
+
+      <p :if={@messages == []} class="text-sm opacity-60">Nothing said yet.</p>
+
+      <%!-- A conversation that has not started yet says why, where the reply will appear: the
+            scheduler's sentence, the latest since it last started (docs/design/ui.md § A job
+            waiting for a machine). A chat sticks nothing, so this is the only surface that says
+            a template is missing. --%>
+      <p :if={@waiting} id="chat-waiting" class="mt-4 text-sm/[1.55] opacity-70">
+        {Events.summary(@waiting)}
+      </p>
+    </.scroll_pane>
+    """
+  end
+
+  # From the bottom up: the composer, the now line with the plan above it, and any open
+  # question's answer rows — under the thumb (`docs/design/ui.md` § Talk).
+  defp footer(assigns) do
+    ~H"""
+    <div class="flex flex-col gap-2 border-t border-base-300 pt-2 pb-2">
+      <%!-- Gone when the conversation is, for the same reason the box is: an answer row *is* a
+            send button, and one offered on a dead conversation takes a tap and loses it. What it
+            asked stays legible in the transcript. --%>
+      <section
+        :if={@question && @live}
+        id="answer-rows"
+        class="flex max-h-[30dvh] flex-col gap-2 overflow-y-auto"
+      >
+        <p class="text-sm/[1.55]">{@question.text}</p>
+        <.answer_row :for={option <- @question.options} phx-click="answer" phx-value-choice={option}>
+          {option}
+        </.answer_row>
+      </section>
+
+      <details :if={@responding && @plan != []} id="plan" class="font-mono text-[12.5px]">
+        <summary class="flex min-h-[46px] cursor-pointer items-center gap-2 text-info">
+          <span class="shrink-0 opacity-60">
+            {Enum.count(@plan, &(&1["status"] == "completed"))}/{length(@plan)}
+          </span>
+          <span class="min-w-0 truncate font-sans text-sm">
+            {(Actions.current_todo(@plan) && Actions.todo_text(Actions.current_todo(@plan))) ||
+              "done"}
+          </span>
+        </summary>
+        <div class="pb-2"><Actions.checklist todos={@plan} /></div>
+      </details>
+
+      <%!-- Static text: ui.md § Motion and structure says nothing pulses, and a conversation you
+            are waiting on is exactly where a decorative animation would be most tempting and
+            least honest. --%>
+      <div :if={@responding} id="now-line" class="flex flex-wrap items-center gap-2">
+        <span class="min-w-0 basis-full break-words font-mono text-[12.5px] text-info sm:basis-0 sm:flex-1">
+          {Actions.now_words(@now) || "…"}
+        </span>
+        <button
+          type="button"
+          phx-click="stop"
+          class="min-h-[46px] rounded-field border border-base-300 px-3 text-sm"
+        >
+          Stop
+        </button>
+        <%!-- Deliberate, and named for what it costs: the tokens already spent on the
+              interrupted turn are spent. --%>
+        <button
+          type="button"
+          phx-click="force"
+          phx-value-text={@draft}
+          class="min-h-[46px] rounded-field border border-base-300 px-3 text-sm"
+        >
+          Interrupt and send
+        </button>
+      </div>
+
+      <p :if={waiting?(@chat, @messages)} class="text-sm opacity-60">It is waiting on you.</p>
+
+      <form :if={@live} id="say" phx-change="draft" phx-submit="send">
+        <ForgeWeb.Conversations.message_box id="draft" name="text" value={@draft} send />
+      </form>
+
+      <section :if={not @live}>
+        <p id="reopen-copy" class="text-sm/[1.55] opacity-70">
+          This conversation has stopped. Reopening starts a new process on a new machine: it is
+          given everything said here to read, and answers the next thing you say.
+          <%= if @branch_exists do %>
+            It works on its branch as it stands.
+          <% else %>
+            Its branch is gone — a merge deletes it, and so does ending — so it starts one again
+            from <span class="font-mono text-[12.5px]">{@base_branch}</span> as it stands now.
+          <% end %>
+        </p>
+        <button
+          type="button"
+          phx-click="reopen"
+          class="mt-2 min-h-[46px] rounded-field bg-base-content px-4 text-sm font-medium text-base-100"
+        >
+          Reopen
+        </button>
+      </section>
+    </div>
+    """
+  end
+
+  defp changes(assigns) do
+    ~H"""
+    <section>
+      <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">What it changed</h2>
+      <div class="mt-3">
+        <Diff.file_table :if={@diff} diff={@diff} ask="ask" />
+        <p :if={!@diff} class="text-sm/[1.55] opacity-70">
+          There is no branch to compare: a merge deletes it, and so does ending.
+        </p>
+      </div>
+    </section>
+
+    <WorkScreen.commits commits={@commits} now={@at} />
+
+    <section :if={@diff} class="mt-8">
+      <p :if={@conflict} class="text-sm/[1.55] text-error">
+        It does not merge cleanly: {Enum.join(@conflict, ", ")}. Ask it to rebase, or take the
+        change by hand.
+      </p>
+
+      <p :if={@merged} class="text-sm/[1.55] opacity-70">
+        Already on {@project.default_branch}.
+      </p>
+
+      <button
+        :if={not @merged and @diff[:files] not in [nil, []]}
+        type="button"
+        phx-click="merge"
+        data-confirm="Merge this into the default branch?"
+        class="mt-4 min-h-[52px] rounded-field bg-base-content px-4 text-sm font-medium text-base-100"
+      >
+        Merge into {@project.default_branch}
+      </button>
+    </section>
+    """
+  end
+
+  defp rail(assigns) do
+    ~H"""
+    <%!-- The strip's gauge written out, where a phone reaches it: below `lg` this is the
+          details sheet, and the top bar that carries the gauge's title is not drawn. --%>
+    <Layouts.capacity_written
+      :if={@capacity not in [nil, %{}]}
+      capacity={@capacity}
+      prefix="details-capacity"
+      class="mb-6 border-b border-base-300 pb-3 lg:hidden"
+    />
+    <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">This chat</h2>
+    <p class="mt-2 text-sm/[1.55] opacity-60">{context_line(@ticket)}</p>
+
+    <dl class="mt-3 flex flex-col gap-2 text-[12.5px]">
+      <.fact label="project" value={@project.name} />
+      <.fact :if={@ticket} label="ticket" value={"##{@ticket.number} #{@ticket.title}"} />
+      <.fact label="model" value={Jobs.model_for(@chat) || "the platform's"} />
+      <.fact label="turns" value={to_string(@chat.turns)} />
+      <.fact label="spent" value={Format.windows(@chat.cost_usd) || "—"} />
+      <.fact label="branch" value={"chat/" <> @chat.id} />
+    </dl>
+
+    <section :if={@live} class="mt-8">
+      <button
+        type="button"
+        phx-click="close"
+        data-confirm={ForgeWeb.Conversations.ending_confirm()}
+        class="min-h-[46px] text-sm text-primary hover:underline"
+      >
+        End it
+      </button>
+      <p id="ending-copy" class="mt-1 text-sm/[1.55] opacity-60">
+        It holds a worker until it ends or goes idle. If you end it, {ForgeWeb.Conversations.ending_rule()}; going idle does not.
+      </p>
+    </section>
     """
   end
 
@@ -477,11 +620,10 @@ defmodule ForgeWeb.ChatLive do
   # conversation's own for what is scoped to it, the ticket's for a ticket chat's documents.
   defp version_href(chat, _project, _ticket, %{job_id: job_id} = artifact, version)
        when is_binary(job_id),
-       do: ~p"/chats/#{chat.id}/artifacts/#{artifact.name}/#{version.version}"
+       do: ~p"/chats/#{chat.id}/artifacts/#{artifact.name}/#{version}"
 
   defp version_href(_chat, project, ticket, artifact, version),
-    do:
-      ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/#{artifact.name}/#{version.version}"
+    do: ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/#{artifact.name}/#{version}"
 
   defp context_line(nil), do: "About the repository as a whole."
   defp context_line(_ticket), do: "About this ticket, from its branch as it stood."

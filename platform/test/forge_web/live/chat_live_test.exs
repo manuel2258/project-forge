@@ -110,7 +110,7 @@ defmodule ForgeWeb.ChatLiveTest do
     } do
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
 
-      html = view |> form("form", %{"text" => "try the other backend"}) |> render_submit()
+      html = view |> form("#say", %{"text" => "try the other backend"}) |> render_submit()
 
       assert html =~ "try the other backend"
       assert html =~ "queued"
@@ -146,27 +146,55 @@ defmodule ForgeWeb.ChatLiveTest do
       assert html =~ "data-scroll-items"
     end
 
-    # Enter sends and shift-enter makes a newline, which a textarea does neither of on its own.
-    # Whether the key actually sends cannot be driven from ExUnit — it is a browser event — so
-    # what is pinned here is that the box carries the hook and says what the keys do.
-    test "the box sends on enter", %{conn: conn, chat: chat} do
-      {:ok, _view, html} = live(conn, ~p"/chats/#{chat.id}")
+    # Enter sends where the pointer is fine and is a newline where it is coarse, because a phone
+    # keyboard has no shift-enter. Whether a key sends is a browser event ExUnit cannot drive, so
+    # what is pinned is what the hook reads: the query that makes Enter a newline, the most lines
+    # the box grows to, and a hint drawn only where it is true.
+    test "the box takes a newline on a phone and sends on enter elsewhere", %{
+      conn: conn,
+      chat: chat
+    } do
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
 
-      assert html =~ "phx-hook"
-      assert html =~ "SendOnEnter"
-      assert html =~ "Enter sends"
+      box = view |> element("#draft") |> render()
+      assert box =~ ~s(phx-hook="ForgeWeb.Conversations.Composer")
+      assert box =~ ~s|data-newline-on="(pointer: coarse)"|
+      assert box =~ ~s(data-max-lines="6")
+      assert box =~ ~s(rows="1")
+
+      hint = view |> element("#say [data-hint]") |> render()
+      assert hint =~ "Enter sends"
+      assert hint =~ "pointer-coarse:hidden"
+
+      # Send is a 46px square, named for a screen reader because it has no word on it.
+      send = view |> element(~s(#say button[type="submit"][aria-label="Send"])) |> render()
+      assert send =~ "size-[46px]"
     end
 
     test "an empty message is not sent", %{conn: conn, chat: chat} do
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
 
       before = length(Conversations.messages(chat.id))
-      view |> form("form", %{"text" => "   "}) |> render_submit()
+      view |> form("#say", %{"text" => "   "}) |> render_submit()
 
       assert length(Conversations.messages(chat.id)) == before
     end
 
+    # Stop and Interrupt are the now line's, and the now line is drawn only while a turn is
+    # open: with no turn open there is nothing to stop, and the composer is the box and Send.
+    test "stop and interrupt are there only while a turn is open", %{conn: conn, chat: chat} do
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+      refute has_element?(view, "#now-line")
+      refute has_element?(view, "button", "Stop")
+
+      running!(chat)
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+      assert has_element?(view, "#now-line button", "Stop")
+      assert has_element?(view, "#now-line button", "Interrupt and send")
+    end
+
     test "stop ends the turn without sending anything", %{conn: conn, chat: chat} do
+      running!(chat)
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
 
       before = length(Conversations.messages(chat.id))
@@ -176,13 +204,21 @@ defmodule ForgeWeb.ChatLiveTest do
     end
 
     test "interrupt and send does send", %{conn: conn, chat: chat} do
+      running!(chat)
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
 
-      view |> form("form", %{"text" => "actually, stop"}) |> render_change()
+      view |> form("#say", %{"text" => "actually, stop"}) |> render_change()
       html = view |> element("button", "Interrupt and send") |> render_click()
 
       assert html =~ "actually, stop"
     end
+  end
+
+  defp running!(chat) do
+    {:ok, running} =
+      chat |> Forge.Jobs.Job.progress_changeset(%{status: :running}) |> Forge.Repo.update()
+
+    running
   end
 
   # A message *is* a body, so a fenced question block in a reply parses with the same parser a
@@ -515,10 +551,10 @@ defmodule ForgeWeb.ChatLiveTest do
     wrote(chat, 1, %{"notes.md" => "# Notes\n"})
     wrote(chat, 2, %{"notes.md" => "# More notes\n"})
 
-    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}?tab=docs")
 
-    assert has_element?(view, ~s(#written a[href="/chats/#{chat.id}/artifacts/notes.md/1"]))
-    assert has_element?(view, ~s(#written a[href="/chats/#{chat.id}/artifacts/notes.md/2"]))
+    assert has_element?(view, ~s(#docs a[href="/chats/#{chat.id}/artifacts/notes.md/1"]))
+    assert has_element?(view, ~s(#docs a[href="/chats/#{chat.id}/artifacts/notes.md/2"]))
   end
 
   # A ticket chat writes against its ticket, so its documents are the ticket's and have the
@@ -528,14 +564,14 @@ defmodule ForgeWeb.ChatLiveTest do
     {:ok, chat} = Conversations.open(project, "rewrite the plan", ticket: ticket)
     wrote(chat, 1, %{"plan.md" => "# Plan\n"})
 
-    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}?tab=docs")
 
     assert has_element?(
              view,
-             ~s(#written a[href="/tickets/#{project.name}/#{ticket.number}/artifacts/plan.md/1"])
+             ~s(#docs a[href="/tickets/#{project.name}/#{ticket.number}/artifacts/plan.md/1"])
            )
 
-    refute has_element?(view, ~s(#written a[href^="/chats/"]))
+    refute has_element?(view, ~s(#docs a[href^="/chats/"]))
   end
 
   # A ticket chat's proposals are not the ticket's: a proposal is scoped to the job that wrote it
@@ -564,8 +600,8 @@ defmodule ForgeWeb.ChatLiveTest do
 
     href = "/chats/#{chat.id}/artifacts/proposal-later.md/1"
 
-    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
-    assert has_element?(view, ~s(#written a[href="#{href}"]))
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}?tab=docs")
+    assert has_element?(view, ~s(#docs a[href="#{href}"]))
 
     assert get(conn, href) |> response(200) =~ "Do it later"
   end
@@ -578,7 +614,7 @@ defmodule ForgeWeb.ChatLiveTest do
   } do
     wrote(chat, 1, %{"ticket" => "# Not mine to write\n"})
 
-    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}?tab=docs")
 
     row = view |> element("#unrecorded li") |> render()
     assert row =~ "ticket"

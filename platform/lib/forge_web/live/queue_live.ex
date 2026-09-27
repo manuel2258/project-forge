@@ -355,23 +355,7 @@ defmodule ForgeWeb.QueueLive do
 
   defp questions_affordance(assigns) do
     ~H"""
-    <div class="flex flex-col gap-4">
-      <.answer_row
-        :if={length(@item.questions) > 1 and Enum.all?(@item.questions, & &1.default)}
-        phx-click="answer_all"
-        phx-disable-with="Sending…"
-        phx-value-ticket={@item.ticket.id}
-        phx-value-version={@item.version.id}
-      >
-        Accept all {length(@item.questions)} recommendations
-      </.answer_row>
-
-      <.question_card
-        :for={question <- @item.questions}
-        question={question}
-        ticket_id={@item.ticket.id}
-      />
-    </div>
+    <.questions questions={@item.questions} ticket_id={@item.ticket.id} version_id={@item.version.id} />
     """
   end
 

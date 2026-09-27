@@ -173,7 +173,10 @@ defmodule ForgeWeb.ProjectLive do
       active={:board}
       measure={nil}
     >
-      <.link navigate={~p"/board"} class="font-mono text-[12.5px] opacity-60 hover:opacity-100">
+      <.link
+        navigate={~p"/board"}
+        class="flex min-h-[46px] items-center font-mono text-[12.5px] opacity-60 hover:opacity-100"
+      >
         ‹ Board
       </.link>
 
@@ -218,7 +221,10 @@ defmodule ForgeWeb.ProjectLive do
             </.link>
           </p>
 
-          <div :if={@tickets != []} class="mt-3 flex gap-px overflow-x-auto bg-base-300">
+          <div
+            :if={@tickets != []}
+            class="mt-3 flex flex-col gap-px bg-base-300 sm:flex-row sm:overflow-x-auto"
+          >
             <Board.column
               :for={column <- @columns}
               column={column}
@@ -243,7 +249,11 @@ defmodule ForgeWeb.ProjectLive do
             </p>
           </div>
 
-          <table :if={Admission.ready?(@current)} class="mt-3 w-full text-[12.5px]">
+          <table
+            :if={Admission.ready?(@current)}
+            id="workflow"
+            class="reflow mt-3 w-full text-[12.5px]"
+          >
             <tbody>
               <tr
                 :for={row <- state_rows(elem(@current, 1))}
@@ -258,19 +268,19 @@ defmodule ForgeWeb.ProjectLive do
                     initial
                   </div>
                 </td>
-                <td class="py-2 pr-3 font-mono opacity-70">
+                <td data-label="Job" class="py-2 pr-3 font-mono opacity-70">
                   <div :if={row.state.prompt}>{row.state.prompt}</div>
                   <div :if={row.state.produces != []} class="opacity-60">
                     → {Enum.join(row.state.produces, ", ")}
                   </div>
                   <div :if={is_nil(row.state.prompt)} class="opacity-50">no job</div>
                 </td>
-                <td class="py-2 pr-3 font-mono opacity-70">
+                <td data-label="Budget" class="py-2 pr-3 font-mono opacity-70">
                   <div :if={row.state.budget}>
                     {row.state.budget.turns} turns · {Format.windows(row.state.budget.cost) || "—"}
                   </div>
                 </td>
-                <td class="py-2 font-mono opacity-70">
+                <td data-label="Goes to" class="py-2 font-mono opacity-70">
                   <div :for={t <- row.out}>
                     {t.to}
                     <span class="opacity-50">on {ForgeCore.Workflow.Transition.outcome(t)}</span>

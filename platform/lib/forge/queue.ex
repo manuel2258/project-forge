@@ -24,6 +24,10 @@ defmodule Forge.Queue do
   alias Forge.Tickets.Ticket
   alias ForgeCore.Workflow
 
+  # A ticket that can still be waiting on someone: one that is running or stuck. The queue loads
+  # only these, and one ticket's items are read only for these, from this one list.
+  @open [:active, :stuck]
+
   @typedoc """
   One thing waiting on a person.
 
@@ -57,6 +61,26 @@ defmodule Forge.Queue do
   def items(%User{} = user), do: build(Enum.map(Projects.list(user), & &1.id))
 
   @doc """
+  The queue's items for one ticket, read the way the queue reads every ticket: what a ticket's
+  own page counts as waiting is then what the queue would count for it, from one definition
+  (`docs/design/ui.md` § Decide and Timeline). A finished ticket has none.
+  """
+  @spec for_ticket(Ticket.t()) :: [item()]
+  def for_ticket(%Ticket{status: status} = ticket) when status in @open,
+    do: questions([ticket]) ++ ticket_items(ticket)
+
+  def for_ticket(%Ticket{}), do: []
+
+  @doc """
+  The queue's item for one conversation — the one it would list — or none: a conversation is
+  in the queue only while it is live and the agent spoke last.
+  """
+  @spec for_chat(Job.t()) :: [item()]
+  def for_chat(%Job{kind: :chat} = chat) do
+    if chat.status in Conversations.live_statuses(), do: chat_item(chat), else: []
+  end
+
+  @doc """
   Whether an item is waiting on a person. Everything is, except an assumption: a question the
   agent did not stop for, which no count of what is waiting may include.
   """
@@ -81,7 +105,7 @@ defmodule Forge.Queue do
           #
           # The rule a test can fail on is "a finished ticket is not in the queue", in
           # `scoping_test.exs`.
-          where: t.status in [:active, :stuck],
+          where: t.status in @open,
           where: ^visible(project_ids),
           order_by: t.inserted_at
       )

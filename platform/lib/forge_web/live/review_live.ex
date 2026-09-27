@@ -108,7 +108,7 @@ defmodule ForgeWeb.ReviewLive do
     <Layouts.app flash={@flash} current_scope={@current_scope} capacity={@capacity} measure="74rem">
       <.link
         navigate={~p"/tickets/#{@project.name}/#{@ticket.number}"}
-        class="font-mono text-[12.5px] opacity-60 hover:opacity-100"
+        class="flex min-h-[46px] items-center font-mono text-[12.5px] opacity-60 hover:opacity-100"
       >
         ‹ {@project.name}#{@ticket.number} · {@ticket.title}
       </.link>

@@ -2,9 +2,11 @@ defmodule ForgeWeb.Diff do
   @moduledoc """
   A change between two commits: how it is read out of the repository, and how it is drawn.
 
-  Two pages show one — the ticket's review and a conversation's — and they show the same thing
-  for the same reason, so there is one of this rather than two. What differs between them is what
-  authorised the merge, not what the diff looks like.
+  Three pages show one, read the same way, in two drawings. A ticket's review page draws
+  `section/1` — the file table and the whole patch beneath it, which is what an approval is given
+  on — and the Changes tab of a ticket and of a conversation draws `file_table/1`, whose rows each
+  expand to their own patch. What each says when there is no change to draw is the same sentence,
+  from one place.
 
   **A diff is bounded.** Past a size it is not rendered inline: a page nobody can read is not a
   review, and the change is still named file by file with its counts. See `docs/design/ui.md`
@@ -61,13 +63,7 @@ defmodule ForgeWeb.Diff do
     <section id={@id}>
       <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">{@title}</h2>
 
-      <p :if={@diff[:error]} class="mt-3 text-sm/[1.55] text-error">
-        The change cannot be read from the repository: {inspect(@diff[:error])}
-      </p>
-
-      <div :if={@diff[:files] == []} class="mt-3 text-sm/[1.55] opacity-70">
-        The branch changes nothing against its base.
-      </div>
+      <.unreadable diff={@diff} class="mt-3" />
 
       <table :if={@diff[:files] not in [nil, []]} class="mt-3 w-full text-[12.5px]">
         <tbody>
@@ -85,11 +81,229 @@ defmodule ForgeWeb.Diff do
         class="mt-4 overflow-x-auto border border-base-300 p-3 font-mono text-[12.5px] leading-[1.5]"
       ><code>{@diff.patch}</code></pre>
 
-      <p :if={@diff[:files] not in [nil, []] and @diff[:inline] == false} class="mt-4 text-sm/[1.55]">
-        This change is {bytes(@diff.bytes)} across {length(@diff.files)} files, too much to read on
-        one page. Read it with <span class="font-mono text-[12.5px]">git diff {short(@diff.base)}..{short(@diff.head)}</span>.
-      </p>
+      <.too_large diff={@diff} />
     </section>
+    """
+  end
+
+  @doc """
+  The change file by file, for a table whose rows expand to their own patch in place:
+  `%{path, added, removed, lines, hunks}`, in the file table's order. `lines` is the file's
+  patch, with each hunk header as `{:hunk, header, line}` — the first line of the new side, which
+  is what a reference to the hunk points at — and every other line as `{:line, text}`. It is nil
+  when there is no patch to draw: the change is too large to draw inline (the table still names
+  every file — it is the map), or the file is binary. `hunks` is each hunk's header and line.
+  """
+  @spec files(t() | nil) :: [map()]
+  def files(%{files: files} = diff) when is_list(files) do
+    patches = if diff[:inline], do: split(diff.patch || ""), else: %{}
+
+    for {path, added, removed} <- files do
+      lines = patch_lines(Map.get(patches, path))
+      hunks = for {:hunk, header, line} <- lines || [], do: %{header: header, line: line}
+      %{path: path, added: added, removed: removed, lines: lines, hunks: hunks}
+    end
+  end
+
+  def files(_diff), do: []
+
+  # Keyed by the path on the `+++` line — the old side's, on `---`, for a file the change
+  # deletes — which is what `--numstat` names for anything but a rename. Not the `diff --git`
+  # header: with a space in the path, `a/a b/c b/a b/c` has more than one reading, and the lazy
+  # one put another file's patch under this one's name. Git marks a path with a space by a tab
+  # after it on `+++`, and quotes one with a quote or a control character in it, the same way
+  # `--numstat` does. A patch with neither line — a binary file, a mode change, a pure rename —
+  # has no key and its row does not expand.
+  defp split(patch) do
+    patch
+    |> String.split(~r/^(?=diff --git )/m, trim: true)
+    |> Enum.flat_map(fn chunk ->
+      case chunk_path(chunk) do
+        nil -> []
+        path -> [{path, String.trim_trailing(chunk, "\n")}]
+      end
+    end)
+    |> Map.new()
+  end
+
+  defp chunk_path(chunk) do
+    new = Regex.run(~r/^\+\+\+ (.*)$/m, chunk, capture: :all_but_first)
+    old = Regex.run(~r/^--- (.*)$/m, chunk, capture: :all_but_first)
+
+    case {new, old} do
+      {["/dev/null"], [old]} -> side(old, "a/")
+      {[new], _old} -> side(new, "b/")
+      _neither -> nil
+    end
+  end
+
+  defp side(printed, prefix) do
+    printed
+    |> String.trim_trailing("\t")
+    |> Git.unquote_path()
+    |> String.replace_prefix(prefix, "")
+  end
+
+  defp patch_lines(nil), do: nil
+
+  defp patch_lines(patch) do
+    for line <- String.split(patch, "\n") do
+      case Regex.run(~r/^@@ -\d+(?:,\d+)? \+(\d+)/, line) do
+        [_all, start] -> {:hunk, line, String.to_integer(start)}
+        nil -> {:line, line}
+      end
+    end
+  end
+
+  @doc """
+  The Changes tab's file table (`docs/design/ui.md` § Changes): never truncated, each row
+  expanding to its own patch in place, and — when `ask` names an event — *Ask about this* beside
+  each row and each hunk header.
+
+  The control is beside the row and never inside it: a row that expands is a control of its
+  own, and one tap meaning two things is what `ui.md` § The affordance rule exists to prevent.
+  """
+  attr :diff, :map, required: true
+  attr :id, :string, default: "changes-files"
+  attr :ask, :string, default: nil, doc: "the event *Ask about this* sends, with `ref`"
+
+  def file_table(assigns) do
+    assigns = assign(assigns, rows: files(assigns.diff))
+
+    ~H"""
+    <.unreadable diff={@diff} />
+
+    <ul :if={@rows != []} id={@id} class="flex flex-col">
+      <li :for={row <- @rows} class="relative border-b border-base-300/60" data-path={row.path}>
+        <details :if={row.lines} class="group">
+          <summary class={[
+            "flex min-h-[46px] cursor-pointer items-center gap-3 py-1.5 font-mono text-[12.5px]",
+            @ask && "pr-16"
+          ]}>
+            <span aria-hidden="true" class="opacity-40 group-open:rotate-90">▸</span>
+            <span class="min-w-0 flex-1 break-all">{row.path}</span>
+            <span class="shrink-0 opacity-60">{count(row.added, "+")} {count(row.removed, "−")}</span>
+          </summary>
+          <%!-- No ligatures, as for every `pre` (app.css): `|>` drawn as a triangle is not
+                what the file says. --%>
+          <div class="mb-3 overflow-x-auto rounded-field border border-base-300 font-mono text-[12.5px] leading-[1.5] [font-variant-ligatures:none]">
+            <%= for line <- row.lines do %>
+              <%= case line do %>
+                <% {:hunk, header, number} -> %>
+                  <div
+                    class="flex items-center gap-2 border-y border-base-300/60 bg-base-200 pl-3"
+                    data-hunk={number}
+                  >
+                    <span class="min-w-0 flex-1 whitespace-pre opacity-70">{header}</span>
+                    <.ask_button :if={@ask} event={@ask} ref={"#{row.path}:#{number}"} />
+                  </div>
+                <% {:line, text} -> %>
+                  <div class="whitespace-pre px-3">{text}</div>
+              <% end %>
+            <% end %>
+          </div>
+        </details>
+
+        <div
+          :if={!row.lines}
+          class={[
+            "flex min-h-[46px] items-center gap-3 py-1.5 font-mono text-[12.5px]",
+            @ask && "pr-16"
+          ]}
+        >
+          <span class="min-w-0 flex-1 break-all">{row.path}</span>
+          <span class="shrink-0 opacity-60">{count(row.added, "+")} {count(row.removed, "−")}</span>
+        </div>
+
+        <div :if={@ask} class="absolute top-0 right-0">
+          <.ask_button event={@ask} ref={ref(row)} />
+        </div>
+      </li>
+    </ul>
+
+    <.too_large diff={@diff} />
+    """
+  end
+
+  attr :diff, :map, required: true
+  attr :class, :string, default: nil
+
+  # Why a change has no rows: it could not be read, or it changes nothing.
+  defp unreadable(assigns) do
+    ~H"""
+    <p :if={@diff[:error]} class={["text-sm/[1.55] text-error", @class]}>
+      The change cannot be read from the repository: {inspect(@diff[:error])}
+    </p>
+
+    <p :if={@diff[:files] == []} class={["text-sm/[1.55] opacity-70", @class]}>
+      The branch changes nothing against its base.
+    </p>
+    """
+  end
+
+  attr :diff, :map, required: true
+
+  # Past the bound, the patch gives way to where it can be read.
+  defp too_large(assigns) do
+    ~H"""
+    <p :if={@diff[:files] not in [nil, []] and @diff[:inline] == false} class="mt-4 text-sm/[1.55]">
+      This change is {bytes(@diff.bytes)} across {length(@diff.files)} files, too much to read on
+      one page. Read it with <span class="font-mono text-[12.5px]">git diff {short(@diff.base)}..{short(@diff.head)}</span>.
+    </p>
+    """
+  end
+
+  @doc "The strip's summary of a change: `+added −removed over N files`, when there is one."
+  attr :diff, :any, required: true
+
+  def stat(assigns) do
+    ~H"""
+    <span :if={@diff[:files]}>
+      +{@diff.added} −{@diff.removed} over {length(@diff.files)} {if length(@diff.files) == 1,
+        do: "file",
+        else: "files"}
+    </span>
+    """
+  end
+
+  @doc "How many files a change touches — its Changes tab's count — or 0 when there is none."
+  @spec file_count(t() | nil) :: non_neg_integer()
+  def file_count(%{files: files}) when is_list(files), do: length(files)
+  def file_count(_diff), do: 0
+
+  @doc """
+  The commits from `base` to `head` in `repo`, newest first — or none when either end is not
+  there to read, as a branch that was deleted is not.
+  """
+  @spec commits(String.t(), String.t() | nil, String.t()) :: [map()]
+  def commits(_repo, nil, _head), do: []
+
+  def commits(repo, base, head) do
+    case Git.log(repo, base, head) do
+      {:ok, commits} -> commits
+      {:error, _gone} -> []
+    end
+  end
+
+  # A file row points at its first hunk, which is where its change starts; a file with no hunk to
+  # point into — binary, or too large to draw — is named on its own.
+  defp ref(%{path: path, hunks: [%{line: line} | _]}), do: "#{path}:#{line}"
+  defp ref(%{path: path}), do: path
+
+  attr :event, :string, required: true
+  attr :ref, :string, required: true
+
+  defp ask_button(assigns) do
+    ~H"""
+    <button
+      type="button"
+      phx-click={@event}
+      phx-value-ref={@ref}
+      aria-label={"Ask about #{@ref}"}
+      class="min-h-[46px] shrink-0 px-2 font-sans text-[12.5px] text-primary hover:underline"
+    >
+      Ask
+    </button>
     """
   end
 

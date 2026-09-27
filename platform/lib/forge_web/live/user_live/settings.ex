@@ -484,7 +484,7 @@ defmodule ForgeWeb.UserLive.Settings do
           phx-click="unassign-credential"
           phx-value-credential={@credential.id}
           phx-value-project={project.id}
-          class="min-h-[46px] min-w-[32px] opacity-60 hover:opacity-100"
+          class="min-h-[46px] min-w-[46px] opacity-60 hover:opacity-100"
           aria-label={"Stop funding #{project.name}"}
         >
           ×
@@ -500,7 +500,7 @@ defmodule ForgeWeb.UserLive.Settings do
         <select
           name="project"
           aria-label="Project"
-          class="h-[40px] rounded-field border border-base-300 bg-base-100 px-2 text-sm"
+          class="h-[46px] rounded-field border border-base-300 bg-base-100 px-2 text-sm"
         >
           <option :for={project <- @projects} value={project.id}>{project.name}</option>
         </select>

@@ -18,7 +18,7 @@ defmodule ForgeWorker.Job.Seed do
   copy. Nothing is locked, because the only thing being raced for is a download.
   """
 
-  alias ForgeWorker.{Config, Store, Volume}
+  alias ForgeWorker.{Config, Log, Store, Volume}
 
   require Logger
 
@@ -31,7 +31,7 @@ defmodule ForgeWorker.Job.Seed do
     case assignment["seed"] do
       %{"key" => key, "token" => token} when is_binary(key) and is_binary(token) ->
         path = path(root, key)
-        if File.dir?(path), do: path, else: fetch(key, token, path)
+        if File.dir?(path), do: path, else: fetch(key, token, path, assignment["job_id"])
 
       _no_seed ->
         nil
@@ -54,7 +54,9 @@ defmodule ForgeWorker.Job.Seed do
     |> Enum.sort()
   end
 
-  defp fetch(key, token, path) do
+  # Both ends of a fetch are lines in the machine's log (`docs/design/worker-log.md`): a seed that
+  # could not be had is why the job that follows is slow, and nothing else on the platform says so.
+  defp fetch(key, token, path, job_id) do
     volume = Volume.impl()
     staging = path <> ".fetching." <> Base.url_encode64(:crypto.strong_rand_bytes(6))
     tarball = staging <> ".tar.gz"
@@ -63,10 +65,16 @@ defmodule ForgeWorker.Job.Seed do
 
     case unpack(volume, key, token, staging, tarball) do
       :ok ->
-        install(volume, staging, path, key, started)
+        install(volume, staging, path, {key, job_id}, started)
 
       {:error, reason} ->
-        Logger.warning("no seed for #{key} (#{inspect(reason)}); this job builds cold")
+        Log.line(
+          "seed.missing",
+          :warning,
+          "no seed for #{key} (#{inspect(reason)}); this job builds cold",
+          job_id: job_id
+        )
+
         volume.delete(staging)
         File.rm(tarball)
         nil
@@ -97,12 +105,18 @@ defmodule ForgeWorker.Job.Seed do
 
   # The rename is the commit. A second job that fetched the same seed concurrently finds the
   # directory occupied, throws its own copy away and uses the one that got there first.
-  defp install(volume, staging, path, key, started) do
+  defp install(volume, staging, path, {key, job_id}, started) do
     File.mkdir_p!(Path.dirname(path))
 
     case File.rename(staging, path) do
       :ok ->
-        Logger.info("fetched seed #{key} in #{System.monotonic_time(:millisecond) - started}ms")
+        Log.line(
+          "seed.fetched",
+          :info,
+          "fetched seed #{key} in #{System.monotonic_time(:millisecond) - started}ms",
+          job_id: job_id
+        )
+
         superseded(volume, path)
         path
 

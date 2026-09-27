@@ -350,6 +350,52 @@ defmodule Forge.Provisioning do
   end
 
   @doc """
+  Records that the image a machine was made from speaks `protocol`, learnt from the machine being
+  refused at join (`docs/design/provisioning.md` § A snapshot that speaks the wrong protocol).
+
+  **Only if the template still names that image.** A template edited onto another snapshot while
+  the refused machine was booting is not the one that was refused, and teaching it would stop it
+  making machines from an image nobody has tried. Null matches null: a template naming no image
+  boots the driver's default, and a machine made from it was made from that.
+  """
+  #
+  # The build comes with it when the machine said one: a machine's first join runs the release its
+  # image was made with, so it is as good as a label. One that said none leaves the build alone.
+  @spec learn_protocol(String.t(), String.t() | nil, non_neg_integer(), String.t() | nil) :: :ok
+  def learn_protocol(template_id, image, protocol, build \\ nil) do
+    query =
+      case image do
+        nil -> from(t in Template, where: t.id == ^template_id and is_nil(t.image))
+        image -> from(t in Template, where: t.id == ^template_id and t.image == ^image)
+      end
+
+    learnt = [image_protocol: protocol] ++ if(build, do: [image_build: build], else: [])
+
+    {_count, _} =
+      Repo.update_all(query, set: learnt ++ [updated_at: DateTime.utc_now(:second)])
+
+    :ok
+  end
+
+  @doc """
+  Why no machine may be made from this template's image, or nil when one may: its known protocol
+  is one this platform does not accept. Nil for an image whose protocol is unknown — unlabelled
+  and never heard from — which is probed rather than refused (`Forge.Workers`).
+
+  One sentence, because two surfaces say it: the template's failure when a job asks for a machine,
+  and the templates page before any does.
+  """
+  @spec image_refusal(Template.t()) :: String.t() | nil
+  def image_refusal(%Template{image_protocol: nil}), do: nil
+
+  def image_refusal(%Template{image_protocol: protocol}) do
+    unless ForgeCore.WorkerProtocol.compatible?(protocol) do
+      "its image speaks worker protocol #{protocol}, and this platform accepts " <>
+        ForgeCore.WorkerProtocol.range()
+    end
+  end
+
+  @doc """
   Puts a disabled template back into service, if it is the caller's.
 
   **Only a person does this.** Editing a template does not: a rename is not a fix, and a

@@ -156,6 +156,15 @@ defmodule ForgeCore.WorkflowTest do
     end
   end
 
+  describe "gib/1" do
+    test "gibibytes to one decimal, and a dash for a figure nobody has" do
+      assert Resources.gib(8 * 1024 ** 3) == "8.0 GiB"
+      assert Resources.gib(8_000_000_000) == "7.5 GiB"
+      assert Resources.gib(0) == "0.0 GiB"
+      assert Resources.gib(nil) == "—"
+    end
+  end
+
   describe "resources/2" do
     setup do
       %{

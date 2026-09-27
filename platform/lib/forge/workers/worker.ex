@@ -38,6 +38,17 @@ defmodule Forge.Workers.Worker do
     # see docs/design/worker-tier.md § Managed and unmanaged.
     field :managed, :boolean, default: true
 
+    # What the machine said at its last join, refused or not (`docs/design/worker-channel.md`
+    # § Versions): the release string it logs, the twelve-character build of its store path, and
+    # the protocol it speaks — 0 for a release too old to say. All null until it joins.
+    field :release, :string
+    field :build, :string
+    field :protocol, :integer
+    # The image this machine was made from, copied from its template like its figures. What a
+    # refused machine teaches its template is about this image, not whatever the template names
+    # by then (`docs/design/provisioning.md` § A snapshot that speaks the wrong protocol).
+    field :image, :string
+
     # **Provenance, not authority.** The recipe this machine was made from, whose values were
     # copied onto this row at creation and are never read back through
     # (`docs/design/provisioning.md` § Two tables). Null for a machine the operator built by
@@ -72,6 +83,10 @@ defmodule Forge.Workers.Worker do
       :last_seen_at,
       :idle_since,
       :managed,
+      :release,
+      :build,
+      :protocol,
+      :image,
       :template_id,
       :provider_credential_id,
       :user_id

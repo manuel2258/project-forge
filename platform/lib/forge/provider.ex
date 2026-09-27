@@ -121,7 +121,12 @@ defmodule Forge.Provider do
           required(:id) => String.t(),
           required(:name) => String.t() | nil,
           optional(:status) => String.t() | nil,
-          optional(:created) => String.t() | nil
+          optional(:created) => String.t() | nil,
+          # What the snapshot carries, from its labels where the driver has them: the worker
+          # build and the channel protocol it speaks. Nil is unlabelled — unknown, not compatible
+          # (`docs/design/provisioning.md` § A snapshot that speaks the wrong protocol).
+          optional(:build) => String.t() | nil,
+          optional(:protocol) => non_neg_integer() | nil
         }
 
   @doc """

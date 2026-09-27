@@ -502,6 +502,162 @@ defmodule ForgeWeb.TemplatesLiveTest do
     assert template.image == "snapshot-1"
   end
 
+  # What a snapshot carries, read from its provider labels: the worker build against the one this
+  # platform ships with, and the protocol it speaks — or *unlabelled*, which is not guessed at
+  # (`docs/design/provisioning.md` § A snapshot that speaks the wrong protocol).
+  describe "what a snapshot carries" do
+    setup do
+      previous = Application.get_env(:forge, Forge.Workers, [])
+      on_exit(fn -> Application.put_env(:forge, Forge.Workers, previous) end)
+
+      Application.put_env(
+        :forge,
+        Forge.Workers,
+        Keyword.put(previous, :current_build, "aaaaaaaaaaaa")
+      )
+
+      Forge.Provider.Fake.listing([
+        %{id: "snap-new", name: "new", build: "aaaaaaaaaaaa", protocol: 1},
+        %{id: "snap-old", name: "old", build: "bbbbbbbbbbbb", protocol: 0},
+        %{id: "snap-legacy", name: "legacy", build: nil, protocol: nil}
+      ])
+
+      on_exit(&Forge.Provider.Fake.allow/0)
+      :ok
+    end
+
+    test "each image is offered with its build and protocol, or as unlabelled", %{conn: conn} do
+      {:ok, _view, html} = live(conn, ~p"/templates")
+      options = options_of(html, "template[image]")
+
+      assert options =~ "new · build aaaaaaaaaaaa current · protocol 1"
+      assert options =~ "old · build bbbbbbbbbbbb other build · protocol 0"
+      assert options =~ "legacy · unlabelled"
+    end
+
+    # From the listing the page holds, never from the form: the params are the client's.
+    test "a saved template records what its image carries", %{conn: conn, user: user} do
+      {:ok, view, _html} = live(conn, ~p"/templates")
+
+      view
+      |> form("#template-form",
+        template: %{
+          name: "labelled",
+          provider: "fake",
+          image: "snap-old",
+          memory: "4GiB",
+          cores: "2",
+          max_workers: "1"
+        }
+      )
+      |> render_submit(%{"template" => %{"image_protocol" => "9", "image_build" => "forged"}})
+
+      assert [template] = Provisioning.templates(user)
+      assert {template.image_build, template.image_protocol} == {"bbbbbbbbbbbb", 0}
+    end
+
+    # Scoped to each row: the image select above offers the same words for the same snapshots,
+    # and a match anywhere on the page would hold with the rows saying nothing.
+    test "a template's row says what its image carries", %{conn: conn, user: user} do
+      known =
+        template_for(user, %{
+          name: "known",
+          image: "snap-new",
+          image_build: "aaaaaaaaaaaa",
+          image_protocol: 1
+        })
+
+      old = template_for(user, %{name: "old-one", image: "snap-legacy"})
+
+      {:ok, view, _html} = live(conn, ~p"/templates")
+      known_row = view |> element("#template-#{known.id}") |> render()
+      old_row = view |> element("#template-#{old.id}") |> render()
+
+      assert known_row =~ "build aaaaaaaaaaaa current · protocol 1"
+      refute known_row =~ "no machine is made from it"
+      assert old_row =~ "unlabelled"
+    end
+
+    # Moving a template onto another snapshot takes that snapshot's labels. Kept from the old one,
+    # a template moved off an image the platform refuses would go on refusing, and one moved onto a
+    # bad unlabelled image would keep the good image's protocol.
+    test "an edit onto another image takes that image's labels", %{conn: conn, user: user} do
+      template =
+        template_for(user, %{
+          name: "moving",
+          image: "snap-old",
+          image_build: "bbbbbbbbbbbb",
+          image_protocol: 0
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/templates")
+
+      view
+      |> element(~s(button[phx-click=edit-template][phx-value-id="#{template.id}"]))
+      |> render_click()
+
+      view
+      |> form("#edit-template-#{template.id}",
+        template: %{
+          name: "moving",
+          provider: "fake",
+          image: "snap-new",
+          memory: "8GiB",
+          cores: "4",
+          max_workers: "2"
+        }
+      )
+      |> render_submit()
+
+      saved = Forge.Repo.get!(Forge.Provisioning.Template, template.id)
+
+      assert {saved.image, saved.image_build, saved.image_protocol} ==
+               {"snap-new", "aaaaaaaaaaaa", 1}
+    end
+
+    # Once a job has asked, the failures line carries the same sentence as its last error; the
+    # row says it once.
+    test "a template that has failed for its image says so once", %{conn: conn, user: user} do
+      too_new = ForgeCore.WorkerProtocol.current() + 1
+      template = template_for(user, %{name: "failed", image: "snap-x", image_protocol: too_new})
+      :ok = Provisioning.failed(template.id, Provisioning.image_refusal(template))
+
+      {:ok, view, _html} = live(conn, ~p"/templates")
+      row = view |> element("#template-#{template.id}") |> render()
+
+      assert length(String.split(row, "its image speaks worker protocol")) == 2
+    end
+
+    # Said on the row before any job asks, not only in the failures that begin once one does.
+    test "a template whose image this platform cannot talk to says so", %{conn: conn, user: user} do
+      too_new = ForgeCore.WorkerProtocol.current() + 1
+      template = template_for(user, %{name: "too-new", image: "snap-x", image_protocol: too_new})
+
+      {:ok, view, _html} = live(conn, ~p"/templates")
+
+      assert view |> element("#template-#{template.id}") |> render() =~
+               "its image speaks worker protocol #{too_new}, and this platform accepts " <>
+                 "#{ForgeCore.WorkerProtocol.range()}: no machine is made from it"
+    end
+  end
+
+  # A node built outside Nix knows no build of its own, so a snapshot's build is shown without a
+  # hint rather than with an invented one.
+  test "a snapshot's build has no hint on a node that knows no build", %{conn: conn} do
+    Forge.Provider.Fake.listing([
+      %{id: "snap-new", name: "new", build: "aaaaaaaaaaaa", protocol: 1}
+    ])
+
+    on_exit(&Forge.Provider.Fake.allow/0)
+
+    {:ok, _view, html} = live(conn, ~p"/templates")
+    options = options_of(html, "template[image]")
+
+    assert options =~ "new · build aaaaaaaaaaaa · protocol 1"
+    refute options =~ "current"
+    refute options =~ "other build"
+  end
+
   # For a provider that does not require one, no image is saved as none and left to the driver
   # — the local one boots its host's image whatever a template says. A provider that does
   # require one is the describe above.

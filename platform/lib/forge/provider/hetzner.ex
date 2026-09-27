@@ -223,14 +223,37 @@ defmodule Forge.Provider.Hetzner do
   end
 
   defp image(image) do
+    labels = image["labels"] || %{}
+
     %{
       id: to_string(image["id"]),
       # Hetzner's own label for a snapshot is `description`; `name` is null for one.
       name: image["description"] || image["name"],
       status: image["status"],
-      created: image["created"]
+      created: image["created"],
+      build: build_label(labels["forge-worker-build"]),
+      protocol: protocol_label(labels["forge-worker-protocol"])
     }
   end
+
+  # What `bin/hetzner-image` labels a snapshot with, from the flake that built it
+  # (`docs/design/provisioning.md` § A snapshot that speaks the wrong protocol). **A label that
+  # is not what the script writes is no label**: nil is *unlabelled*, which the platform treats
+  # as unknown and learns about from the join — whereas a misread number would be believed.
+  defp build_label(value) when is_binary(value) do
+    if value =~ ~r/\A[a-z0-9]{12}\z/, do: value
+  end
+
+  defp build_label(_value), do: nil
+
+  defp protocol_label(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {protocol, ""} -> if ForgeCore.WorkerProtocol.recordable?(protocol), do: protocol
+      _other -> nil
+    end
+  end
+
+  defp protocol_label(_value), do: nil
 
   @doc """
   What Hetzner's server status means to the platform.

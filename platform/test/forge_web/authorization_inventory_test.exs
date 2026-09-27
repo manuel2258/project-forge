@@ -35,6 +35,9 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     # The caller's own machines only (`Workers.list/1`); what reaches a project is the assignment
     # actions below.
     "/workers" => :approved,
+    # One of the caller's own machines, read scoped to them (`Workers.owned/2`): anybody else's is
+    # not here, as a missing one is not.
+    "/workers/:id" => :self,
     # Own credentials and own templates only; the assignment actions below are what reach a
     # project, and those are guarded by membership in `Forge.Provisioning`.
     "/templates" => :self,
@@ -165,6 +168,9 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     # member of that project — `Workers.assign/3` and `unassign/3`.
     {"workers_live.ex", "assign"} => :member,
     {"workers_live.ex", "unassign"} => :member,
+    # Ends one of the caller's own machines: `Workers.retire_by_owner/2` reads the row scoped to
+    # them whatever id arrives, and never forces (`docs/design/provisioning.md` § Whose account).
+    {"workers_live.ex", "destroy"} => :self,
     {"templates_live.ex", "add-credential"} => :self,
     {"templates_live.ex", "delete-credential"} => :self,
     {"templates_live.ex", "add-template"} => :self,
@@ -208,6 +214,13 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
   @channel %{
     "ready" => :socket_worker,
     "heartbeat" => :socket_worker,
+    # Writes only the socket's own worker's registry value, and nothing in the database: the
+    # figures a machine reports about itself, for the workers page
+    # (`docs/design/worker-channel.md` § Live figures).
+    "stats" => :socket_worker,
+    # A line in the socket's own worker's log, bounded field by field and addressed by the socket,
+    # never by the payload (`docs/design/worker-log.md` § The `log` message).
+    "log" => :socket_worker,
     "event" => :owns_job,
     "result" => :owns_job,
     "turn" => :owns_job,

@@ -115,10 +115,12 @@ defmodule Forge.ProvisioningTest do
 
   describe "templates" do
     test "a template records what a machine made from it will be", %{user: user} do
-      assert {:ok, template} = create_template(user, %{memory: 8_000, cores: 4})
+      assert {:ok, template} = create_template(user, %{memory: 8_000, cores: 4, image: "snap-1"})
 
       # Its owner too: a machine made from a template is the template owner's
-      # (`identity.md` § Workers).
+      # (`identity.md` § Workers). And the image, so that a machine refused at its join teaches
+      # the template about the snapshot it was made from and not about whatever the template
+      # names by then (`provisioning.md` § A snapshot that speaks the wrong protocol).
       assert Template.worker_attrs(template) == %{
                provider: "fake",
                template_id: template.id,
@@ -126,7 +128,8 @@ defmodule Forge.ProvisioningTest do
                provider_credential_id: nil,
                memory_budget: 8_000,
                cores: 4,
-               accepts: nil
+               accepts: nil,
+               image: "snap-1"
              }
     end
 
@@ -308,6 +311,86 @@ defmodule Forge.ProvisioningTest do
 
       assert saved.name == "renamed"
       assert Repo.get!(Template, mine.id).user_id == user.id
+    end
+  end
+
+  # What the chosen snapshot carries, read from the listing on save or learnt from a machine
+  # refused at join (`docs/design/provisioning.md` § A snapshot that speaks the wrong protocol).
+  describe "what a template knows about its image" do
+    test "the labels are kept as they were given", %{user: user} do
+      {:ok, template} =
+        create_template(user, %{image: "snap-1", image_build: "8rh57whmgk6m", image_protocol: 1})
+
+      assert {template.image_build, template.image_protocol} == {"8rh57whmgk6m", 1}
+    end
+
+    # **A rename must not forget a learnt protocol**, or it earns a snapshot known to be refused
+    # one more machine: the listing says nothing about an unlabelled snapshot, and saving reads
+    # the listing.
+    test "a save with no label for the same image keeps what is known", %{user: user} do
+      {:ok, template} = create_template(user, %{image: "snap-1"})
+      :ok = Provisioning.learn_protocol(template.id, "snap-1", 7, "8rh57whmgk6m")
+
+      {:ok, saved} =
+        Provisioning.update_template(user, template.id, %{
+          name: "renamed",
+          image: "snap-1",
+          image_build: nil,
+          image_protocol: nil
+        })
+
+      assert {saved.image_protocol, saved.image_build} == {7, "8rh57whmgk6m"}
+    end
+
+    test "a label that is there replaces what is known", %{user: user} do
+      {:ok, template} = create_template(user, %{image: "snap-1"})
+      :ok = Provisioning.learn_protocol(template.id, "snap-1", 7)
+
+      {:ok, saved} =
+        Provisioning.update_template(user, template.id, %{image: "snap-1", image_protocol: 1})
+
+      assert saved.image_protocol == 1
+    end
+
+    # Another snapshot is another question, and what was learnt about the last one is no answer.
+    test "another image takes its own labels, nothing included", %{user: user} do
+      {:ok, template} =
+        create_template(user, %{image: "snap-1", image_build: "aaaaaaaaaaaa", image_protocol: 7})
+
+      {:ok, saved} =
+        Provisioning.update_template(user, template.id, %{
+          image: "snap-2",
+          image_build: nil,
+          image_protocol: nil
+        })
+
+      assert {saved.image_build, saved.image_protocol} == {nil, nil}
+    end
+
+    test "is learnt only while the template names the image that was refused", %{user: user} do
+      {:ok, template} = create_template(user, %{image: "snap-2"})
+
+      :ok = Provisioning.learn_protocol(template.id, "snap-1", 7)
+      assert Repo.get!(Template, template.id).image_protocol == nil
+
+      :ok = Provisioning.learn_protocol(template.id, nil, 7)
+      assert Repo.get!(Template, template.id).image_protocol == nil
+
+      :ok = Provisioning.learn_protocol(template.id, "snap-2", 7)
+      assert Repo.get!(Template, template.id).image_protocol == 7
+    end
+
+    # What one template learns is its own. Another naming the same snapshot id — another
+    # person's, or another provider's, where the id means something else — learns nothing from a
+    # machine it did not make.
+    test "is learnt by the one template, not every template naming the image", %{user: user} do
+      {:ok, mine} = create_template(user, %{image: "snap-1"})
+      {:ok, theirs} = create_template(user_fixture(), %{image: "snap-1"})
+
+      :ok = Provisioning.learn_protocol(mine.id, "snap-1", 7)
+
+      assert Repo.get!(Template, mine.id).image_protocol == 7
+      assert Repo.get!(Template, theirs.id).image_protocol == nil
     end
   end
 

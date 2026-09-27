@@ -221,16 +221,18 @@ slot against `max_workers`, not booting.
 **The skip is recorded, once per reason.** The alternative is a job that never runs and no surface
 saying why, which is what there was: `Scheduler` dropped the reason on the floor, with no event, log
 line or count. A pending job the pass cannot place now gets a `job.waiting` event carrying the
-reason — `creating`, `at_capacity`, `create_failed`, `credential_refused`, `limited` when every
-credential in the project's pool is rate-limited (`docs/design/credentials.md` § How a job picks),
-and for a chat the three template answers below and `no_credential` — beside the sentence the
-operator reads. The two refusals are two because their reasons are in two places: `create_failed` is
-the driver saying no, and its words are on the worker row it made, so the sentence sends the
-operator to the workers page; `credential_refused` is the platform refusing a template whose
-provider credential it may not spend — another user's, or another provider's (§ Whose account) —
-which makes no worker row at all, so the words are on the template and the sentence sends them to
-the templates page — in both cases the template owner's, since each page shows only the viewer's own
-rows. One sentence for both sent the second case to a page with nothing on it. **Only when the
+reason — `creating`, `at_capacity`, `create_failed`, `credential_refused`, `image_refused`,
+`limited` when every credential in the project's pool is rate-limited (`docs/design/credentials.md`
+§ How a job picks), and for a chat the three template answers below and `no_credential` — beside
+the sentence the operator reads. The refusals are separate because their reasons are in two
+places: `create_failed` is the driver saying no, and its words are on the worker row it made, so
+the sentence sends the operator to the workers page; `credential_refused` is the platform refusing
+a template whose provider credential it may not spend — another user's, or another provider's
+(§ Whose account) — and `image_refused` one whose snapshot speaks a worker protocol it does not
+accept (§ A snapshot that speaks the wrong protocol). Neither makes a worker row at all, so the
+words are on the template and the sentence sends them to the templates page — in every case the
+template owner's, since each page shows only the viewer's own rows. One sentence for all of them
+sent the platform's refusals to a page with nothing on it. **Only when the
 reason changes**: the scheduler asks every two seconds and `events` is append-only, so an event per
 pass would be some forty thousand copies of one sentence per job per day. What a new reason is
 compared with is the job's latest `job.waiting` since its latest `job.started`
@@ -462,6 +464,32 @@ Two ways out, and they are different on purpose:
   What that writes down is a claim about the world the platform could not check, so it is not the
   platform's to make.
 
+**A person can end a machine from the workers page, and cannot force one there.** The owner's row
+carries *Destroy machine* on a managed machine and *Retire* on a permanent one (`ui.md` § The
+workers page). Both are `Workers.retire_by_owner/2`, which reads the row scoped to the caller
+whatever id arrived and then does what `mix forge.worker.retire` does, through the same
+`Workers.retire/2`: ask the driver, **without** `force`, and requeue the machine's running jobs.
+
+- **The jobs are requeued once the row is `destroyed`, and not before.** A refused destroy leaves
+  the machine running them, still connected and still assignable, and requeuing them beside it
+  would put a second copy of each on the queue — for the scheduler to hand straight back to the
+  machine that already has it. The command line used to requeue first; it goes through the same
+  function now and so no longer does. **A lost machine is the other way round, and stays so**:
+  `sweep_unreachable/0` requeues first because nothing can observe an unreachable machine running
+  anything, and its jobs come back whether or not the driver lets it go.
+- **And they are cancelled where they were.** A retired permanent machine keeps running, so the
+  channel is handed the jobs still running there and pushes `cancel` for each before it closes —
+  or a requeued job would run on it and again elsewhere, on the job's credential, with nobody left
+  to record what it spent.
+- **A refusal keeps the row**, with the driver's words in `last_error` as the sweeps leave it,
+  and the page's flash names `mix forge.worker.retire --force` as the host-side way out. Force
+  stays on the command line for the reason above: it records a claim about the provider's
+  console that the platform could not check, and a button beside the error message is not
+  somebody having looked.
+- **The row's channel is closed** as it becomes `destroyed`, whoever destroyed it, and a destroyed
+  row can neither connect nor join (`worker-channel.md` § Authentication), so a retired permanent
+  machine that is still running cannot take work again.
+
 **A template is owned, and assigned to projects.** `project_templates` — `project_id`,
 `template_id` — created by the template's owner and only for a project they are a member of. This
 is `identity.md` § Workers' `project_worker` with the noun changed, and it inherits that note's
@@ -584,6 +612,61 @@ needs in order to enable it again.
 and a template that quietly earns three more tries every time somebody touches it is the loop
 again with extra steps. The page shows the count and the last error beside a `DISABLED` flag, and
 `Enable` is its own action.
+
+## A snapshot that speaks the wrong protocol
+
+A template names an image, and an image carries a worker release, and a release speaks one
+version of the channel protocol (`worker-channel.md` § Versions). A template whose snapshot the
+platform refuses at join is a template that makes machines which are destroyed on arrival — the
+loop of the section above, one billed machine per turn.
+
+**`worker_templates` gains `image_build` and `image_protocol`**, read from the driver's listing
+when the template is saved — `Provider.images/2` returns each snapshot's `build` and `protocol`,
+which `Hetzner.images/1` reads from the labels `bin/hetzner-image` sets. They are never typed and
+never taken from the form's params: the page looks the chosen image up in the listing it already
+holds. `/templates` draws both beside the image, with `current` or `other build` against the
+build this platform ships with, and *unlabelled* for a snapshot made before the labels existed,
+which cannot be identified after the fact and is not guessed at from its date.
+
+**A known protocol outside the range is refused before anything is asked of the driver.**
+`Workers.create_from/1` compares `image_protocol` with `ForgeCore.WorkerProtocol.compatible?/1`
+at every create, and a mismatch goes the way a credential the template may not spend goes: no
+worker row, no request, `Provisioning.failed/2` with *its image speaks worker protocol N, and this
+platform accepts A–B*, the job waiting with a sentence that sends its reader to the templates
+page, and the template out of service after three passes. It is asked of the range at every
+create rather than stored as a flag, so a platform upgraded to accept the protocol creates from
+the template again without anybody touching it — unless it was disabled meanwhile, when `Enable`
+is its own action as ever.
+
+**Unlabelled is unknown, not compatible.** A template whose snapshot carries no label makes a
+machine, logs a warning saying it is unlabelled, and lets the join decide — and the template
+**learns** from that join, whatever it says: its `image_protocol` becomes the protocol the machine
+sent, and its `image_build` the build, when it sent one. Refused, the machine is destroyed and the
+check above stops the next create; accepted, the snapshot is known and made from as any labelled
+one is.
+
+**And until that join, the first machine is a probe.** While one machine from an image the
+template knows nothing about is booting and has not joined, no second is made from it; a job that
+does not fit the probe waits, with `at_capacity`'s sentence. Without this, the learning came too
+late to mean anything: a queue of jobs that did not fit one machine made one each, up to
+`max_workers`, all made before any had joined and all refused on arrival. With it, a bad unlabelled
+snapshot costs one machine — not one per sweep, and not one per job waiting. A template naming no
+image is not probed, and not warned about either: it boots the driver's default, which is the
+host's own, and every Hetzner template names one.
+
+- **It learns only if it still names the image the machine was made from.** `workers.image` is
+  copied from the template at creation, beside the size and the figures, and the learning is
+  a conditional update on the template's current image: a template edited onto a new snapshot
+  while the old one's machine was booting is not the one that was refused.
+- **Only a machine's first join teaches anything.** A later one may be running a release
+  `bin/worker-update` put there, which says nothing about the snapshot, or be somebody holding a
+  copy of the machine's token — who could otherwise teach the template a protocol that stops it
+  making anything. First is a row that has recorded no protocol and has never been seen.
+- **A permanent machine teaches nothing.** It came from no template.
+- **Editing does not forget what was learnt.** Saving re-reads the labels, but an unchanged image
+  whose listing has no label keeps the protocol it has, or a rename would earn a known-bad
+  snapshot another machine. Choosing a different image takes that image's labels, and what was
+  learnt about the old one goes with it.
 
 ## Editing a template
 

@@ -20,8 +20,22 @@ defmodule Forge.Provider.Fake do
 
   defp created(opts) do
     notify({:provider_create, opts})
+
+    case :persistent_term.get({__MODULE__, :during_create}, nil) do
+      nil -> :ok
+      during -> during.(opts)
+    end
+
     {:ok, %{provider_id: "fake-" <> opts.worker_id, address: "127.0.0.1"}}
   end
+
+  @doc """
+  Runs `fun` with the create's options while the create is under way, before it answers — which
+  is what a real provider's slow `POST /servers` leaves room for, and what a person pressing
+  Destroy during it does.
+  """
+  @spec during_create((map() -> any())) :: :ok
+  def during_create(fun), do: :persistent_term.put({__MODULE__, :during_create}, fun)
 
   # **The credential is carried in the message**, because the defect this exists to catch is a
   # destroy sent without one: the Hetzner driver refused before reaching the API, the platform
@@ -76,8 +90,19 @@ defmodule Forge.Provider.Fake do
   @impl Forge.Provider
   def images(credential) do
     notify({:provider_images, credential})
-    {:ok, [%{id: "snapshot-1", name: "forge-worker", status: "available"}]}
+
+    {:ok,
+     :persistent_term.get({__MODULE__, :images}, [
+       %{id: "snapshot-1", name: "forge-worker", status: "available", build: nil, protocol: nil}
+     ])}
   end
+
+  @doc """
+  What `images/1` will list until `allow/0`, so a page test can offer labelled and unlabelled
+  snapshots.
+  """
+  @spec listing([map()]) :: :ok
+  def listing(images), do: :persistent_term.put({__MODULE__, :images}, images)
 
   @doc "What `list/1` will say the provider is holding, so reconciliation can be driven."
   @spec holding([map()]) :: :ok
@@ -102,14 +127,17 @@ defmodule Forge.Provider.Fake do
   def refuse_destroy(reason), do: :persistent_term.put({__MODULE__, :refuse_destroy}, reason)
 
   @doc """
-  Stops refusing, both kinds, and stops requiring template fields. Called on exit by anything
-  that called `refuse/1`, `refuse_destroy/1` or `requiring/1`.
+  Stops refusing, both kinds, stops requiring template fields and lists the default images
+  again. Called on exit by anything that called `refuse/1`, `refuse_destroy/1`, `requiring/1` or
+  `listing/1` or `during_create/1`.
   """
   @spec allow() :: :ok
   def allow do
     :persistent_term.erase({__MODULE__, :refuse})
     :persistent_term.erase({__MODULE__, :refuse_destroy})
     :persistent_term.erase({__MODULE__, :requires})
+    :persistent_term.erase({__MODULE__, :images})
+    :persistent_term.erase({__MODULE__, :during_create})
     :ok
   end
 

@@ -86,7 +86,12 @@ config :forge, Forge.Workers,
   # How long a worker may be out of touch before the platform stops waiting for it. Three
   # missed heartbeats would be a minute; this is generous because a machine that is booting
   # has not reported yet and is timed from when its row was made.
-  worker_timeout_ms: 180_000
+  worker_timeout_ms: 180_000,
+  # The worker build this platform ships with: the first twelve characters of the `forge-worker`
+  # package's store hash, which `flake.nix` sets while building the release — so it is read here,
+  # at build time, and baked in, not read from the running host's environment. Unset outside a
+  # Nix build, and then the pages draw no hint (docs/design/worker-tier.md § Updating a worker).
+  current_build: System.get_env("FORGE_WORKER_BUILD")
 
 # Mailer for account emails (magic links, email-change confirmation). The local adapter is a
 # mailbox in memory: it is what development wants, and it is what a release keeps until

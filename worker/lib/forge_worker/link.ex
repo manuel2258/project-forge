@@ -16,16 +16,37 @@ defmodule ForgeWorker.Link do
   use Slipstream, restart: :permanent
 
   alias ForgeCore.Job.Result
-  alias ForgeWorker.{Checkout, Config, Store}
+  alias ForgeCore.WorkerProtocol
+  alias ForgeWorker.{Checkout, Config, Log, Stats, Store}
   alias ForgeWorker.Job.{Conversation, Credential, Dir, Runner, Seed, Workspace}
 
   require Logger
 
   @heartbeat_ms :timer.seconds(20)
+  @stats_ms :timer.seconds(5)
+  @refused_retry_ms :timer.minutes(5)
 
   # Twenty seconds against `worker_timeout_ms` on the platform, and far too long for a test to
   # wait out. Overridable only so that the suite can watch one arrive; nothing configures it.
   defp heartbeat_ms, do: Application.get_env(:forge_worker, :heartbeat_ms, @heartbeat_ms)
+
+  # The workers page refreshes every five seconds, so a reading more often than that is one
+  # nobody sees (`docs/design/worker-channel.md` § Live figures). Configurable like the heartbeat;
+  # the test config sets it long, because a push in `Slipstream.SocketTest` is a call the test
+  # has to answer, and one arriving unasked stalls the link for the call's timeout.
+  defp stats_ms, do: Application.get_env(:forge_worker, :stats_ms, @stats_ms)
+
+  # How long a machine the platform refused waits before asking again. Minutes, because only a
+  # deploy on one side or the other changes the answer, and Slipstream's own rejoin backoff
+  # settles at ten seconds — a log line and a refused join three hundred and sixty times an hour
+  # (`docs/design/worker-channel.md` § Versions).
+  defp refused_retry_ms,
+    do: Application.get_env(:forge_worker, :refused_retry_ms, @refused_retry_ms)
+
+  # Whether this machine's lines go to the platform at all (`docs/design/worker-log.md`). On,
+  # except in the test config, for the reason `stats_ms` is long there: a push nobody asked for
+  # stalls a `Slipstream.SocketTest` link. The tests about the log turn it on.
+  defp log_stream?, do: Application.get_env(:forge_worker, :log_stream, true)
 
   def start_link(opts), do: Slipstream.start_link(__MODULE__, opts, name: __MODULE__)
 
@@ -54,6 +75,10 @@ defmodule ForgeWorker.Link do
       |> assign(:acks, %{})
       |> assign(:root, Keyword.get(opts, :root, Config.root()))
       |> assign(:topic, "worker:" <> worker_id)
+      |> assign(:ticking, false)
+      |> assign(:retry, nil)
+      |> assign(:cpu, nil)
+      |> assign(:log, Log.empty())
 
     {:ok, connect!(socket, config)}
   end
@@ -77,8 +102,19 @@ defmodule ForgeWorker.Link do
 
     push(socket, socket.assigns.topic, "ready", ready_payload(socket))
 
+    {:ok, socket |> tick() |> send_held() |> resend_unacked()}
+  end
+
+  # **Started once, at the first join, and never again.** These used to be started on every join,
+  # so each reconnect added another heartbeat — five reconnects, five heartbeats every twenty
+  # seconds, each a write to the row. A tick while the topic is not joined pushes nothing: `push/4`
+  # answers `{:error, :not_joined}` and the next tick tries again.
+  defp tick(%{assigns: %{ticking: true}} = socket), do: socket
+
+  defp tick(socket) do
     :timer.send_interval(heartbeat_ms(), self(), :heartbeat)
-    {:ok, resend_unacked(socket)}
+    :timer.send_interval(stats_ms(), self(), :stats)
+    assign(socket, :ticking, true)
   end
 
   @doc """
@@ -114,6 +150,7 @@ defmodule ForgeWorker.Link do
       Logger.info("already running job #{assignment["job_id"]}")
       {:ok, socket}
     else
+      Log.line("job.accepted", :info, accepted(assignment), job_id: assignment["job_id"])
       {:ok, start_job(socket, assignment)}
     end
   end
@@ -146,7 +183,12 @@ defmodule ForgeWorker.Link do
   end
 
   def handle_message(topic, event, _payload, socket) do
-    Logger.warning("unknown message #{inspect(event)} on #{topic}")
+    Log.line(
+      "message.unknown",
+      :warning,
+      "unknown message #{inspect(event)} on #{topic}: the platform is a version apart"
+    )
+
     {:ok, socket}
   end
 
@@ -165,6 +207,30 @@ defmodule ForgeWorker.Link do
     push(socket, socket.assigns.topic, "heartbeat", %{"running" => running_list(socket)})
     {:noreply, socket}
   end
+
+  # Sampled on every tick, joined or not, so the first push after a reconnect already has a CPU
+  # figure to difference against. Unacked: the next one is seconds away.
+  def handle_info(:stats, socket) do
+    {stats, cpu} = Stats.sample(socket.assigns.root, socket.assigns.cpu)
+    push(socket, socket.assigns.topic, "stats", stats)
+    {:noreply, assign(socket, :cpu, cpu)}
+  end
+
+  # The retry a refused join scheduled, **and only the latest one**. A reconnect while refused
+  # joins afresh from `handle_connect/1`, and when that join is refused too it schedules its own
+  # retry; the earlier one still fires, and the topic is `:closed` again by then, so `rejoin/3`
+  # would act on it — one more retry chain, one more refused join and log line every few minutes,
+  # for every reconnect. Each refusal therefore names its retry and replaces the last.
+  def handle_info({:rejoin, topic, retry}, %{assigns: %{retry: retry}} = socket) do
+    socket = assign(socket, :retry, nil)
+
+    case rejoin(socket, topic, join_payload(socket)) do
+      {:ok, socket} -> {:noreply, socket}
+      {:error, _reason} -> {:noreply, socket}
+    end
+  end
+
+  def handle_info({:rejoin, _topic, _stale}, socket), do: {:noreply, socket}
 
   def handle_info({:runner, job_id, pid}, socket) do
     {:noreply, update_job(socket, job_id, &Map.put(&1, :runner, pid))}
@@ -186,12 +252,20 @@ defmodule ForgeWorker.Link do
   end
 
   def handle_info({:terminal, job_id, message, payload}, socket) do
+    {level, how} = finished(message, payload)
+    Log.line("job.finished", level, how <> ran(socket.assigns.jobs[job_id]), job_id: job_id)
+
     socket =
       socket
       |> update_in([Access.key!(:assigns), Access.key!(:jobs)], &Map.delete(&1, job_id))
       |> send_terminal(job_id, message, payload)
 
     {:noreply, socket}
+  end
+
+  # A line for this machine's log, from this process or any other (`ForgeWorker.Log.line/4`).
+  def handle_info({:log, entry}, socket) do
+    if log_stream?(), do: {:noreply, send_line(socket, entry)}, else: {:noreply, socket}
   end
 
   def handle_info(message, socket) do
@@ -223,7 +297,20 @@ defmodule ForgeWorker.Link do
   # A channel the platform closed under us — a restart, a redeploy, a worker row it no longer
   # believes in. Rejoining is what makes the reconciliation in handle_join happen, and the
   # default here is to stop, which would lose every unacked result on this worker.
+  #
+  # **Except when the platform has said no for a reason only a deploy changes.** A protocol it
+  # does not accept, or a row it has destroyed, is not answered differently ten seconds later, so
+  # the machine says so in one line and asks again in minutes (`docs/design/worker-channel.md`
+  # § Versions).
   @impl Slipstream
+  def handle_topic_close(topic, {:failed_to_join, %{"reason" => reason} = reply}, socket)
+      when reason in ["protocol", "destroyed"] do
+    Logger.error(refused(reason, reply) <> "; asking again in #{div(refused_retry_ms(), 1000)}s")
+    retry = make_ref()
+    Process.send_after(self(), {:rejoin, topic, retry}, refused_retry_ms())
+    {:ok, assign(socket, :retry, retry)}
+  end
+
   def handle_topic_close(topic, reason, socket) do
     Logger.warning("channel #{topic} closed: #{inspect(reason)}")
 
@@ -231,6 +318,16 @@ defmodule ForgeWorker.Link do
       {:ok, socket} -> {:ok, socket}
       {:error, _reason} -> {:ok, socket}
     end
+  end
+
+  defp refused("protocol", reply) do
+    "the platform refused this worker's protocol #{WorkerProtocol.current()}: it accepts " <>
+      "#{reply["minimum"]}–#{reply["current"]}. Update this machine or the platform"
+  end
+
+  defp refused("destroyed", _reply) do
+    "the platform has retired this machine and will not take it back. Provision it again " <>
+      "with mix forge.worker.new, or switch it off"
   end
 
   # -- running one job ----------------------------------------------------------------------
@@ -247,7 +344,8 @@ defmodule ForgeWorker.Link do
           task: pid,
           runner: nil,
           attempt: 1,
-          kind: :chat
+          kind: :chat,
+          started: System.monotonic_time(:millisecond)
         })
 
       {:error, reason} ->
@@ -276,7 +374,8 @@ defmodule ForgeWorker.Link do
       task: task,
       runner: nil,
       attempt: assignment["spec"]["attempt"],
-      kind: :workflow
+      kind: :workflow,
+      started: System.monotonic_time(:millisecond)
     })
   end
 
@@ -518,7 +617,7 @@ defmodule ForgeWorker.Link do
     |> Map.new(fn {key, value} -> {Atom.to_string(key), encode_offer(value)} end)
   rescue
     error ->
-      Logger.warning("could not probe the harness: #{inspect(error)}")
+      Log.line("harness.unprobed", :warning, "could not probe the harness: #{inspect(error)}")
       %{"driver" => harness().driver(), "credential" => "per_job"}
   end
 
@@ -548,22 +647,35 @@ defmodule ForgeWorker.Link do
     end
   end
 
-  defp build do
-    path = List.to_string(:code.root_dir())
+  @doc """
+  The build this release is, as the first twelve characters of its Nix store path's hash, or nil
+  for a release that is not in the store — a development machine, or anything built without Nix.
 
-    case Regex.run(~r"^/nix/store/([a-z0-9]{32})-", path) do
+  Twelve because that is what `nix build .#forge-worker` shows an operator, what `flake.nix`
+  labels a snapshot with and builds the platform knowing (`docs/design/worker-tier.md`
+  § Updating a worker), and what the join line has always logged.
+  """
+  @spec build(charlist() | String.t()) :: String.t() | nil
+  def build(root_dir \\ :code.root_dir()) do
+    case Regex.run(~r"^/nix/store/([a-z0-9]{32})-", to_string(root_dir)) do
       [_all, hash] -> binary_part(hash, 0, 12)
       nil -> nil
     end
   end
 
+  # What is speaking, in the join and not in `ready`, because the platform decides at the join
+  # whether it will talk to this machine at all (`docs/design/worker-channel.md` § Versions).
+  # `build` is left out rather than sent as null, like `cores`: absent is *unknown*.
   defp join_payload(socket) do
     %{
       "running" => running_list(socket),
       "memory_total" => Config.memory_budget(),
       "seeds" => Seed.present(socket.assigns.root),
-      "root" => socket.assigns.root
+      "root" => socket.assigns.root,
+      "protocol" => WorkerProtocol.current(),
+      "release" => version()
     }
+    |> put_unless_nil("build", build())
   end
 
   defp running_list(socket) do
@@ -603,6 +715,53 @@ defmodule ForgeWorker.Link do
     |> update_in([Access.key!(:assigns), Access.key!(:unacked)], &Map.delete(&1, key))
     |> update_in([Access.key!(:assigns), Access.key!(:acks)], &Map.delete(&1, ref))
   end
+
+  # -- the machine's log --------------------------------------------------------------------
+
+  # **Pushed if joined, held if not**, and never acked: nothing is decided from this log, and a
+  # line pushed into a connection that is dropping is lost like an event
+  # (`docs/design/worker-log.md` § The `log` message).
+  defp send_line(socket, entry) do
+    case push(socket, socket.assigns.topic, "log", entry) do
+      {:ok, _ref} -> socket
+      {:error, _not_joined} -> assign(socket, :log, Log.hold(socket.assigns.log, entry))
+    end
+  end
+
+  # At the join, after `ready`: what finished while the platform was away is in the log at the
+  # time the machine says it finished.
+  defp send_held(socket) do
+    socket.assigns.log
+    |> Log.drain()
+    |> Enum.reduce(assign(socket, :log, Log.empty()), &send_line(&2, &1))
+  end
+
+  defp accepted(%{"kind" => "chat"}), do: "took on a chat"
+
+  # Anything that is not a chat is a workflow job: those are the two kinds there are.
+  defp accepted(assignment),
+    do: "took on a workflow job, attempt #{assignment["spec"]["attempt"]}"
+
+  # How the job ended, as the line says it. A failure's reason may be a whole stack trace; its
+  # first line is what names it, and the journal has the rest.
+  defp finished("result", %{"result" => result}),
+    do: {:info, "ended with a result: #{result["status"]}, #{result["outcome"] || "no outcome"}"}
+
+  defp finished("hibernated", payload), do: {:info, "hibernated: #{payload["reason"]}"}
+
+  defp finished("failed", payload),
+    do: {:error, "failed: #{payload["reason"] |> to_string() |> String.split("\n") |> hd()}"}
+
+  # **Unreachable today, and an equivalent mutant to remove**: every terminal message is one of the
+  # three above. It is here because this runs in the process holding every unacked result, and a
+  # fourth kind of ending added elsewhere must cost a vague line, not the link.
+  defp finished(message, _payload), do: {:info, message}
+
+  # A chat that could not even start was never in the map, so there is no start to measure from.
+  defp ran(%{started: started}),
+    do: ", after #{Log.ran(System.monotonic_time(:millisecond) - started)}"
+
+  defp ran(nil), do: ""
 
   defp update_job(socket, job_id, fun) do
     case socket.assigns.jobs[job_id] do

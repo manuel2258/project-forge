@@ -127,7 +127,8 @@ measure; each route sets its own:
 | `/` | 34rem at every viewport | One ordered list. Width only lets a second item compete for the same glance. |
 | `/board` | none | Full viewport. The columns are the workflow topology; capping them destroys the artefact. |
 | `/projects/:name` | none | The same board for one project, beside a 21rem rail. Same reason. |
-| `/workers` | 74rem | One table of machines. Wide enough for the row, no wider. |
+| `/workers` | 74rem | One block per machine, ruled, not a table: a header line, three meters and two columns that stack on a phone. Wide enough for the two columns, no wider. |
+| `/workers/:id` | 74rem | One machine: its header line and its log, newest first. The workers page's measure, because it is that page's row, looked at alone. |
 | `/templates` | 60rem | Two lists with a form each — provider credentials, then templates. Not one wide table, so narrower than `/workers`; a template row carries its shape, figures, count and actions, and wraps where they do not fit. |
 | `/projects/:name/settings` | 48rem | Forms and tables — tokens, people, mirrors. Narrower loses the row; wider is a rail with nothing to put in it. |
 | `/tickets/:project/:number` | 74rem | 53rem timeline column plus a 21rem facts rail, divided by a 1px rule. Below `lg` the rail moves under the timeline. |
@@ -495,12 +496,72 @@ a machine holds no account, and the models are a credential's.
 
 `managed` is shown because it is the only thing that differs between a machine the platform may
 destroy and one it may not; the second reads `permanent`, and its row stays until somebody
-retires it (`mix forge.worker.retire`). It holds no `max_workers` slot: that ceiling is a
-template's and counts the machines made from it, and a permanent worker came from no template.
-Destroyed rows are hidden unless asked for: they are history, and the page is about what exists.
+retires it — from its row here, or with `mix forge.worker.retire`. It holds no `max_workers`
+slot: that ceiling is a template's and counts the machines made from it, and a permanent worker
+came from no template. Destroyed rows are hidden unless asked for: they are history, and the page
+is about what exists.
 
-Nothing here is accent. It is a readout with two decisions in it, both on a permanent row only: what
-the machine offers (below), and which projects it serves.
+Nothing here is accent. It is a readout with three decisions in it: what a permanent machine
+offers (below), which projects it serves, and — on every row that is not destroyed — ending it.
+
+**A machine is a block, not a table row.** Seven columns did not fit a phone and never would, so
+each machine is a block separated from the next by a row rule (`border-base-300/60`), with no
+card and no box, in this order:
+
+- **A header line**: the short id; provider and provider id; `status`; the reachability dot and
+  word; `managed` or `permanent`; the release it last joined with, in muted mono, and beside it
+  `current` or `other build` (below); and, on the right, *Log* — on every row, destroyed ones
+  too — and the control that ends it.
+- **A refusal line**, when the machine's last join spoke a protocol this platform does not
+  accept, in `error`: *refused: protocol 3, this platform accepts 0–1 — update it*. It is drawn
+  from the protocol the row recorded and the range the platform accepts now, so it cannot say
+  something the next join would not.
+- **Three meters — CPU, RAM and disk** — each a mono figure over a thin bar, from the machine's
+  own last report (`worker-channel.md` § Live figures), re-read on the page's five-second
+  refresh. The bars are **neutral and never accent**: a full machine is not waiting on a human,
+  and the one loud colour is kept for what is. A disk at 95% or more also says so in `error`,
+  because a full disk is how a job fails rather than slows. A connected machine that has sent no
+  figures reads *no stats — update it* when its join spoke no protocol, since a release that
+  predates them is the reason, and *no stats yet* when it did — such a release sends its first
+  figures one tick after joining, and every machine rejoins at once after a deploy. A machine that
+  is not connected draws no meters at all, because a disconnected machine's last figures are a
+  guess about now.
+- **Two columns beneath, stacking on a phone**: what it offers the gate — capacity, the report
+  that disagrees, *never made* — and the form behind *Set what it offers*; then the harness, what
+  it is running, when it was last seen and since when it has been idle, and which projects it
+  serves. Every line the table carried is still here; this was a relayout, not a removal.
+
+Everything tappable on it is 46px, the selects and fields of its two forms included.
+
+**Each block links to the machine's log**, `/workers/:id`: what the platform saw happen to it and
+what the machine itself reported — joined, refused, jobs accepted and finished, seeds fetched,
+swept, destroyed and by what — newest first, with its time and where it came from. It is the
+machine's history and not a job's: what an agent did is on the job page. `worker-log.md` is the
+standard for it.
+
+**Ending a machine is the third decision, and it is the owner's.** A managed row offers
+**Destroy machine** and a permanent one **Retire**, each behind a confirm that says what will
+happen, from one definition each so the sentence cannot drift between uses: *the machine is
+deleted at the provider, and its N running jobs are requeued*, or *forge forgets the machine,
+the machine itself keeps running, and its N running jobs are requeued*. The id is the client's,
+so `Workers.retire_by_owner/2` reads the row scoped to the viewer before anything happens, and
+somebody else's id posted by hand is *not here*, exactly as for the other two decisions
+(`identity.md` § Sequencing). A driver that refuses leaves the row, with its words, and the
+flash names `mix forge.worker.retire --force` — force is not on this page, and why is
+`provisioning.md` § Whose account. It does not promise a retry: the sweeps retry a destroy only
+for a machine that is unreachable or idle, and a machine somebody just pressed Destroy on is
+usually neither.
+
+**The release is what the machine said, and the hint beside it is what the platform knows.**
+`flake.nix` builds the platform release knowing the build of the worker release it ships with
+(`worker-tier.md` § Updating a worker); a row whose build is that one reads `current`, and any
+other reads `other build`. **Not "older build"**, which is what this was first going to say: a
+build is a hash and hashes have no order, so the platform cannot tell a machine that lags it
+from one made from a newer checkout than the platform itself — which is exactly what building a
+snapshot before deploying produces. In the usual order of things it is older, and *other* is the
+word that is true either way. A node built outside Nix knows no build and draws no hint; a row
+that has not joined since the release was on the wire has nothing to compare and draws none
+either.
 
 **`docs/design/provisioning.md` made the page's old summary line false, and it was redesigned
 rather than patched.** It read *"A job is scheduled against memory, not against a count: one
@@ -535,6 +596,12 @@ keeps accruing. § Creating things governs the form; the ceiling and the price a
 form, because raising one raises the other. The two pages link to each other and share the
 Workers nav item.
 
+**A snapshot says what it carries.** Beside a template's image, and in the image select, the
+page shows the snapshot's worker build — with the same `current` or `other build` hint — and the
+protocol it speaks, read from its provider labels (`provisioning.md` § A snapshot that speaks the
+wrong protocol). A snapshot made before the labels existed reads *unlabelled*: it cannot be
+identified after the fact, and a date is not an identification.
+
 ## A job waiting for a machine
 
 A pending job the scheduler could not place says why, in one sentence, where the job is looked at:
@@ -544,8 +611,9 @@ appear. The sentence is the scheduler's (`provisioning.md` § The gate), in the 
 never mono. **A sentence that sends the operator somewhere sends them where the reason is.** A
 provider that refused to make a machine left its words on the worker row, so that sentence names the
 workers page; a template the platform would not spend from — its provider credential is another
-user's, or another provider's — made no worker row, and its words are on the template, so that one
-names the templates page. Both pages show the viewer's own rows only, so each sentence names whose
+user's, or another provider's — or would not make a machine from, because its image speaks a worker
+protocol this platform does not accept, made no worker row, and its words are on the template, so
+those name the templates page. Both pages show the viewer's own rows only, so each sentence names whose
 page: the template owner's, who may not be the person reading it. It is drawn only while the job is
 pending, and only the latest reason since the job last started; every change stays in the job's own
 event stream, where it is a line like any other.

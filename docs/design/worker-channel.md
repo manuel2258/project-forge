@@ -35,6 +35,28 @@ in constant time, and refuses unless the worker's status is `creating`, `ready`,
 A `destroyed` worker is refused even with a valid token: destruction is the platform's record that
 this machine is gone, and a machine that disagrees does not get to argue.
 
+**Destroying a row closes its channel, and a join on a destroyed row is refused.** The socket
+check runs once, when the connection is made, and a connection outlives the row it was made
+for: a machine retired from the workers page, or by `mix forge.worker.retire`, is still holding
+the channel it joined with, and a rejoin on that same live socket — which Slipstream does
+whenever the platform closes a topic — never passes through `connect/3` again. So:
+
+- `Workers.destroy/2` stops the row's channel wherever it marks the row `destroyed`, handing it
+  the jobs still running there to `cancel` first — a retired permanent machine keeps running, and
+  a job requeued from it would otherwise run twice;
+- `join/3` asks the row again and refuses a destroyed one with `reason: "destroyed"`, and the
+  channel reads the row once more after it is registered, closing itself if a retire landed in
+  between, when there was no channel for the stop to reach;
+- `ready/2`, `busy/1` and `release/1` write a status only after re-reading the row under a lock,
+  and never over `destroyed`: each decides from a row read earlier — a message in flight, the
+  scheduler's pass — and written from that read, a retired row came back to `idle` or `busy`,
+  assignable and with its token valid again.
+
+What the channel cannot reach is a row destroyed from another node — the host's command line runs
+in its own VM, with its own registry — and there the other guards are the ones that hold: such a
+machine keeps its open channel until it next reconnects, and it is never assigned anything,
+because `assignable/2` reads the row's status.
+
 There is no query-parameter fallback. Accepting both would keep the leak alive for as long as any
 machine had not been updated, and a worker is updated in seconds (`bin/worker-update`); a worker
 still sending the old shape is refused and says so in its log.
@@ -42,6 +64,14 @@ still sending the old shape is refused and says so in its log.
 The token is minted once, when the worker row is created, and handed to the provider driver for
 the config disk. The platform keeps only the hash — the same shape `Forge.Accounts.UserToken` uses, for
 the same reason.
+
+**A second join while the machine's channel is open is refused before anything is written**, with
+`already_connected`. That is what a copy of a live machine's token makes, and the join now does
+things — it records what the machine runs, it can destroy the machine, and a machine's first join
+teaches its template (§ Versions) — none of which a second caller may do to a machine that is
+there. A join by a token-holder while the real machine is away is not told apart; that is the
+radius below, and learning is kept to a machine's first join so that a copy of the token cannot
+also take its template out of service.
 
 **The token authenticates the machine, not any job.** Everything a worker is allowed to touch
 beyond the channel — a store key, a git ref — is a separate, short-lived, scoped token minted per
@@ -67,13 +97,18 @@ The join payload is the worker's self-report:
 
 ```json
 {"memory_total": 16106127360, "root": "/var/lib/forge",
- "seeds": ["seed/sample-rust/sha256-…"], "running": [{"job_id": "…", "attempt": 1}]}
+ "seeds": ["seed/sample-rust/sha256-…"], "running": [{"job_id": "…", "attempt": 1}],
+ "protocol": 1, "release": "0.2.1 (8rh57whmgk6m)", "build": "8rh57whmgk6m"}
 ```
 
 `seeds` is a list because a worker is not pinned to a project — `docs/design/worker-tier.md` §
 Volumes and the seed says why — so it may hold one seed per project it has run a job for.
 
 `running` is what makes a reconnect survivable; see § Reconnection.
+
+`protocol`, `release` and `build` say what is speaking; see § Versions. They are in the join and
+not in `ready` because the platform has to decide before any work whether it will talk to this
+machine at all, and `ready` comes minutes later.
 
 ## Messages
 
@@ -104,6 +139,8 @@ Worker → platform:
 |---|---|---|
 | `ready` | `memory_budget`, `seeds`, `root`, `harness`, and `cores` and `accepts` when known | no |
 | `heartbeat` | running job ids | no |
+| `stats` | `cpu`, `memory_used`, `memory_total`, `disk_used`, `disk_total`, each only when readable | no |
+| `log` | `at`, `type`, `level`, `message`, and `job_id` on a line about a job | no |
 | `event` | `job_id`, normalised harness event | no |
 | `turn` | `job_id`, turn index, commit, the turn's proposals and documents, and a harness summary carrying its cost | yes |
 | `result` | `job_id`, `ForgeCore.Job.Result` as JSON | yes |
@@ -208,6 +245,146 @@ is not a single set means an image rollout is half done. Union rather than inter
 the list is an offer, not a gate — see `docs/design/workflow-grammar-v1.md` § Semantics, under
 **Model**, for why naming a model the platform has never heard of stays legal.
 
+## Live figures
+
+`stats` is how the workers page draws a machine's CPU, memory and disk while it is connected
+(`docs/design/ui.md` § The workers page). The worker samples and pushes it every five seconds,
+apart from the heartbeat and on its own timer (`stats_ms`, configurable like `heartbeat_ms`),
+because the two answer different questions: the heartbeat says the machine is alive and is
+written to the row, and `stats` says how full it is and is written nowhere.
+
+```json
+{"cpu": 23.4, "memory_used": 5210000000, "memory_total": 16106127360,
+ "disk_used": 41000000000, "disk_total": 152000000000}
+```
+
+- **`cpu` is a percentage of the whole machine between two samples**, from the `cpu` line of
+  `/proc/stat`: the busy share of the time that passed, where idle is `idle` plus `iowait` and
+  `guest` is not counted twice (the kernel already includes it in `user`). The first sample has
+  nothing to be a difference from, so the first message has no `cpu`.
+- **Memory is `MemTotal - MemAvailable`** from `/proc/meminfo` — what the kernel says could not
+  be given to a new process without swapping, which is the figure a slice's ceiling is up
+  against, and not `MemFree`, which counts the page cache as used.
+- **Disk is the filesystem holding the job root**, from `df -P -B1 <root>`, because OTP has no
+  `statfs`. `disk_total` is `Used + Available` rather than the filesystem's size, which is how
+  `df`'s own capacity column counts: blocks reserved for root are not space a job can write, so
+  a disk is full when that sum is used, not when the size is.
+- **A figure that cannot be read is left out, never sent as zero.** A zero would draw an empty
+  bar, which says *nothing is being used* — the opposite of *nothing could be read*.
+- **What the platform keeps is what it can draw.** `cpu` from 0 to 100, and byte counts as whole
+  numbers no larger than 2^60; anything else from a machine is dropped as if unread. A float total
+  of 1e-300 passed a check for *non-negative* and divided the owner's workers page into an
+  exception.
+
+**It never touches the database.** The channel keeps the latest reading as its registry value
+(`Workers.stats/1` reads it) and nothing else, so it lives and dies with the channel: a machine
+that is not connected has no figures at all rather than stale ones, and there is no table, no
+history and nothing to sweep. Unacked for the same reason events are: the next one is five
+seconds away.
+
+A platform older than this message logs it as unknown and replies with an error the worker
+ignores, so a worker that sends it takes nothing away from a platform that does not read it —
+which is what makes it an addition rather than a change (§ Versions).
+
+## The machine's log
+
+`log` carries a line of the machine's own history — a job it accepted or finished, a seed it
+fetched or could not, a message from the platform it did not know — into the log the platform
+keeps for it and shows on `/workers/:id`. Worker-level only: nothing a job's agent did goes here;
+that is the job's `event` stream. It is held while the worker is not joined and sent after the next
+join, and otherwise best-effort and unacked, like an event. `docs/design/worker-log.md` is the
+standard for what goes in, how it is bounded, and what the platform adds of its own.
+
+## Versions
+
+**The join says what is speaking**, in three fields:
+
+- `protocol` — an integer, the version of this protocol the worker speaks. One number for the
+  whole repository, in `core/priv/worker_protocol`, which `ForgeCore.WorkerProtocol` reads at
+  compile time and `flake.nix` reads with `builtins.readFile`; nothing else may write it down,
+  and a core test fails if `flake.nix` stops reading the file.
+- `release` — the string the join line has always logged, `0.2.1 (8rh57whmgk6m)`: the
+  application version and, when the release runs from the Nix store, the first twelve
+  characters of its store path's hash.
+- `build` — those twelve characters on their own, and left out rather than null when the
+  release is not in the Nix store. That is what `nix build .#forge-worker` prints, what the
+  platform release is built knowing (`docs/design/worker-tier.md` § Updating a worker), and what
+  a snapshot is labelled with.
+
+**The platform accepts protocol `P` if and only if `minimum ≤ P ≤ current`**, both from
+`ForgeCore.WorkerProtocol`. A worker that sends no `protocol` is protocol 0, which is every
+release before this field existed; `minimum` starts at 0, so shipping the check refused nobody.
+A newer worker is refused as surely as an older one: a platform cannot know what a protocol
+from after it expects.
+
+All three are written onto the row at every join, refused or not — `workers.release`,
+`workers.build` and `workers.protocol` — so the workers page can say what each machine runs and
+why one was turned away. The one exception is a `destroyed` row, whose join is refused before
+anything is written (§ Authentication): it is history, and a machine that disagrees does not get
+to amend it.
+
+**A refused join is `{:error, %{reason: "protocol", protocol: P, minimum: M, current: C}}`**,
+after the row records the protocol it sent, and what happens next depends on whose machine it
+is:
+
+- **A managed machine is destroyed at once**, because it bills by the hour and can never take
+  work, through `Workers.retire/2`: its running jobs are requeued once the row is destroyed. A
+  destroy the driver refuses keeps the row as any refused destroy does.
+- **Its template learns**, if this is the machine's first join, the protocol of the image it was
+  made from (`workers.image`, copied from the template at creation), so no further machine is made
+  from that snapshot (`docs/design/provisioning.md` § A snapshot that speaks the wrong protocol).
+  A first join that is accepted teaches it too, which is what ends the probe an unlabelled image is
+  held to.
+- **A permanent machine only gets the reason on its row.** It is not the platform's to power off,
+  and updating it is somebody's errand; the page names it.
+
+The refused join does **not** write `last_seen_at`. A permanent machine that keeps knocking is
+still not a machine the platform can hear from, and its jobs have to reach
+`Workers.sweep_unreachable/0`'s timeout like any unreachable machine's.
+
+**The worker, refused, says so once and waits minutes, not seconds.** One log line naming the
+protocol it speaks and the range the platform accepts, and a rejoin after `refused_retry_ms`
+(five minutes) rather than Slipstream's own backoff, which settles at ten seconds and would
+write that line and ask that question three hundred and sixty times an hour for something
+only a deploy can change. A join refused because the row is `destroyed` waits the same way.
+
+### What needs a bump, and raising the minimum
+
+**A change is breaking when a platform and a worker built on either side of it cannot work
+together correctly**, and only a breaking change moves `current`. Breaking:
+
+- removing or renaming a message, or a field the other side reads;
+- changing a field's type, unit or meaning;
+- a new field or message the other side must act on to be correct — a platform-to-worker
+  `update` a worker has to obey, a field the platform starts requiring;
+- changing what an ack or a refusal means.
+
+**Not breaking**, and so no bump: a worker-to-platform message the platform may ignore (`stats`,
+`log`); a new field whose absence already has a meaning the receiver honours (`cores` and
+`accepts` were added this way, and absent reads as *unknown*); a platform-to-worker message a
+worker may log and drop.
+
+Bumping `current` without raising `minimum` keeps every older worker taking work, and refuses a
+newer worker on an older platform — which is why additions do not bump it: the platform is
+deployed first, and a snapshot built from a newer checkout would otherwise be turned away for a
+field its platform could have ignored.
+
+**Raising `minimum`** is the platform dropping an older protocol: the day it stops handling the
+shape older workers send. It is the one edit here that refuses running machines, so, before it
+ships:
+
+1. build and label a snapshot at the new protocol (`bin/hetzner-image`) and move every template
+   to it — the templates page shows each snapshot's protocol;
+2. update every permanent machine (`bin/worker-update`) — the workers page shows each machine's;
+3. then raise `@minimum` in `ForgeCore.WorkerProtocol`, which is a code change and not the file:
+   the file is what this build speaks, and the minimum is what this platform still accepts.
+
+A managed machine still on the old protocol when the platform restarts is refused and destroyed
+on its next join. That is not its first join, so its template learns nothing from it; the template
+is still labelled with the protocol its snapshot speaks — or, unlabelled, knows what the snapshot's
+first machine said — and so refuses to make another. A missed template costs the machines that were
+already running, and says so on the templates page rather than looping.
+
 ## Delivery
 
 Three classes, and they are deliberately not treated alike.
@@ -265,7 +442,8 @@ against the platform's rows for this worker:
 
 ## When the machine goes away
 
-`last_seen_at` is written at join, at `ready` and by every `heartbeat`. Past `worker_timeout_ms`
+`last_seen_at` is written at a join the platform accepts, at `ready` and by every `heartbeat` —
+never by `stats`, and never by a refused join (§ Versions). Past `worker_timeout_ms`
 the platform stops waiting (`Workers.sweep_unreachable/0`), and what it does next depends on whose
 machine it is:
 

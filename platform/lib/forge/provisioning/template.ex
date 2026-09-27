@@ -48,6 +48,13 @@ defmodule Forge.Provisioning.Template do
     field :failures, :integer, default: 0
     field :last_error, :string
 
+    # What the chosen snapshot carries: the worker build and the channel protocol, from its
+    # provider labels when the template is saved, or the protocol learnt when a machine made from
+    # it was refused at join. Null is *unlabelled* — unknown, not compatible
+    # (`docs/design/provisioning.md` § A snapshot that speaks the wrong protocol).
+    field :image_build, :string
+    field :image_protocol, :integer
+
     has_many :project_templates, Forge.Provisioning.ProjectTemplate, foreign_key: :template_id
     has_many :projects, through: [:project_templates, :project]
 
@@ -70,7 +77,9 @@ defmodule Forge.Provisioning.Template do
       :cores,
       :accepts,
       :max_workers,
-      :idle_ms
+      :idle_ms,
+      :image_build,
+      :image_protocol
     ])
     |> validate_required([:user_id, :name, :provider, :memory, :cores, :max_workers])
     |> validate_length(:name, min: 1, max: 100)
@@ -84,6 +93,7 @@ defmodule Forge.Provisioning.Template do
     |> validate_provider()
     |> validate_required_by_driver()
     |> validate_credential_provider()
+    |> keep_what_was_learnt()
     |> unique_constraint([:user_id, :name])
     |> foreign_key_constraint(:user_id)
     |> foreign_key_constraint(:provider_credential_id)
@@ -177,6 +187,25 @@ defmodule Forge.Provisioning.Template do
     end
   end
 
+  # **A save does not forget what the platform knows about the image it already names.** The
+  # labels are read from the provider's listing on every save, and an unlabelled snapshot reads
+  # as nothing there — so a rename of a template whose protocol was learnt from a refused machine
+  # would reset it to unknown, and earn the snapshot one more machine to refuse. With the image
+  # unchanged, only a label that is actually there replaces what is stored; choosing another
+  # image takes that image's labels, nothing included.
+  defp keep_what_was_learnt(changeset) do
+    if Map.has_key?(changeset.changes, :image),
+      do: changeset,
+      else: Enum.reduce([:image_build, :image_protocol], changeset, &keep/2)
+  end
+
+  defp keep(field, changeset) do
+    case Map.fetch(changeset.changes, field) do
+      {:ok, nil} -> delete_change(changeset, field)
+      _kept -> changeset
+    end
+  end
+
   @doc """
   What a machine made from this template is created with.
 
@@ -192,7 +221,8 @@ defmodule Forge.Provisioning.Template do
       provider_credential_id: template.provider_credential_id,
       memory_budget: template.memory,
       cores: template.cores,
-      accepts: template.accepts
+      accepts: template.accepts,
+      image: template.image
     }
   end
 end

@@ -27,7 +27,10 @@ defmodule ForgeWeb.TemplatesLive do
 
   use ForgeWeb, :live_view
 
-  alias Forge.{Projects, Provider, Provisioning}
+  import ForgeCore.Workflow.Resources, only: [gib: 1]
+
+  alias Forge.{Projects, Provider, Provisioning, Workers}
+  alias ForgeWeb.Format
 
   @impl true
   def mount(_params, _session, socket) do
@@ -44,6 +47,7 @@ defmodule ForgeWeb.TemplatesLive do
       assignments: Map.new(Provisioning.templates(user), &{&1.id, Provisioning.for_projects(&1)}),
       projects: Projects.list(user),
       providers: Provider.names(),
+      current_build: Workers.current_build(),
       # **Only the providers that have a credential to give.** A driver whose
       # `credential_fields/0` is empty reaches its machines without an account — the local one
       # does — so offering it here is offering a form with nothing in it, which
@@ -244,7 +248,9 @@ defmodule ForgeWeb.TemplatesLive do
   end
 
   def handle_event("add-template", %{"template" => params}, socket) do
-    case Provisioning.create_template(socket.assigns.current_scope.user, template_attrs(params)) do
+    attrs = params |> template_attrs() |> labelled(socket.assigns.images)
+
+    case Provisioning.create_template(socket.assigns.current_scope.user, attrs) do
       {:ok, _template} -> {:noreply, socket |> load() |> reset_forms()}
       {:error, changeset} -> {:noreply, assign(socket, error: errors(changeset))}
     end
@@ -270,7 +276,9 @@ defmodule ForgeWeb.TemplatesLive do
   def handle_event("save-template", %{"template" => params}, socket) do
     user = socket.assigns.current_scope.user
 
-    case Provisioning.update_template(user, socket.assigns.editing, template_attrs(params)) do
+    attrs = params |> template_attrs() |> labelled(socket.assigns.images)
+
+    case Provisioning.update_template(user, socket.assigns.editing, attrs) do
       {:ok, _template} ->
         {:noreply, socket |> load() |> reset_forms()}
 
@@ -371,6 +379,20 @@ defmodule ForgeWeb.TemplatesLive do
     }
   end
 
+  # **What the chosen snapshot carries, from the listing this page already holds** — never from the
+  # form, whose params are the client's (`docs/design/provisioning.md` § A snapshot that speaks the
+  # wrong protocol). An image the listing does not have — typed by hand for a provider that lists
+  # none, or gone since the page loaded — is unlabelled, and `Template.changeset/2` keeps what is
+  # already known about an image that did not change.
+  defp labelled(attrs, images) do
+    image = Enum.find(images, &(&1.id == attrs.image))
+
+    Map.merge(attrs, %{
+      image_build: image && image[:build],
+      image_protocol: image && image[:protocol]
+    })
+  end
+
   defp blank(nil), do: nil
   defp blank(""), do: nil
   defp blank(value), do: String.trim(value)
@@ -419,9 +441,6 @@ defmodule ForgeWeb.TemplatesLive do
     |> Enum.map_join("; ", fn {field, messages} -> "#{field} #{Enum.join(messages, ", ")}" end)
   end
 
-  defp gib(nil), do: "—"
-  defp gib(bytes), do: :erlang.float_to_binary(bytes / 1024 / 1024 / 1024, decimals: 1) <> " GiB"
-
   defp shape_label(shape) do
     "#{shape.size} — #{gib(shape.memory)}, #{shape.cores} cores" <> price(shape)
   end
@@ -435,6 +454,44 @@ defmodule ForgeWeb.TemplatesLive do
   # promise `Template.changeset/2` then refuses to keep.
   defp blank_choice(required, field, otherwise),
     do: {if(field in required, do: "choose one", else: otherwise), ""}
+
+  # A snapshot as the image select offers it: its name, then what it carries.
+  defp image_label(image, current_build),
+    do: "#{image.name || image.id} · #{carries(image[:build], image[:protocol], current_build)}"
+
+  # What a snapshot carries, in the words the template row and the image select share: its build
+  # against the one this platform ships with, and its protocol — or *unlabelled*, for a snapshot
+  # from before the labels existed, which cannot be identified after the fact.
+  defp carries(nil, nil, _current_build), do: "unlabelled"
+
+  defp carries(build, protocol, current_build) do
+    [build(build, current_build), protocol && "protocol #{protocol}"]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join(" · ")
+  end
+
+  # A snapshot whose label names no build is *unknown*, and draws nothing rather than a hint. Not
+  # the workers page's reading of a machine that joined with none — which is "other build", since
+  # a release outside the Nix store cannot be the one this platform ships with.
+  defp build(nil, _current_build), do: nil
+
+  defp build(build, current_build) do
+    case Format.build_hint(build, current_build) do
+      nil -> "build #{build}"
+      hint -> "build #{build} #{hint}"
+    end
+  end
+
+  # A template whose snapshot this platform would refuse makes nothing, and says so here before
+  # any job asks — its failures only begin once one does. Once they have, the failures line
+  # carries the same sentence as its last error, and it is not said twice.
+  defp refusal(template) do
+    case Provisioning.image_refusal(template) do
+      nil -> nil
+      same when same == template.last_error -> nil
+      sentence -> sentence
+    end
+  end
 
   defp kinds(nil), do: "any kind"
   defp kinds([]), do: "any kind"
@@ -452,6 +509,7 @@ defmodule ForgeWeb.TemplatesLive do
   attr :ready, :boolean, required: true
   attr :required, :list, required: true
   attr :submit, :string, required: true
+  attr :current_build, :string, default: nil
   slot :beside
 
   # What a template is made of: the fields for the form that makes one and the form that edits
@@ -536,7 +594,7 @@ defmodule ForgeWeb.TemplatesLive do
           label="Image"
           options={
             [blank_choice(@required, :image, "the node's default")] ++
-              for(i <- @images, do: {i.name || i.id, i.id})
+              for(i <- @images, do: {image_label(i, @current_build), i.id})
           }
         />
         <.input
@@ -702,6 +760,15 @@ defmodule ForgeWeb.TemplatesLive do
               {template.provider}{if template.size, do: " · #{template.size}"}{if template.image,
                 do: " · #{template.image}"}
             </span>
+            <%!-- What the snapshot carries, beside it: from its labels, or learnt from a machine
+                  refused at join (`provisioning.md` § A snapshot that speaks the wrong
+                  protocol). A template naming no image boots the driver's default. --%>
+            <span
+              :if={template.image || template.image_protocol}
+              class="font-mono text-[12.5px] opacity-60"
+            >
+              {carries(template.image_build, template.image_protocol, @current_build)}
+            </span>
             <span class="font-mono text-[12.5px] opacity-60">
               {gib(template.memory)} · {template.cores} cores · {kinds(template.accepts)}
             </span>
@@ -741,6 +808,10 @@ defmodule ForgeWeb.TemplatesLive do
 
           <%!-- What went wrong, where the thing that went wrong is. A count below the limit is
                 worth showing too: it is the warning before the template stops being used. --%>
+          <p :if={refusal(template)} class="mt-2 text-sm/[1.55] text-error">
+            {refusal(template)}: no machine is made from it until it names another
+          </p>
+
           <p :if={template.failures > 0} class="mt-2 text-sm/[1.55] text-error">
             {template.failures} failed {if template.failures == 1, do: "attempt", else: "attempts"}
             <span :if={Provisioning.disabled?(template)}>— it is out of service until you enable it</span>
@@ -768,6 +839,7 @@ defmodule ForgeWeb.TemplatesLive do
               ready={@template_ready}
               required={Provider.required_template_fields(@template_provider)}
               submit="Save it"
+              current_build={@current_build}
             >
               <:beside>
                 <button
@@ -852,6 +924,7 @@ defmodule ForgeWeb.TemplatesLive do
           ready={@template_ready}
           required={Provider.required_template_fields(@template_provider)}
           submit="Create it"
+          current_build={@current_build}
         />
       </.form>
     </Layouts.app>

@@ -586,7 +586,7 @@ nothing yet runs a worker the operator cannot ssh to.
 
 **A machine says which build it is running when it joins.** Once the release is separable from
 the image, "what is this worker running" stops being answerable from the image, and the
-application version does not answer it either — every release in the PoC is `0.1.0`. What
+application version does not answer it either — every release in the PoC was `0.1.0`. What
 changes on a code edit is the store path, so the join line names it:
 
 ```
@@ -594,19 +594,49 @@ joined worker:8eaaacc1-… running 0.1.0 (8rh57whmgk6m); ready with 6176456704 b
 ```
 
 which is the first twelve characters of what `nix build .#forge-worker` prints, so the operator
-can compare the two without logging in. It is a log line and not a channel field on purpose —
-see the second point below for why it will have to become one.
+can compare the two without logging in.
 
-Two things it will need that do not exist, and both get harder the longer they wait:
+**And it says so on the wire, which is where the platform can act on it.** The join carries
+`protocol`, `release` and `build` (`docs/design/worker-channel.md` § Versions), the row keeps
+them, and the platform refuses a protocol outside the range it accepts before the machine is
+given any work. This was the second of two things this section said the release would need; it
+is built:
+
+- **The protocol is one number**, in `core/priv/worker_protocol`, read by `ForgeCore.WorkerProtocol`
+  and by `flake.nix` and written down nowhere else. It moves only for a breaking change, and
+  `worker-channel.md` § What needs a bump says what counts as one and how the minimum is raised.
+- **A refused managed machine is destroyed on the spot**, and its template learns from the
+  machine's first join what the image it was made from speaks. An image nothing has been heard
+  from is probed by one machine at a time until that join, so a bad snapshot costs one machine
+  rather than one per sweep or one per waiting job (`docs/design/provisioning.md` § A snapshot
+  that speaks the wrong protocol). A refused permanent machine keeps its row, and the row says
+  why.
+- **Snapshots are labelled with what they carry.** `bin/hetzner-image` sets
+  `forge-worker-build` and `forge-worker-protocol` on the snapshot from the flake outputs it
+  builds, `Hetzner.images/1` reads them back, and a template stores both when it is saved. A
+  snapshot made before the labels existed is *unlabelled*, which is unknown rather than
+  compatible: the platform makes a machine from it, warns, and learns from the join.
+- **The platform knows which build it ships with.** `flake.nix` builds the platform release
+  knowing the first twelve characters of the `forge-worker` package's store hash — twelve and
+  not thirty-two, because the full hash in the platform's closure is a runtime reference Nix
+  would follow, and every platform install would drag the worker release in with it. The
+  workers and templates pages set a machine's or a snapshot's build beside it: `current`, or
+  `other build`. A hint, not a gate: nothing refuses a machine for its build, only for its
+  protocol. A development node has no build to compare with and draws no hint.
+
+What is left to need, and it still gets harder the longer it waits:
 
 - **Rollback.** A release that will not start leaves a machine that will not work, and the
   symlink's previous target is the whole of the fix.
-- **A version on the wire.** Nothing in `docs/design/worker-channel.md` carries one, which is
-  harmless only because platform and worker are built from one flake and move together. A worker
-  that can be updated on its own — or simply kept for months — breaks that, and an unknown
-  message is currently a log line rather than a refusal. The build identifier above is in the
-  worker's log, where the platform cannot see it; the platform is the side that has to decide
-  whether to send a machine work.
+- **A pulled `update`.** The refusal says a machine is out of date; nothing yet brings one up to
+  date on a provider, where there is no ssh door. The `update` message above is still the shape,
+  and it would be the first breaking addition from the platform's side — a worker that ignored
+  it would take work it had been told to stop taking.
+
+**The live figures are memory-only.** A connected machine reports its CPU, memory and disk every
+five seconds (`worker-channel.md` § Live figures) for the workers page to draw, and the platform
+keeps the latest one as the channel's registry value and nothing else: no table, no history, and
+a machine that is not connected shows no figures at all rather than old ones.
 
 ## What a machine that never dies accumulates
 

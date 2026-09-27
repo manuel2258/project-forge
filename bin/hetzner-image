@@ -8,15 +8,26 @@
 # The server is created, used and deleted here. It costs a few minutes of one machine's hourly
 # rate; the snapshot it leaves costs a snapshot's monthly rate, which for a 1.8 GiB image is
 # cents. Nothing else is left behind.
+#
+# **The snapshot is labelled with what it carries**: `forge-worker-build`, the first twelve
+# characters of the worker release's store hash, and `forge-worker-protocol`, the channel protocol
+# that release speaks. Both come out of the one evaluation that names the image's derivation, and
+# the image built is that derivation and no other — so a flake that changed between two separate
+# `nix` calls (a working tree being edited, a branch that moved) cannot label one image with
+# another's build. Never typed. The platform reads them back to say
+# which snapshots are current and to refuse one it cannot talk to before it pays for a machine
+# (docs/design/provisioning.md § A snapshot that speaks the wrong protocol).
 set -euo pipefail
 
 usage() {
   cat << 'USAGE'
-usage: bin/hetzner-image [--image PATH] [--type TYPE] [--location LOC] [--name NAME]
+usage: bin/hetzner-image [--flake REF] [--type TYPE] [--location LOC] [--name NAME]
                          [--ssh-key NAME] [--wait SECONDS]
 
-  --image     qcow2 to write. Default: result/forge-worker.qcow2 from `nix build .#worker-image`
-              Converted to raw in $TMPDIR first, so that much free space is needed there.
+  --flake     flake to build the image from. Default: . — `nix build REF#worker-image` is run,
+              and its qcow2 is converted to raw in $TMPDIR first, so that much free space is
+              needed there. The labels come from the same flake, so there is no --image: an image
+              built elsewhere would be labelled with a build it may not carry.
   --type      server type to rescue-boot on. Default: cx23
   --location  where to make it. Default: nbg1 (fsn1 sold no x86 type; see platform/config/config.exs)
   --name      the snapshot's description. Default: forge-worker-<date>
@@ -27,7 +38,7 @@ Needs HCLOUD_TOKEN in the environment, and an ssh key already in the Hetzner pro
 USAGE
 }
 
-image="result/forge-worker.qcow2"
+flake="."
 type="cx23"
 location="nbg1"
 name="forge-worker-$(date -u +%Y%m%d-%H%M%S)"
@@ -36,8 +47,8 @@ wait_seconds=300
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --image)
-      image="$2"
+    --flake)
+      flake="$2"
       shift 2
       ;;
     --type)
@@ -68,14 +79,45 @@ done
   echo "HCLOUD_TOKEN is not set" >&2
   exit 1
 }
-[ -f "$image" ] || {
-  echo "no image at $image — run: nix build .#worker-image" >&2
-  exit 1
-}
 command -v hcloud > /dev/null || {
   echo "hcloud is not on PATH" >&2
   exit 1
 }
+command -v nix > /dev/null || {
+  echo "nix is not on PATH" >&2
+  exit 1
+}
+
+# Built, and labelled, from one evaluation — before any server exists, so a flake that does not
+# evaluate costs nothing. The evaluation yields the image's derivation with its two labels, and
+# `nix build` builds that derivation by its path rather than evaluating the flake again. A build
+# of an image already built is a lookup.
+echo "evaluating $flake#worker-image"
+# Into a variable first, so an evaluation that fails stops the script here: `set -e` does not see
+# a process substitution fail.
+# shellcheck disable=SC2016 # the ${...} below is Nix interpolation, and must reach nix unexpanded
+evaluated="$(nix eval --raw "$flake#worker-image" \
+  --apply 'image: "${image.drvPath} ${image.build} ${toString image.protocol}"')"
+read -r drv build protocol <<< "$evaluated"
+echo "building $drv"
+out="$(nix build --no-link --print-out-paths "$drv^out")"
+image="$out/forge-worker.qcow2"
+
+[ -f "$image" ] || {
+  echo "the build produced no image at $image" >&2
+  exit 1
+}
+# What the platform parses back. A label it cannot read is an unlabelled snapshot, which the
+# platform treats as unknown — so a malformed one is refused here rather than shipped.
+[[ "$build" =~ ^[a-z0-9]{12}$ ]] || {
+  echo "not a build: '$build'" >&2
+  exit 1
+}
+[[ "$protocol" =~ ^[0-9]+$ ]] || {
+  echo "not a protocol: '$protocol'" >&2
+  exit 1
+}
+echo "worker build $build, protocol $protocol"
 
 # **`qemu-img` cannot write to a pipe.** Given `-` it creates a file called `-`, and given
 # `/dev/stdout` it produces nothing at all — both silently, both exit 0. The first version of
@@ -184,8 +226,10 @@ hcloud server poweroff "$server"
 until [ "$(hcloud server describe "$server" -o format='{{.Status}}')" = "off" ]; do sleep 3; done
 
 echo "snapshotting as $name"
-hcloud server create-image --type snapshot --description "$name" "$server" > /dev/null
+hcloud server create-image --type snapshot --description "$name" \
+  --label "forge-worker-build=$build" --label "forge-worker-protocol=$protocol" \
+  "$server" > /dev/null
 
 echo
-echo "done. The snapshot is listed on /templates as $name."
+echo "done. The snapshot is listed on /templates as $name, build $build, protocol $protocol."
 echo "Password for the rescue session, had you needed it: ${password:-<none captured>}"

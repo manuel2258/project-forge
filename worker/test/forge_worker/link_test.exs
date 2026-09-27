@@ -140,6 +140,7 @@ defmodule ForgeWorker.LinkTest do
 
     Application.put_env(:forge_worker, :harness_opts, executable: fake_executable())
     Application.put_env(:forge_worker, :platform_url, "http://platform.test")
+    stats_ms = Application.fetch_env!(:forge_worker, :stats_ms)
 
     on_exit(fn ->
       # A job outliving its test would carry on against directories that are about to go.
@@ -153,6 +154,10 @@ defmodule ForgeWorker.LinkTest do
       Application.delete_env(:forge_worker, :extra_env)
       Application.delete_env(:forge_worker, :harness)
       Application.delete_env(:forge_worker, :heartbeat_ms)
+      Application.delete_env(:forge_worker, :refused_retry_ms)
+      # Put back rather than deleted: the test config sets it long, and deleting it would leave
+      # the five-second default for every test after this one.
+      Application.put_env(:forge_worker, :stats_ms, stats_ms)
       Application.delete_env(:forge_worker, :slice)
       Application.delete_env(:forge_worker, :slice_reporter)
       Application.delete_env(:forge_worker, :token)
@@ -231,6 +236,30 @@ defmodule ForgeWorker.LinkTest do
 
     assert_push(@topic, "ready", %{"memory_budget" => ^budget, "cores" => cores})
     assert cores > 0
+  end
+
+  # What is speaking, in the join, because the platform decides there — before any work — whether
+  # it will talk to this machine at all (`docs/design/worker-channel.md` § Versions).
+  test "the join says which protocol and which release is speaking", %{client: client} do
+    connect_and_assert_join(client, @topic, payload, :ok)
+
+    assert payload["protocol"] == ForgeCore.WorkerProtocol.current()
+    assert payload["release"] == to_string(Application.spec(:forge_worker, :vsn))
+
+    # Not in the Nix store, so no build: absent rather than null, like `cores`.
+    refute Map.has_key?(payload, "build")
+  end
+
+  test "a release in the Nix store is named by the first twelve characters of its hash" do
+    hash = "8rh57whmgk6mxxxxxxxxxxxxxxxxxxxx"
+
+    assert Link.build(~c"/nix/store/#{hash}-forge-worker-0.2.1") == "8rh57whmgk6m"
+    assert Link.build("/nix/store/#{hash}-forge-worker-0.2.1") == "8rh57whmgk6m"
+
+    # Anything else is no build at all, never a guess from a path that merely looks like one.
+    assert Link.build("/usr/lib/forge_worker") == nil
+    assert Link.build("/nix/store/short-forge-worker") == nil
+    assert Link.build("/home/me/nix/store/#{hash}-forge-worker") == nil
   end
 
   describe "what ready says about the gate's other two dimensions" do
@@ -321,6 +350,143 @@ defmodule ForgeWorker.LinkTest do
     # that both are done.
     last = Path.join([root, "jobs", job["spec"]["job_id"], "fake-env-all.txt"])
     wait_until(fn -> File.exists?(last) end)
+  end
+
+  # How full the machine is, for the workers page, on a timer of its own and apart from the
+  # heartbeat: the heartbeat is written to the row and this is written nowhere
+  # (`docs/design/worker-channel.md` § Live figures).
+  test "it reports how full it is on its own, and a CPU figure from the second reading", %{
+    client: client
+  } do
+    Application.put_env(:forge_worker, :stats_ms, 100)
+
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    assert_push(@topic, "stats", first, _ref, 2_000)
+    refute Map.has_key?(first, "cpu")
+    assert first["memory_total"] > 0
+    assert first["memory_used"] <= first["memory_total"]
+    assert first["disk_used"] <= first["disk_total"]
+
+    assert_push(@topic, "stats", second, _ref, 2_000)
+    assert is_float(second["cpu"])
+  end
+
+  # The timers are started at the first join and never again. They used to be started at every
+  # join, so each reconnect added another heartbeat — each a write to the row — for the life of
+  # the machine.
+  test "a rejoin does not start a second heartbeat", %{client: client} do
+    Application.put_env(:forge_worker, :heartbeat_ms, 100)
+
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    send(client, topic_closed(@topic))
+    assert_join(@topic, %{}, :ok, 2_000)
+    assert_push(@topic, "ready", %{})
+
+    # One timer beats five times in half a second and two beat ten. Counted with room either
+    # side, because a timer's first tick is not aligned with the window.
+    assert heartbeats_within(500) <= 7
+  end
+
+  defp heartbeats_within(ms) do
+    deadline = System.monotonic_time(:millisecond) + ms
+
+    Stream.repeatedly(fn -> deadline - System.monotonic_time(:millisecond) end)
+    |> Enum.reduce_while(0, fn
+      left, count when left <= 0 ->
+        {:halt, count}
+
+      left, count ->
+        receive do
+          {:"$gen_call", from,
+           {:__slipstream_command__,
+            %Slipstream.Commands.PushMessage{topic: @topic, event: "heartbeat"}}} ->
+            GenServer.reply(from, inspect(make_ref()))
+            {:cont, count + 1}
+        after
+          left -> {:halt, count}
+        end
+    end)
+  end
+
+  describe "a platform that refuses it" do
+    # One line and minutes, not Slipstream's own backoff: that settles at ten seconds, and only a
+    # deploy changes the answer (`docs/design/worker-channel.md` § Versions).
+    test "an unaccepted protocol is asked about again in minutes, not seconds", %{
+      client: client,
+      root: root
+    } do
+      Application.put_env(:forge_worker, :refused_retry_ms, 1_500)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          connect_and_assert_join(
+            client,
+            @topic,
+            %{},
+            {:error, %{"reason" => "protocol", "protocol" => 1, "minimum" => 2, "current" => 3}}
+          )
+
+          # Slipstream would have asked again 100ms later.
+          refute_join(@topic, %{}, 1_000)
+        end)
+
+      assert log =~ "refused this worker's protocol #{ForgeCore.WorkerProtocol.current()}"
+      assert log =~ "it accepts 2–3"
+
+      # And it does ask again, once the wait is up, with its self-report as it is *now* — a seed
+      # that arrived during the wait is in it, not the one the refused join carried.
+      key = "seed/demo/sha256-new"
+      File.mkdir_p!(ForgeWorker.Job.Seed.path(root, key))
+
+      assert_join(@topic, %{"protocol" => _, "seeds" => [^key]}, :ok, 2_000)
+      assert_push(@topic, "ready", %{})
+    end
+
+    # A reconnect while refused joins afresh and is refused afresh, which schedules its own retry.
+    # The one before it must not also fire: every reconnect — every platform deploy — would add
+    # another refused join and log line every few minutes, for as long as the machine is refused.
+    test "a reconnect while refused leaves one retry, not two", %{client: client} do
+      Application.put_env(:forge_worker, :refused_retry_ms, 1_500)
+      refused = {:error, %{"reason" => "protocol", "minimum" => 2, "current" => 3}}
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        connect_and_assert_join(client, @topic, %{}, refused)
+
+        disconnect(client, :closed)
+        connect_and_assert_join(client, @topic, %{}, refused)
+
+        # The latest refusal's retry, refused again: that schedules the next one, minutes out.
+        assert_join(@topic, %{}, refused, 3_000)
+
+        # The first refusal's retry would land here.
+        refute_join(@topic, %{}, 1_200)
+      end)
+    end
+
+    test "a retired machine is asked about in minutes too", %{client: client} do
+      Application.put_env(:forge_worker, :refused_retry_ms, 60_000)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          connect_and_assert_join(client, @topic, %{}, {:error, %{"reason" => "destroyed"}})
+          refute_join(@topic, %{}, 1_000)
+        end)
+
+      assert log =~ "retired this machine"
+    end
+
+    # Any other refusal is Slipstream's to retry: an `already_connected` is a stale channel of
+    # this machine's own that is gone in a moment.
+    test "any other refusal is retried as before", %{client: client} do
+      Application.put_env(:forge_worker, :refused_retry_ms, 60_000)
+
+      connect_and_assert_join(client, @topic, %{}, {:error, %{"reason" => "already_connected"}})
+      assert_join(@topic, %{}, :ok, 2_000)
+    end
   end
 
   # `ready` is the message that says what this machine can offer: its memory, and its harness.
@@ -557,6 +723,188 @@ defmodule ForgeWorker.LinkTest do
   defp topic_closed(topic) do
     {:__slipstream_event__,
      %Slipstream.Events.TopicJoinClosed{topic: topic, reason: :closed_by_platform}}
+  end
+
+  # `docs/design/worker-log.md`: the lines this machine sends about itself. The stream is off in
+  # the test config, since a push nobody asked for stalls this link, and on for these.
+  describe "the machine's log" do
+    setup do
+      stream = Application.get_env(:forge_worker, :log_stream)
+      Application.put_env(:forge_worker, :log_stream, true)
+      on_exit(fn -> Application.put_env(:forge_worker, :log_stream, stream) end)
+    end
+
+    test "a job accepted and a job finished are a line each, tied to the job", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = origin |> assignment() |> put_in(["spec", "attempt"], 3)
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      {%{"job_id" => ^job_id}, before} = take_push("result")
+
+      assert [{"log", accepted} | _events] = before
+      assert accepted["type"] == "job.accepted"
+      assert accepted["job_id"] == job_id
+      assert accepted["message"] == "took on a workflow job, attempt 3"
+
+      assert_push(@topic, "log", finished)
+      assert finished["type"] == "job.finished"
+      assert finished["level"] == "info"
+      assert finished["job_id"] == job_id
+      assert finished["message"] =~ ~r/^ended with a result: finished, converged, after \d+s$/
+    end
+
+    test "a job that failed is an error line, with the first line of why", context do
+      %{client: client} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = assignment("/nowhere/there-is-no-repository.git")
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"job_id" => ^job_id}, _before} = take_push("failed")
+
+      assert_push(@topic, "log", finished)
+      assert {finished["type"], finished["level"]} == {"job.finished", "error"}
+      assert finished["message"] =~ ~r/^failed: .*there-is-no-repository.*, after \d+s$/
+      refute finished["message"] =~ "\n"
+    end
+
+    test "a chat taken on and closed is a line each", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin)
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, before} = take_push("turn")
+      assert {"log", %{"type" => "job.accepted", "message" => "took on a chat"}} = hd(before)
+
+      push(client, @topic, "close", %{"job_id" => job_id, "reason" => "done talking"})
+      {%{"job_id" => ^job_id}, _before} = take_push("hibernated")
+
+      assert_push(@topic, "log", %{"type" => "job.finished", "job_id" => ^job_id} = finished)
+      assert finished["message"] =~ ~r/^hibernated: done talking, after \d+s$/
+      assert finished["level"] == "info"
+    end
+
+    # A crash's reason is its whole stack trace; the line keeps what names it, and the journal
+    # has the rest. Sent as a job's process sends it, for a job this link never started — a chat
+    # that could not — so there is no start to say how long it ran from.
+    test "a failure is a line of one line", %{client: client} do
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+      job_id = uuid()
+
+      reason = "** (RuntimeError) the harness fell over\n    (forge_worker) lib/x.ex:1: X.y/0"
+      send(client, {:terminal, job_id, "failed", %{"job_id" => job_id, "reason" => reason}})
+
+      assert_push(@topic, "failed", %{"job_id" => ^job_id})
+      assert_push(@topic, "log", %{"type" => "job.finished", "level" => "error"} = finished)
+      assert finished["message"] == "failed: ** (RuntimeError) the harness fell over"
+    end
+
+    # An assignment for a job already running is not a job taken on.
+    test "a job assigned twice is accepted once", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = assignment(origin)
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      push(client, @topic, "assign", job)
+
+      {%{"job_id" => ^job_id}, before} = take_push("result")
+      accepted = for {"log", %{"type" => "job.accepted"} = line} <- before, do: line
+      assert length(accepted) == 1
+    end
+
+    # A result is ended with whatever it says; one with no outcome says so rather than nothing.
+    test "a result with no outcome says so", %{client: client} do
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+      job_id = uuid()
+
+      result = %{"status" => "waiting", "outcome" => nil}
+      send(client, {:terminal, job_id, "result", %{"job_id" => job_id, "result" => result}})
+
+      assert_push(@topic, "result", %{"job_id" => ^job_id})
+      assert_push(@topic, "log", %{"type" => "job.finished", "level" => "info"} = finished)
+      assert finished["message"] == "ended with a result: waiting, no outcome"
+    end
+
+    test "a message this release does not know is a line", %{client: client} do
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      push(client, @topic, "drain", %{})
+
+      assert_push(@topic, "log", %{"type" => "message.unknown", "level" => "warning"} = line)
+      assert line["message"] =~ ~s(unknown message "drain")
+    end
+
+    test "a harness that cannot describe itself is a line", %{client: client} do
+      Application.put_env(:forge_worker, :harness, RaisingHarness)
+
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      assert_push(@topic, "log", %{"type" => "harness.unprobed", "level" => "warning"} = line)
+      assert line["message"] =~ "this driver cannot describe itself"
+    end
+
+    # **Held while the platform is away, and sent after `ready` at the next join**, so a job that
+    # finished meanwhile is in the log at the time the machine says it finished. A hundred at
+    # most, and a line saying how many more there were.
+    test "lines written while not joined are held, and sent at the next join", %{client: client} do
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+      disconnect(client, :closed)
+
+      for n <- 1..102, do: send(client, {:log, %{"type" => "line", "message" => "#{n}"}})
+
+      accept_connect(client)
+      assert_join(@topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      assert_push(@topic, "log", %{"type" => "log.dropped", "message" => dropped})
+      assert dropped =~ "2 line(s)"
+
+      for n <- 3..102 do
+        message = to_string(n)
+        assert_push(@topic, "log", %{"type" => "line", "message" => ^message})
+      end
+
+      refute_push(@topic, "log", _anything)
+
+      # Sent once: the next join has nothing held.
+      disconnect(client, :closed)
+      accept_connect(client)
+      assert_join(@topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+      refute_push(@topic, "log", _anything)
+    end
+
+    test "with the stream off, nothing is sent and nothing is held", %{client: client} do
+      Application.put_env(:forge_worker, :log_stream, false)
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      send(client, {:log, %{"type" => "line", "message" => "joined"}})
+      refute_push(@topic, "log", _anything)
+
+      disconnect(client, :closed)
+      send(client, {:log, %{"type" => "line", "message" => "away"}})
+      accept_connect(client)
+      assert_join(@topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+      refute_push(@topic, "log", _anything)
+    end
   end
 
   # `drain` is gone from both ends, so a platform one release behind can still send it — or any

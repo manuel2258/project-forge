@@ -105,6 +105,15 @@
             env = {
               MIX_ESBUILD_PATH = esbuildPath;
               MIX_TAILWIND_PATH = tailwindPath;
+              # The build of the worker release this platform ships with, which `config.exs`
+              # reads at build time so the workers and templates pages can say which machines
+              # and snapshots run it (docs/design/worker-tier.md § Updating a worker).
+              #
+              # **The x86_64-linux worker, whatever this platform is built for**, because that is
+              # the only worker there is: the image and every machine are x86_64
+              # (`workerConfiguration`). An aarch64 platform taking its own system's worker would
+              # have called every machine and snapshot "other build". Evaluated, not built.
+              FORGE_WORKER_BUILD = workerBuild self.packages.x86_64-linux.forge-worker;
             };
             # Assets are built after `mix compile` (colocated CSS is emitted by the
             # compiler) and before `mix release` (which copies priv/static).
@@ -198,6 +207,28 @@
 
         };
 
+      # The worker channel protocol this build speaks: one number, in one file, which
+      # `ForgeCore.WorkerProtocol` reads at compile time and this reads here. `bin/hetzner-image`
+      # labels a snapshot with it through the worker image's passthru, so no script writes it
+      # down either (docs/design/worker-channel.md § Versions).
+      workerProtocol = nixpkgs.lib.toInt
+        (nixpkgs.lib.removeSuffix "\n" (builtins.readFile ./core/priv/worker_protocol));
+
+      # The first twelve characters of a worker release's store hash: what the worker logs and
+      # sends as `build`, what a snapshot is labelled with, and what the platform is built
+      # knowing.
+      #
+      # **Twelve, and never the whole hash.** A full store path in the platform's output is a
+      # runtime reference: Nix scans outputs for the thirty-two-character hashes of their
+      # inputs, and one it finds pulls that path — the whole worker release — into the
+      # platform's closure. Twelve characters are not a hash Nix looks for. The context is
+      # discarded for the same reason from the other side: the platform needs the worker's
+      # *name*, not the worker built, so evaluating its path is enough and building it is not a
+      # prerequisite.
+      workerBuild = worker: builtins.substring
+        (builtins.stringLength builtins.storeDir + 1) 12
+        (builtins.unsafeDiscardStringContext worker.outPath);
+
       systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" "x86_64-darwin" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
 
@@ -235,7 +266,14 @@
         pkgs.runCommand "forge-worker-image"
           {
             nativeBuildInputs = [ pkgs.qemu-utils pkgs.limine pkgs.util-linux pkgs.jq ];
-            passthru.nixos = nixos;
+            passthru = {
+              inherit nixos;
+              # What `bin/hetzner-image` labels a snapshot of this image with, read from the
+              # same evaluation that built it rather than typed: the worker release inside it,
+              # and the protocol that release speaks.
+              build = workerBuild self.packages.${system}.forge-worker;
+              protocol = workerProtocol;
+            };
           }
           ''
             cp ${nixos.config.system.build.image}/${nixos.config.image.filePath} raw.img

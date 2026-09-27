@@ -15,7 +15,8 @@ defmodule Forge.Workers do
   alias Forge.{Engine, Events, Projects, Provider, Provisioning, Repo}
   alias Forge.Jobs.Job
   alias Forge.Provisioning.ProjectTemplate
-  alias Forge.Workers.{ProjectWorker, Worker}
+  alias Forge.Workers.{Log, ProjectWorker, Worker}
+  alias ForgeCore.WorkerProtocol
 
   require Logger
 
@@ -42,10 +43,28 @@ defmodule Forge.Workers do
       |> Map.put("token_hash", hash(token))
 
     case Repo.insert(Worker.changeset(%Worker{}, attrs)) do
-      {:ok, worker} -> {:ok, worker, Base.url_encode64(token, padding: false)}
-      {:error, changeset} -> {:error, changeset}
+      {:ok, worker} ->
+        by_hand(worker)
+        {:ok, worker, Base.url_encode64(token, padding: false)}
+
+      {:error, changeset} ->
+        {:error, changeset}
     end
   end
+
+  # A managed machine's `created` line is written when its driver has made it (`made/3`), and a
+  # refusal is `create.refused` instead: a row is not yet a machine. A permanent one is a row and
+  # a token for a machine somebody else builds, and this is all the platform ever sees of that.
+  defp by_hand(%Worker{managed: false} = worker),
+    do:
+      Log.record(
+        worker.id,
+        "created",
+        :info,
+        "provisioned by hand, on #{worker.provider}; the platform will not destroy it"
+      )
+
+  defp by_hand(%Worker{}), do: :ok
 
   @spec get(String.t()) :: Worker.t() | nil
   def get(id) when is_binary(id) do
@@ -251,12 +270,38 @@ defmodule Forge.Workers do
   job, and the idle sweep destroyed the machine with the job still on it.
   """
   @spec busy(Worker.t()) :: {:ok, Worker.t()} | {:error, Ecto.Changeset.t()}
-  def busy(%Worker{} = worker) do
-    worker
-    |> Worker.changeset(%{})
-    |> Ecto.Changeset.force_change(:status, :busy)
-    |> Ecto.Changeset.force_change(:idle_since, nil)
-    |> Repo.update()
+  def busy(%Worker{id: id}) do
+    unless_destroyed(id, fn worker ->
+      worker
+      |> Worker.changeset(%{})
+      |> Ecto.Changeset.force_change(:status, :busy)
+      |> Ecto.Changeset.force_change(:idle_since, nil)
+      |> Repo.update()
+    end)
+  end
+
+  # **A status is written from the row as it is, locked, and never over `destroyed`.** `busy/1`,
+  # `release/1` and `ready/2` each decide from a row read earlier — the scheduler's pass, the
+  # channel's message — and a retire can commit in between. Written from that stale read, the
+  # row went back to `busy` or `idle`: assignable again, its token valid again, a Retire undone
+  # without anybody seeing it. So each re-reads the row under `FOR UPDATE` and leaves a destroyed
+  # one alone; `gone/2`'s write waits on the same lock, so whichever commits first, destroyed
+  # wins. The same model as the operation it guards (`CLAUDE.md` § Rules): the row, not a struct.
+  defp unless_destroyed(worker_id, fun) do
+    Repo.transaction(fn ->
+      from(w in Worker, where: w.id == ^worker_id, lock: "FOR UPDATE")
+      |> Repo.one()
+      |> write_unless_destroyed(fun)
+    end)
+  end
+
+  defp write_unless_destroyed(%Worker{status: :destroyed} = worker, _fun), do: worker
+
+  defp write_unless_destroyed(%Worker{} = worker, fun) do
+    case fun.(worker) do
+      {:ok, worker} -> worker
+      {:error, reason} -> Repo.rollback(reason)
+    end
   end
 
   @doc """
@@ -267,14 +312,17 @@ defmodule Forge.Workers do
   def release(nil), do: :ok
 
   def release(worker_id) do
-    with %Worker{} = worker <- get(worker_id),
-         true <- worker.status in [:ready, :busy],
-         [] <- Forge.Jobs.running_on(worker_id) do
-      {:ok, _worker} = update(worker, %{status: :idle, idle_since: now()})
-      :ok
-    else
-      _other -> :ok
+    with %Worker{} <- get(worker_id) do
+      {:ok, _worker} = unless_destroyed(worker_id, &idle_if_empty/1)
     end
+
+    :ok
+  end
+
+  defp idle_if_empty(worker) do
+    if worker.status in [:ready, :busy] and Forge.Jobs.running_on(worker.id) == [],
+      do: update(worker, %{status: :idle, idle_since: now()}),
+      else: {:ok, worker}
   end
 
   @doc """
@@ -296,7 +344,14 @@ defmodule Forge.Workers do
   shown rather than silently resolved.
   """
   @spec ready(Worker.t(), map()) :: {:ok, Worker.t()} | {:error, Ecto.Changeset.t()}
-  def ready(%Worker{} = worker, report) when is_map(report) do
+  def ready(%Worker{id: id}, report) when is_map(report) do
+    # **A destroyed row stays destroyed.** `readiness/1` would make it `idle` — assignable — and a
+    # `ready` can be in flight on a channel when its row is retired, or arrive on a join made
+    # before the row changed (`docs/design/worker-channel.md` § Authentication).
+    unless_destroyed(id, &record_ready(&1, report))
+  end
+
+  defp record_ready(worker, report) do
     harness = report["harness"]
     memory_budget = report["memory_budget"] || 0
     cores = report["cores"]
@@ -315,7 +370,23 @@ defmodule Forge.Workers do
     # out of service).
     Provisioning.succeeded(worker.template_id)
 
-    update(worker, if(is_map(harness), do: Map.put(attrs, :harness, harness), else: attrs))
+    with {:ok, worker} <-
+           update(worker, if(is_map(harness), do: Map.put(attrs, :harness, harness), else: attrs)) do
+      Log.record(worker.id, "ready", :info, offers(worker))
+      {:ok, worker}
+    end
+  end
+
+  # What the row now offers, which is not always what the machine said: a permanent machine's
+  # figures are its owner's once set, and this is the line that says what it will be given.
+  defp offers(%Worker{} = worker) do
+    [
+      "offers #{ForgeCore.Workflow.Resources.gib(worker.memory_budget)} of memory",
+      worker.cores && "#{worker.cores} cores",
+      worker.accepts not in [nil, []] && "for #{Enum.join(worker.accepts, ", ")}"
+    ]
+    |> Enum.filter(& &1)
+    |> Enum.join(", ")
   end
 
   # **Up with nothing to do is idle, and the clock starts now.** Only a job ending used to make a
@@ -406,6 +477,141 @@ defmodule Forge.Workers do
   @spec status(Worker.t(), atom()) :: {:ok, Worker.t()} | {:error, Ecto.Changeset.t()}
   def status(%Worker{} = worker, status), do: update(worker, %{status: status})
 
+  # -- joining --------------------------------------------------------------------------------
+
+  @doc """
+  Whether the platform will talk to this machine, decided at its join and before any work
+  (`docs/design/worker-channel.md` § Versions).
+
+  What the machine said — its release, its build, the protocol it speaks — is written onto the row
+  first, refused or not, so the workers page can say what it runs and why it was turned away. A
+  machine that sends no protocol is protocol 0: every release before the field existed.
+
+  **Refused:**
+
+  - a row that is `destroyed`: the socket checked that when the connection was made, and a
+    connection outlives its row — a rejoin on a live socket never passes `connect/3` again;
+  - a protocol outside `ForgeCore.WorkerProtocol`'s range. A **managed** machine is then destroyed
+    on the spot, its jobs requeued, because it bills by the hour and can never take work, and its
+    template learns the protocol of the image it was made from (`learn/2`). A **permanent** one
+    keeps its row; the row says why.
+
+  `last_seen_at` is not written here, and must not be: a refused machine that keeps knocking is not
+  one the platform can hear from, and its jobs have to reach `sweep_unreachable/0`'s timeout.
+  """
+  @spec admit(String.t(), map()) ::
+          :ok | {:error, :not_found | :destroyed | {:protocol, integer() | nil}}
+  def admit(worker_id, payload) when is_map(payload) do
+    protocol = protocol_of(payload["protocol"])
+
+    case get(worker_id) do
+      nil ->
+        {:error, :not_found}
+
+      %Worker{status: :destroyed} ->
+        {:error, :destroyed}
+
+      worker ->
+        first = first_join?(worker)
+
+        {:ok, worker} =
+          update(worker, %{
+            release: text(payload["release"]),
+            build: text(payload["build"]),
+            protocol: protocol
+          })
+
+        if first, do: learn(worker, protocol)
+        if WorkerProtocol.compatible?(protocol), do: :ok, else: refuse(worker, protocol)
+    end
+  end
+
+  # **Only a machine's first join says anything about the image it was made from.** A later one
+  # may be running a release `bin/worker-update` put there, and it may be somebody holding a copy
+  # of the machine's token — who would otherwise teach its template a protocol that stops the
+  # template making anything (`docs/design/worker-channel.md` § Authentication). A machine that
+  # has joined before has a protocol on its row, or has been seen.
+  defp first_join?(%Worker{protocol: nil, last_seen_at: nil}), do: true
+  defp first_join?(%Worker{}), do: false
+
+  # Absent is 0, a release from before the field. Anything that is not a whole number this
+  # platform can record is not a protocol it can compare, and is recorded as nothing and refused.
+  defp protocol_of(nil), do: 0
+
+  defp protocol_of(protocol),
+    do: if(WorkerProtocol.recordable?(protocol), do: protocol)
+
+  # Shown on a page and nothing else, so anything a machine sends that is not text is not kept,
+  # and text is kept only as the column can hold it: 255 code points — not graphemes, which
+  # `String.slice/3` counts and a combining accent makes two of — and no NUL, which Postgres will
+  # not store at all. A write the column refused would crash the join rather than refuse it.
+  defp text(value), do: Log.clean(value, 255)
+
+  defp refuse(%Worker{managed: true} = worker, protocol) do
+    Logger.warning(
+      "worker #{worker.id} speaks protocol #{inspect(protocol)} and this platform accepts " <>
+        "#{WorkerProtocol.range()}; refusing it, destroying the machine and marking its image"
+    )
+
+    Log.record(
+      worker.id,
+      "join.refused",
+      :error,
+      "speaks #{spoken(protocol)} and this platform accepts #{WorkerProtocol.range()}; " <>
+        "destroying it, since a managed machine that can take no work only bills",
+      once: true
+    )
+
+    case retire(worker, reason: :worker_refused, by: :protocol) do
+      {:ok, _jobs} -> :ok
+      # Kept with the driver's words, as any refused destroy is, and the sweep tries again.
+      {:error, _reason} -> :ok
+    end
+
+    {:error, {:protocol, protocol}}
+  end
+
+  defp refuse(%Worker{} = worker, protocol) do
+    Logger.warning(
+      "worker #{worker.id} speaks protocol #{inspect(protocol)} and this platform accepts " <>
+        "#{WorkerProtocol.range()}; refusing it. It is not the platform's to destroy."
+    )
+
+    Log.record(
+      worker.id,
+      "join.refused",
+      :error,
+      "speaks #{spoken(protocol)} and this platform accepts #{WorkerProtocol.range()}; its row " <>
+        "stays, since it is not the platform's to destroy — update its release",
+      once: true
+    )
+
+    {:error, {:protocol, protocol}}
+  end
+
+  defp spoken(nil), do: "a protocol this platform cannot read"
+  defp spoken(protocol), do: "protocol #{protocol}"
+
+  # What the image this machine was made from speaks, and which build it carries, onto its
+  # template: a refusal stops the template making more from it, and an acceptance ends the probe
+  # an unlabelled image is held to (`create_from/1`). A permanent machine came from no template
+  # and teaches nothing, and neither does a protocol that could not be read.
+  defp learn(%Worker{template_id: nil}, _protocol), do: :ok
+  defp learn(%Worker{}, nil), do: :ok
+
+  defp learn(%Worker{template_id: template_id, image: image, build: build}, protocol),
+    do: Provisioning.learn_protocol(template_id, image, protocol, build)
+
+  @doc """
+  The build of the worker release this platform ships with, or nil on a node built outside Nix.
+
+  `flake.nix` sets it while building the release, as the first twelve characters of the worker
+  package's store hash (`docs/design/worker-tier.md` § Updating a worker). A hint for the pages,
+  never a gate: nothing is refused for its build, only for its protocol.
+  """
+  @spec current_build() :: String.t() | nil
+  def current_build, do: config(:current_build, nil)
+
   # -- connections ----------------------------------------------------------------------------
 
   @doc "Registers the calling process as `worker_id`'s channel."
@@ -427,6 +633,49 @@ defmodule Forge.Workers do
 
   @spec connected?(String.t()) :: boolean()
   def connected?(worker_id), do: whereis(worker_id) != nil
+
+  @stats [:cpu, :memory_used, :memory_total, :disk_used, :disk_total]
+
+  @doc """
+  Keeps a machine's latest figures as its channel's registry value (`docs/design/worker-channel.md`
+  § Live figures). **Called by the channel process itself**, which is the only process that may
+  change the value it registered, and it writes nothing else: no row, no table, no history — so
+  the figures go when the channel does, and a machine that is not connected has none.
+
+  Only the figures the protocol names, and only as non-negative numbers: what a machine sent that
+  is not one is left out, the way the worker leaves out what it could not read.
+  """
+  @spec put_stats(String.t(), map()) :: :ok
+  def put_stats(worker_id, payload) when is_map(payload) do
+    stats =
+      for key <- @stats,
+          value = payload[Atom.to_string(key)],
+          figure?(key, value),
+          into: %{},
+          do: {key, value}
+
+    Registry.update_value(@registry, worker_id, fn _previous -> stats end)
+    :ok
+  end
+
+  # **What the page can draw, and nothing it would choke on.** A CPU share is a percentage, and a
+  # byte count is a whole number no machine exceeds — 2^60 is an exbibyte. A float of 1e-300 bytes
+  # or of 1e308 passed `>= 0` and divided the page into an `ArithmeticError`, which took the
+  # owner's whole workers page down, Destroy buttons and all, for as long as that machine stayed
+  # connected.
+  @most_bytes Bitwise.bsl(1, 60)
+
+  defp figure?(:cpu, value), do: is_number(value) and value >= 0 and value <= 100
+  defp figure?(_bytes, value), do: is_integer(value) and value >= 0 and value <= @most_bytes
+
+  @doc "A connected machine's latest figures, or nil when it is not connected or has sent none."
+  @spec stats(String.t()) :: map() | nil
+  def stats(worker_id) do
+    case Registry.lookup(@registry, worker_id) do
+      [{_pid, stats}] -> stats
+      [] -> nil
+    end
+  end
 
   @doc "Sends a message to a worker's channel. The only way to reach one."
   @spec push(String.t(), term()) :: :ok | {:error, :not_connected}
@@ -767,14 +1016,75 @@ defmodule Forge.Workers do
 
   defp create_from(template) do
     with :ok <- room(template),
+         :ok <- speaks(template),
+         :ok <- probed(template),
          {:ok, credential} <- spendable(template) do
+      unlabelled(template)
+
       do_create(
         Provisioning.Template.worker_attrs(template),
         %{size: template.size, image: template.image},
-        credential
+        credential,
+        template.name
       )
     end
   end
+
+  # **A snapshot the platform knows it would refuse is not paid for.** Its protocol is on the
+  # template, from its labels or learnt from a machine refused at join, and a mismatch is the
+  # template's failure the way a credential it may not spend is — no row, no request, the words
+  # on the templates page, and the template out of service after three passes
+  # (`docs/design/provisioning.md` § A snapshot that speaks the wrong protocol). Asked of the
+  # range every time rather than stored, so upgrading the platform to one that accepts it is all
+  # it takes to create from it again.
+  defp speaks(template) do
+    case Provisioning.image_refusal(template) do
+      nil ->
+        :ok
+
+      message ->
+        Logger.warning("not making a machine from template #{template.id}: #{message}")
+        Provisioning.failed(template.id, message)
+        {:error, {:create_failed, {:image, message}}}
+    end
+  end
+
+  # **An image nobody has heard speak is probed by one machine, not several.** Its protocol is
+  # learnt at the first join of a machine made from it (`admit/2`), and until then the platform
+  # cannot tell a good snapshot from one it will refuse — so while one machine from it is booting
+  # and has not joined, no second is made, and what does not fit in that one waits. Without this
+  # a queue of jobs that did not fit one machine made one each, up to `max_workers`, all refused
+  # and destroyed on arrival (`docs/design/provisioning.md` § A snapshot that speaks the wrong
+  # protocol). Once one has joined, the template knows, and this stops applying — so a machine
+  # from the image that is still here is one that has not joined, or one refused and on its way
+  # out, and either is reason to wait.
+  #
+  # A template naming no image is not probed, for the reason `unlabelled/1` does not warn about
+  # one: it boots the driver's default, this host's own. Every Hetzner template names one.
+  defp probed(%{image: image, image_protocol: nil} = template) when is_binary(image) do
+    probing =
+      Repo.exists?(
+        from w in Worker,
+          where: w.template_id == ^template.id and w.image == ^image and w.status != :destroyed
+      )
+
+    if probing, do: {:error, :at_capacity}, else: :ok
+  end
+
+  defp probed(_template), do: :ok
+
+  # **Unlabelled is unknown, not compatible**, and it is still made: the join decides, and a
+  # refusal teaches the template, so an unlabelled snapshot that cannot work costs one machine.
+  # A template naming no image boots the driver's default, which is the node's own and was built
+  # with this platform.
+  defp unlabelled(%{image: image, image_protocol: nil} = template) when is_binary(image) do
+    Logger.warning(
+      "making a machine from template #{template.id}, whose image #{image} carries no protocol " <>
+        "label; the machine's join will say whether this platform can use it"
+    )
+  end
+
+  defp unlabelled(_template), do: :ok
 
   defp room(template) do
     if Provisioning.live_count(template) < template.max_workers,
@@ -802,17 +1112,62 @@ defmodule Forge.Workers do
     end
   end
 
-  defp do_create(attrs, shape, credential) do
+  # `template` is the template's name, read while it was in hand: it may be deleted while the
+  # driver is making the machine, and the row's `template_id` then names nothing.
+  defp do_create(attrs, shape, credential, template) do
     with {:ok, worker, token} <- create(attrs) do
       case Provider.create(machine_opts(worker, token, shape, credential)) do
         {:ok, machine} ->
-          {:ok, worker} = update(worker, %{provider_id: machine.provider_id})
-          Logger.info("created worker #{worker.id} (#{machine.provider_id})")
-          {:creating, worker}
+          made(worker, machine, credential, template)
 
         {:error, reason} ->
           refused(worker, reason)
       end
+    end
+  end
+
+  # **Recorded only on a row that is still there to hold it.** A create can take a while — a
+  # provider's `POST /servers` — and the row is on the workers page with its Destroy button the
+  # whole time. Retired in between, the row said destroyed with no `provider_id`, so nothing was
+  # released; written afterwards, the id landed on a destroyed row that no sweep looks at, and the
+  # machine booted into a platform that refuses its token, billing with nobody watching. So the id
+  # is written only where the row is not destroyed, and a machine that arrives for a destroyed row
+  # is given straight back.
+  defp made(worker, machine, credential, template) do
+    case Repo.update_all(
+           from(w in Worker, where: w.id == ^worker.id and w.status != :destroyed),
+           set: [provider_id: machine.provider_id, updated_at: now()]
+         ) do
+      {1, _} ->
+        Logger.info("created worker #{worker.id} (#{machine.provider_id})")
+
+        Log.record(
+          worker.id,
+          "created",
+          :info,
+          "#{worker.provider} made #{machine.provider_id} from template #{template}"
+        )
+
+        {:creating, get!(worker.id)}
+
+      {0, _} ->
+        Logger.warning(
+          "worker #{worker.id} was retired while its machine was being made; destroying " <>
+            "#{machine.provider_id} at once"
+        )
+
+        {:ok, _} = update(get!(worker.id), %{provider_id: machine.provider_id})
+        _ = Provider.destroy(worker.provider, machine.provider_id, open_secret(credential))
+
+        Log.record(
+          worker.id,
+          "destroyed",
+          :warning,
+          "#{worker.provider} made #{machine.provider_id} after the row was retired; asked it to " <>
+            "destroy the machine at once"
+        )
+
+        {:error, :at_capacity}
     end
   end
 
@@ -829,6 +1184,7 @@ defmodule Forge.Workers do
     message = message(reason)
     Logger.warning("could not make a machine for worker #{worker.id}: #{message}")
     {:ok, _worker} = update(worker, %{last_error: message})
+    Log.record(worker.id, "create.refused", :error, "#{worker.provider} refused: #{message}")
     Provisioning.failed(worker.template_id, message)
     {:error, {:create_failed, reason}}
   end
@@ -925,7 +1281,7 @@ defmodule Forge.Workers do
     )
     |> Repo.all()
     |> Enum.filter(&idle_past?/1)
-    |> Enum.count(&(destroy(&1) == :ok))
+    |> Enum.count(&(destroy(&1, by: :idle) == :ok))
   end
 
   # **The period is the machine's own template's, and only then the node's.** One number cannot
@@ -994,6 +1350,15 @@ defmodule Forge.Workers do
         )
 
         Enum.each(jobs, &Forge.Jobs.requeue(&1.id, :worker_lost))
+
+        Log.record(
+          worker.id,
+          "unreachable",
+          :warning,
+          "#{silent(worker)}; requeued #{length(jobs)} job(s). Its row stays: it is not the " <>
+            "platform's to destroy, and it may rejoin"
+        )
+
         :ok
     end
   end
@@ -1001,10 +1366,29 @@ defmodule Forge.Workers do
   defp lose(%Worker{} = worker) do
     Logger.warning("worker #{worker.id} is unreachable; re-queueing its jobs and destroying it")
 
-    Enum.each(Forge.Jobs.running_on(worker.id), &Forge.Jobs.requeue(&1.id, :worker_lost))
+    jobs = Forge.Jobs.running_on(worker.id)
+    Enum.each(jobs, &Forge.Jobs.requeue(&1.id, :worker_lost))
+
+    # **Said once, not every pass.** A destroy the driver refuses leaves the row as it was, and
+    # this runs again on every scheduling pass until one goes through.
+    Log.record(
+      worker.id,
+      "unreachable",
+      :warning,
+      "#{silent(worker)}; requeued #{length(jobs)} job(s) and destroying it",
+      once: true
+    )
+
     never_connected(worker)
-    destroy(worker)
+    destroy(worker, by: :unreachable)
   end
+
+  defp silent(%Worker{last_seen_at: nil} = worker),
+    do: "made #{utc(worker.inserted_at)} and never connected"
+
+  defp silent(%Worker{last_seen_at: at}), do: "not heard from since #{utc(at)}"
+
+  defp utc(at), do: Calendar.strftime(at, "%Y-%m-%d %H:%M:%S UTC")
 
   # **A machine that was made and never called home is the template's failure**, and it is the
   # one that matters: in the loop this was written for every create succeeded, so a counter
@@ -1042,13 +1426,21 @@ defmodule Forge.Workers do
   - **A permanent refusal wedges the fleet at `max_workers` instead of leaking**, and says why
     on the workers page. That is the trade, and it is the right way round: a stuck fleet is
     visible and a leaking one is not.
+
+  `by:` says what ended it — `:idle`, `:unreachable`, `:owner`, `:command_line`, `:protocol` — for
+  the machine's log (`docs/design/worker-log.md`), which is where "why did it go away?" is asked.
   """
   @spec destroy(Worker.t(), keyword()) :: :ok | {:error, term()}
   def destroy(%Worker{} = worker, opts \\ []) do
+    by = Keyword.get(opts, :by)
+    # **Said before anything is asked of the driver**, so a cause this does not know raises while
+    # the machine is still there, rather than after it has gone and before its row says so.
+    why = cause(by)
+
     case release_machine(worker) do
       :ok ->
         Logger.info("destroyed worker #{worker.id}")
-        with {:ok, _worker} <- update(worker, %{status: :destroyed}), do: :ok
+        gone(worker, %{status: :destroyed}, {:info, "#{ended(worker)}#{why}"})
 
       # **No driver to ask is not the same as a driver that said no.** A row naming a provider
       # this node no longer has can never be destroyed from here however many times it is
@@ -1062,8 +1454,13 @@ defmodule Forge.Workers do
             "have; retiring the row. Check the provider's console for #{worker.provider_id}."
         )
 
-        {:ok, _worker} = update(worker, %{status: :destroyed, last_error: message(reason)})
-        :ok
+        gone(
+          worker,
+          %{status: :destroyed, last_error: message(reason)},
+          {:warning,
+           "row retired#{why}, but its provider #{worker.provider} is not on this node, " <>
+             "so nothing was asked to destroy #{worker.provider_id}: check that provider's console"}
+        )
 
       # The operator has looked and said so. It is the only way out of a machine the platform
       # cannot end — a credential that was deleted, a provider that will not answer — and it is
@@ -1071,12 +1468,12 @@ defmodule Forge.Workers do
       # that the platform could not check.
       {:error, reason} ->
         if Keyword.get(opts, :force, false),
-          do: forced(worker, reason),
-          else: kept(worker, reason)
+          do: forced(worker, reason, why),
+          else: kept(worker, reason, by, why)
     end
   end
 
-  defp forced(worker, reason) do
+  defp forced(worker, reason, why) do
     message = message(reason)
 
     Logger.warning(
@@ -1084,8 +1481,88 @@ defmodule Forge.Workers do
         "If the machine is still there it is nobody's now."
     )
 
-    {:ok, _worker} = update(worker, %{status: :destroyed, last_error: message})
-    :ok
+    gone(
+      worker,
+      %{status: :destroyed, last_error: message},
+      {:warning,
+       "retired by force#{why}; #{worker.provider} would not destroy " <>
+         "#{worker.provider_id}: #{message}. If the machine is still there it is nobody's now"}
+    )
+  end
+
+  # What ending this row did. A permanent machine is only forgotten — it was never the platform's
+  # to stop, and it runs on — and a managed row whose driver never made anything had no machine.
+  defp ended(%Worker{managed: false}),
+    do: "retired: forgotten, not destroyed, since the machine was never the platform's to stop"
+
+  defp ended(%Worker{provider_id: nil}), do: "row retired; no machine had been made for it"
+  defp ended(%Worker{} = worker), do: "destroyed #{worker.provider_id} on #{worker.provider}"
+
+  # By what, which is the question this line is there to answer ("why did it go away?").
+  defp cause(nil), do: ""
+  defp cause(:idle), do: " — idle past its period"
+  defp cause(:unreachable), do: " — unreachable"
+  defp cause(:owner), do: " — by its owner, from the workers page"
+  defp cause(:command_line), do: " — from the host's command line"
+  defp cause(:protocol), do: " — it speaks a protocol this platform refuses"
+
+  # **Every way a row becomes `destroyed` closes its channel**, because a connection outlives the
+  # row it was made for: a retired permanent machine that is still running is still joined, and
+  # would otherwise go on heartbeating into a row that says it is gone
+  # (`docs/design/worker-channel.md` § Authentication). A machine not connected here — or
+  # connected to another node, which the host's command line is — has nothing to close.
+  #
+  # The channel is handed the jobs still running there, to cancel before it closes: a retired
+  # permanent machine keeps running, and a job requeued from it would otherwise run twice — once
+  # there, on the job's credential, with nobody left to record what it spent.
+  defp gone(worker, attrs, {level, line}) do
+    with {:ok, _worker} <- update(worker, attrs) do
+      Log.record(worker.id, "destroyed", level, line)
+      jobs = Enum.map(Forge.Jobs.running_on(worker.id), & &1.id)
+      push(worker.id, {:retired, jobs})
+      :ok
+    end
+  end
+
+  @doc """
+  Ends a machine: destroys it through its driver — or, for a permanent one, only forgets it — and
+  requeues what it was running. `mix forge.worker.retire` and the workers page both come here,
+  the page through `retire_by_owner/2`.
+
+  **The jobs are requeued once the row is `destroyed`, and not before.** A refused destroy leaves
+  the machine running them, still connected and still assignable, and requeuing them beside it
+  would put a second copy of each on the queue for the scheduler to hand straight back to the
+  machine that already has it (`docs/design/provisioning.md` § Whose account). `force` is passed
+  through to `destroy/2`, and only the command line passes it.
+  """
+  @spec retire(Worker.t(), keyword()) :: {:ok, [Job.t()]} | {:error, term()}
+  def retire(%Worker{} = worker, opts \\ []) do
+    {reason, opts} = Keyword.pop(opts, :reason, :worker_retired)
+
+    with :ok <- destroy(worker, opts) do
+      jobs = Forge.Jobs.running_on(worker.id)
+      Enum.each(jobs, &Forge.Jobs.requeue(&1.id, reason))
+      {:ok, jobs}
+    end
+  end
+
+  @doc """
+  Ends one of `user`'s machines, named by an id off the wire: *Destroy machine* and *Retire* on the
+  workers page (`docs/design/ui.md` § The workers page).
+
+  **The row is read scoped to the caller**, so somebody else's machine is `:not_found` exactly as
+  a missing one is, and so is one already destroyed. Never with `force`: what force writes down is
+  a claim about the provider's console that only a person who has looked can make, and it stays on
+  the command line (`docs/design/provisioning.md` § Whose account).
+  """
+  @spec retire_by_owner(User.t(), String.t() | nil) ::
+          {:ok, [Job.t()]} | {:error, :not_found | term()}
+  def retire_by_owner(%User{} = user, id) do
+    case owned(user, id) do
+      nil -> {:error, :not_found}
+      %Worker{status: :destroyed} -> {:error, :not_found}
+      worker -> retire(worker, by: :owner)
+    end
   end
 
   # A row that never got a machine has nothing to release. The driver is the one that made it,
@@ -1097,18 +1574,37 @@ defmodule Forge.Workers do
   defp release_machine(%Worker{} = worker),
     do: Provider.destroy(worker.provider, worker.provider_id, credential_secret(worker))
 
-  defp kept(worker, reason) do
+  defp kept(worker, reason, by, why) do
     message = message(reason)
 
     Logger.error(
       "could not destroy worker #{worker.id}'s machine (#{worker.provider} " <>
-        "#{worker.provider_id}): #{message}. The row is kept, so the machine is still counted " <>
-        "and the next sweep will try again."
+        "#{worker.provider_id}): #{message}#{retry(by)}."
     )
 
     {:ok, _worker} = update(worker, %{last_error: message})
+
+    # Once until the machine next joins: the sweep asks again every pass, and the row's
+    # `last_error` holds the driver's latest words.
+    Log.record(
+      worker.id,
+      "destroy.refused",
+      :error,
+      "#{worker.provider} would not destroy #{worker.provider_id}#{why}: #{message}#{retry(by)}",
+      once: true
+    )
+
     {:error, reason}
   end
+
+  # **A retry is promised only where something will make one.** The sweeps ask again for a machine
+  # that is idle or unreachable, and a refused machine's next knock asks again; a Destroy pressed
+  # on the page or a retire from the command line is asked once, and the machine it was pressed on
+  # is usually neither idle nor unreachable (`docs/design/ui.md` § The workers page).
+  defp retry(by) when by in [:idle, :unreachable, :protocol],
+    do: ". The row is kept, and the platform tries again"
+
+  defp retry(_by), do: ". The row is kept, so the machine is still counted"
 
   @doc """
   What one job is allowed to use. M3's observed peak plus its margin, carried as a default

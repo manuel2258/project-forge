@@ -462,6 +462,15 @@ you add a provider whose workers dial in from outside, that property is what mak
 What changes for a node that is already running, where the change is in what the platform does
 with rows it already has. Newest first.
 
+- **Workers say which protocol they speak, and the platform can refuse one.** Nothing is refused
+  by this upgrade: a worker that says nothing is protocol 0, and the platform accepts 0 to the
+  current one (`design/worker-channel.md` § Versions). What changes is what is recorded — each
+  row's release, build and protocol from its next join — and that snapshots made before now read
+  *unlabelled* on `/templates`: unknown, not compatible. A machine is still made from one; if its
+  join is refused it is destroyed and the template stops making more. `bin/hetzner-image` labels
+  every snapshot it makes and now builds the image itself from `--flake` (default `.`); its
+  `--image` option is gone, because a label could not be trusted for an image built elsewhere.
+
 - **A Hetzner template that names no image stops making machines.** Such a template used to fall
   back to the node's image setting, which is the local driver's disk image — a file path from
   `FORGE_WORKER_IMAGE`, and never an image Hetzner has. Now the Hetzner driver refuses the create

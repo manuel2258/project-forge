@@ -102,10 +102,8 @@ defmodule ForgeWeb.WorkersLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/workers")
 
-    assert view |> element("tr", String.slice(old.id, 0, 8)) |> render() =~ "takes no agent job"
-
-    refute view |> element("tr", String.slice(current.id, 0, 8)) |> render() =~
-             "takes no agent job"
+    assert view |> element("#worker-#{old.id}") |> render() =~ "takes no agent job"
+    refute view |> element("#worker-#{current.id}") |> render() =~ "takes no agent job"
   end
 
   # A worker running a release older than the probe reports no harness at all, and is still a
@@ -328,7 +326,7 @@ defmodule ForgeWeb.WorkersLiveTest do
 
       html =
         view
-        |> element("tr form[phx-submit=assign]")
+        |> element("#worker-#{w.id} form[phx-submit=assign]")
         |> render_submit(%{"worker" => w.id, "project" => project.id})
 
       refute html =~ "takes no work"
@@ -399,8 +397,8 @@ defmodule ForgeWeb.WorkersLiveTest do
 
     # Tied to the row, not merely present on the page: asserting both words appear passes just
     # as well when the two labels are swapped.
-    assert view |> element("tr", String.slice(kept.id, 0, 8)) |> render() =~ "managed"
-    assert view |> element("tr", String.slice(permanent.id, 0, 8)) |> render() =~ "permanent"
+    assert view |> element("#worker-#{kept.id}") |> render() =~ "managed"
+    assert view |> element("#worker-#{permanent.id}") |> render() =~ "permanent"
   end
 
   test "destroyed rows are history and are hidden until asked for", %{conn: conn, user: user} do
@@ -412,6 +410,435 @@ defmodule ForgeWeb.WorkersLiveTest do
 
     assert view |> element("button", "Show destroyed") |> render_click() =~
              String.slice(w.id, 0, 8)
+  end
+
+  describe "how full a machine is" do
+    # The test process stands in for the machine's channel: it is what registers, and the only
+    # process that may set the figures it registered (`worker-channel.md` § Live figures).
+    defp reporting(worker, stats) do
+      :ok = Workers.connected(worker.id)
+      :ok = Workers.put_stats(worker.id, stats)
+    end
+
+    test "three meters, from the machine's own last report", %{conn: conn, user: user} do
+      w = worker(user)
+      {:ok, w} = Workers.ready(w, %{"memory_budget" => 8_000_000_000, "cores" => 4})
+
+      reporting(w, %{
+        "cpu" => 23.4,
+        "memory_used" => 4 * 1024 * 1024 * 1024,
+        "memory_total" => 16 * 1024 * 1024 * 1024,
+        "disk_used" => 30 * 1024 * 1024 * 1024,
+        "disk_total" => 100 * 1024 * 1024 * 1024
+      })
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+      row = view |> element("#worker-#{w.id}") |> render()
+
+      assert row =~ "23%"
+      assert row =~ "of 4 cores"
+      assert row =~ "25%"
+      assert row =~ "4.0 GiB of 16.0 GiB"
+      assert row =~ "30%"
+      assert row =~ "30.0 GiB of 100.0 GiB"
+      refute row =~ "disk nearly full"
+
+      # Neutral, never accent: a full machine is not waiting on a human (`ui.md` § Colour).
+      refute row =~ "accent"
+    end
+
+    # A full disk fails jobs rather than slowing them, so it is said as well as drawn.
+    test "a disk at 95% or more says so, and one below it does not", %{conn: conn, user: user} do
+      full = worker(user)
+      nearly = worker(user)
+      spawn_channel(nearly, %{"disk_used" => 94, "disk_total" => 100})
+      spawn_channel(full, %{"disk_used" => 95, "disk_total" => 100})
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+
+      assert view |> element("#worker-#{full.id}") |> render() =~ "disk nearly full"
+      refute view |> element("#worker-#{nearly.id}") |> render() =~ "disk nearly full"
+    end
+
+    # A figure the machine could not read is not drawn as an empty bar, which would say nothing
+    # is used.
+    test "a figure the machine could not read is a dash, not a zero", %{conn: conn, user: user} do
+      w = worker(user)
+      reporting(w, %{"cpu" => 10.0})
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+      row = view |> element("#worker-#{w.id}") |> render()
+
+      assert row =~ "10%"
+      # One bar, the CPU's: the other two figures could not be read and have none.
+      assert length(Regex.scan(~r/style="width:/, row)) == 1
+    end
+
+    # A release from before the figures existed sends none, which is the thing to say.
+    test "a connected machine that sends none is told to update", %{conn: conn, user: user} do
+      w = worker(user)
+      :ok = Workers.connected(w.id)
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+
+      assert view |> element("#worker-#{w.id}") |> render() =~ "no stats — update it"
+    end
+
+    # A release that speaks a protocol sends figures from its first tick, seconds after it joins:
+    # it has none *yet*, and telling its owner to update it would be wrong.
+    test "a current release that has not reported yet is not told to update", %{
+      conn: conn,
+      user: user
+    } do
+      w = worker(user)
+      :ok = Workers.admit(w.id, %{"protocol" => ForgeCore.WorkerProtocol.current()})
+      :ok = Workers.connected(w.id)
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+      row = view |> element("#worker-#{w.id}") |> render()
+
+      assert row =~ "no stats yet"
+      refute row =~ "no stats — update it"
+    end
+
+    # Guards on the arithmetic: a total of nothing is no percentage, a figure past its total is
+    # drawn full rather than past the edge, and a detail line is drawn only for a figure there is.
+    test "a meter draws only what adds up", %{conn: conn, user: user} do
+      w = worker(user)
+
+      reporting(w, %{
+        "cpu" => 5.0,
+        "memory_used" => 10,
+        "memory_total" => 0,
+        "disk_used" => 300,
+        "disk_total" => 200
+      })
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+      row = view |> element("#worker-#{w.id}") |> render()
+      text = text_of(view, "#worker-#{w.id}")
+
+      assert row =~ "width: 100%"
+      assert text =~ "disk 100%"
+      assert text =~ "ram —"
+      refute text =~ "— of —"
+      # No cores on the row, so none under the CPU figure either.
+      refute text =~ "of cores"
+    end
+
+    # Its last figures would be a guess about now.
+    test "a machine that is not connected draws no meters", %{conn: conn, user: user} do
+      w = worker(user)
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+      row = view |> element("#worker-#{w.id}") |> render()
+
+      refute row =~ "no stats"
+      refute row =~ ~r/>\s*ram\s*</
+      refute row =~ ~r/>\s*cpu\s*</
+    end
+
+    test "are read again on the page's refresh", %{conn: conn, user: user} do
+      w = worker(user)
+      reporting(w, %{"cpu" => 10.0})
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+      :ok = Workers.put_stats(w.id, %{"cpu" => 77.0})
+      send(view.pid, :refresh)
+
+      assert view |> element("#worker-#{w.id}") |> render() =~ "77%"
+    end
+
+    # And the page sends itself that refresh: the setting is there only so this need not wait
+    # five seconds to see it.
+    test "the page asks again by itself", %{conn: conn, user: user} do
+      Application.put_env(
+        :forge,
+        Workers,
+        Keyword.put(Application.get_env(:forge, Workers, []), :page_refresh_ms, 20)
+      )
+
+      w = worker(user)
+      reporting(w, %{"cpu" => 10.0})
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+      :ok = Workers.put_stats(w.id, %{"cpu" => 77.0})
+
+      assert Enum.any?(1..50, fn _ ->
+               Process.sleep(20)
+               view |> element("#worker-#{w.id}") |> render() =~ "77%"
+             end)
+    end
+  end
+
+  # What a reader sees in an element: its text, with the markup and the line breaks the template
+  # puts between one span and the next taken out.
+  defp text_of(view, selector) do
+    view
+    |> element(selector)
+    |> render()
+    |> String.replace(~r/<[^>]*>/, " ")
+    |> String.replace(~r/\s+/, " ")
+  end
+
+  # A process that holds a machine's channel for the rest of the test, for a test that needs more
+  # than one machine connected — the test process can hold only one registration per id, and
+  # stands in for one channel at a time.
+  defp spawn_channel(worker, stats) do
+    test = self()
+
+    pid =
+      spawn(fn ->
+        :ok = Workers.connected(worker.id)
+        :ok = Workers.put_stats(worker.id, stats)
+        send(test, {:registered, worker.id})
+        Process.sleep(:infinity)
+      end)
+
+    assert_receive {:registered, _id}
+    on_exit(fn -> Process.exit(pid, :kill) end)
+    pid
+  end
+
+  describe "what a machine runs" do
+    setup do
+      previous = Application.get_env(:forge, Workers, [])
+
+      Application.put_env(
+        :forge,
+        Workers,
+        Keyword.put(previous, :current_build, "8rh57whmgk6m")
+      )
+
+      :ok
+    end
+
+    test "its release, and whether it is the build this platform ships", %{
+      conn: conn,
+      user: user
+    } do
+      current = worker(user)
+      other = worker(user)
+      silent = worker(user)
+
+      :ok =
+        Workers.admit(current.id, %{
+          "release" => "0.2.1 (8rh57whmgk6m)",
+          "build" => "8rh57whmgk6m"
+        })
+
+      :ok =
+        Workers.admit(other.id, %{"release" => "0.2.0 (aaaaaaaaaaaa)", "build" => "aaaaaaaaaaaa"})
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+
+      assert text_of(view, "#worker-#{current.id}") =~ "0.2.1 (8rh57whmgk6m) · current"
+      assert text_of(view, "#worker-#{other.id}") =~ "0.2.0 (aaaaaaaaaaaa) · other build"
+
+      # Not joined since the release was on the wire: nothing to compare.
+      refute view |> element("#worker-#{silent.id}") |> render() =~ "build"
+    end
+
+    # A release too old to say is protocol 0, and not running the build this platform ships.
+    test "a machine that said nothing is not current", %{conn: conn, user: user} do
+      w = worker(user)
+      :ok = Workers.admit(w.id, %{})
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+
+      assert text_of(view, "#worker-#{w.id}") =~ "release not reported · other build"
+    end
+
+    # A node built outside Nix knows no build of its own, and a hint there would be invented.
+    test "a node that knows no build draws no hint", %{conn: conn, user: user} do
+      Application.put_env(
+        :forge,
+        Workers,
+        Keyword.delete(Application.get_env(:forge, Workers), :current_build)
+      )
+
+      w = worker(user)
+      :ok = Workers.admit(w.id, %{"release" => "0.2.1 (8rh57whmgk6m)", "build" => "8rh57whmgk6m"})
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+      row = view |> element("#worker-#{w.id}") |> render()
+
+      assert row =~ "0.2.1 (8rh57whmgk6m)"
+      refute row =~ "current"
+      refute row =~ "other build"
+    end
+
+    test "a machine turned away says why, and what would be taken", %{conn: conn, user: user} do
+      w = worker(user, %{managed: false})
+      too_new = ForgeCore.WorkerProtocol.current() + 1
+      {:error, _} = Workers.admit(w.id, %{"protocol" => too_new})
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+
+      assert view |> element("#worker-#{w.id}") |> render() =~
+               "refused: protocol #{too_new}, this platform accepts " <>
+                 "#{ForgeCore.WorkerProtocol.range()} — update it"
+    end
+
+    test "a machine that was taken says nothing of the sort", %{conn: conn, user: user} do
+      w = worker(user, %{managed: false})
+      :ok = Workers.admit(w.id, %{"protocol" => ForgeCore.WorkerProtocol.current()})
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+
+      refute view |> element("#worker-#{w.id}") |> render() =~ "refused"
+    end
+  end
+
+  describe "ending a machine" do
+    setup do
+      Forge.Provider.Fake.watch()
+      on_exit(&Forge.Provider.Fake.allow/0)
+      :ok
+    end
+
+    defp running_on(worker) do
+      Forge.ForgeFixtures.job_fixture(%{status: :running, worker_id: worker.id})
+    end
+
+    test "a managed machine is destroyed at the provider, and its work requeued", %{
+      conn: conn,
+      user: user
+    } do
+      w = worker(user, %{managed: true, provider_id: "fake-7"})
+      job = running_on(w)
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+      button = element(view, "#worker-#{w.id} button[phx-click=destroy]")
+
+      assert render(button) =~ "Destroy machine"
+      # The confirm says what will happen, from the one definition of it.
+      assert render(button) =~ "It is deleted at the provider, and its 1 running job is requeued."
+
+      html = render_click(button)
+
+      assert_receive {:provider_destroy, "fake-7", _credential}
+      assert Workers.get!(w.id).status == :destroyed
+      assert Forge.Jobs.get!(job.id).status == :pending
+      # History now, and hidden until asked for.
+      assert html =~ "is gone; its 1 running job is requeued"
+      refute has_element?(view, "#worker-#{w.id}")
+    end
+
+    test "a permanent machine is retired: forgotten, and left running", %{
+      conn: conn,
+      user: user
+    } do
+      w = worker(user, %{managed: false})
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+      button = element(view, "#worker-#{w.id} button[phx-click=destroy]")
+
+      assert render(button) =~ "Retire"
+      assert render(button) =~ "the machine itself keeps running"
+      assert render(button) =~ "nothing is running on it to requeue"
+
+      render_click(button)
+
+      refute_receive {:provider_destroy, _id, _credential}
+      assert Workers.get!(w.id).status == :destroyed
+    end
+
+    # The row is the platform's claim that nothing is billing, so a refusal leaves it — with the
+    # driver's words, and the host-side way out named, since force is not on this page.
+    test "a destroy the provider refuses keeps the row and says what to do", %{
+      conn: conn,
+      user: user
+    } do
+      Forge.Provider.Fake.refuse_destroy({:fake, "the API is down"})
+      w = worker(user, %{managed: true, provider_id: "fake-7"})
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+      html = view |> element("#worker-#{w.id} button[phx-click=destroy]") |> render_click()
+
+      assert Workers.get!(w.id).status != :destroyed
+      assert view |> element("#worker-#{w.id}") |> render() =~ "the API is down"
+      assert html =~ "mix forge.worker.retire #{w.id} --force"
+      # And no promise of a retry: the sweeps retry only a machine that is unreachable or idle,
+      # and one somebody just pressed Destroy on is usually neither.
+      assert html =~ "The row stays, so the machine is still counted."
+      refute html =~ "sweep"
+    end
+
+    # The id is the client's, modelled on the other two decisions: somebody else's machine is
+    # neither edited, assigned nor ended from here.
+    test "somebody else's machine is not ended from here", %{conn: conn, user: user} do
+      mine = worker(user)
+      theirs = worker(Forge.AccountsFixtures.user_fixture(), %{provider_id: "fake-8"})
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+      assert has_element?(view, "#worker-#{mine.id}")
+
+      html = render_click(view, "destroy", %{"id" => theirs.id})
+
+      assert html =~ "that machine is not here"
+      refute_receive {:provider_destroy, _id, _credential}
+      assert Workers.get!(theirs.id).status == :creating
+    end
+
+    test "the confirm counts every job it will requeue", %{conn: conn, user: user} do
+      w = worker(user, %{managed: true})
+      running_on(w)
+      running_on(w)
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+
+      assert view |> element("#worker-#{w.id} button[phx-click=destroy]") |> render() =~
+               "its 2 running jobs are requeued"
+    end
+
+    test "a destroyed row offers nothing to end", %{conn: conn, user: user} do
+      w = worker(user)
+      {:ok, _w} = Workers.status(w, :destroyed)
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+      view |> element("button", "Show destroyed") |> render_click()
+
+      assert has_element?(view, "#worker-#{w.id}")
+      refute has_element?(view, "#worker-#{w.id} button[phx-click=destroy]")
+    end
+  end
+
+  # The lines the table used to carry in its own columns, each still drawn on the block.
+  test "a row names its machine, what it runs, and when it was last heard from", %{
+    conn: conn,
+    user: user
+  } do
+    w = worker(user, %{provider_id: "srv-1234567890123456"})
+
+    {:ok, view, _html} = live(conn, ~p"/workers")
+    quiet = text_of(view, "#worker-#{w.id}")
+
+    assert quiet =~ "fake · srv-12345678"
+    refute quiet =~ "srv-123456789"
+    assert quiet =~ "no harness reported"
+    assert quiet =~ "running nothing"
+    assert quiet =~ "last seen never"
+    refute quiet =~ "idle now"
+
+    {:ok, w} = Workers.ready(w, %{"memory_budget" => 8_000})
+    job = Forge.ForgeFixtures.job_fixture(%{status: :running, worker_id: w.id})
+
+    {:ok, view, _html} = live(conn, ~p"/workers")
+    busy = text_of(view, "#worker-#{w.id}")
+
+    assert busy =~ "#{job.state} ##{job.attempt}"
+    refute busy =~ "running nothing"
+    assert busy =~ "last seen now"
+  end
+
+  test "an idle machine says since when", %{conn: conn, user: user} do
+    w = worker(user)
+    {:ok, _w} = Workers.ready(w, %{"memory_budget" => 8_000})
+
+    {:ok, view, _html} = live(conn, ~p"/workers")
+
+    assert text_of(view, "#worker-#{w.id}") =~ "last seen now · idle now"
   end
 
   test "the laptop nav carries it and the phone bar does not", %{conn: conn} do

@@ -39,6 +39,31 @@ defmodule Mix.Tasks.Forge.Worker.RetireTest do
     assert_received {:mix_shell, :info, ["re-queued 1 job(s)"]}
   end
 
+  # **Requeued once the row is destroyed, and not before.** The machine a refused destroy leaves
+  # behind is still running its jobs, and requeued beside it they would run twice
+  # (`docs/design/provisioning.md` § Whose account). It used to requeue first.
+  test "a destroy the driver refuses leaves the work where it is, and force moves it" do
+    Forge.Provider.Fake.refuse_destroy({:fake, "nope"})
+    on_exit(&Forge.Provider.Fake.allow/0)
+
+    {:ok, worker, _token} = Workers.create(%{provider: "fake", provider_id: "fake-1"})
+    job = running_on(worker)
+
+    assert_raise Mix.Error, ~r/could not destroy/, fn -> Retire.run([worker.id]) end
+    assert Jobs.get!(job.id).status == :running
+    refute_received {:mix_shell, :info, ["re-queued" <> _]}
+
+    Retire.run([worker.id, "--force"])
+    assert Jobs.get!(job.id).status == :pending
+    assert Workers.get!(worker.id).status == :destroyed
+
+    # And the machine's log says who ended it, and that it was forced.
+    assert [destroyed] =
+             Enum.filter(Forge.Workers.Log.for_worker(worker.id), &(&1.type == "destroyed"))
+
+    assert destroyed.message =~ "retired by force — from the host's command line"
+  end
+
   test "a worker that is already destroyed is said so rather than destroyed twice" do
     {:ok, worker, _token} = Workers.create(%{provider: "fake"})
     :ok = Workers.destroy(worker)

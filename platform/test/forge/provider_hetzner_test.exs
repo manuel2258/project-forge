@@ -538,6 +538,43 @@ defmodule Forge.Provider.HetznerTest do
       assert path =~ "type=snapshot"
     end
 
+    # What `bin/hetzner-image` sets from the flake that built the snapshot. A label that is not
+    # what the script writes is read as no label — unknown, which the join settles — and never
+    # as a number the platform would then believe.
+    test "a snapshot's labels say which build it carries and which protocol that speaks" do
+      configure(token: "t")
+
+      label = fn build, protocol ->
+        %{"forge-worker-build" => build, "forge-worker-protocol" => protocol}
+      end
+
+      answering(200, %{
+        "images" => [
+          %{"id" => 1, "description" => "a", "labels" => label.("8rh57whmgk6m", "1")},
+          %{"id" => 2, "description" => "b", "labels" => %{}},
+          %{"id" => 3, "description" => "c"},
+          %{"id" => 4, "description" => "d", "labels" => label.("8RH57WHMGK6M", "one")},
+          %{"id" => 5, "description" => "e", "labels" => label.("8rh57whmgk6m1", "1.0")},
+          %{"id" => 6, "description" => "f", "labels" => label.("short", "-1")},
+          # Past what the column holds: recorded, it would crash the save of any template naming it.
+          %{"id" => 8, "description" => "h", "labels" => label.("8rh57whmgk6m", "3000000000")}
+        ],
+        "meta" => %{"pagination" => %{"next_page" => nil}}
+      })
+
+      assert {:ok, images} = Hetzner.images(%{"token" => "t"})
+
+      assert Enum.map(images, &{&1.id, &1.build, &1.protocol}) == [
+               {"1", "8rh57whmgk6m", 1},
+               {"2", nil, nil},
+               {"3", nil, nil},
+               {"4", nil, nil},
+               {"5", nil, nil},
+               {"6", nil, nil},
+               {"8", "8rh57whmgk6m", nil}
+             ]
+    end
+
     test "an account with no snapshot yet is empty rather than an error" do
       configure(token: "t")
       answering(200, %{"images" => [], "meta" => %{"pagination" => %{"next_page" => nil}}})

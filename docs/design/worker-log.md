@@ -1,0 +1,140 @@
+# The worker log
+
+Scope: a machine's own history — what happened to it and on it, at the level of the machine —
+kept by the platform and read on the workers page. Not a job's event stream, and not the
+machine's journal.
+
+## Why it exists
+
+A worker logs to journald on its own machine, and nobody can read that. A Hetzner machine has no
+inbound port — the ssh door is shut unless the operator opened it (`worker-tier.md` § The provider
+driver) — and a managed one is destroyed five minutes after it goes idle, taking its journal with
+it. What the platform itself saw happen to a machine — made, refused by its driver, joined,
+refused at the join, swept as unreachable, destroyed and by what — was in the *platform's* log,
+which is a host to grep, or in the one `last_error` a row keeps. "What was this machine doing,
+and why did it go away?" had no answer on any surface the operator has.
+
+## What goes in, and what does not
+
+**Worker-level events only.** A job appears as the unit of work a machine accepted and finished,
+and nothing of what happened inside it: what the agent did — its tool calls, its turns, its
+questions — is the job's own event stream (`claude-code-events.md`), drawn on the job page.
+Copying it here would make this page the activity feed `ui.md` § Motion and structure refuses,
+and write every line twice.
+
+Two sources, one log, told apart on every line:
+
+**What the platform saw** — written by `Forge.Workers` and the channel as it happens:
+
+| Type | Level | Says |
+|---|---|---|
+| `created` | info | made by which driver, as which machine, from which template — or provisioned by hand |
+| `create.refused` | error | the driver's words, when it would not make the machine |
+| `joined` | info | the release, build and protocol the join carried |
+| `join.refused` | error | the protocol, and the range this platform accepts |
+| `ready` | info | what the row now offers — memory, cores, kinds — which for a permanent machine is its owner's figures and not always what it reported |
+| `disconnected` | info when the channel was shut down — the machine or the platform closed the connection, it left, its row was retired, the platform is draining for a restart or stopping — and warning when it crashed | why, in words; for a crash only the kind of error, since the stack trace is the platform's and this page is the owner's |
+| `job.lost` | warning | a job the platform had running there that the machine rejoined without, requeued |
+| `unreachable` | warning | not heard from since when, how many jobs were requeued, and whether the row stays — for a permanent machine only when it had jobs to requeue |
+| `destroyed` | info, or warning when forced, when its provider is gone, or when a machine arrived for a row retired while it was being made | by what: idle, unreachable, its owner, the host's command line, a refused protocol |
+| `destroy.refused` | error | the driver's words, when it would not let the machine go — and that the next sweep tries again only when a sweep was what asked (`ui.md` § The workers page: a Destroy pressed on the page promises no retry) |
+
+**What the platform would otherwise repeat is said once.** `sweep_unreachable` runs on every
+scheduling pass and retries a destroy the driver refused each time, and a refused permanent machine
+knocks again every few minutes; a line per attempt would fill the 500 with one fact. So a managed
+machine's `unreachable`, and every `join.refused` and `destroy.refused`, is written only if the
+platform has written no line of that type about that machine since it last joined — its own
+`joined` lines, never one a machine sent, which could otherwise lift the silence or impose it. The
+row's `last_error` holds the driver's latest words. A permanent machine's `unreachable` needs no
+rule: it is written only when there were jobs to requeue, and a machine out of touch is given none.
+
+A `disconnected` is written only by a channel that joined: a refused join also ends in the
+channel's `terminate/2`, and its refusal is the line.
+
+**What only the machine knows** — sent by the worker in `log` messages
+(`worker-channel.md` § The machine's log):
+
+| Type | Level | Says |
+|---|---|---|
+| `job.accepted` | info | a job or chat it took on, and which attempt |
+| `job.finished` | info, or error when it failed | how it ended — its outcome, hibernated and why, or failed and the first line of why — and how long it ran |
+| `seed.fetched` | info | a project seed it fetched, and how long that took |
+| `seed.missing` | warning | a seed it could not fetch, so the job builds cold |
+| `harness.unprobed` | warning | the harness would not describe itself at join |
+| `message.unknown` | warning | a message from the platform this release does not know — a version apart |
+| `log.dropped` | warning | entries it could not keep while it was not connected |
+
+**Accepting a job is the worker's line, not the platform's.** The platform knows it sent an
+assignment; only the machine knows it took it. An assignment lost in flight is the case
+§ Reconnection in `worker-channel.md` repairs, and it shows here as `job.lost` at the rejoin — which
+the two lines are there to tell apart from a job that ran.
+
+## The `log` message
+
+`{"at": "2026-09-26T19:20:00Z", "type": "job.accepted", "level": "info", "message": "…", "job_id": "…"}`
+— `job_id` only on a line about a job. The worker sends it, unacked, from the link process, whatever
+process the line came from (`ForgeWorker.Log.line/4` hands it to the link by name); it logs the same
+line to its own journal as before.
+
+- **Kept while not joined, and sent at the next join.** Up to a hundred lines are held, oldest
+  dropped first, and a `log.dropped` line saying how many is sent ahead of them — so a job that
+  finished while the platform was away is in the log, at the time the machine says it finished.
+- **Best-effort otherwise**, like a job's events: a line pushed into a connection that is dropping
+  is lost. Nothing is decided from this log.
+- **Additive, so no protocol bump** (`worker-channel.md` § What needs a bump). A platform older than
+  it replies `unknown_message`, which the worker ignores.
+- **The test config turns the stream off** (`log_stream: false`), as it sets `stats_ms` long, and
+  the tests about it turn it on: a push in `Slipstream.SocketTest` is a call the test must answer,
+  and a line nobody asked for stalls the link.
+
+**What the platform keeps is bounded, whatever a machine sends.** The type must look like one —
+lower-case words and dots, at most 64 characters — or it is stored as `unknown`; the level is
+`info`, `warning` or `error`, or `info`; the message is text, cut to 500 code points, with NUL
+removed — **and only those 500 are read**: a message is cut as it is read rather than checked whole
+and then cut, because checking a ten-megabyte message whole cost the channel ten seconds and half a
+gigabyte, and the socket's frame limit is the only other bound on its size; `job_id` is kept only if it is a UUID. `at` is the machine's own clock, believed when it
+is no more than five minutes ahead of the platform's and no more than a week behind, and replaced
+by the time of arrival otherwise, and kept to the column's microseconds whatever precision it was
+written in — a time with no fraction is one a `utc_datetime_usec` would otherwise refuse, crashing
+the channel that received it. A line the platform writes is stamped with its own clock.
+
+## Storage
+
+`worker_log`: the worker, `at`, `source` (`platform` or `worker`), `type`, `level`, `message` and
+`job_id`. **The last 500 lines per machine from each source**, trimmed as each is written: a
+permanent machine runs for months and a line per job adds up, while what anyone reads is the
+recent past. Per source, because **the platform's record of a machine is not the machine's to
+erase**: with one budget, five hundred lines from a machine that is broken, or not what it claims,
+pushed out every `joined`, `job.lost` and `destroy.refused` the platform had written about it. A
+destroyed machine keeps its log, because "why did it go away" is asked afterwards.
+
+It is not the `events` table. Those rows belong to a project, a ticket or a job, and are read by
+who may see that project; a machine belongs to a user and serves several projects, and its log is
+read by its owner (`identity.md` § Workers).
+
+## The page
+
+`/workers/:id`, reached by a *Log* link on the machine's block on `/workers`. The machine's header
+line, then its log newest first — up to 200 lines, each with its time in UTC, where it came from,
+its type, and its message, and the first eight characters of the job a line is about — re-read on
+the same five-second timer as the workers page. **Only the
+owner's**: the id is off the wire and read scoped to the viewer, and somebody else's machine is
+*not here*, as on `/workers` (`identity.md` § Sequencing). A destroyed machine's log is still
+there.
+
+Error lines are in `error`; nothing is accent, for the reason nothing on `/workers` is.
+
+## Deliberately not here
+
+- **The machine's journal.** A "fetch the last 200 lines" request over the channel, the tail
+  uploaded to the store under a scoped token as a transcript is, and taken automatically before a
+  managed machine is destroyed, is the escape hatch for what this log does not carry. Not built.
+- **What went wrong inside a job**: a transcript that would not upload, a ticket volume that could
+  not be used, a credential that would not open. Those belong on the job, not the machine.
+- **Flow control.** A machine that sent a flood would churn its own 500 lines — not the platform's
+  — and cost the platform what any message costs to decode; the same open item as job events in
+  `worker-channel.md` § Open.
+- **Search and filtering.** Two hundred lines newest first is what debugging one machine needs so
+  far.
+- **A machine that never connects** sends nothing, and its log is what the platform saw: made,
+  and swept or refused. The provider's console is the rest.

@@ -202,6 +202,16 @@ defmodule Forge.Jobs.Scheduler do
        "Waiting for a machine: the template it would be made from names a provider credential " <>
          "it may not spend, and the templates page of whoever owns the template says why."}
 
+  # The platform refused again before any driver was asked: the template's image speaks a worker
+  # protocol this platform does not accept, from its labels or learnt from a machine refused at
+  # join (`docs/design/provisioning.md` § A snapshot that speaks the wrong protocol). No worker row
+  # either, so the words are the template's `last_error`, which the templates page draws.
+  defp waiting({:create_failed, {:image, _message}}),
+    do:
+      {"image_refused",
+       "Waiting for a machine: the template it would be made from names an image this platform " <>
+         "cannot talk to, and the templates page of whoever owns the template says why."}
+
   # The driver's own words are on the worker row it refused (`Workers.create_machine/1`), which
   # the workers page draws.
   defp waiting({:create_failed, _reason}),

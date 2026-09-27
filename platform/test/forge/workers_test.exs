@@ -1635,6 +1635,628 @@ defmodule Forge.WorkersTest do
     end
   end
 
+  describe "ending a machine from its owner's row" do
+    setup do
+      user = Forge.AccountsFixtures.user_fixture()
+      %{user: user}
+    end
+
+    defp owned_machine(user, attrs) do
+      {:ok, worker, _token} =
+        Workers.create(Map.merge(%{provider: "fake", user_id: user.id}, attrs))
+
+      worker
+    end
+
+    test "a managed machine is destroyed at the provider and its jobs requeued", %{user: user} do
+      worker = owned_machine(user, %{managed: true, provider_id: "fake-9"})
+      job = running(worker, %{})
+
+      assert {:ok, [requeued]} = Workers.retire_by_owner(user, worker.id)
+      assert requeued.id == job.id
+
+      assert_receive {:provider_destroy, "fake-9", _credential}
+      assert Workers.get!(worker.id).status == :destroyed
+      assert Forge.Jobs.get!(job.id).status == :pending
+    end
+
+    # Forge forgets it, and the machine itself is the owner's to switch off: it was never made
+    # through a driver, so nothing is asked of one.
+    test "a permanent machine is forgotten, and no driver is asked", %{user: user} do
+      worker = owned_machine(user, %{managed: false})
+      job = running(worker, %{})
+
+      assert {:ok, [_requeued]} = Workers.retire_by_owner(user, worker.id)
+
+      refute_receive {:provider_destroy, _id, _credential}
+      assert Workers.get!(worker.id).status == :destroyed
+      assert Forge.Jobs.get!(job.id).status == :pending
+    end
+
+    # The row is the platform's claim that nothing is billing, so it stays; and so do the jobs,
+    # which the machine is still running — requeued beside it they would be run twice.
+    test "a destroy the driver refuses keeps the row and the jobs where they are", %{user: user} do
+      Provider.Fake.refuse_destroy({:fake, "the API is down"})
+      worker = owned_machine(user, %{managed: true, provider_id: "fake-9"})
+      job = running(worker, %{})
+
+      assert {:error, {:fake, "the API is down"}} = Workers.retire_by_owner(user, worker.id)
+
+      kept = Workers.get!(worker.id)
+      assert kept.status != :destroyed
+      assert kept.last_error =~ "the API is down"
+      assert Forge.Jobs.get!(job.id).status == :running
+    end
+
+    # The id is off the wire (`identity.md` § Sequencing): somebody else's machine is not here,
+    # exactly as a missing one is not, and nothing is asked of any driver.
+    test "somebody else's machine is not found, and nothing happens to it", %{user: user} do
+      theirs = owned_machine(Forge.AccountsFixtures.user_fixture(), %{provider_id: "fake-9"})
+      job = running(theirs, %{})
+
+      assert {:error, :not_found} = Workers.retire_by_owner(user, theirs.id)
+
+      refute_receive {:provider_destroy, _id, _credential}
+      assert Workers.get!(theirs.id).status == :creating
+      assert Forge.Jobs.get!(job.id).status == :running
+    end
+
+    test "one already destroyed, or no machine at all, is not found", %{user: user} do
+      worker = owned_machine(user, %{managed: false})
+      {:ok, _} = Workers.status(worker, :destroyed)
+
+      assert {:error, :not_found} = Workers.retire_by_owner(user, worker.id)
+      assert {:error, :not_found} = Workers.retire_by_owner(user, "not-a-uuid")
+      assert {:error, :not_found} = Workers.retire_by_owner(user, nil)
+    end
+
+    # The channel is the registered process; this test stands in for it. A connection outlives
+    # the row it was made for, and a retired machine still joined would otherwise go on
+    # heartbeating into a row that says it is gone (`worker-channel.md` § Authentication).
+    test "the channel of a machine that is gone is told to close", %{user: user} do
+      worker = owned_machine(user, %{managed: false})
+      :ok = Workers.connected(worker.id)
+
+      assert {:ok, []} = Workers.retire_by_owner(user, worker.id)
+      assert_receive {:retired, []}
+    end
+
+    # A retired permanent machine goes on running, so what it was running is named to its
+    # channel, to cancel before it closes — or a requeued job runs there and again elsewhere.
+    test "the channel is told which jobs to cancel", %{user: user} do
+      worker = owned_machine(user, %{managed: false})
+      job = running(worker, %{})
+      :ok = Workers.connected(worker.id)
+
+      assert {:ok, [_]} = Workers.retire_by_owner(user, worker.id)
+      assert_receive {:retired, [job_id]}
+      assert job_id == job.id
+    end
+
+    test "and so is one retired by force, or whose provider is gone" do
+      Provider.Fake.refuse_destroy({:fake, "nope"})
+
+      {:ok, forced, _token} = Workers.create(%{provider: "fake", provider_id: "fake-1"})
+      :ok = Workers.connected(forced.id)
+      assert :ok = Workers.destroy(forced, force: true)
+      assert_receive {:retired, _jobs}
+
+      {:ok, departed, _token} = Workers.create(%{provider: "departed", provider_id: "srv-1"})
+      Registry.unregister(Forge.Workers.Registry, forced.id)
+      :ok = Workers.connected(departed.id)
+      assert :ok = Workers.destroy(departed)
+      assert_receive {:retired, _jobs}
+    end
+
+    test "a refused destroy leaves the channel open" do
+      Provider.Fake.refuse_destroy({:fake, "nope"})
+      {:ok, worker, _token} = Workers.create(%{provider: "fake", provider_id: "fake-1"})
+      :ok = Workers.connected(worker.id)
+
+      assert {:error, _reason} = Workers.destroy(worker)
+      refute_receive {:retired, _jobs}
+    end
+
+    # A `ready` in flight when the row changed, or on a join made before it did, must not bring
+    # the row back: `readiness/1` would make it idle, and idle is assignable.
+    # Each of these decides from a row read earlier — the channel's, the scheduler's — and a
+    # retire can commit in between. Written from that stale read, the row came back: assignable,
+    # its token valid, a Retire undone. So each re-reads the row under a lock, and the struct it
+    # is handed says nothing about whether the row is destroyed.
+    test "a stale read does not bring a destroyed row back", %{user: user} do
+      stale = owned_machine(user, %{managed: false})
+      {:ok, _} = Workers.status(stale, :destroyed)
+      assert stale.status == :creating
+
+      assert {:ok, _} = Workers.ready(stale, %{"memory_budget" => 8_000})
+      assert Workers.get!(stale.id).status == :destroyed
+
+      assert {:ok, _} = Workers.busy(stale)
+      assert Workers.get!(stale.id).status == :destroyed
+
+      assert :ok = Workers.release(stale.id)
+      assert Workers.get!(stale.id).status == :destroyed
+    end
+
+    # A job ending on a machine that is already idle is not the start of its idle period: the
+    # clock that destroys it keeps the time it already had, or every ended job would buy another.
+    test "a job ending on an idle machine does not restart its clock", %{user: user} do
+      worker = owned_machine(user, %{managed: true})
+      long_ago = DateTime.add(DateTime.utc_now(:second), -600)
+      {:ok, _} = Workers.update(worker, %{status: :idle, idle_since: long_ago})
+
+      assert :ok = Workers.release(worker.id)
+      assert Workers.get!(worker.id).idle_since == long_ago
+    end
+
+    # **A create can take a while, and the Destroy button is on the page the whole time.** Retired
+    # in between, the row said destroyed with nothing to release; the machine then arrived for a
+    # row no sweep looks at, and billed with nobody watching.
+    test "a machine made for a row retired while it was being made is given straight back" do
+      %{user: user, project: project} = with_template()
+
+      Provider.Fake.during_create(fn opts ->
+        {:ok, []} = Workers.retire_by_owner(user, opts.worker_id)
+      end)
+
+      assert {:error, :at_capacity} = Workers.create_machine(demand(project_id: project.id))
+
+      assert_receive {:provider_create, %{worker_id: worker_id}}
+      provider_id = "fake-" <> worker_id
+      assert_receive {:provider_destroy, ^provider_id, _credential}
+
+      # Recorded on the row all the same, so the history says which machine it was.
+      gone = Workers.get!(worker_id)
+      assert {gone.status, gone.provider_id} == {:destroyed, provider_id}
+    end
+  end
+
+  describe "joining: what is speaking, and whether the platform will talk to it" do
+    setup do
+      user = Forge.AccountsFixtures.user_fixture()
+      {:ok, project} = Forge.Projects.register(project_attrs(), user)
+      %{user: user, project: project}
+    end
+
+    defp too_new, do: ForgeCore.WorkerProtocol.current() + 1
+
+    test "a protocol it accepts is recorded with the release and the build" do
+      {:ok, worker, _token} = Workers.create(%{provider: "fake"})
+      current = ForgeCore.WorkerProtocol.current()
+
+      assert :ok =
+               Workers.admit(worker.id, %{
+                 "protocol" => current,
+                 "release" => "0.2.1 (8rh57whmgk6m)",
+                 "build" => "8rh57whmgk6m"
+               })
+
+      joined = Workers.get!(worker.id)
+
+      assert {joined.protocol, joined.release, joined.build} ==
+               {current, "0.2.1 (8rh57whmgk6m)", "8rh57whmgk6m"}
+    end
+
+    # Every release before the field is protocol 0, and 0 is accepted: shipping the check turned
+    # nobody away.
+    test "a worker that says nothing is protocol 0, and is taken" do
+      {:ok, worker, _token} = Workers.create(%{provider: "fake"})
+
+      assert :ok = Workers.admit(worker.id, %{})
+      assert Workers.get!(worker.id).protocol == 0
+    end
+
+    test "a destroyed row is refused, whatever it speaks" do
+      {:ok, worker, _token} = Workers.create(%{provider: "fake"})
+      {:ok, _} = Workers.status(worker, :destroyed)
+
+      assert {:error, :destroyed} =
+               Workers.admit(worker.id, %{"protocol" => ForgeCore.WorkerProtocol.current()})
+    end
+
+    # It bills by the hour and can never take work, so it goes at once, what it was running goes
+    # back on the queue, and its template learns what the image it was made from speaks.
+    test "a managed machine it will not talk to is destroyed, and its template learns", context do
+      %{user: user, project: project} = context
+      template = assigned(user, project, %{image: "snapshot-1"})
+      worker = managed_from(template, provider_id: "fake-3")
+      job = running(worker, %{})
+
+      assert {:error, {:protocol, protocol}} =
+               Workers.admit(worker.id, %{"protocol" => too_new(), "release" => "9.9.9"})
+
+      assert protocol == too_new()
+      assert_receive {:provider_destroy, "fake-3", _credential}
+
+      refused = Workers.get!(worker.id)
+      assert refused.status == :destroyed
+      assert {refused.protocol, refused.release} == {too_new(), "9.9.9"}
+      assert Forge.Jobs.get!(job.id).status == :pending
+      assert reloaded(template).image_protocol == too_new()
+
+      # And the job's timeline says why it came back.
+      assert Enum.any?(
+               Forge.Events.for_job(job.id),
+               &(&1.type == "job.interrupted" and &1.payload["reason"] == "worker_refused")
+             )
+    end
+
+    # The refusal is still the answer when the driver will not let the machine go: the row keeps
+    # the driver's words, as any refused destroy does, and the jobs stay where they are running.
+    test "a machine refused whose destroy is refused too is still refused", context do
+      %{user: user, project: project} = context
+      Provider.Fake.refuse_destroy({:fake, "the API is down"})
+      template = assigned(user, project, %{image: "snapshot-1"})
+      worker = managed_from(template, provider_id: "fake-4")
+      job = running(worker, %{})
+
+      assert {:error, {:protocol, _}} = Workers.admit(worker.id, %{"protocol" => too_new()})
+
+      kept = Workers.get!(worker.id)
+      assert kept.status != :destroyed
+      assert kept.last_error =~ "the API is down"
+      assert Forge.Jobs.get!(job.id).status == :running
+    end
+
+    # A template moved onto a new snapshot while the refused machine was booting is not the one
+    # that was refused.
+    test "a template that has moved to another image learns nothing", context do
+      %{user: user, project: project} = context
+      template = assigned(user, project, %{image: "snapshot-1"})
+      worker = managed_from(template)
+
+      {:ok, template} =
+        Provisioning.update_template(user, template.id, %{image: "snapshot-2"})
+
+      assert {:error, {:protocol, _}} = Workers.admit(worker.id, %{"protocol" => too_new()})
+      assert reloaded(template).image_protocol == nil
+    end
+
+    # Null matches null: a template naming no image boots the driver's default, which is what
+    # its machine was made from.
+    test "a template naming no image learns about the default it boots", context do
+      %{user: user, project: project} = context
+      template = assigned(user, project, %{})
+      worker = managed_from(template)
+
+      assert {:error, {:protocol, _}} = Workers.admit(worker.id, %{"protocol" => too_new()})
+      assert reloaded(template).image_protocol == too_new()
+    end
+
+    # Not the platform's to power off. The row stays, and says why.
+    test "a permanent machine it will not talk to keeps its row" do
+      {:ok, worker, _token} = Workers.create(%{provider: "fake", managed: false})
+      {:ok, worker} = Workers.ready(worker, %{"memory_budget" => 8_000})
+
+      assert {:error, {:protocol, _}} = Workers.admit(worker.id, %{"protocol" => too_new()})
+
+      refute_receive {:provider_destroy, _id, _credential}
+      kept = Workers.get!(worker.id)
+      assert kept.status == worker.status
+      assert kept.protocol == too_new()
+    end
+
+    # The first join of a machine made from an image says what that image speaks, accepted or not:
+    # an unlabelled snapshot is known from then on, and stops being probed one machine at a time.
+    test "a first join that is accepted teaches the template what its image speaks", context do
+      %{user: user, project: project} = context
+      template = assigned(user, project, %{image: "snapshot-1"})
+      worker = managed_from(template)
+      current = ForgeCore.WorkerProtocol.current()
+
+      assert :ok = Workers.admit(worker.id, %{"protocol" => current, "build" => "8rh57whmgk6m"})
+
+      learnt = reloaded(template)
+      assert {learnt.image_protocol, learnt.image_build} == {current, "8rh57whmgk6m"}
+    end
+
+    # A later join may be a release `bin/worker-update` put there, or a copy of the machine's
+    # token: neither says anything about the image, and the second could otherwise stop the
+    # template making anything at all.
+    test "a machine that has joined before teaches nothing", context do
+      %{user: user, project: project} = context
+      template = assigned(user, project, %{image: "snapshot-1"})
+      worker = managed_from(template)
+      {:ok, _} = Workers.touch(worker)
+
+      assert {:error, {:protocol, _}} = Workers.admit(worker.id, %{"protocol" => too_new()})
+      assert reloaded(template).image_protocol == nil
+    end
+
+    # A refused machine that keeps knocking is still not one the platform can hear from, and its
+    # jobs have to reach the unreachable sweep's timeout like any other's.
+    test "a refused join is not a sign of life" do
+      {:ok, worker, _token} = Workers.create(%{provider: "fake", managed: false})
+      long_ago = DateTime.add(DateTime.utc_now(:second), -600)
+      {:ok, _} = Workers.update(worker, %{last_seen_at: long_ago})
+
+      assert {:error, _} = Workers.admit(worker.id, %{"protocol" => too_new()})
+      assert Workers.get!(worker.id).last_seen_at == long_ago
+    end
+
+    test "a protocol that is not a whole number is refused and not recorded", context do
+      %{user: user, project: project} = context
+      current = ForgeCore.WorkerProtocol.current()
+      template = user |> assigned(project, %{image: "snapshot-1"}) |> labelled(current)
+      worker = managed_from(template)
+
+      for nonsense <- ["1", 1.0, -1, %{}, 3_000_000_000] do
+        assert {:error, {:protocol, nil}} = Workers.admit(worker.id, %{"protocol" => nonsense}),
+               inspect(nonsense)
+
+        # Destroyed by the first, refused as destroyed after it.
+        break_if_destroyed(worker)
+      end
+
+      assert Workers.get!(worker.id).protocol == nil
+      # Nothing it could have been learnt from, so what the template knew stands.
+      assert reloaded(template).image_protocol == current
+    end
+
+    test "what is not text is not kept, and text is kept to what the column holds" do
+      {:ok, worker, _token} = Workers.create(%{provider: "fake", managed: false})
+
+      assert :ok = Workers.admit(worker.id, %{"release" => %{"no" => 1}, "build" => 12})
+      assert {Workers.get!(worker.id).release, Workers.get!(worker.id).build} == {nil, nil}
+
+      assert :ok = Workers.admit(worker.id, %{"release" => String.duplicate("r", 400)})
+      assert String.length(Workers.get!(worker.id).release) == 255
+
+      # The column counts code points. An accent written as its own code point is one grapheme
+      # and two of them, so a cut by graphemes left 400 code points for a column of 255, and the
+      # write — and with it the join — failed.
+      assert :ok = Workers.admit(worker.id, %{"release" => String.duplicate("e\u0301", 200)})
+      assert length(String.codepoints(Workers.get!(worker.id).release)) == 255
+
+      # NUL is not text Postgres will store, and bytes that are not UTF-8 are not text at all.
+      assert :ok = Workers.admit(worker.id, %{"release" => "0.2.1\0x", "build" => <<255, 0>>})
+      assert {Workers.get!(worker.id).release, Workers.get!(worker.id).build} == {"0.2.1x", nil}
+    end
+  end
+
+  # A row a refusal has already destroyed is refused as destroyed from then on, which is the next
+  # guard rather than the one the loop above is about — so it is put back.
+  defp break_if_destroyed(worker) do
+    {:ok, _} = Workers.update(Workers.get!(worker.id), %{status: :idle})
+    :ok
+  end
+
+  defp managed_from(template, attrs \\ []) do
+    {:ok, worker, _token} =
+      Workers.create(
+        template
+        |> Provisioning.Template.worker_attrs()
+        |> Map.merge(%{managed: true})
+        |> Map.merge(Map.new(attrs))
+      )
+
+    worker
+  end
+
+  describe "a template whose image speaks the wrong protocol" do
+    setup do
+      user = Forge.AccountsFixtures.user_fixture()
+      {:ok, project} = Forge.Projects.register(project_attrs(), user)
+      %{user: user, project: project}
+    end
+
+    defp labelled(template, protocol) do
+      template |> Ecto.Changeset.change(image_protocol: protocol) |> Forge.Repo.update!()
+    end
+
+    # Refused before the driver is asked: no request, no row, and the template's failure, which
+    # takes it out of service after three passes like a credential it may not spend.
+    test "makes nothing, and says why on the template", context do
+      %{user: user, project: project} = context
+      template = user |> assigned(project, %{image: "snapshot-1"}) |> labelled(too_new())
+
+      assert {:error, {:create_failed, {:image, message}}} =
+               Workers.create_machine(demand(project_id: project.id))
+
+      refute_receive {:provider_create, _opts}
+      assert Workers.list() == []
+      assert message =~ "protocol #{too_new()}"
+      assert reloaded(template).failures == 1
+      assert reloaded(template).last_error == message
+    end
+
+    test "one it accepts makes machines as ever", context do
+      %{user: user, project: project} = context
+
+      user
+      |> assigned(project, %{image: "snapshot-1"})
+      |> labelled(ForgeCore.WorkerProtocol.current())
+
+      assert {:error, :creating} = Workers.create_machine(demand(project_id: project.id))
+      assert_receive {:provider_create, %{image: "snapshot-1"}}
+    end
+
+    # Unknown, not compatible — and still made: the join decides, and a refusal teaches.
+    test "an unlabelled one is made, with a warning", context do
+      %{user: user, project: project} = context
+      assigned(user, project, %{image: "snapshot-1"})
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, :creating} = Workers.create_machine(demand(project_id: project.id))
+        end)
+
+      assert_receive {:provider_create, %{image: "snapshot-1"}}
+      assert log =~ "carries no protocol label"
+    end
+
+    test "a probe that joins lifts the rule, and machines are made again", context do
+      %{user: user, project: project} = context
+      assigned(user, project, %{image: "snapshot-1", max_workers: 5})
+
+      assert {:error, :creating} = Workers.create_machine(demand(project_id: project.id))
+      assert_receive {:provider_create, %{worker_id: probe}}
+      assert {:error, :at_capacity} = Workers.create_machine(demand(project_id: project.id))
+
+      :ok = Workers.admit(probe, %{"protocol" => ForgeCore.WorkerProtocol.current()})
+
+      assert {:error, :creating} = Workers.create_machine(demand(project_id: project.id))
+      assert_receive {:provider_create, _opts}
+    end
+
+    # A probe that never joined — swept at the timeout, or retired by hand — taught nothing, and
+    # the next machine is the next probe rather than none at all.
+    test "a probe that is gone without joining is replaced by another", context do
+      %{user: user, project: project} = context
+      assigned(user, project, %{image: "snapshot-1", max_workers: 5})
+
+      assert {:error, :creating} = Workers.create_machine(demand(project_id: project.id))
+      assert_receive {:provider_create, %{worker_id: probe}}
+      {:ok, _} = Workers.status(Workers.get!(probe), :destroyed)
+
+      assert {:error, :creating} = Workers.create_machine(demand(project_id: project.id))
+      assert_receive {:provider_create, _opts}
+    end
+
+    # The probe is of an image, not of a template: machines still running from the snapshot the
+    # template named before are no reason to hold back the first machine from the new one.
+    test "machines from the image before are not a probe of this one", context do
+      %{user: user, project: project} = context
+      template = assigned(user, project, %{image: "snapshot-1", max_workers: 5})
+      _running = managed_from(template)
+
+      {:ok, _} = Provisioning.update_template(user, template.id, %{image: "snapshot-2"})
+
+      assert {:error, :creating} = Workers.create_machine(demand(project_id: project.id))
+      assert_receive {:provider_create, %{image: "snapshot-2"}}
+    end
+
+    # It boots the driver's default, this host's own, and every Hetzner template names one.
+    test "a template naming no image is not probed", context do
+      %{user: user, project: project} = context
+      assigned(user, project, %{max_workers: 5})
+
+      assert {:error, :creating} = Workers.create_machine(demand(project_id: project.id))
+      assert {:error, :creating} = Workers.create_machine(demand(project_id: project.id))
+    end
+
+    test "a template naming no image is not warned about", context do
+      %{user: user, project: project} = context
+      assigned(user, project, %{})
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, :creating} = Workers.create_machine(demand(project_id: project.id))
+        end)
+
+      refute log =~ "carries no protocol label"
+    end
+
+    # **The cycle the learning exists for**: an unlabelled snapshot that cannot work costs one
+    # machine, not one per sweep and not one per job. The first machine is a probe, and nothing
+    # more is made from the image until it has joined; refused, it is destroyed, the template
+    # learns, and the next demand makes nothing.
+    test "at most one machine is ever made from a bad snapshot", context do
+      %{user: user, project: project} = context
+      template = assigned(user, project, %{image: "snapshot-1", max_workers: 5})
+
+      assert {:error, :creating} = Workers.create_machine(demand(project_id: project.id))
+      assert_receive {:provider_create, %{worker_id: worker_id}}
+
+      # A second job that does not fit the first machine waits for the probe rather than making
+      # another from an image nobody has heard speak.
+      assert {:error, :at_capacity} = Workers.create_machine(demand(project_id: project.id))
+      refute_receive {:provider_create, _opts}
+
+      assert {:error, {:protocol, _}} = Workers.admit(worker_id, %{"protocol" => too_new()})
+      assert_receive {:provider_destroy, _id, _credential}
+
+      for _pass <- 1..3 do
+        assert {:error, _refused} = Workers.create_machine(demand(project_id: project.id))
+      end
+
+      refute_receive {:provider_create, _opts}
+      assert [%{status: :destroyed}] = Workers.list()
+      assert Provisioning.disabled?(reloaded(template))
+    end
+  end
+
+  describe "a machine's live figures" do
+    # The test process stands in for the channel, which is the only process that may set the
+    # value it registered.
+    test "are what the channel last put, and only the figures the protocol names" do
+      {:ok, worker, _token} = Workers.create(%{provider: "fake"})
+      :ok = Workers.connected(worker.id)
+
+      :ok =
+        Workers.put_stats(worker.id, %{
+          "cpu" => 12.5,
+          "memory_used" => 1_000,
+          "memory_total" => 4_000,
+          "disk_used" => "full",
+          "disk_total" => -1,
+          "uptime" => 99
+        })
+
+      assert Workers.stats(worker.id) == %{cpu: 12.5, memory_used: 1_000, memory_total: 4_000}
+
+      :ok = Workers.put_stats(worker.id, %{"cpu" => 50.0})
+      assert Workers.stats(worker.id) == %{cpu: 50.0}
+    end
+
+    # What the page could not draw is not kept. A total of 1e-300 bytes, or 1e308 used, divided
+    # the owner's whole workers page into an `ArithmeticError` for as long as the machine stayed
+    # connected.
+    test "only a percentage for CPU, and only whole bytes a machine could have" do
+      {:ok, worker, _token} = Workers.create(%{provider: "fake"})
+      :ok = Workers.connected(worker.id)
+
+      :ok =
+        Workers.put_stats(worker.id, %{
+          "cpu" => 150.0,
+          "memory_used" => 1.0e308,
+          "memory_total" => 1.0e-300,
+          "disk_used" => Bitwise.bsl(1, 61),
+          "disk_total" => Bitwise.bsl(1, 60)
+        })
+
+      assert Workers.stats(worker.id) == %{disk_total: Bitwise.bsl(1, 60)}
+    end
+
+    # No table, no history: a machine that is not connected has no figures rather than old ones.
+    test "go with the channel, and touch nothing in the database" do
+      {:ok, worker, _token} = Workers.create(%{provider: "fake"})
+      test = self()
+
+      channel =
+        spawn(fn ->
+          :ok = Workers.connected(worker.id)
+          :ok = Workers.put_stats(worker.id, %{"cpu" => 1.0})
+          send(test, :put)
+          receive do: (:stop -> :ok)
+        end)
+
+      assert_receive :put
+      assert Workers.stats(worker.id) == %{cpu: 1.0}
+      assert Workers.get!(worker.id).last_seen_at == nil
+
+      ref = Process.monitor(channel)
+      send(channel, :stop)
+      assert_receive {:DOWN, ^ref, :process, _pid, _reason}
+
+      # The registry drops an entry when its process goes, which it is told asynchronously.
+      wait_until(fn -> Workers.stats(worker.id) == nil end)
+    end
+
+    test "a machine that never connected has none" do
+      {:ok, worker, _token} = Workers.create(%{provider: "fake"})
+      assert Workers.stats(worker.id) == nil
+    end
+  end
+
+  defp wait_until(fun, attempts \\ 100) do
+    cond do
+      fun.() -> :ok
+      attempts == 0 -> flunk("condition not met in time")
+      true -> Process.sleep(10) && wait_until(fun, attempts - 1)
+    end
+  end
+
   defp model(id), do: %{"id" => id, "name" => String.upcase(id)}
 
   # A job's three questions, with room to spare in whichever dimension a test is not about.

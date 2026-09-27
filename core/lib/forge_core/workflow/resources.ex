@@ -95,6 +95,15 @@ defmodule ForgeCore.Workflow.Resources do
     "#{div(bytes, multiplier)}#{unit}"
   end
 
+  @doc """
+  A byte count as gibibytes to one decimal — `7.5 GiB` — for reading rather than for typing back,
+  which is `humanize/1`'s job; nil, a figure nobody has, is a dash rather than a zero. The one
+  copy the workers page, the templates page and a machine's log all draw with.
+  """
+  @spec gib(non_neg_integer() | nil) :: String.t()
+  def gib(nil), do: "—"
+  def gib(bytes), do: :erlang.float_to_binary(bytes / 1024 ** 3, decimals: 1) <> " GiB"
+
   @doc "The units a byte size may carry, for an error message that says what is accepted."
   @spec units() :: [String.t()]
   def units, do: @units |> Map.keys() |> Enum.sort_by(&byte_size/1)

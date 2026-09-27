@@ -1363,6 +1363,42 @@ defmodule Forge.FlowTest do
     refute Enum.any?(Forge.Workers.list(), &(&1.template_id == template.id))
   end
 
+  # The same shape for an image the platform knows it cannot talk to: refused before the driver
+  # is asked, no worker row, and the words on the template — so the sentence names that page
+  # (`docs/design/provisioning.md` § A snapshot that speaks the wrong protocol).
+  test "a template whose image speaks the wrong protocol says so, and where", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    Registry.unregister(Forge.Workers.Registry, worker.id)
+    :ok = Forge.Workers.destroy(worker)
+
+    {:ok, template} =
+      Forge.Provisioning.create_template(user, %{
+        name: "too-new",
+        provider: "fake",
+        image: "snapshot-1",
+        image_protocol: ForgeCore.WorkerProtocol.current() + 1,
+        memory: 64_000_000_000,
+        cores: 64,
+        max_workers: 1
+      })
+
+    {:ok, _} = Forge.Provisioning.assign(user, template.id, project.id)
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    job = only_pending(ticket)
+    start_supervised!(Forge.Jobs.Scheduler)
+
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert waits_and_starts(job) == ["image_refused"]
+
+    sentence = Jobs.current_wait(Jobs.get!(job.id)) |> Events.summary()
+    assert sentence =~ "templates page of whoever owns the template"
+    refute sentence =~ "workers page"
+    refute Enum.any?(Forge.Workers.list(), &(&1.template_id == template.id))
+  end
+
   # A **ticket** chat has a ticket, and it is not the chat's to stick: the ticket's own work may
   # place perfectly well. Here the template takes workflow jobs and refuses chats, so the job is
   # being made a machine while the conversation about it can go nowhere.

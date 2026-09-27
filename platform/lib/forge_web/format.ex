@@ -44,6 +44,17 @@ defmodule ForgeWeb.Format do
   end
 
   @doc """
+  Whether a worker build is the one this platform ships with, in the words both the workers and
+  the templates pages use: `current` or `other build` — never "older", because a build is a hash
+  with no order (`docs/design/ui.md` § The workers page). Nil when the platform knows no build of
+  its own, which is a node built outside Nix, and then nothing is drawn.
+  """
+  @spec build_hint(String.t() | nil, String.t() | nil) :: String.t() | nil
+  def build_hint(_build, nil), do: nil
+  def build_hint(current, current), do: "current"
+  def build_hint(_build, _current), do: "other build"
+
+  @doc """
   A cost rendered as the capacity it consumed, or `nil` when the calibration constant is not
   configured. Dollars do not appear on an operator surface.
   """

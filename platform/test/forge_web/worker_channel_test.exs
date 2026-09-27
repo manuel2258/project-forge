@@ -12,6 +12,7 @@ defmodule ForgeWeb.WorkerChannelTest do
   import Forge.GitFixtures
 
   alias Forge.{Conversations, Events, Jobs, Projects, Tickets, Workers}
+  alias Forge.Workers.Log
   alias ForgeCore.Job.Result
   alias ForgeWeb.{WorkerChannel, WorkerSocket}
 
@@ -204,6 +205,157 @@ defmodule ForgeWeb.WorkerChannelTest do
       assert {:error, %{reason: "unknown_topic"}} =
                subscribe_and_join(socket, WorkerChannel, "nonsense:1", %{})
     end
+
+    # What is speaking is recorded at the join, which is where the platform decides whether it
+    # will talk to the machine at all (`docs/design/worker-channel.md` § Versions).
+    test "records the protocol, the release and the build", %{worker: worker, token: token} do
+      current = ForgeCore.WorkerProtocol.current()
+
+      assert {:ok, _reply, _socket} =
+               join_worker(worker, token, %{
+                 "protocol" => current,
+                 "release" => "0.2.1 (8rh57whmgk6m)",
+                 "build" => "8rh57whmgk6m"
+               })
+
+      joined = Workers.get!(worker.id)
+      assert {joined.protocol, joined.build} == {current, "8rh57whmgk6m"}
+    end
+
+    test "a protocol it does not accept is refused, with the range it does", %{
+      worker: worker,
+      token: token
+    } do
+      too_new = ForgeCore.WorkerProtocol.current() + 1
+
+      assert {:error, reply} = join_worker(worker, token, %{"protocol" => too_new})
+
+      assert reply == %{
+               reason: "protocol",
+               protocol: too_new,
+               minimum: ForgeCore.WorkerProtocol.minimum(),
+               current: ForgeCore.WorkerProtocol.current()
+             }
+
+      # Never registered, so never reachable and never assigned anything.
+      refute Workers.connected?(worker.id)
+      assert Workers.get!(worker.id).protocol == too_new
+    end
+
+    # JSON off the wire need not be an object. A join whose payload is not one is read as a join
+    # that said nothing, rather than crashing the channel. Called directly, because
+    # `Phoenix.ChannelTest` will only send a map — the wire will send whatever it is given.
+    test "a payload that is not an object is a join that said nothing", %{
+      worker: worker,
+      token: token
+    } do
+      socket = connect_worker(worker, token)
+
+      assert {:ok, _socket} =
+               WorkerChannel.join("worker:#{worker.id}", ["not", "an", "object"], socket)
+
+      assert Workers.get!(worker.id).protocol == 0
+    end
+
+    # A second join while the machine's channel is open is what a copy of a live machine's token
+    # makes. Refused before anything is written: it cannot overwrite what the machine said about
+    # itself, have the machine destroyed, or teach its template a protocol that stops it making
+    # machines.
+    test "a second join while one is open changes nothing", %{worker: worker, token: token} do
+      {:ok, _reply, live} = join_worker(worker, token, %{"protocol" => 1, "release" => "real"})
+      ref = Process.monitor(live.channel_pid)
+      too_new = ForgeCore.WorkerProtocol.current() + 1
+
+      assert {:error, %{reason: "already_connected"}} =
+               join_worker(worker, token, %{"protocol" => too_new, "release" => "forged"})
+
+      kept = Workers.get!(worker.id)
+      assert {kept.protocol, kept.release, kept.status} == {1, "real", :creating}
+      refute_receive {:DOWN, ^ref, :process, _pid, _reason}
+    end
+
+    # The socket checked the row when the connection was made, and a connection outlives its
+    # row: a rejoin on a live socket never passes `connect/3` again.
+    test "a row destroyed since the socket connected is refused", %{worker: worker, token: token} do
+      socket = connect_worker(worker, token)
+      {:ok, _} = Workers.status(worker, :destroyed)
+
+      assert {:error, %{reason: "destroyed"}} =
+               subscribe_and_join(socket, WorkerChannel, "worker:#{worker.id}", %{})
+
+      refute Workers.connected?(worker.id)
+    end
+  end
+
+  # Retired from the workers page, by the command line, lost or refused: whichever way a row
+  # becomes destroyed, the machine's channel goes with it, and the machine cannot come back —
+  # neither on a new connection nor on the socket it still holds.
+  describe "a machine that is gone" do
+    test "has its channel closed, and cannot join or connect again", %{
+      worker: worker,
+      token: token
+    } do
+      {:ok, worker} = Workers.update(worker, %{managed: false})
+      {:ok, _reply, socket} = join_worker(worker, token)
+      # The channel is linked to this process, as a socket's are to their transport.
+      Process.flag(:trap_exit, true)
+      ref = Process.monitor(socket.channel_pid)
+
+      assert {:ok, []} = Workers.retire(Workers.get!(worker.id))
+
+      assert_receive {:DOWN, ^ref, :process, _pid, {:shutdown, :retired}}
+      # The registry drops the entry when its partition handles the exit, which is not ordered
+      # against this process's `:DOWN` — and `Registry.lookup/2` does not ask whether the pid is
+      # alive. The channel's own parting line in `terminate/2` was enough to lose that race.
+      wait_until(fn -> not Workers.connected?(worker.id) end)
+
+      assert {:error, %{reason: "destroyed"}} =
+               subscribe_and_join(socket, WorkerChannel, "worker:#{worker.id}", %{})
+
+      assert :error = connect(WorkerSocket, %{"worker_id" => worker.id}, bearer(token))
+    end
+
+    # A retired permanent machine goes on running: what it was running is cancelled on it before
+    # the channel closes, or a requeued job runs there and again elsewhere.
+    test "is told to cancel what it was running first", %{worker: worker, token: token} do
+      {:ok, worker} = Workers.update(worker, %{managed: false})
+      job = job_fixture()
+
+      {:ok, job} =
+        job
+        |> Jobs.Job.progress_changeset(%{status: :running, worker_id: worker.id})
+        |> Forge.Repo.update()
+
+      {:ok, _reply, socket} =
+        join_worker(worker, token, %{"running" => [%{"job_id" => job.id, "attempt" => 1}]})
+
+      Process.flag(:trap_exit, true)
+      ref = Process.monitor(socket.channel_pid)
+      job_id = job.id
+
+      assert {:ok, [_]} = Workers.retire(Workers.get!(worker.id))
+
+      assert_push "cancel", %{"job_id" => ^job_id, "reason" => "retired"}
+      assert_receive {:DOWN, ^ref, :process, _pid, {:shutdown, :retired}}
+      assert Jobs.get!(job.id).status == :pending
+    end
+
+    # Retired between the join's check and the channel being registered, when there was no
+    # channel for the `:retired` to reach: the row is read again once there is one.
+    test "closes a channel that registered after its row was retired", %{
+      worker: worker,
+      token: token
+    } do
+      {:ok, _reply, socket} = join_worker(worker, token)
+      Process.flag(:trap_exit, true)
+      ref = Process.monitor(socket.channel_pid)
+
+      # Destroyed without the push `gone/2` would send, which is the message the window loses.
+      {:ok, _} = Workers.status(Workers.get!(worker.id), :destroyed)
+      send(socket.channel_pid, {:after_join, %{}})
+
+      assert_receive {:DOWN, ^ref, :process, _pid, {:shutdown, :retired}}
+    end
   end
 
   describe "messages" do
@@ -246,6 +398,33 @@ defmodule ForgeWeb.WorkerChannelTest do
       assert recorded.harness["version"] == "2.1.220"
       assert Workers.runs?(recorded, "claude_code")
       assert Workers.offered(nil).aliases == ["opus"]
+    end
+
+    # Kept as the channel's registry value and nowhere else: not a heartbeat, so the row is not
+    # touched (`docs/design/worker-channel.md` § Live figures).
+    test "stats are kept for the page and written nowhere", %{worker: worker, token: token} do
+      {:ok, _reply, socket} = join_worker(worker, token)
+      {:ok, _worker} = Workers.update(Workers.get!(worker.id), %{last_seen_at: nil})
+
+      push(socket, "stats", %{"cpu" => 12.5, "memory_used" => 1_000, "memory_total" => 4_000})
+
+      wait_until(fn -> Workers.stats(worker.id) != nil end)
+      assert Workers.stats(worker.id) == %{cpu: 12.5, memory_used: 1_000, memory_total: 4_000}
+      refute Workers.get!(worker.id).last_seen_at
+    end
+
+    test "stats that are not an object are dropped, and the channel lives", %{
+      worker: worker,
+      token: token
+    } do
+      {:ok, _reply, socket} = join_worker(worker, token)
+
+      push(socket, "stats", ["not", "an", "object"])
+      ref = push(socket, "heartbeat", %{"running" => []})
+      assert_reply ref, :ok
+
+      assert Process.alive?(socket.channel_pid)
+      assert Workers.stats(worker.id) == nil
     end
 
     test "heartbeat says we are still here", %{worker: worker, token: token} do
@@ -574,6 +753,197 @@ defmodule ForgeWeb.WorkerChannelTest do
     end
   end
 
+  # `docs/design/worker-log.md`: what the channel writes, and what it keeps of what a machine sends.
+  describe "the machine's log" do
+    defp log_types(worker), do: worker.id |> Log.for_worker() |> Enum.map(& &1.type)
+
+    defp line(worker, type) do
+      assert [line] = Enum.filter(Log.for_worker(worker.id), &(&1.type == type))
+      line
+    end
+
+    test "a line the machine sends is kept as its own, whatever it names", %{
+      worker: worker,
+      token: token
+    } do
+      {:ok, other, _t} = Workers.create(%{provider: "local"})
+      {:ok, _reply, socket} = join_worker(worker, token)
+
+      push(socket, "log", %{
+        "type" => "job.accepted",
+        "level" => "info",
+        "message" => "took on a job",
+        "worker_id" => other.id
+      })
+
+      wait_until(fn -> "job.accepted" in log_types(worker) end)
+      assert line(worker, "job.accepted").source == :worker
+      assert Log.for_worker(other.id) == []
+    end
+
+    test "a line that is not an object is dropped, and the channel lives", %{
+      worker: worker,
+      token: token
+    } do
+      {:ok, _reply, socket} = join_worker(worker, token)
+
+      push(socket, "log", ["not", "an", "object"])
+      ref = push(socket, "heartbeat", %{})
+      assert_reply ref, :ok
+
+      assert Process.alive?(socket.channel_pid)
+      assert log_types(worker) == ["joined"]
+    end
+
+    test "a join is a line, with what the machine said", %{worker: worker, token: token} do
+      {:ok, _reply, _socket} =
+        join_worker(worker, token, %{"protocol" => 1, "release" => "0.3.0", "build" => "abc123"})
+
+      wait_until(fn -> "joined" in log_types(worker) end)
+      assert line(worker, "joined").message == "release 0.3.0, build abc123, protocol 1"
+      assert line(worker, "joined").level == :info
+    end
+
+    test "a join that said nothing about itself says so", %{worker: worker, token: token} do
+      {:ok, _reply, _socket} = join_worker(worker, token)
+
+      wait_until(fn -> "joined" in log_types(worker) end)
+      assert line(worker, "joined").message == "release unknown, build unknown, protocol 0"
+    end
+
+    test "leaving is a line, and not a warning", %{worker: worker, token: token} do
+      {:ok, _reply, socket} = join_worker(worker, token)
+      Process.unlink(socket.channel_pid)
+      ref = leave(socket)
+      assert_reply ref, :ok
+
+      wait_until(fn -> "disconnected" in log_types(worker) end)
+
+      assert {line(worker, "disconnected").level, line(worker, "disconnected").message} ==
+               {:info, "left the channel"}
+    end
+
+    test "a connection that closed is a line, and not a warning", %{worker: worker, token: token} do
+      {:ok, _reply, socket} = join_worker(worker, token)
+      Process.unlink(socket.channel_pid)
+      :ok = close(socket)
+
+      wait_until(fn -> "disconnected" in log_types(worker) end)
+
+      assert {line(worker, "disconnected").level, line(worker, "disconnected").message} ==
+               {:info, "the connection closed"}
+    end
+
+    test "a channel closed because its row was retired says so", %{worker: worker, token: token} do
+      {:ok, worker} = Workers.update(worker, %{managed: false})
+      {:ok, _reply, socket} = join_worker(worker, token)
+      Process.flag(:trap_exit, true)
+      ref = Process.monitor(socket.channel_pid)
+
+      {:ok, []} = Workers.retire(Workers.get!(worker.id))
+      assert_receive {:DOWN, ^ref, :process, _pid, _reason}
+
+      wait_until(fn -> "disconnected" in log_types(worker) end)
+
+      assert {line(worker, "disconnected").level, line(worker, "disconnected").message} ==
+               {:info, "closed by the platform: the row was retired"}
+    end
+
+    # A deploy stops every channel with it, and that is not something wrong with the machine.
+    test "a platform shutting down is a line, and not a warning", %{worker: worker, token: token} do
+      {:ok, _reply, socket} = join_worker(worker, token)
+      Process.flag(:trap_exit, true)
+      wait_until(fn -> "joined" in log_types(worker) end)
+
+      GenServer.stop(socket.channel_pid, :shutdown)
+
+      wait_until(fn -> "disconnected" in log_types(worker) end)
+      disconnected = line(worker, "disconnected")
+      assert {disconnected.level, disconnected.message} == {:info, "the platform shut down"}
+    end
+
+    # What Phoenix hands a channel in production when its transport goes, which `Phoenix.ChannelTest`
+    # never makes: the socket server's `:peer_closed` and `:local_closed`, and a restart's
+    # `:draining`. None of them is something wrong with the machine.
+    test "the ways a connection really ends are lines, and not warnings" do
+      Process.flag(:trap_exit, true)
+
+      for {why, says} <- [
+            peer_closed: "the machine closed the connection",
+            local_closed: "the platform closed the connection",
+            draining: "the platform is restarting",
+            unheard_of: "shut down: :unheard_of"
+          ] do
+        {:ok, worker, token} = Workers.create(%{provider: "local"})
+        {:ok, _reply, socket} = join_worker(worker, token)
+        wait_until(fn -> "joined" in log_types(worker) end)
+
+        GenServer.stop(socket.channel_pid, {:shutdown, why})
+
+        wait_until(fn -> "disconnected" in log_types(worker) end)
+
+        assert {line(worker, "disconnected").level, line(worker, "disconnected").message} ==
+                 {:info, says}
+      end
+    end
+
+    # A crash says what kind of error it was and nothing else: the stack trace and whatever the
+    # error carried are the platform's, and this line is on the machine owner's page.
+    test "a crash says what kind, and keeps what it carried to the journal", %{
+      worker: worker,
+      token: token
+    } do
+      {:ok, _reply, socket} = join_worker(worker, token)
+      Process.flag(:trap_exit, true)
+      wait_until(fn -> "joined" in log_types(worker) end)
+
+      {:current_stacktrace, stack} = Process.info(self(), :current_stacktrace)
+      crash = {%RuntimeError{message: "the platform's own secret"}, stack}
+
+      ExUnit.CaptureLog.capture_log(fn -> GenServer.stop(socket.channel_pid, crash) end)
+
+      wait_until(fn -> "disconnected" in log_types(worker) end)
+      disconnected = line(worker, "disconnected")
+      assert {disconnected.level, disconnected.message} == {:warning, "crashed: RuntimeError"}
+    end
+
+    # How a crash in the channel, or a connection torn down under it, shows up.
+    test "a channel that ended any other way is a warning, naming only the kind" do
+      Process.flag(:trap_exit, true)
+
+      for {reason, says} <- [
+            {:boom, "ended: :boom"},
+            {{:badmatch, "the platform's own secret"}, "ended: :badmatch"},
+            {"the platform's own secret", "ended: an error"}
+          ] do
+        {:ok, worker, token} = Workers.create(%{provider: "local"})
+        {:ok, _reply, socket} = join_worker(worker, token)
+        wait_until(fn -> "joined" in log_types(worker) end)
+
+        ExUnit.CaptureLog.capture_log(fn -> GenServer.stop(socket.channel_pid, reason) end)
+
+        wait_until(fn -> "disconnected" in log_types(worker) end)
+        disconnected = line(worker, "disconnected")
+        assert {disconnected.level, disconnected.message} == {:warning, says}
+      end
+    end
+
+    # A refused join ends in `terminate/2` too. Its refusal is the line; a `disconnected` after
+    # it would be a connection that never was.
+    test "a refused join is its refusal, not a join and a parting", %{
+      worker: worker,
+      token: token
+    } do
+      {:ok, worker} = Workers.update(worker, %{managed: false})
+      too_new = ForgeCore.WorkerProtocol.current() + 1
+
+      assert {:error, _reply} = join_worker(worker, token, %{"protocol" => too_new})
+      Process.sleep(100)
+
+      assert log_types(worker) == ["join.refused"]
+    end
+  end
+
   describe "rejoining" do
     setup :ticket_with_job
 
@@ -598,6 +968,10 @@ defmodule ForgeWeb.WorkerChannelTest do
 
       assert Jobs.get!(job.id).status == :pending
       assert "job.interrupted" in (job.ticket_id |> Events.for_ticket() |> Enum.map(& &1.type))
+
+      # And the machine's log says which job it came back without.
+      assert [lost] = Enum.filter(Log.for_worker(worker.id), &(&1.type == "job.lost"))
+      assert {lost.level, lost.job_id} == {:warning, job.id}
     end
 
     test "a job the platform has finished with is cancelled", context do

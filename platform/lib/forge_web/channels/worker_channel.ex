@@ -264,7 +264,7 @@ defmodule ForgeWeb.WorkerChannel do
         Conversations.ended(chat, payload["commit"], payload["reason"])
 
       %{} ->
-        Jobs.hibernate(job_id, payload["commit"], payload["reason"])
+        Jobs.hibernate(job_id, payload["commit"], payload["reason"], payload["result"])
     end
   end
 

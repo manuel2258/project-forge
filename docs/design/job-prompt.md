@@ -86,26 +86,40 @@ ticket's branch against its base, taken when the job was created.
 
 - Read the inputs. Do the work described by the state prompt. Commit code to the current
   branch with ordinary commits; history is squashed later.
-- Write each declared output to its path under `out/`. Do not write anything else there;
-  undeclared files are rejected and the job ends with outcome `error`. The one exception is
-  `out/proposals/`, which `Dir.collect/2` subtracts before it counts what is undeclared.
-- Begin each document with YAML front matter containing `outcome`, one of the values listed
-  in the manifest, or `did_not_converge` if the work could not be completed.
-- Ask questions inside the document, next to the passage they concern, as fenced
-  `question` blocks. Prefer few, specific questions with a recommended default. State the
-  assumption taken for non-blocking questions and continue. Use `blocking: true` only when
-  no reasonable assumption exists.
+- Write each declared output to the path the manifest gives. Nothing else goes in `out/` but
+  `proposals/`, which `Dir.collect/2` subtracts before it counts what is undeclared.
+- The document the manifest marks as carrying the outcome begins with YAML front matter holding
+  `outcome`: one of the values the manifest lists, or `did_not_converge`.
+- An output that cannot be accepted — missing, undeclared, unparseable, or declaring an outcome
+  the state does not allow — is not the end: the job is told what is wrong and resumed to fix it
+  (`claude-code-events.md` § Correcting the outputs). The preamble says so in one sentence, so the
+  correction message is not a surprise, and says nothing about what happens after the last round.
+- Ask questions inside the document, next to the passage they concern, as fenced `question`
+  blocks. Prefer few, specific questions with a recommended default. State the assumption taken
+  for non-blocking questions and continue. Use `blocking: true` only when no reasonable
+  assumption exists; the job resumes with the answers.
+- **Put `text`, `anchor` and `assumption` in double quotes.** The block is YAML, and the failure
+  it prevents is the one production had: unquoted text holding `: ` is not YAML. One rule an agent
+  can follow without knowing YAML's indicator characters beats a list of them.
 - Propose a ticket for work that is real but not this ticket's, instead of doing it or losing
   it: one file per proposal in `out/proposals/`, an H1 title and a body, with no front matter
   and no `question` blocks. A proposal is a suggestion; nothing runs until a person accepts it,
   and there is a limit per job (`ticket-proposals.md`).
 - Read `tickets/index.md` before proposing. It lists every ticket on the project and every open
   proposal, as a snapshot; each ticket's file holds its body and nothing else.
+- The general tools on `PATH` are named, because an agent that does not know `python3` is there
+  reaches for it anyway and finds out, or does not reach for it at all (`worker-tier.md` § The
+  worker image). The chat preamble names them too; `platform.md` does not repeat them.
 - Budgets are fixed. Stop when told to; the platform enforces them regardless.
 - Do not edit `.forge/workflow.yml`, anything under `.forge/agents/` or anything under
   `.forge/commands/` in this job.
 - Do not write outside the repository and `$FORGE_JOB/out/` — and `$FORGE_JOB/invoke.json`, when
   the manifest lists commands this job may run.
+
+What the preamble leaves out, on purpose: anything the platform does that the agent cannot act on
+— that a failed job's proposals are withheld, that an unreadable proposal is kept verbatim, how a
+correction round is budgeted. `platform.md` is where the machinery is described, for the agent
+whose question is what becomes of its output.
 
 ## Output format
 
@@ -120,17 +134,27 @@ outcome: done
 ```question
 key: storage-backend
 anchor: "Persist the high score table"
-text: Local file or the existing SQLite database?
+text: "Local file or the existing SQLite database?"
 options: [local-file, sqlite]
 default: sqlite
 blocking: false
-assumption: sqlite
+assumption: "sqlite, which the scores already sit beside"
 ```
 ```
 
 `key` is stable within the document and is how answers attach. `anchor` quotes the passage
 so the queue can show the question in context. `options` is a short list; free text is
 always allowed as an answer but is not offered as a tap.
+
+The block is YAML, and YAML types what it reads: `options: [5, 10, 20]` is three integers and
+`default: true` a boolean. **Wherever text is meant — `key`, `text`, `anchor`, `options`,
+`default`, `assumption` — a number or a boolean is read as the text it was written as**
+(`ForgeCore.Document.Question`), because an agent writing `[5, 10, 20]` meant three labels, and
+refusing it once dropped a whole refinement in production. The one loss is a number YAML
+normalises while reading (`1e3` arrives as `1000.0`). A list or a mapping where text is meant is
+still refused, and `blocking` is still a flag. What remains refusable — an unquoted value holding
+`: `, a key that is not lowercase — goes back to the agent before the job reports
+(`claude-code-events.md` § Correcting the outputs).
 
 ## Blocking questions and `waiting`
 

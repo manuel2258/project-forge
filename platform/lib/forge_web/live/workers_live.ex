@@ -87,6 +87,9 @@ defmodule ForgeWeb.WorkersLive do
     assign(socket,
       rows: rows,
       projects: Projects.list(user),
+      # Whether the viewer has any template of their own: with none, no machine can be made for
+      # them, and the header's Templates button says so (`ui.md` § The workers page).
+      has_templates: Forge.Provisioning.templates(user) != [],
       live_count: Enum.count(rows, &(&1.worker.status != :destroyed)),
       connected_count: Enum.count(rows, & &1.connected),
       slice_bytes: Workers.slice_bytes(),
@@ -720,17 +723,30 @@ defmodule ForgeWeb.WorkersLive do
         >
           {if @show_destroyed, do: "Hide destroyed", else: "Show destroyed"}
         </button>
+        <%!-- Filled when there is none: the one state in which this page has nothing to show and
+              nothing will appear by waiting. Primary, not accent — no person is waited on yet. --%>
+        <.link
+          id="templates-button"
+          navigate={~p"/templates"}
+          class={[
+            "flex min-h-[46px] items-center rounded-field px-3 text-sm",
+            if(@has_templates,
+              do: "border border-base-300 hover:border-base-content/30",
+              else: "bg-primary text-primary-content"
+            )
+          ]}
+        >
+          Templates
+        </.link>
       </header>
+
+      <p :if={not @has_templates} id="no-templates" class="mt-2 text-sm/[1.55] text-error">
+        You have no templates, so no machine of yours can be made.
+      </p>
 
       <p class="mt-2 text-sm/[1.55] opacity-60">
         A job is scheduled against what it asked for, in memory and in cores, and against the
         kinds a machine says it takes. A job that declares nothing gets {gib(@slice_bytes)}.
-        <.link
-          navigate={~p"/templates"}
-          class="inline-flex min-h-[46px] items-center text-primary hover:underline"
-        >
-          Templates ›
-        </.link>
       </p>
 
       <p :if={@error} class="mt-4 text-sm text-error">{@error}</p>

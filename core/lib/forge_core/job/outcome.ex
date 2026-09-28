@@ -85,7 +85,7 @@ defmodule ForgeCore.Job.Outcome do
         {:error, nil, "undeclared outputs: #{Enum.join(run.undeclared, ", ")}"}
 
       map_size(run.invalid) > 0 ->
-        {:error, nil, "invalid documents: #{run.invalid |> Map.keys() |> Enum.join(", ")}"}
+        {:error, nil, "invalid documents: #{invalid(run.invalid)}"}
 
       true ->
         declared(spec, run.documents)
@@ -124,6 +124,19 @@ defmodule ForgeCore.Job.Outcome do
   end
 
   defp to_line(_other), do: ""
+
+  # **Each document with what is wrong with it**, not only its name. The name alone was the whole
+  # record of two failed refinements in production: the documents were dropped, the machines
+  # destroyed, and why they did not parse had to be recovered by rebuilding them from transcripts.
+  defp invalid(invalid) do
+    # Sorted so the reason reads the same every time. No test can see it: a map of 32 keys or
+    # fewer already iterates in key order, and 33 invalid documents is a fixture nobody writes.
+    invalid
+    |> Enum.sort()
+    |> Enum.map_join("; ", fn {name, why} ->
+      "#{name} (#{why |> ForgeCore.Error.to_text() |> String.replace("\n", "; ")})"
+    end)
+  end
 
   # Exit status 2 is documented as the cost ceiling. It does not also cover an authentication
   # failure: that exits 1 and does produce a result message, so it never reaches here.

@@ -120,6 +120,8 @@ than only the fields named here.
 All are `job.harness.*` in the event log, with `job_id`, `ticket_id`, `actor = {job, id}`:
 
 `started` (session_id, model, tools), `text` (text), `tool_use` (id, name, input),
+`correction` (round, of, problems — the worker's own, § Correcting the outputs), `starting`
+(waited_s, gave_up, stderr — the worker's own, § A harness that never starts),
 `tool_result` (tool_use_id, is_error, bytes, excerpt), `delivered` (text), `control`
 (request_id, subtype), `retry` (attempt, max_retries, error), `notice` (subtype), `rate_limit`
 (status, resets_at, rate_limit_type, utilization, is_using_overage, windows), `unknown` (type),
@@ -174,11 +176,13 @@ Decided in this order, first match wins:
    status 2 with an error result (documented as the cost ceiling): `budget_exhausted`.
 4. Any other non-success `result`, or `is_error`: `error`.
 5. Success, but a declared artifact in `produces` is missing or has no parseable front
-   matter: `error`.
+   matter: `error` — once § Correcting the outputs has had its rounds.
 6. Front matter `outcome` is `did_not_converge`: `did_not_converge`. An agent may always
    report this, whatever the state declares.
 7. Front matter `outcome` is a declared outcome of the state: `converged`, with
-   `declared_outcome` set. Anything else: `error`.
+   `declared_outcome` set. Anything else: `error` — once § Correcting the outputs has had its
+   rounds, which also covers an undeclared file in `out/` (rule 5's neighbour in
+   `ForgeCore.Job.Outcome`).
 
 ### Naming the failure
 
@@ -199,6 +203,88 @@ ceiling "or an authentication failure before the first turn, which yields no res
 is caught earlier". It does not: an authentication failure exits **1** and does produce a result
 message, so it was never caught earlier. Rule 3 is unchanged — exit 2 with an error result is
 still the cost ceiling — but nothing may assume an unauthenticated run is silent.
+
+## Correcting the outputs
+
+A run can end cleanly and still end in `error` because of what it wrote: a document that does not
+parse, a declared output it never wrote, a file in `out/` nobody declared, or an outcome the state
+does not accept. **Before the worker reports such a run, it resumes the same session and tells it
+what is wrong** — up to twice — and reports only what the last round leaves behind.
+
+The case that made it a rule: two refinements failed in production, one on a `question` block
+whose unquoted text held `: `, one on `options: [5, 10, 20]`, which YAML types as integers. Each
+agent had finished its work and said it was waiting for answers; each document was dropped with
+its questions, the job ended in `error`, and the ticket stuck with no transition out. Either
+mistake is a sentence away from fixed, and the session that made it is the one that knows what it
+meant.
+
+**Where.** In the worker's runner (`ForgeWorker.Job.Runner`), not on the platform. The validator
+is `ForgeCore.Document.parse/2`, which the worker already runs when it collects `out/`, and the
+session lives in the job's private `HOME` on this machine — a round trip through the platform
+would ask a question the worker can answer, and would then need the machine to still be there.
+The platform hears one result, as before, and still checks what arrives.
+
+**When** (`ForgeCore.Job.Correction.needed/2`, pure): the run is `finished` with outcome `error`,
+nothing killed it, the harness's result is `success` without `is_error`, and the reason is in the
+outputs — `missing`, `undeclared`, `invalid`, or an outcome document whose `outcome` is absent or
+not the state's. A run the harness stopped for its budget, one that failed to authenticate, one
+that is `waiting` or parked, and one that failed for any other reason is reported as it is.
+
+**How.** Another harness process in the same runner, the same slice and the same job directory,
+with `out/` exactly as the last round left it: `--resume <session_id>` and, on stdin, the problems
+one per line (`Correction.prompt/3`), written to `correction-<n>.md` beside `prompt.md` so both
+stay readable. It ends like any run and is collected and decided again. Each round is announced as
+`job.harness.correction` with the problems it was sent, so the timeline says it happened.
+
+**What it may spend.** The job's budget, not a new one: a round gets the turns and cost the
+earlier rounds left (`Correction.remaining/2`), and none starts on less than one turn or no money.
+The wall clock is the runner's and covers every round. A cancel reaches whichever process is
+running, because it is the same runner — and one that lands after a round printed its result and
+before it exited is still a cancel: a run asked to stop is never corrected, and is reported
+killed. The spawn options a round is started from are kept behind a function, because they carry
+the git token and the runner's state is what a crash report prints. Two rounds at most (`:max_corrections`); after the last,
+the run is reported as it stands.
+
+**What the platform is told.** One result: the last round's documents and outcome, with the
+harness summary's `turns`, `cost_usd` and `duration_ms` summed over every round and `corrections`
+saying how many ran — the platform adds a result's figures to the job once, so a result carrying
+only the last process's would lose the rest. One transcript holds every round, in order.
+
+**What is not corrected.** A conversation: it has no outputs to accept, and a person reads every
+turn. A proposal that does not parse: it never fails the job (`ticket-proposals.md` § Malformed
+degrades, never drops). And whether the failure reached the operator at all: when every round
+fails, `job.finished` carries each invalid document's errors as text (`invalid`), and the reason
+names them in one line — the name alone was what the two production failures left.
+
+## A harness that never starts
+
+`system/init` is the harness saying it started. A process given its prompt that has not said so
+is reported every two minutes as `job.harness.starting` — how long it has waited and the last
+2 KiB of its stderr, which is where `nix develop` writes what it is building — and stopped after
+thirty (`ForgeWorker.Job.Runner`, `:start_notice_ms` and `:start_timeout_ms`). The run then ends
+like one with no result message, and its reason says it never started, with stderr's last line.
+A conversation that ends this way is reported hibernated with that reason, so it can be reopened
+on a machine that works.
+
+The case: two new chats on one machine, which had just closed a third after an hour of Android
+builds, sat for 38 minutes with the worktree fetched and not one `job.harness.*` event, until the
+machine was destroyed by hand. The same chat started within a minute and a half on a fresh one.
+Why the first machine stalled is **not known** — the machine is gone, its journal with it, and
+nothing that could have said was sent anywhere. The candidates are the ones a used machine has and
+a fresh one lacks (a disk near the Nix store's `min-free`, so a garbage collection under the
+store's lock; a leftover of the earlier chat), and they are guesses. What is fixed is that the
+next one says what it is waiting on while it waits.
+
+The watch starts when the prompt is delivered, not when the process is spawned: a reopened
+conversation holding its prompt until someone writes (§ Invocation) is silent because it has been
+given nothing. Each correction round (§ Correcting the outputs) is timed from its own start. A
+harness that said it started and then works for hours is the wall clock's business, not this.
+
+Two more gaps from the same case are closed in `ForgeWorker.Link`. A conversation process that
+crashed was never reported — nothing monitored it — so the platform went on believing it ran; the
+link now monitors each one and reports a crash as `failed`. And a message for a chat that is not
+running on the machine was a line in the journal only; it is a `chat.missing` line in the machine's
+log, which reaches the platform's worker log.
 
 ## Resume
 

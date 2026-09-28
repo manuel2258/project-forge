@@ -135,6 +135,7 @@ measure; each route sets its own:
 | `/` | 34rem at every viewport | One ordered list. Width only lets a second item compete for the same glance. |
 | `/board` | none | Full viewport. The columns are the workflow topology; capping them destroys the artefact. |
 | `/projects/:name` | none | The same board for one project, beside a 21rem rail. Same reason. |
+| `/projects` | 60rem | One row per project: its name, then what it has to run on. A list, not a board — the boards are a tap away on each row. |
 | `/workers` | 74rem | One block per machine, ruled, not a table: a header line, three meters and two columns that stack on a phone. Wide enough for the two columns, no wider. |
 | `/workers/:id` | 74rem | One machine: its header line and its log, newest first. The workers page's measure, because it is that page's row, looked at alone. |
 | `/templates` | 60rem | Two lists with a form each — provider credentials, then templates. Not one wide table, so narrower than `/workers`; a template row carries its shape, figures, count and actions, and wraps where they do not fit. |
@@ -152,11 +153,11 @@ measure; each route sets its own:
 | `/users/pending` | 34rem | A sentence and one button. The queue's measure because it is a single column of prose, and the only route that draws the layout **without its nav** — every link in it leads somewhere this account is redirected away from. |
 
 Navigation is a hairline-ruled top row on a laptop and a fixed bottom bar on a phone (56px plus
-safe-area inset, each item a full-height tap target, Queue carrying the only badge in the
-product). The laptop row carries Queue, Board, Workers and Chats; the phone bar carries Queue,
-Board, Chats and **More**, and everything else the laptop header holds is in the sheet More
-opens (§ The phone). Tickets joins both when `/tickets` exists, and not before. Nothing on
-`/workers` waits on a human, which is why nothing on it is accent.
+safe-area inset, each item a full-height tap target, Queue carrying the only badge in the product).
+The laptop row carries Queue, Board, Projects, Workers and Chats; the phone bar carries Queue,
+Board, Chats and **More**, and everything else the laptop header holds is in the sheet More opens (§
+The phone). Tickets joins both when `/tickets` exists, and not before. Nothing on `/workers` waits
+on a human, which is why nothing on it is accent.
 
 **Accounts is not a nav item.** It is one link beside the address in the laptop header and one
 row in the phone's sheet, shown only to a node admin, because account governance is not a place
@@ -456,6 +457,20 @@ nothing waiting it says so and names what would put something there. Beneath, wi
 under no count, is what an agent **assumed and carried on from**: the non-blocking questions the
 queue's digest sends here to be answered (§ Not waiting on you).
 
+**Run again.** Beneath the transition card, and on its own when there is no card, a row names the
+state and offers to run it again — `Run refining again` — whenever the ticket rests in a job or
+command state with nothing live in it (`workflow-grammar-v1.md` § Running a state again). It is
+on the ticket page after a success as well as a failure, because redoing a refinement before
+approving it is a choice a person makes while reading it. In the queue it is on the stuck card
+only. An approval card already asks one thing — this version, yes or no — and a third row that
+throws the version away is a decision made from the ticket page, where the version is read. A
+transition whose approval has nothing to approve is never on either card.
+
+**Cancel ticket** is at the foot of the rail, in error colour behind a confirm, on an active or
+stuck ticket; a cancelled one has **Restore** there instead, with a line saying where it is hidden
+and what restoring leaves (`workflow-grammar-v1.md` § Cancelling a ticket). It is rare and
+undoable, so it sits apart from Decide, which is where the ticket's next step is chosen.
+
 **A human state's documents are written here**, above its transition card: one editor per name
 the state declares in `produces` (`workflow-grammar-v1.md` § Semantics), holding the latest version
 when there is one, and a filled *Save* that records what was typed as a new version by the person.
@@ -489,8 +504,8 @@ column. Nothing is removed at this width; § The work screen is the one page wit
 **More opens a sheet**, a native `<dialog>` drawn as a bottom sheet, opened with `showModal()`
 from a dispatched event and closed by Escape, a tap on the backdrop, or navigating. Focus and
 inertness come from the element rather than from code. In order: the capacity gauge with its
-detail written out (§ The capacity gauge in the top bar); Workers, Templates, New project, and
-Accounts for a node admin; then the account's address, which opens settings, the theme toggle,
+detail written out (§ The capacity gauge in the top bar); Projects, Workers, Templates, New
+project, and Accounts for a node admin; then the account's address, which opens settings, the theme toggle,
 and Log out. Every row is a 46px target. Logged out there is no More, and so no theme toggle
 where a laptop's top row has one: what a logged-out phone reaches is the log-in forms, and the
 theme there is the system's, as it is everywhere until someone picks one.
@@ -498,8 +513,8 @@ theme there is the system's, as it is everywhere until someone picks one.
 **This is the menu the note used to forbid** — *no hamburger at any width*. The objection was to
 hiding the product's places behind a control, and it was right for the places that matter most:
 Queue, Board and Chats stay one tap away on the bar. What the sheet holds is the rest of what a
-laptop reaches from its top row — Workers from its nav, Templates from the Workers page, the
-gauge, New project, Accounts and the account from the header's right-hand group — and the
+laptop reaches from its top row — Projects and Workers from its nav, Templates from the Workers
+page, the gauge, New project, Accounts and the account from the header's right-hand group — and the
 alternative was not having them on a phone at all.
 
 **The board stacks below `sm`.** Each state is a section — its name with the topology glyph and
@@ -599,6 +614,24 @@ made, when they have come to change the workflow and have found that they cannot
 when they are minting the credential to use it with — settings names the URL a token is for, and
 shows it once with the token in it. A git URL anywhere else is an invitation to a surface that is
 not the product.
+
+## The projects page
+
+`/projects` lists the projects the viewer is a member of, one row each, and nobody else's
+(`design/identity.md` § Read scoping). Before it a project was reached from a ticket, the board's
+column headings or a URL, and nothing answered "which projects are there, and can each of them
+run anything?".
+
+A row is the project's name, which leads to its page, and four figures: its open tickets, the
+templates assigned to it, the permanent machines assigned to it, and the credentials in its pool
+that are not revoked. **A project that cannot run anything says so in error colour** — "no
+template or machine", "no credential", or both — for the same reason a permanent machine that
+serves nothing does on the workers page: it is the state that looks fine everywhere else and takes
+no work. A project runs on a template *or* a permanent machine, so either one is enough. The
+figures are counted in one query each over every project on the page, never one query per row.
+The page reloads when a ticket of one of its projects changes, filtered to those projects before
+anything is read; an assignment is not announced, and shows on the next visit. Nothing on it is
+accent; nothing on it waits on a person. New project is in the header, as on the top row.
 
 ## The project page
 
@@ -738,6 +771,11 @@ retires it — from its row here, or with `mix forge.worker.retire`. It holds no
 slot: that ceiling is a template's and counts the machines made from it, and a permanent worker
 came from no template. Destroyed rows are hidden unless asked for: they are history, and the page
 is about what exists.
+
+**Templates is a button in the header**, not a link inside the explanation beneath it, where it
+used to be the only way there from a laptop. While the viewer has no template of their own it is
+drawn filled, and a line beneath the header says in error colour that no machine of theirs can be
+made: the machines on this page are the viewer's, and a machine is made from its owner's template.
 
 Nothing here is accent. It is a readout with three decisions in it: what a permanent machine
 offers (below), which projects it serves, and — on every row that is not destroyed — ending it.

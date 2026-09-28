@@ -447,6 +447,26 @@ defmodule ForgeWeb.Operator.Components do
   end
 
   @doc """
+  Runs the state the ticket rests in again (`docs/design/ui.md` § Decide and Timeline): after a
+  failure, or after a success whose documents a person wants done afresh. An answer row, because
+  it commits something — it spends a job.
+  """
+  attr :ticket, :map, required: true
+
+  def retry_row(assigns) do
+    ~H"""
+    <.answer_row
+      id={"retry-#{@ticket.id}"}
+      phx-click="retry"
+      phx-disable-with="Starting…"
+      phx-value-ticket={@ticket.id}
+    >
+      Run {@ticket.state} again
+    </.answer_row>
+    """
+  end
+
+  @doc """
   One document a human state declares, written by the person while the ticket rests there
   (`docs/design/ui.md` § Decide and Timeline): the latest version to start from, and a filled
   *Save* that records what was typed as a new version. Not a decision, so no accent.

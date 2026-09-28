@@ -173,8 +173,27 @@ defmodule ForgeCore.Job.OutcomeTest do
                run(%{documents: %{"plan.md" => plan("done")}, undeclared: ["notes.md"]})
              )
 
-    assert {:finished, :error, nil, "invalid documents: plan.md"} =
+    assert {:finished, :error, nil, "invalid documents: plan.md ([:bad])"} =
              Outcome.decide(spec(), run(%{invalid: %{"plan.md" => [:bad]}}))
+  end
+
+  # The document's name was once the whole reason, and the parse errors were thrown away with the
+  # document — so a failed refinement said which file was wrong and never what was wrong with it.
+  test "an invalid document is named with what is wrong with it, one line" do
+    errors = [
+      ForgeCore.Error.new("question[2].options", "must be a non-empty list of strings"),
+      ForgeCore.Error.new("question[2].default", "must be a string")
+    ]
+
+    assert {:finished, :error, nil, reason} =
+             Outcome.decide(
+               spec(),
+               run(%{invalid: %{"plan.md" => errors, "notes.md" => "is not UTF-8"}})
+             )
+
+    assert reason ==
+             "invalid documents: notes.md (is not UTF-8); plan.md (question[2].options: " <>
+               "must be a non-empty list of strings; question[2].default: must be a string)"
   end
 
   test "the outcome document decides between converged, did_not_converge and error" do

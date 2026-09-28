@@ -15,6 +15,7 @@ defmodule ForgeCore.Job.Result do
 
   alias ForgeCore.Document
   alias ForgeCore.Document.Question
+  alias ForgeCore.Error
   alias ForgeCore.Proposal
 
   @enforce_keys [:status]
@@ -107,7 +108,7 @@ defmodule ForgeCore.Job.Result do
       "stderr_path" => result.stderr_path,
       "questions" => Enum.map(result.questions, &question_to_map/1),
       "documents" => Map.new(result.documents, fn {name, doc} -> {name, doc_to_map(doc)} end),
-      "invalid" => Map.new(result.invalid, fn {name, why} -> {name, inspect(why)} end),
+      "invalid" => Map.new(result.invalid, fn {name, why} -> {name, Error.to_text(why)} end),
       "missing" => result.missing,
       "undeclared" => result.undeclared,
       "proposals" =>

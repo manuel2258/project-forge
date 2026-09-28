@@ -332,6 +332,142 @@ defmodule ForgeWeb.OperatorLiveTest do
     assert Tickets.get!(ticket.id).status == :stuck
   end
 
+  # The production case, through the surfaces that showed it: a refinement that failed left its
+  # ticket offering `planning`, which approves a refinement that was never written and failed when
+  # taken. What it offers now is the state again, and taking that makes the next attempt.
+  test "a ticket stuck on a failed job offers its state again, not a transition it cannot take",
+       %{
+         conn: conn,
+         user: user,
+         project: project
+       } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
+    scenario("invalid_document", "refinement.md")
+    run_pending(ticket.id)
+    assert Tickets.get!(ticket.id).status == :stuck
+
+    {:ok, queue, _html} = live(conn, ~p"/")
+    assert has_element?(queue, "#retry-#{ticket.id}", "Run refining again")
+    refute has_element?(queue, "[phx-value-to='planning']")
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+    refute has_element?(view, "#hoisted-decision [phx-value-to='planning']")
+
+    assert view |> element("#retry-#{ticket.id}") |> render_click() =~ "Running refining again"
+
+    assert Tickets.get!(ticket.id).status == :active
+
+    assert [%{attempt: 2, status: :pending}] =
+             Enum.filter(Jobs.for_ticket(ticket.id), &(&1.status == :pending))
+  end
+
+  # Offered after a success as well, on the ticket page — redoing a refinement before approving
+  # it is a choice made while reading it — and not in the queue, which lists only what waits.
+  test "a ticket awaiting approval offers its state again on its page, not in the queue", %{
+    conn: conn,
+    user: user,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
+    scenario("success", "refinement.md")
+    run_pending(ticket.id)
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+    assert has_element?(view, "#retry-#{ticket.id}")
+
+    {:ok, queue, _html} = live(conn, ~p"/")
+    refute has_element?(queue, "#retry-#{ticket.id}")
+  end
+
+  # Stuck while its job is still pending — the scheduler could not place it — the state cannot
+  # be run again: its job has not run yet. The card offers what it can and not that.
+  test "a ticket stuck with its job still pending is not offered its state again", %{
+    conn: conn,
+    user: user,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
+    {:ok, _stuck} = Forge.Engine.stick(ticket, "no machine", :placement)
+
+    {:ok, queue, _html} = live(conn, ~p"/")
+    assert has_element?(queue, "#transitions-#{ticket.id}")
+    refute has_element?(queue, "#retry-#{ticket.id}")
+  end
+
+  # A stale page can still send a transition the surfaces no longer offer; the refusal says
+  # which document has nothing to approve rather than "something went wrong".
+  test "taking a transition with nothing to approve says what is missing", %{
+    conn: conn,
+    user: user,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
+    scenario("invalid_document", "refinement.md")
+    run_pending(ticket.id)
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+
+    assert render_hook(view, "transition", %{"ticket" => ticket.id, "to" => "planning"}) =~
+             "refinement.md has no version to approve"
+  end
+
+  test "a ticket is cancelled from its page, leaves the board, and is restored there", %{
+    conn: conn,
+    user: user,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Never mind"}, {:user, user.id})
+
+    {:ok, board, _html} = live(conn, ~p"/projects/#{project.name}")
+    assert render(board) =~ "Never mind"
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+    refute has_element?(view, "#restore-ticket")
+    assert view |> element("#cancel-ticket") |> render_click() =~ "Ticket cancelled"
+    assert Tickets.get!(ticket.id).status == :cancelled
+
+    {:ok, board, _html} = live(conn, ~p"/projects/#{project.name}")
+    refute render(board) =~ "Never mind"
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+    refute has_element?(view, "#cancel-ticket")
+    assert view |> element("#restore-ticket") |> render_click() =~ "stuck in refining"
+    assert Tickets.get!(ticket.id).status == :stuck
+  end
+
+  # Offered on a stuck ticket too, which is where a failed one rests; never on a done one.
+  test "Cancel is on an open ticket's rail only", %{conn: conn, user: user, project: project} do
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+
+    for {status, offered} <- [stuck: true, done: false] do
+      Tickets.get!(ticket.id) |> Ecto.Changeset.change(status: status) |> Forge.Repo.update!()
+      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+      assert has_element?(view, "#cancel-ticket") == offered
+      refute has_element?(view, "#restore-ticket")
+    end
+  end
+
+  # What each refusal says, through the page that sends it. A stale page can send any of these.
+  test "a refused cancel, restore, retry or transition says why", %{
+    conn: conn,
+    user: user,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+
+    assert render_hook(view, "restore-ticket", %{"ticket" => ticket.id}) =~
+             "only a cancelled ticket can be restored"
+
+    {:ok, _ticket} = Forge.Engine.cancel(ticket, user.id)
+
+    assert render_hook(view, "cancel-ticket", %{"ticket" => ticket.id}) =~
+             "a cancelled ticket cannot be cancelled"
+
+    assert render_hook(view, "transition", %{"ticket" => ticket.id, "to" => "planning"}) =~
+             "the ticket is cancelled; restore it first"
+  end
+
   test "the job page shows the pinned manifest and harness events", %{
     conn: conn,
     user: user,

@@ -110,10 +110,10 @@ defmodule ForgeWeb.TicketLive do
       chats: Conversations.summaries(ticket_id: ticket.id),
       events: ticket.id |> Events.for_ticket() |> Enum.reverse() |> Enum.take(4),
       activity: if(current, do: Events.for_job(current.id), else: []),
-      transitions:
-        workflow |> Workflow.transitions_from(ticket.state) |> Enum.map(& &1.to) |> Enum.uniq(),
+      transitions: Engine.offered_transitions(ticket, workflow),
+      retry: Engine.retryable?(ticket),
       human_state:
-        ticket.status in [:active, :stuck] and
+        ticket.status in Forge.Tickets.Ticket.open_statuses() and
           Workflow.State.human?(Workflow.state(workflow, ticket.state)),
       writable: writable(ticket, workflow),
       proposals: Proposals.open_for_ticket(ticket.id),
@@ -129,7 +129,10 @@ defmodule ForgeWeb.TicketLive do
   # `produces`, with the latest version of each when there is one (`docs/design/ui.md` § Decide
   # and Timeline). A job state's are the job's to write, so it offers none.
   defp writable(ticket, workflow) do
-    case Workflow.state(workflow, ticket.state) do
+    # Nothing is written into a ticket that is done or cancelled: it rests where no one decides.
+    state = if ticket.status in Forge.Tickets.Ticket.open_statuses(), do: ticket.state
+
+    case state && Workflow.state(workflow, state) do
       %Workflow.State{prompt: nil, invoke: [], produces: produces} ->
         Enum.map(produces, &{&1, Artifacts.latest(ticket.id, &1)})
 
@@ -338,7 +341,7 @@ defmodule ForgeWeb.TicketLive do
   defp deciding?(assigns),
     do:
       assigns.ticket.pending_transition != nil or blocking(assigns) != [] or
-        stuck_or_human?(assigns)
+        stuck_or_human?(assigns) or assigns.retry or assigns.writable != []
 
   # The changeset approval, at the foot of the diff it approves — only when that approval is what
   # the ticket waits on.
@@ -467,6 +470,9 @@ defmodule ForgeWeb.TicketLive do
           ticket={@ticket}
           transitions={@transitions}
         />
+        <div :if={@retry} class="mt-2">
+          <.retry_row ticket={@ticket} />
+        </div>
       </div>
     </section>
 
@@ -787,6 +793,34 @@ defmodule ForgeWeb.TicketLive do
         <span class="truncate">{event.type}</span>
       </li>
     </ol>
+    <%!-- Cancelling is rare and undoable, so it sits at the foot of the rail rather than beside
+          the decisions: `workflow-grammar-v1.md` § Cancelling a ticket. --%>
+    <div :if={@ticket.status in Forge.Tickets.Ticket.open_statuses()} class="mt-6">
+      <button
+        type="button"
+        id="cancel-ticket"
+        phx-click="cancel-ticket"
+        phx-value-ticket={@ticket.id}
+        data-confirm="Cancel this ticket? Its jobs stop and it is hidden everywhere but this page, where Restore brings it back."
+        class="flex min-h-[46px] items-center text-sm text-error hover:underline"
+      >
+        Cancel ticket
+      </button>
+    </div>
+    <div :if={@ticket.status == :cancelled} class="mt-6">
+      <p class="text-[12.5px] opacity-60">
+        Cancelled: hidden everywhere but here. Restoring leaves it stuck in {@ticket.state}.
+      </p>
+      <button
+        type="button"
+        id="restore-ticket"
+        phx-click="restore-ticket"
+        phx-value-ticket={@ticket.id}
+        class="flex min-h-[46px] items-center text-sm text-primary hover:underline"
+      >
+        Restore
+      </button>
+    </div>
     """
   end
 

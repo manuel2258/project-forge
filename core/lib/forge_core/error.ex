@@ -23,4 +23,14 @@ defmodule ForgeCore.Error do
       %__MODULE__{path: path, message: message} -> "#{path}: #{message}"
     end)
   end
+
+  @doc """
+  What went wrong, as text, whatever shape it arrived in: a list of errors is `format/1`'s lines,
+  text is itself, and anything else is inspected. For a reason that has to cross the wire or sit
+  in a timeline row, where a struct cannot.
+  """
+  @spec to_text(term()) :: String.t()
+  def to_text([%__MODULE__{} | _] = errors), do: format(errors)
+  def to_text(text) when is_binary(text), do: text
+  def to_text(other), do: inspect(other)
 end

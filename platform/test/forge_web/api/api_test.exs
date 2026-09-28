@@ -83,6 +83,65 @@ defmodule ForgeWeb.ApiTest do
     assert actor == member.id
   end
 
+  # The queue serves `retry` on a stuck item; the API is where a client acts on it. A transition
+  # with nothing to approve is refused by name, as on the page.
+  test "a stuck ticket's state is run again, and a transition with nothing to approve says so", %{
+    conn: conn,
+    user: user,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
+    name = project.name
+
+    assert %{"error" => %{"reason" => "job_live"}} =
+             conn |> post(~p"/api/v1/tickets/#{name}/1/retry") |> json_response(409)
+
+    scenario("invalid_document", "refinement.md")
+    run_pending(ticket.id)
+
+    assert %{"items" => [%{"kind" => "stuck", "detail" => %{"retry" => true}}]} =
+             conn |> get(~p"/api/v1/queue") |> json_response(200)
+
+    assert %{"error" => %{"reason" => "no_version"}} =
+             conn
+             |> post(~p"/api/v1/tickets/#{name}/1/transition", %{to: "planning"})
+             |> json_response(409)
+
+    assert %{"state" => "refining", "status" => "active"} =
+             conn |> post(~p"/api/v1/tickets/#{name}/1/retry") |> json_response(200)
+
+    assert [%{attempt: 2}] = Enum.filter(Jobs.for_ticket(ticket.id), &(&1.status == :pending))
+  end
+
+  test "a ticket is cancelled and restored, and leaves the ticket list meanwhile", %{
+    conn: conn,
+    user: user,
+    project: project
+  } do
+    {:ok, _ticket} = Tickets.admit(project, %{title: "Never mind"}, {:user, user.id})
+    name = project.name
+
+    assert %{"status" => "cancelled"} =
+             conn |> post(~p"/api/v1/tickets/#{name}/1/cancel") |> json_response(200)
+
+    assert %{"tickets" => []} =
+             conn |> get(~p"/api/v1/tickets?project=#{name}") |> json_response(200)
+
+    assert %{"error" => %{"reason" => "not_cancellable"}} =
+             conn |> post(~p"/api/v1/tickets/#{name}/1/cancel") |> json_response(409)
+
+    assert %{"error" => %{"reason" => "cancelled"}} =
+             conn
+             |> post(~p"/api/v1/tickets/#{name}/1/transition", %{to: "planning"})
+             |> json_response(409)
+
+    assert %{"status" => "stuck"} =
+             conn |> post(~p"/api/v1/tickets/#{name}/1/restore") |> json_response(200)
+
+    assert %{"error" => %{"reason" => "not_cancelled"}} =
+             conn |> post(~p"/api/v1/tickets/#{name}/1/restore") |> json_response(409)
+  end
+
   # A client that reads the queue decides what is waiting from the kind. A non-blocking question
   # served as a `question` would read as a halted job to every client that was not told otherwise.
   test "the queue serves a non-blocking question as an assumption", %{

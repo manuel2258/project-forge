@@ -62,7 +62,9 @@ defmodule Forge.Backlog do
 
   defp tickets(project_id) do
     Repo.all(
-      from t in Ticket,
+      # A cancelled ticket is hidden everywhere a ticket is listed, and a job reading the backlog is
+      # one more reader (`workflow-grammar-v1.md` § Cancelling a ticket).
+      from t in Forge.Tickets.visible(Ticket),
         where: t.project_id == ^project_id,
         order_by: [asc: t.number],
         select: %{

@@ -25,6 +25,15 @@ defmodule ForgeWorker.Job.Runner do
       to `commands/` in the job directory; see `ForgeWorker.Job.Dir.prepare/3`.
     * `:head` - the commit the worktree is at. Named in the continuation a resumed run is
       handed; see `ForgeCore.Prompt.continuation/3`.
+    * `:max_corrections` - prompt mode only. How many times a run whose outputs could not be
+      accepted is resumed with the problems listed, before it is reported (§ Correcting the
+      outputs in `docs/design/claude-code-events.md`). Default 2.
+    * `:start_notice_ms` - how often a harness that has been given its prompt and not yet said it
+      started is reported as `job.harness.starting`, with the tail of its stderr. Default two
+      minutes.
+    * `:start_timeout_ms` - how long it may take before it is stopped as one that never started.
+      Default thirty minutes (§ A harness that never starts in
+      `docs/design/claude-code-events.md`).
     * `:hold_prompt` - streaming only. When true nothing is delivered at start: the composed
       prompt waits for the first `send_message/2` and goes down with it, as one message. A
       reopened conversation with nothing waiting to be answered is the case
@@ -41,13 +50,22 @@ defmodule ForgeWorker.Job.Runner do
   # place; `Dir.prepare/3` clears `out/` for it, so it never inherits a dead run's outputs.
   use GenServer, restart: :temporary
 
-  alias ForgeCore.Job.{Outcome, Result, Spec}
+  alias ForgeCore.Job.{Correction, Outcome, Result, Spec}
   alias ForgeCore.Prompt
   alias ForgeWorker.Job.{Dir, Exec}
   alias ForgeWorker.Log
 
   require Logger
 
+  @default_max_corrections 2
+  @default_start_notice_ms :timer.minutes(2)
+  @default_start_timeout_ms :timer.minutes(30)
+  # The tail of stderr a `starting` event carries: enough for `nix develop`'s last lines.
+  @stderr_tail_bytes 2048
+  # How long a conversation waits on a runner still setting up before the call gives up. The
+  # default five seconds is shorter than making a slice can take, and a call that times out
+  # takes the conversation with it.
+  @call_timeout :timer.minutes(1)
   @default_wall_clock_ms :timer.hours(1)
   @default_grace_ms :timer.seconds(10)
   @eof_grace_ms :timer.seconds(5)
@@ -80,21 +98,21 @@ defmodule ForgeWorker.Job.Runner do
   """
   @spec send_message(pid(), String.t()) :: :ok | {:error, :closed | :unsupported}
   def send_message(pid, text) when is_binary(text),
-    do: GenServer.call(pid, {:send_message, text})
+    do: GenServer.call(pid, {:send_message, text}, @call_timeout)
 
   @doc """
   Ends the turn in flight, leaving the process running. The turn it cuts is reported as
   interrupted rather than as the error the harness calls it.
   """
   @spec interrupt(pid()) :: :ok | {:error, :closed | :unsupported}
-  def interrupt(pid), do: GenServer.call(pid, :interrupt)
+  def interrupt(pid), do: GenServer.call(pid, :interrupt, @call_timeout)
 
   @doc """
   Closes the harness's stdin, which is how a conversation ends: the process sees EOF and exits
   on its own, so nothing is signalled and the last turn is not cut short.
   """
   @spec close(pid()) :: :ok | {:error, :closed | :unsupported}
-  def close(pid), do: GenServer.call(pid, :close)
+  def close(pid), do: GenServer.call(pid, :close, @call_timeout)
 
   # -- lifecycle ----------------------------------------------------------------------------
 
@@ -154,6 +172,26 @@ defmodule ForgeWorker.Job.Runner do
       buffer: "",
       transcript_path: transcript_path,
       transcript: File.open!(transcript_path, [:write, :binary]),
+      # What the harness reads its stdin from in prompt mode. A correction writes its own file
+      # beside the first, so the prompt the job was given is still there to read afterwards.
+      prompt_path: Dir.prompt_path(job_dir),
+      # The options the process was spawned with, kept for a correction to spawn the next — behind
+      # a function, because they carry the git token (`{:secret, …}` in `:extra_env`), and a value
+      # in this state is a value in every crash report and `:sys.get_state/1` of this process. A
+      # closure prints as a function. The credential is kept the same way for the same reason
+      # (`ForgeWorker.Job.Credential.put/3`).
+      spawn_opts: fn -> opts end,
+      corrections: 0,
+      max_corrections: Keyword.get(opts, :max_corrections, @default_max_corrections),
+      # What the rounds before this one spent, summed, once a correction has run: the result
+      # reports the whole job, not its last process.
+      prior: nil,
+      start_notice_ms: setting(opts, :start_notice_ms, @default_start_notice_ms),
+      start_timeout_ms: setting(opts, :start_timeout_ms, @default_start_timeout_ms),
+      # When the harness was given something to start on, and so from when its silence counts.
+      waiting_since: nil,
+      # Stopped because it never started, which is what the result's reason then says.
+      stalled: false,
       finished_event: nil,
       started_event: nil,
       rate_limit: nil,
@@ -167,6 +205,11 @@ defmodule ForgeWorker.Job.Runner do
       hold: hold,
       interrupting: nil,
       killed: nil,
+      # A cancel or the wall clock asked this run to stop — recorded even when `killed` is not,
+      # which is a prompt-mode run that had already printed its result (`kill/2`). A run asked to
+      # stop is never corrected: it is concluded as killed when a correction would have followed,
+      # and `Correction.needed/2` corrects no killed run.
+      kill_requested: nil,
       exit_status: nil,
       slice: nil,
       slice_context: nil,
@@ -183,6 +226,11 @@ defmodule ForgeWorker.Job.Runner do
 
     {state, {:continue, {:spawn, opts}}}
   end
+
+  # An option, else the application's setting, else the default — so a conversation, which starts
+  # its runner without naming these, is timed the way the machine is configured to time it.
+  defp setting(opts, key, default),
+    do: Keyword.get(opts, key, Application.get_env(:forge_worker, key, default))
 
   # A run that resumes its session is handed what changed while it was stopped, not the whole
   # prompt again. Chosen from `resume?`, which is `:resume_session` — the value the driver turns
@@ -242,7 +290,7 @@ defmodule ForgeWorker.Job.Runner do
       job_id: state.spec.job_id
     )
 
-    send(self(), :conclude)
+    send(self(), {:conclude, state.corrections})
     state
   end
 
@@ -261,7 +309,7 @@ defmodule ForgeWorker.Job.Runner do
            "-c",
            wrapper(secrets, state.mode),
            "forge-job",
-           Dir.prompt_path(job_dir),
+           state.prompt_path,
            Dir.stderr_path(job_dir)
          ] ++ assignments ++ [executable | args]},
         {:cd, Keyword.fetch!(opts, :worktree)},
@@ -274,8 +322,8 @@ defmodule ForgeWorker.Job.Runner do
     # streaming mode it goes down the pipe as the first message instead of being redirected in.
     case state.mode do
       :streaming when state.hold -> state
-      :streaming -> deliver(state, File.read!(Dir.prompt_path(job_dir)))
-      :prompt -> state
+      :streaming -> state |> deliver(File.read!(Dir.prompt_path(job_dir))) |> watch_start()
+      :prompt -> watch_start(state)
     end
   end
 
@@ -349,7 +397,7 @@ defmodule ForgeWorker.Job.Runner do
     File.write!(Dir.prompt_path(state.job_dir), prompt)
 
     case write(state, state.harness.encode_message(prompt)) do
-      :ok -> {:reply, :ok, %{state | hold: false}}
+      :ok -> {:reply, :ok, watch_start(%{state | hold: false})}
       error -> {:reply, error, state}
     end
   end
@@ -402,13 +450,98 @@ defmodule ForgeWorker.Job.Runner do
     maybe_conclude(%{state | eof: true})
   end
 
-  def handle_info(:conclude, %{result: nil} = state) do
+  # **Tagged with the round it concludes.** A correction starts a second process in this one, and
+  # the backstop `maybe_conclude/1` sets for the first is still in the mailbox: untagged, it would
+  # conclude the second round the moment it arrived, before the harness had said anything.
+  # **No test reaches the tag**: it needs a first round whose output pipe outlives its exit and a
+  # second that is still running when the five-second backstop fires, which is a suite made slow
+  # for one clause. Dropping it is a real bug, not an equivalent mutant — keep it.
+  def handle_info({:conclude, round}, %{result: nil, corrections: round} = state) do
     state =
       if state.buffer == "", do: state, else: handle_line(state.buffer, %{state | buffer: ""})
 
+    result = conclude(state)
+
+    # A run asked to stop whose outputs would have been corrected stopped as it was asked to: it
+    # is reported killed, as a run that had not printed its result is, and not as the error its
+    # outputs would otherwise have made it.
+    result =
+      if state.kill_requested && Correction.needed(state.spec, result) != :none,
+        do: conclude(%{state | killed: state.kill_requested}),
+        else: result
+
+    case correct(state, result) do
+      {:ok, state} -> {:noreply, state}
+      :none -> finish(state, result)
+    end
+  end
+
+  # The end is reached by more than one road — the exit status and the end of output each ask for
+  # it — and a runner holding its result for a late `await/1` (`stop_or_hold/2`) is still here to
+  # receive the second. The first conclusion is the one; one for an earlier round is stale.
+  def handle_info({:conclude, _round}, state), do: {:noreply, state}
+
+  # Sent only once a result is held, so there is nothing left to wait for.
+  def handle_info(:release, state), do: {:stop, :normal, state}
+
+  def handle_info(:wall_clock, %{result: nil} = state), do: {:noreply, kill(state, :wall_clock)}
+  def handle_info(:wall_clock, state), do: {:noreply, state}
+
+  # Tagged with the round, like `:conclude`: one set for a round that then ended must not reach
+  # the next round's process.
+  def handle_info({:force_kill, round}, %{port: port, result: nil, corrections: round} = state) do
+    Exec.signal(port, "KILL")
+    {:noreply, state}
+  end
+
+  def handle_info({:force_kill, _round}, state), do: {:noreply, state}
+
+  # A harness that was given its prompt and has not said it started: say so, with what it wrote
+  # to stderr, and stop it once it has had long enough (§ A harness that never starts). Tagged with
+  # the round, like `:conclude`, so a correction's process is timed from its own start.
+  def handle_info(
+        {:start_check, round},
+        %{corrections: round, started_event: nil, result: nil, stalled: false} = state
+      )
+      when is_port(state.port) do
+    waited = System.monotonic_time(:millisecond) - state.waiting_since
+    gave_up = waited >= state.start_timeout_ms
+
+    state =
+      emit(
+        %{
+          type: "starting",
+          payload: %{
+            waited_s: div(waited, 1000),
+            gave_up: gave_up,
+            stderr: stderr_tail(state.job_dir)
+          }
+        },
+        state
+      )
+
+    if gave_up do
+      Exec.signal(state.port, "TERM")
+      Process.send_after(self(), {:force_kill, round}, state.grace_ms)
+      {:noreply, %{state | stalled: true}}
+    else
+      Process.send_after(self(), {:start_check, round}, state.start_notice_ms)
+      {:noreply, state}
+    end
+  end
+
+  def handle_info({:start_check, _round}, state), do: {:noreply, state}
+
+  # What an earlier round's process said after its round was concluded — the end of its output
+  # arriving after the backstop had already stood in for it. That process is gone. Like the
+  # `{:conclude, round}` tag, **no test reaches this**: it needs a round whose output pipe outlives
+  # the five-second backstop. Without it the message would match no clause and crash the runner.
+  def handle_info({port, _message}, state) when is_port(port), do: {:noreply, state}
+
+  defp finish(state, result) do
     File.close(state.transcript)
     if state.slice, do: state.slice.cleanup(state.slice_context)
-    result = conclude(state)
+    result = result |> accumulate(state) |> stalled(state) |> stage(state)
     Enum.each(state.waiters, &GenServer.reply(&1, {:ok, result}))
 
     # A conversation's owner is not blocked on `await/1` — it has been handling turns all
@@ -419,23 +552,145 @@ defmodule ForgeWorker.Job.Runner do
     stop_or_hold(%{state | result: result, waiters: []}, state.waiters)
   end
 
-  # The end is reached by more than one road — the exit status and the end of output each ask for
-  # it — and a runner holding its result for a late `await/1` (`stop_or_hold/2`) is still here to
-  # receive the second. The first conclusion is the one.
-  def handle_info(:conclude, state), do: {:noreply, state}
+  # -- a harness that never starts ------------------------------------------------------------
 
-  # Sent only once a result is held, so there is nothing left to wait for.
-  def handle_info(:release, state), do: {:stop, :normal, state}
-
-  def handle_info(:wall_clock, %{result: nil} = state), do: {:noreply, kill(state, :wall_clock)}
-  def handle_info(:wall_clock, state), do: {:noreply, state}
-
-  def handle_info(:force_kill, %{port: port, result: nil} = state) do
-    Exec.signal(port, "KILL")
-    {:noreply, state}
+  defp watch_start(state) do
+    Process.send_after(self(), {:start_check, state.corrections}, state.start_notice_ms)
+    %{state | waiting_since: System.monotonic_time(:millisecond)}
   end
 
-  def handle_info(:force_kill, state), do: {:noreply, state}
+  # The reason a run stopped for never starting gives, in place of "no result message": that is
+  # true and names nothing, and the last line of stderr is usually the thing it was stuck on.
+  defp stalled(result, %{stalled: false}), do: result
+
+  defp stalled(result, state) do
+    last =
+      state.job_dir
+      |> stderr_tail()
+      |> String.split("\n", trim: true)
+      |> List.last()
+
+    reason = "the harness had not started after #{duration(state.start_timeout_ms)}"
+    %{result | reason: if(last, do: "#{reason}; stderr: #{last}", else: reason)}
+  end
+
+  defp duration(ms) when ms < 60_000, do: "#{div(ms, 1000)}s"
+  defp duration(ms), do: "#{div(ms, 60_000)} minutes"
+
+  defp stderr_tail(job_dir) do
+    case File.open(Dir.stderr_path(job_dir), [:read, :binary]) do
+      {:ok, file} ->
+        tail = tail(file)
+        File.close(file)
+        tail
+
+      {:error, _reason} ->
+        ""
+    end
+  end
+
+  defp tail(file) do
+    {:ok, size} = :file.position(file, :eof)
+    {:ok, _at} = :file.position(file, max(size - @stderr_tail_bytes, 0))
+
+    case IO.binread(file, @stderr_tail_bytes) do
+      data when is_binary(data) -> String.replace_invalid(data)
+      _eof -> ""
+    end
+  end
+
+  # -- correcting the outputs -----------------------------------------------------------------
+
+  # A run whose harness ended cleanly but whose outputs could not be accepted is resumed — the same
+  # session, the same job directory with `out/` as it was left, the same slice — and told what is
+  # wrong, a bounded number of times, before anything is reported
+  # (`docs/design/claude-code-events.md` § Correcting the outputs). Only in prompt mode: a
+  # conversation has no outputs to accept. Only with a slice, because the next process runs in
+  # the one this run was given, and a run whose slice was refused never started.
+  defp correct(%{mode: :prompt, slice: slice} = state, %Result{} = result) when slice != nil do
+    spent = spent(state, result.harness)
+
+    with {:correct, problems} <- Correction.needed(state.spec, result),
+         true <- state.corrections < state.max_corrections,
+         session when is_binary(session) <- result.harness["session_id"],
+         {:ok, budget} <- Correction.remaining(state.spec, spent) do
+      round = state.corrections + 1
+      text = Correction.prompt(problems, round, state.max_corrections)
+
+      state =
+        emit(
+          %{
+            type: "correction",
+            payload: %{round: round, of: state.max_corrections, problems: problems}
+          },
+          state
+        )
+
+      {:ok, respawn(state, round, session, budget, text, result.harness)}
+    else
+      _ -> :none
+    end
+  end
+
+  defp correct(_state, _result), do: :none
+
+  defp respawn(state, round, session, budget, text, harness) do
+    path = Path.join(state.job_dir, "correction-#{round}.md")
+    File.write!(path, text)
+
+    opts = state.spawn_opts.()
+    harness_opts = opts |> Keyword.get(:harness_opts, []) |> Keyword.put(:resume_session, session)
+    spec = %{state.spec | budget: budget}
+
+    {executable, args, env} = state.harness.command(spec, state.job_dir, harness_opts)
+    {executable, args} = Exec.nix(executable, args, spec.env, Keyword.get(opts, :nix_env, false))
+    {plain, secrets} = split_env(env ++ Keyword.get(opts, :extra_env, []))
+    plain = Exec.inherited_env() ++ [{"HOME", Dir.home_dir(state.job_dir)}] ++ plain
+    {executable, args} = state.slice.wrap(executable, args, state.slice_context)
+
+    state = %{
+      state
+      | corrections: round,
+        prior: add_up(state.prior, harness),
+        prompt_path: path,
+        port: nil,
+        buffer: "",
+        exit_status: nil,
+        eof: false,
+        started_event: nil,
+        finished_event: nil
+    }
+
+    spawn_harness(state, opts, executable, args, plain, secrets)
+  end
+
+  # Turns and cost so far: every earlier round's, and this one's.
+  defp spent(state, harness) do
+    total = add_up(state.prior, harness)
+    %{turns: total["turns"], cost: total["cost_usd"]}
+  end
+
+  @summed ~w(turns cost_usd duration_ms)
+
+  defp add_up(nil, harness),
+    do: add_up(%{"turns" => 0, "cost_usd" => 0, "duration_ms" => 0}, harness)
+
+  defp add_up(prior, harness) do
+    Map.new(@summed, fn key -> {key, (prior[key] || 0) + (harness[key] || 0)} end)
+  end
+
+  # The job's result is the last round's, with what every round spent. The platform adds the cost
+  # and the turns to the job once, so reporting only the last process's would lose the rest.
+  defp accumulate(result, %{prior: nil}), do: result
+
+  defp accumulate(%Result{harness: harness} = result, %{prior: prior, corrections: corrections}) do
+    harness =
+      harness
+      |> Map.merge(add_up(prior, harness))
+      |> Map.put("corrections", corrections)
+
+    %{result | harness: harness}
+  end
 
   # **A run can end before anyone has asked for it.** A slice refused at once concludes within the
   # call that started the runner, and a runner that stopped on concluding took the result with
@@ -481,9 +736,9 @@ defmodule ForgeWorker.Job.Runner do
   # bounds that wait rather than hanging the job. It is not the path a healthy run takes.
   defp maybe_conclude(%{exit_status: status, eof: eof} = state) when status != nil do
     if eof do
-      handle_info(:conclude, state)
+      handle_info({:conclude, state.corrections}, state)
     else
-      Process.send_after(self(), :conclude, @eof_grace_ms)
+      Process.send_after(self(), {:conclude, state.corrections}, @eof_grace_ms)
       {:noreply, state}
     end
   end
@@ -557,7 +812,9 @@ defmodule ForgeWorker.Job.Runner do
 
   defp kill(%{killed: nil, port: port} = state, reason) do
     Exec.signal(port, "TERM")
-    Process.send_after(self(), :force_kill, state.grace_ms)
+    Process.send_after(self(), {:force_kill, state.corrections}, state.grace_ms)
+    state = %{state | kill_requested: state.kill_requested || reason}
+
     # A harness that already produced its result finished on its own; the signal only
     # hurries the exit and must not relabel the outcome. That holds for a single-turn run,
     # where a result means the work is done — but a conversation produces one every turn and is
@@ -605,7 +862,7 @@ defmodule ForgeWorker.Job.Runner do
       harness: harness_summary(started, finished, state.exit_status, state.rate_limit)
     }
 
-    state |> decide(spec, run, base) |> stage(state)
+    decide(state, spec, run, base)
   end
 
   # A finished run's groups of files, copied out for the link to upload

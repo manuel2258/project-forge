@@ -90,6 +90,39 @@ defmodule Forge.Operator do
     end
   end
 
+  @doc """
+  Runs the ticket's current state again (`Forge.Engine.retry/2`): after a failure, or after a
+  success whose documents a person wants done afresh.
+  """
+  @spec retry(Ticket.t(), User.t()) :: {:ok, Ticket.t()} | {:error, term()}
+  def retry(%Ticket{} = ticket, %User{} = user) do
+    with :ok <- allow(ticket, user, :use),
+         {:ok, ticket} <- Engine.retry(ticket, user.id) do
+      notify(ticket)
+    end
+  end
+
+  @doc """
+  Cancels a ticket (`Forge.Engine.cancel/2`): its live jobs end and it is hidden everywhere a ticket
+  is listed. Not a deletion; `restore/2` undoes it.
+  """
+  @spec cancel(Ticket.t(), User.t()) :: {:ok, Ticket.t()} | {:error, term()}
+  def cancel(%Ticket{} = ticket, %User{} = user) do
+    with :ok <- allow(ticket, user, :use),
+         {:ok, ticket} <- Engine.cancel(ticket, user.id) do
+      notify(ticket)
+    end
+  end
+
+  @doc "Brings a cancelled ticket back, stuck in the state it was in (`Forge.Engine.restore/2`)."
+  @spec restore(Ticket.t(), User.t()) :: {:ok, Ticket.t()} | {:error, term()}
+  def restore(%Ticket{} = ticket, %User{} = user) do
+    with :ok <- allow(ticket, user, :use),
+         {:ok, ticket} <- Engine.restore(ticket, user.id) do
+      notify(ticket)
+    end
+  end
+
   @doc "Writes a new version of a document, authored by the user."
   @spec edit(Ticket.t(), User.t(), String.t(), String.t()) :: {:ok, Ticket.t()} | {:error, term()}
   def edit(%Ticket{} = ticket, %User{} = user, name, content) do

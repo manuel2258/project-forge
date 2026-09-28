@@ -66,8 +66,24 @@ defmodule ForgeCore.Document.Question do
     end
   end
 
+  # **A scalar where text was meant is read as the text it was written as.** YAML types an unquoted
+  # `10` as a number and `true` as a boolean, and an agent writing `options: [5, 10, 20]` meant
+  # three labels, not three integers. Refusing that failed a whole refinement in production — the
+  # document was dropped with its questions — over a quoting rule nobody reading the file would
+  # notice. Numbers and booleans are turned back into the words; anything else (a list, a
+  # mapping, `null`) is passed through, and the field's own check refuses it as it always did.
+  # The one loss is a number YAML normalises while reading: `1e3` comes back as `1000.0`, and
+  # `0x1F` as `31`.
+  defp as_text(value) when is_boolean(value), do: to_string(value)
+  defp as_text(value) when is_integer(value), do: Integer.to_string(value)
+  defp as_text(value) when is_float(value), do: Float.to_string(value)
+  defp as_text(value), do: value
+
+  defp texts(values) when is_list(values), do: Enum.map(values, &as_text/1)
+  defp texts(value), do: value
+
   defp key(map, path) do
-    case Map.get(map, "key") do
+    case map |> Map.get("key") |> as_text() do
       value when is_binary(value) ->
         if Regex.match?(@key_format, value),
           do: {value, []},
@@ -84,7 +100,7 @@ defmodule ForgeCore.Document.Question do
   end
 
   defp string(map, field, path, required: required) do
-    case Map.get(map, field) do
+    case map |> Map.get(field) |> as_text() do
       value when is_binary(value) and value != "" -> {value, []}
       nil when required -> {nil, [Error.new(Error.join(path, field), "is required")]}
       nil -> {nil, []}
@@ -93,7 +109,7 @@ defmodule ForgeCore.Document.Question do
   end
 
   defp options(map, path) do
-    value = Map.get(map, "options")
+    value = map |> Map.get("options") |> texts()
 
     cond do
       is_nil(value) ->
@@ -119,7 +135,7 @@ defmodule ForgeCore.Document.Question do
 
   defp default(map, options, path) do
     field_path = Error.join(path, "default")
-    value = Map.get(map, "default")
+    value = map |> Map.get("default") |> as_text()
 
     cond do
       is_nil(value) -> {nil, []}
@@ -144,7 +160,7 @@ defmodule ForgeCore.Document.Question do
   defp assumption(map, blocking, path) do
     field_path = Error.join(path, "assumption")
 
-    case {Map.get(map, "assumption"), blocking} do
+    case {map |> Map.get("assumption") |> as_text(), blocking} do
       {nil, false} ->
         {nil, [Error.new(field_path, "is required on a non-blocking question")]}
 

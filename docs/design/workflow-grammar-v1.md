@@ -237,6 +237,43 @@ left it pending left the ticket saying "waiting for you to choose" while the que
 page both still drew the approve-or-reject card, because each of them checks `pending_transition`
 before anything else. There was no way forward from the page at all.
 
+**A transition that approves a document with no version is not offered.** Approving records an
+approval on the latest version of each listed artifact, and a state whose job failed may never have
+written one: a refinement that did not parse left its ticket stuck in `refining` with `planning`
+offered, and taking it failed on `{:no_version, "refinement.md"}` twice before anyone could say
+why. So the surfaces list only the transitions whose `approve` names all have a version
+(`Forge.Engine.offered_transitions/2`), and taking one anyway is refused with the name that has
+none.
+
+**Running a state again.** A person may run the ticket's current state again whenever it is a job
+or command state and nothing is live in it — stuck or active, after a failure, and after a
+success too, say to have a refinement done afresh before approving it (`Forge.Engine.retry/2`).
+It makes the next attempt of the state's job, or the state's commands again, with the arrival
+the last attempt had (`job-prompt.md` § How the job arrived); clears any pending approval, since
+the documents it would approve are about to be replaced; unsticks the ticket; and records
+`ticket.retried`. It takes no transition, so no `max` counts it: `max` bounds the engine's loops,
+and this is a person choosing to spend again. What a retry may spend is the ticket's cost cap,
+as for any job.
+
+**Cancelling a ticket.** A person may cancel a ticket that is active or stuck
+(`Forge.Engine.cancel/2`): the ticket becomes `cancelled`, every job of it that is still live —
+pending, running, waiting, parked or hibernated — is finished with outcome `cancelled`, a machine
+running one is told to stop, any pending approval is cleared, and `ticket.cancelled` names the
+jobs it ended. **It is not a deletion.** Events and artifact versions are append-only
+(`data-model.md`), the branch is the work, and a mistaken cancel must be undoable — so a cancelled
+ticket keeps all of it and is **hidden everywhere a ticket is listed**: the board, the project
+page, the queue, the projects page's count, the API's ticket list, a project token's ticket
+choice, and the backlog every job reads (`ticket-proposals.md` § Reading the backlog). Its own
+page is still reached by its address, and offers **Restore**, which makes it `stuck` in the state
+it was in: waiting for a person to run that state again or take a transition out of it. Nothing
+else acts on a cancelled ticket — it takes no transition, no retry and no approval, and the
+scheduler cannot stick it back into view. A report arriving from a job it ended is refused, as any
+report for a finished job is, and settles what that last run spent — the cancel closed the run
+with nothing, and spend is read from runs — and releases the machine, which nothing else would.
+The cancel locks the ticket and its live jobs, so a job starting or a result being recorded at the
+same moment happens wholly before it or is refused after it. The ticket's conversations are left
+as they are: a conversation is ended by closing it.
+
 **Merging.** A state declaring `on_enter: merge` merges the `changeset` the ticket's approval
 pinned, not whatever the branch head happens to be. The merge is checked before the transition is
 taken, so a conflict refuses the approval and leaves the ticket where it was, with its edges out

@@ -38,6 +38,7 @@ defmodule ForgeWeb.Router do
       live "/workers", WorkersLive
       live "/workers/:id", WorkerLive
       live "/templates", TemplatesLive
+      live "/projects", ProjectsLive
       # Before /tickets/:project/:number, or "new" is read as a project name.
       live "/projects/new", ProjectNewLive
       live "/projects/:name", ProjectLive
@@ -97,6 +98,9 @@ defmodule ForgeWeb.Router do
     post "/tickets/:project/:number/answers", TicketController, :answer
     post "/tickets/:project/:number/approve", TicketController, :approve
     post "/tickets/:project/:number/transition", TicketController, :transition
+    post "/tickets/:project/:number/retry", TicketController, :retry
+    post "/tickets/:project/:number/cancel", TicketController, :cancel
+    post "/tickets/:project/:number/restore", TicketController, :restore
     get "/projects/:project/proposals", TicketController, :proposals
     post "/proposals/:version_id/accept", TicketController, :accept_proposal
     post "/proposals/:version_id/decline", TicketController, :decline_proposal

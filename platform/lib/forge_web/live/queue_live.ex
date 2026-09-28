@@ -255,6 +255,8 @@ defmodule ForgeWeb.QueueLive do
             transitions={transitions(item)}
           />
 
+          <.retry_row :if={item.kind == :stuck and item.detail[:retry]} ticket={item.ticket} />
+
           <.chat_answer :if={item.kind == :chat} item={item} />
 
           <.identifiers

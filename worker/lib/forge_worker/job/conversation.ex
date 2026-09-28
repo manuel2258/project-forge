@@ -409,7 +409,7 @@ defmodule ForgeWorker.Job.Conversation do
       {:terminal, state.job_id, "hibernated",
        %{
          "job_id" => state.job_id,
-         "reason" => state.closing || "ended",
+         "reason" => state.closing || stopped_why(result) || "ended",
          "commit" => commit,
          "turns" => state.turns,
          "result" => Result.to_map(result)
@@ -420,6 +420,12 @@ defmodule ForgeWorker.Job.Conversation do
     Dir.sweep(Path.join(state.root, "jobs"), job_retention_ms())
     state
   end
+
+  # A runner that stopped the harness itself — it never started (`Runner`'s `:start_timeout_ms`)
+  # — says why in the result, and the platform records it as how the conversation ended. Anything
+  # but `closed` or `idle` leaves it hibernated, so it can be reopened on a machine that works.
+  defp stopped_why(%Result{reason: reason}) when is_binary(reason), do: reason
+  defp stopped_why(_result), do: nil
 
   defp report_failed(state, reason) do
     send(

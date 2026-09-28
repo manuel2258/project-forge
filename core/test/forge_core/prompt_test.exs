@@ -191,16 +191,40 @@ defmodule ForgeCore.PromptTest do
       assert flat =~ "suggestion, not a ticket"
     end
 
-    # The preamble tells a job that an undeclared file in `out/` ends it with `error`. That is
-    # true and `proposals/` is the exception, so the rule has to name it — otherwise the
-    # preamble forbids in one paragraph what it asks for in the next.
+    # The preamble tells a job that an undeclared file in `out/` is refused. `proposals/` is the
+    # exception, so the rule has to name it — otherwise the preamble forbids in one paragraph what
+    # it asks for in the next.
     test "the undeclared-output rule names the one directory it does not cover" do
       [rule] =
         Prompt.preamble()
         |> String.split("\n\n")
-        |> Enum.filter(&(&1 =~ "undeclared file ends the job"))
+        |> Enum.filter(&(&1 =~ "An undeclared file"))
 
       assert rule =~ "proposals/"
+    end
+
+    # The examples are what an agent copies. Two refinements failed in production on question
+    # blocks that were not YAML, and one project's own prompt showed the shape that failed. The
+    # platform's examples are parsed by the platform's parser, as a job's and a chat's would be.
+    test "the question blocks the preambles show are ones the parser accepts" do
+      for {preamble, opts} <- [
+            {Prompt.preamble(), []},
+            {Prompt.chat_preamble(), [blocking: :always]}
+          ] do
+        [block] = Regex.run(~r/```question\n.*?\n```\n/s, preamble)
+        assert {:ok, %{questions: [question]}} = ForgeCore.Document.parse(block, opts)
+        assert question.key == "storage-backend"
+      end
+    end
+
+    test "a job is told to quote question text, that it is resumed to fix a refused output, " <>
+           "and what tools it has" do
+      flat = Prompt.preamble() |> String.replace("\n", " ")
+
+      assert flat =~ "Put `text`, `anchor` and `assumption` in double quotes"
+      assert flat =~ "you are told exactly what is wrong and resumed to fix it"
+      assert flat =~ "`python3`"
+      refute ForgeCore.Workflow.platform_overview() =~ "`python3`"
     end
 
     test "a conversation is told the same two things, in its own words" do

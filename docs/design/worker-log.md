@@ -71,6 +71,7 @@ channel's `terminate/2`, and its refusal is the line.
 | `seed.fetched` | info | a project seed it fetched, and how long that took |
 | `seed.missing` | warning | a seed it could not fetch, so the job builds cold |
 | `harness.unprobed` | warning | the harness would not describe itself at join |
+| `chat.missing` | warning | the platform spoke to a chat that is not running on this machine — a message, an interrupt or a close that reached nobody |
 | `message.unknown` | warning | a message from the platform this release does not know — a version apart |
 | `log.dropped` | warning | entries it could not keep while it was not connected |
 

@@ -44,6 +44,11 @@ defmodule Forge.ScopingTest do
       assert {:error, :forbidden} = Operator.transition(ticket, outsider, "planning")
     end
 
+    test "retry", %{ticket: ticket, outsider: outsider, member: member} do
+      assert {:error, :forbidden} = Operator.retry(ticket, outsider)
+      refute Operator.retry(ticket, member) == {:error, :forbidden}
+    end
+
     test "decide", %{ticket: ticket, outsider: outsider} do
       assert {:error, :forbidden} = Operator.decide(ticket, outsider, :approved, nil)
     end

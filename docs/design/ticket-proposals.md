@@ -95,8 +95,9 @@ The agent writes `$FORGE_JOB/out/proposals/<name>.md`. One file, one proposal.
 `ForgeWorker.Job.Dir.collect/2` computes `undeclared` as
 `(written -- declared) -- [proposals]` against `Spec.document_outputs/1`, so the subdirectory is
 subtracted there rather than named as a declared output. That subtraction is load-bearing rather
-than tidy: an undeclared output ends a job with `error`, so without it a job that proposed
-anything would fail for having done so.
+than tidy: an undeclared output is refused — the job is told and resumed to remove it, and ends in
+`error` if it stays (`claude-code-events.md` § Correcting the outputs) — so without it a job that
+proposed anything would be told to take its proposals back.
 
 A reserved *directory* is a cleaner carve-out than a reserved filename. It is also why no group
 of files may be called `proposals/*`: `out/proposals/` is this directory
@@ -171,8 +172,10 @@ the ticket instead. The version-granular rule above is what *makes* editing safe
 it is not the same thing as its existing. Until it does, a proposal is accepted as written or
 declined.
 
-**A declined proposal is a recorded decision, not a deletion.** It has to be one: without it the
-next job proposes the same thing, and the one after that.
+**A declined proposal is a recorded decision, not a deletion.** It has to be one: recording is by
+content (below), so a later job writing the same proposal again finds it already recorded and
+decided, and it does not come back. A job is not shown declined proposals — `tickets/index.md`
+lists only open ones — so one worded differently is a new proposal, and is decided again.
 
 **Recording is idempotent by content**, which is what makes it safe to collect the same folder
 more than once for one job. `out/proposals/` accumulates: a conversation reports it every turn, so
@@ -208,6 +211,23 @@ depends on it, and ending a finished implementation with `error` over a malforme
 would trade real work for a typo. This is the same shape as `job.harness.unknown`, which keeps a
 harness line the event mapping does not recognise rather than dropping it
 (`docs/design/claude-code-events.md`).
+
+## A failed job proposes nothing
+
+A job that ends in `error` has its proposals **withheld**: none is recorded as a version, and
+`proposals.withheld` names the files instead (`Forge.Jobs`, `put_proposals/3`). A job that ends
+`did_not_converge` or on its budget still proposes; only `error` withholds.
+
+The case that made this a rule: two refinements failed in production because their
+`refinement.md` did not parse. The document was dropped with its questions, and the proposals
+written beside it were recorded all the same — so a person was asked to decide follow-ups to scope
+nobody had been shown, and declined one of them. A proposal is scoped by the work it sits next to;
+when that work is thrown away, the proposal has nothing to be read against.
+
+This is a drop, and it is bounded rather than silent. The event names every file, the transcript
+keeps what the agent wrote, and the ticket's next run of the state — a retry, or the run the
+correction loop makes before the job ever reports (`claude-code-events.md` § Correcting the
+outputs) — proposes again from work that stands.
 
 ## Where it surfaces
 

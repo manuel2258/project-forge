@@ -38,6 +38,29 @@ echo "some diagnostics on stderr" >&2
 
 case "${FAKE_SCENARIO:-success}" in
   no_start) exit 1 ;;
+  # Never says it started: what a `nix develop` still building, or a harness stuck before its
+  # first line, looks like from the worker. Two chats sat like this for 38 minutes in production.
+  # More stderr than the tail a report carries, so the head and the tail differ.
+  long_stderr)
+    for i in $(seq 1 400); do echo "early line $i of a long nix develop" >&2; done
+    echo "the last thing it said" >&2
+    sleep 60
+    ;;
+  # Round one writes a document that does not parse (below). Resumed to correct it, it works on
+  # and never finishes — or, with FAKE_SILENT_RESUME, never says it started either.
+  hangs_when_resumed)
+    case " $* " in
+      *" --resume "*)
+        [ -n "${FAKE_SILENT_RESUME-}" ] ||
+          emit '{"type":"system","subtype":"init","session_id":"sess-43","model":"fake-model","tools":[]}'
+        sleep 60
+        ;;
+    esac
+    ;;
+  never_starts)
+    echo "copying path '/nix/store/abc-android-sdk' from 'https://cache.nixos.org'..." >&2
+    sleep 60
+    ;;
   chat)
     turns=0
     cost=0
@@ -211,6 +234,31 @@ case "${FAKE_SCENARIO:-success}" in
   invalid_document)
     printf -- '---\noutcome: done\n' > "$doc"
     emit "$result_success"
+    ;;
+  fixes_when_resumed)
+    # The production failure and its remedy: a question block whose unquoted text holds `: `,
+    # which is not YAML — and, told so on the resumed session, the same document with the text
+    # quoted. Each run's prompt is kept, numbered, for the test to read.
+    n=$(find "$FORGE_JOB" -maxdepth 1 -name 'fake-prompt-*.txt' | wc -l)
+    printf '%s' "$prompt" > "$FORGE_JOB/fake-prompt-$((n + 1)).txt"
+    case " $* " in
+      *" --resume "*) text='"Split by region, e.g. Lesson 1: open strings?"' ;;
+      *) text='Split by region, e.g. Lesson 1: open strings?' ;;
+    esac
+    # shellcheck disable=SC2016 # the fenced question block is literal; nothing here expands
+    printf -- '---\noutcome: done\n---\n# Plan\n\n```question\nkey: split\ntext: %s\noptions: [region, string]\nblocking: true\n```\n' "$text" > "$doc"
+    emit "$result_success"
+    ;;
+  hangs_when_resumed)
+    printf -- '---\noutcome: done\n' > "$doc"
+    emit "$result_success"
+    ;;
+  result_then_linger)
+    # Its result says success, its document does not parse, and it takes a moment to exit — the
+    # window in which an operator's cancel arrives after the result and before the end.
+    printf -- '---\noutcome: done\n' > "$doc"
+    emit "$result_success"
+    sleep 2
     ;;
   noeol)
     printf -- '---\noutcome: done\n---\n# Plan\n' > "$doc"

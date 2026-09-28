@@ -79,5 +79,16 @@ defmodule Forge.Jobs.Runs do
       Decimal.new(0)
   end
 
+  @doc "Closes the open runs of every job in `job_ids` at once, for a ticket cancelled whole."
+  @spec close_all(Multi.t(), [String.t()], DateTime.t()) :: Multi.t()
+  def close_all(multi, job_ids, now) do
+    Multi.update_all(
+      multi,
+      :close_runs,
+      from(r in Run, where: r.job_id in ^job_ids and is_nil(r.finished_at)),
+      set: [finished_at: now]
+    )
+  end
+
   defp open_runs(job_id), do: from(r in Run, where: r.job_id == ^job_id and is_nil(r.finished_at))
 end

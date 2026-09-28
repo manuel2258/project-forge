@@ -1111,6 +1111,74 @@ defmodule ForgeWorker.LinkTest do
       assert finished["level"] == "info"
     end
 
+    # A conversation that crashed used to leave the platform believing it ran here, for ever:
+    # nothing monitored it, and it had no chance to say it was going.
+    test "a chat that crashes is reported as failed", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin)
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _before} = take_push("turn")
+
+      job_id |> ForgeWorker.Job.Conversation.whereis() |> Process.exit(:kill)
+
+      {%{"job_id" => ^job_id, "reason" => reason}, _before} = take_push("failed")
+      assert reason == "the conversation stopped: killed"
+    end
+
+    test "a crash for any reason says which", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin)
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _before} = take_push("turn")
+
+      job["job_id"] |> ForgeWorker.Job.Conversation.whereis() |> GenServer.stop(:boom)
+
+      {%{"reason" => reason}, _before} = take_push("failed")
+      assert reason == "the conversation stopped: :boom"
+    end
+
+    # The chat that sat for 38 minutes. Its harness never said it started; it is stopped, and
+    # the platform is told why it ended rather than "ended".
+    test "a chat whose harness never starts ends saying so", context do
+      %{client: client, origin: origin} = context
+      Application.put_env(:forge_worker, :start_notice_ms, 50)
+      Application.put_env(:forge_worker, :start_timeout_ms, 100)
+
+      on_exit(fn ->
+        Application.delete_env(:forge_worker, :start_notice_ms)
+        Application.delete_env(:forge_worker, :start_timeout_ms)
+      end)
+
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin, env: [{"FAKE_SCENARIO", "never_starts"}])
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      {%{"job_id" => ^job_id, "reason" => reason}, _before} = take_push("hibernated")
+      assert reason == "the harness had not started after 0s"
+    end
+
+    test "a message for a chat not running here is a line in the machine's log", %{
+      client: client
+    } do
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      push(client, @topic, "message", %{"job_id" => "gone", "message_id" => "1", "text" => "hi"})
+
+      assert_push(@topic, "log", %{"type" => "chat.missing", "job_id" => "gone"} = line)
+      assert line["message"] == "asked to message a chat that is not running here"
+    end
+
     # A crash's reason is its whole stack trace; the line keeps what names it, and the journal
     # has the rest. Sent as a job's process sends it, for a job this link never started — a chat
     # that could not — so there is no start to say how long it ran from.

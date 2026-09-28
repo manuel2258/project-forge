@@ -50,6 +50,24 @@ defmodule ForgeWeb.Api.FallbackController do
   def call(conn, {:error, {:job_live, state}}),
     do: error(conn, :conflict, "job_live", "a job for #{state} is pending, running or waiting")
 
+  def call(conn, {:error, {:no_version, name}}),
+    do: error(conn, :conflict, "no_version", "#{name} has no version to approve")
+
+  def call(conn, {:error, {:no_job_in, state}}),
+    do: error(conn, :conflict, "no_job_in_state", "no job runs in #{state}")
+
+  def call(conn, {:error, {:not_retryable, status}}),
+    do: error(conn, :conflict, "not_retryable", "a #{status} ticket cannot be run again")
+
+  def call(conn, {:error, {:not_cancellable, status}}),
+    do: error(conn, :conflict, "not_cancellable", "a #{status} ticket cannot be cancelled")
+
+  def call(conn, {:error, {:not_cancelled, _status}}),
+    do: error(conn, :conflict, "not_cancelled", "only a cancelled ticket can be restored")
+
+  def call(conn, {:error, {:not_active, :cancelled}}),
+    do: error(conn, :conflict, "cancelled", "the ticket is cancelled; restore it first")
+
   def call(conn, {:error, {:no_open_question, key}}),
     do: error(conn, :not_found, "no_open_question", key)
 

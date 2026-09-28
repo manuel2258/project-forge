@@ -1092,7 +1092,7 @@ defmodule Forge.Jobs do
       # hear the same one twice. Keyed by the job: a job is recorded once. Not "is it running":
       # a worker that rejoins before its result is acked has the job re-queued under it
       # (`WorkerChannel.reconcile/2`), and the result that follows is still the run's answer.
-      job.status == :finished -> {:error, :already_recorded}
+      job.status == :finished -> settled(job, result.harness)
       # A command's result is its exit status and its log (`docs/design/commands.md`).
       job.kind == :command -> Commands.complete(job, ticket, result)
       # An agent that asked for commands: the run is over and the job is not.
@@ -1288,30 +1288,48 @@ defmodule Forge.Jobs do
     do: Commands.put_resumed_event(multi, job, batch)
 
   defp record_and_follow_up(job, ticket, result) do
-    with {:ok, %{job: job, ticket_cost: ticket}} <- record(job, ticket, result) do
-      case job.status do
-        :finished ->
-          # The worktree is the worker's to throw away, and it already has. What is left here
-          # is the credential, which is no good to anyone once the job is over, and the
-          # worker's memory, which the next job wants back.
-          Tokens.revoke_for_job(job.id)
-          Workers.release(job.worker_id)
-          follow_up(ticket, job, result)
-
-        :waiting ->
-          # Stopped on a question: the run is over, and the answer resumes it with a new one.
-          # The question is pushed by `Forge.Push.Watch`, which hears the notice below and
-          # pushes whatever on the ticket has started waiting — this is one of those.
-          Tokens.revoke_for_job(job.id)
-      end
-
-      Events.notify(ticket.id)
-      {:ok, job}
+    case record(job, ticket, result) do
+      {:ok, %{job: job, ticket_cost: ticket}} -> followed_up(job, ticket, result)
+      # Finished between the read in `complete/2` and the lock below: its ticket was cancelled.
+      {:error, {:still_live, :finished}} -> settled(get!(job.id), result.harness)
+      {:error, _reason} = error -> error
     end
+  end
+
+  defp followed_up(job, ticket, result) do
+    case job.status do
+      :finished ->
+        # The worktree is the worker's to throw away, and it already has. What is left here
+        # is the credential, which is no good to anyone once the job is over, and the
+        # worker's memory, which the next job wants back.
+        Tokens.revoke_for_job(job.id)
+        Workers.release(job.worker_id)
+        follow_up(ticket, job, result)
+
+      :waiting ->
+        # Stopped on a question: the run is over, and the answer resumes it with a new one.
+        # The question is pushed by `Forge.Push.Watch`, which hears the notice below and
+        # pushes whatever on the ticket has started waiting — this is one of those.
+        Tokens.revoke_for_job(job.id)
+    end
+
+    Events.notify(ticket.id)
+    {:ok, job}
   end
 
   defp record(job, ticket, result) do
     Multi.new()
+    # Locked and re-read: `Engine.cancel/2` locks the same row, so a result and a cancel cannot
+    # both win. Without it a result read as running before the cancel committed was recorded after
+    # it, and moved the cancelled ticket on to its next state. No test reaches the refusal — it
+    # needs the cancel to commit between two statements of this process — so `settled/2`'s own
+    # tests are what cover what happens next.
+    |> Multi.run(:still_live, fn repo, _changes ->
+      case repo.one!(from j in Job, where: j.id == ^job.id, lock: "FOR UPDATE", select: j.status) do
+        :finished -> {:error, :finished}
+        status -> {:ok, status}
+      end
+    end)
     |> put_documents(ticket, job, result)
     |> put_blobs(ticket, job, result)
     |> put_proposals(job, result)
@@ -1332,6 +1350,50 @@ defmodule Forge.Jobs do
       {:ok, changes} -> {:ok, changes}
       {:error, step, reason, _} -> {:error, {step, reason}}
     end
+  end
+
+  # A report for a job already finished. For a job its ticket's cancel ended (`Engine.cancel/2`) it
+  # is the machine saying it stopped: what that last run spent is recorded — the cancel closed the
+  # run with nothing, and spend is read from runs — and the machine is released, which nothing else
+  # does for it. Idempotent, because a report is re-sent until it is acked: the run's cost is set,
+  # not added, and the job and ticket move by the difference. Any other finished job's report is a
+  # re-send, and changes nothing.
+  defp settled(%Job{status: :finished, outcome: :cancelled} = job, harness) do
+    cost = decimal((harness || %{})["cost_usd"])
+    before = latest_run_cost(job.id)
+    delta = Decimal.sub(cost, before)
+    ticket = job.ticket_id && Tickets.get!(job.ticket_id)
+
+    Multi.new()
+    |> Runs.cost(job.id, cost)
+    |> Multi.update(
+      :job,
+      Job.progress_changeset(job, %{cost_usd: Decimal.add(job.cost_usd, delta)})
+    )
+    |> then(fn multi ->
+      if ticket,
+        do:
+          Tickets.put_progress(multi, :ticket_cost, ticket, %{
+            cost_usd: Decimal.add(ticket.cost_usd, delta)
+          }),
+        else: multi
+    end)
+    |> Repo.transaction()
+
+    Workers.release(job.worker_id)
+    {:error, :already_recorded}
+  end
+
+  defp settled(%Job{}, _harness), do: {:error, :already_recorded}
+
+  defp latest_run_cost(job_id) do
+    Repo.one(
+      from r in Forge.Jobs.Run,
+        where: r.job_id == ^job_id,
+        order_by: [desc: r.started_at, desc: r.inserted_at],
+        limit: 1,
+        select: r.cost_usd
+    ) || Decimal.new(0)
   end
 
   defp follow_up(ticket, job, %Result{} = result) do
@@ -1406,6 +1468,26 @@ defmodule Forge.Jobs do
   # Only for a run that ended. A waiting job's `out/proposals/` is still there when it resumes
   # and would be collected again, so recording now would put the same proposal in as a second
   # version of itself for every question the job stopped on.
+  #
+  # **And not for a run that ended in `error`.** Its proposals were written beside work that was
+  # thrown away — a refinement that did not parse, say — so they point at scope nobody was shown,
+  # and a person was asked to decide them anyway. They are named in an event rather than dropped
+  # in silence, and a run of the state again proposes afresh (`ticket-proposals.md` § A failed
+  # job proposes nothing).
+  defp put_proposals(multi, job, %Result{status: :finished, outcome: :error} = result) do
+    names = Enum.sort(Map.keys(result.proposals) ++ Map.keys(result.invalid_proposals))
+
+    if names == [] do
+      multi
+    else
+      Events.log(multi, :proposals_withheld, "proposals.withheld", :system, %{
+        ticket_id: job.ticket_id,
+        job_id: job.id,
+        payload: %{"files" => names, "reason" => "the job ended in error"}
+      })
+    end
+  end
+
   defp put_proposals(multi, job, %Result{status: :finished} = result) do
     Proposals.put_from_result(multi, job, result.proposals, result.invalid_proposals)
   end
@@ -1509,7 +1591,11 @@ defmodule Forge.Jobs do
       "exit_status" => result.exit_status,
       "questions" => Enum.map(result.questions, & &1.key),
       "harness" => json_safe(result.harness),
-      "invalid_blobs" => result.invalid_blobs
+      "invalid_blobs" => result.invalid_blobs,
+      # What was wrong with each document that did not parse, as text. The reason names them in
+      # one line; this keeps each one's errors whole (`claude-code-events.md` § Naming the failure).
+      "invalid" =>
+        Map.new(result.invalid, fn {name, why} -> {name, ForgeCore.Error.to_text(why)} end)
     }
   end
 
@@ -1531,34 +1617,48 @@ defmodule Forge.Jobs do
   ticket branch; resuming reconstructs from the branch and the manifest, never from the
   conversation (`docs/decisions.md`).
   """
-  @spec hibernate(String.t(), String.t() | nil, String.t() | nil) ::
+  @spec hibernate(String.t(), String.t() | nil, String.t() | nil, map() | nil) ::
           {:ok, Job.t()} | {:error, term()}
-  def hibernate(job_id, commit, reason) do
+  def hibernate(job_id, commit, reason, result \\ nil) do
     job = get!(job_id)
 
-    if job.status == :hibernated do
-      {:ok, job}
-    else
-      Multi.new()
-      |> Multi.update(:job, Job.progress_changeset(job, %{status: :hibernated}))
-      |> Runs.close(job.id, DateTime.utc_now(:second))
-      |> Events.log(:event, "job.hibernated", {:job, job.id}, %{
-        ticket_id: job.ticket_id,
-        job_id: job.id,
-        payload: %{"commit" => commit, "reason" => reason}
-      })
-      |> Repo.transaction()
-      |> case do
-        {:ok, %{job: job}} ->
-          # The worker pushed before it said so, and a resume is a new assignment with a new
-          # credential — for a conversation, a day's worth of one (`requeue/2`).
-          Tokens.revoke_for_job(job.id)
-          Events.notify(job.ticket_id)
-          {:ok, job}
+    cond do
+      # A re-sent report.
+      job.status == :hibernated ->
+        {:ok, job}
 
-        {:error, step, reason, _changes} ->
-          {:error, {step, reason}}
-      end
+      # A job ended under the worker — its ticket cancelled (`Engine.cancel/2`) — whose machine is
+      # only now saying it stopped. Recording it would make a cancelled ticket's job resumable
+      # again; what the run spent is settled and the machine released instead.
+      job.status == :finished ->
+        settled(job, (result || %{})["harness"])
+        {:ok, job}
+
+      true ->
+        hibernate_running(job, commit, reason)
+    end
+  end
+
+  defp hibernate_running(job, commit, reason) do
+    Multi.new()
+    |> Multi.update(:job, Job.progress_changeset(job, %{status: :hibernated}))
+    |> Runs.close(job.id, DateTime.utc_now(:second))
+    |> Events.log(:event, "job.hibernated", {:job, job.id}, %{
+      ticket_id: job.ticket_id,
+      job_id: job.id,
+      payload: %{"commit" => commit, "reason" => reason}
+    })
+    |> Repo.transaction()
+    |> case do
+      {:ok, %{job: job}} ->
+        # The worker pushed before it said so, and a resume is a new assignment with a new
+        # credential — for a conversation, a day's worth of one (`requeue/2`).
+        Tokens.revoke_for_job(job.id)
+        Events.notify(job.ticket_id)
+        {:ok, job}
+
+      {:error, step, reason, _changes} ->
+        {:error, {step, reason}}
     end
   end
 

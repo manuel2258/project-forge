@@ -690,6 +690,44 @@ defmodule Forge.ProposalsTest do
       assert event.payload["reasons"]["half.md"] =~ "level-one heading"
     end
 
+    # Two failed refinements in production each left proposals behind for a person to decide,
+    # written beside a document the platform had thrown away. They are named, not recorded.
+    test "a job that ended in error records none, and says which it withheld" do
+      ticket = ticket_fixture()
+      job = job_fixture(%{ticket: ticket, status: :running})
+
+      failed = %ForgeCore.Job.Result{
+        status: :finished,
+        outcome: :error,
+        reason: "invalid documents: refinement.md (question[0]: invalid YAML)",
+        proposals: %{"score-table.md" => proposal("Extract the score table")},
+        invalid_proposals: %{"half.md" => %{"reason" => "no title", "raw" => "x\n"}},
+        harness: %{}
+      }
+
+      {:ok, _job} = Jobs.complete(job.id, failed)
+
+      assert artifacts_of(job.id) == []
+      assert Proposals.open(job.project_id) == []
+
+      assert [event] =
+               ticket.id
+               |> Events.for_ticket()
+               |> Enum.filter(&(&1.type == "proposals.withheld"))
+
+      assert event.payload["files"] == ["half.md", "score-table.md"]
+    end
+
+    test "a job that ended in error and proposed nothing says nothing about proposals" do
+      ticket = ticket_fixture()
+      job = job_fixture(%{ticket: ticket, status: :running})
+
+      {:ok, _job} =
+        Jobs.complete(job.id, %ForgeCore.Job.Result{status: :finished, outcome: :error})
+
+      refute "proposals.withheld" in Enum.map(Events.for_ticket(ticket.id), & &1.type)
+    end
+
     test "a waiting job's are not, because it will report them again when it resumes" do
       ticket = ticket_fixture()
       job = job_fixture(%{ticket: ticket, status: :running})

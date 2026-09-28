@@ -1,7 +1,8 @@
 # NixOS module for the forge worker image: a machine that boots, learns who it is and where the
 # platform is from a config disk or a metadata service, and runs the forge_worker release. A
-# btrfs root for the volume layer to snapshot, a Nix daemon pointed at the binary cache, and Claude
-# Code. No project toolchain: that comes from the workload's own flake through `nix develop`.
+# btrfs root for the volume layer to snapshot, a Nix daemon pointed at the binary cache, Claude
+# Code, and a shell's worth of general tools for the agent (jobTools below). No project
+# toolchain: that comes from the workload's own flake through `nix develop`.
 #
 # See docs/design/worker-tier.md § The worker image. The image pins nothing about any
 # particular project, and it is meant to boot unchanged on a provider later.
@@ -22,9 +23,9 @@ let
   releaseLink = "${root}/release";
   gcRoot = "/nix/var/nix/gcroots/forge-worker-release";
 
-  # What the worker needs to do its work and to confine a job: git for the clone and the push,
-  # nix for `nix develop`, btrfs-progs for the volume layer, tar and gzip for the seed, shadow
-  # and systemd for the per-job user and its transient unit, and Claude Code itself.
+  # What the worker itself needs to do its work and to confine a job: git for the clone and the
+  # push, nix for `nix develop`, btrfs-progs for the volume layer, tar and gzip for the seed,
+  # shadow and systemd for the per-job user and its transient unit, and Claude Code itself.
   servicePath = [
     pkgs.git
     pkgs.bash
@@ -37,6 +38,41 @@ let
     config.nix.package
     config.systemd.package
     pkgs.claude-code
+  ];
+
+  # What the *agent* reaches for in its own shell, as opposed to what the worker needs. A job's
+  # PATH is the worker's (ForgeWorker.Job.Exec passes PATH through), and `nix develop .#<env>`
+  # only prepends the devshell's to it, so whatever is here is on every job's PATH whether or not
+  # its state names an env. Without it an agent asking for `python3` or `rg` got "command not
+  # found" and edited with sed. General-purpose tools for reading and changing code only: plain
+  # python3 with no packages, and nothing that belongs to one project — a project's compilers,
+  # linters and libraries come from its own flake's devshell.
+  jobTools = [
+    pkgs.python3
+    pkgs.ripgrep
+    pkgs.fd
+    pkgs.jq
+    pkgs.yq-go
+    pkgs.gnugrep
+    pkgs.gnused
+    pkgs.gawk
+    pkgs.findutils
+    pkgs.diffutils
+    pkgs.gnupatch
+    pkgs.file
+    pkgs.which
+    pkgs.procps
+    pkgs.psmisc
+    pkgs.less
+    pkgs.tree
+    pkgs.unzip
+    pkgs.zip
+    pkgs.xz
+    pkgs.bzip2
+    pkgs.curl
+    pkgs.wget
+    pkgs.bc
+    pkgs.gnumake
   ];
 in
 {
@@ -319,7 +355,8 @@ in
     # otherwise start a release with no identity, which only fails once it tries to dial.
     unitConfig.ConditionPathExists = envFile;
 
-    path = servicePath;
+    # The worker's tools and the agent's: a job inherits this PATH.
+    path = servicePath ++ jobTools;
 
     environment = {
       LANG = "C.UTF-8";
@@ -385,9 +422,10 @@ in
   # network is up.
   systemd.services."serial-getty@ttyS0".enable = true;
 
-  # The service's own tools, plus curl: how the config unit reads a metadata service, and how
-  # the measurement harness fetches a seed from inside the guest.
-  environment.systemPackages = servicePath ++ [ pkgs.curl ];
+  # The service's own tools and the agent's, so a shell over ssh sees what a job sees. curl is
+  # among them: how the config unit reads a metadata service, and how the measurement harness
+  # fetches a seed from inside the guest.
+  environment.systemPackages = servicePath ++ jobTools;
 
   # Nothing on this machine is worth keeping: it is created for a ticket and destroyed when it
   # has had nothing to do for a while.

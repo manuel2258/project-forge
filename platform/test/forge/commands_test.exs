@@ -84,6 +84,33 @@ defmodule Forge.CommandsTest do
   defp pending(ticket, :command),
     do: ticket.id |> Jobs.commands_for_ticket() |> Enum.filter(&(&1.status == :pending))
 
+  # A command state runs its commands again, as a batch of its own: the retry is the state's, and
+  # a command state's work is its commands. Without this branch a retry marked the ticket active,
+  # recorded itself, and made nothing to run.
+  test "a command state is run again as a new batch", %{user: user} = context do
+    ticket = implement(context)
+    assert ticket.state == "checking"
+    first = pending(ticket, :command)
+    assert length(first) == 2
+
+    for job <- first do
+      job |> Ecto.Changeset.change(status: :finished, outcome: :error) |> Repo.update!()
+    end
+
+    {:ok, stuck} = Engine.stick(Tickets.get!(ticket.id), "the batch was lost")
+    assert Engine.retryable?(stuck)
+
+    {:ok, _ticket} = Engine.retry(stuck, user.id)
+
+    again = pending(ticket, :command)
+    assert length(again) == 2
+    assert Enum.map(again, & &1.id) -- Enum.map(first, & &1.id) == Enum.map(again, & &1.id)
+
+    assert ticket.id
+           |> Events.for_ticket()
+           |> Enum.count(&(&1.type == "commands.started")) == 2
+  end
+
   defp head(repo, ticket) do
     {:ok, sha} = Forge.Git.resolve(repo, "refs/heads/" <> ticket.branch)
     sha

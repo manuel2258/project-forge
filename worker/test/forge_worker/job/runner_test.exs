@@ -114,8 +114,10 @@ defmodule ForgeWorker.Job.RunnerTest do
             executable: fake_executable(),
             credential: {:api_key, "secret-key"}
           ),
-        extra_env: [{"FAKE_SCENARIO", scenario}]
-      ] ++ Keyword.drop(extra, [:spec, :harness_opts])
+        # Merged, not appended: a second `:extra_env` key is one `Keyword.get/2` never reads, and a
+        # test that passed a secret through it once passed without the secret ever arriving.
+        extra_env: [{"FAKE_SCENARIO", scenario} | Keyword.get(extra, :extra_env, [])]
+      ] ++ Keyword.drop(extra, [:spec, :harness_opts, :extra_env])
 
     {:ok, pid} = Runner.start_link(opts)
     pid
@@ -499,11 +501,236 @@ defmodule ForgeWorker.Job.RunnerTest do
   end
 
   test "undeclared and invalid outputs are errors", context do
-    {:ok, result} = context |> run("undeclared") |> Runner.await(5_000)
+    {:ok, result} =
+      context |> run("undeclared", max_corrections: 0) |> Runner.await(5_000)
+
     assert {:error, "undeclared outputs: notes.md"} = {result.outcome, result.reason}
 
-    {:ok, result} = context |> run("invalid_document") |> Runner.await(5_000)
-    assert {:error, "invalid documents: plan.md"} = {result.outcome, result.reason}
+    {:ok, result} =
+      context |> run("invalid_document", max_corrections: 0) |> Runner.await(5_000)
+
+    assert {:error, "invalid documents: plan.md (front_matter: is not closed by a --- line)"} =
+             {result.outcome, result.reason}
+  end
+
+  # The git token rides in `:extra_env` as a secret, and the runner keeps its spawn options for a
+  # correction. A value in a process's state is a value in every crash report of it.
+  test "the runner's state holds no secret it was given", context do
+    pid =
+      run(context, "hang", extra_env: [{"FORGE_GIT_TOKEN", {:secret, "tok-never-shown"}}])
+
+    refute inspect(:sys.get_state(pid), limit: :infinity, printable_limit: :infinity) =~
+             "tok-never-shown"
+
+    Runner.cancel(pid)
+    {:ok, _result} = Runner.await(pid, 5_000)
+  end
+
+  describe "a harness that never starts" do
+    test "is reported while it waits, with its stderr, and stopped at the limit", context do
+      {:ok, result} =
+        context
+        |> run("never_starts", start_notice_ms: 100, start_timeout_ms: 350, grace_ms: 200)
+        |> Runner.await(5_000)
+
+      assert result.outcome == :error
+
+      assert result.reason ==
+               "the harness had not started after 0s; stderr: copying path " <>
+                 "'/nix/store/abc-android-sdk' from 'https://cache.nixos.org'..."
+
+      starting = Enum.filter(events(), &(&1.type == "job.harness.starting"))
+      assert [%{payload: %{gave_up: false, stderr: stderr}} | _] = starting
+      assert stderr =~ "android-sdk"
+      assert %{payload: %{gave_up: true}} = List.last(starting)
+      assert Enum.count(starting, & &1.payload.gave_up) == 1
+    end
+
+    # The reason quotes stderr's last line and the event carries its tail, not its head: a
+    # `nix develop` writes far more than the tail, and what it was stuck on is at the end.
+    test "the tail of a long stderr is what is quoted", context do
+      {:ok, result} =
+        context
+        |> run("long_stderr", start_notice_ms: 100, start_timeout_ms: 300, grace_ms: 100)
+        |> Runner.await(5_000)
+
+      assert result.reason =~ "stderr: the last thing it said"
+
+      assert [%{payload: %{stderr: stderr}} | _] =
+               Enum.filter(events(), &(&1.type == "job.harness.starting"))
+
+      assert byte_size(stderr) <= 2048
+      refute stderr =~ "early line 1 of"
+    end
+
+    # `hang` says it started and then works on, well past the limit: a long job, not a stuck one.
+    # Only the wall clock stops it, and nothing reports it as waiting to start.
+    test "one that has started is never reported or stopped for it, however long it runs",
+         context do
+      {:ok, result} =
+        context
+        |> run("hang",
+          start_notice_ms: 50,
+          start_timeout_ms: 100,
+          wall_clock_ms: 600,
+          grace_ms: 100
+        )
+        |> Runner.await(5_000)
+
+      assert result.killed == :wall_clock
+      assert Enum.filter(events(), &(&1.type == "job.harness.starting")) == []
+    end
+  end
+
+  describe "correcting the outputs" do
+    # Two refinements failed in production on a `question` block that was not YAML, and each
+    # was discarded with its questions. The session that wrote it is told what is wrong and
+    # fixes it, and the platform hears one result: here, a job waiting on its question.
+    test "a document that does not parse is fixed on the same session before anything is reported",
+         context do
+      {:ok, result} = context |> run("fixes_when_resumed") |> Runner.await(5_000)
+
+      assert result.status == :waiting
+      assert [%Question{key: "split", blocking: true}] = result.questions
+
+      job_dir = Path.dirname(result.stderr_path)
+      assert File.read!(Path.join(job_dir, "fake-args.txt")) =~ "--resume sess-42"
+
+      told = File.read!(Path.join(job_dir, "fake-prompt-2.txt"))
+      assert told =~ "- plan.md: question[0]: block at line 6: invalid YAML"
+      assert told =~ "correction 1 of 2"
+
+      assert [%{payload: %{round: 1, of: 2, problems: [problem]}}] =
+               Enum.filter(events(), &(&1.type == "job.harness.correction"))
+
+      assert problem =~ "plan.md: question[0]"
+    end
+
+    # The platform adds a result's cost and turns to the job once. Reporting only the last
+    # process's would lose what the first spent.
+    test "the result reports what every round spent, and how many corrections ran", context do
+      {:ok, result} = context |> run("fixes_when_resumed") |> Runner.await(5_000)
+
+      assert result.harness["corrections"] == 1
+      assert result.harness["turns"] == 6
+      assert_in_delta result.harness["cost_usd"], 2 * 0.0421, 1.0e-9
+      assert result.harness["duration_ms"] == 2 * 1234
+      assert result.harness["session_id"] == "sess-42"
+    end
+
+    test "one transcript holds every round, in order", context do
+      {:ok, result} = context |> run("fixes_when_resumed") |> Runner.await(5_000)
+
+      inits =
+        result.transcript_path
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.count(&String.contains?(&1, ~s("subtype":"init")))
+
+      assert inits == 2
+    end
+
+    test "a run that stays broken is corrected at most max_corrections times, then fails",
+         context do
+      {:ok, result} = context |> run("invalid_document") |> Runner.await(5_000)
+
+      assert result.outcome == :error
+      assert result.reason =~ "invalid documents: plan.md"
+      assert result.harness["corrections"] == 2
+
+      # Three rounds of three turns each, all of them the job's.
+      assert result.harness["turns"] == 9
+      assert_in_delta result.harness["cost_usd"], 3 * 0.0421, 1.0e-9
+
+      assert [1, 2] =
+               events()
+               |> Enum.filter(&(&1.type == "job.harness.correction"))
+               |> Enum.map(& &1.payload.round)
+    end
+
+    test "max_corrections: 0 reports the first failure as it is", context do
+      {:ok, result} =
+        context |> run("invalid_document", max_corrections: 0) |> Runner.await(5_000)
+
+      assert result.outcome == :error
+      refute Map.has_key?(result.harness, "corrections")
+      assert Enum.filter(events(), &(&1.type == "job.harness.correction")) == []
+    end
+
+    # The fake spends three turns a run. A budget of three leaves nothing for a correction to
+    # start with, so none is started — the budget is the job's, not each process's.
+    test "a correction is not started on a spent budget", context do
+      spec = %{spec() | budget: %{turns: 3, cost: 2.0}}
+      {:ok, result} = context |> run("invalid_document", spec: spec) |> Runner.await(5_000)
+
+      assert result.outcome == :error
+      assert Enum.filter(events(), &(&1.type == "job.harness.correction")) == []
+    end
+
+    test "a correction is given what is left of the budget, not the whole of it", context do
+      {:ok, result} = context |> run("fixes_when_resumed") |> Runner.await(5_000)
+      args = File.read!(Path.join(Path.dirname(result.stderr_path), "fake-args.txt"))
+
+      assert args =~ "--max-turns 37"
+      assert args =~ "--max-budget-usd 1.95"
+    end
+
+    # The cancel arrives after the harness printed its result and before it exited. It is a
+    # cancel all the same: no correction starts, and the job reports it was cancelled.
+    test "a cancel after the result and before the exit is still a cancel", context do
+      pid = run(context, "result_then_linger", grace_ms: 200)
+      assert_receive {:event, %{type: "job.harness.finished"}}, 5_000
+      Runner.cancel(pid)
+      {:ok, result} = Runner.await(pid, 5_000)
+
+      assert result.outcome == :cancelled
+      assert result.killed == :operator
+      assert Enum.filter(events(), &(&1.type == "job.harness.correction")) == []
+    end
+
+    # The correction round is the one running now, and a cancel is its cancel: recorded as one,
+    # with no round after it.
+    test "a cancel during a correction round is a cancel", context do
+      pid = run(context, "hangs_when_resumed", grace_ms: 200)
+      assert_receive {:event, %{type: "job.harness.correction"}}, 5_000
+
+      assert_receive {:event, %{type: "job.harness.started", payload: %{session_id: "sess-43"}}},
+                     5_000
+
+      Runner.cancel(pid)
+      {:ok, result} = Runner.await(pid, 5_000)
+
+      assert result.killed == :operator
+      assert result.outcome == :cancelled
+      # The first correction was taken off the mailbox above; none came after the cancel.
+      refute Enum.any?(events(), &(&1.type == "job.harness.correction"))
+    end
+
+    # A correction round is watched from its own start like any process.
+    test "a correction round that never starts is stopped as one", context do
+      {:ok, result} =
+        context
+        |> run("hangs_when_resumed",
+          extra_env: [{"FAKE_SILENT_RESUME", "1"}],
+          start_notice_ms: 100,
+          start_timeout_ms: 300,
+          grace_ms: 100
+        )
+        |> Runner.await(5_000)
+
+      assert result.reason =~ "the harness had not started after 0s"
+      assert result.harness["corrections"] == 1
+    end
+
+    test "a run that is cancelled is not corrected", context do
+      pid = run(context, "hang", grace_ms: 200)
+      Process.sleep(100)
+      Runner.cancel(pid)
+      {:ok, result} = Runner.await(pid, 5_000)
+
+      assert result.outcome == :cancelled
+      assert Enum.filter(events(), &(&1.type == "job.harness.correction")) == []
+    end
   end
 
   test "the wall clock kills a hung harness and reports budget_exhausted", context do

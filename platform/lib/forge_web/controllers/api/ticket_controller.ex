@@ -181,6 +181,26 @@ defmodule ForgeWeb.Api.TicketController do
     end
   end
 
+  # Runs the state the ticket rests in again (`Forge.Engine.retry/2`). The queue serves `retry`
+  # on a stuck item, and a client that can read it can act on it.
+  def retry(conn, _params) do
+    with {:ok, ticket} <- Operator.retry(conn.assigns.ticket, user(conn)) do
+      json(conn, Render.ticket(ticket, conn.assigns.project.name))
+    end
+  end
+
+  def cancel(conn, _params) do
+    with {:ok, ticket} <- Operator.cancel(conn.assigns.ticket, user(conn)) do
+      json(conn, Render.ticket(ticket, conn.assigns.project.name))
+    end
+  end
+
+  def restore(conn, _params) do
+    with {:ok, ticket} <- Operator.restore(conn.assigns.ticket, user(conn)) do
+      json(conn, Render.ticket(ticket, conn.assigns.project.name))
+    end
+  end
+
   # Open proposals are per project, not per ticket: a project chat's proposal has no ticket, and
   # the operator's question is "what has been suggested here", not "what did ticket 12 suggest".
   def proposals(conn, %{"project" => name}) do

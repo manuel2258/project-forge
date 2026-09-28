@@ -69,6 +69,56 @@ defmodule ForgeWorker.Job.RunnerStreamingTest do
     {pid, spec}
   end
 
+  # A reopened conversation with nothing waiting holds its prompt until someone writes; its
+  # harness is silent because it has been given nothing, and that is not a harness failing to
+  # start. The watch begins when the prompt goes down, not when the process does.
+  test "a held prompt is not a harness that never started", context do
+    {pid, _spec} =
+      chat(context, hold_prompt: true, start_notice_ms: 20, start_timeout_ms: 40)
+
+    Process.sleep(150)
+    assert Process.alive?(pid)
+    refute_received {:event, %{type: "job.harness.starting"}}
+
+    assert Runner.send_message(pid, "now there is something") == :ok
+    assert_receive {:turn, _job_id, 1, _event}, 5_000
+    refute_received {:event, %{type: "job.harness.starting"}}
+    Runner.close(pid)
+  end
+
+  # Held, and then given its first message: from there its silence counts like anyone's.
+  test "a held prompt is watched from the message that carries it", context do
+    {pid, _spec} =
+      chat(context,
+        hold_prompt: true,
+        extra_env: [{"FAKE_SCENARIO", "never_starts"}],
+        start_notice_ms: 50,
+        start_timeout_ms: 100,
+        grace_ms: 100
+      )
+
+    assert Runner.send_message(pid, "anyone there?") == :ok
+    assert_receive {:event, %{type: "job.harness.starting", payload: %{gave_up: true}}}, 5_000
+    assert_receive {:ended, _job_id, %{reason: "the harness had not started after 0s"}}, 5_000
+  end
+
+  # The conversation that sat for 38 minutes: given its prompt, never said it started.
+  test "one given its prompt that never starts is stopped, and says why", context do
+    {_pid, _spec} =
+      chat(context,
+        extra_env: [{"FAKE_SCENARIO", "never_starts"}],
+        start_notice_ms: 50,
+        start_timeout_ms: 100,
+        grace_ms: 100
+      )
+
+    assert_receive {:event, %{type: "job.harness.starting", payload: %{gave_up: true}}}, 5_000
+    assert_receive {:ended, _job_id, result}, 5_000
+    # The fake reads stdin to its end before it writes anything, and a conversation's stdin does
+    # not end, so there is no stderr to quote here — the reason is the sentence alone.
+    assert result.reason == "the harness had not started after 0s"
+  end
+
   # `<"$prompt"` made stdin a regular file already at EOF and threw the port's pipe away, so
   # nothing written to a running harness could ever arrive. This is the blocker the whole
   # feature sat behind, and it is why the first message goes down the pipe like every other.

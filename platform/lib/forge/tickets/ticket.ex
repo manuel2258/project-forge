@@ -8,6 +8,19 @@ defmodule Forge.Tickets.Ticket do
   use Ecto.Schema
   import Ecto.Changeset
 
+  @open [:active, :stuck]
+
+  @doc """
+  The statuses of a ticket that still has work ahead of it: active, or stuck waiting for a person.
+  Done and cancelled are not. The one definition every surface and guard reads, so "open" cannot
+  mean one thing on the board and another in the engine.
+  """
+  @spec open_statuses() :: [atom()]
+  def open_statuses, do: @open
+
+  @doc "`open_statuses/0` as a guard."
+  defguard open?(status) when status in @open
+
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id
   schema "tickets" do

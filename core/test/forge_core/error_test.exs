@@ -46,4 +46,16 @@ defmodule ForgeCore.ErrorTest do
       assert Error.format([]) == ""
     end
   end
+
+  describe "to_text/1" do
+    test "errors are their formatted lines" do
+      assert Error.to_text([Error.new("a", "is wrong"), Error.new("b", "too")]) ==
+               "a: is wrong\nb: too"
+    end
+
+    test "text is itself, and anything else is inspected" do
+      assert Error.to_text("is not UTF-8") == "is not UTF-8"
+      assert Error.to_text({:parse_error, [:x]}) == "{:parse_error, [:x]}"
+    end
+  end
 end

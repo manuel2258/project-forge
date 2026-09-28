@@ -176,6 +176,7 @@ defmodule ForgeWeb.Layouts do
       <nav :if={@nav} class="flex items-center gap-5 text-sm">
         <.nav_link navigate={~p"/"} active={@active == :queue} count={@queue_count}>Queue</.nav_link>
         <.nav_link navigate={~p"/board"} active={@active == :board}>Board</.nav_link>
+        <.nav_link navigate={~p"/projects"} active={@active == :projects}>Projects</.nav_link>
         <%!-- Nothing on it waits on a human, which is why nothing on it is accent. On a phone it
               is a row in the More sheet: a phone reaches everything a laptop does
               (docs/design/ui.md § The phone). --%>
@@ -242,6 +243,7 @@ defmodule ForgeWeb.Layouts do
     />
 
     <nav class="flex flex-col" aria-label="More">
+      <.more_row navigate={~p"/projects"}>Projects</.more_row>
       <.more_row navigate={~p"/workers"}>Workers</.more_row>
       <.more_row navigate={~p"/templates"}>Templates</.more_row>
       <.more_row navigate={~p"/projects/new"}>New project</.more_row>

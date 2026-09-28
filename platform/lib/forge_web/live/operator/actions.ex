@@ -72,6 +72,24 @@ defmodule ForgeWeb.Operator.Actions do
     end
   end
 
+  defp act("cancel-ticket", %{"ticket" => id}, socket) do
+    with {:ok, _ticket} <- Operator.cancel(ticket(id), user(socket)) do
+      {:ok, "Ticket cancelled"}
+    end
+  end
+
+  defp act("restore-ticket", %{"ticket" => id}, socket) do
+    with {:ok, ticket} <- Operator.restore(ticket(id), user(socket)) do
+      {:ok, "Restored; stuck in #{ticket.state}"}
+    end
+  end
+
+  defp act("retry", %{"ticket" => id}, socket) do
+    with {:ok, ticket} <- Operator.retry(ticket(id), user(socket)) do
+      {:ok, "Running #{ticket.state} again"}
+    end
+  end
+
   # A document a human state declares, written from the ticket's Decide tab. The same write the
   # API's `POST …/artifacts/:name` makes (`docs/design/workflow-grammar-v1.md` § Semantics).
   defp act("write_document", %{"ticket" => id, "name" => name, "content" => content}, socket) do
@@ -98,6 +116,12 @@ defmodule ForgeWeb.Operator.Actions do
   defp describe({:invalid_document, errors}), do: ForgeCore.Error.format(errors)
   defp describe(:nothing_pending), do: "nothing awaits approval"
   defp describe(:no_such_transition), do: "no such transition"
+  defp describe({:no_version, name}), do: "#{name} has no version to approve"
+  defp describe({:no_job_in, state}), do: "no job runs in #{state}"
+  defp describe({:not_retryable, status}), do: "a #{status} ticket cannot be run again"
+  defp describe({:not_cancellable, status}), do: "a #{status} ticket cannot be cancelled"
+  defp describe({:not_cancelled, _status}), do: "only a cancelled ticket can be restored"
+  defp describe({:not_active, :cancelled}), do: "the ticket is cancelled; restore it first"
 
   defp describe({:ambiguous, outcomes}),
     do: "ambiguous; pick an outcome: #{Enum.join(outcomes, ", ")}"

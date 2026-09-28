@@ -14,8 +14,12 @@ A job ends by declaring an **outcome** in the front matter of its first declared
 outcome selects which **transition** the ticket takes next. A job does not choose where the
 ticket goes; it says what happened, and the workflow decides.
 
-Jobs are disposable. The machine you are on is thrown away when you finish. What survives is what
-you committed to the branch, and the documents you wrote to `$FORGE_JOB/out/`.
+Jobs are disposable. Assume nothing on the machine outlives your job: what survives is what you
+committed to the branch, and the documents you wrote to `$FORGE_JOB/out/`.
+
+A document the platform cannot accept — missing, unparseable, an outcome the state does not allow
+— is sent back to the job that wrote it, with what is wrong, before the job is reported. After two
+such rounds the job ends in `error`.
 
 ## Artifacts and versions
 
@@ -35,7 +39,7 @@ in this product says "approve whatever is latest".
 ## Commands
 
 A project may declare **commands**: fixed scripts, read from the workflow's pinned commit, that run
-as jobs of their own on their own machines. A state may run them on entry, and a job's manifest
+as jobs of their own, possibly on another machine. A state may run them on entry, and a job's manifest
 may list commands its agent may run — by writing `$FORGE_JOB/invoke.json` and ending the run, which
 parks the job until they are done and resumes it with their exit statuses and logs. The format is
 in the manifest of a job that may; a job whose manifest lists none needs nothing from this section.
@@ -44,8 +48,8 @@ in the manifest of a job that may; a job whose manifest lists none needs nothing
 
 A job asks inside the document it is writing, in a fenced `question` block, next to the passage
 the question is about. A blocking question stops the job until a person answers; a non-blocking
-one states the assumption the job proceeded with and carries on. The answers a person gives come
-back to later jobs as `answers.md`.
+one states the assumption the job proceeded with and carries on. The job that stopped resumes with
+the answers, and every later job on the ticket is handed them as `answers.md`.
 
 ## Ticket proposals
 
@@ -58,9 +62,9 @@ This is the same rule as everywhere else here — your write scope is your own t
 it you can only speak. It is also why proposing is free: nothing you write starts work, spends
 money or takes a machine.
 
-An accepted proposal becomes a ticket; a declined one is recorded as declined, so the next job
-does not propose it again. Both appear in `$FORGE_JOB/tickets/`, which is the project's tickets
-and its open proposals as a snapshot taken when your job started.
+An accepted proposal becomes a ticket like any other; a declined one is recorded and is no longer
+listed. `$FORGE_JOB/tickets/` is the project's tickets and its open proposals, as a snapshot taken
+when your job started. A job that ends in `error` proposes nothing: what it wrote there is withheld.
 
 ## Branches and merging
 
@@ -77,7 +81,7 @@ a person approving it and the platform merging it — never by a push from here.
 
 A conversation is the other thing the platform runs: an agent a person talks to, in a project's or
 a ticket's context, with no state, no outcome and no end until the person stops. It commits to its
-own branch like a job and the person merges that branch if they want the work; ending the
+own branch like a job and the person merges that branch if they want the work; closing the
 conversation deletes a branch that was not merged, unless it would not merge cleanly.
 
 Bootstrapping a project — writing its first `.forge/workflow.yml` — is a conversation's job, not a

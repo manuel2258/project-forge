@@ -49,9 +49,11 @@ defmodule ForgeWeb.ProjectLive do
       current: Tickets.admissible(project),
       clone_url: Url.for(project),
       mirrors: Projects.list_mirrors(project),
-      open: Enum.count(tickets, &(&1.status in [:active, :stuck])),
+      open: Enum.count(tickets, &(&1.status in Forge.Tickets.Ticket.open_statuses())),
       waiting: Enum.count(tickets, &(&1.status == :stuck)),
-      spent: Enum.reduce(tickets, Decimal.new(0), &Decimal.add(&2, &1.cost_usd)),
+      # Every ticket's, a cancelled one's too: cancelling hides a ticket, it does not unspend it.
+      spent:
+        project |> Tickets.all() |> Enum.reduce(Decimal.new(0), &Decimal.add(&2, &1.cost_usd)),
       events: Events.for_project(project.id, 8),
       # The board is the workflow, and a conversation is not on it — it has no state to be in.
       # Without this a chat is a thing you can start from this page and then cannot find from it.
@@ -78,7 +80,8 @@ defmodule ForgeWeb.ProjectLive do
   # Flattened here rather than in the component, so the component takes a list of plain maps and
   # can be rendered from a test without a database.
   defp open_proposals(project) do
-    numbers = Map.new(Tickets.list(project), &{&1.id, &1.number})
+    # Every ticket's number, a cancelled one's too: its proposals are still its.
+    numbers = Map.new(Tickets.all(project), &{&1.id, &1.number})
 
     Enum.map(Proposals.open(project.id), fn found ->
       {title, body, readable} =

@@ -266,6 +266,24 @@ defmodule ForgeWorker.Link do
     {:noreply, socket}
   end
 
+  # A conversation that stopped without saying so. One that ends normally has already sent its
+  # terminal message, which removed it from `jobs` before this arrives — a process's messages to
+  # one receiver keep their order, and the monitor's comes after its last — so a chat still listed
+  # here crashed, and the platform is told it failed rather than left holding a chat that is not
+  # running anywhere.
+  def handle_info({:DOWN, ref, :process, _pid, reason}, socket) do
+    case Enum.find(socket.assigns.jobs, fn {_id, job} -> job[:monitor] == ref end) do
+      {job_id, _job} ->
+        why = "the conversation stopped: #{Exception.format_exit(reason)}"
+        send(self(), {:terminal, job_id, "failed", %{"job_id" => job_id, "reason" => why}})
+
+      nil ->
+        :ok
+    end
+
+    {:noreply, socket}
+  end
+
   # A line for this machine's log, from this process or any other (`ForgeWorker.Log.line/4`).
   def handle_info({:log, entry}, socket) do
     if log_stream?(), do: {:noreply, send_line(socket, entry)}, else: {:noreply, socket}
@@ -345,6 +363,9 @@ defmodule ForgeWorker.Link do
       {:ok, pid} ->
         put_in(socket.assigns.jobs[assignment["job_id"]], %{
           task: pid,
+          # A conversation reports its own ending — unless it crashes, when nothing would, and the
+          # platform would go on believing it runs here (`handle_info({:DOWN, …})`).
+          monitor: Process.monitor(pid),
           runner: nil,
           attempt: 1,
           kind: :chat,
@@ -384,8 +405,18 @@ defmodule ForgeWorker.Link do
 
   defp with_conversation(socket, job_id, message, fun) do
     case Conversation.whereis(job_id) do
-      pid when is_pid(pid) -> fun.(pid)
-      nil -> Logger.info("asked to #{message} #{job_id}, which is not a chat running here")
+      pid when is_pid(pid) ->
+        fun.(pid)
+
+      # In the machine's log, not only the journal: the platform believes this chat runs here, and
+      # a message that reached nobody is the one thing a person asking "why no reply" needs.
+      nil ->
+        Log.line(
+          "chat.missing",
+          :warning,
+          "asked to #{message} a chat that is not running here",
+          job_id: job_id
+        )
     end
 
     {:ok, socket}

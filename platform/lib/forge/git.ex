@@ -301,17 +301,50 @@ defmodule Forge.Git do
 
   Options: `:env` adds variables to the child's environment, and `:stderr` set to `:separate`
   keeps stderr out of the returned output — a hook's messages arrive there, and a caller that
-  parses stdout must not have them mixed in.
+  parses stdout must not have them mixed in. Separate is not discarded: on a failure the error
+  carries stdout followed by stderr. (`Forge.Merge` reads a conflict's paths out of that text by
+  their tab, wherever they sit, so the order is for a person reading it, and swapping it is an
+  equivalent mutant.)
+
+  **Separate used to mean inherited.** `System.cmd/3` cannot capture stderr apart from stdout,
+  so stderr went to the platform's own, and a chat page reading the commits of a branch its
+  close had deleted wrote `fatal: ambiguous argument 'refs/heads/main..refs/heads/chat/…'` into
+  the server log on every render — eleven times for two chats in production. It is written to a
+  file of its own now and read back.
   """
   @spec run(String.t(), [String.t()], keyword()) ::
           {:ok, String.t()} | {:error, {integer(), String.t()}}
   def run(dir, args, opts \\ []) do
     env = [{"GIT_TERMINAL_PROMPT", "0"} | Keyword.get(opts, :env, [])]
-    separate? = Keyword.get(opts, :stderr) == :separate
 
-    case System.cmd("git", args, cd: dir, stderr_to_stdout: not separate?, env: env) do
-      {out, 0} -> {:ok, out}
-      {out, code} -> {:error, {code, out}}
+    case cmd(dir, args, env, Keyword.get(opts, :stderr)) do
+      {out, 0, _err} -> {:ok, out}
+      {out, code, err} -> {:error, {code, out <> err}}
     end
+  end
+
+  defp cmd(dir, args, env, :separate) do
+    err = Path.join(System.tmp_dir!(), "forge-git-#{System.unique_integer([:positive])}.err")
+
+    try do
+      # `$0` is the file and `"$@"` git's arguments, so nothing in them is read by the shell.
+      {out, code} =
+        System.cmd("sh", ["-c", ~s(exec git "$@" 2>"$0"), err | args], cd: dir, env: env)
+
+      stderr =
+        case File.read(err) do
+          {:ok, text} -> text
+          {:error, _reason} -> ""
+        end
+
+      {out, code, stderr}
+    after
+      File.rm(err)
+    end
+  end
+
+  defp cmd(dir, args, env, _merged) do
+    {out, code} = System.cmd("git", args, cd: dir, stderr_to_stdout: true, env: env)
+    {out, code, ""}
   end
 end

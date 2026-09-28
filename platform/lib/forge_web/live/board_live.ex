@@ -31,7 +31,7 @@ defmodule ForgeWeb.BoardLive do
         %{
           project: project,
           columns: Board.columns(tickets, Board.workflow(tickets), cap: @rows),
-          open: Enum.count(tickets, &(&1.status in [:active, :stuck])),
+          open: Enum.count(tickets, &(&1.status in Forge.Tickets.Ticket.open_statuses())),
           waiting: Enum.count(tickets, &(&1.status == :stuck))
         }
       end

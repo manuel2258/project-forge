@@ -41,6 +41,8 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     # Own credentials and own templates only; the assignment actions below are what reach a
     # project, and those are guarded by membership in `Forge.Provisioning`.
     "/templates" => :self,
+    # The caller's own projects only (`Projects.summaries/1` reads `Projects.list/1`).
+    "/projects" => :member,
     "/projects/new" => :approved,
     "/projects/:name" => :member,
     "/projects/:name/settings" => :member,
@@ -91,6 +93,9 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     "/api/v1/tickets/:project/:number/answers" => :member,
     "/api/v1/tickets/:project/:number/approve" => :member,
     "/api/v1/tickets/:project/:number/transition" => :member,
+    "/api/v1/tickets/:project/:number/retry" => :member,
+    "/api/v1/tickets/:project/:number/cancel" => :member,
+    "/api/v1/tickets/:project/:number/restore" => :member,
     "/api/v1/projects/:project/proposals" => :member,
     "/api/v1/proposals/:version_id/accept" => :member,
     "/api/v1/proposals/:version_id/decline" => :member,

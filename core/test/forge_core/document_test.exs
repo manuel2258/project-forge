@@ -234,7 +234,7 @@ defmodule ForgeCore.DocumentTest do
       options: [a, a]
       default: b
       blocking: maybe
-      assumption: 3
+      assumption: [3]
       extra: 1
       ```
       """
@@ -305,6 +305,50 @@ defmodule ForgeCore.DocumentTest do
 
       assert messages(yaml) == [
                {"question[0].anchor", "must be a non-empty string"},
+               {"question[0].options", "must be a non-empty list of strings"},
+               {"question[0].text", "must be a non-empty string"}
+             ]
+    end
+
+    # An agent that wrote `options: [5, 10, 20]` meant three labels. YAML types them as integers,
+    # and refusing that dropped a whole refinement, questions and all, in production.
+    test "numbers and booleans where text is meant are read as the text they were written as" do
+      yaml = """
+      ```question
+      key: 10
+      text: 42
+      anchor: 1.5
+      options: [5, 10, true, until-wrong]
+      default: 10
+      blocking: false
+      assumption: 5
+      ```
+      """
+
+      assert {:ok, %{questions: [question]}} = Document.parse(yaml)
+      assert question.key == "10"
+      assert question.text == "42"
+      assert question.anchor == "1.5"
+      assert question.options == ["5", "10", "true", "until-wrong"]
+      assert question.default == "10"
+      assert question.assumption == "5"
+    end
+
+    # Only scalars are text: a list or a mapping where text is meant is still refused, and
+    # `blocking` is a flag, not text.
+    test "a value that is not a scalar is still refused" do
+      yaml = """
+      ```question
+      key: a
+      text: [t]
+      options: [[a], {b: c}]
+      blocking: "true"
+      ```
+      """
+
+      assert messages(yaml) == [
+               {"question[0].assumption", "is required on a non-blocking question"},
+               {"question[0].blocking", "must be true or false"},
                {"question[0].options", "must be a non-empty list of strings"},
                {"question[0].text", "must be a non-empty string"}
              ]

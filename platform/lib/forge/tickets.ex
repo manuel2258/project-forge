@@ -211,12 +211,39 @@ defmodule Forge.Tickets do
     Repo.one!(from t in Ticket, where: t.project_id == ^project_id and t.number == ^number)
   end
 
+  @doc """
+  The tickets of a project, or of every project, **leaving out cancelled ones**: a cancelled ticket
+  is hidden everywhere a ticket is listed, and reached only by its own address
+  (`docs/design/workflow-grammar-v1.md` § Cancelling a ticket).
+  """
   @spec list(Project.t() | nil) :: [Ticket.t()]
   def list(project \\ nil)
-  def list(nil), do: Repo.all(from t in Ticket, order_by: [asc: t.inserted_at])
+
+  def list(nil),
+    do: Repo.all(from t in visible(Ticket), order_by: [asc: t.inserted_at])
 
   def list(%Project{id: id}),
+    do: Repo.all(from t in visible(Ticket), where: t.project_id == ^id, order_by: [asc: t.number])
+
+  @doc """
+  Every ticket of a project, cancelled ones included: for what a cancel must not change — money
+  already spent, and which ticket a proposal came from. Anything that *lists* tickets uses
+  `list/1`.
+  """
+  @spec all(Project.t()) :: [Ticket.t()]
+  def all(%Project{id: id}),
     do: Repo.all(from t in Ticket, where: t.project_id == ^id, order_by: [asc: t.number])
+
+  @doc "Narrows a ticket query to the tickets that are listed: every one but a cancelled one."
+  @spec visible(Ecto.Queryable.t()) :: Ecto.Query.t()
+  def visible(query), do: from(t in query, where: t.status != :cancelled)
+
+  @doc "The project a ticket belongs to, by id, or nil — one indexed read, for filtering events."
+  @spec project_id(String.t() | nil) :: String.t() | nil
+  def project_id(nil), do: nil
+
+  def project_id(ticket_id),
+    do: Repo.one(from t in Ticket, where: t.id == ^ticket_id, select: t.project_id)
 
   @spec project_of(Ticket.t()) :: Project.t()
   def project_of(%Ticket{project_id: id}), do: Projects.get!(id)

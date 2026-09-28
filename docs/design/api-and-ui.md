@@ -14,6 +14,10 @@ outside `Operator` altogether (§ Operations).
   when none of its blocking questions remain open.
 - `decide(ticket, user, :approved | :rejected, comment)` — decides the pending transition.
 - `transition(ticket, user, to, opts)` — takes a declared transition by hand.
+- `retry(ticket, user)` — runs the state the ticket rests in again
+  (`design/workflow-grammar-v1.md` § Running a state again).
+- `cancel(ticket, user)`, `restore(ticket, user)` — cancels a ticket, hiding it everywhere, and
+  brings it back (`design/workflow-grammar-v1.md` § Cancelling a ticket).
 - `edit(ticket, user, name, content)` — writes a new version of a document.
 - `accept_proposal(version_id, user, comment)` — admits a ticket proposal as a ticket.
 - `decline_proposal(version_id, user, comment)` — records that it will not be.
@@ -24,7 +28,7 @@ outside `Operator` altogether (§ Operations).
 - `set_model(project, user, model)`, `issue_token(project, user, opts)`,
   `revoke_token(project, user, token_id)` — project settings, which need the admin capability.
 
-The first four return `{:ok, ticket}` or `{:error, reason}` and, on success, notify subscribers
+The first seven return `{:ok, ticket}` or `{:error, reason}` and, on success, notify subscribers
 of the ticket so open pages refresh.
 
 The two proposal operations break that shape, and it is worth saying exactly how rather than
@@ -81,6 +85,8 @@ and audited like any other.
 | `POST /tickets/:project/:number/answers` | `{key, choice, text}` |
 | `POST /tickets/:project/:number/approve` | `{decision, comment}` |
 | `POST /tickets/:project/:number/transition` | `{to, outcome, comment}` |
+| `POST /tickets/:project/:number/retry` | Runs the state the ticket rests in again |
+| `POST /tickets/:project/:number/cancel`, `…/restore` | Cancels the ticket; brings a cancelled one back |
 | `GET /projects/:project/proposals` | Open ticket proposals on the project |
 | `POST /proposals/:version_id/accept` | `{comment}`; answers with the ticket it admitted |
 | `POST /proposals/:version_id/decline` | `{comment}` |
@@ -101,7 +107,8 @@ flow; public registration is disabled. An account is created from the command li
 pending account that a node admin has to approve (`design/identity.md` § Approval).
 
 - `/` — the queue: one card per item, answerable in place. Options are buttons, free text a
-  field; approvals have approve and reject; stuck and review items list the transitions.
+  field; approvals have approve and reject; stuck and review items list the transitions, and a
+  stuck item says whether its state can be run again (`retry`).
   Non-blocking questions follow the last card as a digest of lines, each leading to its ticket,
   and are not cards (`design/ui.md` § Not waiting on you). `GET /queue` serves them as items of
   kind `assumption`.

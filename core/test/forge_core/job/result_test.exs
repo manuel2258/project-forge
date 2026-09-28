@@ -190,4 +190,21 @@ defmodule ForgeCore.Job.ResultTest do
     assert %Result{invalid: %{"plan.md" => rendered}} = Result.from_map(round_tripped)
     assert rendered =~ "missing_outcome"
   end
+
+  # Parse errors used to cross as `inspect` of their structs, which is what the platform then had
+  # to show a person. They cross as the lines `ForgeCore.Error.format/1` writes.
+  test "invalid outputs that are parse errors cross as their lines" do
+    errors = [
+      ForgeCore.Error.new("question[0].options", "must be a non-empty list of strings"),
+      ForgeCore.Error.new("question[0].default", "must be a string")
+    ]
+
+    map = Result.to_map(%{result() | invalid: %{"plan.md" => errors}})
+
+    assert map["invalid"] == %{
+             "plan.md" =>
+               "question[0].options: must be a non-empty list of strings\n" <>
+                 "question[0].default: must be a string"
+           }
+  end
 end

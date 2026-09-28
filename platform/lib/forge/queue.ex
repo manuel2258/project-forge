@@ -18,7 +18,7 @@ defmodule Forge.Queue do
   require Logger
 
   alias Forge.Accounts.User
-  alias Forge.{Artifacts, Conversations, Projects, Repo, Tickets}
+  alias Forge.{Artifacts, Conversations, Engine, Projects, Repo, Tickets}
   alias Forge.Artifacts.Question
   alias Forge.Jobs.Job
   alias Forge.Tickets.Ticket
@@ -26,7 +26,7 @@ defmodule Forge.Queue do
 
   # A ticket that can still be waiting on someone: one that is running or stuck. The queue loads
   # only these, and one ticket's items are read only for these, from this one list.
-  @open [:active, :stuck]
+  @open Forge.Tickets.Ticket.open_statuses()
 
   @typedoc """
   One thing waiting on a person.
@@ -99,8 +99,8 @@ defmodule Forge.Queue do
           #
           # What actually makes this redundant is an invariant in the engine:
           # `put_pending_approval/4` always writes `status: :active`, `put_transition/6` always
-          # clears `pending_transition`, and nothing writes `:cancelled` at all — so the pair
-          # that would distinguish them cannot be produced. This stays as a narrowing of the
+          # clears `pending_transition`, and `Engine.cancel/2` clears it as it writes `:cancelled`
+          # — so the pair that would distinguish them cannot be produced. This stays as a narrowing of the
           # rows loaded, and a fourth `ticket_items/1` clause would need this read again.
           #
           # The rule a test can fail on is "a finished ticket is not in the queue", in
@@ -193,7 +193,8 @@ defmodule Forge.Queue do
         detail: %{
           state: ticket.state,
           transitions: transitions_from(ticket),
-          reviewable: reviewable?(ticket)
+          reviewable: reviewable?(ticket),
+          retry: retryable?(ticket)
         }
       }
     ]
@@ -249,14 +250,18 @@ defmodule Forge.Queue do
   # `from` - and this names states, so each is named once.
   defp transitions_from(%Ticket{} = ticket) do
     case Tickets.parsed_workflow(ticket) do
-      {:ok, workflow} ->
-        workflow
-        |> Workflow.transitions_from(ticket.state)
-        |> Enum.map(& &1.to)
-        |> Enum.uniq()
+      {:ok, workflow} -> Engine.offered_transitions(ticket, workflow)
+      {:error, errors} -> unparseable(ticket, errors, [])
+    end
+  end
 
-      {:error, errors} ->
-        unparseable(ticket, errors, [])
+  # Whether the state the stuck ticket rests in can be run again (`Engine.retry/2`). Asked through
+  # the parsed workflow for the reason above: one ticket whose definition no longer parses costs
+  # its own detail, not the queue.
+  defp retryable?(%Ticket{} = ticket) do
+    case Tickets.parsed_workflow(ticket) do
+      {:ok, _workflow} -> Engine.retryable?(ticket)
+      {:error, errors} -> unparseable(ticket, errors, false)
     end
   end
 

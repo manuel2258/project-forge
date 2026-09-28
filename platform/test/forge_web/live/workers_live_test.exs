@@ -34,6 +34,50 @@ defmodule ForgeWeb.WorkersLiveTest do
     worker
   end
 
+  # Templates used to be a link inside the explanation beneath the header, and the only way there
+  # from a laptop. It is a button, filled while the viewer has no template, because then nothing
+  # will ever appear on this page by waiting.
+  describe "the Templates button" do
+    test "is filled, with a line saying why, while the viewer has no template", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/workers")
+
+      assert view |> element("#templates-button") |> render() =~ "bg-primary"
+
+      assert has_element?(
+               view,
+               "#no-templates",
+               "You have no templates, so no machine of yours can be made"
+             )
+
+      assert has_element?(view, ~s(#templates-button[href="/templates"]))
+    end
+
+    test "is plain once the viewer has one, and someone else's does not count", %{
+      conn: conn,
+      user: user
+    } do
+      template = fn owner ->
+        {:ok, _template} =
+          Forge.Provisioning.create_template(owner, %{
+            name: "t-#{System.unique_integer([:positive])}",
+            provider: "fake",
+            memory: 8 * 1024 * 1024 * 1024,
+            cores: 4,
+            max_workers: 1
+          })
+      end
+
+      template.(Forge.AccountsFixtures.user_fixture())
+      {:ok, view, _html} = live(conn, ~p"/workers")
+      assert has_element?(view, "#no-templates")
+
+      template.(user)
+      {:ok, view, _html} = live(conn, ~p"/workers")
+      refute view |> element("#templates-button") |> render() =~ "bg-primary"
+      refute has_element?(view, "#no-templates")
+    end
+  end
+
   test "an empty fleet names what would fill it", %{conn: conn} do
     {:ok, _view, html} = live(conn, ~p"/workers")
 

@@ -96,6 +96,12 @@ defmodule Forge.CLITest do
 
       reviewing = ticket_fixture(%{project: project, number: 4, state: "review_ready"})
 
+      # The merge approves the changeset, and a transition with nothing to approve is not offered.
+      {:ok, _version} =
+        Forge.Artifacts.record_version(reviewing.id, "changeset", :blob, :system, %{
+          blob_uri: "git:" <> String.duplicate("a", 40)
+        })
+
       # Older than everything above, and still last: an assumption is not waiting on anyone, so
       # it follows the decisions rather than being sorted in among them.
       assuming = ticket_fixture(%{project: project, number: 5, state: "planning"})

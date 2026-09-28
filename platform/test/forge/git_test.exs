@@ -84,6 +84,34 @@ defmodule Forge.GitTest do
     assert {:ok, [%{subject: "second"}, %{subject: "first"}]} = Git.log(repo, base, "ticket/2")
   end
 
+  # A chat page reads the commits of a branch its close deleted, and git complains on stderr. With
+  # stderr kept apart from stdout that complaint used to go to the platform's own stderr — the
+  # server log — on every render, and the error the caller got carried nothing. It is the error's
+  # now, and only the error's.
+  describe "a range whose end is gone" do
+    test "log/3 says why in the error", %{repo: repo} do
+      assert {:error, {128, why}} = Git.log(repo, "refs/heads/main", "refs/heads/chat/gone")
+      assert why =~ "ambiguous argument 'refs/heads/main..refs/heads/chat/gone'"
+    end
+
+    test "diff/3 and diff_stat/3 say why in the error", %{repo: repo} do
+      assert {:error, {128, why}} = Git.diff(repo, "refs/heads/main", "refs/heads/chat/gone")
+      assert why =~ "unknown revision"
+
+      assert {:error, {128, why}} = Git.diff_stat(repo, "refs/heads/main", "refs/heads/chat/gone")
+      assert why =~ "unknown revision"
+    end
+
+    # Separate still means separate on success: stdout alone, whatever git said on stderr. And
+    # the default still merges them.
+    test "a success returns stdout alone, and the default both", %{repo: repo} do
+      both = ["-c", "alias.both=!echo out; echo err >&2", "both"]
+
+      assert Git.run(repo, both, stderr: :separate) == {:ok, "out\n"}
+      assert Git.run(repo, both) == {:ok, "out\nerr\n"}
+    end
+  end
+
   describe "ensure_initial_commit/2" do
     # A bare repository has no commits, so its default branch is unborn — and everything starts
     # from it: a ticket's base, a conversation's branch, a merge's destination. Nothing outside

@@ -11,6 +11,7 @@ defmodule Forge.Engine do
   alias Forge.Events.Event
   alias Forge.Jobs.Job
   alias Forge.Tickets.Ticket
+  require Forge.Tickets.Ticket
   alias ForgeCore.Engine, as: Core
   alias ForgeCore.Workflow
   alias ForgeCore.Workflow.{State, Transition}
@@ -47,8 +48,13 @@ defmodule Forge.Engine do
   """
   @spec stick(Ticket.t(), String.t(), :placement | nil) :: {:ok, Ticket.t()} | {:error, term()}
   def stick(%Ticket{} = ticket, reason, cause \\ nil) do
+    # Locked and re-read: the scheduler decides to stick from a ticket it read earlier, and one
+    # cancelled since must stay cancelled rather than come back as stuck. Only cancelled is
+    # refused — a merge that fails sticks a ticket that entered its terminal state
+    # (`stick_after_merge/2`), which is how it gets a way forward.
     Multi.new()
-    |> put_stuck(ticket, reason, cause)
+    |> Multi.run(:open, fn repo, _changes -> lock_uncancelled(repo, ticket.id) end)
+    |> Multi.merge(fn %{open: open} -> put_stuck(Multi.new(), open, reason, cause) end)
     |> Repo.transaction()
     |> case do
       {:ok, %{ticket: ticket}} ->
@@ -368,7 +374,12 @@ defmodule Forge.Engine do
   """
   @spec choose(Ticket.t(), String.t(), String.t(), keyword()) ::
           {:ok, Ticket.t()} | {:error, term()}
-  def choose(%Ticket{} = ticket, user_id, to, opts \\ []) do
+  def choose(ticket, user_id, to, opts \\ [])
+
+  def choose(%Ticket{status: :cancelled}, _user_id, _to, _opts),
+    do: {:error, {:not_active, :cancelled}}
+
+  def choose(%Ticket{} = ticket, user_id, to, opts) do
     workflow = Tickets.workflow(ticket)
 
     with :ok <- no_live_job(ticket),
@@ -379,6 +390,229 @@ defmodule Forge.Engine do
 
   defp no_live_job(%Ticket{id: id, state: state}) do
     if Jobs.live?(id, state), do: {:error, {:job_live, state}}, else: :ok
+  end
+
+  @doc """
+  The states a person may move the ticket to from where it rests, each named once — two edges may
+  share a target — and **none whose transition approves a document with no version**, because
+  taking it would record an approval of nothing and is refused (`workflow-grammar-v1.md`
+  § Semantics). A refinement that failed left its ticket offering `planning`, which failed twice
+  when taken. The ticket page and the queue both ask this, so they cannot disagree.
+  """
+  @spec offered_transitions(Ticket.t(), Workflow.t()) :: [String.t()]
+  def offered_transitions(%Ticket{} = ticket, %Workflow{} = workflow) do
+    workflow
+    |> Workflow.transitions_from(ticket.state)
+    |> Enum.filter(&(unversioned(ticket, &1) == []))
+    |> Enum.map(& &1.to)
+    |> Enum.uniq()
+  end
+
+  defp unversioned(%Ticket{id: id}, %Transition{approve: names}),
+    do: Enum.reject(names, &Artifacts.latest(id, &1))
+
+  # -- cancelling and restoring ---------------------------------------------------------------
+
+  # Every status a job is not finished in. Wider than `Jobs.live?/2`, which leaves out
+  # `:hibernated` because it asks whether something occupies the state now: a hibernated job
+  # occupies nothing but is resumable, and a cancelled ticket's job must not be.
+  @live_job_statuses [:pending, :running, :waiting, :parked, :hibernated]
+
+  @doc """
+  Cancels a ticket: `cancelled`, every live job of it finished as `cancelled`, a machine running
+  one told to stop, any pending approval cleared. Not a deletion — the history, the branch and the
+  documents stay, and `restore/2` undoes it (`workflow-grammar-v1.md` § Cancelling a ticket).
+  Refused for a ticket that is done or already cancelled.
+  """
+  @spec cancel(Ticket.t(), String.t()) :: {:ok, Ticket.t()} | {:error, term()}
+  def cancel(%Ticket{} = ticket, user_id) do
+    now = DateTime.utc_now(:second)
+
+    # **Locked, and read inside the transaction.** The ticket row first, then its live jobs, so
+    # every other writer is serialised against this one: the scheduler starting a pending job
+    # (`mark_started` locks the row and requires `:pending`), a result being recorded (`record`
+    # locks the row and refuses a finished job), and the scheduler sticking the ticket
+    # (`stick/3` locks the ticket and refuses one no longer open). Read outside, a job that went
+    # from pending to running in between was finished here and its machine never told, and a
+    # result committed in between moved the cancelled ticket on to its next state. **No test
+    # reaches the locks**: each race needs another writer to commit between two statements of
+    # this process. What each refused writer does next is tested (`cancel_test.exs`).
+    Multi.new()
+    |> Multi.run(:locked, fn repo, _changes -> lock_open(repo, ticket.id, :not_cancellable) end)
+    |> Multi.run(:live, fn repo, _changes ->
+      {:ok,
+       repo.all(
+         from j in Job,
+           where:
+             j.ticket_id == ^ticket.id and j.kind in [:workflow, :command] and
+               j.status in @live_job_statuses,
+           lock: "FOR UPDATE"
+       )}
+    end)
+    |> Multi.merge(fn %{locked: locked, live: live} ->
+      ids = Enum.map(live, & &1.id)
+
+      Multi.new()
+      |> Tickets.put_progress(:ticket, locked, %{
+        state: locked.state,
+        status: :cancelled,
+        cost_usd: locked.cost_usd,
+        pending_transition: nil
+      })
+      |> Multi.update_all(:ended, from(j in Job, where: j.id in ^ids),
+        set: [status: :finished, outcome: :cancelled, finished_at: now, updated_at: now]
+      )
+      |> Jobs.Runs.close_all(ids, now)
+      |> Events.log(:cancel_event, "ticket.cancelled", actor(user_id), %{
+        ticket_id: ticket.id,
+        payload: %{"state" => locked.state, "jobs" => ids}
+      })
+    end)
+    |> Repo.transaction()
+    |> case do
+      {:ok, %{ticket: ticket, live: live}} ->
+        # After the commit, never inside it: a machine told to stop a job the transaction then
+        # rolled back would stop work that is still the ticket's. The machine is released when it
+        # says it stopped (`Forge.Jobs.hibernate/4` and `complete/2`, which settle what the run
+        # spent), not here, where its process is still running. `Workers.push/2` to a job with
+        # no worker is an equivalent mutant of the filter: it finds no channel and does nothing.
+        for %Job{status: :running, worker_id: worker_id} = job <- live, worker_id != nil do
+          Forge.Workers.push(worker_id, {:cancel, job.id, :ticket_cancelled})
+        end
+
+        Enum.each(live, &Forge.Git.Tokens.revoke_for_job(&1.id))
+        {:ok, ticket}
+
+      {:error, :locked, reason, _changes} ->
+        {:error, reason}
+
+      {:error, step, reason, _changes} ->
+        {:error, {step, reason}}
+    end
+  end
+
+  defp lock_uncancelled(repo, ticket_id) do
+    case repo.one!(from t in Ticket, where: t.id == ^ticket_id, lock: "FOR UPDATE") do
+      %Ticket{status: :cancelled} -> {:error, {:not_open, :cancelled}}
+      %Ticket{} = ticket -> {:ok, ticket}
+    end
+  end
+
+  # The ticket row, locked, if it is still open — active or stuck. `why` names the refusal.
+  defp lock_open(repo, ticket_id, why) do
+    case repo.one!(from t in Ticket, where: t.id == ^ticket_id, lock: "FOR UPDATE") do
+      %Ticket{status: status} = ticket when Ticket.open?(status) -> {:ok, ticket}
+      %Ticket{status: status} -> {:error, {why, status}}
+    end
+  end
+
+  @doc """
+  Undoes `cancel/2`: the ticket is `stuck` in the state it was in, waiting for a person to run that
+  state again or take a transition out of it. Nothing is started by restoring.
+  """
+  @spec restore(Ticket.t(), String.t()) :: {:ok, Ticket.t()} | {:error, term()}
+  def restore(%Ticket{status: :cancelled} = ticket, user_id) do
+    Multi.new()
+    |> Tickets.put_progress(:ticket, ticket, %{
+      state: ticket.state,
+      status: :stuck,
+      cost_usd: ticket.cost_usd,
+      pending_transition: nil
+    })
+    |> Events.log(:restore_event, "ticket.restored", actor(user_id), %{
+      ticket_id: ticket.id,
+      payload: %{"state" => ticket.state}
+    })
+    |> Repo.transaction()
+    |> case do
+      {:ok, %{ticket: ticket}} ->
+        {:ok, ticket}
+
+      {:error, step, reason, _changes} ->
+        {:error, {step, reason}}
+    end
+  end
+
+  def restore(%Ticket{status: status}, _user_id), do: {:error, {:not_cancelled, status}}
+
+  # -- running a state again ------------------------------------------------------------------
+
+  @doc """
+  Runs the ticket's current state again: the next attempt of its job, or its commands again, with
+  the arrival the last attempt had. Clears a pending approval, whose documents are about to be
+  replaced, and unsticks the ticket. Takes no transition, so no `max` counts it
+  (`workflow-grammar-v1.md` § Running a state again).
+
+  Refused, with why, on a ticket that is done, in a state no job runs in, or with a job still live
+  in its state — `retryable/1` is the same check, for a surface deciding whether to offer it.
+  """
+  @spec retry(Ticket.t(), String.t()) :: {:ok, Ticket.t()} | {:error, term()}
+  def retry(%Ticket{} = ticket, user_id) do
+    workflow = Tickets.workflow(ticket)
+
+    with :ok <- retryable(ticket, workflow) do
+      Multi.new()
+      |> Tickets.put_progress(:ticket, ticket, %{
+        state: ticket.state,
+        status: :active,
+        cost_usd: ticket.cost_usd,
+        pending_transition: nil
+      })
+      |> Events.log(:retry_event, "ticket.retried", actor(user_id), %{
+        ticket_id: ticket.id,
+        payload: %{"state" => ticket.state}
+      })
+      |> put_again(workflow, Workflow.state(workflow, ticket.state))
+      |> Repo.transaction()
+      |> case do
+        {:ok, %{ticket: ticket}} ->
+          Events.notify(ticket.id)
+          {:ok, ticket}
+
+        {:error, step, reason, _changes} ->
+          {:error, {step, reason}}
+      end
+    end
+  end
+
+  @doc "Whether `retry/2` would run the ticket's state again, for a surface deciding to offer it."
+  @spec retryable?(Ticket.t()) :: boolean()
+  def retryable?(%Ticket{} = ticket), do: retryable(ticket, Tickets.workflow(ticket)) == :ok
+
+  defp retryable(%Ticket{status: status}, _workflow) when not Ticket.open?(status),
+    do: {:error, {:not_retryable, status}}
+
+  defp retryable(%Ticket{} = ticket, workflow) do
+    case Workflow.state(workflow, ticket.state) do
+      %State{prompt: prompt} when is_binary(prompt) -> no_live_job(ticket)
+      %State{invoke: [_ | _]} -> no_live_job(ticket)
+      _human_or_missing -> {:error, {:no_job_in, ticket.state}}
+    end
+  end
+
+  defp put_again(multi, workflow, %State{prompt: prompt}) when is_binary(prompt) do
+    Multi.merge(multi, fn %{ticket: ticket} ->
+      Jobs.put_create(Multi.new(), :next_job, ticket, workflow, ticket.state, arrival(ticket))
+    end)
+  end
+
+  defp put_again(multi, workflow, %State{invoke: [_ | _]}) do
+    Multi.merge(multi, fn %{ticket: ticket} ->
+      Forge.Jobs.Commands.put_for_state(Multi.new(), :next_job, ticket, workflow, ticket.state)
+    end)
+  end
+
+  # How the last attempt of this state arrived, so the next is told the same: the comment a tester
+  # sent a build back with is still what the job has to act on (`job-prompt.md` § How the job
+  # arrived). Nil when no attempt ran here, which is how a ticket's first state arrives anyway.
+  defp arrival(%Ticket{id: id, state: state}) do
+    Repo.one(
+      from j in Job,
+        where: j.ticket_id == ^id and j.state == ^state and j.kind == :workflow,
+        order_by: [desc: j.attempt],
+        limit: 1,
+        select: j.spec["entered"]
+    )
   end
 
   # Records approvals (or rejections) for the transition's artifacts, then takes it if approved.

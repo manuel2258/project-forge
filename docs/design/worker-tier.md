@@ -185,6 +185,15 @@ A NixOS image, built by the flake, that boots unchanged both locally and — aft
   platform address `forge-worker-config.service` found.
 - No project toolchain. The workload is a parameter: the environment comes from the project's own
   flake through `nix develop .#<env>`, exactly as `ForgeWorker.Job.Runner` already does it.
+- A shell's worth of general tools for the agent, `jobTools` in `nix/worker-image.nix`: plain
+  `python3` with no packages, `rg`, `fd`, `jq`, `yq`, grep, sed, awk, find, diff, patch, `file`,
+  `which`, `ps`/`pkill`, `less`, `tree`, zip/unzip, xz, bzip2, `curl`, `wget`, `bc` and `make`.
+  They are on the worker unit's `path` beside the worker's own tools (`servicePath`), and a job's
+  `PATH` is the worker's (`ForgeWorker.Job.Exec`'s allowlist passes it through, for an agent and a
+  command alike); `nix develop` only prepends the devshell's, so they are there whether or not the
+  state names an env. They exist because an agent that asked for `python3` got "command not found"
+  and fell back to sed. The line between them and a toolchain is that nothing here belongs to one
+  project: a compiler, a linter or a Python library is the project's flake's to provide.
 
 ## How a machine learns what it is
 

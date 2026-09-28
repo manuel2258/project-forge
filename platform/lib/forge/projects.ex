@@ -143,6 +143,81 @@ defmodule Forge.Projects do
     )
   end
 
+  @doc """
+  The viewer's projects with what each has to run on: open tickets, assigned templates, permanent
+  machines assigned to it, and credentials in its pool that are not revoked (`docs/design/ui.md` § The projects page).
+
+  One query per figure over every project, never one per project: the page is a list, and a
+  list that queries per row grows its cost with the thing it lists.
+  """
+  @spec summaries(User.t()) :: [
+          %{
+            project: Project.t(),
+            open_tickets: non_neg_integer(),
+            templates: non_neg_integer(),
+            machines: non_neg_integer(),
+            credentials: non_neg_integer()
+          }
+        ]
+  def summaries(%User{} = user) do
+    projects = list(user)
+    ids = Enum.map(projects, & &1.id)
+
+    tickets =
+      counts(
+        from(t in Forge.Tickets.Ticket,
+          where: t.project_id in ^ids and t.status in ^Forge.Tickets.Ticket.open_statuses(),
+          group_by: t.project_id,
+          select: {t.project_id, count(t.id)}
+        )
+      )
+
+    templates =
+      counts(
+        from(a in Forge.Provisioning.ProjectTemplate,
+          where: a.project_id in ^ids,
+          group_by: a.project_id,
+          select: {a.project_id, count(a.template_id)}
+        )
+      )
+
+    # Permanent machines assigned to the project, which serve its jobs with no template at all
+    # (`docs/design/identity.md` § Workers). A destroyed one serves nothing.
+    machines =
+      counts(
+        from(a in Forge.Workers.ProjectWorker,
+          join: w in Forge.Workers.Worker,
+          on: w.id == a.worker_id,
+          where: a.project_id in ^ids and w.status != :destroyed,
+          group_by: a.project_id,
+          select: {a.project_id, count(w.id)}
+        )
+      )
+
+    credentials =
+      counts(
+        from(a in Forge.Credentials.ProjectCredential,
+          join: c in Forge.Credentials.Credential,
+          on: c.id == a.credential_id,
+          where: a.project_id in ^ids and is_nil(c.revoked_at),
+          group_by: a.project_id,
+          select: {a.project_id, count(c.id)}
+        )
+      )
+
+    for project <- projects do
+      %{
+        project: project,
+        open_tickets: Map.get(tickets, project.id, 0),
+        templates: Map.get(templates, project.id, 0),
+        machines: Map.get(machines, project.id, 0),
+        credentials: Map.get(credentials, project.id, 0)
+      }
+    end
+  end
+
+  defp counts(query), do: query |> Repo.all() |> Map.new()
+
   ## Membership
 
   @doc "The role this user holds on this project, or nil for a non-member."

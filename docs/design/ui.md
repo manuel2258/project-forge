@@ -766,8 +766,11 @@ card and no box, in this order:
   guess about now.
 - **Two columns beneath, stacking on a phone**: what it offers the gate — capacity, the report
   that disagrees, *never made* — and the form behind *Set what it offers*; then the harness, what
-  it is running, when it was last seen and since when it has been idle, and which projects it
-  serves. Every line the table carried is still here; this was a relayout, not a removal.
+  it is running, when it was last seen and since when it has been idle — and, for a machine the
+  platform made, when it will go (*goes in 43m*, *goes now*): the end of its period or of a
+  claim on it, or on a provider billing by the hour the leeway point of an hour it has paid for
+  (`worker-tier.md` § The hour already paid for) — and which projects it serves. Every line the
+  table carried is still here; this was a relayout, not a removal.
 
 Everything tappable on it is 46px, the selects and fields of its two forms included.
 

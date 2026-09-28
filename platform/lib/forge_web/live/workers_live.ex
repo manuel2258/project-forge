@@ -57,6 +57,8 @@ defmodule ForgeWeb.WorkersLive do
   defp load(socket) do
     user = socket.assigns.current_scope.user
 
+    now = DateTime.utc_now()
+
     rows =
       for worker <- Workers.list(user),
           socket.assigns.show_destroyed or worker.status != :destroyed do
@@ -73,6 +75,11 @@ defmodule ForgeWeb.WorkersLive do
           jobs: jobs,
           remaining_memory: Workers.remaining(worker),
           remaining_cores: Workers.remaining_cores(worker),
+          # When the idle sweep will take it, from the function the sweep asks: on a provider
+          # that bills by the hour that is a leeway point of an hour it has paid for, and a
+          # machine idle for longer than its period would otherwise read as one the sweep had
+          # forgotten.
+          goes_at: Workers.goes_at(worker, now),
           serves: serving_projects(worker)
         }
       end
@@ -84,7 +91,7 @@ defmodule ForgeWeb.WorkersLive do
       connected_count: Enum.count(rows, & &1.connected),
       slice_bytes: Workers.slice_bytes(),
       current_build: Workers.current_build(),
-      now: DateTime.utc_now()
+      now: now
     )
   end
 
@@ -114,6 +121,15 @@ defmodule ForgeWeb.WorkersLive do
     case Enum.filter(Forge.Jobs.Job.kinds(), &(params["accepts_#{&1}"] == "true")) do
       [] -> nil
       kinds -> kinds
+    end
+  end
+
+  # `Format.until/2` says `now` for anything less than a minute off, the moment already here
+  # included, which reads as "goes now" rather than "goes in now".
+  defp goes(at, now) do
+    case Format.until(at, now) do
+      "now" -> "goes now"
+      left -> "goes in #{left}"
     end
   end
 
@@ -668,7 +684,7 @@ defmodule ForgeWeb.WorkersLive do
               "never"}<span :if={@row.worker.idle_since} class="opacity-70"> · idle {Format.ago(
               @row.worker.idle_since,
               @now
-            )}</span>
+            )}</span><span :if={@row.goes_at} class="opacity-70"> · {goes(@row.goes_at, @now)}</span>
           </div>
 
           <.serves row={@row} projects={@projects} />

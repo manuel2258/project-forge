@@ -80,9 +80,22 @@ config :forge, Forge.Workers,
   # M4: a machine goes from nothing to able to build in about 35 seconds (docs/measurements.md
   # § M4), so being wrong about this costs 35 seconds, less than the operator's own round trip
   # to approve an artifact. Five minutes covers an approval gap without holding a machine
-  # through a lunch break. The closing step re-measures it on a provider, where the seed and the
-  # Nix store stop arriving over loopback and the cold start gets longer.
+  # through a lunch break — where nothing is billed; on a provider that bills by the hour it is
+  # only the least a machine is kept (billing_leeway_ms, below). The closing step re-measures it
+  # on a provider, where the seed and the Nix store stop arriving over loopback and the cold
+  # start gets longer.
   idle_period_ms: 300_000,
+  # On a provider that bills every started hour, a machine is decided on this long before each
+  # hour it has paid for ends: destroyed if it has been idle past its period by then and nothing
+  # has a claim on it, kept for the whole next hour otherwise (docs/design/worker-tier.md § The
+  # hour already paid for). It covers the platform's own lag — a pass every two seconds that may
+  # wait on a provider's API, and a delete the provider finishes asynchronously — and is what the
+  # Jenkins Hetzner plugin leaves; the TestFlows runners leave ten.
+  billing_leeway_ms: 300_000,
+  # And no destroy is sent in an hour's last minute: one sent then could complete in the next
+  # hour, billed with the machine already gone, so a machine not destroyed by now keeps the next
+  # hour instead. A provider call waits up to thirty seconds; this is twice that.
+  billing_last_call_ms: 60_000,
   # How long a worker may be out of touch before the platform stops waiting for it. Three
   # missed heartbeats would be a minute; this is generous because a machine that is booting
   # has not reported yet and is timed from when its row was made.

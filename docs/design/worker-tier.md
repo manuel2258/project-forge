@@ -107,6 +107,7 @@ The callbacks:
 @callback list(credential) :: {:ok, [instance]} | {:error, term}
 @callback credential_fields() :: [%{key: String.t(), label: String.t()}]
 @callback required_template_fields() :: [:size | :image]
+@callback billed_increment_ms() :: pos_integer() | nil
 ```
 
 `opts` carries the worker id, the token, the platform's address, the provider name the registry
@@ -128,6 +129,10 @@ secret that reaches its account; `required_template_fields/0`, which of `size` a
 template must name for the driver to make anything from it; and `list/1`, the machines forge
 made in that account, which nothing calls yet — and `impl/0` became a registry, so the driver is
 resolved per machine from the row rather than per node from configuration. All of it is built.
+A ninth came with billing: `billed_increment_ms/0`, how long a machine is billed for at a time
+when every started increment is charged whole — an hour for Hetzner, nil for the local driver —
+which is what keeps an idle machine to a leeway point of an hour it has paid for (§ The hour
+already paid for).
 
 **Nothing above the driver knows the provider.** Not the scheduler, not the channel, not the
 worker. A module that pattern-matches on `"local"` outside `Forge.Provider.*` is the bug this
@@ -737,9 +742,11 @@ contract.
 
 A worker with no running jobs goes `idle` and starts a timer: when its last job ends, or when it
 reports `ready` with nothing running — a machine that came up and was never given anything is
-idle from that moment, and a reconnect does not restart a clock already running. On expiry the
-platform destroys the machine through the driver and marks the row `destroyed` — only once the
-driver says it went (`Workers.destroy/2`). The next ticket creates a new one.
+idle from that moment, and a reconnect does not restart a clock already running. Once the period
+is up and nothing has a claim on it — and, on a provider that bills by the hour, once the hour the
+machine has paid for is nearly over (§ The hour already paid for) — the platform destroys the
+machine through the driver and marks the row `destroyed`, only once the driver says it went
+(`Workers.destroy/2`). The next ticket creates a new one.
 `Workers.sweep_idle/0` does it, only to a `managed` worker, at the end of every scheduling pass:
 after the pass, because before it the sweep destroyed the machine the pass was about to use, and
 whatever is still pending, because gating it on nothing pending let one job nobody could place —
@@ -756,12 +763,168 @@ template). The node's default is now M4's rather than a guess: **five minutes**.
 M4 measured a machine going from nothing to able to build in about 35 seconds
 (`docs/measurements.md` § M4), which is what being wrong costs — less than the operator's own
 round trip to approve the artifact that produces the next ticket. Five minutes covers an
-approval gap without holding a machine through a lunch break.
+approval gap without holding a machine through a lunch break — on a provider that bills nothing.
+On one that bills by the hour the period is only the least a machine is kept, and it can be held
+most of an hour past it (§ The hour already paid for).
 
 The number is local, and the two phases that dominate it are the two the closing step makes
 worse: the seed arrived over loopback and the Nix store came from the binary cache over the
 host's own connection. On a provider both are network-bound, the cold start gets longer, and
 the argument for a longer idle period goes with it. Re-measuring there is the closing step's.
+
+### The hour already paid for
+
+**The period is the least time an idle machine is kept, not the moment it goes.** On Hetzner the
+difference is money, because of how Hetzner bills a server:
+
+- **Every started hour is billed whole.** *"If you create a server just for a few minutes, we will
+  still bill you for one whole hour"* ([Hetzner Cloud billing FAQ][hz-faq]); *"we round up
+  partial hours"* ([Billing system at Hetzner][hz-billing]).
+- **It bills while the server exists**, running or not: *"you pay for a server that has completed
+  the creation process for as long as it exists, regardless of whether it is turned on or not"*
+  ([FAQ][hz-faq]). Deleting it is the only thing that stops it — which is why a power-off is no
+  cheaper than a destroy and this section has no suspend.
+- **A month is capped** at the server type's monthly price, and the hourly rate times the hours
+  is charged when it is less. The cap is reached only by a machine alive for most of a month.
+- **The primary IPv4 is billed separately**, whether or not a server holds it (*ibid.*).
+
+So a machine destroyed five minutes after it went idle, ten minutes into an hour, has paid for
+fifty minutes it threw away, and a ticket arriving in those fifty minutes makes another machine,
+pays that one's first hour too, and waits out a cold start besides. Holding the idle machine to
+the end of its hour costs nothing: the hour is already charged.
+
+**So on such a provider the machine is decided on at the leeway point of each billed hour** —
+`billing_leeway_ms` (five minutes) before the hour ends, counting hours from when the machine was
+made. At that point it goes only if nothing still has a claim on it:
+
+- **no job running on it**, which includes a conversation until its own idle timeout
+  (`docs/design/conversations.md` § Lifetime): a chat whose last message came at 0:55 holds its
+  machine until 1:25, so at the 0:55 leeway point the machine is in use and takes the next hour;
+- **no job parked on it whose commands have not timed out**, and no job that last ran on it
+  come back to the queue within an idle period (below);
+- **and its idle period ran out before the leeway point**, not merely before the hour's end.
+
+Anything that still has a claim at the leeway point keeps the machine for **the whole next
+hour**, and the question is asked again at that hour's leeway point. So in the example the chat
+goes quiet at 1:25, the machine is idle from then, its period is over by 1:30, and it is destroyed
+at 1:55 — the hour the chat ran into is used to its end rather than thrown away. Which provider
+bills that way is the driver's to say — `Provider.billed_increment_ms/1`, an hour for Hetzner and
+nil for the local driver, whose machines go at the period, or when a claim on them ends
+(`docs/design/provisioning.md` § Where a machine comes from). The workers page draws when an idle
+machine will go, from the same function the sweep asks (`Workers.goes_at/2`), which asks the
+sweep's own question of the row — idle, the platform's, nothing running on it whatever its status
+says — so the page cannot show a moment for a machine the sweep would not take.
+
+- **The hour is counted from the row, which is earlier than Hetzner's clock.** The row is
+  inserted before `POST /servers` is sent, so its `inserted_at` precedes the moment Hetzner
+  starts billing by at least the create call, and an error in the anchor is always towards going
+  a little early — never into an hour nobody meant to buy.
+- **The leeway is the platform's own lag**, not Hetzner's: a scheduling pass every two seconds,
+  a pass that waits on provider calls of up to thirty seconds each — the sweep destroys one
+  machine after another, and a `GET` retries — and a `DELETE` that
+  Hetzner finishes asynchronously. Five minutes is what the Jenkins plugin's hour-wrap policy
+  leaves (`SHUTDOWN_TIME_BUFFER`); the TestFlows runners leave ten. A machine free at the
+  leeway point is destroyed on the next pass, and asked again on every pass until the hour's
+  **last call**.
+- **No destroy is sent in an hour's last call**, `billing_last_call_ms` (a minute) before it
+  ends: a `DELETE` sent then could complete in the next hour, which would be billed with the
+  machine already gone. A machine not destroyed by then — a refused destroy, a node that was down
+  across the leeway — is kept to the next hour's leeway point, which costs the same hour and keeps
+  its use. So does one whose hour ended meanwhile.
+- **A configuration that cannot work is refused when the node starts**
+  (`Workers.check_billing!/0`): a leeway no longer than the last call never opens, so a billed
+  machine would never be destroyed, and one as long as a billed increment destroys at the hour's
+  end or after it. Both are whole seconds or more, since the rows and the sweep count in seconds.
+- **Parked jobs aside, what it costs over going at the period is at most one hour, and only for
+  a machine that was just in use.** A period that runs out before the leeway point is stretched
+  to it, which is free. One that runs out after it — a job ended in the hour's last minutes —
+  buys the next hour, which is the hour the next job, arriving soon after the last, is likeliest
+  to use.
+
+**A parked job keeps its machine while its commands can still finish.** A job parked on the
+commands it invoked holds no slice (`commands.md` § Always park), so its machine is idle — and
+was destroyed on its period while the command it waited on was still running, which lost the
+Claude Code session the job would have resumed on it (`docs/design/provisioning.md` § Affinity
+on resume). A job parked on a machine — `status: :parked`, its `worker_id` that machine, which is
+also the one it prefers when it resumes — now counts as a claim on it until the last of its open
+commands would time out: `timeout_ms` from when the command's row last changed, which is its
+start, or its return to the queue after a lost worker. That bound is what keeps a command stuck in
+the queue from holding a machine for ever. It is not exact: the worker starts a command's clock
+only once it has prepared it, so the claim can end a preparation's length early.
+
+When the commands are done the job goes back to the queue and is parked no longer — and its
+machine, idle since the park, was destroyed by the very pass that had not placed it yet, which a
+job whose credential is limited can miss for hours. So **a job that last ran on a machine and is
+back in the queue** — resumed, reopened, requeued — is a claim on it too, for one idle period
+from its return. That covers the gap between the resume and the pass that places it, and no
+more: a job waiting a week for a rate limit does not hold a machine for the week. Both claims hold
+for the local driver too, where they simply defer the period's end (`Workers.claimed_until/1`).
+
+**A machine kept past its period yields its slot.** It still counts against its template's
+`max_workers`, which is the point when the next job can use it and is a queue that does not move
+when it cannot — a template edited since the machine was made, or a command needing a protocol
+the machine does not speak. Without more, that job would wait for a leeway point instead of the
+end of the period. So when a template is full and a job needs a machine from it, an idle machine
+of that template past its period that could not hold the job even empty is **named** to give its
+slot up (`Workers.provide/4` answers `{:yield, worker}`), and the scheduler hands the names to the
+sweep at the end of its pass, which destroys each one still idle and past its period
+(`by: :yielded`). The job has the slot on the next pass. One still inside its period is not
+named; the job waits the period out, exactly as it did before this. A parked job's claim does not
+stop a yield either: the job resumes on any machine, and a queue that does not move is worse than
+a session that has to be rebuilt.
+
+It was first a destroy on the spot, and the review of it found three things wrong with that, each
+of which is why the rule is shaped as it is:
+
+- **A younger job in the same pass could have used the machine.** The older job that could not
+  fit destroyed it, and the younger one that could then waited for a cold boot. Destroyed at the
+  pass's end, a machine the pass gave work to is busy and is left alone.
+- **A refused destroy was asked again by every job that wanted the slot** — up to ten requests a
+  pass against one account, and, against an API that hangs, minutes of a scheduler doing nothing
+  else. At the pass's end it is asked once a pass, as every other sweep asks. A machine the
+  driver has refused before is named last, so one whose account will not let it go does not
+  stand in front of one that would.
+- **It was destroyed before the create's other checks ran**, so a template whose image the
+  platform refuses, or whose credential it may not spend, lost the machine and made nothing. A
+  machine is named only once the create would go ahead.
+
+A template whose `max_workers` was lowered below the machines it has gives one up a pass until
+there is room, which is a pass's latency per machine over, in a case that is rare.
+
+**Where the hour starts is inferred, not documented, and has not been observed here.** Hetzner
+does not say whether an hour runs from the server's creation or from the clock. Two independent
+autoscalers built against it both count from the server's `created`: the Jenkins plugin's
+[hour-wrap policy][jenkins-hw] (`Helper.canShutdownServer`, a server's age modulo sixty minutes)
+and the [TestFlows GitHub runners][testflows] (`end_of_life`, fifty minutes into each hour of a
+server's age). One third-party write-up says the clock ([CloudTally][cloudtally]: *"Create a
+server at 14:55 and destroy it at 15:05, and you have used parts of two hours: you are billed for
+two"*). The platform takes creation. If the clock is right, what this costs is at most one extra
+hour per machine's life, and only for one made more than the leeway into a clock hour; what it
+saves is unchanged. Observing it is one machine: make one at hh:50, destroy it at hh:40 of the
+next hour, and read the hours on the project's usage page — one hour if Hetzner counts from
+creation, two if it counts the clock.
+
+**Deliberately not here.**
+
+- **The monthly cap.** A machine past its month's cap costs nothing more that month, so keeping
+  it would be free. Reaching the cap takes most of a month of uptime, which an idle-destroyed
+  fleet does not do, and knowing it needs the monthly price and the month's hours so far —
+  `shapes/1` carries only the hourly one.
+- **The IPv4 address.** It is billed beside the server, and its price is a rounding error on the
+  server's. A worker dials out and needs no inbound address, but GitHub has no IPv6, so an
+  IPv6-only worker could not fetch a flake input from it. Whether the address Hetzner makes with a
+  server is deleted with it is not documented — the API reference defaults `auto_delete` to false
+  for one made on its own — and has not been checked here; `list/1` lists servers, so an address
+  outliving its server would be found in the console and not on the workers page.
+- **Deciding to buy the next hour.** At each hour's end the real question is whether a job will
+  arrive in the next one; the period is the operator's answer to it, set per template, and
+  nothing here predicts arrivals.
+
+[hz-faq]: https://docs.hetzner.com/cloud/billing/faq/
+[hz-billing]: https://docs.hetzner.com/general/billing-and-account-management/billing-at-hetzner/billing-system-hetzner/
+[jenkins-hw]: https://github.com/jenkinsci/hetzner-cloud-plugin
+[testflows]: https://github.com/testflows/TestFlows-GitHub-Hetzner-Runners
+[cloudtally]: https://cloudtally.eu/blog/hetzner-cloud-billing-explained
 
 ## What the operator's machine settled
 

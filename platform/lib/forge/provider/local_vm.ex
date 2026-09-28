@@ -166,6 +166,13 @@ defmodule Forge.Provider.LocalVm do
   def required_template_fields, do: []
 
   @doc """
+  Nothing: a machine on this host costs no more for being kept a minute longer, so an idle one
+  goes at its period (`docs/design/worker-tier.md` § The hour already paid for).
+  """
+  @impl Provider
+  def billed_increment_ms, do: nil
+
+  @doc """
   The QEMU invocation for a machine. Public because it is the part of this driver that can be
   checked without a hypervisor, and a test that checked something else would be checking
   nothing.

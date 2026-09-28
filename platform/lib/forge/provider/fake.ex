@@ -77,6 +77,15 @@ defmodule Forge.Provider.Fake do
   @impl Forge.Provider
   def required_template_fields, do: :persistent_term.get({__MODULE__, :requires}, [])
 
+  # Nothing unless a test says otherwise with `billing/1`, so every idle machine in the suite goes
+  # at its period as it did before providers could bill by the hour.
+  @impl Forge.Provider
+  def billed_increment_ms, do: :persistent_term.get({__MODULE__, :billed_increment_ms}, nil)
+
+  @doc "Makes `billed_increment_ms/0` answer `ms` until `allow/0`: a provider billing by the hour."
+  @spec billing(pos_integer()) :: :ok
+  def billing(ms), do: :persistent_term.put({__MODULE__, :billed_increment_ms}, ms)
+
   @doc "Makes `required_template_fields/0` answer `fields` until `allow/0`."
   @spec requiring([:size | :image]) :: :ok
   def requiring(fields), do: :persistent_term.put({__MODULE__, :requires}, fields)
@@ -127,15 +136,16 @@ defmodule Forge.Provider.Fake do
   def refuse_destroy(reason), do: :persistent_term.put({__MODULE__, :refuse_destroy}, reason)
 
   @doc """
-  Stops refusing, both kinds, stops requiring template fields and lists the default images
-  again. Called on exit by anything that called `refuse/1`, `refuse_destroy/1`, `requiring/1` or
-  `listing/1` or `during_create/1`.
+  Stops refusing, both kinds, stops requiring template fields and billing by the hour, and lists
+  the default images again. Called on exit by anything that called `refuse/1`, `refuse_destroy/1`,
+  `requiring/1`, `billing/1`, `listing/1` or `during_create/1`.
   """
   @spec allow() :: :ok
   def allow do
     :persistent_term.erase({__MODULE__, :refuse})
     :persistent_term.erase({__MODULE__, :refuse_destroy})
     :persistent_term.erase({__MODULE__, :requires})
+    :persistent_term.erase({__MODULE__, :billed_increment_ms})
     :persistent_term.erase({__MODULE__, :images})
     :persistent_term.erase({__MODULE__, :during_create})
     :ok

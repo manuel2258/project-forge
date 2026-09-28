@@ -9,6 +9,11 @@ defmodule Forge.Application do
 
   @impl true
   def start(_type, _args) do
+    # A billing configuration that cannot work is refused here, not met by the scheduler's first
+    # pass as a machine that is never destroyed (`Forge.Workers.check_billing!/0`). No test can see
+    # this call go: the application starts once, before any test runs; the check itself is tested.
+    Forge.Workers.check_billing!()
+
     children =
       [
         ForgeWeb.Telemetry,

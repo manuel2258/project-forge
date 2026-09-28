@@ -211,11 +211,12 @@ be set with that in mind rather than as a generous safety number.
 **Whether the harness session survives a park is not a measurement. It is a consequence, and the
 answer was usually no.** This paragraph used to say measuring it was the first thing to do; two
 facts settled it without a run. A parked job holds no slice — which is the whole point of the
-feature — so a worker whose only job is parked has nothing running, goes `idle`, and is destroyed
-on its period while the command is still going. And `Workers.assignable/1` was first-fit by
-`inserted_at`, so even a machine that survived was not preferred for the resume. The second is
-no longer true (below); the first still is. Claude Code's session lookup is per project directory
-(`docs/design/claude-code-events.md` § Resume), so a different worker cannot find it.
+feature — so a worker whose only job is parked has nothing running, goes `idle`, and was destroyed
+on its period while the command was still going. And `Workers.assignable/1` was first-fit by
+`inserted_at`, so even a machine that survived was not preferred for the resume. **Neither is
+true any more** (below). Claude Code's session lookup is per project directory
+(`docs/design/claude-code-events.md` § Resume), so a different worker cannot find it — which is
+why keeping the machine matters.
 
 Nothing about correctness turns on this — that note is explicit that *"resume is never required
 for correctness, and no outcome depends on it"*, and `worker-tier.md` § Hibernation and resume
@@ -226,7 +227,11 @@ cap on park cycles assuming the fallback, not the session.
 **The lever that changes it is affinity, not measurement, and it is built.**
 `Workers.assignable/2` prefers the worker the job last ran on and falls through to any other that
 fits when that one is gone (`docs/design/provisioning.md` § Affinity on resume). What makes it
-hit is the first fact's answer: a per-template idle period long enough on the agent side.
+hit is that the machine is still there: a job parked on it is a claim on it until the last of
+its open commands would time out, and once it is back in the queue it holds it for one idle
+period more, long enough to be placed (`docs/design/worker-tier.md` § The hour already paid for).
+It still misses when a command outruns its own timeout, when a full template needs the slot, or
+when the resumed job cannot be placed within the period — a credential at its limit.
 
 ## The ensured commit
 

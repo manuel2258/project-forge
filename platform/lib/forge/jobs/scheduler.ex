@@ -77,8 +77,12 @@ defmodule Forge.Jobs.Scheduler do
     # The reservations are the machines held for a job that has waited too long, which the jobs
     # after it in the pass may not use (`docs/design/provisioning.md` § The gate). They start empty
     # too: the old job is offered first in every pass, before it holds anything against itself.
-    {assigned, _claims, _reserved} =
-      Enum.reduce(pending, {0, %{}, MapSet.new()}, &offer(&1, &2, waited_since))
+    #
+    # The yields are the idle machines named to give a full template's slot up to a job they
+    # cannot hold (`Workers.provide/4`). They are destroyed by the sweep below and not where they
+    # were named, so a younger job in this pass that fits one still gets it.
+    {assigned, _claims, _reserved, yields} =
+      Enum.reduce(pending, {0, %{}, MapSet.new(), MapSet.new()}, &offer(&1, &2, waited_since))
 
     # **After the pass, not before it, and whatever is still pending.** Before it, the sweep
     # destroyed the very machine the pass was about to use — a machine that has just finished one
@@ -88,12 +92,12 @@ defmodule Forge.Jobs.Scheduler do
     # job waiting for its credentials' limits to reset, which could be a week
     # (`docs/design/credentials.md` § A limit reached mid-run). After the pass, a machine that was
     # given work is busy and out of the sweep's reach, and one that was not is idle by any measure.
-    Workers.sweep_idle()
+    Workers.sweep_idle(yields)
 
     assigned
   end
 
-  defp offer(job, {assigned, claims, reserved}, waited_since) do
+  defp offer(job, {assigned, claims, reserved, yields}, waited_since) do
     # **The credential before the machine.** A job nothing can fund does not ask for capacity,
     # so an empty pool never makes a machine that could run nothing — the loop a disabled
     # template exists to stop, arriving by another door (`docs/design/credentials.md` § How a
@@ -104,24 +108,30 @@ defmodule Forge.Jobs.Scheduler do
     with :ok <- its_turn(job),
          {:ok, _credential} <- credential(job),
          {:ok, worker} <- Workers.provide(demand, job.worker_id, claims, reserved) do
-      {assigned + assign(job, worker), claims, reserved}
+      {assigned + assign(job, worker), claims, reserved, yields}
     else
       # A machine is being made that will hold it: this one, or one an earlier pass asked for.
       {:creating, worker} ->
         wait(job, :creating)
-        {assigned, claim(claims, worker.id, demand), reserved}
+        {assigned, claim(claims, worker.id, demand), reserved, yields}
 
       # Nothing in the project's pool can pay for this job: a person has to assign one, which
       # brings the ticket back by itself (`Engine.resume_placement/2`).
       {:error, {:no_credential, why}} ->
         stick(job, {:no_credential, why})
-        {assigned, claims, reserved}
+        {assigned, claims, reserved, yields}
 
       # No room, and no machine to be made. A job that has waited long enough holds the machines
       # that could take it once they empty, for the rest of the pass; one that would have fitted
       # on a held machine is told it is behind an older job rather than that nothing has room.
       {:error, :at_capacity} ->
-        {assigned, claims, at_capacity(job, demand, reserved, waited_since)}
+        {assigned, claims, at_capacity(job, demand, reserved, waited_since), yields}
+
+      # No room yet, but a machine past its period that cannot hold this job is giving its slot
+      # up at the end of the pass: the job waits as one at capacity does, and has it next pass.
+      {:yield, worker} ->
+        reserved = at_capacity(job, demand, reserved, waited_since)
+        {assigned, claims, reserved, MapSet.put(yields, worker.id)}
 
       # **No template can make this job a machine**, which is a different answer from "not
       # right now" and must not be queued as one: the ticket sticks with the reason, through
@@ -133,7 +143,7 @@ defmodule Forge.Jobs.Scheduler do
       # sentence would send them at the wrong thing. Only `:at_capacity` above is a queue.
       {:error, {:no_template, why}} ->
         stick(job, {:no_template, why})
-        {assigned, claims, reserved}
+        {assigned, claims, reserved, yields}
 
       # Refused by the driver, or held by `concurrent`: the job waits and is offered again next
       # pass, and the pass continues to the jobs behind it. What it does is say why, which it
@@ -144,7 +154,7 @@ defmodule Forge.Jobs.Scheduler do
       # (`docs/design/credentials.md` § How a job picks).
       {:error, reason} ->
         wait(job, reason)
-        {assigned, claims, reserved}
+        {assigned, claims, reserved, yields}
     end
   end
 

@@ -177,6 +177,18 @@ defmodule Forge.Provider.Hetzner do
   @impl Provider
   def credential_fields, do: [%{key: "token", label: "API token"}]
 
+  @doc """
+  An hour. Hetzner charges every hour a server has started — *"if you create a server just for a
+  few minutes, we will still bill you for one whole hour"* — for as long as it exists, running or
+  not, up to the type's monthly price (`docs/design/worker-tier.md` § The hour already paid for).
+
+  **Counted from the server's creation, which is inferred and not observed here.** Hetzner does
+  not say whether an hour runs from creation or from the clock; two autoscalers built against it
+  count from creation, and that note says what it costs if they are wrong and how to find out.
+  """
+  @impl Provider
+  def billed_increment_ms, do: :timer.hours(1)
+
   # Both refused at create below when blank, so a template without them could only ever fail.
   # Declaring them is what lets the template form refuse one instead of saving it.
   @impl Provider

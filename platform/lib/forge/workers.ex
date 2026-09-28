@@ -921,9 +921,17 @@ defmodule Forge.Workers do
   (`docs/design/provisioning.md` § The gate). **A booting machine that would hold the job is
   asked before a new one is made**: a `creating` worker is not assignable, and without this
   every pass until it booted made another, up to the template's `max_workers`.
+
+  `{:yield, worker}` is a full template with an idle machine past its period that could not hold
+  the job: the caller passes it to `sweep_idle/1` at the end of the pass, which destroys it if the
+  pass left it idle, and the job has the slot on the next pass (`docs/design/worker-tier.md` § The
+  hour already paid for).
   """
   @spec provide(demand(), String.t() | nil, claims(), MapSet.t()) ::
-          {:ok, Worker.t()} | {:creating, Worker.t()} | {:error, :at_capacity | term()}
+          {:ok, Worker.t()}
+          | {:creating, Worker.t()}
+          | {:yield, Worker.t()}
+          | {:error, :at_capacity | term()}
   def provide(demand, preferred \\ nil, claims \\ %{}, reserved \\ MapSet.new()) do
     with nil <- assignable(demand, preferred, reserved),
          nil <- booting(demand, claims) do
@@ -982,6 +990,8 @@ defmodule Forge.Workers do
   def create_machine(demand \\ %{kind: :workflow, memory: 0, cores: 0}) do
     case make_machine(demand) do
       {:creating, _worker} -> {:error, :creating}
+      # A slot that one machine has to give up first is a slot not yet there.
+      {:yield, _worker} -> {:error, :at_capacity}
       refusal -> refusal
     end
   end
@@ -989,7 +999,7 @@ defmodule Forge.Workers do
   defp make_machine(%{project_id: project_id} = demand) when is_binary(project_id) do
     case Provisioning.for_demand(project_id, demand) do
       nil -> no_template(project_id, demand)
-      template -> create_from(template)
+      template -> create_from(template, demand)
     end
   end
 
@@ -1054,20 +1064,32 @@ defmodule Forge.Workers do
       (is_nil(worker.cores) or worker.cores >= demand.cores)
   end
 
-  defp create_from(template) do
-    with :ok <- room(template),
+  defp create_from(template, demand) do
+    with {:ok, slot} <- room(template, demand),
          :ok <- speaks(template),
          :ok <- probed(template),
          {:ok, credential} <- spendable(template) do
-      unlabelled(template)
-
-      do_create(
-        Provisioning.Template.worker_attrs(template),
-        %{size: template.size, image: template.image},
-        credential,
-        template.name
-      )
+      make_in(slot, template, credential)
     end
+  end
+
+  # **A slot that has to be freed first is not made in, it is named.** The machine giving it up is
+  # destroyed at the end of the pass (`sweep_idle/1`), not here, for two reasons the review of this
+  # found: here, a younger job later in the same pass that *could* have used the machine found it
+  # gone, and a destroy the driver refused was asked again by every job that reached this line —
+  # up to ten requests a pass against one account. Named only once the checks above have passed,
+  # so a machine is never given up for a create that was going to be refused anyway.
+  defp make_in({:yield, worker}, _template, _credential), do: {:yield, worker}
+
+  defp make_in(:free, template, credential) do
+    unlabelled(template)
+
+    do_create(
+      Provisioning.Template.worker_attrs(template),
+      %{size: template.size, image: template.image},
+      credential,
+      template.name
+    )
   end
 
   # **A snapshot the platform knows it would refuse is not paid for.** Its protocol is on the
@@ -1126,10 +1148,40 @@ defmodule Forge.Workers do
 
   defp unlabelled(_template), do: :ok
 
-  defp room(template) do
-    if Provisioning.live_count(template) < template.max_workers,
-      do: :ok,
-      else: {:error, :at_capacity}
+  # **A machine kept past its period gives its slot up to a job it cannot take.** On a provider
+  # that bills by the hour an idle machine is kept to a leeway point of an hour it has paid for
+  # (`goes_at/2`), and it still counts against `max_workers` — so a job it cannot hold, because
+  # the template was edited since it was made or the job needs a protocol it does not speak, would
+  # wait for a leeway point instead of the period's end. One past its period is named instead, and
+  # destroyed at the end of the pass if nothing in the pass took it (`make_in/3`); one inside its
+  # period is not, and the job waits it out as it always did (`docs/design/worker-tier.md` § The
+  # hour already paid for).
+  defp room(template, demand) do
+    if Provisioning.live_count(template) < template.max_workers do
+      {:ok, :free}
+    else
+      case outstayed_by(template, demand) do
+        nil -> {:error, :at_capacity}
+        worker -> {:ok, {:yield, worker}}
+      end
+    end
+  end
+
+  # The machine that gives its slot up: idle past its period and unable to hold the job even
+  # empty. **One the driver has refused to destroy before goes last**, so a machine whose account
+  # will not let it go does not stand in front of one that would. On an idle row `last_error` is a
+  # refused destroy's words (`kept/4`), or — rarely — a create the driver called refused and made
+  # anyway (`refused/2`), which puts that machine last too and costs only the order.
+  defp outstayed_by(template, demand) do
+    now = now()
+
+    from(w in idle_managed(),
+      where: w.template_id == ^template.id,
+      order_by: [asc: not is_nil(w.last_error), asc: w.idle_since],
+      preload: [:template]
+    )
+    |> Repo.all()
+    |> Enum.find(&(outstayed?(&1, now) and not holds_when_empty?(&1, demand)))
   end
 
   # **Whose account, asked again where it costs money.** `Template.changeset/2` refuses a
@@ -1303,26 +1355,217 @@ defmodule Forge.Workers do
   end
 
   @doc """
-  Destroys managed workers that have had nothing to do for longer than the idle period: their
-  template's `idle_ms`, or the node's `idle_period_ms`, whose default is set from M4's cold
-  start (`docs/measurements.md` § M4, `docs/design/worker-tier.md` § Idle destroy).
+  Destroys managed workers that have had nothing to do for long enough (`goes_at/2`): past their
+  period — their template's `idle_ms`, or the node's `idle_period_ms`, whose default is set from
+  M4's cold start (`docs/measurements.md` § M4, `docs/design/worker-tier.md` § Idle destroy) —
+  with no job still claiming them, and on a provider that bills by the hour, at a leeway point of
+  an hour they have paid for.
+
+  `yields` are the machines this pass named to give up their slot (`provide/4`). One is destroyed
+  only if the pass left it idle — a younger job that fitted it has made it busy — and it is still
+  past its period.
+
+  **Decided one machine at a time, each at its own moment**, because a destroy is a provider call
+  that can take its thirty-second timeout, and a decision taken before the first of several would
+  be stale by the last.
   """
-  @spec sweep_idle() :: non_neg_integer()
-  def sweep_idle do
-    # **And nothing running on it, whatever its status says.** A status is one write behind the
-    # jobs it describes, and destroying a machine under a job leaves that job `running` for ever:
-    # nothing re-queues a job whose worker was destroyed rather than lost.
+  @spec sweep_idle(MapSet.t()) :: non_neg_integer()
+  def sweep_idle(yields \\ MapSet.new()) do
+    from(w in idle_managed(), preload: [:template])
+    |> Repo.all()
+    |> Enum.count(fn worker ->
+      case ending(worker, yields, now()) do
+        nil -> false
+        by -> destroy(worker, by: by) == :ok
+      end
+    end)
+  end
+
+  defp ending(worker, yields, now) do
+    cond do
+      reached?(leaves_at(worker, now), now) -> :idle
+      MapSet.member?(yields, worker.id) and outstayed?(worker, now) -> :yielded
+      true -> nil
+    end
+  end
+
+  # **And nothing running on it, whatever its status says.** A status is one write behind the
+  # jobs it describes, and destroying a machine under a job leaves that job `running` for ever:
+  # nothing re-queues a job whose worker was destroyed rather than lost. One definition for the
+  # sweep, the yield and the workers page (`goes_at/2`), so none of them can mean something else.
+  defp idle_managed do
     running = from(j in Job, where: j.worker_id == parent_as(:worker).id and j.status == :running)
 
     from(w in Worker,
       as: :worker,
-      where: w.status == :idle and w.managed and not exists(running),
-      preload: [:template]
+      where: w.status == :idle and w.managed and not exists(running)
     )
-    |> Repo.all()
-    |> Enum.filter(&idle_past?/1)
-    |> Enum.count(&(destroy(&1, by: :idle) == :ok))
   end
+
+  # Whether a moment has come. Nil never has. One comparison for the sweep's two questions — is a
+  # machine due, is it past its period — so the second of the boundary means the same to both.
+  defp reached?(nil, _now), do: false
+  defp reached?(at, now), do: DateTime.compare(at, now) != :gt
+
+  @doc """
+  When the idle sweep will destroy this machine, as of `now` — nil for one it never will: a
+  machine that is not idle, has a job running whatever its status says, has no idle clock, or is
+  not the platform's to destroy.
+
+  **Once nothing has a claim on it** (`claimed_until/1`): its idle period is over, no job parked on
+  it is still waiting on commands that have not timed out, and no job that last ran on it has just
+  come back to the queue. On a provider that bills by the hour that is not yet the moment. The
+  machine is decided on at the **leeway point** of each billed increment
+  (`Forge.Provider.billed_increment_ms/1`) — `billing_leeway_ms` before it ends, counted from when
+  its row was made, which is before the provider's own clock started, so an error in the anchor
+  goes early and never into an hour nobody meant to buy. It goes at the first leeway point by which
+  nothing has a claim on it; a claim still standing at a leeway point — a chat that has not reached
+  its own idle timeout keeps its machine busy, so it is one — buys the whole next hour
+  (`docs/design/worker-tier.md` § The hour already paid for).
+
+  **Not in an hour's last call** (`billing_last_call_ms`): a destroy sent then could complete in the
+  next hour, which would be billed with the machine already gone. A machine the sweep did not get
+  to before the last call — a refused destroy, a node that was down — is kept to the next hour's
+  leeway point, and so is one whose hour ended meanwhile.
+
+  One function for the sweep and the workers page, asking the sweep's own question of the row
+  (`idle_managed/0`), so what the page says and what the sweep does cannot drift apart.
+  """
+  @spec goes_at(Worker.t(), DateTime.t()) :: DateTime.t() | nil
+  def goes_at(%Worker{id: id} = worker, now) do
+    if Repo.exists?(from w in idle_managed(), where: w.id == ^id),
+      do: worker |> Repo.preload(:template) |> leaves_at(now)
+  end
+
+  defp leaves_at(%Worker{idle_since: %DateTime{}} = worker, now) do
+    free = latest(period_ends(worker), claimed_until(worker))
+
+    case Provider.billed_increment_ms(worker.provider) do
+      nil -> latest(free, now)
+      increment -> leeway_point(worker.inserted_at, increment, free, now)
+    end
+  end
+
+  defp leaves_at(%Worker{}, _now), do: nil
+
+  # Three cases, in the order `goes_at/2` states them: the first leeway point by which nothing has
+  # a claim, while it is still to come; `now`, once it has passed and an hour's leeway is open —
+  # after its point and before its last call; otherwise the next leeway point from `now`.
+  # Increments are counted from `from`.
+  defp leeway_point(from, increment, free, now) do
+    point = increment - leeway()
+    closes = increment - config(:billing_last_call_ms, :timer.minutes(1))
+    first = next_point(from, increment, point, free)
+    into = into(now, from, increment)
+
+    # The two boundaries here are equivalent mutants: at `now == first`, and at `into == point`,
+    # every arm answers `now`.
+    cond do
+      DateTime.compare(now, first) == :lt -> first
+      into >= point and into < closes -> now
+      true -> next_point(from, increment, point, now)
+    end
+  end
+
+  # **A claim that ends after an hour's leeway point buys the next hour**, so it is that hour's
+  # point that comes next — not the moment the claim ends, however soon before the hour's end.
+  defp next_point(from, increment, point, at) do
+    into = into(at, from, increment)
+    wait = if into <= point, do: point - into, else: increment - into + point
+
+    DateTime.add(at, wait, :millisecond)
+  end
+
+  # How far into its increment `at` is. `Integer.mod/2` rather than `rem/2` is an equivalent
+  # mutant while the clock only moves forward: every moment asked about is after the row was made.
+  # They differ only for a clock stepped back past a row's making, where `rem/2` would go late.
+  defp into(at, from, increment),
+    do: Integer.mod(DateTime.diff(at, from, :millisecond), increment)
+
+  # config.exs always sets `billing_leeway_ms`, so this fallback is an equivalent mutant under any
+  # configured node; it matches that value so removing the line changes nothing. The same holds for
+  # `billing_last_call_ms` above.
+  defp leeway, do: config(:billing_leeway_ms, :timer.minutes(5))
+
+  @doc """
+  Refuses a billing configuration that cannot work, when the node starts rather than in the pass
+  that meets it. The leeway must open after the last call is over — `billing_last_call_ms` below
+  `billing_leeway_ms` — and before every billed increment a configured driver declares, and both
+  must be whole seconds' worth, since the rows and the sweep count in seconds.
+
+  **Each wrong value was a silent failure** (`docs/design/worker-tier.md` § The hour already paid
+  for): a leeway no longer than the last call is a window that never opens, so a billed machine is
+  never destroyed; one as long as the increment destroys at the hour's end or after it.
+  """
+  @spec check_billing!() :: :ok
+  def check_billing! do
+    leeway = leeway()
+    last_call = config(:billing_last_call_ms, :timer.minutes(1))
+
+    increments =
+      Provider.names() |> Enum.map(&Provider.billed_increment_ms/1) |> Enum.reject(&is_nil/1)
+
+    cond do
+      not (is_integer(last_call) and last_call >= 1_000) ->
+        raise ArgumentError,
+              "billing_last_call_ms must be at least a second, got #{inspect(last_call)}"
+
+      not (is_integer(leeway) and leeway > last_call) ->
+        raise ArgumentError,
+              "billing_leeway_ms (#{inspect(leeway)}) must be longer than billing_last_call_ms " <>
+                "(#{last_call}), or a billed machine is never destroyed"
+
+      Enum.any?(increments, &(leeway >= &1)) ->
+        raise ArgumentError,
+              "billing_leeway_ms (#{leeway}) must be shorter than every billed increment " <>
+                "(#{inspect(increments)}), or a machine is destroyed at its hour's end or after it"
+
+      true ->
+        :ok
+    end
+  end
+
+  # **What still has a claim on this machine, and until when** — nil when nothing does.
+  #
+  # - **A job parked on it**, waiting on commands it invoked, until the last of its open commands
+  #   would time out: `timeout_ms` from when the command's row last changed — its start, or its
+  #   return to the queue after a lost worker — so a command stuck in the queue cannot hold a
+  #   machine for ever. The worker starts that clock only once it has prepared the command, so the
+  #   claim can end a preparation's length early. The job's `worker_id` is the machine it ran on and
+  #   the one it prefers when it resumes (`docs/design/provisioning.md` § Affinity on resume).
+  # - **A job that last ran on it and is back in the queue** — resumed from a park, reopened,
+  #   requeued — for one idle period from its return, which is what covers the gap between the
+  #   resume and the pass that places it, and no longer: a job waiting for a rate limit to reset
+  #   does not hold a machine for a week.
+  defp claimed_until(%Worker{id: id} = worker) do
+    commands =
+      from(c in Forge.Jobs.Commands.open(),
+        join: p in Job,
+        on: p.id == c.parent_job_id,
+        where: p.worker_id == ^id and p.status == :parked
+      )
+      |> Repo.all()
+      |> Enum.map(&DateTime.add(&1.updated_at, Forge.Jobs.wall_clock_ms(&1), :millisecond))
+
+    returned =
+      from(j in Job, where: j.worker_id == ^id and j.status == :pending)
+      |> Repo.all()
+      |> Enum.map(&DateTime.add(&1.updated_at, period(worker), :millisecond))
+
+    Enum.max(commands ++ returned, DateTime, fn -> nil end)
+  end
+
+  defp latest(a, nil), do: a
+  defp latest(a, b), do: if(DateTime.compare(a, b) == :lt, do: b, else: a)
+
+  # Past its period: the warmth the operator asked for is spent, and what is left of the hour is
+  # the platform's to give up (`room/2`). A parked job's claim is not asked about here: it resumes
+  # on any machine, and a queue that does not move is worse than a session rebuilt elsewhere.
+  defp outstayed?(%Worker{idle_since: nil}, _now), do: false
+  defp outstayed?(%Worker{} = worker, now), do: reached?(period_ends(worker), now)
+
+  defp period_ends(%Worker{} = worker),
+    do: DateTime.add(worker.idle_since, period(worker), :millisecond)
 
   # **The period is the machine's own template's, and only then the node's.** One number cannot
   # serve two kinds of machine (`docs/design/provisioning.md` § Lifecycle is per template): an
@@ -1330,21 +1573,13 @@ defmodule Forge.Workers do
   # machine is expensive by the hour and its warm store is worth *more*, because a cold one
   # re-fetches a whole toolchain over the provider's network rather than over loopback.
   #
-  # Filtered in Elixir rather than in the query because the cutoff now differs per row, and a
-  # `CASE` that computed it in SQL would put the rule somewhere nobody reads it.
-  defp idle_past?(%Worker{idle_since: nil}), do: false
+  # Read in Elixir rather than in the query because it differs per row, and a `CASE` that
+  # computed it in SQL would put the rule somewhere nobody reads it.
+  defp period(%Worker{template: %{idle_ms: ms}}) when is_integer(ms), do: ms
 
-  defp idle_past?(%Worker{} = worker) do
-    period =
-      case worker.template do
-        %{idle_ms: ms} when is_integer(ms) -> ms
-        # config.exs always sets `idle_period_ms`, so this fallback is an equivalent mutant under
-        # any configured node; it matches that value so removing the line changes nothing.
-        _none -> config(:idle_period_ms, :timer.minutes(5))
-      end
-
-    DateTime.compare(worker.idle_since, DateTime.add(now(), -period, :millisecond)) == :lt
-  end
+  # config.exs always sets `idle_period_ms`, so this fallback is an equivalent mutant under any
+  # configured node; it matches that value so removing the line changes nothing.
+  defp period(%Worker{}), do: config(:idle_period_ms, :timer.minutes(5))
 
   @doc """
   Destroys workers the platform cannot reach any more. `docs/design/worker-channel.md` § When
@@ -1467,8 +1702,9 @@ defmodule Forge.Workers do
     on the workers page. That is the trade, and it is the right way round: a stuck fleet is
     visible and a leaking one is not.
 
-  `by:` says what ended it — `:idle`, `:unreachable`, `:owner`, `:command_line`, `:protocol` — for
-  the machine's log (`docs/design/worker-log.md`), which is where "why did it go away?" is asked.
+  `by:` says what ended it — `:idle`, `:yielded`, `:unreachable`, `:owner`, `:command_line`,
+  `:protocol` — for the machine's log (`docs/design/worker-log.md`), which is where "why did it
+  go away?" is asked.
   """
   @spec destroy(Worker.t(), keyword()) :: :ok | {:error, term()}
   def destroy(%Worker{} = worker, opts \\ []) do
@@ -1541,6 +1777,10 @@ defmodule Forge.Workers do
   # By what, which is the question this line is there to answer ("why did it go away?").
   defp cause(nil), do: ""
   defp cause(:idle), do: " — idle past its period"
+
+  defp cause(:yielded),
+    do: " — idle past its period, and its slot wanted by a job it could not take"
+
   defp cause(:unreachable), do: " — unreachable"
   defp cause(:owner), do: " — by its owner, from the workers page"
   defp cause(:command_line), do: " — from the host's command line"
@@ -1641,7 +1881,7 @@ defmodule Forge.Workers do
   # that is idle or unreachable, and a refused machine's next knock asks again; a Destroy pressed
   # on the page or a retire from the command line is asked once, and the machine it was pressed on
   # is usually neither idle nor unreachable (`docs/design/ui.md` § The workers page).
-  defp retry(by) when by in [:idle, :unreachable, :protocol],
+  defp retry(by) when by in [:idle, :yielded, :unreachable, :protocol],
     do: ". The row is kept, and the platform tries again"
 
   defp retry(_by), do: ". The row is kept, so the machine is still counted"

@@ -197,6 +197,29 @@ defmodule Forge.Provider do
   end
 
   @doc """
+  How long this provider bills a machine for at a time, in milliseconds, when every started
+  increment is charged whole — counted from when the machine was made. Nil for a provider that
+  bills nothing, or bills by use so finely that when a machine goes does not matter.
+
+  **It decides when an idle machine goes.** Hetzner charges every hour a server has started, so an
+  idle one destroyed ten minutes into its hour threw away fifty minutes it had paid for; with an
+  increment, `Forge.Workers.goes_at/2` decides on a machine only at the leeway point before each
+  increment ends (`docs/design/worker-tier.md` § The hour already paid for).
+  """
+  @callback billed_increment_ms() :: pos_integer() | nil
+
+  @spec billed_increment_ms(String.t() | nil) :: pos_integer() | nil
+  def billed_increment_ms(provider) do
+    case driver(provider) do
+      {:ok, module} -> module.billed_increment_ms()
+      # A row naming a provider this node does not have cannot be destroyed from here at all
+      # (`Forge.Workers.destroy/2` retires it), so nothing is gained by waiting for an hour of a
+      # bill nobody can read: it goes at its period.
+      {:error, _reason} -> nil
+    end
+  end
+
+  @doc """
   Creates a machine. The driver comes from `opts.provider`, or the default when it says nothing.
   """
   @spec create(opts()) :: {:ok, machine()} | {:error, term()}

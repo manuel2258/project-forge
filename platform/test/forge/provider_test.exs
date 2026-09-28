@@ -292,6 +292,16 @@ defmodule Forge.ProviderTest do
                })
     end
 
+    # Hetzner charges every started hour and this host charges nothing, which is what decides
+    # whether an idle machine is kept to an hour's end (`docs/design/worker-tier.md` § The hour
+    # already paid for). A row naming a provider this node lacks cannot be destroyed from here at
+    # all, so it goes at its period rather than waiting on a bill nobody can read.
+    test "which providers bill by the started hour" do
+      assert Provider.billed_increment_ms("hetzner") == :timer.hours(1)
+      assert Provider.billed_increment_ms("local") == nil
+      assert Provider.billed_increment_ms("nowhere") == nil
+    end
+
     test "names lists every provider this node can speak to" do
       assert Provider.names() == ["fake", "hetzner", "local"]
     end

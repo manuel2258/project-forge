@@ -497,11 +497,20 @@ defmodule Forge.Jobs.Commands do
     })
   end
 
+  @doc """
+  The commands not finished yet: what a parked job is still waiting on. One definition for the
+  batch that decides whether its parent resumes (`open_in_batch/3`) and for the claim a parked job
+  has on the machine it ran on (`Forge.Workers.goes_at/2`), so the two cannot disagree about which
+  commands are still open.
+  """
+  @spec open() :: Ecto.Query.t()
+  def open, do: from(j in Job, where: j.kind == :command and j.status != :finished)
+
   defp open_in_batch(repo, parent_id, batch) do
     repo.one(
-      from j in Job,
+      from j in open(),
         where:
-          j.parent_job_id == ^parent_id and j.kind == :command and j.status != :finished and
+          j.parent_job_id == ^parent_id and
             fragment("?->'command'->>'batch'", j.spec) == ^batch,
         select: count()
     )

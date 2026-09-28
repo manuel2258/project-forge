@@ -8,11 +8,11 @@ machine's journal.
 
 A worker logs to journald on its own machine, and nobody can read that. A Hetzner machine has no
 inbound port — the ssh door is shut unless the operator opened it (`worker-tier.md` § The provider
-driver) — and a managed one is destroyed five minutes after it goes idle, taking its journal with
-it. What the platform itself saw happen to a machine — made, refused by its driver, joined,
-refused at the join, swept as unreachable, destroyed and by what — was in the *platform's* log,
-which is a host to grep, or in the one `last_error` a row keeps. "What was this machine doing,
-and why did it go away?" had no answer on any surface the operator has.
+driver) — and a managed one is destroyed once it has had nothing to do for long enough, taking
+its journal with it. What the platform itself saw happen to a machine — made, refused by its
+driver, joined, refused at the join, swept as unreachable, destroyed and by what — was in the
+*platform's* log, which is a host to grep, or in the one `last_error` a row keeps. "What was this
+machine doing, and why did it go away?" had no answer on any surface the operator has.
 
 ## What goes in, and what does not
 
@@ -46,7 +46,7 @@ Two sources, one log, told apart on every line:
 | `disconnected` | info when the channel was shut down — the machine or the platform closed the connection, it left, its row was retired, the platform is draining for a restart or stopping — and warning when it crashed | why, in words; for a crash only the kind of error, since the stack trace is the platform's and this page is the owner's |
 | `job.lost` | warning | a job the platform had running there that the machine rejoined without, requeued |
 | `unreachable` | warning | not heard from since when, how many jobs were requeued, and whether the row stays — for a permanent machine only when it had jobs to requeue |
-| `destroyed` | info, or warning when forced, when its provider is gone, or when a machine arrived for a row retired while it was being made | by what: idle, unreachable, its owner, the host's command line, a refused protocol |
+| `destroyed` | info, or warning when forced, when its provider is gone, or when a machine arrived for a row retired while it was being made | by what: idle, idle and its slot wanted by a job it could not take, unreachable, its owner, the host's command line, a refused protocol |
 | `destroy.refused` | error | the driver's words, when it would not let the machine go — and that the next sweep tries again only when a sweep was what asked (`ui.md` § The workers page: a Destroy pressed on the page promises no retry) |
 
 **What the platform would otherwise repeat is said once.** `sweep_unreachable` runs on every

@@ -1466,6 +1466,587 @@ defmodule Forge.WorkersTest do
     end
   end
 
+  describe "the hour already paid for" do
+    # Hetzner charges every hour a server has started, so an idle machine destroyed at its period
+    # throws away the rest of an hour it has already paid for, and the next ticket in that hour
+    # pays for another machine's (`docs/design/worker-tier.md` § The hour already paid for).
+    setup do
+      Provider.Fake.billing(:timer.hours(1))
+      configure(idle_period_ms: 60_000, billing_leeway_ms: :timer.minutes(5))
+      :ok
+    end
+
+    test "an idle machine past its period is kept to the leeway point of the hour it paid for" do
+      worker = billed_idle(made: minutes(10), idle: 120)
+
+      assert Workers.sweep_idle() == 0
+      assert Workers.get!(worker.id).status == :idle
+
+      # The same machine, fifty-six minutes into its hour: past the leeway point at fifty-five,
+      # and free of everything by then.
+      made!(worker, minutes(56))
+
+      assert Workers.sweep_idle() == 1
+      assert_receive {:provider_destroy, "fake-billed-" <> _, _credential}
+      assert Workers.get!(worker.id).status == :destroyed
+    end
+
+    # Its period ran out after the leeway point: a job ended in the hour's last minutes, which is
+    # use too recent to throw away, so it takes the next hour.
+    test "a machine still inside its period at the leeway point takes the next hour" do
+      worker = billed_idle(made: minutes(56), idle: 30)
+
+      assert Workers.sweep_idle() == 0
+      assert Workers.get!(worker.id).status == :idle
+
+      # Not merely kept until its period ends half a minute on: kept to the next hour's point.
+      assert at?(
+               Workers.goes_at(worker, DateTime.utc_now()),
+               DateTime.add(worker.inserted_at, minutes(115))
+             )
+    end
+
+    # The page reads rows without their template; the period is still the template's.
+    test "goes_at takes the period from the machine's template, however the row was read" do
+      %{template: template} = with_template(%{idle_ms: :timer.hours(1)})
+      worker = billed_idle(template, made: minutes(10), idle: minutes(5))
+
+      # An hour's period from five minutes ago runs into the next hour, so its point is next.
+      assert at?(
+               Workers.goes_at(Workers.get!(worker.id), DateTime.utc_now()),
+               DateTime.add(worker.inserted_at, minutes(115))
+             )
+    end
+
+    # The row's provider decides, not whichever is the node's default — which in production is the
+    # local driver, and would turn the rule off for every Hetzner machine.
+    test "goes_at asks the machine's own provider how it bills" do
+      Provider.Fake.allow()
+      made = ~U[2026-09-27 10:00:00Z]
+      worker = at_clock(made, idle_since: ~U[2026-09-27 10:10:00Z])
+      {:ok, worker} = Workers.update(worker, %{provider: "hetzner"})
+
+      assert at?(Workers.goes_at(worker, ~U[2026-09-27 10:12:00Z]), ~U[2026-09-27 10:55:00Z])
+    end
+
+    # The case the rule was asked for: a conversation's last message at 0:55 holds its machine
+    # until its own idle timeout at 1:25, so at the 0:55 leeway point the machine is in use. It
+    # takes the next hour, and uses it to that hour's leeway point rather than going at 1:30.
+    # The machine here was made eighty-five minutes ago, so now is 1:25, when the chat goes idle.
+    test "a chat that runs past a leeway point keeps its machine to the next hour's" do
+      worker = billed_idle(made: minutes(85), idle: minutes(30))
+
+      chat =
+        chat_fixture(%{status: :running})
+        |> Ecto.Changeset.change(worker_id: worker.id)
+        |> Forge.Repo.update!()
+
+      {:ok, _busy} = Workers.update(Workers.get!(worker.id), %{status: :busy, idle_since: nil})
+
+      # While it runs, nothing takes the machine — at 0:55 or at any pass after.
+      assert Workers.sweep_idle() == 0
+
+      # Its idle timeout fires now, twenty-five minutes into the machine's second hour.
+      {:ok, _} = chat |> Ecto.Changeset.change(status: :hibernated) |> Forge.Repo.update()
+      :ok = Workers.release(worker.id)
+      worker = Workers.get!(worker.id)
+      now = DateTime.add(worker.idle_since, 1)
+
+      assert worker.status == :idle
+      assert Workers.sweep_idle() == 0
+      assert at?(Workers.goes_at(worker, now), DateTime.add(worker.inserted_at, minutes(115)))
+    end
+
+    # A refused destroy, or a node that was down across the hour's end, finds the next hour
+    # started — and paid for. Destroying at once would throw that hour away.
+    test "an hour-end the sweep missed waits for the next hour's leeway point" do
+      worker = billed_idle(made: minutes(62), idle: minutes(30))
+
+      assert Workers.sweep_idle() == 0
+      assert Workers.get!(worker.id).status == :idle
+    end
+
+    test "the leeway is the node's to set" do
+      configure(billing_leeway_ms: :timer.minutes(10))
+      worker = billed_idle(made: minutes(52), idle: minutes(5))
+
+      assert Workers.sweep_idle() == 1
+      assert Workers.get!(worker.id).status == :destroyed
+    end
+
+    test "goes_at is the first leeway point by which nothing has a claim on the machine" do
+      made = ~U[2026-09-27 10:00:00Z]
+      worker = at_clock(made, idle_since: ~U[2026-09-27 10:10:00Z])
+
+      # Past its period twelve minutes in: the hour's leeway point is 10:55.
+      assert at?(Workers.goes_at(worker, ~U[2026-09-27 10:12:00Z]), ~U[2026-09-27 10:55:00Z])
+
+      # Free exactly at the leeway point is free at it.
+      worker = at_clock(made, idle_since: ~U[2026-09-27 10:54:00Z])
+      assert at?(Workers.goes_at(worker, ~U[2026-09-27 10:54:10Z]), ~U[2026-09-27 10:55:00Z])
+
+      # Free half a minute after it is not: the next hour is bought, and its point is next.
+      worker = at_clock(made, idle_since: ~U[2026-09-27 10:54:30Z])
+      assert at?(Workers.goes_at(worker, ~U[2026-09-27 10:54:40Z]), ~U[2026-09-27 11:55:00Z])
+
+      # Inside a leeway it was free at, the answer is now — never a moment already gone.
+      worker = at_clock(made, idle_since: ~U[2026-09-27 10:10:00Z])
+      assert at?(Workers.goes_at(worker, ~U[2026-09-27 10:57:00Z]), ~U[2026-09-27 10:57:00Z])
+
+      # And a provider that bills nothing: the period's end, and nothing after — and once that has
+      # passed, now, never a moment already gone.
+      Provider.Fake.allow()
+      worker = at_clock(made, idle_since: ~U[2026-09-27 10:10:00Z])
+      assert at?(Workers.goes_at(worker, ~U[2026-09-27 10:10:20Z]), ~U[2026-09-27 10:11:00Z])
+      assert at?(Workers.goes_at(worker, ~U[2026-09-27 10:20:00Z]), ~U[2026-09-27 10:20:00Z])
+    end
+
+    # Parked on its commands it holds no slice, so its machine is idle — and destroying it loses
+    # the Claude Code session the job would resume on it (`docs/design/provisioning.md` § Affinity
+    # on resume). A command that has not timed out is a claim; one that has is not.
+    test "a job parked on a machine keeps it while its commands can still finish" do
+      worker = billed_idle(made: minutes(56), idle: minutes(30))
+      parent = parked_on(worker)
+      command = command_of(parent, changed: minutes(10), timeout: minutes(30))
+
+      assert Workers.sweep_idle() == 0
+      assert Workers.get!(worker.id).status == :idle
+
+      # Queued forty minutes ago with a thirty-minute timeout, and never started.
+      aged!(command, updated_at: minutes(40))
+
+      assert Workers.sweep_idle() == 1
+      assert Workers.get!(worker.id).status == :destroyed
+    end
+
+    test "the claim lasts until the last of the parked job's commands would time out" do
+      worker = billed_idle(made: minutes(56), idle: minutes(30))
+      parent = parked_on(worker)
+      command_of(parent, changed: minutes(10), timeout: minutes(5))
+      command_of(parent, changed: minutes(10), timeout: minutes(60))
+
+      assert Workers.sweep_idle() == 0
+    end
+
+    # `started_at` is a command's first start and is never reset, so a command requeued after a
+    # lost worker and started again would be timed from a start it no longer has.
+    test "a command is timed from its last change of state, not from when it was asked for" do
+      worker = billed_idle(made: minutes(56), idle: minutes(30))
+      command = command_of(parked_on(worker), changed: minutes(10), timeout: minutes(30))
+      aged!(command, inserted_at: minutes(120), started_at: minutes(120))
+
+      assert Workers.sweep_idle() == 0
+    end
+
+    test "only a parked job on this machine with a command still open has a claim on it" do
+      worker = billed_idle(made: minutes(56), idle: minutes(30))
+      elsewhere = billed_idle(made: minutes(10), idle: minutes(30))
+
+      command_of(parked_on(elsewhere), changed: minutes(1), timeout: minutes(30))
+      aged!(parked_on(elsewhere, :pending), updated_at: 10)
+      command_of(parked_on(worker, :finished), changed: minutes(1), timeout: minutes(30))
+      done = command_of(parked_on(worker), changed: minutes(1), timeout: minutes(30))
+      aged!(done, status: :finished)
+
+      assert Workers.sweep_idle() == 1
+      assert Workers.get!(worker.id).status == :destroyed
+    end
+
+    # Its commands done, the parked job is back in the queue — and no longer parked, so without
+    # this its machine, idle since the park, went on the pass that had not placed it yet.
+    test "a job that last ran here and is back in the queue holds it for one idle period" do
+      worker = billed_idle(made: minutes(56), idle: minutes(30))
+      returned = parked_on(worker, :pending)
+      aged!(returned, updated_at: 30)
+
+      assert Workers.sweep_idle() == 0
+
+      # Back for three minutes, against a one-minute period: it has had its pass.
+      aged!(returned, updated_at: minutes(3))
+
+      assert Workers.sweep_idle() == 1
+    end
+
+    # Not a billing rule: a parked job's claim holds on a provider that bills nothing too, where it
+    # only defers the period's end.
+    test "a parked job keeps its machine past the period where nothing is billed" do
+      Provider.Fake.allow()
+      worker = billed_idle(made: minutes(10), idle: minutes(30))
+      command = command_of(parked_on(worker), changed: minutes(1), timeout: minutes(30))
+
+      assert Workers.sweep_idle() == 0
+
+      aged!(command, updated_at: minutes(40))
+      assert Workers.sweep_idle() == 1
+    end
+
+    # A destroy sent in an hour's last minute could complete in the next hour, which is then billed
+    # with the machine gone; keeping it costs the same hour and keeps its use.
+    test "no destroy is sent in an hour's last call: the machine keeps the next hour" do
+      worker = billed_idle(made: minutes(59) + 30, idle: minutes(30))
+
+      assert Workers.sweep_idle() == 0
+      assert Workers.get!(worker.id).status == :idle
+    end
+
+    # The row's status is one write behind its jobs; the sweep does not believe it, and neither
+    # may the page.
+    test "goes_at is nothing for a row that says idle with a job running on it" do
+      worker = billed_idle(made: minutes(10), idle: minutes(30))
+      running(Workers.get!(worker.id), memory_max: 1_000, cores: 1)
+
+      refute Workers.goes_at(Workers.get!(worker.id), DateTime.utc_now())
+    end
+
+    test "goes_at is nothing for a machine the sweep will never take" do
+      made = ~U[2026-09-27 10:00:00Z]
+      now = ~U[2026-09-27 10:20:00Z]
+
+      assert Workers.goes_at(at_clock(made, idle_since: made), now)
+      refute Workers.goes_at(at_clock(made, idle_since: nil), now)
+      refute Workers.goes_at(at_clock(made, idle_since: made, status: :ready), now)
+      refute Workers.goes_at(at_clock(made, idle_since: made, managed: false), now)
+    end
+
+    # The hour is free to the machine, not to the queue: one that cannot take the job waiting for
+    # its slot would hold that job for up to an hour instead of the period.
+    test "a machine past its period is named to give its slot up, and goes at the pass's end" do
+      %{project: project, template: template} = with_template(%{max_workers: 1, memory: 8_000})
+      worker = small_idle(template, idle: 120)
+      want = demand(memory: 4_000, project_id: project.id)
+
+      assert {:yield, named} = Workers.provide(want)
+      assert named.id == worker.id
+      refute_received {:provider_destroy, _id, _credential}
+
+      assert Workers.sweep_idle(MapSet.new([named.id])) == 1
+      assert_receive {:provider_destroy, "fake-billed-" <> _, _credential}
+      assert Workers.get!(worker.id).status == :destroyed
+
+      assert Enum.any?(
+               Workers.Log.for_worker(worker.id),
+               &(&1.type == "destroyed" and &1.message =~ "a job it could not take")
+             )
+
+      # And the next pass has the slot.
+      assert {:creating, fresh} = Workers.provide(want)
+      refute fresh.id == worker.id
+    end
+
+    # A younger job later in the pass fitted it and was given it, which is why the destroy waits
+    # for the pass to end.
+    test "a named machine the pass gave work to is not destroyed" do
+      %{project: project, template: template} = with_template(%{max_workers: 1, memory: 8_000})
+      worker = small_idle(template, idle: 120)
+
+      assert {:yield, _named} = Workers.provide(demand(memory: 4_000, project_id: project.id))
+      assert {:ok, taken} = Workers.provide(demand(memory: 1_000, project_id: project.id))
+      assert taken.id == worker.id
+      running(Workers.get!(worker.id), memory_max: 1_000, cores: 1)
+
+      assert Workers.sweep_idle(MapSet.new([worker.id])) == 0
+      assert Workers.get!(worker.id).status == :idle
+    end
+
+    # Every job at capacity in a pass reached the same line; a refusal used to be asked again by
+    # each of them, up to ten requests a pass against one account.
+    test "a refused destroy is asked once a pass, however many jobs wanted the slot" do
+      %{project: project, template: template} = with_template(%{max_workers: 1, memory: 8_000})
+      worker = small_idle(template, idle: 120)
+      Provider.Fake.refuse_destroy({:fake, "the API is down"})
+
+      yields =
+        for _job <- 1..3, into: MapSet.new() do
+          {:yield, named} = Workers.provide(demand(memory: 4_000, project_id: project.id))
+          named.id
+        end
+
+      refute_received {:provider_destroy, _id, _credential}
+      assert Workers.sweep_idle(yields) == 0
+      assert_received {:provider_destroy, _id, _credential}
+      refute_received {:provider_destroy, _id, _credential}
+
+      assert Enum.any?(
+               Workers.Log.for_worker(worker.id),
+               &(&1.type == "destroy.refused" and &1.message =~ "the platform tries again")
+             )
+    end
+
+    test "a machine the driver refused before is named last" do
+      %{project: project, template: template} = with_template(%{max_workers: 2, memory: 8_000})
+      stuck = small_idle(template, idle: 300)
+      {:ok, _} = Workers.update(stuck, %{last_error: "the API is down"})
+      fresher = small_idle(template, idle: 120)
+
+      assert {:yield, named} = Workers.provide(demand(memory: 4_000, project_id: project.id))
+      assert named.id == fresher.id
+    end
+
+    test "of two that could give it up, the one idle longest is named" do
+      %{project: project, template: template} = with_template(%{max_workers: 2, memory: 8_000})
+      _recent = small_idle(template, idle: 120)
+      oldest = small_idle(template, idle: 300)
+
+      assert {:yield, named} = Workers.provide(demand(memory: 4_000, project_id: project.id))
+      assert named.id == oldest.id
+    end
+
+    # `create_machine/1` answers in refusals only: a slot another machine has to give up first is
+    # not there yet, which is what at capacity says.
+    test "create_machine reads a slot still to be given up as at capacity" do
+      %{project: project, template: template} = with_template(%{max_workers: 1, memory: 8_000})
+      small_idle(template, idle: 120)
+
+      assert {:error, :at_capacity} =
+               Workers.create_machine(demand(memory: 4_000, project_id: project.id))
+    end
+
+    test "a template with room to spare makes a machine and names none" do
+      %{project: project, template: template} = with_template(%{max_workers: 2, memory: 8_000})
+      worker = small_idle(template, idle: 120)
+
+      assert {:creating, _fresh} = Workers.provide(demand(memory: 4_000, project_id: project.id))
+      assert Workers.get!(worker.id).status == :idle
+    end
+
+    # Named only once the create would go ahead: a machine given up for a create that is then
+    # refused is a machine lost and nothing made.
+    test "no machine is named for a template that could not make one anyway" do
+      %{project: project, template: template} = with_template(%{max_workers: 1, memory: 8_000})
+      worker = small_idle(template, idle: 120)
+      {:ok, _} = template |> Ecto.Changeset.change(image_protocol: 99_999) |> Forge.Repo.update()
+
+      assert {:error, {:create_failed, {:image, _}}} =
+               Workers.provide(demand(memory: 4_000, project_id: project.id))
+
+      assert Workers.get!(worker.id).status == :idle
+    end
+
+    test "a machine inside its period does not yield: the job waits it out, as it always did" do
+      %{project: project, template: template} = with_template(%{max_workers: 1, memory: 8_000})
+      worker = small_idle(template, idle: 30)
+
+      assert {:error, :at_capacity} =
+               Workers.provide(demand(memory: 4_000, project_id: project.id))
+
+      assert Workers.sweep_idle(MapSet.new([worker.id])) == 0
+      assert Workers.get!(worker.id).status == :idle
+    end
+
+    # Not connected, so nothing could be assigned to it this pass — but it would hold the job
+    # when it is, and destroying it would be making a machine to replace one that fits.
+    test "a machine that could hold the job does not yield to it" do
+      %{project: project, template: template} = with_template(%{max_workers: 1, memory: 8_000})
+      worker = billed_idle(template, made: minutes(10), idle: 120)
+      Registry.unregister(Forge.Workers.Registry, worker.id)
+
+      assert {:error, :at_capacity} =
+               Workers.provide(demand(memory: 4_000, project_id: project.id))
+
+      assert Workers.get!(worker.id).status == :idle
+    end
+
+    # `update/2` is public and nothing stops an idle row with no clock on it; the sweep leaves one
+    # alone, and so must this — which asks it the same question on the scheduler's pass.
+    test "an idle machine with no clock on it does not yield, and does not raise" do
+      %{project: project, template: template} = with_template(%{max_workers: 1, memory: 8_000})
+      {:ok, worker} = Workers.update(small_idle(template, idle: 120), %{idle_since: nil})
+
+      assert {:error, :at_capacity} =
+               Workers.provide(demand(memory: 4_000, project_id: project.id))
+
+      assert Workers.sweep_idle(MapSet.new([worker.id])) == 0
+      assert Workers.get!(worker.id).status == :idle
+    end
+
+    test "only the template's own machines yield to it" do
+      %{project: project, template: template} = with_template(%{max_workers: 1, memory: 8_000})
+      %{template: other} = with_template(%{max_workers: 1, memory: 8_000})
+      stranger = small_idle(other, idle: 120)
+      {:ok, _busy} = Workers.update(small_idle(template, idle: 120), %{status: :busy})
+
+      assert {:error, :at_capacity} =
+               Workers.provide(demand(memory: 4_000, project_id: project.id))
+
+      assert Workers.get!(stranger.id).status == :idle
+    end
+
+    # A template whose `max_workers` was lowered is more than one machine over: one gives its slot
+    # up each pass until there is room.
+    test "a template over its ceiling gives up a machine a pass until there is room" do
+      %{project: project, template: template} = with_template(%{max_workers: 2, memory: 8_000})
+      first = small_idle(template, idle: 180)
+      second = small_idle(template, idle: 120)
+      {:ok, _} = template |> Ecto.Changeset.change(max_workers: 1) |> Forge.Repo.update()
+      want = demand(memory: 4_000, project_id: project.id)
+
+      assert {:yield, named} = Workers.provide(want)
+      assert named.id == first.id
+      assert Workers.sweep_idle(MapSet.new([named.id])) == 1
+
+      assert {:yield, named} = Workers.provide(want)
+      assert named.id == second.id
+      assert Workers.sweep_idle(MapSet.new([named.id])) == 1
+
+      assert {:creating, _fresh} = Workers.provide(want)
+    end
+
+    # The wiring, end to end: the pass names the machine, and its own sweep destroys it.
+    test "a scheduling pass gives the slot up at its end, and the next pass makes the machine" do
+      user = Forge.AccountsFixtures.user_fixture()
+
+      {:ok, project} =
+        Forge.Projects.register(
+          %{
+            name: "yield-#{System.unique_integer([:positive])}",
+            repo_path: Forge.GitFixtures.seeded_repo()
+          },
+          user
+        )
+
+      template = assigned(user, project, %{max_workers: 1, memory: 8_000})
+      funded!(project)
+      worker = small_idle(template, idle: 120)
+
+      {:ok, ticket} = Forge.Tickets.admit(project, %{title: "big"}, {:user, user.id})
+      [job] = Forge.Jobs.for_ticket(ticket.id)
+
+      {:ok, job} =
+        job |> Ecto.Changeset.change(memory_max: 4_000, cores: 1) |> Forge.Repo.update()
+
+      start_supervised!(Forge.Jobs.Scheduler)
+
+      assert Forge.Jobs.Scheduler.tick() == 0
+      assert Workers.get!(worker.id).status == :destroyed
+      assert Forge.Jobs.get!(job.id).status == :pending
+
+      assert Forge.Jobs.Scheduler.tick() == 0
+
+      assert [%{status: :creating}] =
+               Enum.filter(
+                 Workers.list(),
+                 &(&1.template_id == template.id and &1.id != worker.id)
+               )
+    end
+
+    test "a billing configuration that cannot work is refused at boot" do
+      assert Workers.check_billing!() == :ok
+
+      configure(billing_leeway_ms: :timer.minutes(1), billing_last_call_ms: :timer.minutes(1))
+      assert_raise ArgumentError, ~r/longer than billing_last_call_ms/, &Workers.check_billing!/0
+
+      configure(billing_leeway_ms: :timer.hours(1), billing_last_call_ms: :timer.minutes(1))
+
+      assert_raise ArgumentError,
+                   ~r/shorter than every billed increment/,
+                   &Workers.check_billing!/0
+
+      configure(billing_leeway_ms: :timer.minutes(5), billing_last_call_ms: 999)
+      assert_raise ArgumentError, ~r/at least a second/, &Workers.check_billing!/0
+
+      configure(billing_leeway_ms: 1_001, billing_last_call_ms: 1_000)
+      assert Workers.check_billing!() == :ok
+    end
+
+    defp minutes(n), do: n * 60
+
+    # The same instant, whatever precision the arithmetic left it with.
+    defp at?(actual, expected), do: DateTime.compare(actual, expected) == :eq
+
+    # A machine from `template` (a fresh one's by default), idle for `idle` seconds, whose row was
+    # made `made` seconds ago — which is where its billed hours are counted from.
+    defp billed_idle(template \\ nil, opts) do
+      template = template || with_template().template
+      worker = managed_worker(template)
+      now = DateTime.utc_now(:second)
+
+      {:ok, worker} =
+        Workers.update(worker, %{
+          provider_id: "fake-billed-#{System.unique_integer([:positive])}",
+          status: :idle,
+          idle_since: DateTime.add(now, -Keyword.fetch!(opts, :idle))
+        })
+
+      made!(worker, Keyword.fetch!(opts, :made))
+    end
+
+    # One made from `template` when it offered less than the job the test asks for: the template
+    # has been edited since, so this machine can never hold it.
+    defp small_idle(template, idle: idle) do
+      worker = billed_idle(template, made: minutes(10), idle: idle)
+      {:ok, worker} = Workers.update(worker, %{memory_budget: 2_000})
+      worker
+    end
+
+    defp made!(worker, seconds_ago) do
+      at = DateTime.add(DateTime.utc_now(:second), -seconds_ago)
+
+      Forge.Repo.update_all(
+        Ecto.Query.from(w in Forge.Workers.Worker, where: w.id == ^worker.id),
+        set: [inserted_at: at]
+      )
+
+      Workers.get!(worker.id)
+    end
+
+    # A job parked on `worker`: it ran there, and prefers it when it resumes.
+    defp parked_on(worker, status \\ :parked) do
+      job_fixture(%{})
+      |> Ecto.Changeset.change(status: status, worker_id: worker.id)
+      |> Forge.Repo.update!()
+    end
+
+    # A command `parent` is waiting on, whose row last changed `changed` seconds ago, with a
+    # `timeout` of its own.
+    defp command_of(parent, changed: changed, timeout: timeout) do
+      job_fixture(%{})
+      |> Ecto.Changeset.change(
+        kind: :command,
+        parent_job_id: parent.id,
+        spec: %{"command" => %{"timeout_ms" => timeout * 1000}}
+      )
+      |> Forge.Repo.update!()
+      |> aged!(updated_at: changed)
+    end
+
+    # Moves a job's clocks back by the seconds given, and sets anything else as it is.
+    defp aged!(job, changes) do
+      ago = fn seconds -> DateTime.add(DateTime.utc_now(), -seconds) end
+
+      changes =
+        Enum.map(changes, fn
+          {field, seconds} when field in [:inserted_at, :updated_at, :started_at] ->
+            {field, ago.(seconds) |> truncated(field)}
+
+          other ->
+            other
+        end)
+
+      job |> Ecto.Changeset.change(changes) |> Forge.Repo.update!()
+    end
+
+    defp truncated(at, :started_at), do: DateTime.truncate(at, :second)
+    defp truncated(at, _field), do: at
+
+    # A row on a fixed clock, for asking `goes_at/2` about instants rather than about now.
+    defp at_clock(made, attrs) do
+      {:ok, worker, _token} = Workers.create(%{provider: "fake"})
+
+      {:ok, worker} =
+        Workers.update(
+          worker,
+          Enum.into(attrs, %{provider_id: "fake-clock", status: :idle, managed: true})
+        )
+
+      Forge.Repo.update_all(
+        Ecto.Query.from(w in Forge.Workers.Worker, where: w.id == ^worker.id),
+        set: [inserted_at: made]
+      )
+
+      Workers.get!(worker.id)
+    end
+  end
+
   # **A person's one write on a machine, guarded where it is made.** It was guarded only on the
   # workers page, which matched `managed: false` itself and then called `update/2` — no actor,
   # every field cast. These call the context directly, which is what a page that forgot the

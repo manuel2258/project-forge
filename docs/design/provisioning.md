@@ -323,10 +323,12 @@ The driver for a create is resolved from the template's credential, not from nod
 Adding a provider is a config line and a module implementing the behaviour; no platform code
 learns its name.
 
-**`shapes/1` was the fourth callback, and four more followed it.** The behaviour now has eight:
+**`shapes/1` was the fourth callback, and five more followed it.** The behaviour now has nine:
 `create`, `destroy` and `status` from before, then `shapes/1`, `images/1` (below),
-`credential_fields/0` (§ Whose account), `required_template_fields/0` (below) and `list/1` —
-every machine forge made in a credential's account, for reconciling against `workers`. Nothing reconciles yet: `Forge.Provider.list/2` has
+`credential_fields/0` (§ Whose account), `required_template_fields/0` (below), `list/1` —
+every machine forge made in a credential's account, for reconciling against `workers` — and
+`billed_increment_ms/0`, the provider's billing unit, which decides when an idle machine goes
+(`worker-tier.md` § The hour already paid for). Nothing reconciles yet: `Forge.Provider.list/2` has
 no caller, so a machine the platform lost track of is still found in the provider's console.
 The template UI has to offer machine sizes, and the sizes are the provider's. The driver answers
 — from the provider's API or from a table it embeds, which is the driver's business and
@@ -729,6 +731,14 @@ affordable at all.** Setting it short on a build template because the machine is
 hour is the mistake it warns against, and the number that decides it — how long between a ticket's
 successive commands — is a dogfooding question nobody has answered.
 
+**On a provider that bills by the hour the period is a floor, and the hour decides the rest.** A
+machine is billed for every hour it starts, so it is decided on at each hour's leeway point, five
+minutes before the hour ends: destroyed if it has been idle past its period by then and nothing
+has a claim on it, kept for the whole next hour otherwise (`worker-tier.md` § The hour already
+paid for). Warmth up to the hour's end is free, which makes a
+short period on an expensive build template cheaper to get wrong than this section feared: what
+the period now buys is only the hours *after* the one the machine is in.
+
 **There is still no minimum warm count.** A floor — keep *n* machines of this template alive
 whatever happens — bills with nothing running, and the idle period buys warmth for work that
 actually arrives rather than work that might. It is deliberately not here, and if the idle period
@@ -738,8 +748,8 @@ turns out to be the wrong instrument it is one column on a table that already ex
 
 `commands.md` § Always park frees a parked job's slice, which is the point of it. A consequence
 that note did not follow through: a worker whose only job is parked has nothing running, is
-therefore idle, and is destroyed on its template's period while the command it is waiting for is
-still going.
+therefore idle, and was destroyed on its template's period while the command it was waiting for
+was still going — until a parked job became a claim on its machine (below).
 
 **Nothing about correctness depends on this.** `worker-tier.md` § Hibernation and resume
 reconstructs from the branch and the manifest, *never* from the conversation, and
@@ -756,11 +766,14 @@ worker was not preferred. Session reuse was unavailable by construction, most of
 built.** `Workers.assignable/2` takes the demand and a preferred worker id, and
 `Forge.Jobs.Scheduler` passes the job's `worker_id`, the machine it last ran on. When that one is
 gone, full or will not take the kind, any other that fits is taken, so it costs nothing when the
-machine is gone. The first fact still stands, and it is what the idle period answers: with a
-per-template idle period long enough on the agent side, the preference will usually hit.
-`may_invoke`'s `max` should still be set as a cap on park cycles rather than a generous safety
-number, because the fallback is a re-composed prompt and context is this system's expensive
-resource.
+machine is gone. The first fact no longer holds: **a parked job now keeps its machine**
+until the last of its open commands would time out, so the machine is still there when the job
+resumes unless a command outran its own timeout or a full template needed the slot
+(`worker-tier.md` § The hour already paid for). The gap after that — the job back in the queue,
+no longer parked, not yet placed — is covered by a second claim: a job that last ran on a machine
+and has come back to the queue holds it for one idle period from its return. `may_invoke`'s
+`max` should still be set as a cap on park cycles rather than a generous safety number, because
+the fallback is a re-composed prompt and context is this system's expensive resource.
 
 ## What this gives up
 

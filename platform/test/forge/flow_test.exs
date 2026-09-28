@@ -1062,13 +1062,21 @@ defmodule Forge.FlowTest do
     {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
     assignment = FakeWorker.assign(only_job(ticket), worker)
 
-    {:ok, %{status: :pending}} =
+    {:ok, %{status: :pending} = job} =
       FakeWorker.finish(assignment, "rate_limited", doc: "refinement.md")
 
+    # Two minutes on, for both clocks the run's end started: the machine's idle one, and the
+    # job's return to the queue — which holds the machine it ran on for one idle period
+    # (`docs/design/worker-tier.md` § The hour already paid for), and not for the week it waits.
+    two_minutes_ago = DateTime.add(DateTime.utc_now(:second), -120)
+
     {:ok, _worker} =
-      Forge.Workers.update(Forge.Workers.get!(worker.id), %{
-        idle_since: DateTime.add(DateTime.utc_now(:second), -120)
-      })
+      Forge.Workers.update(Forge.Workers.get!(worker.id), %{idle_since: two_minutes_ago})
+
+    {:ok, _job} =
+      job
+      |> Ecto.Changeset.change(updated_at: DateTime.add(two_minutes_ago, 0, :microsecond))
+      |> Forge.Repo.update()
 
     start_supervised!(Forge.Jobs.Scheduler)
     assert Forge.Jobs.Scheduler.tick() == 0

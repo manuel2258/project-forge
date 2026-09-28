@@ -841,6 +841,48 @@ defmodule ForgeWeb.WorkersLiveTest do
     assert text_of(view, "#worker-#{w.id}") =~ "last seen now · idle now"
   end
 
+  # On a provider that bills every started hour, an idle machine outlives its period to the end of
+  # the hour it has paid for — which, undrawn, reads as a sweep that forgot it.
+  test "an idle machine the platform made says when it goes", %{conn: conn, user: user} do
+    Forge.Provider.Fake.billing(:timer.hours(1))
+    on_exit(&Forge.Provider.Fake.allow/0)
+
+    w = worker(user)
+    {:ok, _w} = Workers.ready(w, %{"memory_budget" => 8_000})
+
+    # Twenty minutes and a half into its hour, so its last five open in thirty-four and a half.
+    made = DateTime.add(DateTime.utc_now(:second), -(20 * 60 + 30))
+    require Ecto.Query
+
+    Forge.Repo.update_all(
+      Ecto.Query.from(r in Forge.Workers.Worker, where: r.id == ^w.id),
+      set: [inserted_at: made]
+    )
+
+    permanent = worker(user, %{managed: false})
+    {:ok, _permanent} = Workers.ready(permanent, %{"memory_budget" => 8_000})
+
+    {:ok, view, _html} = live(conn, ~p"/workers")
+
+    assert text_of(view, "#worker-#{w.id}") =~ "idle now · goes in 34m"
+    # The sweep never takes a machine the platform did not make.
+    refute text_of(view, "#worker-#{permanent.id}") =~ "goes"
+  end
+
+  # `Format.until/2` says "now" for a moment already here, and the row would read "goes in now".
+  test "an idle machine whose moment has come says it goes now", %{conn: conn, user: user} do
+    w = worker(user)
+    {:ok, w} = Workers.ready(w, %{"memory_budget" => 8_000})
+
+    {:ok, _w} =
+      Workers.update(w, %{idle_since: DateTime.add(DateTime.utc_now(:second), -600)})
+
+    {:ok, view, _html} = live(conn, ~p"/workers")
+
+    assert text_of(view, "#worker-#{w.id}") =~ "· goes now"
+    refute text_of(view, "#worker-#{w.id}") =~ "goes in"
+  end
+
   test "the laptop nav carries it and the phone bar does not", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/")
 

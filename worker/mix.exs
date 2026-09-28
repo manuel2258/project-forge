@@ -25,7 +25,7 @@ defmodule ForgeWorker.MixProject do
       # `elixirc_paths` in this env, and a fixture module is exercised by definition — counting it
       # lifts the percentage without anything being better tested.
       test_coverage: [
-        summary: [threshold: 90],
+        summary: [threshold: 91],
         ignore_modules: [ForgeWorker.Fixtures]
       ]
     ]

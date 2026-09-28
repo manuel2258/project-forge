@@ -196,7 +196,7 @@ operator sees a mirror that stopped working rather than a mirror that was never 
 ### Non-fast-forward on a ticket branch: allowed, recorded, and pinned
 
 `decisions.md` says a job commits freely and history is squashed. The squash happens on the
-worker, once per run: `ForgeWorker.Checkout.squash/3` resets softly to the fetched branch head and
+worker, once per run: `ForgeWorker.Checkout.squash/4` resets softly to the fetched branch head and
 commits everything the run did as one commit, so the ticket branch gains one commit per run
 rather than the agent's keystrokes. The merge does not squash again — it keeps both parents
 (§ The merge). So the common case is append-only — but a resumed job amending its last commit, or

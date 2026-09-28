@@ -174,9 +174,9 @@ what it lacks is what happened while it was stopped:
    inline, fenced verbatim. That is every answer on the ticket, oldest first, so the ones this
    job stopped for are among the newest. Absent when the spec carries no answers input.
 2. **The branch** — its name and the commit the worktree is at, which the worker reads from the
-   checkout it has just made (`ForgeWorker.Checkout.head/1`). The earlier run's work was
-   committed and squashed when it stopped (`worker-tier.md` § Git), so the history is not the one
-   the session remembers even though the files are, and the prompt says so.
+   checkout it has just made, as the job's user (`ForgeWorker.Job.Workspace.head/2`). The earlier
+   run's work was committed and squashed when it stopped (`worker-tier.md` § Git), so the history
+   is not the one the session remembers even though the files are, and the prompt says so.
 3. **The manifest**, whole: it is short, it lists `answers.md` among the inputs, and it carries
    the budget as assigned, which the platform may have lowered since the session last saw it.
 
@@ -206,7 +206,7 @@ had only just made, too — a snapshot of the ticket's volume or the project's s
 whatever commit that volume was — so a resume on a machine without the job's own worktree ran on
 the wrong tree, and the squash at its end pushed the difference as a commit reverting the ticket's
 work. A snapshot is reset to the branch whatever the assignment says
-(`ForgeWorker.Job.Workspace.prepare/2`); only a worktree that was already there is kept.
+(`ForgeWorker.Job.Workspace.prepare/3`); only a worktree that was already there is kept.
 
 ### Non-blocking questions
 

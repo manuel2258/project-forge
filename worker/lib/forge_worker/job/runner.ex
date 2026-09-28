@@ -44,6 +44,7 @@ defmodule ForgeWorker.Job.Runner do
   alias ForgeCore.Job.{Outcome, Result, Spec}
   alias ForgeCore.Prompt
   alias ForgeWorker.Job.{Dir, Exec}
+  alias ForgeWorker.Log
 
   require Logger
 
@@ -156,6 +157,9 @@ defmodule ForgeWorker.Job.Runner do
       finished_event: nil,
       started_event: nil,
       rate_limit: nil,
+      # Whether the sink has failed yet this run: said once, in the machine's log, rather than
+      # once for every event after it.
+      sink_failed: false,
       # A conversation produces one of these per turn. `finished_event` is the latest, which is
       # what the result is built from; `turns` is how many there have been, which is what tells
       # a second turn from a first.
@@ -234,7 +238,10 @@ defmodule ForgeWorker.Job.Runner do
   # A slice that cannot be made is a job that cannot run: it concludes with nothing started,
   # which `ForgeCore.Job.Outcome` already reads as an error, rather than running unconfined.
   defp conclude_without_starting(state, reason) do
-    Logger.error("could not make a slice for job #{state.spec.job_id}: #{inspect(reason)}")
+    Log.line("slice.failed", :error, "could not make a slice: #{inspect(reason)}",
+      job_id: state.spec.job_id
+    )
+
     send(self(), :conclude)
     state
   end
@@ -490,11 +497,13 @@ defmodule ForgeWorker.Job.Runner do
 
   # A failing sink must not take the job down with it.
   defp emit(%{type: type, payload: payload} = event, state) do
-    try do
-      state.sink.(%{type: "job.harness." <> type, payload: payload, job_id: state.spec.job_id})
-    rescue
-      error -> Logger.warning("event sink failed for #{type}: #{Exception.message(error)}")
-    end
+    state =
+      try do
+        state.sink.(%{type: "job.harness." <> type, payload: payload, job_id: state.spec.job_id})
+        state
+      rescue
+        error -> sink_failed(state, type, error)
+      end
 
     case type do
       "finished" -> finished(state, event)
@@ -502,6 +511,21 @@ defmodule ForgeWorker.Job.Runner do
       "rate_limit" -> %{state | rate_limit: payload}
       _ -> state
     end
+  end
+
+  # The first failure is a line in the machine's log; the rest only the journal's, since a sink
+  # that fails once fails for every event after it and would fill the log with one fact.
+  defp sink_failed(%{sink_failed: false} = state, type, error) do
+    Log.line("event.dropped", :warning, "could not hand on #{type}: #{Exception.message(error)}",
+      job_id: state.spec.job_id
+    )
+
+    %{state | sink_failed: true}
+  end
+
+  defp sink_failed(state, type, error) do
+    Logger.warning("event sink failed for #{type}: #{Exception.message(error)}")
+    state
   end
 
   # A turn ended. In prompt mode there is exactly one and this is the end of the run; in

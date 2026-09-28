@@ -16,9 +16,8 @@ defmodule ForgeWorker.Job.Workspace do
   is what keeps the credential's handling in one place too.
   """
 
-  alias ForgeWorker.Checkout
+  alias ForgeWorker.{Checkout, Log, Slice, Volume}
   alias ForgeWorker.Job.Seed
-  alias ForgeWorker.Volume
 
   require Logger
 
@@ -37,19 +36,26 @@ defmodule ForgeWorker.Job.Workspace do
   uncommitted discarded. A resume keeps a tree that is already here as it stands: the work in
   progress is the point of resuming. A tree made for the resume — a snapshot, a clone — has no
   work in progress, and is the branch as the platform has it like any other.
+
+  **The tree is `user`'s before any git runs in it, and git runs as `user`**
+  (`docs/design/worker-tier.md` § The job slice). A snapshot of a ticket's template carries the
+  last job's `.git`, hooks and all; a tree left by an earlier attempt carries this job's. Only a
+  clone, into a directory nothing has touched, is the worker's own, and it is handed over after.
   """
-  @spec prepare(assignment(), String.t()) :: {:ok, String.t()} | {:error, term()}
-  def prepare(assignment, root) do
+  @spec prepare(assignment(), String.t(), Slice.user()) :: {:ok, String.t()} | {:error, term()}
+  def prepare(assignment, root, user) do
     dir = dir(assignment, root)
 
     # A worktree that is already there belongs to a run that did not finish — this one is a
     # resume, or a previous attempt died before `discard/2`. Either way it has a repository in
     # it, and `Checkout.ensure/1` knows what to do with one.
     if File.dir?(dir) do
-      with :ok <- Checkout.ensure(checkout_opts(assignment, dir, [])), do: {:ok, dir}
+      with :ok <- Slice.own(user, [dir]),
+           :ok <- Checkout.ensure(checkout_opts(assignment, dir, user, [])),
+           do: {:ok, dir}
     else
-      from_template(assignment, root, dir) || from_seed(assignment, root, dir) ||
-        clone(assignment, dir)
+      from_template(assignment, root, dir, user) || from_seed(assignment, root, dir, user) ||
+        clone(assignment, dir, user)
     end
   end
 
@@ -58,7 +64,7 @@ defmodule ForgeWorker.Job.Workspace do
   this one left off rather than where the project's seed was published.
 
   **Only after the run committed and pushed**, which is what makes the template safe to snapshot
-  from without cleaning: `Checkout.squash/3` stages everything with `add -A`, so what is left
+  from without cleaning: `Checkout.squash/4` stages everything with `add -A`, so what is left
   beside the checkout is the ignored build output and nothing a later run could mistake for its
   own work. A run that ended before that keeps the template the ticket already had.
 
@@ -69,7 +75,7 @@ defmodule ForgeWorker.Job.Workspace do
   def promote(assignment, root, dir) do
     case template(assignment, root) do
       nil -> :ok
-      path -> replace(path, dir)
+      path -> replace(path, dir, assignment["job_id"])
     end
   end
 
@@ -107,18 +113,23 @@ defmodule ForgeWorker.Job.Workspace do
   @doc """
   Commits everything in the worktree and pushes it to the ticket branch, returning the head.
   One commit per run. A run that changed nothing pushes nothing and reports the head it
-  started from.
+  started from. As `user`, whose tree it is and whose hooks it would run.
   """
-  @spec commit_and_push(assignment(), String.t(), String.t()) ::
+  @spec commit_and_push(assignment(), String.t(), String.t(), Slice.user()) ::
           {:ok, String.t() | nil} | {:error, term()}
-  def commit_and_push(assignment, dir, message) do
+  def commit_and_push(assignment, dir, message, user) do
     git = assignment["git"]
+    as = Slice.as_user(user)
 
-    with {:ok, committed?} <- Checkout.squash(dir, remote(git), message),
-         :ok <- maybe_push(git, dir, committed?) do
-      Checkout.head(dir)
+    with {:ok, committed?} <- Checkout.squash(dir, remote(git), message, as),
+         :ok <- maybe_push(git, dir, committed?, as) do
+      Checkout.head(dir, as)
     end
   end
+
+  @doc "The commit the worktree is on, read as `user`."
+  @spec head(String.t(), Slice.user()) :: {:ok, String.t()} | {:error, term()}
+  def head(dir, user), do: Checkout.head(dir, Slice.as_user(user))
 
   @doc """
   Throws the worktree away. A job's tree is disposable by construction — the run committed and
@@ -130,8 +141,13 @@ defmodule ForgeWorker.Job.Workspace do
     dir = dir(assignment, root)
 
     case Volume.impl().delete(dir) do
-      :ok -> :ok
-      {:error, reason} -> Logger.warning("could not remove #{dir}: #{inspect(reason)}")
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Log.line("worktree.undeleted", :warning, "could not remove #{dir}: #{inspect(reason)}",
+          job_id: assignment["job_id"]
+        )
     end
 
     :ok
@@ -141,16 +157,16 @@ defmodule ForgeWorker.Job.Workspace do
   @spec dir(assignment(), String.t()) :: String.t()
   def dir(assignment, root), do: Path.join([root, "worktrees", assignment["job_id"]])
 
-  defp from_template(assignment, root, dir) do
+  defp from_template(assignment, root, dir, user) do
     path = template(assignment, root)
 
     if is_binary(path) and File.dir?(path),
-      do: from_volume(assignment, path, dir, "ticket volume")
+      do: from_volume(assignment, path, dir, "ticket volume", user)
   end
 
-  defp from_seed(assignment, root, dir) do
+  defp from_seed(assignment, root, dir, user) do
     case Seed.ensure(assignment, root) do
-      seed when is_binary(seed) -> from_volume(assignment, seed, dir, "seed")
+      seed when is_binary(seed) -> from_volume(assignment, seed, dir, "seed", user)
       nil -> nil
     end
   end
@@ -164,18 +180,30 @@ defmodule ForgeWorker.Job.Workspace do
   # the volume was, often not this branch at all. Kept as it was, a resume on a machine without
   # the job's own worktree ran on the wrong tree, and the squash at its end pushed the difference
   # as a commit undoing the ticket's work.
-  defp from_volume(assignment, source, dir, what) do
+  #
+  # **Handed to the job's user before git touches it.** A template's `.git` is the last job's,
+  # written by a user who could put a `post-checkout` hook in it; run as root, the checkout below
+  # would run that hook as root.
+  defp from_volume(assignment, source, dir, what, user) do
     git = assignment["git"]
+    opts = checkout_opts(assignment, dir, user, clean: false, resume: false)
 
     with :ok <- Volume.impl().snapshot(source, dir),
-         :ok <- Checkout.remote(dir, git["url"]),
-         :ok <- Checkout.ensure(checkout_opts(assignment, dir, clean: false, resume: false)) do
+         :ok <- Slice.own(user, [dir]),
+         :ok <- Checkout.remote(dir, git["url"], opts[:as]),
+         :ok <- Checkout.ensure(opts) do
       {:ok, dir}
     else
       {:error, reason} ->
         # A warm start is what makes a job fast, not what makes it correct: a snapshot that will
         # not become this branch is thrown away and the caller falls back to a colder start.
-        Logger.warning("could not use the #{what} for #{dir} (#{inspect(reason)})")
+        Log.line(
+          "volume.unused",
+          :warning,
+          "could not use the #{what} for #{dir}, so it starts colder: #{inspect(reason)}",
+          job_id: assignment["job_id"]
+        )
+
         Volume.impl().delete(dir)
         nil
     end
@@ -185,7 +213,7 @@ defmodule ForgeWorker.Job.Workspace do
   # rather than none at all. The touch is what `sweep/2` reads: a snapshot carries the mtime of
   # the tree it came from, which says when the worktree's root last changed rather than when this
   # ticket last ran.
-  defp replace(path, dir) do
+  defp replace(path, dir, job_id) do
     volume = Volume.impl()
     staging = path <> ".promoting." <> Base.url_encode64(:crypto.strong_rand_bytes(6))
 
@@ -196,7 +224,13 @@ defmodule ForgeWorker.Job.Workspace do
       :ok
     else
       {:error, reason} ->
-        Logger.warning("could not keep #{dir} as #{path} (#{inspect(reason)})")
+        Log.line(
+          "volume.unkept",
+          :warning,
+          "could not keep #{dir} as #{path}, so the next job starts colder: #{inspect(reason)}",
+          job_id: job_id
+        )
+
         volume.delete(staging)
         :ok
     end
@@ -223,11 +257,15 @@ defmodule ForgeWorker.Job.Workspace do
     end
   end
 
-  defp clone(assignment, dir) do
-    with :ok <- Checkout.ensure(checkout_opts(assignment, dir, [])), do: {:ok, dir}
+  # The worker's own clone, into a directory that does not exist yet, and the job's user's the
+  # moment it does.
+  defp clone(assignment, dir, user) do
+    with :ok <- Checkout.ensure(checkout_opts(assignment, dir, user, [])),
+         :ok <- Slice.own(user, [dir]),
+         do: {:ok, dir}
   end
 
-  defp checkout_opts(assignment, dir, extra) do
+  defp checkout_opts(assignment, dir, user, extra) do
     git = assignment["git"]
 
     Keyword.merge(
@@ -236,16 +274,17 @@ defmodule ForgeWorker.Job.Workspace do
         url: git["url"],
         branch: git["branch"],
         token: git["token"],
-        resume: assignment["resume_session"] != nil
+        resume: assignment["resume_session"] != nil,
+        as: Slice.as_user(user)
       ],
       extra
     )
   end
 
-  defp maybe_push(_git, _dir, false), do: :ok
+  defp maybe_push(_git, _dir, false, _as), do: :ok
 
-  defp maybe_push(git, dir, true),
-    do: Checkout.push(dir: dir, branch: git["branch"], token: git["token"])
+  defp maybe_push(git, dir, true, as),
+    do: Checkout.push(dir: dir, branch: git["branch"], token: git["token"], as: as)
 
   defp remote(git), do: "origin/" <> git["branch"]
 end

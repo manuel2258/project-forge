@@ -18,9 +18,7 @@ defmodule ForgeWorker.Job.Credential do
   """
 
   alias ForgeCore.Job.Credential, as: Sealed
-  alias ForgeWorker.Config
-
-  require Logger
+  alias ForgeWorker.{Config, Log}
 
   # What the platform calls a kind, and what `ForgeWorker.Harness.ClaudeCode` is handed. A map and
   # not `String.to_existing_atom/1`: the wire says which of these it is, and nothing else.
@@ -54,7 +52,13 @@ defmodule ForgeWorker.Job.Credential do
       {kind, secret}
     else
       :error ->
-        Logger.error("the credential for job #{job_id} could not be opened; running without one")
+        Log.line(
+          "credential.unopened",
+          :error,
+          "the credential would not open; running without one",
+          job_id: job_id
+        )
+
         nil
     end
   end

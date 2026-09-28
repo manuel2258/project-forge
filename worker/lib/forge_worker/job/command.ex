@@ -22,8 +22,7 @@ defmodule ForgeWorker.Job.Command do
 
   alias ForgeCore.Job.{Result, Spec}
   alias ForgeWorker.Job.{Dir, Exec}
-
-  require Logger
+  alias ForgeWorker.Log
 
   @default_grace_ms :timer.seconds(10)
 
@@ -114,7 +113,10 @@ defmodule ForgeWorker.Job.Command do
 
       {:error, reason} ->
         # A command that cannot be confined is not run unconfined: it ends with no status.
-        Logger.error("could not make a slice for command #{spec.job_id}: #{inspect(reason)}")
+        Log.line("slice.failed", :error, "could not make a slice: #{inspect(reason)}",
+          job_id: spec.job_id
+        )
+
         {:noreply, conclude(state, nil)}
     end
   end

@@ -14,6 +14,18 @@ defmodule ForgeWorker.Job.CommandTest.WrapReportingSlice do
 
   @impl ForgeWorker.Slice
   def cleanup(_context), do: :ok
+
+  @impl ForgeWorker.Slice
+  defdelegate enter(job_id), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate own(owner, paths), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate run_as(owner, executable, args), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate leave(owner, paths), to: ForgeWorker.Slice.Direct
 end
 
 defmodule ForgeWorker.Job.CommandTest.RefusingSlice do
@@ -29,6 +41,18 @@ defmodule ForgeWorker.Job.CommandTest.RefusingSlice do
 
   @impl ForgeWorker.Slice
   def cleanup(_context), do: :ok
+
+  @impl ForgeWorker.Slice
+  defdelegate enter(job_id), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate own(owner, paths), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate run_as(owner, executable, args), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate leave(owner, paths), to: ForgeWorker.Slice.Direct
 end
 
 defmodule ForgeWorker.Job.CommandTest do

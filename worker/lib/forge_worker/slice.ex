@@ -13,6 +13,14 @@ defmodule ForgeWorker.Slice do
 
   `measure/` makes the same substitution for the same reason and stamps which one ran
   (`docs/design/measurement-harness.md`); so does the worker, in the job's `started` event.
+
+  **Two lifetimes.** The unit is the runner's: `prepare/1`, `wrap/3` and `cleanup/1` bracket the
+  harness or the command's script. The Unix user is the job's, and longer: `enter/1` makes it
+  before the worktree exists and `leave/2` removes it after the worker's last git command in that
+  worktree, because every one of those runs as the job's user (`run_as/3`) — a repository's hooks
+  and configuration are programs the job could have written, and git run as root would run them
+  as root. `docs/design/worker-tier.md` § The job slice has the order; the job's owner holds it,
+  through `enter/1`, `own/2`, `as_user/1` and `leave/2` here.
   """
 
   @typedoc """
@@ -34,7 +42,16 @@ defmodule ForgeWorker.Slice do
   @typedoc "What `prepare/1` set up and `wrap/3` and `cleanup/1` need back."
   @type context :: map()
 
-  @doc "Makes whatever the slice needs before the process starts, such as its Unix user."
+  @typedoc "A job's Unix user as an implementation made it: what it needs back to use it."
+  @type owner :: map()
+
+  @typedoc "A job's Unix user and the implementation that made it, as the job's owner holds it."
+  @type user :: {module(), owner()}
+
+  @typedoc "How a command is run as the job's user: the command, and what runs instead."
+  @type as :: (String.t(), [String.t()] -> {String.t(), [String.t()]})
+
+  @doc "Makes what the unit needs before the process starts. The job's user already exists."
   @callback prepare(opts()) :: {:ok, context()} | {:error, term()}
 
   @doc "The command that runs `executable` inside the slice."
@@ -43,9 +60,45 @@ defmodule ForgeWorker.Slice do
   @doc "Removes what `prepare/1` made. Called whether the job succeeded or not."
   @callback cleanup(context()) :: :ok
 
+  @doc "Makes the job's Unix user, before anything of the job exists on this machine."
+  @callback enter(job_id :: String.t()) :: {:ok, owner()} | {:error, term()}
+
+  @doc "Gives `paths`, and everything under them, to the job's user."
+  @callback own(owner(), [String.t()]) :: :ok | {:error, term()}
+
+  @doc "The command that runs `executable` as the job's user, for one the worker waits on."
+  @callback run_as(owner(), String.t(), [String.t()]) :: {String.t(), [String.t()]}
+
+  @doc """
+  Gives `paths` back to root and removes the job's user. Never raises: it is on every ending,
+  including the ones where something has already gone wrong. A second call finds the user gone
+  and says nothing of it; a path already removed is the caller's to leave out.
+  """
+  @callback leave(owner(), [String.t()]) :: :ok
+
   @doc "The implementation in force. `Direct` unless something says otherwise."
   @spec impl() :: module()
   def impl, do: Application.get_env(:forge_worker, :slice, ForgeWorker.Slice.Direct)
+
+  @doc "Makes the job's user with the implementation in force."
+  @spec enter(String.t()) :: {:ok, user()} | {:error, term()}
+  def enter(job_id) do
+    slice = impl()
+    with {:ok, owner} <- slice.enter(job_id), do: {:ok, {slice, owner}}
+  end
+
+  @doc "Gives `paths` to the job's user."
+  @spec own(user(), [String.t()]) :: :ok | {:error, term()}
+  def own({slice, owner}, paths), do: slice.own(owner, paths)
+
+  @doc "How to run a command as the job's user — what `ForgeWorker.Checkout` takes as `as`."
+  @spec as_user(user()) :: as()
+  def as_user({slice, owner}),
+    do: fn executable, args -> slice.run_as(owner, executable, args) end
+
+  @doc "Gives `paths` back and removes the job's user."
+  @spec leave(user(), [String.t()]) :: :ok
+  def leave({slice, owner}, paths), do: slice.leave(owner, paths)
 end
 
 defmodule ForgeWorker.Slice.Direct do
@@ -65,6 +118,18 @@ defmodule ForgeWorker.Slice.Direct do
 
   @impl ForgeWorker.Slice
   def cleanup(_context), do: :ok
+
+  @impl ForgeWorker.Slice
+  def enter(job_id), do: {:ok, %{kind: :direct, job_id: job_id}}
+
+  @impl ForgeWorker.Slice
+  def own(_owner, _paths), do: :ok
+
+  @impl ForgeWorker.Slice
+  def run_as(_owner, executable, args), do: {executable, args}
+
+  @impl ForgeWorker.Slice
+  def leave(_owner, _paths), do: :ok
 end
 
 defmodule ForgeWorker.Slice.Systemd do
@@ -78,23 +143,28 @@ defmodule ForgeWorker.Slice.Systemd do
   is built around seeing the harness's stdout and its exit; the unit is a wrapper, not a
   different execution model.
 
-  **Not exercised by the test suite.** It needs systemd as PID 1 and cgroup v2, which the
-  machine this was written on has neither of. What is tested is the command it builds. The
+  **The unit is not exercised by the test suite.** It needs systemd as PID 1 and cgroup v2, which
+  the machine this was written on has neither of. What is tested is the command it builds. The
   mechanism itself is what `measure/`'s M3 already measured, and what milestone 3's demo has
   to show — `docs/measurements.md` says the crossing of M2 and M3, four builds with one under
   a binding ceiling, has never been run and should be before the demo depends on it.
+
+  **The user is, where the suite runs as root.** `enter/1`, `own/2`, `run_as/3` and `leave/2` need
+  only `useradd`, `chown`, `setpriv` and `userdel`, and `ForgeWorker.JobUserTest` uses them to show
+  a hook the job planted running as the job's user rather than root: `mix test --include root`.
   """
 
   @behaviour ForgeWorker.Slice
 
-  require Logger
+  alias ForgeWorker.Log
 
+  # The user is the job owner's (`enter/1`), and the worktree was given to it before any git ran
+  # in it. What is left is the job directory, which the runner has just written as root.
   @impl ForgeWorker.Slice
   def prepare(opts) do
     user = user_name(opts.job_id)
 
-    with :ok <- create_user(user),
-         :ok <- own(user, [Map.get(opts, :worktree), Map.get(opts, :job_dir)]) do
+    with :ok <- chown(user, [Map.get(opts, :job_dir)]) do
       {:ok, Map.merge(opts, %{kind: :systemd, user: user})}
     end
   end
@@ -104,32 +174,72 @@ defmodule ForgeWorker.Slice.Systemd do
     {"systemd-run", flags(context) ++ ["--", executable | args]}
   end
 
+  # Nothing: the unit is collected by systemd (`--collect`), and the user and its files are the
+  # job owner's to take back once its last git command has run (`leave/2`).
   @impl ForgeWorker.Slice
-  def cleanup(%{user: user} = context) do
-    # The files come back to the worker before the user goes away. Two reasons, and the first
-    # is not optional: the worker commits and pushes the worktree the moment the job ends, and
-    # git refuses to work in a repository owned by somebody else — rightly, since that is how
-    # a repository's own configuration gets executed by a user who did not write it. The second
-    # is that files owned by a deleted uid outlive every job this machine ever runs.
-    case own("root", [Map.get(context, :worktree), Map.get(context, :job_dir)]) do
+  def cleanup(_context), do: :ok
+
+  @impl ForgeWorker.Slice
+  def enter(job_id) do
+    user = user_name(job_id)
+
+    with :ok <- create_user(user),
+         {:ok, gid} <- gid(user) do
+      {:ok, %{kind: :systemd, job_id: job_id, user: user, gid: gid}}
+    end
+  end
+
+  @impl ForgeWorker.Slice
+  def own(%{user: user}, paths), do: chown(user, paths)
+
+  # `setpriv` rather than a unit: git is a short command the worker waits on and reads, dozens of
+  # times a job. Its uid and gid, and no supplementary groups, so nothing of root's comes along.
+  # `HOME` names nothing, because the worker's is root's: git would read root's configuration
+  # and warn that it may not, on every command.
+  @impl ForgeWorker.Slice
+  def run_as(owner, executable, args), do: {"setpriv", as_flags(owner) ++ [executable | args]}
+
+  @doc "What `run_as/3` puts in front of a command. Public because it is what can be checked here."
+  @spec as_flags(map()) :: [String.t()]
+  def as_flags(%{user: user, gid: gid}) do
+    ["--reuid=" <> user, "--regid=" <> gid, "--clear-groups", "--", "env", "HOME=/nonexistent"]
+  end
+
+  # The files come back to root before the user goes, because files owned by a deleted uid are
+  # handed to whoever `useradd` gives that uid next.
+  @impl ForgeWorker.Slice
+  def leave(%{user: user} = owner, paths) do
+    case chown("root", paths) do
       :ok ->
         :ok
 
       {:error, reason} ->
-        Logger.warning("could not take #{user}'s files back: #{inspect(reason)}")
+        Log.line(
+          "slice.uncleaned",
+          :warning,
+          "could not take #{user}'s files back: #{inspect(reason)}",
+          job_id: owner.job_id
+        )
     end
 
     # No `--remove`: the user was made without a home, and asking for one to be removed fails
-    # with a warning on every job that ever succeeded.
+    # with a warning on every job that ever succeeded. 6 is a user that is already gone, which a
+    # second `leave/2` finds.
     case System.cmd("userdel", [user], stderr_to_stdout: true) do
-      {_out, 0} -> :ok
-      {out, code} -> Logger.warning("could not remove #{user} (#{code}): #{out}")
+      {_out, code} when code in [0, 6] ->
+        :ok
+
+      {out, code} ->
+        Log.line(
+          "slice.uncleaned",
+          :warning,
+          "could not remove #{user} (#{code}): #{String.trim(out)}",
+          job_id: owner.job_id
+        )
     end
 
     :ok
   end
-
-  def cleanup(_context), do: :ok
 
   @doc "The unit's flags. Public because it is the part of this that can be checked here."
   @spec flags(map()) :: [String.t()]
@@ -162,7 +272,8 @@ defmodule ForgeWorker.Slice.Systemd do
 
   # The job's files belong to the job's user: it has to write them, and no other job on this
   # machine may read them. Without this the unit cannot even change into its working directory.
-  defp own(user, paths) do
+  # `-R` does not follow a link the job left in the tree: the link is chowned, not its target.
+  defp chown(user, paths) do
     paths
     |> Enum.reject(&is_nil/1)
     |> Enum.reduce_while(:ok, fn path, :ok ->
@@ -194,6 +305,15 @@ defmodule ForgeWorker.Slice.Systemd do
   # job's cleanup pulled the other's files and user out from under it. At 60 bits a collision is
   # not a thing that happens on one machine, so the reuse branch is safe.
   defp short(job_id), do: job_id |> String.replace("-", "") |> String.slice(0, 16)
+
+  # The primary group `useradd` gave the user, which `setpriv` has to be told: it changes nothing
+  # it is not asked to, and a gid left at root's is root's group permissions.
+  defp gid(user) do
+    case System.cmd("id", ["-g", user], stderr_to_stdout: true) do
+      {out, 0} -> {:ok, String.trim(out)}
+      {out, code} -> {:error, {:id, code, out}}
+    end
+  end
 
   defp create_user(user) do
     args = ["--system", "--no-create-home", "--shell", "/sbin/nologin", user]

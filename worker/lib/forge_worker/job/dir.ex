@@ -27,6 +27,7 @@ defmodule ForgeWorker.Job.Dir do
 
   alias ForgeCore.{Document, Proposal, Workflow}
   alias ForgeCore.Job.Spec
+  alias ForgeWorker.Log
 
   require Logger
 
@@ -63,10 +64,10 @@ defmodule ForgeWorker.Job.Dir do
     File.mkdir_p!(home_dir(job_dir))
     File.write!(Path.join(job_dir, "spec.json"), Spec.to_json(spec))
     write_platform_docs(job_dir)
-    write_backlog(job_dir, Keyword.get(opts, :backlog))
+    write_backlog(job_dir, Keyword.get(opts, :backlog), job_id)
     write_replay(job_dir, spec.replay)
     File.rm_rf!(invoke_path(job_dir))
-    write_command_logs(job_dir, Keyword.get(opts, :command_logs, []))
+    write_command_logs(job_dir, Keyword.get(opts, :command_logs, []), job_id)
 
     Enum.each(spec.inputs, fn input ->
       path = Path.join(inputs, input.name)
@@ -96,23 +97,25 @@ defmodule ForgeWorker.Job.Dir do
   # Named by the platform, so matched rather than trusted before they become paths: `<n>-<name>.log`,
   # a name being a command's, which the validator holds to one path segment. The directory is made
   # fresh here, so there is nothing an agent planted in it for a lexical check to miss.
-  defp write_command_logs(job_dir, logs) do
+  defp write_command_logs(job_dir, logs, job_id) do
     dir = Path.join(job_dir, "commands")
     File.rm_rf!(dir)
 
     unless logs == [] do
       File.mkdir_p!(dir)
-      Enum.each(logs, &write_command_log(dir, &1))
+      Enum.each(logs, &write_command_log(dir, &1, job_id))
     end
   end
 
-  defp write_command_log(dir, {file, source}) do
+  defp write_command_log(dir, {file, source}, job_id) do
     if Regex.match?(~r/^[0-9]+-[A-Za-z0-9][A-Za-z0-9._-]*\.log$/, file) do
       target = Path.join(dir, file)
       File.cp!(source, target)
       File.chmod!(target, 0o444)
     else
-      Logger.warning("commands: refusing a log named #{inspect(file)}")
+      Log.line("commands.unwritten", :warning, "refusing a command's log named #{inspect(file)}",
+        job_id: job_id
+      )
     end
   end
 
@@ -215,15 +218,15 @@ defmodule ForgeWorker.Job.Dir do
   #
   # Rewritten whole each time. A stale file from an earlier composition would be a ticket the
   # agent believes still exists, which is worse than not having the folder at all.
-  defp write_backlog(job_dir, nil), do: File.rm_rf!(backlog_dir(job_dir))
+  defp write_backlog(job_dir, nil, _job_id), do: File.rm_rf!(backlog_dir(job_dir))
 
-  defp write_backlog(job_dir, backlog) when is_map(backlog) do
+  defp write_backlog(job_dir, backlog, job_id) when is_map(backlog) do
     dir = backlog_dir(job_dir)
     File.rm_rf!(dir)
     File.mkdir_p!(dir)
     write_readonly(Path.join(dir, "index.md"), backlog["index"] || "")
 
-    Enum.each(backlog["tickets"] || [], &write_backlog_entry(dir, &1))
+    Enum.each(backlog["tickets"] || [], &write_backlog_entry(dir, &1, job_id))
 
     case backlog["proposals"] || [] do
       [] ->
@@ -232,7 +235,7 @@ defmodule ForgeWorker.Job.Dir do
       proposals ->
         nested = Path.join(dir, Workflow.proposals_dir())
         File.mkdir_p!(nested)
-        Enum.each(proposals, &write_backlog_entry(nested, &1))
+        Enum.each(proposals, &write_backlog_entry(nested, &1, job_id))
     end
   rescue
     # The backlog is context, and context is never worth the job. `prepare/3` is called from
@@ -240,7 +243,12 @@ defmodule ForgeWorker.Job.Dir do
     # backlog is recomposed identically on every assignment, it would be a job that never starts
     # again either. A name the platform should not have sent is a line in the log, not an outage.
     error ->
-      Logger.warning("could not write the backlog: #{Exception.message(error)}")
+      Log.line(
+        "backlog.unwritten",
+        :warning,
+        "could not write the backlog: #{Exception.message(error)}",
+        job_id: job_id
+      )
   end
 
   defp backlog_dir(job_dir), do: Path.join(job_dir, Workflow.tickets_dir())
@@ -254,19 +262,30 @@ defmodule ForgeWorker.Job.Dir do
   # so there is no symlink for a lexical check to be wrong about — nothing the agent planted
   # survives into the window, and an entry cannot create a subdirectory to hide one in. The
   # guard is sound because of that, not because `Path.expand` is filesystem-aware. It is not.
-  defp write_backlog_entry(dir, %{"file" => file, "content" => content}) when is_binary(file) do
+  defp write_backlog_entry(dir, %{"file" => file, "content" => content}, job_id)
+       when is_binary(file) do
     base = Path.expand(dir)
     path = Path.expand(Path.join(base, file))
 
     if Path.dirname(path) == base do
       write_readonly(path, content || "")
     else
-      Logger.warning("backlog: refusing #{inspect(file)}, which leaves the folder")
+      Log.line(
+        "backlog.unwritten",
+        :warning,
+        "refusing #{inspect(file)}, which leaves the folder",
+        job_id: job_id
+      )
     end
   end
 
-  defp write_backlog_entry(_dir, entry) do
-    Logger.warning("backlog: refusing an entry with no file name: #{inspect(entry)}")
+  defp write_backlog_entry(_dir, entry, job_id) do
+    Log.line(
+      "backlog.unwritten",
+      :warning,
+      "refusing an entry with no file name: #{inspect(entry)}",
+      job_id: job_id
+    )
   end
 
   defp write_readonly(path, content) do

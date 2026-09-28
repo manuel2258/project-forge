@@ -291,9 +291,9 @@ which is what makes it an addition rather than a change (§ Versions).
 ## The machine's log
 
 `log` carries a line of the machine's own history — a job it accepted or finished, a seed it
-fetched or could not, a message from the platform it did not know — into the log the platform
-keeps for it and shows on `/workers/:id`. Worker-level only: nothing a job's agent did goes here;
-that is the job's `event` stream. It is held while the worker is not joined and sent after the next
+fetched or could not, a message from the platform it did not know, and what it could not do for a
+job, such as a turn it could not commit — into the log the platform keeps for it and shows on
+`/workers/:id`. Nothing a job's agent did goes here; that is the job's `event` stream. It is held while the worker is not joined and sent after the next
 join, and otherwise best-effort and unacked, like an event. `docs/design/worker-log.md` is the
 standard for what goes in, how it is bounded, and what the platform adds of its own.
 

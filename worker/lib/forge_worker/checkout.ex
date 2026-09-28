@@ -11,6 +11,13 @@ defmodule ForgeWorker.Checkout do
   `$FORGE_GIT_TOKEN`, and the variable is passed through the process environment only — the same
   rule `ForgeWorker.Job.Runner` applies to every `{:secret, _}` value.
 
+  **Git runs as whoever `as` says, and in a job's worktree that is the job's user.** A
+  repository's hooks and configuration are programs — a `pre-commit`, a `core.fsmonitor` — and
+  git runs them as whoever runs git; the job's user can write every one of them. So every
+  function that runs git in a checkout takes `as` (`ForgeWorker.Slice.as_user/1`), and the one
+  command that runs as the worker itself is the clone into a directory that does not exist yet,
+  which nothing of a job has touched (`docs/design/worker-tier.md` § The job slice).
+
   See `docs/design/git-hosting.md`.
   """
 
@@ -25,7 +32,8 @@ defmodule ForgeWorker.Checkout do
           token: (-> String.t()),
           resume: boolean(),
           clean: boolean(),
-          identity: {String.t(), String.t()}
+          identity: {String.t(), String.t()},
+          as: ForgeWorker.Slice.as()
         ]
 
   @doc """
@@ -42,6 +50,10 @@ defmodule ForgeWorker.Checkout do
   (`docs/design/worker-tier.md` § Volumes and the seed). A build directory that is *not* in
   `.gitignore` would otherwise be deleted by the one command meant to protect the run from a
   predecessor it never had.
+
+  `as` runs git in a checkout that is already there, and the checkout must already be the job's
+  user's. A clone is the worker's own — into a directory nothing has touched — and the caller
+  gives it to the user afterwards.
   """
   @spec ensure(opts()) :: :ok | {:error, term()}
   def ensure(opts) do
@@ -61,14 +73,14 @@ defmodule ForgeWorker.Checkout do
   from — a different host, a different platform address — so the remote is set rather than
   trusted. A checkout with no origin at all still ends up with one.
   """
-  @spec remote(String.t(), String.t()) :: :ok | {:error, term()}
-  def remote(dir, url) do
-    case git(dir, ["remote", "set-url", "origin", url], []) do
+  @spec remote(String.t(), String.t(), ForgeWorker.Slice.as()) :: :ok | {:error, term()}
+  def remote(dir, url, as) do
+    case git(dir, ["remote", "set-url", "origin", url], as: as) do
       {:ok, _out} ->
         :ok
 
       {:error, _reason} ->
-        with {:ok, _out} <- git(dir, ["remote", "add", "origin", url], []), do: :ok
+        with {:ok, _out} <- git(dir, ["remote", "add", "origin", url], as: as), do: :ok
     end
   end
 
@@ -82,23 +94,25 @@ defmodule ForgeWorker.Checkout do
   machine. `decisions.md` asks for one commit per run rather than an agent's keystrokes, and
   this is where that happens.
   """
-  @spec squash(String.t(), String.t(), String.t()) :: {:ok, boolean()} | {:error, term()}
-  def squash(dir, base, message) do
-    with {:ok, _out} <- git(dir, ["reset", "--soft", base], []),
-         {:ok, _out} <- git(dir, ["add", "-A"], []) do
-      commit(dir, message)
+  @spec squash(String.t(), String.t(), String.t(), ForgeWorker.Slice.as()) ::
+          {:ok, boolean()} | {:error, term()}
+  def squash(dir, base, message, as) do
+    with {:ok, _out} <- git(dir, ["reset", "--soft", base], as: as),
+         {:ok, _out} <- git(dir, ["add", "-A"], as: as) do
+      commit(dir, message, as)
     end
   end
 
   # A non-zero status from `diff --cached --quiet` means something is staged, which is the only
   # reason to make a commit at all.
-  defp commit(dir, message) do
-    case git(dir, ["diff", "--cached", "--quiet"], []) do
+  defp commit(dir, message, as) do
+    case git(dir, ["diff", "--cached", "--quiet"], as: as) do
       {:ok, _out} ->
         {:ok, false}
 
       {:error, _reason} ->
-        with {:ok, _out} <- git(dir, ["commit", "--quiet", "-m", message], []), do: {:ok, true}
+        with {:ok, _out} <- git(dir, ["commit", "--quiet", "-m", message], as: as),
+             do: {:ok, true}
     end
   end
 
@@ -120,11 +134,11 @@ defmodule ForgeWorker.Checkout do
   is on the branch `ensure/1` fetched, because the job that invoked it pushed it there before it
   parked; a sha the fetch did not bring is refused rather than looked for elsewhere.
   """
-  @spec detach(String.t(), String.t()) :: :ok | {:error, term()}
-  def detach(dir, sha) do
+  @spec detach(String.t(), String.t(), ForgeWorker.Slice.as()) :: :ok | {:error, term()}
+  def detach(dir, sha, as) do
     if Regex.match?(~r/^[0-9a-f]{40}$/, sha) do
-      with {:ok, _out} <- git(dir, ["checkout", "--quiet", "--detach", sha], []),
-           {:ok, _out} <- git(dir, ["reset", "--quiet", "--hard", sha], []) do
+      with {:ok, _out} <- git(dir, ["checkout", "--quiet", "--detach", sha], as: as),
+           {:ok, _out} <- git(dir, ["reset", "--quiet", "--hard", sha], as: as) do
         :ok
       end
     else
@@ -133,15 +147,19 @@ defmodule ForgeWorker.Checkout do
   end
 
   @doc "The commit the checkout is on."
-  @spec head(String.t()) :: {:ok, String.t()} | {:error, term()}
-  def head(dir) do
-    with {:ok, out} <- git(dir, ["rev-parse", "HEAD"], []), do: {:ok, String.trim(out)}
+  @spec head(String.t(), ForgeWorker.Slice.as()) :: {:ok, String.t()} | {:error, term()}
+  def head(dir, as) do
+    with {:ok, out} <- git(dir, ["rev-parse", "HEAD"], as: as), do: {:ok, String.trim(out)}
   end
 
+  # The worker's own, and the only git that is: `dir` does not exist yet, so there is no hook or
+  # configuration in it that anybody but git wrote. `as` is dropped rather than used — the job's
+  # user cannot write the directory the clone is made in.
   defp clone(dir, opts) do
     url = Keyword.fetch!(opts, :url)
     branch = Keyword.fetch!(opts, :branch)
     File.mkdir_p!(Path.dirname(dir))
+    opts = Keyword.put(opts, :as, &worker/2)
 
     args = ["clone", "--quiet", "--branch", branch, "--single-branch", url, dir]
 
@@ -157,36 +175,41 @@ defmodule ForgeWorker.Checkout do
          :ok <- identity(dir, opts) do
       if Keyword.get(opts, :resume, false),
         do: :ok,
-        else: reset(dir, branch, Keyword.get(opts, :clean, true))
+        else: reset(dir, branch, Keyword.get(opts, :clean, true), opts[:as])
     end
   end
 
   # `-B` rather than a bare reset: a snapshot of a seed is on whatever commit the seed was
   # built at, and often not on this branch at all.
-  defp reset(dir, branch, clean?) do
-    with {:ok, _out} <- git(dir, ["checkout", "--quiet", "-B", branch, "FETCH_HEAD"], []),
-         {:ok, _out} <- git(dir, ["reset", "--quiet", "--hard", "FETCH_HEAD"], []),
-         {:ok, _out} <- maybe_clean(dir, clean?) do
+  defp reset(dir, branch, clean?, as) do
+    with {:ok, _out} <- git(dir, ["checkout", "--quiet", "-B", branch, "FETCH_HEAD"], as: as),
+         {:ok, _out} <- git(dir, ["reset", "--quiet", "--hard", "FETCH_HEAD"], as: as),
+         {:ok, _out} <- maybe_clean(dir, clean?, as) do
       :ok
     end
   end
 
-  defp maybe_clean(_dir, false), do: {:ok, ""}
-  defp maybe_clean(dir, true), do: git(dir, ["clean", "--quiet", "-fd"], [])
+  defp maybe_clean(_dir, false, _as), do: {:ok, ""}
+  defp maybe_clean(dir, true, as), do: git(dir, ["clean", "--quiet", "-fd"], as: as)
 
   # The harness runs with a private HOME, so a fresh clone has no global identity and the agent's
   # first commit would fail with git's "please tell me who you are".
   defp identity(dir, opts) do
     {name, email} = Keyword.get(opts, :identity, {"forge", "forge@localhost"})
 
-    with {:ok, _out} <- git(dir, ["config", "--local", "user.name", name], []),
-         {:ok, _out} <- git(dir, ["config", "--local", "user.email", email], []) do
+    with {:ok, _out} <- git(dir, ["config", "--local", "user.name", name], opts),
+         {:ok, _out} <- git(dir, ["config", "--local", "user.email", email], opts) do
       :ok
     end
   end
 
+  # `as` is required rather than defaulted: a call that forgot it would be git run as root in a
+  # job's tree, which is the one thing this module is careful never to do.
   defp git(dir, args, opts) do
-    args = ["-c", "credential.helper=", "-c", "credential.helper=" <> @helper] ++ args
+    as = Keyword.fetch!(opts, :as)
+
+    {executable, args} =
+      as.("git", ["-c", "credential.helper=", "-c", "credential.helper=" <> @helper] ++ args)
 
     env =
       [{"GIT_TERMINAL_PROMPT", "0"}] ++
@@ -196,7 +219,7 @@ defmodule ForgeWorker.Checkout do
           token when is_binary(token) -> [{"FORGE_GIT_TOKEN", token}]
         end
 
-    case System.cmd("git", args, cd: dir, stderr_to_stdout: true, env: env) do
+    case System.cmd(executable, args, cd: dir, stderr_to_stdout: true, env: env) do
       {out, 0} -> {:ok, out}
       {out, code} -> {:error, {code, redact(out)}}
     end
@@ -213,5 +236,7 @@ defmodule ForgeWorker.Checkout do
   # this git, not a missing test, and writing one would mean asserting a string git never emits.
   # Kept because older git did echo credentials and the cost of being wrong here is a token in a
   # log for ever.
+  defp worker(executable, args), do: {executable, args}
+
   defp redact(out), do: String.replace(out, ~r{//[^/@\s]+@}, "//")
 end

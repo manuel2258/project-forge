@@ -22,7 +22,7 @@ defmodule ForgeWorker.Job.Conversation do
   alias ForgeCore.Job.Result
   alias ForgeWorker.Config
   alias ForgeWorker.Job.{Dir, Runner, Workspace}
-  alias ForgeWorker.Store
+  alias ForgeWorker.{Log, Slice, Store}
 
   require Logger
 
@@ -71,6 +71,9 @@ defmodule ForgeWorker.Job.Conversation do
        root: Keyword.fetch!(opts, :root),
        assignment: assignment,
        job_id: assignment["job_id"],
+       # The job's Unix user, whose tree it is and as whom every turn is committed. Removed once
+       # the last git command has run (`docs/design/worker-tier.md` § The job slice).
+       user: nil,
        worktree: nil,
        runner: nil,
        turns: 0,
@@ -95,20 +98,39 @@ defmodule ForgeWorker.Job.Conversation do
   # the conversation is running, for ever, with a worker's slice held against it.
   @impl true
   def handle_continue(:start, state) do
-    case Workspace.prepare(state.assignment, state.root) do
+    case Slice.enter(state.job_id) do
+      {:ok, user} -> prepare(%{state | user: user})
+      {:error, reason} -> fail(state, "could not make the job's user: #{inspect(reason)}")
+    end
+  rescue
+    error -> fail(state, Exception.format(:error, error, __STACKTRACE__))
+  end
+
+  # Its own rescue, so that what raises here stops a conversation that has a user to remove —
+  # `terminate/2` removes it — rather than one the clause above only knows without.
+  defp prepare(state) do
+    case Workspace.prepare(state.assignment, state.root, state.user) do
       {:ok, worktree} ->
         write_history(state)
         start_runner(%{state | worktree: worktree})
 
       {:error, reason} ->
-        report_failed(state, "could not prepare the worktree: #{inspect(reason)}")
-        {:stop, :normal, state}
+        fail(state, "could not prepare the worktree: #{inspect(reason)}")
     end
   rescue
-    error ->
-      report_failed(state, Exception.format(:error, error, __STACKTRACE__))
-      {:stop, :normal, state}
+    error -> fail(state, Exception.format(:error, error, __STACKTRACE__))
   end
+
+  defp fail(state, reason) do
+    report_failed(state, reason)
+    {:stop, :normal, state}
+  end
+
+  # Whatever stopped it, the job's user goes. An ending that went through `finish/1` has already
+  # removed it and says so by leaving none here.
+  @impl true
+  def terminate(_reason, %{user: nil}), do: :ok
+  def terminate(_reason, state), do: leave(state)
 
   defp start_runner(state) do
     case Runner.start_link(runner_opts(state)) do
@@ -117,8 +139,7 @@ defmodule ForgeWorker.Job.Conversation do
         {:noreply, reset_idle(%{state | runner: runner})}
 
       {:error, reason} ->
-        report_failed(state, "could not start the harness: #{inspect(reason)}")
-        {:stop, :normal, state}
+        fail(state, "could not start the harness: #{inspect(reason)}")
     end
   end
 
@@ -143,11 +164,14 @@ defmodule ForgeWorker.Job.Conversation do
       entries ->
         base = Path.join([job_dir(state), "history"])
         File.mkdir_p!(base)
-        Enum.each(entries, &write_entry(base, &1))
+        Enum.each(entries, &write_entry(base, &1, job_id))
         Logger.info("chat #{state.job_id}: wrote #{length(entries)} job(s) of history")
     end
   rescue
-    error -> Logger.warning("chat #{job_id}: could not write the history: #{inspect(error)}")
+    error ->
+      Log.line("history.unwritten", :warning, "could not write the history: #{inspect(error)}",
+        job_id: job_id
+      )
   end
 
   defp job_dir(%{assignment: assignment, root: root}) do
@@ -155,7 +179,7 @@ defmodule ForgeWorker.Job.Conversation do
     Path.join([root, "jobs", spec.job_id])
   end
 
-  defp write_entry(base, entry) do
+  defp write_entry(base, entry, job_id) do
     case contained(base, entry["dir"]) do
       {:ok, dir} ->
         File.mkdir_p!(dir)
@@ -163,7 +187,12 @@ defmodule ForgeWorker.Job.Conversation do
         maybe_fetch(dir, entry["transcript"])
 
       :error ->
-        Logger.warning("chat history: refusing #{inspect(entry["dir"])}, which leaves the folder")
+        Log.line(
+          "history.unwritten",
+          :warning,
+          "refusing a history entry named #{inspect(entry["dir"])}, which leaves the folder",
+          job_id: job_id
+        )
     end
   end
 
@@ -268,7 +297,13 @@ defmodule ForgeWorker.Job.Conversation do
         {:noreply, reset_idle(%{state | pending: state.pending ++ [id]})}
 
       {:error, reason} ->
-        Logger.warning("chat #{state.job_id} could not take a message: #{inspect(reason)}")
+        Log.line(
+          "chat.undelivered",
+          :warning,
+          "the harness would not take a message: #{inspect(reason)}",
+          job_id: state.job_id
+        )
+
         {:noreply, state}
     end
   end
@@ -359,6 +394,12 @@ defmodule ForgeWorker.Job.Conversation do
   # The harness is gone. What is left is what a job's task does after `await`: get the
   # transcript off the machine, give the worktree back, and report.
   defp finish(state) do
+    # The last git command in the tree, and then the files come back and the user goes: nothing
+    # after this runs git, and the transcript is read as root.
+    commit = head(state)
+    leave(state)
+    state = %{state | user: nil}
+
     # The runner sends its result before it stops, so it is already here. A conversation whose
     # machine died mid-turn has none, and reports what it can rather than nothing.
     result = upload_transcript(state.result || %Result{status: :finished}, state.assignment)
@@ -369,7 +410,7 @@ defmodule ForgeWorker.Job.Conversation do
        %{
          "job_id" => state.job_id,
          "reason" => state.closing || "ended",
-         "commit" => head(state),
+         "commit" => commit,
          "turns" => state.turns,
          "result" => Result.to_map(result)
        }}
@@ -389,18 +430,33 @@ defmodule ForgeWorker.Job.Conversation do
 
   # -- the work -------------------------------------------------------------------------------
 
-  # One commit per turn, and they accumulate: `Checkout.squash/3` resets to `origin/<branch>`,
+  # One commit per turn, and they accumulate: `Checkout.squash/4` resets to `origin/<branch>`,
   # and pushing moves that remote-tracking ref, so turn two is built on turn one rather than
   # replacing it. That was measured before it was relied on, because the opposite reading —
   # every turn rewriting the last into a single amended commit — is equally plausible from the
   # code and would silently lose each turn's history.
+  #
+  # **As the job's user**, which still owns the tree: the harness is running, and git refuses to
+  # work in a repository somebody else owns. Run as root it refused every turn, and each turn's
+  # work stayed on the machine until the agent pushed it itself.
   defp commit_turn(state, index) do
-    case Workspace.commit_and_push(state.assignment, state.worktree, commit_message(state, index)) do
+    message = commit_message(state, index)
+
+    case Workspace.commit_and_push(state.assignment, state.worktree, message, state.user) do
       {:ok, head} ->
         head
 
+      # The turn is still reported, with no commit: its reply and its cost happened whether or
+      # not its work reached the branch. What went wrong is a line in the machine's log, because
+      # nothing else carries it off the machine (`docs/design/worker-log.md`).
       {:error, reason} ->
-        Logger.warning("chat #{state.job_id} could not commit turn #{index}: #{inspect(reason)}")
+        Log.line(
+          "turn.uncommitted",
+          :error,
+          "could not commit turn #{index}; its work is on this machine only: #{inspect(reason)}",
+          job_id: state.job_id
+        )
+
         nil
     end
   end
@@ -411,10 +467,16 @@ defmodule ForgeWorker.Job.Conversation do
   defp head(%{worktree: nil}), do: nil
 
   defp head(state) do
-    case ForgeWorker.Checkout.head(state.worktree) do
+    case Workspace.head(state.worktree, state.user) do
       {:ok, head} -> head
       _other -> nil
     end
+  end
+
+  # Only what is there: a conversation that stopped before its worktree was made has none.
+  defp leave(state) do
+    paths = [Workspace.dir(state.assignment, state.root), job_dir(state)]
+    Slice.leave(state.user, Enum.filter(paths, &File.exists?/1))
   end
 
   defp take_pending([]), do: {nil, []}
@@ -461,13 +523,16 @@ defmodule ForgeWorker.Job.Conversation do
              result.transcript_path
            ) do
         {:ok, _info} -> %{result | transcript: store["transcript_key"]}
-        {:error, reason} -> log_transcript(result, reason)
+        {:error, reason} -> log_transcript(result, reason, assignment["job_id"])
       end
     end
   end
 
-  defp log_transcript(result, reason) do
-    Logger.warning("could not upload the transcript: #{inspect(reason)}")
+  defp log_transcript(result, reason, job_id) do
+    Log.line("upload.failed", :warning, "could not upload the transcript: #{inspect(reason)}",
+      job_id: job_id
+    )
+
     result
   end
 

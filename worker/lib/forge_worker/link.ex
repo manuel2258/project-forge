@@ -17,7 +17,7 @@ defmodule ForgeWorker.Link do
 
   alias ForgeCore.Job.Result
   alias ForgeCore.WorkerProtocol
-  alias ForgeWorker.{Checkout, Config, Log, Stats, Store}
+  alias ForgeWorker.{Checkout, Config, Log, Slice, Stats, Store}
   alias ForgeWorker.Job.{Blobs, Command, Conversation, Credential, Dir, Runner, Seed, Workspace}
 
   require Logger
@@ -398,7 +398,7 @@ defmodule ForgeWorker.Link do
   def run(link, assignment, root) do
     job_id = assignment["job_id"]
 
-    case prepare_and_run(link, assignment, root) do
+    case as_user(assignment, root, &prepare_and_run(link, assignment, root, &1)) do
       {:ok, {"result", result}} ->
         send(link, {:terminal, job_id, "result", %{"job_id" => job_id, "result" => result}})
 
@@ -425,16 +425,39 @@ defmodule ForgeWorker.Link do
       )
   end
 
+  # The job's Unix user, made before anything of the job exists on this machine and removed after
+  # it, however it ended (`docs/design/worker-tier.md` § The job slice). A job that got as far as
+  # its commit has already left, straight after it; this is for the endings that never got there,
+  # and finds nothing to do for the ones that did.
+  defp as_user(assignment, root, fun) do
+    case Slice.enter(assignment["job_id"]) do
+      {:ok, user} ->
+        try do
+          fun.(user)
+        after
+          # The worktree is usually discarded by now, and a path that is not there is no
+          # failure to report.
+          Slice.leave(user, Enum.filter(job_paths(assignment, root), &File.exists?/1))
+        end
+
+      {:error, reason} ->
+        {:error, {:user, reason}}
+    end
+  end
+
+  defp job_paths(assignment, root),
+    do: [Workspace.dir(assignment, root), job_dir(root, assignment["job_id"])]
+
   # `docs/design/commands.md`: the checkout at the recorded commit, the script the spec carries,
   # the log to the store under the key the platform minted a token for. Nothing is committed or
   # pushed — a command's write is its log — and nothing is promoted: its tree is a commit, not a
   # ticket's work in progress.
-  defp prepare_and_run(link, %{"kind" => "command"} = assignment, root) do
+  defp prepare_and_run(link, %{"kind" => "command"} = assignment, root, user) do
     job_id = assignment["job_id"]
     spec = ForgeCore.Job.Spec.from_map(assignment["spec"])
 
-    with {:ok, worktree} <- Workspace.prepare(assignment, root),
-         :ok <- ForgeWorker.Checkout.detach(worktree, spec.command["at"]),
+    with {:ok, worktree} <- Workspace.prepare(assignment, root, user),
+         :ok <- Checkout.detach(worktree, spec.command["at"], Slice.as_user(user)),
          {:ok, command} <- start_command(assignment, spec, root, worktree) do
       send(link, {:runner, job_id, command})
       {:ok, result} = Command.await(command)
@@ -449,12 +472,12 @@ defmodule ForgeWorker.Link do
     end
   end
 
-  defp prepare_and_run(link, assignment, root) do
+  defp prepare_and_run(link, assignment, root, user) do
     job_id = assignment["job_id"]
 
-    with {:ok, worktree} <- Workspace.prepare(assignment, root),
+    with {:ok, worktree} <- Workspace.prepare(assignment, root, user),
          {:ok, logs} <- fetch_command_logs(assignment, root),
-         {:ok, runner} <- start_runner(link, assignment, root, worktree, logs) do
+         {:ok, runner} <- start_runner(link, assignment, root, worktree, logs, user) do
       # Copied into the job directory by the time the runner has started (`Dir.prepare/3`).
       File.rm_rf(Dir.fetched_dir(job_dir(root, job_id)))
       send(link, {:runner, job_id, runner})
@@ -463,7 +486,13 @@ defmodule ForgeWorker.Link do
       # The work goes to the branch before anything is reported: the platform records the
       # branch head as the changeset artifact the moment it hears from us, and a job that is
       # stopping must not lose what it did (`docs/decisions.md`).
-      {:ok, head} = Workspace.commit_and_push(assignment, worktree, commit_message(assignment))
+      {:ok, head} =
+        Workspace.commit_and_push(assignment, worktree, commit_message(assignment), user)
+
+      # That was the last git command in the tree, so the files come back to root and the user
+      # goes — before the worker reads the job's outputs or keeps the tree as the ticket's
+      # template, which must not belong to a uid the next `useradd` may hand to another job.
+      Slice.leave(user, job_paths(assignment, root))
 
       terminal =
         {:ok,
@@ -535,7 +564,13 @@ defmodule ForgeWorker.Link do
 
     cond do
       is_nil(Config.platform_url()) or is_nil(store["log_key"]) ->
-        Logger.warning("nowhere to put the command's log: no platform url or no key")
+        Log.line(
+          "upload.failed",
+          :warning,
+          "nowhere to put the command's log: no platform url or no key",
+          job_id: assignment["job_id"]
+        )
+
         result
 
       not File.exists?(path) ->
@@ -547,7 +582,13 @@ defmodule ForgeWorker.Link do
             %{result | log: store["log_key"]}
 
           {:error, reason} ->
-            Logger.warning("could not upload the command's log: #{inspect(reason)}")
+            Log.line(
+              "upload.failed",
+              :warning,
+              "could not upload the command's log: #{inspect(reason)}",
+              job_id: assignment["job_id"]
+            )
+
             result
         end
     end
@@ -573,7 +614,13 @@ defmodule ForgeWorker.Link do
             [{file, path}]
 
           {:error, reason} ->
-            Logger.warning("could not fetch the log #{file}: #{inspect(reason)}")
+            Log.line(
+              "commands.unwritten",
+              :warning,
+              "could not fetch the command's log #{file}, so it is left out: #{inspect(reason)}",
+              job_id: job_id
+            )
+
             []
         end
       end)
@@ -583,7 +630,7 @@ defmodule ForgeWorker.Link do
 
   defp fetch_command_logs(_assignment, _root), do: {:ok, []}
 
-  defp start_runner(link, assignment, root, worktree, logs) do
+  defp start_runner(link, assignment, root, worktree, logs, user) do
     job_id = assignment["job_id"]
     spec = ForgeCore.Job.Spec.from_map(assignment["spec"])
 
@@ -611,7 +658,7 @@ defmodule ForgeWorker.Link do
       # Named in the continuation a resumed run is handed, read from the tree it is about to run
       # in rather than taken from the platform: what the agent will find is what it is told
       # (`docs/design/job-prompt.md` § The continuation prompt).
-      head: head(worktree),
+      head: head(worktree, user),
       wall_clock_ms: assignment["wall_clock_ms"] || :timer.hours(1),
       nix_env: Application.get_env(:forge_worker, :nix_env, true),
       extra_env: Application.get_env(:forge_worker, :extra_env, []) ++ git_env(assignment)
@@ -627,11 +674,11 @@ defmodule ForgeWorker.Link do
 
   defp git_env(_assignment), do: []
 
-  # Equivalent mutant in the second clause: a worktree `Workspace.prepare/2` returned was cloned
+  # Equivalent mutant in the second clause: a worktree `Workspace.prepare/3` returned was cloned
   # or reset onto a branch, so it always has a HEAD and nil is never what reaches the prompt.
   # Kept because a job must not fail over one sentence of its prompt.
-  defp head(worktree) do
-    case Checkout.head(worktree) do
+  defp head(worktree, user) do
+    case Workspace.head(worktree, user) do
       {:ok, sha} -> sha
       {:error, _reason} -> nil
     end
@@ -677,14 +724,20 @@ defmodule ForgeWorker.Link do
     store = assignment["store"] || %{}
 
     if is_nil(Config.platform_url()) or is_nil(store["transcript_key"]) do
-      Logger.warning("nowhere to put the transcript: no platform url or no key")
+      Log.line(
+        "upload.failed",
+        :warning,
+        "nowhere to put the transcript: no platform url or no key",
+        job_id: assignment["job_id"]
+      )
+
       result
     else
-      put_transcript(result, store)
+      put_transcript(result, store, assignment["job_id"])
     end
   end
 
-  defp put_transcript(result, store) do
+  defp put_transcript(result, store, job_id) do
     case Store.put(
            Config.platform_url(),
            store["transcript_key"],
@@ -695,7 +748,10 @@ defmodule ForgeWorker.Link do
         %{result | transcript: store["transcript_key"]}
 
       {:error, reason} ->
-        Logger.warning("could not upload the transcript: #{inspect(reason)}")
+        Log.line("upload.failed", :warning, "could not upload the transcript: #{inspect(reason)}",
+          job_id: job_id
+        )
+
         result
     end
   end

@@ -10,10 +10,8 @@ defmodule ForgeWorker.Job.Blobs do
   """
 
   alias ForgeCore.Job.Result
-  alias ForgeWorker.{Config, Store}
+  alias ForgeWorker.{Config, Log, Store}
   alias ForgeWorker.Job.Dir
-
-  require Logger
 
   @max_bytes 1024 * 1024 * 1024
   @max_files 100
@@ -56,7 +54,7 @@ defmodule ForgeWorker.Job.Blobs do
       |> Enum.sort()
       |> Enum.with_index(1)
       |> Enum.reduce({%{}, %{}}, fn {{name, %{"path" => path}}, n}, {kept, failed} ->
-        case put(outputs, n, path) do
+        case put(outputs, n, path, assignment["job_id"]) do
           {:ok, key} ->
             {Map.put(kept, name, %{"key" => key, "size" => File.stat!(path).size}), failed}
 
@@ -69,7 +67,7 @@ defmodule ForgeWorker.Job.Blobs do
     %{result | blobs: kept, invalid_blobs: Map.merge(result.invalid_blobs, failed)}
   end
 
-  defp put(%{"prefix" => prefix, "token" => token}, n, path)
+  defp put(%{"prefix" => prefix, "token" => token}, n, path, job_id)
        when is_binary(prefix) and is_binary(token) do
     key = prefix <> Integer.to_string(n)
 
@@ -78,10 +76,14 @@ defmodule ForgeWorker.Job.Blobs do
         {:ok, key}
 
       {:error, reason} ->
-        Logger.warning("could not upload #{key}: #{inspect(reason)}")
+        Log.line("upload.failed", :warning, "could not upload #{key}: #{inspect(reason)}",
+          job_id: job_id
+        )
+
         {:error, "could not be uploaded: #{inspect(reason)}"}
     end
   end
 
-  defp put(_outputs, _n, _path), do: {:error, "the assignment named nowhere to upload it"}
+  defp put(_outputs, _n, _path, _job_id),
+    do: {:error, "the assignment named nowhere to upload it"}
 end

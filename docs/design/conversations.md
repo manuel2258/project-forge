@@ -181,7 +181,7 @@ end; a conversation has none until a person says so, so each turn is committed a
 the platform records the branch head the moment it hears about a turn, and work that is not on the
 branch is work a lost machine takes with it.
 
-That this accumulates rather than amends was measured, not read: `Checkout.squash/3` resets to
+That this accumulates rather than amends was measured, not read: `Checkout.squash/4` resets to
 `origin/<branch>` before committing, which looks as though every turn would rewrite the last into
 one squashed commit. Pushing moves that remote-tracking ref, so turn two is built on turn one. The
 opposite reading is equally plausible from the code and would quietly lose each turn's history,
@@ -624,6 +624,11 @@ A conversation runs exactly as a job does — one transient systemd unit, one Un
 worktree, `MemoryMax` and the rest — and differs only in how long it lasts. No second isolation
 model, and the idle timeout is what bounds the duration the existing one was not designed for.
 The user and the worktree are torn down when the process ends, as they are for a job.
+
+What the longer life does change is when the worker runs git: after every turn, with the job's
+user still holding the tree, where a job's commit comes after its process has gone. So the
+worker's git runs as the job's user throughout (`worker-tier.md` § The job slice), and the user is
+removed only after the last turn's commit and the head the ending reports.
 
 ## Asking a question
 

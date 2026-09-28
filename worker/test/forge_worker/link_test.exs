@@ -86,6 +86,77 @@ defmodule ForgeWorker.LinkTest.RecordingSlice do
 
   @impl ForgeWorker.Slice
   defdelegate cleanup(context), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate enter(job_id), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate own(owner, paths), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate run_as(owner, executable, args), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate leave(owner, paths), to: ForgeWorker.Slice.Direct
+end
+
+defmodule ForgeWorker.LinkTest.UserSlice do
+  @moduledoc """
+  `Slice.Direct`, telling the test what happened to the job's user and in what order: made,
+  handed the tree, a git command run as it, and gone — with, at that last, whether the ticket's
+  template had already been kept, which is what must not happen while the user still owns it.
+  """
+
+  @behaviour ForgeWorker.Slice
+
+  @impl ForgeWorker.Slice
+  defdelegate prepare(opts), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate wrap(executable, args, context), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate cleanup(context), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  def enter(job_id) do
+    tell({:enter, job_id})
+    {:ok, %{job_id: job_id}}
+  end
+
+  @impl ForgeWorker.Slice
+  def own(_owner, paths) do
+    tell({:own, paths})
+    :ok
+  end
+
+  @impl ForgeWorker.Slice
+  def run_as(_owner, executable, args) do
+    tell({:as, git_command(args)})
+    {executable, args}
+  end
+
+  # Whether the ticket's template — which the test names, since only it knows where — was already
+  # there when the user went.
+  @impl ForgeWorker.Slice
+  def leave(_owner, paths) do
+    kept =
+      case Application.get_env(:forge_worker, :template_probe) do
+        nil -> nil
+        template -> File.exists?(template)
+      end
+
+    tell({:leave, paths, kept})
+    :ok
+  end
+
+  defp tell(message) do
+    if test = Application.get_env(:forge_worker, :slice_reporter),
+      do: send(test, {:user, message})
+  end
+
+  defp git_command(["-c", _setting | rest]), do: git_command(rest)
+  defp git_command([command | _rest]), do: command
 end
 
 defmodule ForgeWorker.LinkTest do
@@ -99,7 +170,7 @@ defmodule ForgeWorker.LinkTest do
   import ForgeWorker.Fixtures
 
   alias ForgeWorker.Link
-  alias ForgeWorker.LinkTest.{CrashingHarness, RaisingHarness, RecordingSlice}
+  alias ForgeWorker.LinkTest.{CrashingHarness, RaisingHarness, RecordingSlice, UserSlice}
 
   @topic "worker:w-1"
 
@@ -221,6 +292,39 @@ defmodule ForgeWorker.LinkTest do
       attempts == 0 -> flunk("condition not met in time")
       true -> Process.sleep(20) && wait_until(fun, attempts - 1)
     end
+  end
+
+  # What the job's user went through, oldest first: `UserSlice`'s reports.
+  defp user_story(acc \\ []) do
+    receive do
+      {:user, event} -> user_story([event | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  defp as_user(events), do: for({:as, command} <- events, do: command)
+
+  # Nothing ran as the user once it was gone, and nothing ran before it had the tree.
+  defp in_order!(events) do
+    first_own = Enum.find_index(events, &match?({:own, _}, &1))
+    first_as = Enum.find_index(events, &match?({:as, _}, &1))
+    first_leave = Enum.find_index(events, &match?({:leave, _, _}, &1))
+
+    last_as =
+      events |> Enum.with_index() |> Enum.filter(&match?({{:as, _}, _}, &1)) |> List.last()
+
+    assert match?({:enter, _}, hd(events)), "the user was not made first: #{inspect(events)}"
+    assert first_own < first_as, "git ran before the tree was the user's: #{inspect(events)}"
+    assert first_leave, "the user never went: #{inspect(events)}"
+    assert elem(last_as, 1) < first_leave, "git ran after the user went: #{inspect(events)}"
+  end
+
+  # A store that answers every request the same way, and not with what was asked for.
+  defp store_answers(status, body) do
+    Application.put_env(:forge_worker, :req_options,
+      plug: fn conn -> Plug.Conn.send_resp(conn, status, body) end
+    )
   end
 
   defp git!(dir, args) do
@@ -1120,6 +1224,178 @@ defmodule ForgeWorker.LinkTest do
       assert_push(@topic, "ready", %{})
       refute_push(@topic, "log", _anything)
     end
+
+    # What the worker could not do for a job, tied to the job (`docs/design/worker-log.md` § What
+    # goes in, and what does not). What a process reaches without a link is in
+    # `ForgeWorker.JobLinesTest`; these need the job run the way the link runs it.
+    test "a turn it could not push is an error line, and the turn carries no commit", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      # The repository refuses every push. A worker whose git will not run in the worktree at
+      # all ends in the same place: the turn's work never leaves the machine.
+      hook = Path.join([origin, "hooks", "pre-receive"])
+      File.write!(hook, "#!/bin/sh\necho 'refused by the test' >&2\nexit 1\n")
+      File.chmod!(hook, 0o755)
+
+      job = chat(origin, env: [{"FAKE_COMMIT", "1"}])
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      {%{"turn" => 1, "commit" => nil}, before} = take_push("turn")
+
+      assert [line] = for({"log", %{"type" => "turn.uncommitted"} = l} <- before, do: l)
+      assert line["job_id"] == job_id
+      assert line["level"] == "error"
+      assert line["message"] =~ "could not commit turn 1"
+      assert line["message"] =~ "refused by the test"
+    end
+
+    test "a history entry that would leave its folder is refused, and says so", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = Map.put(chat(origin), "history", [%{"dir" => "../../escaped", "metadata" => "no"}])
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      {%{"turn" => 1}, before} = take_push("turn")
+
+      assert [line] = for({"log", %{"type" => "history.unwritten"} = l} <- before, do: l)
+      assert line["job_id"] == job_id
+      assert line["message"] =~ ~s("../../escaped")
+    end
+
+    test "history that will not be written says why", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      # Not text, so the write raises — and the conversation still starts.
+      job = Map.put(chat(origin), "history", [%{"dir" => "planning/1", "metadata" => 42}])
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      {%{"turn" => 1}, before} = take_push("turn")
+
+      assert [line] = for({"log", %{"type" => "history.unwritten"} = l} <- before, do: l)
+      assert line["job_id"] == job_id
+      assert line["message"] =~ "could not write the history"
+    end
+
+    test "a conversation's transcript that will not upload says so", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+      store_answers(507, "the store is full")
+
+      job = chat(origin)
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _before} = take_push("turn")
+
+      push(client, @topic, "close", %{"job_id" => job_id, "reason" => "done talking"})
+      {%{"job_id" => ^job_id}, before} = take_push("hibernated")
+
+      assert [line] = for({"log", %{"type" => "upload.failed"} = l} <- before, do: l)
+      assert line["job_id"] == job_id
+      assert line["message"] =~ "could not upload the transcript"
+      assert line["message"] =~ "the store is full"
+    end
+
+    test "a job's transcript that will not upload says so", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+      store_answers(507, "the store is full")
+
+      job = assignment(origin)
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      {%{"job_id" => ^job_id}, before} = take_push("result")
+
+      assert [line] = for({"log", %{"type" => "upload.failed"} = l} <- before, do: l)
+      assert line["job_id"] == job_id
+      assert line["message"] =~ "could not upload the transcript"
+      assert line["message"] =~ "the store is full"
+    end
+
+    test "a job's transcript with nowhere to go says so", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = origin |> assignment() |> Map.put("store", %{})
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      {%{"job_id" => ^job_id}, before} = take_push("result")
+
+      assert [line] = for({"log", %{"type" => "upload.failed"} = l} <- before, do: l)
+      assert line["job_id"] == job_id
+      assert line["message"] =~ "nowhere to put the transcript"
+    end
+
+    test "a command's log that will not upload says so", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+      store_answers(507, "the store is full")
+
+      job = command_assignment(origin, "#!/bin/sh\necho built\n")
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      {%{"job_id" => ^job_id}, before} = take_push("result")
+
+      assert [line] = for({"log", %{"type" => "upload.failed"} = l} <- before, do: l)
+      assert line["job_id"] == job_id
+      assert line["message"] =~ "could not upload the command's log"
+      assert line["message"] =~ "the store is full"
+    end
+
+    test "a command's log with nowhere to go says so", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = origin |> command_assignment("#!/bin/sh\necho built\n") |> Map.put("store", %{})
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      {%{"job_id" => ^job_id}, before} = take_push("result")
+
+      assert [line] = for({"log", %{"type" => "upload.failed"} = l} <- before, do: l)
+      assert line["job_id"] == job_id
+      assert line["message"] =~ "nowhere to put the command's log"
+    end
+
+    test "a command's log a resumed job cannot fetch is left out, and says so", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+      store_answers(404, "no such key")
+
+      job =
+        origin
+        |> assignment()
+        |> Map.put("commands", [
+          %{"file" => "1-build.log", "key" => "job/c1/log-1.txt", "token" => "get-token"}
+        ])
+
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      {%{"job_id" => ^job_id}, before} = take_push("result")
+
+      assert [line] = for({"log", %{"type" => "commands.unwritten"} = l} <- before, do: l)
+      assert line["job_id"] == job_id
+      assert line["message"] =~ "1-build.log"
+      assert line["message"] =~ "no such key"
+    end
   end
 
   # `drain` is gone from both ends, so a platform one release behind can still send it — or any
@@ -1435,6 +1711,129 @@ defmodule ForgeWorker.LinkTest do
     assert result["outcome"] == "converged"
     assert result["declared_outcome"] == "done"
     assert result["undeclared"] == []
+  end
+
+  # `docs/design/worker-tier.md` § The job slice: a repository's hooks and configuration are
+  # programs the job could have written, so the worker's git in a job's tree runs as the job's
+  # user — made first, handed the tree before the first git command, gone after the last.
+  describe "the job's user" do
+    setup do
+      Application.put_env(:forge_worker, :slice, UserSlice)
+      Application.put_env(:forge_worker, :slice_reporter, self())
+      on_exit(fn -> Application.delete_env(:forge_worker, :template_probe) end)
+    end
+
+    test "a job's git is its user's, and the user goes before the tree is kept", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      %{root: root} = context
+      job = assignment(origin)
+      Application.put_env(:forge_worker, :extra_env, [{"FAKE_COMMIT", "NOTES.md"}])
+      template = ForgeWorker.Job.Workspace.template(job, root)
+      Application.put_env(:forge_worker, :template_probe, template)
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"job_id" => ^job_id}, _events} = take_push("result")
+
+      events = user_story()
+      in_order!(events)
+      assert {:enter, job_id} == hd(events)
+      assert "commit" in as_user(events)
+      assert "push" in as_user(events)
+
+      # The clone is the worker's, so the first git as the user is the head the harness is told.
+      assert hd(as_user(events)) == "rev-parse"
+
+      # Handed back before the tree became the ticket's template, not after — and it did become
+      # it, or the first half says nothing.
+      assert {:leave, _paths, false} = Enum.find(events, &match?({:leave, _, _}, &1))
+      assert File.dir?(template)
+    end
+
+    test "every turn is committed as the conversation's user, and it goes at the end", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin, env: [{"FAKE_COMMIT", "1"}])
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      {%{"turn" => 1, "commit" => commit}, _before} = take_push("turn")
+      assert is_binary(commit)
+      turn = user_story()
+      assert "commit" in as_user(turn)
+      assert "push" in as_user(turn)
+      refute Enum.any?(turn, &match?({:leave, _, _}, &1))
+
+      push(client, @topic, "close", %{"job_id" => job_id, "reason" => "done talking"})
+      {%{"job_id" => ^job_id}, _before} = take_push("hibernated")
+
+      ending = user_story()
+      in_order!(turn ++ ending)
+
+      # The head the ending reports is read as the user too, and before it goes.
+      assert [{:as, "rev-parse"}, {:leave, _paths, _kept} | _rest] = ending
+
+      # At the ending, with the tree still there to give back: before the discard, not after it.
+      {:leave, paths, _kept} = Enum.find(ending, &match?({:leave, _, _}, &1))
+      assert Enum.any?(paths, &String.ends_with?(&1, "/worktrees/" <> job_id))
+    end
+
+    # The user is made before anything that can fail, so everything that can fail removes it.
+    test "a job that could not start still removes its user", %{client: client} do
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = assignment("/nowhere/there-is-no-repository.git")
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"job_id" => ^job_id}, _before} = take_push("failed")
+
+      events = user_story()
+      assert {:enter, job_id} == hd(events)
+      assert Enum.any?(events, &match?({:leave, _, _}, &1))
+    end
+
+    test "a conversation that could not start still removes its user", %{client: client} do
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job_id = uuid()
+
+      job = %{
+        "job_id" => job_id,
+        "kind" => "chat",
+        "spec" =>
+          spec() |> Map.put(:job_id, job_id) |> ForgeCore.Job.Spec.to_json() |> Jason.decode!(),
+        "git" => %{"url" => "/nowhere/there-is-no-repository.git", "branch" => "chat/" <> job_id}
+      }
+
+      push(client, @topic, "assign", job)
+      {%{"job_id" => ^job_id}, _before} = take_push("failed")
+
+      wait_until(fn -> ForgeWorker.Job.Conversation.whereis(job_id) == nil end)
+      events = user_story()
+      assert {:enter, job_id} == hd(events)
+      assert Enum.any?(events, &match?({:leave, _, _}, &1))
+    end
+
+    test "a command's checkout is its user's", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = command_assignment(origin, "#!/bin/sh\necho built\n")
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"job_id" => ^job_id}, _before} = take_push("result")
+
+      events = user_story()
+      in_order!(events)
+      assert "checkout" in as_user(events)
+    end
   end
 
   describe "a conversation" do
@@ -2036,7 +2435,7 @@ defmodule ForgeWorker.LinkTest do
 
       {%{"turn" => 2}, _} = take_push("turn")
 
-      # Pushing moves the remote-tracking ref that `Checkout.squash/3` resets to, so turn two
+      # Pushing moves the remote-tracking ref that `Checkout.squash/4` resets to, so turn two
       # is built on turn one rather than replacing it. Both turns' work is on the branch.
       branch = "refs/heads/chat/" <> job_id
       files = git!(nil, ["-C", origin, "ls-tree", "--name-only", branch])

@@ -16,11 +16,21 @@ and why did it go away?" had no answer on any surface the operator has.
 
 ## What goes in, and what does not
 
-**Worker-level events only.** A job appears as the unit of work a machine accepted and finished,
-and nothing of what happened inside it: what the agent did — its tool calls, its turns, its
-questions — is the job's own event stream (`claude-code-events.md`), drawn on the job page.
-Copying it here would make this page the activity feed `ui.md` § Motion and structure refuses,
-and write every line twice.
+**Worker-level events, and what the worker itself could not do for a job.** A job appears as the
+unit of work a machine accepted and finished, and nothing the agent did inside it: its tool calls,
+its turns, its questions are the job's own event stream (`claude-code-events.md`), drawn on the
+job page. Copying them here would make this page the activity feed `ui.md` § Motion and structure
+refuses, and write every line twice.
+
+**What the machine failed to do on a job's behalf is here, tied to the job.** A turn it could not
+commit, a transcript it could not upload, a credential it could not open, a slice it could not
+make: the worker's own work, not the agent's, and none of it reaches the job's event stream. This
+note said the opposite first — "those belong on the job, not the machine" — and the job had
+nowhere to put them, so each was a journal line and nothing else. That is how a conversation whose
+every turn failed to commit looked, from the platform, exactly like one that had nothing to
+commit: the turn arrived with no commit and no reason, and the reason was on a machine nobody can
+read. A failure the job's own terminal message already carries — a job that failed, and why — is
+`job.finished` and is not said twice.
 
 Two sources, one log, told apart on every line:
 
@@ -63,6 +73,25 @@ channel's `terminate/2`, and its refusal is the line.
 | `harness.unprobed` | warning | the harness would not describe itself at join |
 | `message.unknown` | warning | a message from the platform this release does not know — a version apart |
 | `log.dropped` | warning | entries it could not keep while it was not connected |
+
+And what it could not do for a job, each line carrying the job's id and the failure in the words
+it was reported in (git's, the store's, the filesystem's):
+
+| Type | Level | Says |
+|---|---|---|
+| `turn.uncommitted` | error | a conversation's turn it could not commit or push, so the turn's work is on the machine and not on the branch |
+| `chat.undelivered` | warning | a message for a conversation the harness would not take |
+| `credential.unopened` | error | the job's credential would not open, so the harness runs without one |
+| `slice.failed` | error | a job or command it could not confine, and so did not run |
+| `slice.uncleaned` | warning | a job's files it could not take back from the job's user, or the user it could not remove |
+| `upload.failed` | warning | a transcript, a blob or a command's log that did not reach the store, or had nowhere to go |
+| `history.unwritten` | warning | what already ran on the ticket that a conversation was to read and could not be laid out, or an entry refused for a name that leaves its folder |
+| `backlog.unwritten` | warning | the project's tickets that could not be laid out for the job, or an entry refused |
+| `commands.unwritten` | warning | a command's log a resumed job was to read, left out because it would not fetch or its name was refused |
+| `volume.unused` | warning | a seed or ticket volume that would not become the job's worktree, so it started colder |
+| `volume.unkept` | warning | a finished worktree it could not keep as the ticket's template, so the next job starts colder |
+| `worktree.undeleted` | warning | a finished job's worktree it could not remove |
+| `event.dropped` | warning | an event of the job's it could not hand on — said once per run, since a sink that fails once fails for every event after it |
 
 **Accepting a job is the worker's line, not the platform's.** The platform knows it sent an
 assignment; only the machine knows it took it. An assignment lost in flight is the case
@@ -129,8 +158,12 @@ Error lines are in `error`; nothing is accent, for the reason nothing on `/worke
 - **The machine's journal.** A "fetch the last 200 lines" request over the channel, the tail
   uploaded to the store under a scoped token as a transcript is, and taken automatically before a
   managed machine is destroyed, is the escape hatch for what this log does not carry. Not built.
-- **What went wrong inside a job**: a transcript that would not upload, a ticket volume that could
-  not be used, a credential that would not open. Those belong on the job, not the machine.
+- **The rest of the journal's warnings**, which are not about a job. The connection's own —
+  disconnected, refused, a channel closed — are lines the platform writes from its side
+  (`disconnected`, `join.refused`), and a machine that is not configured has no link to send
+  anything on. The sweeps of old job directories and ticket volumes still warn only in the journal:
+  housekeeping on the machine's own disk, about no job, and a candidate for this log if a full disk
+  ever needs explaining.
 - **Flow control.** A machine that sent a flood would churn its own 500 lines — not the platform's
   — and cost the platform what any message costs to decode; the same open item as job events in
   `worker-channel.md` § Open.

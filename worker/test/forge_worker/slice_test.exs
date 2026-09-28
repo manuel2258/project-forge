@@ -94,23 +94,58 @@ defmodule ForgeWorker.SliceTest do
     end
   end
 
-  describe "cleaning up" do
+  describe "leaving" do
     @tag :tmp_dir
     test "never raises, whatever it could not undo", %{tmp_dir: tmp_dir} do
-      # Cleanup is on every job's exit path, including the paths where something has already
-      # gone wrong: chown and userdel both need privileges this test does not have, and a
-      # cleanup that raised here would turn a finished job into a crashed runner.
+      # `leave/2` is on every job's exit path, including the ones where something has already
+      # gone wrong, and one that raised would turn a finished job into a crashed one. Both of its
+      # commands are made to fail here, whatever this test runs as: a path that is not there,
+      # and a name `userdel` refuses as an option.
       import ExUnit.CaptureLog
 
-      context = %{
-        job_id: @job,
-        kind: :systemd,
-        user: "forge-job-does-not-exist",
-        worktree: Path.join(tmp_dir, "nothing-here"),
-        job_dir: Path.join(tmp_dir, "nor-here")
-      }
+      owner = %{job_id: @job, kind: :systemd, user: "--not-a-user", gid: "0"}
 
-      assert capture_log(fn -> assert Systemd.cleanup(context) == :ok end) =~ "forge-job"
+      log =
+        capture_log(fn ->
+          assert Systemd.leave(owner, [Path.join(tmp_dir, "nothing-here")]) == :ok
+        end)
+
+      assert log =~ "files back"
+      assert log =~ "could not remove"
+    end
+
+    # A second `leave/2` — the net under every ending — finds the user already gone. That is
+    # `userdel`'s 6, and it is not a failure worth a line on every job that ever finished.
+    test "a user that is already gone is not a failure" do
+      import ExUnit.CaptureLog
+
+      owner = %{job_id: @job, kind: :systemd, user: "forge-job-does-not-exist", gid: "0"}
+      assert capture_log(fn -> assert Systemd.leave(owner, []) == :ok end) == ""
+    end
+  end
+
+  describe "running as the job's user" do
+    # What can be checked without making a user. That git then runs as it — and a hook the job
+    # wrote with it — is `ForgeWorker.JobUserTest`'s, which needs root.
+    test "is setpriv to its uid and gid, with no supplementary groups and no home" do
+      owner = %{job_id: @job, kind: :systemd, user: "forge-job-abc", gid: "991"}
+
+      assert Systemd.run_as(owner, "git", ["status"]) ==
+               {"setpriv",
+                [
+                  "--reuid=forge-job-abc",
+                  "--regid=991",
+                  "--clear-groups",
+                  "--",
+                  "env",
+                  "HOME=/nonexistent",
+                  "git",
+                  "status"
+                ]}
+    end
+
+    test "leaves the unit alone: the user is the job owner's to remove" do
+      assert Systemd.cleanup(%{job_id: @job, kind: :systemd, user: "forge-job-abc"}) == :ok
     end
   end
 

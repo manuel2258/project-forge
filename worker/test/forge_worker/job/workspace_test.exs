@@ -10,6 +10,10 @@ defmodule ForgeWorker.Job.WorkspaceTest do
 
   alias ForgeWorker.Job.Workspace
 
+  # The development slice's user, which is the worker's own: what these tests are about is the
+  # git, and who runs it is `ForgeWorker.Job.WorkspaceUserTest`'s.
+  @direct {ForgeWorker.Slice.Direct, %{kind: :direct}}
+
   setup do
     origin = Path.join(tmp_dir("origin"), "project.git")
     seed = tmp_dir("seed")
@@ -45,7 +49,7 @@ defmodule ForgeWorker.Job.WorkspaceTest do
   end
 
   test "a cold start checks out the ticket branch", %{origin: origin, root: root} do
-    assert {:ok, dir} = Workspace.prepare(assignment(origin), root)
+    assert {:ok, dir} = Workspace.prepare(assignment(origin), root, @direct)
 
     assert File.read!(Path.join(dir, "README.md")) == "# Game\n"
     assert git!(dir, ["rev-parse", "--abbrev-ref", "HEAD"]) |> String.trim() == "ticket/1"
@@ -53,11 +57,11 @@ defmodule ForgeWorker.Job.WorkspaceTest do
 
   test "a cold start discards what a dead run left uncommitted", %{origin: origin, root: root} do
     job = assignment(origin)
-    {:ok, dir} = Workspace.prepare(job, root)
+    {:ok, dir} = Workspace.prepare(job, root, @direct)
     File.write!(Path.join(dir, "half-done.txt"), "from the run that was killed")
     File.write!(Path.join(dir, "README.md"), "clobbered")
 
-    assert {:ok, ^dir} = Workspace.prepare(job, root)
+    assert {:ok, ^dir} = Workspace.prepare(job, root, @direct)
 
     refute File.exists?(Path.join(dir, "half-done.txt"))
     assert File.read!(Path.join(dir, "README.md")) == "# Game\n"
@@ -65,21 +69,21 @@ defmodule ForgeWorker.Job.WorkspaceTest do
 
   test "a resume keeps the work in progress", %{origin: origin, root: root} do
     job = assignment(origin)
-    {:ok, dir} = Workspace.prepare(job, root)
+    {:ok, dir} = Workspace.prepare(job, root, @direct)
     File.write!(Path.join(dir, "half-done.txt"), "from the attempt this one resumes")
 
     resumed = %{job | "resume_session" => "sess-42"}
-    assert {:ok, ^dir} = Workspace.prepare(resumed, root)
+    assert {:ok, ^dir} = Workspace.prepare(resumed, root, @direct)
 
     assert File.read!(Path.join(dir, "half-done.txt")) =~ "resumes"
   end
 
   test "the work is committed and pushed to the ticket branch", %{origin: origin, root: root} do
     job = assignment(origin)
-    {:ok, dir} = Workspace.prepare(job, root)
+    {:ok, dir} = Workspace.prepare(job, root, @direct)
     File.write!(Path.join(dir, "NOTES.md"), "work happened\n")
 
-    assert {:ok, head} = Workspace.commit_and_push(job, dir, "planning: attempt 1")
+    assert {:ok, head} = Workspace.commit_and_push(job, dir, "planning: attempt 1", @direct)
 
     assert git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"]) |> String.trim() == head
     assert git!(nil, ["-C", origin, "show", head <> ":NOTES.md"]) == "work happened\n"
@@ -87,11 +91,11 @@ defmodule ForgeWorker.Job.WorkspaceTest do
 
   test "one commit per run, not one per file", %{origin: origin, root: root} do
     job = assignment(origin)
-    {:ok, dir} = Workspace.prepare(job, root)
+    {:ok, dir} = Workspace.prepare(job, root, @direct)
     File.write!(Path.join(dir, "a.md"), "a")
     File.write!(Path.join(dir, "b.md"), "b")
 
-    {:ok, _head} = Workspace.commit_and_push(job, dir, "planning: attempt 1")
+    {:ok, _head} = Workspace.commit_and_push(job, dir, "planning: attempt 1", @direct)
 
     commits = git!(dir, ["rev-list", "--count", "HEAD"]) |> String.trim() |> String.to_integer()
     assert commits == 2
@@ -102,7 +106,7 @@ defmodule ForgeWorker.Job.WorkspaceTest do
     root: root
   } do
     job = assignment(origin)
-    {:ok, dir} = Workspace.prepare(job, root)
+    {:ok, dir} = Workspace.prepare(job, root, @direct)
 
     # What Claude Code does when it is left to use git: it commits, and possibly several times.
     # `git add -A` then finds nothing staged, and the work used to go no further than the
@@ -115,7 +119,7 @@ defmodule ForgeWorker.Job.WorkspaceTest do
     git!(dir, ["commit", "--quiet", "-m", "and another"])
     File.write!(Path.join(dir, "three.md"), "third\n")
 
-    assert {:ok, head} = Workspace.commit_and_push(job, dir, "planning: attempt 1")
+    assert {:ok, head} = Workspace.commit_and_push(job, dir, "planning: attempt 1", @direct)
 
     assert git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"]) |> String.trim() == head
     assert git!(nil, ["-C", origin, "show", head <> ":one.md"]) == "first\n"
@@ -128,10 +132,10 @@ defmodule ForgeWorker.Job.WorkspaceTest do
 
   test "a run that changed nothing pushes nothing", %{origin: origin, root: root} do
     job = assignment(origin)
-    {:ok, dir} = Workspace.prepare(job, root)
+    {:ok, dir} = Workspace.prepare(job, root, @direct)
     before = git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"])
 
-    assert {:ok, head} = Workspace.commit_and_push(job, dir, "planning: attempt 1")
+    assert {:ok, head} = Workspace.commit_and_push(job, dir, "planning: attempt 1", @direct)
 
     assert git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"]) == before
     assert String.trim(before) == head
@@ -177,7 +181,7 @@ defmodule ForgeWorker.Job.WorkspaceTest do
     end
 
     test "a worktree starts from the seed, warm build and all", %{origin: origin, root: root} do
-      assert {:ok, dir} = Workspace.prepare(seeded(origin), root)
+      assert {:ok, dir} = Workspace.prepare(seeded(origin), root, @direct)
 
       assert_receive {:seed_fetched, "/store/seed/demo/sha256-abc"}
 
@@ -209,7 +213,7 @@ defmodule ForgeWorker.Job.WorkspaceTest do
       tip = git!(work, ["rev-parse", "HEAD"]) |> String.trim()
 
       job = seeded(origin, resume_session: "sess-42")
-      assert {:ok, dir} = Workspace.prepare(job, root)
+      assert {:ok, dir} = Workspace.prepare(job, root, @direct)
 
       assert git!(dir, ["rev-parse", "--abbrev-ref", "HEAD"]) |> String.trim() == "ticket/1"
       assert git!(dir, ["rev-parse", "HEAD"]) |> String.trim() == tip
@@ -220,23 +224,23 @@ defmodule ForgeWorker.Job.WorkspaceTest do
 
       # And the run that ends here builds on that work rather than undoing it. (The fixture's
       # seed does not ignore `build/`, so the squash does commit the seed's own output.)
-      assert {:ok, head} = Workspace.commit_and_push(job, dir, "planning: attempt 2")
+      assert {:ok, head} = Workspace.commit_and_push(job, dir, "planning: attempt 2", @direct)
       assert git!(nil, ["-C", origin, "rev-parse", head <> "^"]) |> String.trim() == tip
       assert git!(nil, ["-C", origin, "show", head <> ":PLAN.md"]) =~ "earlier run"
     end
 
     test "the seed is fetched once and snapshotted per job", %{origin: origin, root: root} do
-      assert {:ok, _first} = Workspace.prepare(seeded(origin, job_id: uuid()), root)
+      assert {:ok, _first} = Workspace.prepare(seeded(origin, job_id: uuid()), root, @direct)
       assert_receive {:seed_fetched, _path}
 
-      assert {:ok, second} = Workspace.prepare(seeded(origin, job_id: uuid()), root)
+      assert {:ok, second} = Workspace.prepare(seeded(origin, job_id: uuid()), root, @direct)
       refute_receive {:seed_fetched, _path}, 200
 
       assert File.read!(Path.join(second, "build/warm.o")) == "already compiled\n"
     end
 
     test "a project with no seed clones and builds cold", %{origin: origin, root: root} do
-      assert {:ok, dir} = Workspace.prepare(assignment(origin), root)
+      assert {:ok, dir} = Workspace.prepare(assignment(origin), root, @direct)
 
       refute_receive {:seed_fetched, _path}, 200
       assert File.read!(Path.join(dir, "README.md")) == "# Game\n"
@@ -248,14 +252,14 @@ defmodule ForgeWorker.Job.WorkspaceTest do
         plug: fn conn -> Plug.Conn.send_resp(conn, 404, "no such key") end
       )
 
-      assert {:ok, dir} = Workspace.prepare(seeded(origin), root)
+      assert {:ok, dir} = Workspace.prepare(seeded(origin), root, @direct)
       assert File.read!(Path.join(dir, "README.md")) == "# Game\n"
       refute File.exists?(Path.join(dir, "build/warm.o"))
     end
 
     test "the seeds a machine holds are what it reports", %{origin: origin, root: root} do
       assert ForgeWorker.Job.Seed.present(root) == []
-      {:ok, _dir} = Workspace.prepare(seeded(origin), root)
+      {:ok, _dir} = Workspace.prepare(seeded(origin), root, @direct)
       assert ForgeWorker.Job.Seed.present(root) == ["seed/demo/sha256-abc"]
     end
 
@@ -263,20 +267,20 @@ defmodule ForgeWorker.Job.WorkspaceTest do
       origin: origin,
       root: root
     } do
-      {:ok, _dir} = Workspace.prepare(seeded(origin), root)
+      {:ok, _dir} = Workspace.prepare(seeded(origin), root, @direct)
       assert ForgeWorker.Job.Seed.present(root) == ["seed/demo/sha256-abc"]
 
       # The project's seed_id moved. A worker needs the current seed and no other; on a machine
       # that is never destroyed, keeping them all is a few hundred megabytes a time, for ever.
       newer = put_in(seeded(origin, job_id: uuid()), ["seed", "key"], "seed/demo/sha256-def")
-      {:ok, _dir} = Workspace.prepare(newer, root)
+      {:ok, _dir} = Workspace.prepare(newer, root, @direct)
 
       assert ForgeWorker.Job.Seed.present(root) == ["seed/demo/sha256-def"]
     end
 
     test "the worktree is thrown away when the job ends", %{origin: origin, root: root} do
       job = seeded(origin)
-      {:ok, dir} = Workspace.prepare(job, root)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
       assert File.dir?(dir)
 
       assert :ok = Workspace.discard(job, root)
@@ -290,12 +294,12 @@ defmodule ForgeWorker.Job.WorkspaceTest do
   describe "ticket volumes" do
     # What the agent leaves behind: a commit, and a build directory git was told to ignore.
     defp run!(job, root, message) do
-      {:ok, dir} = Workspace.prepare(job, root)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
       File.write!(Path.join(dir, ".gitignore"), "build/\n")
       File.mkdir_p!(Path.join(dir, "build"))
       File.write!(Path.join(dir, "build/warm.o"), message)
       File.write!(Path.join(dir, "NOTES.md"), message)
-      {:ok, _head} = Workspace.commit_and_push(job, dir, message)
+      {:ok, _head} = Workspace.commit_and_push(job, dir, message, @direct)
       :ok = Workspace.promote(job, root, dir)
       :ok = Workspace.discard(job, root)
       dir
@@ -305,7 +309,7 @@ defmodule ForgeWorker.Job.WorkspaceTest do
       %{origin: origin, root: root} = context
       run!(assignment(origin, job_id: uuid()), root, "first")
 
-      assert {:ok, second} = Workspace.prepare(assignment(origin, job_id: uuid()), root)
+      assert {:ok, second} = Workspace.prepare(assignment(origin, job_id: uuid()), root, @direct)
 
       # The ignored build output the seed mechanism exists to carry, now carried between two
       # jobs of one ticket rather than only out of the project's seed.
@@ -321,7 +325,7 @@ defmodule ForgeWorker.Job.WorkspaceTest do
       run!(assignment(origin, job_id: uuid()), root, "first")
       run!(assignment(origin, job_id: uuid()), root, "second")
 
-      assert {:ok, third} = Workspace.prepare(assignment(origin, job_id: uuid()), root)
+      assert {:ok, third} = Workspace.prepare(assignment(origin, job_id: uuid()), root, @direct)
       assert File.read!(Path.join(third, "build/warm.o")) == "second"
     end
 
@@ -357,7 +361,7 @@ defmodule ForgeWorker.Job.WorkspaceTest do
       chat = put_in(assignment(origin), ["git", "branch"], branch)
 
       assert Workspace.template(chat, root) == nil
-      {:ok, dir} = Workspace.prepare(chat, root)
+      {:ok, dir} = Workspace.prepare(chat, root, @direct)
       assert :ok = Workspace.promote(chat, root, dir)
       assert Path.wildcard(Path.join([root, "volumes", "*", "*"])) == []
     end
@@ -405,7 +409,7 @@ defmodule ForgeWorker.Job.WorkspaceTest do
 
       git!(Workspace.template(job, root), ["remote", "remove", "origin"])
 
-      assert {:ok, second} = Workspace.prepare(assignment(origin, job_id: uuid()), root)
+      assert {:ok, second} = Workspace.prepare(assignment(origin, job_id: uuid()), root, @direct)
       assert File.read!(Path.join(second, "build/warm.o")) == "first"
       assert git!(second, ["remote", "get-url", "origin"]) |> String.trim() == origin
     end
@@ -423,7 +427,7 @@ defmodule ForgeWorker.Job.WorkspaceTest do
       File.mkdir_p!(template)
       File.write!(Path.join(template, "junk.txt"), "not a checkout\n")
 
-      assert {:ok, dir} = Workspace.prepare(job, root)
+      assert {:ok, dir} = Workspace.prepare(job, root, @direct)
       assert File.read!(Path.join(dir, "README.md")) == "# Game\n"
       refute File.exists?(Path.join(dir, "junk.txt"))
     end
@@ -436,9 +440,9 @@ defmodule ForgeWorker.Job.WorkspaceTest do
       %{origin: origin, root: root} = context
       job = assignment(origin, job_id: uuid())
 
-      {:ok, dir} = Workspace.prepare(job, root)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
       File.write!(Path.join(dir, "NOTES.md"), "first")
-      {:ok, _head} = Workspace.commit_and_push(job, dir, "first")
+      {:ok, _head} = Workspace.commit_and_push(job, dir, "first", @direct)
       File.touch!(dir, System.os_time(:second) - 3 * 24 * 60 * 60)
       :ok = Workspace.promote(job, root, dir)
 
@@ -464,7 +468,7 @@ defmodule ForgeWorker.Job.WorkspaceTest do
 
   test "the credential never lands in the repository", %{origin: origin, root: root} do
     job = put_in(assignment(origin), ["git", "token"], "secret-token")
-    {:ok, dir} = Workspace.prepare(job, root)
+    {:ok, dir} = Workspace.prepare(job, root, @direct)
 
     config = File.read!(Path.join([dir, ".git", "config"]))
     refute config =~ "secret-token"

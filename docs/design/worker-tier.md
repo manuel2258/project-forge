@@ -364,10 +364,34 @@ systemd-run --pipe --wait --collect --unit=forge-job-<job_id>
   would prevent. `measure/`'s M2 already runs its builds this way.
 - **A fresh Unix user per job**, created at assignment and removed after, owning the snapshot and
   the job directory. It is what stops one job reading another's worktree, credentials or outputs on
-  a machine where several run at once. The ownership is handed back when the slice is cleaned up,
-  before the worker commits and pushes: git refuses to work in a repository owned by somebody
-  else, which is how a repository's own configuration gets executed by a user who did not write
-  it, and files owned by a deleted uid otherwise outlive every job the machine ever runs.
+  a machine where several run at once.
+- **Every git command in a job's worktree runs as the job's user, never as root.** A repository's
+  hooks and its own configuration are programs — `.git/hooks/*`, `core.fsmonitor`, a filter or
+  diff driver, a `url.*.insteadOf` onto `ext::` — and git runs them as whoever runs git. The job's
+  user can write all of them, so git run by the worker as root in a tree the job has touched is
+  that job's code run as root. Hence the order, which the job's owner (the link's task for a job or
+  a command, the conversation's process for a chat) holds from start to end, around the runner
+  rather than inside it:
+  1. **The user is made first** (`Slice.enter/1`), before the worktree exists.
+  2. **The worktree is the user's before any git runs in it** (`Slice.own/2`). Root runs git only
+     to clone into a directory nothing has touched. A snapshot of a seed or a ticket's template, and
+     a tree left by an earlier attempt, are handed over first and refreshed as the user — a
+     template's `.git` is the last job's, and a `post-checkout` hook in it would otherwise run as
+     root at the next job's `checkout`.
+  3. **Git runs as the user** (`Slice.as/3`: `setpriv` to the user's uid and gid, with a `HOME`
+     that does not exist so root's own configuration is not read): refresh, a command's detach,
+     every conversation turn's commit and push, a job's commit and push, and the head the worker
+     reports.
+  4. **The files come back to root and the user goes after the last git command**
+     (`Slice.leave/2`), and before the worker keeps anything of the tree: a ticket's template must
+     not belong to a uid the next `useradd` may hand to somebody else.
+
+  This note said first that ownership was handed back *before* the worker committed, because git
+  refuses to work in a repository owned by somebody else. That satisfied git's check and defeated
+  its purpose: the owner changed and the hooks and configuration the job wrote did not, so the
+  worker's `git commit` ran a job's `pre-commit` as root. A conversation, which commits after every
+  turn while the job's user still owns the tree, could not commit at all — git refused, and each
+  turn's work stayed on the machine until the agent pushed it itself.
 - **`--pipe --wait`** so the runner's existing Port sees the harness's stdout and its exit, which is
   what `ForgeWorker.Job.Runner` is already built around. The unit is the wrapper, not a new
   execution model.
@@ -467,7 +491,7 @@ runs in:
   built at — and that repoints a ticket volume sitting on the last job's commit just as well.
 
 **Promotion happens only after the run committed and pushed**, and that is what makes the template
-safe to snapshot without cleaning. `Checkout.squash/3` does `reset --soft origin/<branch>` then
+safe to snapshot without cleaning. `Checkout.squash/4` does `reset --soft origin/<branch>` then
 `add -A`, so after a successful run every untracked file that was not ignored has been committed,
 and what is left beside the checkout is the ignored build output the whole mechanism is for. A run
 that failed before it pushed keeps its worktree's untracked debris, and promoting that would hand

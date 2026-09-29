@@ -35,6 +35,35 @@ defmodule Forge.Storage.Local do
   end
 
   @impl true
+  def read_range(key, offset, length) do
+    case :file.open(path(key), [:read, :binary, :raw]) do
+      {:ok, io} ->
+        try do
+          with {:ok, info} <- :file.read_file_info(io) do
+            size = File.Stat.from_record(info).size
+            {:ok, %{size: size, bytes: pread(io, offset, length)}}
+          end
+        after
+          :file.close(io)
+        end
+
+      {:error, :enoent} ->
+        {:error, :not_found}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # `pread` answers `:eof` for a range that starts at or past the end, and for a length of zero.
+  defp pread(io, offset, length) do
+    case :file.pread(io, offset, length) do
+      {:ok, bytes} -> bytes
+      :eof -> ""
+    end
+  end
+
+  @impl true
   def fetch(key, destination) do
     source = path(key)
 

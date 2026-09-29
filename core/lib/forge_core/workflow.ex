@@ -109,8 +109,14 @@ defmodule ForgeCore.Workflow do
   Prefixed rather than bare, because the prefix is what says a job-scoped artifact is a
   proposal. The agent's own filename is kept after it: it is the only place the agent gets to
   say what a proposal is about in a word, and the title says it in a sentence.
+
+  **A file already named with the prefix keeps its one prefix.** Agents read the backlog, where
+  open proposals are listed under their stored names, and copy the convention: six of one
+  project's ten open proposals were stored as `proposal-proposal-…`, which is what the person
+  read. The prompt says the platform adds it; this makes the guess harmless when it is wrong.
   """
   @spec proposal_artifact(artifact_name()) :: artifact_name()
+  def proposal_artifact(@proposal_prefix <> _rest = file), do: file
   def proposal_artifact(file), do: @proposal_prefix <> file
 
   @doc "Whether an artifact name is a proposal's, i.e. carries the reserved prefix."
@@ -235,6 +241,18 @@ defmodule ForgeCore.Workflow do
     end
   end
 
+  @doc """
+  The command whose log is recorded as `artifact`, or nil. A command's log is a blob, and a state
+  may read it as an input: always an optional one, since whether the command has run by then is
+  not something the transitions can say (`docs/design/workflow-grammar-v1.md` § Inputs).
+  """
+  @spec log_producer(t(), artifact_name()) :: String.t() | nil
+  def log_producer(%__MODULE__{commands: commands}, artifact) do
+    Enum.find_value(commands, fn {name, %Command{produces: produces}} ->
+      if produces == artifact, do: name
+    end)
+  end
+
   @doc "Names of the states that produce `artifact`, sorted."
   @spec producers(t(), artifact_name()) :: [state_name()]
   def producers(%__MODULE__{states: states}, artifact) do
@@ -250,7 +268,9 @@ defmodule ForgeCore.Workflow do
   An input that is not required is optional, and a job starts without it when it has not been
   written yet — the case a loop makes, where a later state sends work back with its reasons. The
   ticket body and the changeset always exist, so they are always required. A document a human
-  state produces never makes an input required: nothing obliges the person to write it.
+  state produces never makes an input required: nothing obliges the person to write it, and a
+  command's log never does either, for the same reason in another form — no job state produces
+  it, so every way in avoids its producers and it comes out optional with no clause of its own.
 
   The walk goes forward from `initial` and stops at every producer, so the consumer is reached
   only along a path none of whose earlier states produced the input. The consumer's own

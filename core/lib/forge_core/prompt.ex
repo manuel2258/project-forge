@@ -78,17 +78,36 @@ defmodule ForgeCore.Prompt do
 
   Only for a run that passes `--resume`. A cold start gets `compose/2`, and the caller chooses
   between them from the same value that puts the flag on the command line.
+
+  `fork: true` is a new attempt of the state resuming its predecessor's session under a new id
+  (`docs/design/claude-code-events.md` § Resume): it is told it is a new attempt that came back,
+  and that nothing it wrote last time counts for this one.
+
+  A conversation resumes too, after it was reopened, and is told only that: it has no manifest
+  of a job's, and what the person said since is the rest of its prompt.
   """
-  @spec continuation(Spec.t(), String.t(), String.t() | nil) :: String.t()
-  def continuation(%Spec{} = spec, job_dir, head) do
+  @spec continuation(Spec.t(), String.t(), String.t() | nil, keyword()) :: String.t()
+  def continuation(spec, job_dir, head, opts \\ [])
+
+  def continuation(%Spec{kind: :chat} = spec, _job_dir, head, _opts) do
     [
       """
-      # Continue this job
+      # This conversation was reopened
 
-      This resumes your session on it. Your instructions are the ones you were given; below is
-      what changed while you were stopped, and the manifest as it stands now. Where the manifest
-      differs from what you remember, the manifest is right.
+      It stopped, and this resumes your session in it: what was said and what you did are as you
+      left them. Nothing of it needs reading again.
       """,
+      chat_branch(spec, head),
+      if(blank?(spec.prompt), do: nil, else: "---\n\n" <> String.trim(spec.prompt))
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.map_join("\n\n", &String.trim/1)
+    |> Kernel.<>("\n")
+  end
+
+  def continuation(%Spec{} = spec, job_dir, head, opts) do
+    [
+      opening(spec, Keyword.get(opts, :fork, false)),
       answers(spec, job_dir),
       branch_state(spec, head),
       "---\n\n" <> manifest(spec, job_dir)
@@ -121,6 +140,53 @@ defmodule ForgeCore.Prompt do
         """
     end
   end
+
+  defp opening(_spec, false) do
+    """
+    # Continue this job
+
+    This resumes your session on it. Your instructions are the ones you were given; below is
+    what changed while you were stopped, and the manifest as it stands now. Where the manifest
+    differs from what you remember, the manifest is right.
+    """
+  end
+
+  # A fork: the session is the previous attempt's, and the job is a new one. The one thing it
+  # must not carry over is the belief that its outputs are written — they were the last
+  # attempt's, and this attempt's `out/` is empty.
+  defp opening(%Spec{state: state, attempt: attempt}, true) do
+    """
+    # A new attempt of `#{state}`
+
+    This is attempt #{attempt} of `#{state}`, and the session you are in is attempt
+    #{attempt - 1}'s: what you remember is what you did then. The ticket went on from here and
+    has come back — *How you got here* in the manifest below says from where and why — and your
+    instructions are the ones you were given.
+
+    **Nothing you wrote last time counts for this attempt.** Its outputs were kept as versions of
+    their own; this attempt's output directory is empty, and every output the manifest declares
+    is written again. Where the manifest differs from what you remember, the manifest is right.
+    """
+  end
+
+  # Every turn of a conversation is committed as it ends, so the tree is what the last turn left;
+  # a turn cut short when it stopped left only what it had committed.
+  defp chat_branch(%Spec{branch: branch}, head) do
+    at = if head, do: ", at `#{head}`", else: ""
+
+    """
+    ## Your branch
+
+    `#{branch}`#{at}, checked out in the worktree you are running in, on what may be another
+    machine. A turn that was cut short when it stopped left only what it had committed. If the
+    conversation was closed in between, closing may have deleted the branch, merged or abandoned,
+    and the reopen made it again from the branch it started from: what you remember committing
+    is then in that branch if it was merged, and gone if not. `git log` says which.
+    """
+  end
+
+  defp blank?(nil), do: true
+  defp blank?(text), do: String.trim(text) == ""
 
   # Longer than any run of backticks in what it wraps, so a person's answer that quotes a fenced
   # block cannot close this one early and leave the rest of the prompt inside it.
@@ -235,7 +301,7 @@ defmodule ForgeCore.Prompt do
 
     ## How you got here
 
-    #{arrival(spec.entered)}
+    #{arrival(spec.entered)}#{entered_commands(spec, job_dir)}
 
     ## Inputs (read-only)
 
@@ -253,17 +319,50 @@ defmodule ForgeCore.Prompt do
     ## Budget
 
     - Turns: #{spec.budget.turns}
-    - Cost: #{spec.budget.cost} USD
+    - Cost: #{spec.budget.cost} USD#{lowered(spec.budget)}#{allowance(spec.budget)}
     """
   end
 
+  # Said, not left to an event log the agent cannot read: a job stopping at a tenth of its state's
+  # budget, or saving a round it had plenty for, needs the figure that decided it.
+  defp lowered(%{declared: declared, lowered_by: by}) do
+    left = if by == "day", do: "what the day has left", else: "what the ticket has left"
+    " — lowered from the state's #{declared} USD to #{left}"
+  end
+
+  defp lowered(_budget), do: ""
+
+  defp allowance(%{ticket_left: left, ticket_limit: limit}),
+    do:
+      "\n- The ticket: #{format_usd(left)} of #{format_usd(limit)} USD left for every job still to run on it"
+
+  defp allowance(_budget), do: ""
+
+  defp format_usd(value) when is_float(value), do: :erlang.float_to_binary(value, decimals: 2)
+  defp format_usd(value), do: to_string(value)
+
   defp inputs(%Spec{inputs: []}, _job_dir), do: "- none"
 
-  defp inputs(%Spec{inputs: inputs}, job_dir) do
+  defp inputs(%Spec{inputs: inputs} = spec, job_dir) do
     Enum.map_join(inputs, "\n", fn input ->
-      "- `#{input.name}` version #{input.version} -> `#{Path.join([job_dir, "inputs", input.name])}`"
+      "- `#{input.name}` version #{input.version} -> `#{Path.join([job_dir, "inputs", input.name])}`" <>
+        since(input, spec)
     end)
   end
+
+  # A second visit to a state that reads the changeset — a review after rework — opens with what
+  # changed since the first, and re-derived it from the whole diff every time.
+  defp since(%{name: "changeset", version: version}, %Spec{previous_changeset: sha, attempt: n})
+       when is_binary(sha) and sha != version do
+    "\n  attempt #{n - 1} of this state read it at `#{String.slice(sha, 0, 12)}`; " <>
+      "`git diff #{sha}` is what changed on the branch since"
+  end
+
+  defp since(%{name: "changeset"}, %Spec{previous_changeset: sha, attempt: n})
+       when is_binary(sha),
+       do: "\n  attempt #{n - 1} of this state read the same commit; nothing changed since"
+
+  defp since(_input, _spec), do: ""
 
   # `docs/design/job-prompt.md` § How the job arrived. A second visit to a state is there because
   # something sent it back, and the job has to be told what and why rather than infer it from
@@ -284,6 +383,18 @@ defmodule ForgeCore.Prompt do
   end
 
   defp comment(_none), do: ""
+
+  # The commands of the state that sent the ticket here, when that state was a command state: the
+  # reason it sent it is in their logs, and the job that has to act on a failed build cannot act on
+  # the outcome's name alone.
+  defp entered_commands(%Spec{entered_commands: []}, _job_dir), do: ""
+
+  defp entered_commands(%Spec{entered_commands: results, entered: %{"from" => from}}, job_dir) do
+    lines = Enum.map_join(results, "\n", &command_result(&1, job_dir))
+
+    "\n\nWhat `#{from}`'s commands said, in the order it ran them. Read the log of any that " <>
+      "failed before you change anything: it is why you are here.\n\n" <> lines
+  end
 
   # Optional inputs not written yet: named, so a missing file is not mistaken for a failure
   # (`docs/design/workflow-grammar-v1.md` § Inputs).

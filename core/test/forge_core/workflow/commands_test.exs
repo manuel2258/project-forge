@@ -177,6 +177,27 @@ defmodule ForgeCore.Workflow.CommandsTest do
 
   # `produces: [package.log, package/*]`: at most one log, any number of groups of files.
   describe "a command's groups of files" do
+    # `workflow-grammar-v1.md` § Inputs: the log a command produces is something a later state can
+    # read — the build that failed, for the review that has to judge the fix.
+    test "produce a log a state may read, always as an optional input" do
+      map = put_in(base_map(), ["states", "implementing", "inputs"], ["ticket", "build.log"])
+
+      assert {:ok, workflow} = Parser.from_map(map)
+      assert workflow.states["implementing"].inputs == ["ticket", "build.log"]
+      assert Workflow.log_producer(workflow, "build.log") == "build"
+      assert Workflow.log_producer(workflow, "implementation.md") == nil
+      refute Workflow.required_input?(workflow, "implementing", "build.log")
+    end
+
+    test "a log no command produces is still not an input" do
+      map = put_in(base_map(), ["states", "implementing", "inputs"], ["test.log"])
+
+      assert messages(map) == [
+               {"states.implementing.inputs[0]",
+                "\"test.log\" is not produced by any state or command"}
+             ]
+    end
+
     test "are read from a list beside its log, or on their own" do
       map =
         put_in(base_map(), ["commands", "build", "produces"], [

@@ -130,8 +130,8 @@ needed.
 **A project chat** gets a worktree of the project's default branch at its head, plus the
 documents it has written itself at their latest versions, laid out the way a job's `inputs/` are.
 It sees nothing about tickets. On a first start there are none; after a reopen they are what the
-earlier process wrote, and without them that would be gone from its view: a reopen is a cold
-start, and a cold start clears `out/` (`job-prompt.md` § Job directory). Its proposals are not
+earlier process wrote, and without them that would be gone from its view: a reopen clears
+`out/`, whether it resumes the session or starts cold (`job-prompt.md` § Job directory). Its proposals are not
 among them — they are backlog, and an open one is already in `tickets/index.md`. A ticket chat
 never had this gap, because what it writes is the ticket's and comes back as the ticket's (below).
 Either kind that wants to change a document it wrote writes it to `out/` again, which records a
@@ -324,12 +324,28 @@ person's edit drops one; a blocking question a job waits on is the case refused 
 - **Idle is measured from the last human message.** When it fires, the harness process ends and
   the machine is released. The conversation is not over: its messages persist in the event log
   and it can be reopened.
-- **Reopening is cold.** The machine is gone, so a new process starts with the conversation so
-  far replayed as context — what was said, which is the projection and not the harness's
-  transcript (below) — rather than `--resume`, which cannot find a session whose worktree no
-  longer exists (`docs/design/claude-code-events.md` § Resume). If the same worker still holds
-  the worktree, resuming warm is an optimisation and never a guarantee — and **the warm resume
-  is not built.**
+- **Reopening resumes the session, and falls back to a cold start.** The machine is usually
+  gone, and with it the harness's session file — but the worker uploads that file after every
+  turn, and the platform keeps the latest as the row's
+  `session_blob` (`docs/design/claude-code-events.md` § Resume). So `reopen/1` keeps the row's
+  session, and the new process restores the file and runs `--resume` with `--fork-session`: the
+  agent has the whole conversation it had, tool calls and all, under a new session id — new
+  because turns are numbered from one in every process and `record_turn/2` tells a re-sent turn
+  from a new one by `(session, turn)`. Its opening is a short continuation — it was stopped and is
+  resumed, the branch and where it stands — followed by what the person said since, or held for
+  the next message as a cold reopen's is. After every turn rather than at the end, because a
+  conversation goes dormant when its worker is lost or the platform restarts (below), when
+  nothing is left to upload anything — and a turn cut short is not one to resume into.
+
+  **When there is no session to restore, or the one there fails its check, reopening is cold**:
+  a new process with the conversation so far replayed as context — what was said, which is the
+  projection and not the harness's transcript (below). That is a conversation from before
+  sessions were carried, a file the machine's Claude Code did not write or that would not
+  download, or a first turn that never ended; the rest of this bullet is that path. A file that
+  passed the check and that the harness still refused ends the process before its first turn,
+  and nothing re-queues a conversation, so the platform forgets that session when the process
+  ends (`Conversations.ended/4`, `Jobs.resume_refused?/2`): the reopen after it is cold, rather
+  than refused the same way again.
 
   **The replay is the projection, split at the agent's last reply.** `Conversations.opening/1`
   runs when a conversation is assigned. Everything up to the last assistant message in
@@ -382,8 +398,8 @@ person's edit drops one; a blocking question a job waits on is the case refused 
   length of one assignment. Closing them wants sends held from the moment the row is marked until
   the worker has the job; that is not built.
 - **Losing the worker mid-conversation loses uncommitted work**, and that is accepted. The
-  process dies with its machine and the session with it; reopening is the same cold start as
-  after a timeout. A workflow job is re-queued because nothing is watching it and its spec is
+  process dies with its machine and the turn in flight with it; reopening resumes the session as
+  it stood after the last turn that ended, as it does after a timeout. A workflow job is re-queued because nothing is watching it and its spec is
   enough to run it again — a conversation has a person in it, who can say what was lost. It is
   the exception, and the sweeps that make it happen are minutes long.
 - **A conversation goes dormant, it is never re-queued.** `Jobs.recover/0` and

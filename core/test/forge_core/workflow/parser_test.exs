@@ -324,7 +324,8 @@ defmodule ForgeCore.Workflow.ParserTest do
       map = put_in(map, ["states", "planning", "inputs"], ["ticket", "missing.md", "answers.md"])
 
       assert messages(map) == [
-               {"states.planning.inputs[1]", "\"missing.md\" is not produced by any state"},
+               {"states.planning.inputs[1]",
+                "\"missing.md\" is not produced by any state or command"},
                {"states.planning.inputs[2]", "answers.md is platform-managed and never declared"}
              ]
     end

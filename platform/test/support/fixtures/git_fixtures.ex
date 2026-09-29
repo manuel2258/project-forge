@@ -162,6 +162,42 @@ defmodule Forge.GitFixtures do
     sha
   end
 
+  @doc """
+  Commits `files` (`%{path => content}`) to the project's default branch and returns the new head.
+  Stands in for the platform's own merge, the only writer the repository lets onto that branch,
+  which is why the push says it is one.
+  """
+  def commit_to_default(project, files),
+    do: commit_to(Forge.Projects.repo_path(project), project.default_branch, files, "fix")
+
+  @doc """
+  Commits `files` (`%{path => content}`) onto `branch` of the repository at `repo`, pushed as the
+  platform pushes — past the hooks that keep everyone else off a protected branch — and returns
+  the new head.
+  """
+  def commit_to(repo, branch, files, message \\ "change") do
+    work = Path.join(tmp_dir("commit"), "work")
+    git!(Path.dirname(work), ["clone", "-q", "--branch", branch, repo, work])
+
+    for {path, content} <- files do
+      File.mkdir_p!(Path.dirname(Path.join(work, path)))
+      File.write!(Path.join(work, path), content)
+    end
+
+    git!(work, ["add", "."])
+    git!(work, ["-c", "user.name=t", "-c", "user.email=t@forge", "commit", "-q", "-m", message])
+
+    {_out, 0} =
+      System.cmd("git", ["push", "-q", "origin", "HEAD:refs/heads/" <> branch],
+        cd: work,
+        env: [{"FORGE_INTERNAL", "1"}],
+        stderr_to_stdout: true
+      )
+
+    {:ok, head} = Git.resolve(repo, "refs/heads/" <> branch)
+    head
+  end
+
   defp git!(dir, args) do
     {:ok, _} = Git.run(dir, args)
   end

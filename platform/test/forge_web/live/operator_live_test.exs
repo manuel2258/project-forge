@@ -365,6 +365,22 @@ defmodule ForgeWeb.OperatorLiveTest do
              Enum.filter(Jobs.for_ticket(ticket.id), &(&1.status == :pending))
   end
 
+  # A document that did not parse is not kept, so the job page is where why is said.
+  test "a job page says why a document was refused", %{conn: conn, user: user, project: project} do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
+    scenario("invalid_document", "refinement.md")
+    run_pending(ticket.id)
+    [job] = Jobs.for_ticket(ticket.id)
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/jobs/#{job.id}")
+
+    assert view |> element("#refused-refinement\\.md") |> render() =~
+             Jobs.refusals(job)["refinement.md"]
+
+    assert Jobs.refusals(job)["refinement.md"] =~ "front_matter: is not closed"
+    refute render(view) =~ "not written"
+  end
+
   # Offered after a success as well, on the ticket page — redoing a refinement before approving
   # it is a choice made while reading it — and not in the queue, which lists only what waits.
   test "a ticket awaiting approval offers its state again on its page, not in the queue", %{
@@ -396,6 +412,61 @@ defmodule ForgeWeb.OperatorLiveTest do
     {:ok, queue, _html} = live(conn, ~p"/")
     assert has_element?(queue, "#transitions-#{ticket.id}")
     refute has_element?(queue, "#retry-#{ticket.id}")
+  end
+
+  # A fix on the default branch never reaches a ticket already pinned before it; the rail says what
+  # changed there under `.forge/`, and re-pinning takes it (`workflow-grammar-v1.md` § Pinning).
+  test "a ticket whose pin the default branch moved past says so, and re-pins", %{
+    conn: conn,
+    user: user,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
+    scenario("invalid_document", "refinement.md")
+    run_pending(ticket.id)
+    assert Tickets.get!(ticket.id).status == :stuck
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+    refute has_element?(view, "#pin-drift")
+
+    head =
+      commit_to_default(project, %{
+        ".forge/agents/refine.md" => "Refine it better.\n"
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+    assert view |> element("#pin-drift") |> render() =~ ".forge/agents/refine.md"
+
+    assert view |> element("#repin-ticket") |> render_click() =~
+             "Re-pinned at #{String.slice(head, 0, 12)}"
+
+    assert Tickets.get!(ticket.id).workflow_commit == head
+    refute has_element?(view, "#pin-drift")
+  end
+
+  # "Stuck" alone sends a person to the event log to learn whether a job failed, a `max` ran out or
+  # nothing matched. The queue, the ticket's Decide and its rail say which, from the latest stick.
+  test "a stuck ticket says why, on the queue and on its page", %{
+    conn: conn,
+    user: user,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
+    {:ok, stuck} = Forge.Engine.stick(ticket, "an older reason")
+    {:ok, _stuck} = Forge.Engine.stick(stuck, "transition to implementing already fired 2 times")
+
+    {:ok, queue, _html} = live(conn, ~p"/")
+
+    assert render(queue) =~
+             "Persist scores is stuck: transition to implementing already fired 2 times."
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+    html = render(view)
+    assert html =~ "Stuck: transition to implementing already fired 2 times. Waiting for you"
+    refute html =~ "an older reason. Waiting"
+
+    # The rail says each stick's reason beside its event, the older one included.
+    assert html =~ "an older reason"
   end
 
   # A stale page can still send a transition the surfaces no longer offer; the refusal says

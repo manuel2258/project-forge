@@ -118,6 +118,79 @@ defmodule ForgeCore.PromptTest do
     end
   end
 
+  # A second review's first question is what changed since the first; the manifest says which
+  # commit that one read, beside the changeset this one reads.
+  describe "the changeset a previous attempt read" do
+    defp with_changeset(version, previous) do
+      input = %ForgeCore.Job.Spec.Input{name: "changeset", version: version, content: "diff"}
+      %{spec() | attempt: 2, inputs: [input], previous_changeset: previous}
+    end
+
+    test "is named beside this one's, with the diff to run" do
+      old = String.duplicate("a", 40)
+      manifest = Prompt.manifest(with_changeset(String.duplicate("b", 40), old), "/j")
+
+      assert manifest =~
+               "\n  attempt 1 of this state read it at `aaaaaaaaaaaa`; `git diff #{old}` is what changed on the branch since"
+    end
+
+    test "says so when it is the same commit" do
+      same = String.duplicate("c", 40)
+
+      assert Prompt.manifest(with_changeset(same, same), "/j") =~
+               "attempt 1 of this state read the same commit; nothing changed since"
+    end
+
+    test "says nothing on a first attempt" do
+      refute Prompt.manifest(with_changeset("d", nil), "/j") =~ "of this state read"
+    end
+  end
+
+  # `docs/design/capacity.md` § Spend caps: a lowered cost says what it was lowered from and by
+  # what, and the ticket's allowance is named beside the job's own budget.
+  describe "the budget" do
+    test "names what the ticket has left" do
+      budget = %{turns: 20, cost: 30, ticket_left: 96.2, ticket_limit: 140}
+      manifest = Prompt.manifest(%{spec() | budget: budget}, "/j")
+
+      assert manifest =~ "- Cost: 30 USD\n"
+      assert manifest =~ "- The ticket: 96.20 of 140 USD left for every job still to run on it"
+    end
+
+    test "says what a lowered cost was lowered from, and by which cap" do
+      for {by, left} <- [{"ticket", "what the ticket has left"}, {"day", "what the day has left"}] do
+        budget = %{turns: 20, cost: 3.5, declared: 30, lowered_by: by}
+        manifest = Prompt.manifest(%{spec() | budget: budget}, "/j")
+
+        assert manifest =~ "- Cost: 3.5 USD — lowered from the state's 30 USD to #{left}"
+      end
+    end
+
+    test "a budget stated alone says only itself" do
+      manifest = Prompt.manifest(%{spec() | budget: %{turns: 20, cost: 30}}, "/j")
+
+      assert manifest =~ "- Cost: 30 USD\n"
+      refute manifest =~ "lowered"
+      refute manifest =~ "The ticket:"
+    end
+
+    test "survives the wire with what the platform added" do
+      budget = %{
+        turns: 20,
+        cost: 3.5,
+        declared: 30,
+        lowered_by: "ticket",
+        ticket_left: 3.5,
+        ticket_limit: 140
+      }
+
+      spec = %{spec() | budget: budget}
+
+      assert {:ok, %{budget: ^budget}} =
+               spec |> ForgeCore.Job.Spec.to_json() |> ForgeCore.Job.Spec.from_json()
+    end
+  end
+
   # `docs/design/job-prompt.md` § How the job arrived: a job sent back has to be told by what, and
   # a person's note on the way is the reason itself.
   describe "how the job arrived" do
@@ -150,6 +223,36 @@ defmodule ForgeCore.PromptTest do
     test "the first state says so" do
       assert Prompt.manifest(%{spec() | entered: nil}, "/j") =~
                "This is the ticket's first state."
+    end
+
+    # A failed build sends the ticket to the one job that has to fix it; the outcome's name is not
+    # the reason, the log is. Named with its path, as a resume's own results are.
+    test "out of a command state, names what its commands said and where their logs are" do
+      entered = %{"from" => "packaging", "outcome" => "build_failed", "by" => "engine"}
+
+      results = [
+        %{
+          "command" => "build",
+          "args" => [],
+          "at" => String.duplicate("d", 40),
+          "exit_status" => 1,
+          "outcome" => "converged",
+          "duration_ms" => 2_000,
+          "log" => "entered-1-build.log"
+        }
+      ]
+
+      manifest =
+        Prompt.manifest(%{spec() | entered: entered, entered_commands: results}, "/j")
+
+      assert manifest =~ "came from `packaging` on `build_failed`; the engine took"
+      assert manifest =~ "What `packaging`'s commands said"
+
+      assert manifest =~
+               "- `build` at `dddddddddddd`: exit 1 in 2s; log `/j/commands/entered-1-build.log`"
+
+      refute manifest =~ "Commands you ran"
+      refute Prompt.manifest(%{spec() | entered: entered}, "/j") =~ "commands said"
     end
 
     test "a note is fenced past any backticks in it" do
@@ -395,7 +498,7 @@ defmodule ForgeCore.PromptTest do
       refute flat =~ "nowhere for those to go"
     end
 
-    # A reopen is a cold start and a cold start clears `out/`, so the agent is told where what it
+    # Every reopen clears `out/`, resumed or cold, so the agent is told where what it
     # wrote before now is, and that writing it to `out/` again is what changes it.
     test "is told where what it wrote before a reopen is, and how to change it" do
       flat = Prompt.chat_preamble() |> String.replace(~r/\s+/, " ")
@@ -516,6 +619,60 @@ defmodule ForgeCore.PromptTest do
       refute prompt =~ "## Answers"
       refute prompt =~ "A person answered"
       assert prompt =~ "## Your branch"
+    end
+
+    # `docs/design/claude-code-events.md` § Resume: an attempt that came back resumes its
+    # predecessor's session as a fork. It remembers writing its outputs, and must be told those
+    # were the last attempt's.
+    test "for a new attempt says whose session it is, and that the outputs are written again" do
+      spec = %{resumed_spec() | attempt: 3}
+      prompt = Prompt.continuation(spec, "/var/forge/jobs/job-1", "c0ffee", fork: true)
+
+      assert String.starts_with?(prompt, "# A new attempt of `planning`")
+
+      assert prompt =~
+               "This is attempt 3 of `planning`, and the session you are in is attempt\n2's"
+
+      assert prompt =~ "**Nothing you wrote last time counts for this attempt.**"
+      refute prompt =~ "# Continue this job"
+
+      # The rest is a resume's: the answers, the branch, the whole manifest last.
+      assert prompt =~ "## Answers"
+      assert prompt =~ "## Your branch"
+      assert [_changes, manifest] = String.split(prompt, "\n---\n\n")
+      assert manifest == Prompt.manifest(spec, "/var/forge/jobs/job-1")
+    end
+
+    test "for a resume of the same attempt says nothing of a new one" do
+      prompt = Prompt.continuation(resumed_spec(), "/var/forge/jobs/job-1", "c0ffee", fork: false)
+
+      assert String.starts_with?(prompt, "# Continue this job")
+      refute prompt =~ "Nothing you wrote last time"
+    end
+  end
+
+  # `docs/design/conversations.md` § Lifetime: a reopened conversation resumes its session, so
+  # it is told only that it stopped and where its branch is — none of the replay a cold reopen
+  # needs, which it would otherwise read and answer all over again.
+  describe "a reopened conversation's continuation" do
+    test "says it resumes, where the branch is, and ends with what the person said since" do
+      spec = chat_spec(%{prompt: "Did the migration land?", replay: "# earlier\n"})
+      prompt = Prompt.continuation(spec, "/var/forge/jobs/chat-1", "beef")
+
+      assert String.starts_with?(prompt, "# This conversation was reopened")
+      assert prompt =~ "`chat/2026-09-15-abc`, at `beef`"
+      assert String.ends_with?(prompt, "---\n\nDid the migration land?\n")
+
+      refute prompt =~ "conversation.md"
+      refute prompt =~ Prompt.chat_preamble() |> String.split("\n") |> hd()
+      refute prompt =~ "# This is a conversation"
+    end
+
+    test "with nothing said since, ends at the branch" do
+      prompt = Prompt.continuation(chat_spec(%{prompt: "  "}), "/var/forge/jobs/chat-1", nil)
+
+      refute prompt =~ "---"
+      assert String.ends_with?(prompt, "`git log` says which.\n")
     end
   end
 end

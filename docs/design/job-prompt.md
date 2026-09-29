@@ -28,6 +28,32 @@ the note a tester leaves when sending a build back is exactly what the next job 
 job of a ticket has none, and the manifest says it is the ticket's first state. Like the rest of
 the spec it is written once, when the job is created, from the transition that created it.
 
+**Out of a command state, `entered` names the batch, and the job is handed what it said.** A
+command state's outcome is a name — `build_failed` — and the reason is in the logs. The job it
+sends the ticket to is the one that has to fix the build, and it was the one job that could not
+read why it failed: a log was a blob no state could name as an input, and *Commands you ran*
+(§ Commands) is only for a job's own invocations. A state may name one now
+(`workflow-grammar-v1.md` § Inputs), but the job that has to act should not depend on its
+workflow's author having thought to. One ticket spent two implementing jobs guessing
+at a failure whose log said `not a git repository`.
+
+So `entered` carries `batch`: the command state's latest batch, when that batch was decided —
+not one that was cancelled or is still running, since that would describe a visit the ticket did
+not leave by. It is set whoever takes the edge, so a person moving a stuck ticket on hands the log
+over as the engine would. At run time the spec gains `entered_commands`, one entry per command
+in `invoke` order in the shape of a resume's results, and the logs are fetched to
+`$FORGE_JOB/commands/entered-<n>-<command>.log`, on every run of the job and not only its first.
+The manifest lists them under *How you got here*, and says to read a failed one first.
+
+**A second visit to a state that reads the changeset is told which commit the first one read**
+— `previous_changeset`, filled at run time from the previous attempt's own stored spec — and the
+manifest puts it beside the changeset input with the `git diff` to run, or says nothing changed.
+"What changed since the version the last review looked at" is the question a review after rework
+opens with. A state that does not read the changeset is not told, and the first attempt of any
+state has nothing to be told about — which leaves out the other half of the ask: on one ticket,
+five implementing jobs each re-derived what the ones before them had done from the code and the
+prose of `implementation.md`, and an implementing state rarely reads the changeset.
+
 **An optional input not yet written is named, not silently absent** (`workflow-grammar-v1.md`
 § Inputs). `implementing` on its first entry is told that `review.md` does not exist yet; on its
 second, it is an input with a version like any other. An agent that could not tell those apart
@@ -51,15 +77,20 @@ $FORGE_JOB/out/proposals/<name>.md       # ticket proposals, optional (ticket-pr
 $FORGE_JOB/out/<group>/<file>            # a declared group's files, any number, any bytes
 $FORGE_JOB/invoke.json                   # commands to run, written by an agent that may invoke
 $FORGE_JOB/commands/<n>-<command>.log    # a resumed run's command logs, read-only
+$FORGE_JOB/commands/entered-<n>-<command>.log  # the logs of the batch that sent it here
 $FORGE_JOB/tickets/index.md              # the project's tickets and open proposals, read-only
 $FORGE_JOB/tickets/<number>.md           # one ticket's body
 $FORGE_JOB/conversation.md               # a reopened conversation's past, read-only
 $FORGE_JOB/platform/platform.md          # how the platform works, read-only
 $FORGE_JOB/platform/workflow-grammar.md  # workflow-grammar-v1.md as compiled in, read-only
 $FORGE_JOB/home                          # HOME for the harness process
-$FORGE_JOB/transcript-<n>.jsonl          # the harness's raw stdout, one file per run
-$FORGE_JOB/stderr.log                    # the harness's stderr
 ```
+
+The harness's raw stdout and its stderr are kept beside the job directory, not in it: one
+`transcript-<n>.jsonl` per run and `stderr.log` in `<job_id>.worker/`, which the job cannot reach,
+because the worker reads them back as a more privileged user (`ForgeWorker.Job.Dir.worker_dir/1`).
+A file the job could replace would be one it could point at anything root can read. The stderr
+file is opened by the worker's shell before the harness starts, which inherits it already open.
 
 `ForgeWorker.Job.Dir` owns the layout. `tickets/` is `ticket-proposals.md` § Reading the backlog;
 a conversation's directory also holds `history/` (`conversations.md` § Context) and, once it has
@@ -73,9 +104,9 @@ clears `out/` as well (`Dir.prepare/3`). Artifact and state names are single pat
 checked by the validator, so nothing in the workflow can name a path outside these directories.
 
 A conversation declares nothing: every file it leaves in `out/` besides `proposals/` is a
-document, recorded after each turn (`conversations.md` § Commits, `Dir.documents/1`). A
-conversation never resumes a session, so every start of one is cold and begins with `out/`
-empty; what it wrote before is in `inputs/` instead — the ticket's latest documents for a ticket
+document, recorded after each turn (`conversations.md` § Commits, `Dir.documents/1`). Every
+start of one begins with `out/` empty, a reopen that resumes its session included, since what it
+left there was recorded; what it wrote before is in `inputs/` instead — the ticket's latest documents for a ticket
 chat, and a project chat's own (`conversations.md` § Context).
 
 The path is passed as an environment variable and repeated in the manifest. `changeset` has
@@ -228,7 +259,7 @@ survive gets a cold start, and a cold start has to know what it asked for too.
 
 ### The continuation prompt
 
-A run that resumes its harness session is handed a **continuation**, `Prompt.continuation/3`,
+A run that resumes its harness session is handed a **continuation**, `Prompt.continuation/4`,
 rather than the whole prompt again. The session already holds the preamble and the state prompt;
 what it lacks is what happened while it was stopped:
 
@@ -247,20 +278,26 @@ runner reads `resume_session` from the assignment: set, the continuation goes to
 driver adds `--resume`; unset, `Prompt.compose/2` and no flag. One value decides both, so the
 prompt and the flag cannot disagree.
 
-**Whether the session is really there is not predicted, by either side.** The platform could
-compare the worker it picked with the job's `worker_id`, and the worker could look for Claude
-Code's session file under the job's `home`, but both are a model of the harness's session lookup
-rather than the lookup, and a guard must use the model of the operation it guards. The lookup is
+**Whether the session is really there is not predicted by the platform.** The lookup is
 `--resume` itself. When it finds nothing the harness exits before `system/init`, the platform
 re-queues the job with no session (`claude-code-events.md` § Resume), and that run is a cold
 start with the full composed prompt — so a continuation is never acted on by a session that did
 not resume. That rests on the harness failing a missing session rather than starting a new one,
-which is what `Forge.Jobs.complete/2` already reads; a harness that started afresh instead would
-hand the continuation to an agent with no memory of the job. **That is unmeasured.** Nothing has
-run `claude --resume` against a session id its home does not hold and recorded what it does:
-`bin/measure streaming` does not resume, and no other measurement covers it. It is what the code
-assumes, and it is the first thing to measure if a resumed job ever behaves as though it
-remembers nothing.
+and **that was measured** (`docs/measurements.md` § Session resume): a missing session ends
+before `system/init`. What the measurement also found is the case this does not cover — a file
+that is there and is not the session's own starts a session with no memory — which is why the
+worker checks a carried session file before it restores one, and drops the resume and runs the
+full prompt when the check fails (`claude-code-events.md` § Resume). That is the one place the
+worker changes which prompt a run gets: a resume it will not attempt is a cold start, decided
+before the runner is started, so the flag and the prompt still come from one value.
+
+**A new attempt that came back resumes its predecessor as a fork, and is told it is one.**
+`Prompt.continuation/4` with `fork: true` opens by saying this is attempt *n* of the state, that
+the session is the previous attempt's, that the ticket went on and came back — the manifest's
+*How you got here* says from where and why — and that nothing written last time counts for this
+attempt: `out/` is empty, and every declared output is written again. The answers and the branch
+follow as for any resume, then the manifest. When forking happens is `claude-code-events.md`
+§ Resume's; that it is a continuation and not a composed prompt is what saves the context.
 
 **The worktree a continuation names has to be the branch.** A resume keeps the working tree it
 finds, because an unfinished tree is what a resume is for. It used to skip the reset for a tree it
@@ -291,6 +328,18 @@ question: it is in that document's form, optional, and not in the digest as well
 question on the ticket is still open — and a non-blocking answer closes none, so a job waiting on
 a blocking question keeps waiting, and a job that is running or not yet started is untouched. The
 answer reaches the next run through `answers.md`, which is how every answer reaches a job.
+
+**An answer says what it amends.** The document written on an assumption is immutable, and its
+answer lands beside it in `answers.md`. When they disagreed, nothing said so: a refinement assumed
+`declared-in-core`, the person answered `own-composable`, and each of the ten implementing and
+reviewing jobs after it re-derived that the answer held, one paragraph at a time. So an entry for a
+question that carried an assumption names the document and version it was asked in and the
+assumption; when the assumption is one of the options' labels and the answer is another, it says
+**This overturns an assumption**, the passage its `anchor` quotes, and that the answer holds, and
+when they match, that it confirms it — with no passage, since there is nothing in it to read
+again. An assumption in prose cannot be compared with a choice, so that entry names it and leaves
+the comparison to the reader. The preamble asks for an option-shaped assumption where one fits,
+and says an overturning answer holds over the document.
 
 ### Answering a document's questions at once
 

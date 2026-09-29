@@ -119,6 +119,28 @@ defmodule ForgeWorker.Job.CommandTest do
     end
   end
 
+  # `docs/design/workflow-grammar-v1.md` § Commands: what a script can rely on to find things.
+  # The script is the pinned copy in the job directory, not the checkout's, so the checkout has
+  # to be named for a script that has moved away from where it started.
+  test "names the checkout, the job directory and the output directory to the script", context do
+    File.write!(Path.join(context.worktree, "marker"), "in the checkout\n")
+
+    script = """
+    #!/bin/sh
+    case "$0" in "$FORGE_JOB"/*) echo "script in the job directory" ;; esac
+    [ "$FORGE_OUT" = "$FORGE_JOB/out" ] && echo "out under the job directory"
+    cd /
+    cat "$FORGE_CHECKOUT/marker"
+    """
+
+    {result, job_dir} = run(context, spec(script))
+
+    assert %Result{outcome: :converged, exit_status: 0} = result
+
+    assert log(job_dir) ==
+             "script in the job directory\nout under the job directory\nin the checkout\n"
+  end
+
   test "runs the spec's script in the worktree, with each argument as one argument", context do
     File.write!(Path.join(context.worktree, "marker"), "in the worktree\n")
 

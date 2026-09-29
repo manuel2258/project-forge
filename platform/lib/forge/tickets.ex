@@ -62,6 +62,28 @@ defmodule Forge.Tickets do
   end
 
   @doc """
+  What changed under `.forge/` on the project's default branch since `ticket` was pinned — the
+  workflow, its prompts, its command scripts — as the head and the paths, or nil when nothing did.
+
+  A ticket reads all of those at its pin for its whole life (`docs/design/workflow-grammar-v1.md`
+  § Pinning), so a fix to `build.sh` that lands on the default branch never reaches a ticket
+  already failing on the old one. The ticket page says so, beside the way to re-pin.
+  """
+  @spec drift(Ticket.t(), Project.t()) :: %{head: String.t(), paths: [String.t()]} | nil
+  def drift(%Ticket{workflow_commit: pinned}, %Project{} = project) do
+    repo = Projects.repo_path(project)
+
+    # `head != pinned` is an equivalent mutant: the diff of a commit against itself is empty, and
+    # an empty diff is nil too. It spares the second git call on the common case.
+    with {:ok, head} when head != pinned <- Git.resolve(repo, project.default_branch),
+         {:ok, [_ | _] = paths} <- Git.changed_paths(repo, pinned, head, [".forge"]) do
+      %{head: head, paths: paths}
+    else
+      _none -> nil
+    end
+  end
+
+  @doc """
   Adds the steps that admit a ticket to `multi`, under `:number`, `:ticket`, `:admitted`,
   `{:ticket_doc, _}`, `{:first_job, _}` and `:branch`.
 

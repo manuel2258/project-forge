@@ -40,6 +40,9 @@ defmodule Forge.Jobs.Job do
     field :turns, :integer, default: 0
     field :cost_usd, :decimal, default: Decimal.new(0)
     field :harness_session_id, :string
+    # The latest session file the worker uploaded — `%{"key", "version"}` — which a resume on
+    # another machine puts back (`docs/design/claude-code-events.md` § Resume).
+    field :session_blob, :map
     field :started_at, :utc_datetime
     field :finished_at, :utc_datetime
 
@@ -48,6 +51,9 @@ defmodule Forge.Jobs.Job do
     # without this there is nothing to clone and no project to schedule it for.
     belongs_to :project, Forge.Projects.Project
     belongs_to :parent_job, __MODULE__
+    # The previous attempt of this state whose session this one forks: a new attempt the ticket
+    # came back to (`docs/design/claude-code-events.md` § Resume). Cleared when a resume is refused.
+    belongs_to :resume_from, __MODULE__
     belongs_to :worker, Forge.Workers.Worker
     # What pays for it: the credential it picked from its project's pool at its first start, and
     # keeps while that is usable (`docs/design/credentials.md` § How a job picks). A credential's
@@ -81,6 +87,7 @@ defmodule Forge.Jobs.Job do
       :state,
       :attempt,
       :parent_job_id,
+      :resume_from_id,
       :spec,
       :worker_id,
       :model,
@@ -128,6 +135,8 @@ defmodule Forge.Jobs.Job do
       :turns,
       :cost_usd,
       :harness_session_id,
+      :session_blob,
+      :resume_from_id,
       :worker_id,
       :credential_id,
       :started_at,

@@ -49,6 +49,12 @@ defmodule Forge.ScopingTest do
       refute Operator.retry(ticket, member) == {:error, :forbidden}
     end
 
+    # Without the guard an outsider is answered as a member would be — here `:already_pinned`.
+    test "repin", %{ticket: ticket, outsider: outsider, member: member} do
+      assert {:error, :forbidden} = Operator.repin(ticket, outsider)
+      refute Operator.repin(ticket, member) == {:error, :forbidden}
+    end
+
     test "decide", %{ticket: ticket, outsider: outsider} do
       assert {:error, :forbidden} = Operator.decide(ticket, outsider, :approved, nil)
     end

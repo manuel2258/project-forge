@@ -257,8 +257,10 @@ throwing the session away. The limit is asked first.
 **Where it resumes.** The scheduler already offers a job to the machine that last ran it first
 (`provisioning.md` § Affinity on resume). There the harness session is still on disk and the run continues
 with `--resume`, on whichever credential the pick gave it. Anywhere else — the old machine
-reclaimed while the job waited — the resume finds no session, which the platform already
-recognises as a resume that never started and re-queues as a fresh run (`Forge.Jobs.complete/2`).
+reclaimed while the job waited — the worker puts back the session file the last run uploaded
+(`claude-code-events.md` § Resume). One that cannot be put back, or that the harness refuses, is
+a resume that never started, which the platform re-queues as a fresh run
+(`Forge.Jobs.complete/2`).
 A fresh run starts from the branch, which holds everything the stopped run did: `decisions.md`'s
 rule that resuming reconstructs from the branch and the manifest, never from the conversation.
 
@@ -409,9 +411,9 @@ a permanent one needs `bin/worker-update`.
 ## Deliberately not here
 
 - **Enforcing `daily_limit_usd`.** `identity.md` § Credentials decided it is tracking.
-- **Holding a machine through a wait.** A job waiting for a reset lets its machine go, and a
-  session on a machine that was reclaimed is a fresh run from the branch. Holding it would keep
-  the exact session at the price of an idle machine billing for up to a week.
+- **Holding a machine through a wait.** A job waiting for a reset lets its machine go, and its
+  session goes with the job rather than the machine (`claude-code-events.md` § Resume). Holding
+  the machine would save a download at the price of an idle machine billing for up to a week.
 - **A conversation resuming by itself after a limit.** A person is in it, and they decide when it
   goes on; the pick moves it to a free credential when they do.
 - **A pick weighted by anything but spend.** Least spent today is a spread, not a schedule; a

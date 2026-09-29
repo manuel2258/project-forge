@@ -361,3 +361,30 @@ before the Nix store is populated, because the seed carries the checkout whose f
 is populated from. `docs/design/worker-tier.md` § Volumes and the seed has the longer version —
 a machine cannot fetch a seed before it knows which project it is for, which is what an
 assignment tells it.
+
+### Session resume
+
+Measured 2026-09-29 against Claude Code 2.1.284, by hand rather than by the harness: a
+development container with the CLI installed, `haiku`, a scratch `HOME` per case and
+`env -i` so that nothing of the calling session reached the process. One run wrote a session
+("remember PELICAN"), and each case then resumed it with `--resume <id>`, asking for the word.
+`--permission-mode bypassPermissions` was left out because the CLI refuses it as root; it does
+not bear on where a session is found. All six runs together cost about eleven cents.
+
+| Case | Exit | `system/init` | Answer |
+|---|---|---|---|
+| Same `HOME`, same working directory | 0 | yes | PELICAN |
+| Empty `HOME`, same directory | 1 | **no** — one `result`, `error_during_execution`, $0 | — |
+| Empty `HOME`, the session file restored under `.claude/projects/<dir>/` | 0 | yes | PELICAN |
+| The same, run from a different directory | 0 | yes | PELICAN |
+| Empty `HOME`, the *stdout* transcript placed as the session file | 0 | **yes** | **NONE** |
+
+The session file was 163 KiB for a two-message exchange, most of it attachments, and each
+resume appended to it — to the restored file, whichever directory the run was in. A search for
+`sk-ant`, OAuth, bearer and API-key strings in it found only prose from the system prompt; that
+is a pattern search, not an audit.
+
+**What this decided.** The session file is what is carried between machines, and it is checked
+before it is used (`docs/design/claude-code-events.md` § Resume): the last row is a restore that
+does not fail and does not work, and nothing downstream could tell. The second row is the
+assumption `resume_failed?` rested on, now observed.

@@ -8,7 +8,8 @@ sessions pages under code.claude.com/docs, read on 2026-09-11.
 ## Invocation
 
 One OS process per job, opened as an Erlang Port in line mode, stdout consumed line by line,
-stderr captured to `stderr.log` in the job directory. There are two shapes, and
+stderr captured to `stderr.log` in the worker's own directory beside the job's
+(`ForgeWorker.Job.Dir.stderr_path/1`). There are two shapes, and
 `ForgeWorker.Harness.ClaudeCode.command/3` picks one by its `:mode` option.
 
 **Prompt**, for a workflow job. The composed prompt is written to `prompt.md` in the job directory
@@ -42,7 +43,8 @@ claude -p \
 No `--max-turns`: a conversation ends when a person stops talking. `--max-budget-usd` is what was
 left of the day when the conversation was assigned, and is absent when the day has no cap
 (`conversations.md` § Spend). `--replay-user-messages` is what makes delivery observable
-(`conversations.md` § Turns). A conversation is never given `--resume`.
+(`conversations.md` § Turns). A conversation is given `--resume <session_id> --fork-session` only
+once it has been reopened with a session carried (§ Resume).
 
 In both, `--model` is the model the platform resolved into the spec, else the machine's
 `FORGE_CLAUDE_MODEL`, and is absent when neither names one. A workflow job whose assignment
@@ -89,7 +91,7 @@ Each stdout line is JSON with a top-level `type`. The types the driver knows and
 
 | `type` | `subtype` | Driver action |
 |---|---|---|
-| `system` | `init` | Record `session_id`, `model`, `tools`. Emit `harness.started`. |
+| `system` | `init` | Record `session_id`, `model`, `tools`, `claude_code_version`. Emit `harness.started`. |
 | `system` | `api_retry` | Emit `harness.retry` with `attempt`, `max_retries`, `error`. |
 | `system` | other | Emit `harness.notice` with the subtype and the raw message. |
 | `rate_limit_event` | | Emit `harness.rate_limit` with `status`, `resets_at`, `rate_limit_type`, `utilization`, `is_using_overage`, and `windows` when the release sends `unifiedWindows`. Undocumented; see below. |
@@ -119,7 +121,7 @@ than only the fields named here.
 
 All are `job.harness.*` in the event log, with `job_id`, `ticket_id`, `actor = {job, id}`:
 
-`started` (session_id, model, tools), `text` (text), `tool_use` (id, name, input),
+`started` (session_id, model, tools, version), `text` (text), `tool_use` (id, name, input),
 `correction` (round, of, problems — the worker's own, § Correcting the outputs), `starting`
 (waited_s, gave_up, stderr — the worker's own, § A harness that never starts),
 `tool_result` (tool_use_id, is_error, bytes, excerpt), `delivered` (text), `control`
@@ -293,19 +295,72 @@ again — resumed after a blocking question is answered, say — the assignment 
 `resume_session` and the driver adds `--resume <session_id>`. The prompt is then a continuation
 naming the answers, the branch and the commit the worktree is at, and the pinned manifest — not
 the whole prompt a fresh run gets — and the runner chooses it from the same `resume_session` the
-flag comes from (`job-prompt.md` § The continuation prompt). A conversation never resumes this
-way; reopening one clears its session (`conversations.md` § Lifetime). Documented caveat: session
-lookup is per project directory, so the worktree path must be the same one the session started
-in; on a different worker it will not be found. A resume that exits without ever emitting
-`system/init` is re-queued as a fresh invocation with the same spec and no session, and so with
-the full composed prompt: the fallback is that re-queue, not a guess made before the run. Resume
-is never required for correctness, and no outcome depends on it.
+flag comes from (`job-prompt.md` § The continuation prompt). Resume is never required for
+correctness, and no outcome depends on it: what it saves is context, which is this system's
+expensive resource.
 
-That the harness *does* exit before `system/init` when the session is not found — rather than
-starting a new session and carrying on — is **unmeasured**. It is inferred from the caveat, not
-observed, and the continuation prompt rests on it (`job-prompt.md` § The continuation prompt):
-a harness that started afresh would hand a continuation to an agent that remembers nothing of the
-job. No measurement resumes anything; that is the first one to add.
+**What `--resume` needs is a file, and the file is carried.** Claude Code keeps a session as
+`$HOME/.claude/projects/<the working directory, each character not a letter or digit a dash>/<session_id>.jsonl`,
+and `HOME` is `$FORGE_JOB/home` — on the machine that ran the job and on no other. So after every
+run the worker reads that file the way it reads `out/` (one open, the handle's owner checked, a
+size cap; `ForgeWorker.Job.Dir.stage_session/4`) and uploads it under the job's own key, and the
+platform records it as `jobs.session_blob`, beside the Claude Code version that wrote it
+(`system/init`'s `claude_code_version`). A resume's assignment carries a `get` token for it, and
+the worker puts it back before the harness starts — on whatever machine that is. The transcript
+that is already uploaded is the harness's stdout and is not this file; it cannot stand in for it
+(below).
+
+**It is checked before it is used, because a wrong file does not fail.** The worker restores the
+file only when the machine's Claude Code reports the version that wrote it and the file holds
+this session's own chained records — every line JSON, and a `user` or `assistant` record naming
+the session and carrying `parentUuid`. Anything else is a cold start: the worker drops the
+session, runs the full composed prompt, and logs `session.unrestored`. A file that fails to
+download, or that no run uploaded, leaves the resume to whatever the machine holds, which is the
+case this section used to be about: found on the machine that ran it, and not on any other.
+
+**Measured, 2026-09-29, Claude Code 2.1.284** (`docs/measurements.md` § Session resume):
+
+| Case | What happened |
+|---|---|
+| The session's own `HOME` and working directory | Resumed; remembered. |
+| An empty `HOME` — another machine, nothing carried | Exit 1, one `result` of subtype `error_during_execution`, no `system/init`, no cost; stderr `No conversation found with session ID`. |
+| An empty `HOME` with the session file restored | Resumed; remembered. |
+| The same, run from another working directory | Resumed; remembered, and the turn was appended to the restored file. |
+| An empty `HOME` with the stdout transcript placed as the session file | **Started — `system/init` and all — and remembered nothing**, with only a stderr warning that no record carried `parentUuid`. |
+
+The second row settles what this section used to call unmeasured: a session that is not there
+ends before `system/init`, which is what `Forge.Jobs.resume_refused?/2` reads, and the re-queue
+with no session is sound. The fourth retires a caveat this section carried from the CLI's
+documentation — that session lookup is per project directory — for this version at least. The
+last is why the file is checked: a restored file that is not the session's own is not refused, it
+is silently a fresh session handed a continuation prompt it has no memory to continue.
+
+**A new attempt that came back resumes its predecessor as a fork.** When a transition sends the
+ticket back into a state it has run before — `reviewing` returning work to `implementing`, a
+tester sending a build back — and that state's previous attempt ended with an outcome its agent
+declared (`converged`), the new job records the previous one as `jobs.resume_from_id`. Its first
+run restores the previous attempt's session and adds `--fork-session`, so it begins with its
+predecessor's conversation under a session id of its own, and the old one's file is untouched. Its
+continuation says it is a new attempt that came back, and why; `out/` is empty and every output is
+written again. A person's *Run again* never forks — it is a request to redo, and it is what a
+person reaches for after a failure — and neither does an attempt after one that ended `error`,
+`did_not_converge`, `budget_exhausted` or `cancelled`, which is started fresh so as not to carry
+on from whatever went wrong. No state forks another's session: a reviewer does not share the
+implementer's memory. Nor does an attempt fork one that was given other instructions — another
+prompt, after a re-pin moved it, or another preamble, after the platform's changed: the fork would
+remember the old ones and be told they were its own.
+
+A forked resume that is refused is the same re-queue as any other: `resume_refused?/2` asks whether
+the run was a resume, and the re-queue clears the fork with the session, so it is tried once.
+
+**What it costs** is the previous context read again on the first turn, uncached — by then the
+prompt cache has long expired — so a lap starts at the size of the last one's context, bounded by
+Claude Code's own compaction. Whether that is cheaper than a cold start reading the code again is
+open, and answerable from the costs the platform already records per job.
+
+**A conversation resumes too**, once it has been reopened (`conversations.md` § Lifetime). Nothing
+re-queues it, so a resume the harness refuses is handled where it ends: the platform forgets the
+session (`Forge.Conversations.ended/4`), and the next reopen starts cold, with the replay.
 
 ## Declared capabilities
 

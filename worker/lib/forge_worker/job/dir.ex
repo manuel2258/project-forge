@@ -14,11 +14,13 @@ defmodule ForgeWorker.Job.Dir do
       <root>/<job_id>/out/<file>           a conversation's documents; see documents/1
       <root>/<job_id>/invoke.json          commands an agent asks to run, then removed
       <root>/<job_id>/commands/<n>-<name>.log  a resumed run's command logs, read-only
+      <root>/<job_id>/commands/entered-<n>-<name>.log  the logs of the batch it was entered after
       <root>/<job_id>/home                 HOME for the harness process
-      <root>/<job_id>/stderr.log
 
   And beside it, the worker's own (`worker_dir/1`), which the job cannot reach:
 
+      <root>/<job_id>.worker/stderr.log    the harness's stderr
+      <root>/<job_id>.worker/session/      a session being restored, or staged for upload
       <root>/<job_id>.worker/transcript-<run>.jsonl
       <root>/<job_id>.worker/command.log   a command job's combined output
       <root>/<job_id>.worker/blobs/<n>     a run's groups of files, staged for upload
@@ -62,12 +64,15 @@ defmodule ForgeWorker.Job.Dir do
     File.mkdir_p!(inputs)
     File.mkdir_p!(out)
     File.mkdir_p!(home_dir(job_dir))
-    File.write!(Path.join(job_dir, "spec.json"), Spec.to_json(spec))
+    # Where the harness's stderr is written, before anything is spawned to write it.
+    worker_dir!(job_dir)
+    write_new!(Path.join(job_dir, "spec.json"), Spec.to_json(spec))
     write_platform_docs(job_dir)
     write_backlog(job_dir, Keyword.get(opts, :backlog), job_id)
     write_replay(job_dir, spec.replay)
     File.rm_rf!(invoke_path(job_dir))
     write_command_logs(job_dir, Keyword.get(opts, :command_logs, []), job_id)
+    place_session(job_dir, Keyword.get(opts, :session))
 
     Enum.each(spec.inputs, fn input ->
       path = Path.join(inputs, input.name)
@@ -95,7 +100,8 @@ defmodule ForgeWorker.Job.Dir do
   end
 
   # Named by the platform, so matched rather than trusted before they become paths: `<n>-<name>.log`,
-  # a name being a command's, which the validator holds to one path segment. The directory is made
+  # or `entered-<n>-<name>.log` for the batch of the state that sent the ticket here, a name being
+  # a command's, which the validator holds to one path segment. The directory is made
   # fresh here, so there is nothing an agent planted in it for a lexical check to miss.
   defp write_command_logs(job_dir, logs, job_id) do
     dir = Path.join(job_dir, "commands")
@@ -108,7 +114,7 @@ defmodule ForgeWorker.Job.Dir do
   end
 
   defp write_command_log(dir, {file, source}, job_id) do
-    if Regex.match?(~r/^[0-9]+-[A-Za-z0-9][A-Za-z0-9._-]*\.log$/, file) do
+    if Regex.match?(~r/^(entered-)?[0-9]+-[A-Za-z0-9][A-Za-z0-9._-]*\.log$/, file) do
       target = Path.join(dir, file)
       File.cp!(source, target)
       File.chmod!(target, 0o444)
@@ -334,6 +340,162 @@ defmodule ForgeWorker.Job.Dir do
     else
       _other -> false
     end
+  end
+
+  @doc """
+  Writes `content` at `path` as a new file, never through what is there.
+
+  Everything in a job directory was the job's while it ran, and this process is more privileged
+  than the job's user: a `spec.json` or a `prompt.md` the agent replaced with a link to a file
+  outside would have the next run's preparation write over that file. So whatever is at the path
+  — a file, a link, a directory — is removed rather than followed, and the file is created
+  exclusively. Sound because nothing of the job runs while its directory is prepared: its user
+  from the last run is gone, and the next run's has not started.
+  """
+  @spec write_new!(String.t(), iodata()) :: :ok
+  def write_new!(path, content) do
+    File.rm_rf!(path)
+    # `:exclusive` is an equivalent mutant here: after the removal nothing is at the path, and
+    # nothing of the job runs to put one there. Kept so that if something ever does, the write
+    # fails rather than follows it.
+    File.write!(path, content, [:exclusive])
+  end
+
+  # -- the harness session ----------------------------------------------------------------------
+
+  @session_max_bytes 64 * 1024 * 1024
+
+  @doc """
+  Copies the harness's session `session_id` out of the job's `HOME` into `target`, for the
+  worker to upload (`docs/design/claude-code-events.md` § Resume). Claude Code keeps it as
+  `home/.claude/projects/<the working directory>/<session_id>.jsonl`.
+
+  Read the way `out/` is read, because the job arranged every part of that path: each directory
+  on the way must be a directory and not a link standing in for one, and the file is opened once
+  and the *handle's* owner decides — the job's own user while it runs, root once it has gone and
+  nothing is left to swap a path. A session id that is not one is refused before it is a path.
+  `:owner` and `:max_bytes` are for a test, as `stage_groups/4`'s are.
+  """
+  @spec stage_session(String.t(), String.t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def stage_session(job_dir, session_id, target, opts \\ []) do
+    owner = Keyword.get_lazy(opts, :owner, fn -> owner(job_dir) end)
+    max_bytes = Keyword.get(opts, :max_bytes, @session_max_bytes)
+
+    with :ok <- check_session_id(session_id),
+         {:ok, projects} <- real_dirs(home_dir(job_dir), [".claude", "projects"]) do
+      projects
+      |> list_dir()
+      |> Enum.find_value({:error, :not_found}, &session_in(Path.join(projects, &1), session_id))
+      |> then(fn
+        {:error, reason} -> {:error, reason}
+        path -> copy_owned(path, target, owner, max_bytes)
+      end)
+    end
+  end
+
+  # The session's file in one project directory, if that is a directory and the file is there.
+  # The file's `lstat` is an equivalent mutant for what can leave the machine: `stat` would pass a
+  # link here, and `copy_owned/4` would refuse it by its own `lstat` before opening anything. What
+  # it changes is only whether a link ends the search in an error or lets it look further.
+  defp session_in(dir, session_id) do
+    path = Path.join(dir, session_id <> ".jsonl")
+
+    with {:ok, %File.Stat{type: :directory}} <- File.lstat(dir),
+         {:ok, %File.Stat{type: :regular}} <- File.lstat(path) do
+      path
+    else
+      _none -> nil
+    end
+  end
+
+  @doc """
+  Whether the file at `path` is `session_id`'s own session, as far as a file can say: every line
+  JSON, and among them a `user` or `assistant` record that names the session and carries
+  `parentUuid`, the link Claude Code rebuilds a conversation by.
+
+  A file that is not is not refused by the harness: it starts a session with no memory, handed
+  a continuation it cannot continue (`docs/measurements.md` § Session resume). This is what
+  stands in front of that.
+  """
+  @spec session_file?(String.t(), String.t()) :: boolean()
+  def session_file?(path, session_id) do
+    with :ok <- check_session_id(session_id),
+         {:ok, %File.Stat{type: :regular, size: size}} when size <= @session_max_bytes <-
+           File.lstat(path) do
+      path
+      |> File.stream!(:line)
+      |> Enum.reduce_while(false, &read_record(&1, &2, session_id))
+      |> Kernel.==(true)
+    else
+      _no -> false
+    end
+  end
+
+  # Every line a record, or the file is not a session; linked once any record is.
+  defp read_record(line, linked, session_id) do
+    case Jason.decode(line) do
+      {:ok, record} when is_map(record) -> {:cont, linked or linked?(record, session_id)}
+      _not_json -> {:halt, :broken}
+    end
+  end
+
+  defp linked?(%{"type" => type, "sessionId" => id} = record, session_id)
+       when type in ["user", "assistant"],
+       do: id == session_id and Map.has_key?(record, "parentUuid")
+
+  defp linked?(_record, _session_id), do: false
+
+  # Put back where the harness looks for it, under the working directory it will run in; this
+  # version of Claude Code finds it under any, but the path is the one it would have written.
+  # Made fresh here: each directory on the way that is not a directory — a link the job left,
+  # which this process would follow — is removed and made again, and the file is written new.
+  defp place_session(_job_dir, nil), do: :ok
+
+  defp place_session(job_dir, %{id: session_id, source: source, cwd: cwd}) do
+    :ok = check_session_id(session_id)
+    dir = fresh_dirs(home_dir(job_dir), [".claude", "projects", project_dir(cwd)])
+    write_new!(Path.join(dir, session_id <> ".jsonl"), File.read!(source))
+  end
+
+  @doc "The directory name Claude Code keeps a working directory's sessions under."
+  @spec project_dir(String.t()) :: String.t()
+  def project_dir(cwd), do: String.replace(cwd, ~r/[^A-Za-z0-9]/, "-")
+
+  defp check_session_id(id) when is_binary(id) do
+    if Regex.match?(~r/^[A-Za-z0-9][A-Za-z0-9-]{0,127}$/, id), do: :ok, else: {:error, :bad_id}
+  end
+
+  defp check_session_id(_id), do: {:error, :bad_id}
+
+  defp real_dirs(base, names) do
+    Enum.reduce_while([base | names], {:ok, nil}, fn name, {:ok, at} ->
+      path = if at, do: Path.join(at, name), else: name
+
+      case File.lstat(path) do
+        {:ok, %File.Stat{type: :directory}} -> {:cont, {:ok, path}}
+        _other -> {:halt, {:error, {:not_a_directory, path}}}
+      end
+    end)
+  end
+
+  defp fresh_dirs(base, names) do
+    Enum.reduce([base | names], nil, fn name, at ->
+      path = if at, do: Path.join(at, name), else: name
+
+      case File.lstat(path) do
+        {:ok, %File.Stat{type: :directory}} ->
+          path
+
+        {:ok, _not_a_directory} ->
+          File.rm_rf!(path)
+          File.mkdir!(path)
+          path
+
+        {:error, :enoent} ->
+          File.mkdir!(path)
+          path
+      end
+    end)
   end
 
   @doc "The harness's private HOME, so its own state lives with the job and not the operator."
@@ -787,6 +949,10 @@ defmodule ForgeWorker.Job.Dir do
   @spec blobs_dir(String.t()) :: String.t()
   def blobs_dir(job_dir), do: Path.join(worker_dir(job_dir), "blobs")
 
+  @doc "Where a carried session is fetched to, and staged for upload, in the worker's own directory."
+  @spec session_dir(String.t()) :: String.t()
+  def session_dir(job_dir), do: Path.join(worker_dir(job_dir), "session")
+
   @doc "Where the logs a resume is handed are fetched to, before `prepare/3` copies them in."
   @spec fetched_dir(String.t()) :: String.t()
   def fetched_dir(job_dir), do: Path.join(worker_dir(job_dir), "fetched")
@@ -799,6 +965,13 @@ defmodule ForgeWorker.Job.Dir do
     Path.join(dir, "transcript-#{run + 1}.jsonl")
   end
 
+  @doc """
+  Where the harness's stderr goes: the worker's own directory, not the job's. The shell that
+  opens it is the worker's, and the runner reads it back for a failure's reason — so in the job
+  directory it was a name the agent could replace with a link, and the next run's shell would
+  truncate whatever it pointed at, or the tail would carry any file the worker can read into a
+  result the platform shows. The transcript moved out for the same reason.
+  """
   @spec stderr_path(String.t()) :: String.t()
-  def stderr_path(job_dir), do: Path.join(job_dir, "stderr.log")
+  def stderr_path(job_dir), do: Path.join(worker_dir(job_dir), "stderr.log")
 end

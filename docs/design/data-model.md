@@ -37,7 +37,11 @@ command's, null for every other kind and for a command that ended without one),
 finished), `declared_outcome` (the workflow outcome the agent selected, null unless converged),
 `turns`, `cost_usd` (what its runs have cost between them — a conversation's read from them with
 `Runs.total/1`, a workflow job's added up as each run reports; see **job_run**),
-`harness_session_id` (opaque, nullable, an optimisation only), `worker_id` (nullable),
+`harness_session_id` (opaque, nullable, an optimisation only), `session_blob` (the latest session
+file the worker uploaded — its store key and the Claude Code version that wrote it — which a resume
+on another machine puts back; `design/claude-code-events.md` § Resume), `resume_from_id` (the
+previous attempt of the state whose session a new attempt forks, set when the ticket came back to
+a state that attempt finished in, and cleared when a resume is refused), `worker_id` (nullable),
 `credential_id` (the inference credential its current or last run spent, nullable until it first
 starts), `model` (a conversation's, chosen when it was opened; a workflow job's is its state's and
 is not on the row), `memory_max` and `cores` (what the scheduler gates on, resolved once at creation

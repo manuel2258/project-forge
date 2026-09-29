@@ -48,6 +48,11 @@ defmodule Forge.Jobs do
   @commands_protocol 2
   @questions_protocol 3
 
+  # How much of a command's log a state reading it as an input is handed: its first and last bytes,
+  # a quarter of a document's size in all (`docs/design/workflow-grammar-v1.md` § Inputs).
+  @log_input_head 64 * 1024
+  @log_input_tail 192 * 1024
+
   # -- creation -------------------------------------------------------------------------------
 
   @doc """
@@ -56,8 +61,23 @@ defmodule Forge.Jobs do
   `entered` is how the ticket came into the state — `%{"from", "outcome", "by", "comment"}` from
   the transition that is creating the job — and nil for the ticket's first state. It goes into the
   spec so the job is told why it is here (`docs/design/job-prompt.md` § How the job arrived).
+
+  `came_back: true` says a transition is creating the job, as opposed to a person asking for the
+  state again. The engine passes it on every transition, a state's first entry included, and
+  whether there is anything to come back to is `forkable/4`'s: a new attempt forks its
+  predecessor's harness session when that one finished with an outcome it declared, left a
+  session to fork, and was given the same instructions (`docs/design/claude-code-events.md`
+  § Resume).
   """
-  @spec put_create(Multi.t(), term(), Ticket.t(), Workflow.t(), String.t(), map() | nil) ::
+  @spec put_create(
+          Multi.t(),
+          term(),
+          Ticket.t(),
+          Workflow.t(),
+          String.t(),
+          map() | nil,
+          keyword()
+        ) ::
           Multi.t()
   def put_create(
         multi,
@@ -65,7 +85,8 @@ defmodule Forge.Jobs do
         %Ticket{} = ticket,
         %Workflow{} = workflow,
         state_name,
-        entered \\ nil
+        entered \\ nil,
+        opts \\ []
       ) do
     multi
     |> Multi.run(key, fn repo, _ ->
@@ -83,6 +104,10 @@ defmodule Forge.Jobs do
             project_id: ticket.project_id,
             state: state_name,
             attempt: spec.attempt,
+            resume_from_id:
+              if(Keyword.get(opts, :came_back, false),
+                do: forkable(repo, ticket.id, state_name, spec)
+              ),
             spec: spec |> Spec.to_json() |> Jason.decode!(),
             memory_max: resources.memory,
             cores: resources.cores
@@ -227,8 +252,64 @@ defmodule Forge.Jobs do
 
     case repo.one(query) do
       nil -> {:error, {:missing_input, name}}
-      version -> {:ok, %Input{name: name, version: version.version, content: version.content}}
+      version -> input_version(name, version)
     end
+  end
+
+  defp input_version(name, %{content: content} = version) when is_binary(content),
+    do: {:ok, %Input{name: name, version: version.version, content: content}}
+
+  # A command's log, the one blob a state may read (`docs/design/workflow-grammar-v1.md` § Inputs).
+  # Inlined like a document, so the worker needs nothing new to hand it over, and cut to its two
+  # ends so a runaway build cannot make every later job's spec the size of its log. A log the
+  # store cannot give back is an input not written: such an input is always optional.
+  defp input_version(name, version) do
+    case Artifacts.excerpt(version, @log_input_head, @log_input_tail) do
+      {:ok, text} ->
+        {:ok, %Input{name: name, version: version.version, content: text}}
+
+      {:error, reason} ->
+        Logger.warning("could not read #{name} version #{version.version}: #{inspect(reason)}")
+        {:error, {:missing_input, name}}
+    end
+  end
+
+  # The previous attempt of the state, if it is one a new attempt may fork: it finished having
+  # converged — its agent declared an outcome — and left a session and the file to restore it
+  # from. An attempt that ended any other way is not carried on from.
+  #
+  # **And it was given the same instructions.** A fork remembers the prompt its session began
+  # with and is told its instructions are the ones it was given, so a re-pin that moved the
+  # state's prompt, or a platform whose preamble changed, starts the new attempt fresh instead.
+  #
+  # `status == :finished` is an equivalent mutant: a row carries an outcome only once finished
+  # (`Job.progress_changeset/2`). Kept for what it says.
+  defp forkable(repo, ticket_id, state_name, %Spec{attempt: attempt} = spec) do
+    from(j in previous_attempt(ticket_id, state_name, attempt),
+      where:
+        j.status == :finished and j.outcome == :converged and
+          not is_nil(j.harness_session_id) and not is_nil(j.session_blob),
+      select: j.id
+    )
+    |> given_the_same(spec)
+    |> repo.one()
+  end
+
+  # The agent's attempt of `state_name` before attempt `attempt`, the one a fork carries on from
+  # and a second review reads what changed since. An agent's own, not a command's: the commands
+  # it invokes share its state's name and number their own attempts (`next_attempt/3`).
+  defp previous_attempt(ticket_id, state_name, attempt) do
+    from j in Job,
+      where:
+        j.ticket_id == ^ticket_id and j.state == ^state_name and j.kind == :workflow and
+          j.attempt == ^(attempt - 1)
+  end
+
+  defp given_the_same(query, %Spec{prompt: prompt, preamble_hash: preamble}) do
+    from j in query,
+      where:
+        fragment("(? ->> 'prompt') IS NOT DISTINCT FROM ?", j.spec, ^prompt) and
+          fragment("(? ->> 'preamble_hash') IS NOT DISTINCT FROM ?", j.spec, ^preamble)
   end
 
   # An agent's attempts, not its commands': they share its state, and count their own
@@ -587,16 +668,18 @@ defmodule Forge.Jobs do
         "branch" => branch(job, ticket),
         "base" => ticket && ticket.base_commit
       },
-      "store" => %{
-        "transcript_key" => transcript,
-        # Used when the job stops, not when it starts, so it lives as long as the job may: its
-        # preparation and then its whole clock, which the worker starts only once the clone and
-        # the seed are ready (`docs/design/storage.md` § Serving).
-        "transcript_token" =>
-          Storage.Token.sign(:put, transcript,
-            outlasting_ms: wall_clock_ms(job) + preparation_margin_ms()
-          )
-      },
+      "store" =>
+        %{
+          "transcript_key" => transcript,
+          # Used when the job stops, not when it starts, so it lives as long as the job may: its
+          # preparation and then its whole clock, which the worker starts only once the clone and
+          # the seed are ready (`docs/design/storage.md` § Serving).
+          "transcript_token" =>
+            Storage.Token.sign(:put, transcript,
+              outlasting_ms: wall_clock_ms(job) + preparation_margin_ms()
+            )
+        }
+        |> Map.merge(session_upload(job)),
       # Every job, workflow and chat alike, with no grammar key: an unread file costs nothing
       # (`docs/design/ticket-proposals.md` § Reading the backlog).
       "backlog" => Backlog.compose(project),
@@ -610,13 +693,91 @@ defmodule Forge.Jobs do
         "memory_max" => job.memory_max || Workers.slice_bytes(),
         "cpu_weight" => Workers.config(:cpu_weight, 100)
       },
-      "resume_session" => job.harness_session_id,
       "wall_clock_ms" => wall_clock_ms(job)
     }
+    |> Map.merge(resume_keys(job))
     |> Map.merge(chat_assignment(job))
     |> Map.merge(command_logs(job))
     |> Map.merge(group_outputs(job))
   end
+
+  # Where the run's harness session goes, one file per upload under a prefix of its own — a
+  # conversation uploads after every turn — with a token that lives as long as the run may
+  # (`docs/design/claude-code-events.md` § Resume). A command has no harness, and its
+  # assignment is `command_assignment/4`'s, which asks for none.
+  defp session_upload(%Job{} = job) do
+    prefix = session_prefix(job.id) <> Storage.Key.nonce() <> "/"
+
+    %{
+      "session_prefix" => prefix,
+      "session_token" =>
+        Storage.Token.sign_prefix(prefix,
+          outlasting_ms: wall_clock_ms(job) + preparation_margin_ms()
+        )
+    }
+  end
+
+  # What this run resumes, if anything: `resume_session`, whether to fork it, and the session file
+  # to put back, with a token to fetch it that lives the preparation margin, as a command log's
+  # does. `resume_session` is always a key of the assignment, nil when there is nothing to resume.
+  defp resume_keys(job) do
+    case resume_source(job) do
+      {id, blob, fork} ->
+        %{"resume_session" => id, "fork_session" => fork}
+        |> Map.merge(session_ref(id, blob))
+
+      nil ->
+        %{"resume_session" => nil}
+    end
+  end
+
+  defp session_ref(id, %{"key" => key} = blob) do
+    %{
+      "session" => %{
+        "key" => key,
+        "token" => Storage.Token.sign(:get, key, outlasting_ms: preparation_margin_ms()),
+        "id" => id,
+        "version" => blob["version"]
+      }
+    }
+  end
+
+  defp session_ref(_id, _none), do: %{}
+
+  @doc """
+  The session a run of `job` resumes, as `{session_id, session_blob, fork?}`, or nil
+  (`docs/design/claude-code-events.md` § Resume):
+
+  - a job's own session, when it has one — a resume after a question, a park, a rate limit;
+  - otherwise the previous attempt's, forked, when the job came back to a state that attempt
+    finished in (`jobs.resume_from_id`);
+  - a conversation's own, forked, and only when a file was carried: a reopen is a new process
+    whose turns are numbered from one again, and nothing re-queues a conversation whose resume
+    finds nothing, so it never resumes on the chance the machine holds the session.
+  """
+  @spec resume_source(Job.t()) :: {String.t(), map() | nil, boolean()} | nil
+  def resume_source(%Job{kind: :chat, harness_session_id: id, session_blob: %{} = blob})
+      when is_binary(id),
+      do: {id, blob, true}
+
+  def resume_source(%Job{kind: :chat}), do: nil
+
+  def resume_source(%Job{harness_session_id: id, session_blob: blob}) when is_binary(id),
+    do: {id, blob, false}
+
+  # `%{} = blob` is an equivalent mutant here: `resume_from_id` is set only to an attempt that had
+  # a session file (`forkable/4`), and nothing clears a workflow job's afterwards.
+  def resume_source(%Job{resume_from_id: from}) when is_binary(from) do
+    case Repo.get(Job, from) do
+      %Job{harness_session_id: id, session_blob: %{} = blob} when is_binary(id) ->
+        {id, blob, true}
+
+      _gone ->
+        nil
+    end
+  end
+
+  def resume_source(%Job{}), do: nil
 
   # Where a job's groups of files go, for a job that declares one (`Forge.Jobs.Blobs`). Uploaded
   # when the job stops, so the token lives as long as a transcript's does.
@@ -626,14 +787,18 @@ defmodule Forge.Jobs do
     do: Blobs.outputs(job, spec(job), wall_clock_ms(job) + preparation_margin_ms())
 
   # A resume after commands is handed each command's log, by key and a `get` token, to fetch into
-  # `$FORGE_JOB/commands/` before it starts (`docs/design/job-prompt.md` § Commands). Spent while
-  # the worktree is prepared, so it lives the preparation margin and not the clock.
+  # `$FORGE_JOB/commands/` before it starts (`docs/design/job-prompt.md` § Commands), and so is a
+  # job entered from a command state, on every run (§ How the job arrived). Spent while the
+  # worktree is prepared, so it lives the preparation margin and not the clock.
   defp command_logs(%Job{kind: :workflow} = job) do
-    case Commands.results(job) do
-      {_results, []} ->
+    {_results, own} = Commands.results(job)
+    {_entered, entered} = Commands.entered(job)
+
+    case entered ++ own do
+      [] ->
         %{}
 
-      {_results, logs} ->
+      logs ->
         %{
           "commands" =>
             Enum.map(logs, fn %{file: file, key: key} ->
@@ -802,11 +967,14 @@ defmodule Forge.Jobs do
     spec = %{spec(job) | answered_keys: Artifacts.answered_keys(ticket_id), model: model_for(job)}
     spec = lower_budget(spec, job, ticket)
     {results, _logs} = Commands.results(job)
+    {entered, _logs} = Commands.entered(job)
 
     spec = %{
       spec
       | may_invoke: Commands.remaining(job, spec.may_invoke),
-        command_results: results
+        command_results: results,
+        entered_commands: entered,
+        previous_changeset: previous_changeset(job, spec)
     }
 
     case Artifacts.latest(ticket_id, Workflow.answers_artifact()) do
@@ -847,8 +1015,9 @@ defmodule Forge.Jobs do
 
   # A ticket chat gets every document on the ticket, which is more than any one of its jobs is
   # handed and is the point: it is for asking about, or fixing, the work in flight. A project chat
-  # gets what it wrote itself. Every start of a conversation is cold and begins with `out/`
-  # empty, so without this a reopened project chat could not see a document it wrote an hour ago,
+  # gets what it wrote itself. Every start of a conversation begins with `out/` empty, a resumed
+  # reopen included, so without this a reopened project chat could not see a document it wrote an
+  # hour ago,
   # while a ticket chat's came back as the ticket's (`docs/design/conversations.md` § Context).
   # Its proposals are its own too, and are left out: they are backlog, not documents, and an open
   # one is already in `tickets/index.md`.
@@ -872,7 +1041,9 @@ defmodule Forge.Jobs do
   # declared. Only the copy the harness runs with is narrowed, and the difference is an event,
   # without which a job stopping at a tenth of its declared budget is inexplicable later.
   defp lower_budget(spec, %Job{} = job, %Ticket{} = ticket) do
-    {cost, binding} = Spend.effective_cost(spec.budget.cost, ticket, Tickets.workflow(ticket))
+    workflow = Tickets.workflow(ticket)
+    {cost, binding} = Spend.effective_cost(spec.budget.cost, ticket, workflow)
+    spec = put_allowance(spec, ticket, workflow)
 
     if binding == :state or cost >= spec.budget.cost do
       spec
@@ -887,9 +1058,44 @@ defmodule Forge.Jobs do
         }
       })
 
-      %{spec | budget: %{spec.budget | cost: cost}}
+      budget =
+        Map.merge(spec.budget, %{
+          cost: cost,
+          declared: spec.budget.cost,
+          lowered_by: Atom.to_string(binding)
+        })
+
+      %{spec | budget: budget}
     end
   end
+
+  # The commit the previous attempt of this state read as its `changeset`, for a job that reads one:
+  # read from that job's own stored spec, which pinned it when it was made.
+  defp previous_changeset(%Job{kind: :workflow, attempt: n} = job, %Spec{inputs: inputs})
+       when is_integer(n) and n > 1 do
+    with true <- Enum.any?(inputs, &(&1.name == Workflow.changeset_artifact())),
+         %Job{spec: %{"inputs" => previous}} <-
+           Repo.one(previous_attempt(job.ticket_id, job.state, n)),
+         %{"version" => sha} <-
+           Enum.find(previous, &(&1["name"] == Workflow.changeset_artifact())) do
+      sha
+    else
+      _none -> nil
+    end
+  end
+
+  defp previous_changeset(%Job{}, _spec), do: nil
+
+  # What the ticket has left of its allowance, beside the job's own budget: a job weighing whether
+  # another round is worth it was left to guess at the one figure that decides it
+  # (`docs/design/capacity.md` § Spend caps).
+  defp put_allowance(spec, ticket, %Workflow{limits: %{ticket_cost: cap}} = workflow)
+       when is_number(cap) do
+    left = ticket |> Spend.ticket_remaining(workflow) |> Decimal.to_float()
+    %{spec | budget: Map.merge(spec.budget, %{ticket_left: left, ticket_limit: cap})}
+  end
+
+  defp put_allowance(spec, _ticket, _workflow), do: spec
 
   # -- waiting --------------------------------------------------------------------------------
 
@@ -1023,7 +1229,7 @@ defmodule Forge.Jobs do
     |> Events.log(:event, "job.started", :system, %{
       ticket_id: job.ticket_id,
       job_id: job.id,
-      payload: %{"resume" => job.harness_session_id != nil}
+      payload: %{"resume" => resume_source(job) != nil}
     })
     |> Repo.transaction()
     |> case do
@@ -1157,11 +1363,25 @@ defmodule Forge.Jobs do
     end
   end
 
-  # A resumed harness that produced no `started` event never got going (session not found,
-  # different host); the design says fall back to a fresh invocation.
-  defp resume_failed?(%Job{harness_session_id: session}, %Result{} = result) do
-    session != nil and result.status == :finished and result.killed == nil and
-      result.harness["model"] == nil and result.outcome == :error
+  # A job's run that never got going ends in `error`, having written nothing; one that did not end
+  # in `error` is recorded as whatever it was.
+  defp resume_failed?(%Job{} = job, %Result{} = result),
+    do: resume_refused?(job, result) and result.outcome == :error
+
+  @doc """
+  Whether a run asked to resume a session never got going: the harness exited on its own and
+  never said which model it runs, which is how it refuses a session it cannot find
+  (`docs/measurements.md` § Session resume). A fork is a resume too: the previous attempt's
+  session, which the machine may not find.
+
+  A job's is re-queued fresh (`docs/design/claude-code-events.md` § Resume). A conversation's
+  session is forgotten, so that the next reopen starts cold rather than being refused again
+  (`Forge.Conversations.ended/4`).
+  """
+  @spec resume_refused?(Job.t(), Result.t()) :: boolean()
+  def resume_refused?(%Job{} = job, %Result{} = result) do
+    resume_source(job) != nil and result.status == :finished and result.killed == nil and
+      result.harness["model"] == nil
   end
 
   defp requeue_fresh(job, ticket, result) do
@@ -1169,7 +1389,11 @@ defmodule Forge.Jobs do
     |> put_transcript(ticket, job, result)
     |> Multi.update(
       :job,
-      Job.progress_changeset(job, %{status: :pending, harness_session_id: nil})
+      Job.progress_changeset(job, %{
+        status: :pending,
+        harness_session_id: nil,
+        resume_from_id: nil
+      })
     )
     |> Runs.close(job.id, DateTime.utc_now(:second))
     |> Events.log(:event, "job.resume_failed", {:job, job.id}, %{
@@ -1563,9 +1787,28 @@ defmodule Forge.Jobs do
     %{
       turns: job.turns + (result.harness["turns"] || 0),
       cost_usd: Decimal.add(job.cost_usd, decimal(result.harness["cost_usd"])),
-      harness_session_id: result.harness["session_id"] || job.harness_session_id
+      harness_session_id: result.harness["session_id"] || job.harness_session_id,
+      session_blob: session_blob(job, result.harness) || job.session_blob
     }
   end
+
+  @doc """
+  The session file a run or a turn reports it uploaded, as `jobs.session_blob` keeps it — its key
+  and the version that wrote it — or nil. Only a key under the job's own prefix is taken: the
+  worker names it, and a key elsewhere in the store would hand a later resume another job's
+  session (`docs/design/claude-code-events.md` § Resume).
+  """
+  @spec session_blob(Job.t(), map()) :: map() | nil
+  def session_blob(%Job{id: id}, %{"session_blob" => key} = harness) when is_binary(key) do
+    if String.starts_with?(key, session_prefix(id)) and Storage.Key.validate(key) == {:ok, key},
+      do: %{"key" => key, "version" => harness["version"]}
+  end
+
+  def session_blob(%Job{}, _harness), do: nil
+
+  # Everything a job's sessions are uploaded under; each assignment adds its own nonce, so a
+  # resumed run never collides with the key an earlier run of the same job wrote.
+  defp session_prefix(job_id), do: Storage.Key.job(job_id, "session-")
 
   defp progress_attrs(job, %Result{} = result) do
     base = accounting(job, result)
@@ -1599,6 +1842,31 @@ defmodule Forge.Jobs do
       "invalid" =>
         Map.new(result.invalid, fn {name, why} -> {name, ForgeCore.Error.to_text(why)} end)
     }
+  end
+
+  @doc """
+  What the platform refused of what `job` wrote, by name, with why: the documents that did not
+  parse, from its latest `job.finished`. A refused document is not kept, so this is the only
+  record of what was wrong with it — the reason a job ended `error` with nothing to show.
+  """
+  @spec refusals(Job.t()) :: %{String.t() => String.t()}
+  def refusals(%Job{id: id}) do
+    case Events.latest_for_job(id, "job.finished") do
+      %Event{payload: %{"invalid" => invalid}} when is_map(invalid) -> invalid
+      _none -> %{}
+    end
+  end
+
+  @doc """
+  The last thing `job`'s agent said, from its latest `job.harness.text`, or nil. What a reader
+  reconstructing a job wants before its transcript, which is too large to read to find it.
+  """
+  @spec last_words(Job.t()) :: String.t() | nil
+  def last_words(%Job{id: id}) do
+    case Events.latest_for_job(id, "job.harness.text") do
+      %Event{payload: %{"text" => text}} when is_binary(text) -> text
+      _none -> nil
+    end
   end
 
   @doc "Resumes a waiting job once its blocking questions are answered: back to pending."

@@ -294,6 +294,12 @@ marks.
 - **Hollow primary square** — advances state or spends capacity.
 - **Hollow success circle** — routine.
 
+**A stuck item says why.** Its sentence is `<title> is stuck: <reason>.`, the reason from the
+ticket's latest `ticket.stuck` — a failed job, a `max` that ran out, an outcome no edge matches,
+a rejected approval. The push carries it after the title, and the ticket's Decide says it in place
+of *Stuck, and waiting for you to choose*. The first ticket stuck on an exhausted `max` read only
+*needs a way forward*, which is true of every stuck ticket and says nothing about this one.
+
 The end of the queue is the success state: a success-coloured `END OF QUEUE` micro-label, a
 sentence phrased as completion, and one line of evidence that work happened without you. The same
 block, alone, is the empty state. Every other empty state names what would fill it rather than
@@ -543,6 +549,19 @@ none as the engine outcome that says why — and its duration where a job's turn
 it has neither. One an agent invoked is indented beneath the job that invoked it, in the step that
 job is in; a command state's commands are that state's step. A command state's glyph is a job
 state's, `▸`: entering it starts work that ends in an outcome.
+
+**A failed command of the batch that decided where the ticket is shows the end of its log** under
+its row: the last 4 KiB, from a whole line, with how much was cut. The failing line is what a
+person looking at `build_failed` wants first, and before this it was behind the log's download.
+Only that batch — an older one's failure was answered by the work after it — and never an
+agent's own commands, whose logs the agent is handed. The rail's last four events say what three
+of them mean beside their type: the statuses a batch decided and its outcome, why the ticket
+stuck, and which edge it took.
+
+**A ticket whose pin the default branch has moved past says so in its rail**, under the
+`workflow` fact: the paths under `.forge/` that changed, and **Re-pin at `<sha>`** behind a
+confirm (`workflow-grammar-v1.md` § Pinning). Nothing is said while `.forge/` is unchanged —
+a default branch that moved on for other reasons changes nothing the ticket runs.
 
 **A command's page** is the job page with what a command has: its exit status as the largest thing
 on it, the script as it ran, the argument vector as JSON — it reached `exec` as a vector, and

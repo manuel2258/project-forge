@@ -530,6 +530,18 @@ wrote, which M2 measured and which is the number that matters on a real host.
 nothing; on a machine without btrfs — a development machine, a container — each promotion copies
 the tree. Correct either way, and slow in the place that is already slow.
 
+**A tool's dependency cache is build output like any other, and belongs in the checkout.** Every
+job's `HOME` is its own and goes with the job directory, so a Gradle, npm or cargo cache in the
+default place under `HOME` is fetched again by every job on every machine. Pointed at an ignored
+directory inside the checkout instead — `GRADLE_USER_HOME="$PWD/.gradle-home"` — it is carried
+exactly as the build directory is: in the seed when the seed was published with it warm, and in the
+ticket's volume from one of its agent jobs to the next on the same machine. A command job snapshots
+the ticket's volume where there is one and promotes nothing, since its tree is a commit. There is
+no shared cache between jobs beyond these, and no key that declares one: the first project to hit
+this measured 343 MB fetched per job. Pointing the cache at a
+directory outside the checkout, which is the obvious fix, is the one that loses it — nothing
+outside the checkout and the Nix store survives a job.
+
 What this deliberately does not do is move warmth *between* tickets. When a ticket merges, its
 volume is the best possible starting point for the next ticket on that machine, and promoting it
 to be the project's local base is the obvious next step — and a separate one, because it needs a
@@ -683,10 +695,11 @@ destruction collected them. Each has a rule, and the rules are retention rather 
 purpose: a worker cannot always tell whether a job will be resumed, and a sweep that only has to
 know an age is a sweep that cannot get that wrong.
 
-- **Job directories.** `<root>/jobs/<job_id>` holds the prompt, stderr and the agent's private
+- **Job directories.** `<root>/jobs/<job_id>` holds the prompt and the agent's private
   `HOME` — which is where Claude Code keeps the session a resume needs, so it cannot simply go
   when the job ends. Beside it, `<root>/jobs/<job_id>.worker` holds what the worker writes and
-  reads back: the transcripts, a command's log, the groups of files staged for upload. Not inside
+  reads back: the transcripts, the harness's stderr, a command's log, the groups of files staged
+  for upload, the session staged for upload or restore. Not inside
   the job directory, whose every name the job's Unix user owns and could replace with a link to a
   file only the worker may read, which the worker would then upload; mode 0700, so no other job
   reads it either. Both are swept together. Directories untouched for `job_retention_ms` are removed
@@ -740,12 +753,12 @@ immutable and already in the row; inputs are re-pinned at run time as they are t
 is a fresh snapshot with the branch checked out at the commit the hibernation left — reset to it
 even though the run is a resume, because a snapshot has no unfinished work of its own to keep
 (`docs/design/job-prompt.md` § The continuation prompt). Resuming the harness session — a workflow
-job's `--resume`; a chat never resumes one (`docs/design/conversations.md` § Lifetime) — is
-attempted whenever a session was recorded, and succeeds only where the same worker still has the
-same worktree path, because Claude Code's session lookup is per project directory and will not
-find it anywhere else (`docs/design/claude-code-events.md`). When it is not found, the job is
+job's `--resume`, a reopened chat's `--resume --fork-session` (`docs/design/conversations.md`
+§ Lifetime) — is attempted whenever a session was recorded, on whichever machine the run lands:
+the worker uploads the session's file after a run and puts it back before the resume
+(`docs/design/claude-code-events.md` § Resume). When the harness cannot use it, a job is
 re-queued without the session and runs from the full prompt and the artifacts, which is the
-contract.
+contract, and a conversation forgets it, so that its next reopen starts cold.
 
 ## Idle destroy
 

@@ -21,7 +21,7 @@ defmodule ForgeWorker.Job.Conversation do
 
   alias ForgeCore.Job.Result
   alias ForgeWorker.Config
-  alias ForgeWorker.Job.{Dir, Runner, Workspace}
+  alias ForgeWorker.Job.{Dir, Runner, Session, Workspace}
   alias ForgeWorker.{Log, Slice, Store}
 
   require Logger
@@ -84,6 +84,9 @@ defmodule ForgeWorker.Job.Conversation do
        # the prompt riding with it.
        pending: if(hold, do: [], else: [:prompt]),
        hold: hold,
+       # The CLI's version, from its `system/init`: recorded with each session upload, so a
+       # reopen restores the file only onto the CLI that wrote it.
+       version: nil,
        idle_ms: Keyword.get(opts, :idle_ms) || assignment["idle_ms"] || @default_idle_ms,
        idle_timer: nil,
        closing: nil,
@@ -241,12 +244,19 @@ defmodule ForgeWorker.Job.Conversation do
     slice = assignment["slice"] || %{}
     spec = ForgeCore.Job.Spec.from_map(assignment["spec"])
 
-    harness_opts =
+    harness = ForgeWorker.Link.harness()
+
+    # A reopened conversation resumes its session as a fork, when one was carried and passes its
+    # check, and starts cold with the replay otherwise (`docs/design/conversations.md` § Lifetime).
+    {harness_opts, session} =
       Application.get_env(:forge_worker, :harness_opts, [])
       |> Keyword.put(:mode, :streaming)
+      |> Keyword.merge(ForgeWorker.Link.resume_opts(assignment))
       |> put_max_cost(assignment)
       |> put_model(spec)
-      |> ForgeWorker.Job.Credential.put(assignment, ForgeWorker.Link.harness().driver())
+      |> then(&Session.restore(assignment, job_dir(state), state.worktree, &1, harness))
+
+    harness_opts = ForgeWorker.Job.Credential.put(harness_opts, assignment, harness.driver())
 
     [
       harness: ForgeWorker.Link.harness(),
@@ -260,6 +270,7 @@ defmodule ForgeWorker.Job.Conversation do
       slice_opts: %{memory_max: slice["memory_max"], cpu_weight: slice["cpu_weight"]},
       harness_opts: harness_opts,
       backlog: assignment["backlog"],
+      session: session,
       hold_prompt: state.hold,
       # A conversation is bounded by going idle, not by the clock: a chat someone is still in
       # is not a runaway. The wall clock stays as a backstop, far out.
@@ -332,6 +343,14 @@ defmodule ForgeWorker.Job.Conversation do
     {:noreply, %{state | pending: pending}}
   end
 
+  def handle_info(
+        {:harness_event, %{type: "job.harness.started", payload: payload} = event},
+        state
+      ) do
+    send(state.link, {:event, state.job_id, event})
+    {:noreply, %{state | version: payload[:version] || state.version}}
+  end
+
   def handle_info({:harness_event, event}, state) do
     send(state.link, {:event, state.job_id, event})
     {:noreply, state}
@@ -350,6 +369,10 @@ defmodule ForgeWorker.Job.Conversation do
     proposals = Dir.proposals(job_dir(state))
     documents = Dir.documents(job_dir(state))
 
+    # After every turn and not at the end, because a conversation's end may be its machine's: it
+    # goes dormant when its worker is lost, and a reopen resumes what the last turn left.
+    session = Session.upload(job_dir(state), event.payload[:session_id], state.assignment, index)
+
     send(
       state.link,
       {:chat_turn, state.job_id, index,
@@ -365,7 +388,7 @@ defmodule ForgeWorker.Job.Conversation do
          "invalid_proposals" => proposals.invalid_proposals,
          "documents" => documents.documents,
          "invalid_documents" => documents.invalid_documents,
-         "harness" => turn_summary(event)
+         "harness" => turn_summary(event, session, state.version)
        }}
     )
 
@@ -494,11 +517,13 @@ defmodule ForgeWorker.Job.Conversation do
 
   # String keys: this crosses the channel as JSON, and an atom key here arrives as a string key
   # there. The same trap `harness_summary/3` already carries a comment about.
-  defp turn_summary(event) do
+  defp turn_summary(event, session, version) do
     payload = event.payload
 
     %{
       "session_id" => payload[:session_id],
+      "session_blob" => session,
+      "version" => version,
       "subtype" => payload[:subtype],
       "is_error" => payload[:is_error],
       "turns" => payload[:num_turns],

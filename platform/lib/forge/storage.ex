@@ -25,6 +25,13 @@ defmodule Forge.Storage do
   @doc "Writes the object at `key` to `path`, without holding it in memory."
   @callback fetch(key(), Path.t()) :: {:ok, info()} | {:error, :not_found | term()}
   @callback stat(key()) :: {:ok, info()} | {:error, :not_found}
+  @doc """
+  The object's size and `length` bytes of it from `offset`, fewer at its end — without reading or
+  hashing the rest, which `stat/1` does. What a log's two ends are read with, on a page that asks
+  on every load (`Forge.Artifacts.excerpt/3`); an S3 implementation would be a ranged GET.
+  """
+  @callback read_range(key(), non_neg_integer(), non_neg_integer()) ::
+              {:ok, %{size: non_neg_integer(), bytes: binary()}} | {:error, :not_found | term()}
   @callback delete(key()) :: :ok | {:error, term()}
 
   @uri_scheme "store:"
@@ -47,6 +54,12 @@ defmodule Forge.Storage do
   @spec stat(key()) :: {:ok, info()} | {:error, term()}
   def stat(key) do
     with {:ok, key} <- Key.validate(key), do: impl().stat(key)
+  end
+
+  @spec read_range(key(), non_neg_integer(), non_neg_integer()) ::
+          {:ok, %{size: non_neg_integer(), bytes: binary()}} | {:error, term()}
+  def read_range(key, offset, length) do
+    with {:ok, key} <- Key.validate(key), do: impl().read_range(key, offset, length)
   end
 
   @spec delete(key()) :: :ok | {:error, term()}

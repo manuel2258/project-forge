@@ -192,8 +192,7 @@ defmodule Forge.Artifacts do
   This is the context a conversation opens with (`docs/design/conversations.md` § Context). On a
   ticket it is every document the ticket has — more than any one job is handed, which is the
   inputs its state declares. In a conversation's own scope it is what that conversation wrote,
-  which a reopen would otherwise lose from view: a reopen is a cold start, and a cold start
-  clears `out/`. Documents only — a blob is in the store and a changeset is a commit, and neither
+  which a reopen would otherwise lose from view: every reopen, resumed or cold, clears `out/`. Documents only — a blob is in the store and a changeset is a commit, and neither
   is something to inline into a prompt.
   """
   @spec latest_documents(scope()) :: [
@@ -339,6 +338,70 @@ defmodule Forge.Artifacts do
       {:error, reason} -> {:error, reason}
     end
   end
+
+  @doc """
+  A version read as text an agent or a page can hold: whole when it is at most `head + tail` bytes,
+  and otherwise its first `head` and last `tail` bytes with how much was cut named between them.
+  Bytes that are not UTF-8, and NUL, which Postgres will not store in JSON, become U+FFFD.
+
+  What a state that reads a command's log is handed as its input (`docs/design/workflow-grammar-v1.md`
+  § Inputs), and what the ticket page shows of a failed command's log. Both ends, not one: a build
+  says what it was doing at the top and why it stopped at the bottom. Read with two ranged reads
+  (`Forge.Storage.read_range/3`) and nothing else: the ticket page asks this on every load, and
+  `Storage.stat/1` hashes the whole object, which for a large build log is seconds.
+  """
+  @spec excerpt(Version.t(), non_neg_integer(), non_neg_integer()) ::
+          {:ok, String.t()} | {:error, term()}
+  def excerpt(%Version{blob_uri: "store:" <> _rest = uri}, head, tail) do
+    with {:ok, key} <- key(uri),
+         {:ok, %{size: size, bytes: bytes}} <- Storage.read_range(key, 0, head + tail) do
+      if size <= head + tail,
+        do: {:ok, printable(bytes)},
+        else: with_tail(key, size, binary_part(bytes, 0, head), tail)
+    end
+  end
+
+  def excerpt(%Version{} = version, _head, _tail) do
+    with {:ok, bytes} <- content(version), do: {:ok, printable(bytes)}
+  end
+
+  defp with_tail(key, size, first, tail) do
+    with {:ok, %{bytes: last}} <- Storage.read_range(key, size - tail, tail) do
+      {:ok, cut(size, lines(first, &up_to_last_line/1), lines(last, &from_first_line/1))}
+    end
+  end
+
+  # Cut on line boundaries where the log has lines, so neither end starts or stops half way
+  # through one — unless the cut would leave nothing to show. A log that ends in one line longer
+  # than the tail, or with its only newline at the very end, is the shape a build's failure
+  # often has, and the line it ended on is the one worth reading: that end is kept as the bytes
+  # fall rather than cut away to the marker alone.
+  defp lines(bytes, cut) do
+    kept = cut.(bytes)
+    if String.trim(kept) == "", do: bytes, else: kept
+  end
+
+  defp up_to_last_line(bytes) do
+    case :binary.matches(bytes, "\n") do
+      [] -> bytes
+      matches -> binary_part(bytes, 0, elem(List.last(matches), 0) + 1)
+    end
+  end
+
+  defp from_first_line(bytes) do
+    case :binary.match(bytes, "\n") do
+      :nomatch -> bytes
+      {at, 1} -> binary_part(bytes, at + 1, byte_size(bytes) - at - 1)
+    end
+  end
+
+  defp cut(size, first, last) do
+    gone = size - byte_size(first) - byte_size(last)
+    first = if first == "" or String.ends_with?(first, "\n"), do: first, else: first <> "\n"
+    printable(first) <> "[… #{gone} bytes cut, of #{size} …]\n" <> printable(last)
+  end
+
+  defp printable(bytes), do: bytes |> String.replace_invalid() |> String.replace(<<0>>, "\uFFFD")
 
   defp key(uri) do
     case Storage.key_from_uri(uri) do
@@ -624,16 +687,64 @@ defmodule Forge.Artifacts do
           String.t()
   def render_answers(ticket_id, pending \\ []) do
     existing =
-      Enum.map(answered(ticket_id), &{&1.question, &1.answer.choice, &1.answer.text})
+      Enum.map(answered(ticket_id), fn row ->
+        {%{
+           row.question
+           | artifact_version: %{version: row.version, artifact: %{name: row.artifact}}
+         }, row.answer.choice, row.answer.text}
+      end)
 
     entries =
       Enum.map_join(existing ++ pending, "\n", fn {question, choice, text} ->
         answer = Answer.reads(choice, text)
-        "## #{question.key}\n\nQ: #{question.text}\n\nA: #{answer}\n"
+
+        "## #{question.key}\n\nQ: #{question.text}\n\nA: #{answer}\n" <>
+          assumed(question, choice)
       end)
 
     "# Answers\n\nDecisions a person made on this ticket, oldest first.\n\n" <> entries
   end
+
+  # `docs/design/job-prompt.md` § Non-blocking questions. A document written on an assumption is
+  # immutable, and its answer lands here, beside it: every later job reads both, and without this
+  # each re-derived which one holds. So the entry names the document and the assumption, and says
+  # outright when the answer is a different option from the one assumed. An assumption in prose
+  # cannot be compared with a choice, so that case is named and left to the reader. Only a
+  # non-blocking question carries an assumption — the parser refuses one on a blocking question —
+  # so the assumption alone is the match.
+  defp assumed(%Question{assumption: assumption} = question, choice)
+       when is_binary(assumption) do
+    where = source(question)
+
+    option? = ForgeCore.Document.Question.offers?(question, assumption)
+
+    # `option?` is an equivalent mutant in the first clause: a choice is one of the options'
+    # labels, so a choice equal to the assumption already says the assumption is one.
+    cond do
+      option? and choice == assumption ->
+        "\n#{where} assumed `#{assumption}` and carried on; this confirms it.\n"
+
+      option? and is_binary(choice) ->
+        "\n**This overturns an assumption.** #{where} was written assuming `#{assumption}`#{at(question)}. " <>
+          "Where it says otherwise, this answer holds, not the document.\n"
+
+      true ->
+        "\n#{where} was written assuming: #{assumption}#{at(question)}. " <>
+          "Where this answer differs, the answer holds, not the document.\n"
+    end
+  end
+
+  defp assumed(_question, _choice), do: ""
+
+  defp source(%Question{artifact_version: %{version: version, artifact: %{name: name}}}),
+    do: "`#{name}` version #{version}"
+
+  # `anchor != ""` is an equivalent mutant: the parser refuses an empty anchor
+  # (`ForgeCore.Document.Question`), so a stored question has a non-empty one or none.
+  defp at(%Question{anchor: anchor}) when is_binary(anchor) and anchor != "",
+    do: ", at the passage beginning \"#{String.slice(anchor, 0, 120)}\""
+
+  defp at(_question), do: ""
 
   @doc """
   Records the branch head as a version of the `changeset` artifact, so approvals can attach

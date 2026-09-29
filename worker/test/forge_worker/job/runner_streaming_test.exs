@@ -57,13 +57,14 @@ defmodule ForgeWorker.Job.RunnerStreamingTest do
         worktree: context.worktree,
         owner: test_pid,
         sink: fn event -> send(test_pid, {:event, event}) end,
-        harness_opts: [
-          executable: fake_executable(),
-          credential: {:api_key, "secret-key"},
-          mode: :streaming
-        ],
+        harness_opts:
+          [
+            executable: fake_executable(),
+            credential: {:api_key, "secret-key"},
+            mode: :streaming
+          ] ++ Keyword.get(extra, :harness_opts, []),
         extra_env: [{"FAKE_SCENARIO", "chat"} | Keyword.get(extra, :extra_env, [])]
-      ] ++ Keyword.drop(extra, [:spec, :extra_env])
+      ] ++ Keyword.drop(extra, [:spec, :extra_env, :harness_opts])
 
     {:ok, pid} = Runner.start_link(opts)
     {pid, spec}
@@ -71,18 +72,20 @@ defmodule ForgeWorker.Job.RunnerStreamingTest do
 
   # A reopened conversation with nothing waiting holds its prompt until someone writes; its
   # harness is silent because it has been given nothing, and that is not a harness failing to
-  # start. The watch begins when the prompt goes down, not when the process does.
+  # start. The watch begins when the prompt goes down, not when the process does: held for twice
+  # the limit, it is neither noticed nor stopped. Once the message is down it is watched like any
+  # other, so whether a notice follows then depends on how fast the harness answers, which under
+  # a loaded test run is not fast enough to assert on.
   test "a held prompt is not a harness that never started", context do
     {pid, _spec} =
-      chat(context, hold_prompt: true, start_notice_ms: 20, start_timeout_ms: 40)
+      chat(context, hold_prompt: true, start_notice_ms: 100, start_timeout_ms: 200)
 
-    Process.sleep(150)
+    Process.sleep(400)
     assert Process.alive?(pid)
     refute_received {:event, %{type: "job.harness.starting"}}
 
     assert Runner.send_message(pid, "now there is something") == :ok
     assert_receive {:turn, _job_id, 1, _event}, 5_000
-    refute_received {:event, %{type: "job.harness.starting"}}
     Runner.close(pid)
   end
 
@@ -177,6 +180,46 @@ defmodule ForgeWorker.Job.RunnerStreamingTest do
   # the prompt at start, as a first start does, is a billed turn spent answering the opening
   # message a second time as though it were new — which is what the old path did, because the
   # platform handed a reopen the first `chat.message` as its prompt.
+  # A conversation's documents are collected every turn, so what its last process left in
+  # `out/` is recorded; a reopen that resumes its session clears it as a cold one does, whether
+  # or not the resume is a fork.
+  test "a resumed conversation starts with nothing in out/", context do
+    held = spec(%{kind: :chat, prompt: nil, branch: "chat/held"})
+    stale = Path.join([job_dir(context, held), "out", "stale.md"])
+    File.mkdir_p!(Path.dirname(stale))
+    File.write!(stale, "recorded last time\n")
+
+    {pid, _spec} =
+      chat(context, spec: held, hold_prompt: true, harness_opts: [resume_session: "sess-42"])
+
+    refute File.exists?(stale)
+
+    # Stopped before the test's directory is removed: the harness, which finds no session to
+    # resume, is still writing into it.
+    ref = Process.monitor(pid)
+    Runner.close(pid)
+    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 5_000
+  end
+
+  # Composed when the message arrives, into a directory the conversation's last process had for
+  # its own: a `prompt.md` it left as a link is replaced, not written through.
+  test "a held prompt is written new, not through a link the last process left", context do
+    held = spec(%{kind: :chat, prompt: nil, replay: "# So far\n", branch: "chat/held"})
+    job_dir = job_dir(context, held)
+    File.mkdir_p!(job_dir)
+    victim = Path.join(tmp_dir("outside"), "victim")
+    File.write!(victim, "untouched")
+    File.ln_s!(victim, Path.join(job_dir, "prompt.md"))
+
+    {pid, _spec} = chat(context, spec: held, hold_prompt: true)
+    assert Runner.send_message(pid, "hello") == :ok
+    assert_receive {:turn, _job_id, 1, _event}, 5_000
+    Runner.close(pid)
+
+    assert File.read!(victim) == "untouched"
+    assert {:ok, %File.Stat{type: :regular}} = File.lstat(Path.join(job_dir, "prompt.md"))
+  end
+
   test "a held prompt waits for the first message and goes down with it", context do
     held =
       spec(%{

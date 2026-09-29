@@ -85,10 +85,11 @@ it was reported in (git's, the store's, the filesystem's):
 | `credential.unopened` | error | the job's credential would not open, so the harness runs without one |
 | `slice.failed` | error | a job or command it could not confine, and so did not run |
 | `slice.uncleaned` | warning | a job's files it could not take back from the job's user, or the user it could not remove |
-| `upload.failed` | warning | a transcript, a blob or a command's log that did not reach the store, or had nowhere to go |
+| `upload.failed` | warning | a transcript, a blob, a command's log or a harness session that did not reach the store, or had nowhere to go |
 | `history.unwritten` | warning | what already ran on the ticket that a conversation was to read and could not be laid out, or an entry refused for a name that leaves its folder |
 | `backlog.unwritten` | warning | the project's tickets that could not be laid out for the job, or an entry refused |
-| `commands.unwritten` | warning | a command's log a resumed job was to read, left out because it would not fetch or its name was refused |
+| `session.unrestored` | warning | a carried harness session it did not put back — written by another version of the CLI, not the session's own, or not downloadable — and so a cold start, or for a job a resume left to what the machine holds |
+| `commands.unwritten` | warning | a command's log a resumed job, or one entered from a command state, was to read, left out because it would not fetch or its name was refused |
 | `volume.unused` | warning | a seed or ticket volume that would not become the job's worktree, so it started colder |
 | `volume.unkept` | warning | a finished worktree it could not keep as the ticket's template, so the next job starts colder |
 | `worktree.undeleted` | warning | a finished job's worktree it could not remove |

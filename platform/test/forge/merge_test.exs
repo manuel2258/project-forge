@@ -423,22 +423,8 @@ defmodule Forge.MergeTest do
 
   # Moves the default branch somewhere the ticket branch cannot merge into cleanly. Written
   # directly, because the endpoint exists precisely to refuse this.
-  defp diverge_default_branch(%{project: project, bare: bare}, path, content) do
-    dir = Path.join(tmp_dir("merge-trunk"), "trunk")
-    {:ok, _out} = Git.run(tmp_dir("merge-trunk-parent"), ["clone", "--quiet", bare, dir])
-    {:ok, _out} = Git.run(dir, ["config", "user.name", "trunk"])
-    {:ok, _out} = Git.run(dir, ["config", "user.email", "trunk@forge"])
-    File.write!(Path.join(dir, path), content <> "\n")
-    {:ok, _out} = Git.run(dir, ["commit", "--quiet", "-am", content])
-
-    {:ok, _out} =
-      Git.run(dir, ["push", "--quiet", bare, "HEAD:refs/heads/main"],
-        env: [{"FORGE_INTERNAL", "1"}]
-      )
-
-    {:ok, sha} = Git.resolve(Projects.repo_path(project), "refs/heads/main")
-    sha
-  end
+  defp diverge_default_branch(%{bare: bare}, path, content),
+    do: commit_to(bare, "main", %{path => content <> "\n"}, content)
 
   defp changeset!(ticket, sha) do
     {:ok, _version} =

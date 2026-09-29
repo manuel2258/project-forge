@@ -249,6 +249,17 @@ defmodule Forge.Git do
   defp count("-"), do: :binary
   defp count(value), do: String.to_integer(value)
 
+  @doc "The paths under `pathspec` that differ from `base` to `head`, unquoted."
+  @spec changed_paths(repo(), sha(), sha(), [String.t()]) ::
+          {:ok, [String.t()]} | {:error, term()}
+  def changed_paths(repo, base, head, pathspec) do
+    args = @paths_as_written ++ ["diff", "--name-only", "#{base}..#{head}", "--" | pathspec]
+
+    with {:ok, out} <- run(repo, args, stderr: :separate) do
+      {:ok, out |> String.split("\n", trim: true) |> Enum.map(&unquote_path/1)}
+    end
+  end
+
   @doc "Whether `ancestor` is reachable from `descendant`."
   @spec ancestor?(repo(), String.t(), String.t()) :: boolean()
   def ancestor?(repo, ancestor, descendant),

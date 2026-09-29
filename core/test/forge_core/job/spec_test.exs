@@ -194,6 +194,28 @@ defmodule ForgeCore.Job.SpecTest do
     assert {:ok, ^spec} = spec |> Spec.to_json() |> Spec.from_json()
   end
 
+  # An arrival from a command state names its batch, and the run is handed what that batch said
+  # (`docs/design/job-prompt.md` § How the job arrived). Both have to reach the worker.
+  test "an arrival's batch and what its commands said survive the wire" do
+    entered = %{
+      "from" => "packaging",
+      "outcome" => "build_failed",
+      "by" => "engine",
+      "comment" => nil,
+      "batch" => "b-1"
+    }
+
+    spec = %{
+      spec()
+      | entered: entered,
+        entered_commands: [
+          %{"command" => "build", "exit_status" => 1, "log" => "entered-1-build.log"}
+        ]
+    }
+
+    assert {:ok, ^spec} = spec |> Spec.to_json() |> Spec.from_json()
+  end
+
   # `validate/1` exists because the struct no longer can: a conversation has no state, outcomes
   # or budget, so `@enforce_keys` cannot demand them. Its own docstring states the cost of
   # letting an incomplete spec through — "a job that fails on the machine after a credential has

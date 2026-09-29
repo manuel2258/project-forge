@@ -44,7 +44,8 @@ defmodule ForgeCore.Job.Spec do
     :replay,
     # How the ticket came into this job's state: `%{"from", "outcome", "by", "comment"}`, from the
     # transition that created the job, or nil for the ticket's first state
-    # (`docs/design/job-prompt.md` § How the job arrived).
+    # (`docs/design/job-prompt.md` § How the job arrived). `"batch"` too when it came from a
+    # command state: the batch of commands that state last ran to a decision.
     :entered,
     # A command job's whole description, string keys: `name`, `args`, `run`, `script` (the text of
     # `run` at the pinned commit), `at` (the commit to run against), `timeout_ms`, `produces` and
@@ -66,7 +67,15 @@ defmodule ForgeCore.Job.Spec do
     # The batch a parked job invoked, filled at run time for its resume: each entry's `command`,
     # `args`, `at`, `exit_status`, `outcome`, `duration_ms`, `log` (the file name under
     # `$FORGE_JOB/commands/`) or `refused` (`docs/design/job-prompt.md` § Commands).
-    command_results: []
+    command_results: [],
+    # The batch `entered` names, filled at run time the same way, each entry's `log` named
+    # `entered-<n>-<command>.log`: what the commands of the state that sent the ticket here said
+    # (`docs/design/job-prompt.md` § How the job arrived).
+    entered_commands: [],
+    # The commit the previous attempt of this state read as its `changeset`, filled at run time
+    # for a job that reads one too: what a second review asks first is what changed since the
+    # first (`docs/design/job-prompt.md` § How the job arrived).
+    previous_changeset: nil
   ]
 
   @workflow_keys [
@@ -87,6 +96,8 @@ defmodule ForgeCore.Job.Spec do
           command: %{String.t() => term()} | nil,
           may_invoke: %{String.t() => %{String.t() => pos_integer() | nil}},
           command_results: [%{String.t() => term()}],
+          entered_commands: [%{String.t() => term()}],
+          previous_changeset: String.t() | nil,
           ticket: %{number: pos_integer(), title: String.t()} | nil,
           state: String.t() | nil,
           attempt: pos_integer() | nil,
@@ -96,7 +107,13 @@ defmodule ForgeCore.Job.Spec do
           model: String.t() | nil,
           commit: String.t(),
           branch: String.t(),
-          budget: %{turns: pos_integer(), cost: number()},
+          # At run time also `ticket_left` and `ticket_limit`, and `declared` and `lowered_by`
+          # when the cost is less than the state declared.
+          budget: %{
+            required(:turns) => pos_integer(),
+            required(:cost) => number(),
+            optional(atom()) => term()
+          },
           preamble_hash: String.t() | nil,
           replay: String.t() | nil,
           entered: %{String.t() => String.t() | nil} | nil,
@@ -186,6 +203,8 @@ defmodule ForgeCore.Job.Spec do
       command: get.(:command),
       may_invoke: or_default(get, :may_invoke, %{}),
       command_results: or_default(get, :command_results, []),
+      entered_commands: or_default(get, :entered_commands, []),
+      previous_changeset: get.(:previous_changeset),
       produces: or_default(get, :produces, []),
       outcomes: or_default(get, :outcomes, ["done"]),
       permitted_children: or_default(get, :permitted_children, []),
@@ -208,16 +227,34 @@ defmodule ForgeCore.Job.Spec do
   defp entered_from_map(nil), do: nil
 
   defp entered_from_map(map) do
-    %{
+    entered = %{
       "from" => nested(map, :from),
       "outcome" => nested(map, :outcome),
       "by" => nested(map, :by),
       "comment" => nested(map, :comment)
     }
+
+    # Only from a command state, so every other arrival keeps the shape it always had.
+    case nested(map, :batch) do
+      nil -> entered
+      batch -> Map.put(entered, "batch", batch)
+    end
   end
 
   defp budget_from_map(nil), do: nil
-  defp budget_from_map(map), do: %{turns: nested(map, :turns), cost: nested(map, :cost)}
+
+  # `turns` and `cost` always; the rest only when the platform added them at run time — the
+  # ticket's allowance, and what a lowered cost was lowered from and by — so a budget stated on its
+  # own keeps the shape it always had.
+  defp budget_from_map(map) do
+    [:ticket_left, :ticket_limit, :declared, :lowered_by]
+    |> Enum.reduce(%{turns: nested(map, :turns), cost: nested(map, :cost)}, fn key, budget ->
+      case nested(map, key) do
+        nil -> budget
+        value -> Map.put(budget, key, value)
+      end
+    end)
+  end
 
   # Named rather than converted, and a kind nobody knows is refused as `Result` refuses a status it
   # does not know: a spec whose kind is guessed runs the wrong job.

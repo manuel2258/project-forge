@@ -135,14 +135,21 @@ defmodule ForgeWorker.Job.Runner do
 
   defp start_state(opts, spec, harness, mode) do
     # A session to resume is what makes this a continuation of an earlier attempt rather than
-    # a fresh one, and so what decides whether `out/` is kept or cleared.
-    resume? = Keyword.get(Keyword.get(opts, :harness_opts, []), :resume_session) != nil
+    # a fresh one, and so what decides whether `out/` is kept or cleared — for a job resuming its
+    # own session. A fork is a new attempt, told its output directory is empty, and a fork run
+    # again on the machine that lost it would otherwise inherit what the lost run left. A
+    # conversation's documents are collected every turn, so what one left in `out/` has been
+    # recorded, and a reopen that resumes its session clears it as a cold reopen always has.
+    harness_opts = Keyword.get(opts, :harness_opts, [])
+    resume? = Keyword.get(harness_opts, :resume_session) != nil
+    fork? = Keyword.get(harness_opts, :fork_session, false)
 
     job_dir =
       Dir.prepare(Keyword.fetch!(opts, :root), spec,
-        resume: resume?,
+        resume: resume? and not fork? and spec.kind != :chat,
         backlog: Keyword.get(opts, :backlog),
-        command_logs: Keyword.get(opts, :command_logs, [])
+        command_logs: Keyword.get(opts, :command_logs, []),
+        session: Keyword.get(opts, :session)
       )
 
     # Held, the prompt is composed when the message it opens with arrives, and written then:
@@ -156,7 +163,7 @@ defmodule ForgeWorker.Job.Runner do
     hold = mode == :streaming and Keyword.get(opts, :hold_prompt, false)
 
     unless hold,
-      do: File.write!(Dir.prompt_path(job_dir), prompt(spec, job_dir, resume?, opts))
+      do: Dir.write_new!(Dir.prompt_path(job_dir), prompt(spec, job_dir, resume?, opts))
 
     transcript_path = Dir.new_transcript_path(job_dir)
 
@@ -203,6 +210,13 @@ defmodule ForgeWorker.Job.Runner do
       # a second turn from a first.
       turns: 0,
       hold: hold,
+      # How a held prompt is composed when the first message arrives: as a resume's, if this run
+      # resumes, since a reopened conversation resuming its session is told only that it was
+      # reopened (`ForgeCore.Prompt.continuation/4`). Only a conversation holds, and its
+      # continuation needs the head and nothing else — not the harness options, which carry the
+      # credential.
+      resume: resume?,
+      prompt_opts: [head: Keyword.get(opts, :head)],
       interrupting: nil,
       killed: nil,
       # A cancel or the wall clock asked this run to stop — recorded even when `killed` is not,
@@ -238,8 +252,10 @@ defmodule ForgeWorker.Job.Runner do
   # there is the harness's to find out: a resume it cannot honour ends before `system/init`, and
   # the platform re-queues the job with no session, which lands in the second clause
   # (`docs/design/job-prompt.md` § The continuation prompt).
-  defp prompt(spec, job_dir, true = _resume?, opts),
-    do: Prompt.continuation(spec, job_dir, Keyword.get(opts, :head))
+  defp prompt(spec, job_dir, true = _resume?, opts) do
+    fork = opts |> Keyword.get(:harness_opts, []) |> Keyword.get(:fork_session, false)
+    Prompt.continuation(spec, job_dir, Keyword.get(opts, :head), fork: fork)
+  end
 
   defp prompt(spec, job_dir, false = _resume?, _opts), do: Prompt.compose(spec, job_dir)
 
@@ -393,8 +409,8 @@ defmodule ForgeWorker.Job.Runner do
   # it with this message as its opening, so what a reopened conversation is given differs from
   # a new one's only in what the spec says about the past.
   def handle_call({:send_message, text}, _from, %{hold: true} = state) do
-    prompt = Prompt.compose(%{state.spec | prompt: text}, state.job_dir)
-    File.write!(Dir.prompt_path(state.job_dir), prompt)
+    prompt = prompt(%{state.spec | prompt: text}, state.job_dir, state.resume, state.prompt_opts)
+    Dir.write_new!(Dir.prompt_path(state.job_dir), prompt)
 
     case write(state, state.harness.encode_message(prompt)) do
       :ok -> {:reply, :ok, watch_start(%{state | hold: false})}
@@ -636,7 +652,7 @@ defmodule ForgeWorker.Job.Runner do
 
   defp respawn(state, round, session, budget, text, harness) do
     path = Path.join(state.job_dir, "correction-#{round}.md")
-    File.write!(path, text)
+    Dir.write_new!(path, text)
 
     opts = state.spawn_opts.()
     harness_opts = opts |> Keyword.get(:harness_opts, []) |> Keyword.put(:resume_session, session)
@@ -935,6 +951,7 @@ defmodule ForgeWorker.Job.Runner do
     %{
       "session_id" => Map.get(finished, :session_id) || Map.get(started, :session_id),
       "model" => Map.get(started, :model),
+      "version" => Map.get(started, :version),
       "subtype" => Map.get(finished, :subtype),
       "is_error" => Map.get(finished, :is_error),
       "turns" => Map.get(finished, :num_turns),

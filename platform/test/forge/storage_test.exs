@@ -53,6 +53,7 @@ defmodule Forge.StorageTest do
     test "are checked before any implementation sees them" do
       assert {:error, :invalid_key} = Storage.put("job/../escape", "x")
       assert {:error, :invalid_key} = Storage.get("job/../escape")
+      assert {:error, :invalid_key} = Storage.read_range("job/../escape", 0, 1)
     end
   end
 
@@ -82,9 +83,20 @@ defmodule Forge.StorageTest do
       assert {:ok, "first"} = Storage.get("job/j1/out.txt")
     end
 
+    # The size is the whole object's, and a range is cut at its end rather than refused.
+    test "reads a range, and says how big the whole is" do
+      assert {:ok, _info} = Storage.put("job/j1/log.txt", "0123456789")
+
+      assert {:ok, %{size: 10, bytes: "234"}} = Storage.read_range("job/j1/log.txt", 2, 3)
+      assert {:ok, %{size: 10, bytes: "89"}} = Storage.read_range("job/j1/log.txt", 8, 5)
+      assert {:ok, %{size: 10, bytes: ""}} = Storage.read_range("job/j1/log.txt", 10, 5)
+      assert {:ok, %{size: 10, bytes: ""}} = Storage.read_range("job/j1/log.txt", 0, 0)
+    end
+
     test "says not_found rather than raising" do
       assert {:error, :not_found} = Storage.get("job/j1/missing.txt")
       assert {:error, :not_found} = Storage.stat("job/j1/missing.txt")
+      assert {:error, :not_found} = Storage.read_range("job/j1/missing.txt", 0, 1)
 
       assert {:error, :not_found} =
                Storage.fetch(

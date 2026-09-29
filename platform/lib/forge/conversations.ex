@@ -21,6 +21,7 @@ defmodule Forge.Conversations do
   alias Forge.Events.Event
   alias Forge.Git.Tokens
   alias Forge.Jobs.{Job, Runs}
+  alias ForgeCore.Job.Result
   alias ForgeCore.Proposal
 
   require Logger
@@ -327,7 +328,8 @@ defmodule Forge.Conversations do
         status: :running,
         turns: chat.turns + (harness["turns"] || 1),
         cost_usd: Runs.total(chat.id),
-        harness_session_id: harness["session_id"] || chat.harness_session_id
+        harness_session_id: harness["session_id"] || chat.harness_session_id,
+        session_blob: Jobs.session_blob(chat, harness) || chat.session_blob
       })
     end)
     |> Events.log(:turn, "chat.turn", {:job, chat.id}, %{
@@ -512,15 +514,8 @@ defmodule Forge.Conversations do
   """
   @spec unrecorded(String.t()) :: %{String.t() => String.t()}
   def unrecorded(job_id) do
-    Repo.one(
-      from e in Event,
-        where: e.job_id == ^job_id and e.type == "chat.turn",
-        order_by: [desc: e.seq],
-        limit: 1,
-        select: e.payload
-    )
-    |> case do
-      %{"refused_documents" => %{} = refused} -> refused
+    case Events.latest_for_job(job_id, "chat.turn") do
+      %Event{payload: %{"refused_documents" => %{} = refused}} -> refused
       _none -> %{}
     end
   end
@@ -547,10 +542,16 @@ defmodule Forge.Conversations do
   @closed "closed"
 
   @doc """
-  Records that a conversation stopped, and why. It is not over: reopening is a cold start.
+  Records that a conversation stopped, and why. It is not over: a reopen resumes the session it
+  carried, and starts cold with the replay when it carried none (`docs/design/conversations.md`
+  § Lifetime).
 
   `expect: status` records it only if the row still has the status the caller read, and answers
   `{:error, {:row, {:changed, now}}}` otherwise (`close/2`).
+
+  `result:` is the run's result as the worker reported it. A dormant one whose resume the harness
+  refused (`Forge.Jobs.resume_refused?/2`) forgets the session it was asked to resume, or every
+  reopen would ask for it again and be refused again: the next one starts cold, with the replay.
 
   A chat that was closed is finished; one that lost its machine or its platform is dormant, and
   the difference is whether anyone asked for it.
@@ -566,6 +567,7 @@ defmodule Forge.Conversations do
           {:ok, Job.t()} | {:error, term()}
   def ended(%Job{kind: :chat} = chat, commit, reason, opts \\ []) do
     status = if reason in [@closed, "idle"], do: :finished, else: :hibernated
+    forget? = status == :hibernated and refused?(chat, opts[:result])
 
     worker_id =
       chat.worker_id || Repo.one(from j in Job, where: j.id == ^chat.id, select: j.worker_id)
@@ -574,13 +576,16 @@ defmodule Forge.Conversations do
     |> Multi.run(:row, fn repo, _changes -> expected(repo, chat, opts[:expect]) end)
     |> Multi.update(
       :job,
-      Job.progress_changeset(chat, %{status: status, finished_at: DateTime.utc_now(:second)})
+      Job.progress_changeset(
+        chat,
+        forgetting(%{status: status, finished_at: DateTime.utc_now(:second)}, forget?)
+      )
     )
     |> Runs.close(chat.id, DateTime.utc_now(:second))
     |> Events.log(:ended, "chat.ended", :system, %{
       ticket_id: chat.ticket_id,
       job_id: chat.id,
-      payload: %{"reason" => reason, "commit" => commit}
+      payload: said_refused(%{"reason" => reason, "commit" => commit}, forget?)
     })
     |> Repo.transaction()
     |> case do
@@ -600,6 +605,17 @@ defmodule Forge.Conversations do
         {:error, {step, reason}}
     end
   end
+
+  defp refused?(chat, %{} = result), do: Jobs.resume_refused?(chat, Result.from_map(result))
+  defp refused?(_chat, nil), do: false
+
+  defp forgetting(changes, true),
+    do: Map.merge(changes, %{harness_session_id: nil, session_blob: nil})
+
+  defp forgetting(changes, false), do: changes
+
+  defp said_refused(payload, true), do: Map.put(payload, "session", "refused")
+  defp said_refused(payload, false), do: payload
 
   # `:expect` is the status the caller read, locked and compared, the other half of
   # `Forge.Jobs`' check before it marks a row running. Without it — the worker reporting its own
@@ -644,13 +660,14 @@ defmodule Forge.Conversations do
   end
 
   @doc """
-  Reopens a conversation that is not live: back in the queue, cold. One that is live is
-  refused, `{:error, :live}`.
+  Reopens a conversation that is not live: back in the queue. One that is live is refused,
+  `{:error, :live}`.
 
-  The machine is gone and so is the harness session, so the new process starts fresh rather
-  than with `--resume`, which cannot find a session whose worktree no longer exists. What it is
-  given is the branch as it stands and the conversation so far, replayed (`opening/1`): it reads
-  what was said, and answers what the person says next rather than the opening message again.
+  The machine is usually gone, but the harness session is not: its file was uploaded after every
+  turn, and the new process restores it and resumes it as a fork (`Forge.Jobs.resume_source/1`).
+  When there is no file, or it fails the worker's check, the process starts cold with the branch
+  as it stands and the conversation so far, replayed (`opening/1`) — which is composed either way,
+  since only the worker knows which it will be.
 
   **A branch that is gone is made again**, where opening would make it — the default branch or
   the ticket's, as it stands now — and in the same transaction, the way `open/3` does: a worker
@@ -662,10 +679,11 @@ defmodule Forge.Conversations do
     Multi.new()
     |> Multi.run(:dormant, fn repo, _changes -> dormant(repo, chat) end)
     |> Multi.update(:job, fn %{dormant: row} ->
+      # The session is kept: the reopen resumes it as a fork when its file was carried, and starts
+      # cold with the replay when it was not (`docs/design/conversations.md` § Lifetime).
       Job.progress_changeset(row, %{
         status: :pending,
         worker_id: nil,
-        harness_session_id: nil,
         finished_at: nil
       })
     end)
@@ -1401,7 +1419,7 @@ defmodule Forge.Conversations do
     ## What it wrote
 
     #{written(job)}
-
+    #{refused(job)}#{last_words(job)}
     ## Its transcript
 
     #{transcript_line(job)}
@@ -1424,6 +1442,35 @@ defmodule Forge.Conversations do
         Enum.map_join(versions, "\n", fn {a, v} -> "- `#{a.name}` version #{v.version}" end)
     end
   end
+
+  # A refused document is not kept, and `job.md` is where a reader reconstructing the job looks
+  # first: a job that ended `error` with nothing written says why here, or nowhere they will read.
+  defp refused(job) do
+    case Jobs.refusals(job) do
+      refusals when map_size(refusals) == 0 ->
+        ""
+
+      refusals ->
+        lines =
+          refusals
+          |> Enum.sort()
+          |> Enum.map_join("\n", fn {name, why} ->
+            "- `#{name}`, not kept:\n" <> indent(why)
+          end)
+
+        "\n## What was refused\n\n" <> lines <> "\n"
+    end
+  end
+
+  defp last_words(job) do
+    case Jobs.last_words(job) do
+      nil -> ""
+      text -> "\n## What it said last\n\n" <> quote_lines(String.slice(text, 0, 4000)) <> "\n"
+    end
+  end
+
+  defp indent(text), do: text |> String.split("\n") |> Enum.map_join("\n", &("  " <> &1))
+  defp quote_lines(text), do: text |> String.split("\n") |> Enum.map_join("\n", &("> " <> &1))
 
   defp transcript_line(job) do
     case transcript_ref(job) do

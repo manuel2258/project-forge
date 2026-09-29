@@ -127,6 +127,13 @@ declared, what the ticket has left and what the day has left, so the existing `-
 enforcement stops a runaway job at whichever cap binds. The stored spec is not touched — a job's
 budget is written once — and the difference is recorded as `job.budget_lowered`, without which a
 job stopping at a tenth of its declared budget is inexplicable to anyone reading the log later.
+
+**The job is told as well.** The manifest's budget says what a lowered cost was lowered from and
+by which cap, and names what the ticket has left of its allowance for every job still to run on
+it. The event is the operator's record; the agent could not read it. Without the figures one
+ticket's jobs all finished far under budget — the largest used $6.76 of $30.00 — while reasoning
+that "a fifth edit to this file would cost the ticket a whole implementing cycle", which a visible
+allowance answers at once.
 The wall clock remains the platform's own coarse stop, independent of whether the harness honours
 its flag.
 

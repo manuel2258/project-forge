@@ -176,6 +176,15 @@ left out, and the manifest names it as not yet written, so the agent knows what 
 later attempt. A document a human state produces (below) is always optional, because nothing makes
 a person write it. Which kind an input is follows from the transitions and needs no mark.
 
+**A command's log is an input too** — the name in a command's `produces` (§ Commands), never one
+of its groups. It is always optional, since no job state produces it and whether the command has
+run by then is not something the transitions can say, and it is the latest version on the ticket
+whichever caller ran it. It is a blob and not a document, so it is inlined cut to its two ends:
+the first 64 KiB and the last 192 KiB, with how much was cut named between them, and anything that
+is not UTF-8 replaced. The job a command state sends the ticket to is handed that state's logs
+whether or not it names them, whole and as files (`docs/design/job-prompt.md` § How the job
+arrived); naming one is for a state further on — a review that has to judge the fix to a build.
+
 This paragraph replaces a sentence that said the reachability rule meant "a job never starts with a
 missing input". It did not: the rule accepted `review.md` as an input of `implementing`, and the
 job then could not be created on its first entry, which undid the transition into it and stuck the
@@ -350,6 +359,25 @@ job is working on. Otherwise an agent that edits `build.sh` changes what `build`
 state that is meant to judge it. A ticket that changes a command script sees the change only after
 it merges.
 
+**What a script can rely on.** It starts in the checkout, at the commit the invocation names, and
+the environment names four places:
+
+| Variable | Is |
+|---|---|
+| `FORGE_CHECKOUT` | The checkout: the same directory the script starts in, named for a script that has changed directory. |
+| `FORGE_JOB` | The job's own directory, outside the checkout. |
+| `FORGE_OUT` | `$FORGE_JOB/out`, where the script writes its groups of files. |
+| `HOME` | `$FORGE_JOB/home`, empty, and never handed to another job. |
+
+**The script is not in the checkout.** What runs is the pinned copy, written into `$FORGE_JOB`, so
+`$0` is a path there and not `.forge/commands/build.sh`. A script that finds the repository by
+climbing from `dirname "$0"` leaves it — the `cd` succeeds, and the build then runs in a directory
+with no repository in it. Use the working directory or `$FORGE_CHECKOUT`.
+
+**Nothing in `HOME` outlives the job.** A tool cache that should carry from one job to the next
+belongs inside the checkout, ignored by git: that is what the project's seed and a ticket's volume
+keep (`docs/design/worker-tier.md` § Volumes and the seed).
+
 **Arguments are freeform and carry no schema.** An invocation supplies a list of strings and the
 worker `exec`s the script with them as an argument vector — never a string given to a shell, so
 `--filter "foo bar"` cannot word-split. A state's `invoke` entry is either a command name or a
@@ -422,7 +450,24 @@ still not `mb`.
 
 At admission the engine reads `.forge/workflow.yml` at the ticket's base commit, validates
 it, and stores the parsed definition and the commit hash on the ticket. Later changes to the
-file do not affect that ticket. Re-pinning is a human action and not in v1.
+file do not affect that ticket, and neither do later changes to its prompts or command scripts,
+which are read at the same commit.
+
+**Re-pinning is a person's act** (`Forge.Engine.repin/2`). It reads the workflow at the default
+branch's head, validates it as admission does, and stores the definition and the commit in place
+of the old ones; every job made after it reads its prompt and its scripts from there. The branch,
+its base and what the ticket has written stay. It is refused while a job for the ticket's state
+is live, since that job was made from the old pin; while an approval is pending, whose transition
+the new workflow may not have; when the new workflow has no state the ticket is in; and when the
+head is the pin already. A `ticket.repinned` event records both commits.
+
+It exists because the pin makes some failures unfixable from inside the ticket. A command script
+nobody on the ticket may edit, failing in a way no change on the branch can mend, would have gone
+on failing on that ticket after a fix landed on the default branch, for as long as the ticket
+lived; the only way on was to move the ticket past the state by hand. The ticket page says when `.forge/` has changed on the
+default branch since the pin, which paths, and offers the re-pin beside it (`docs/design/ui.md` §
+Decide and Timeline). A ticket that changes a command script still sees the change only after it
+merges: re-pinning takes the default branch, never the ticket's own.
 
 ## Validation (rejects the file, never partially runs it)
 
@@ -434,9 +479,9 @@ file do not affect that ticket. Re-pinning is a human action and not in v1.
   may carry, and what it produces is documents — never `changeset`.
 - `model`, where present, is a non-empty string. Its value is not checked against anything.
 - State and artifact names are single path segments: letters, digits, `.`, `_`, `-`.
-- Every `inputs` entry is `ticket` or produced by a state that can run before the consumer; every
-`produces` entry other than `changeset` is produced by exactly one state. `ticket` is never
-produced; `answers.md` is platform-managed and never declared.
+- Every `inputs` entry is `ticket`, a command's log, or produced by a state that can run before the
+consumer; every `produces` entry other than `changeset` is produced by exactly one state. `ticket`
+is never produced; `answers.md` is platform-managed and never declared.
 - A job state declaring outcomes other than `done` produces at least one document. A command
   state does not, because its outcomes come from `exit`.
 - Every state is reachable from `initial` through transitions.

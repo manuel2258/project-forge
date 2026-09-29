@@ -669,7 +669,67 @@ defmodule ForgeWeb.WorkerChannelTest do
       chat_id = chat.id
       assert_push "close", %{"job_id" => ^chat_id, "reason" => "operator closed it"}
     end
+
+    # A reopened conversation resumes the session it carried (`docs/design/conversations.md`
+    # § Lifetime). One the harness refused ends before its first turn, and kept, it would be asked
+    # for again by every reopen after it.
+    test "a resume the harness refused is forgotten, so the next reopen is cold", context do
+      chat = carrying(context.chat)
+      {:ok, _reply, socket} = join_with_chat(context.worker, context.token, chat)
+
+      ref = push(socket, "hibernated", ending(chat, "ended", %{"exit_status" => 1}))
+      assert_reply ref, :ok
+
+      assert %{status: :hibernated, harness_session_id: nil, session_blob: nil} =
+               Jobs.get!(chat.id)
+
+      assert %{payload: %{"session" => "refused"}} =
+               chat.id |> Events.for_job() |> Enum.find(&(&1.type == "chat.ended"))
+    end
+
+    test "a session is kept by a run that started", context do
+      chat = carrying(context.chat)
+      {:ok, _reply, socket} = join_with_chat(context.worker, context.token, chat)
+
+      ref = push(socket, "hibernated", ending(chat, "ended", %{"model" => "claude-x"}))
+      assert_reply ref, :ok
+
+      assert %{status: :hibernated, harness_session_id: "s1", session_blob: %{}} =
+               Jobs.get!(chat.id)
+    end
+
+    # A person who reopened it and said nothing before it went idle: the harness never said
+    # which model it runs because nobody asked it anything, not because it refused.
+    test "a session is kept by a run that went idle before its first turn", context do
+      chat = carrying(context.chat)
+      {:ok, _reply, socket} = join_with_chat(context.worker, context.token, chat)
+
+      ref = push(socket, "hibernated", ending(chat, "idle", %{"exit_status" => 0}))
+      assert_reply ref, :ok
+
+      assert %{status: :finished, harness_session_id: "s1"} = Jobs.get!(chat.id)
+    end
   end
+
+  # A chat carrying a session: what a reopen resumes.
+  defp carrying(chat) do
+    chat
+    |> Jobs.Job.progress_changeset(%{
+      harness_session_id: "s1",
+      session_blob: %{"key" => "job/#{chat.id}/session-x/1.jsonl", "version" => "2.1.284"}
+    })
+    |> Forge.Repo.update!()
+  end
+
+  # What `ForgeWorker.Job.Conversation` sends when its harness is gone.
+  defp ending(chat, reason, harness),
+    do: %{
+      "job_id" => chat.id,
+      "reason" => reason,
+      "commit" => nil,
+      "turns" => 0,
+      "result" => Result.to_map(%Result{status: :finished, harness: harness})
+    }
 
   # Reporting on a job means the scheduler assigned it first, and the channel refuses a job that
   # is not the caller's. The rejoin block deliberately does not use this: it builds its own

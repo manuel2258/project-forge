@@ -198,6 +198,7 @@ defmodule Forge.Queue do
         question: nil,
         detail: %{
           state: ticket.state,
+          reason: Engine.why_stuck(ticket),
           transitions: transitions_from(ticket),
           reviewable: reviewable?(ticket),
           retry: retryable?(ticket)

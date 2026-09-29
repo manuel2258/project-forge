@@ -79,7 +79,12 @@ assumption: "SQLite, which the scores already sit beside"
   `detail`, one sentence saying what choosing it means. Mark the one you recommend with
   `recommended: true` — one at most. Free text is always a valid answer too, so options are for
   the common cases, not every case.
-- A non-blocking question states the `assumption` you proceeded with, and you proceed.
+- A non-blocking question states the `assumption` you proceeded with, and you proceed. When the
+  assumption is one of the `options`, write it as that option's `label` exactly: then
+  `answers.md` says plainly whether the answer confirmed it or overturned it, and a later job
+  need not work it out.
+- An answer in `answers.md` that overturns an assumption holds over the document written on it.
+  That document does not change; where it says otherwise, follow the answer.
 - `blocking: true` stops the job until a person answers, and you are resumed with the answers.
   Use it only when no reasonable assumption exists, and give it no `assumption`.
 
@@ -97,7 +102,9 @@ you can state over a question you could avoid.
 ## Proposing a ticket
 
 When you notice work that is real but is not this ticket's, say so instead of doing it or
-losing it. Write one file per proposal in `$FORGE_JOB/out/proposals/`:
+losing it. Write one file per proposal in `$FORGE_JOB/out/proposals/`, named for what it proposes
+— `score-table.md`. The platform stores it as `proposal-score-table.md`, which is the name
+`tickets/index.md` lists open proposals under; do not add the prefix yourself.
 
 ```
 # Extract the score table into its own module

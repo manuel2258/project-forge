@@ -131,13 +131,16 @@ defmodule Forge.Push do
          "approval-#{ticket.id}"}
 
       :stuck ->
-        {"Stuck: #{label}", ticket.title, url, "stuck-#{ticket.id}"}
+        {"Stuck: #{label}", stuck_body(ticket, item.detail[:reason]), url, "stuck-#{ticket.id}"}
 
       _review ->
         {"Waiting on you: #{label}", "#{ticket.title} — in #{ticket.state}", url,
          "#{kind}-#{ticket.id}"}
     end
   end
+
+  defp stuck_body(ticket, reason) when is_binary(reason), do: "#{ticket.title} — #{reason}"
+  defp stuck_body(ticket, _reason), do: ticket.title
 
   @doc """
   Pushes a conversation's completed reply, if its conversation is now waiting on a person.

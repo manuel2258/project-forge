@@ -171,7 +171,7 @@ defmodule Forge.FakeWorker do
       invocation_error: Keyword.get(opts, :invocation_error),
       commit: Keyword.get(opts, :commit),
       transcript: assignment["store"]["transcript_key"],
-      harness: @harness
+      harness: Map.merge(@harness, Keyword.get(opts, :harness, %{}))
     })
   end
 

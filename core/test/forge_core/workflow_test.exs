@@ -27,6 +27,13 @@ defmodule ForgeCore.WorkflowTest do
       assert Workflow.proposal_artifact("score-table.md") =~ "score-table.md"
     end
 
+    # Agents copy the stored names they read in the backlog; the person then read
+    # `proposal-proposal-…` on six of one project's ten open proposals.
+    test "a file already named with the prefix is stored under one prefix, not two" do
+      assert Workflow.proposal_artifact("score-table.md") == "proposal-score-table.md"
+      assert Workflow.proposal_artifact("proposal-score-table.md") == "proposal-score-table.md"
+    end
+
     test "an ordinary artifact name is not a proposal" do
       refute Workflow.proposal?("plan.md")
       refute Workflow.proposal?(Workflow.ticket_artifact())

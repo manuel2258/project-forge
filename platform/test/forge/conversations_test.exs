@@ -804,6 +804,62 @@ defmodule Forge.ConversationsTest do
       refute entry["metadata"] =~ "\"type\":"
     end
 
+    # A refused document is not kept, and the transcript is too large to read to find out why: a
+    # chat reconstructing a job that ended `error` was left guessing at a rule it could not see.
+    test "a job's refused documents and its last words are in its metadata", %{project: project} do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+      [job] = Jobs.for_ticket(ticket.id)
+
+      for text <- ["Reading the ticket.", "Written; the job now parks.\nFour questions."] do
+        Forge.Events.append("job.harness.text", :system, %{
+          ticket_id: ticket.id,
+          job_id: job.id,
+          payload: %{"text" => text}
+        })
+      end
+
+      Forge.Events.append("job.finished", :system, %{
+        ticket_id: ticket.id,
+        job_id: job.id,
+        payload: %{"invalid" => %{"refinement.md" => "question[1].assumption: not allowed"}}
+      })
+
+      assert [%{"metadata" => metadata}] = Conversations.history(ticket)
+      assert metadata =~ "## What was refused\n\n- `refinement.md`, not kept:\n  question[1]"
+
+      assert metadata =~
+               "## What it said last\n\n> Written; the job now parks.\n> Four questions."
+
+      refute metadata =~ "Reading the ticket."
+    end
+
+    # Its last words are for knowing how it ended, and a job that ended by pasting a log into
+    # its reply would otherwise put all of it into every conversation's history.
+    test "a job's last words are cut to their first four thousand characters", %{
+      project: project
+    } do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+      [job] = Jobs.for_ticket(ticket.id)
+
+      Forge.Events.append("job.harness.text", :system, %{
+        ticket_id: ticket.id,
+        job_id: job.id,
+        payload: %{"text" => String.duplicate("x", 4000) <> "BEYOND"}
+      })
+
+      assert [%{"metadata" => metadata}] = Conversations.history(ticket)
+      assert metadata =~ "> " <> String.duplicate("x", 4000)
+      refute metadata =~ "BEYOND"
+    end
+
+    test "a job with nothing refused and nothing said has neither section", %{project: project} do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+
+      assert [%{"metadata" => metadata}] = Conversations.history(ticket)
+      refute metadata =~ "What was refused"
+      refute metadata =~ "What it said last"
+    end
+
     test "a job that never uploaded a transcript still gets its metadata", %{project: project} do
       {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
 
@@ -1265,7 +1321,7 @@ defmodule Forge.ConversationsTest do
       refute spec["replay"] =~ "does it still build?"
     end
 
-    # A reopen is a cold start and a cold start clears `out/`, so a project chat's own documents
+    # Every reopen clears `out/`, resumed or cold, so a project chat's own documents
     # were gone from its view — while a ticket chat's came back as the ticket's. Now it is handed
     # what it last wrote of each, and not its proposals, which are backlog and not documents.
     test "a reopened project chat is handed what it wrote, at its latest", %{chat: chat} do
@@ -1613,34 +1669,8 @@ defmodule Forge.ConversationsTest do
 
     # What a worker's push is, without a worker: a clone of the branch, a commit, and a push by
     # path — `FORGE_INTERNAL` because the hook refuses an uncredentialed push, which is its job.
-    defp push_to(repo, branch, path, content) do
-      work = Path.join(tmp_dir("push"), "clone")
-
-      for args <- [
-            ["clone", "--quiet", "--branch", branch, repo, work],
-            ["-C", work, "config", "user.name", "someone"],
-            ["-C", work, "config", "user.email", "someone@forge"]
-          ] do
-        {_out, 0} = System.cmd("git", args, stderr_to_stdout: true)
-      end
-
-      File.write!(Path.join(work, path), content)
-
-      for args <- [
-            ["add", "."],
-            ["commit", "--quiet", "-m", "change #{path}"],
-            ["push", "--quiet", "origin", "HEAD:refs/heads/" <> branch]
-          ] do
-        {_out, 0} =
-          System.cmd("git", ["-C", work | args],
-            stderr_to_stdout: true,
-            env: [{"FORGE_INTERNAL", "1"}]
-          )
-      end
-
-      {:ok, head} = Git.resolve(repo, "refs/heads/" <> branch)
-      head
-    end
+    defp push_to(repo, branch, path, content),
+      do: commit_to(repo, branch, %{path => content}, "change #{path}")
 
     defp branch_events(chat, type),
       do: chat.id |> Events.for_job() |> Enum.filter(&(&1.type == type))

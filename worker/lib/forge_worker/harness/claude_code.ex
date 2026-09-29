@@ -63,10 +63,14 @@ defmodule ForgeWorker.Harness.ClaudeCode do
     end
   end
 
+  # A fork begins with the session's conversation under a new id, leaving the old one as it was:
+  # a new attempt resuming its predecessor's, or a reopened conversation, whose turns are
+  # numbered from one again (`docs/design/claude-code-events.md` § Resume).
   defp resume_args(opts) do
-    case Keyword.get(opts, :resume_session) do
-      nil -> []
-      session_id -> ["--resume", session_id]
+    case {Keyword.get(opts, :resume_session), Keyword.get(opts, :fork_session, false)} do
+      {nil, _fork} -> []
+      {session_id, true} -> ["--resume", session_id, "--fork-session"]
+      {session_id, false} -> ["--resume", session_id]
     end
   end
 
@@ -98,7 +102,9 @@ defmodule ForgeWorker.Harness.ClaudeCode do
 
   # **No request, and so nothing that fails on a network blip.** The probe used to ask
   # `GET /v1/models` with the machine's own token to learn the models and whether the login
-  # worked; a machine holds no token now, and both questions moved to where the tokens are.
+  # worked; a machine holds no token now, and both questions moved to where the tokens are. Its
+  # version is also what a carried session is checked against before it is put back
+  # (`ForgeWorker.Job.Session`).
   @impl true
   def probe(opts) do
     %{
@@ -172,6 +178,9 @@ defmodule ForgeWorker.Harness.ClaudeCode do
       event("started", %{
         session_id: m["session_id"],
         model: m["model"],
+        # What wrote the session file this run leaves, recorded beside it so a later resume is
+        # restored only onto the same CLI (`docs/design/claude-code-events.md` § Resume).
+        version: m["claude_code_version"],
         tools: m["tools"] || [],
         raw: m
       })

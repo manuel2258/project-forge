@@ -18,7 +18,18 @@ defmodule ForgeWorker.Link do
   alias ForgeCore.Job.Result
   alias ForgeCore.WorkerProtocol
   alias ForgeWorker.{Checkout, Config, Log, Slice, Stats, Store}
-  alias ForgeWorker.Job.{Blobs, Command, Conversation, Credential, Dir, Runner, Seed, Workspace}
+
+  alias ForgeWorker.Job.{
+    Blobs,
+    Command,
+    Conversation,
+    Credential,
+    Dir,
+    Runner,
+    Seed,
+    Session,
+    Workspace
+  }
 
   require Logger
 
@@ -529,6 +540,7 @@ defmodule ForgeWorker.Link do
         {:ok,
          result
          |> upload_transcript(assignment)
+         |> upload_session(assignment, job_dir(root, job_id))
          |> Blobs.upload(assignment, Dir.blobs_dir(job_dir(root, job_id)))
          |> terminal(head)}
 
@@ -669,7 +681,12 @@ defmodule ForgeWorker.Link do
       Application.get_env(:forge_worker, :harness_opts, [])
       |> Keyword.merge(resume_opts(assignment))
       |> put_model(spec)
-      |> Credential.put(assignment, harness().driver())
+
+    # Before the credential goes in: the check asks the harness its version, and that needs none.
+    {harness_opts, session} =
+      Session.restore(assignment, job_dir(root, job_id), worktree, harness_opts, harness())
+
+    harness_opts = Credential.put(harness_opts, assignment, harness().driver())
 
     slice = assignment["slice"] || %{}
 
@@ -686,6 +703,7 @@ defmodule ForgeWorker.Link do
       harness_opts: harness_opts,
       backlog: assignment["backlog"],
       command_logs: logs,
+      session: session,
       # Named in the continuation a resumed run is handed, read from the tree it is about to run
       # in rather than taken from the platform: what the agent will find is what it is told
       # (`docs/design/job-prompt.md` § The continuation prompt).
@@ -715,10 +733,13 @@ defmodule ForgeWorker.Link do
     end
   end
 
-  defp resume_opts(%{"resume_session" => session}) when is_binary(session),
-    do: [resume_session: session]
+  # A fork is a new attempt resuming its predecessor's session under an id of its own
+  # (`docs/design/claude-code-events.md` § Resume).
+  @doc false
+  def resume_opts(%{"resume_session" => session} = assignment) when is_binary(session),
+    do: [resume_session: session, fork_session: assignment["fork_session"] == true]
 
-  defp resume_opts(_assignment), do: []
+  def resume_opts(_assignment), do: []
 
   # The spec's model wins over the machine's, and a spec that names none leaves the machine's
   # alone. The platform resolved it — a state's, then the project's — because it knows the state
@@ -744,6 +765,17 @@ defmodule ForgeWorker.Link do
   defp commit_message(assignment) do
     spec = assignment["spec"]
     "#{spec["state"]}: attempt #{spec["attempt"]}\n\nJob #{assignment["job_id"]}.\n"
+  end
+
+  # The run's harness session, uploaded after the user has gone, so the file is read as root with
+  # nothing left to swap a path (`ForgeWorker.Job.Dir.stage_session/4`). Reported inside the
+  # harness summary, beside the session id and the version that wrote it, which is what the
+  # platform records it with.
+  defp upload_session(%Result{harness: harness} = result, assignment, job_dir) do
+    case Session.upload(job_dir, harness["session_id"], assignment, 1) do
+      nil -> result
+      key -> %{result | harness: Map.put(harness, "session_blob", key)}
+    end
   end
 
   # The transcript goes to the store under the key the platform minted a token for, and the

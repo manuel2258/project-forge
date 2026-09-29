@@ -42,6 +42,24 @@ defmodule ForgeWorker.Harness.ClaudeCodeTest do
       assert {"CLAUDE_CODE_OAUTH_TOKEN", false} in env
     end
 
+    # `docs/design/claude-code-events.md` § Resume: a fork starts from the session under an id of
+    # its own. Only with a session to fork: the flag means nothing without `--resume`.
+    test "forks a resumed session when asked, and only then" do
+      {_exe, args, _env} =
+        ClaudeCode.command(spec(), "/jobs/j", resume_session: "sess-1", fork_session: true)
+
+      assert Enum.take(args, -3) == ["--resume", "sess-1", "--fork-session"]
+
+      {_exe, args, _env} =
+        ClaudeCode.command(spec(), "/jobs/j", resume_session: "sess-1", fork_session: false)
+
+      refute "--fork-session" in args
+
+      {_exe, args, _env} = ClaudeCode.command(spec(), "/jobs/j", fork_session: true)
+      refute "--fork-session" in args
+      refute "--resume" in args
+    end
+
     # A conversation has no turn ceiling — it ends when a person stops talking — and no state to
     # take a cost ceiling from, so the caller passes what is left of the day instead.
     test "streaming mode takes messages on stdin and drops the turn ceiling" do
@@ -110,6 +128,12 @@ defmodule ForgeWorker.Harness.ClaudeCodeTest do
       assert [%{type: "started", payload: %{session_id: "s", model: "m", tools: ["Read"]}}] =
                ClaudeCode.parse_line(
                  ~s({"type":"system","subtype":"init","session_id":"s","model":"m","tools":["Read"]})
+               )
+
+      # The version that will write the session file, recorded beside it for a later resume.
+      assert [%{type: "started", payload: %{version: "2.1.284"}}] =
+               ClaudeCode.parse_line(
+                 ~s({"type":"system","subtype":"init","session_id":"s","claude_code_version":"2.1.284"})
                )
 
       assert [%{type: "retry", payload: %{attempt: 2, error: "rate_limit"}}] =

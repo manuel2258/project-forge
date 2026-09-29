@@ -94,7 +94,7 @@ defmodule ForgeWorker.Job.RunnerTest do
 
   alias ForgeCore.Document.Question
   alias ForgeCore.Job.Result
-  alias ForgeWorker.Job.Runner
+  alias ForgeWorker.Job.{Dir, Runner}
 
   setup do
     %{root: tmp_dir("root"), worktree: tmp_dir("worktree")}
@@ -122,6 +122,10 @@ defmodule ForgeWorker.Job.RunnerTest do
     {:ok, pid} = Runner.start_link(opts)
     pid
   end
+
+  # The job directory a result's run used. Its stderr is kept beside it, in the worker's own.
+  defp job_dir(%Result{stderr_path: path}),
+    do: path |> Path.dirname() |> String.replace_suffix(".worker", "")
 
   defp events do
     receive_all([])
@@ -182,12 +186,17 @@ defmodule ForgeWorker.Job.RunnerTest do
              5
 
     assert File.read!(result.stderr_path) =~ "diagnostics on stderr"
+
+    # In the worker's own directory, where the job cannot replace it with a link: the worker reads
+    # it back as root, to quote its tail while the harness is starting.
+    assert Path.dirname(result.stderr_path) == Dir.worker_dir(job_dir(result))
+    refute File.exists?(Path.join(job_dir(result), "stderr.log"))
   end
 
   test "the harness receives the composed prompt, the credential and the budget flags", context do
     pid = run(context, "success")
     {:ok, result} = Runner.await(pid, 5_000)
-    job_dir = Path.dirname(result.stderr_path)
+    job_dir = job_dir(result)
 
     prompt = File.read!(Path.join(job_dir, "fake-prompt.txt"))
     assert prompt =~ "# You are one job in a ticket lifecycle"
@@ -207,7 +216,7 @@ defmodule ForgeWorker.Job.RunnerTest do
     on_exit(fn -> System.delete_env("FORGE_TEST_LEAK") end)
 
     {:ok, result} = context |> run("success") |> Runner.await(5_000)
-    job_dir = Path.dirname(result.stderr_path)
+    job_dir = job_dir(result)
     env = File.read!(Path.join(job_dir, "fake-env-all.txt"))
 
     refute env =~ "FORGE_TEST_LEAK"
@@ -222,7 +231,7 @@ defmodule ForgeWorker.Job.RunnerTest do
   test "a credential given as a function is resolved at spawn time", context do
     opts = [harness_opts: [executable: fake_executable(), credential: fn -> {:oauth, "tok"} end]]
     {:ok, result} = context |> run("success", opts) |> Runner.await(5_000)
-    job_dir = Path.dirname(result.stderr_path)
+    job_dir = job_dir(result)
 
     assert File.read!(Path.join(job_dir, "fake-env.txt")) ==
              "ANTHROPIC_API_KEY=unset\nCLAUDE_CODE_OAUTH_TOKEN=tok\n"
@@ -248,7 +257,7 @@ defmodule ForgeWorker.Job.RunnerTest do
   # directory: there, it could be a link to a file only the worker may read by the time it is.
   test "the transcript is written where the job cannot reach, not in its directory", context do
     {:ok, result} = context |> run("success") |> Runner.await(5_000)
-    job_dir = Path.dirname(result.stderr_path)
+    job_dir = job_dir(result)
 
     refute String.starts_with?(result.transcript_path, job_dir <> "/")
     assert Path.dirname(result.transcript_path) == ForgeWorker.Job.Dir.worker_dir(job_dir)
@@ -354,7 +363,7 @@ defmodule ForgeWorker.Job.RunnerTest do
         )
 
       {:ok, result} = Runner.await(pid, 5_000)
-      job_dir = Path.dirname(result.stderr_path)
+      job_dir = job_dir(result)
       prompt = File.read!(Path.join(job_dir, "fake-prompt.txt"))
 
       assert File.read!(Path.join(job_dir, "fake-args.txt")) =~ "--resume sess-42"
@@ -370,7 +379,7 @@ defmodule ForgeWorker.Job.RunnerTest do
 
     test "a cold start gets the whole prompt, and no --resume", %{spec: spec} = context do
       {:ok, result} = context |> run("success", spec: spec, head: "c0ffee") |> Runner.await(5_000)
-      job_dir = Path.dirname(result.stderr_path)
+      job_dir = job_dir(result)
       prompt = File.read!(Path.join(job_dir, "fake-prompt.txt"))
 
       refute File.read!(Path.join(job_dir, "fake-args.txt")) =~ "--resume"
@@ -465,7 +474,7 @@ defmodule ForgeWorker.Job.RunnerTest do
                result.blobs
 
       assert File.read!(home) == <<137, 80, 78, 71, 13, 10, 26, 10, 0, 1>>
-      assert Path.dirname(home) == ForgeWorker.Job.Dir.blobs_dir(Path.dirname(result.stderr_path))
+      assert Path.dirname(home) == ForgeWorker.Job.Dir.blobs_dir(job_dir(result))
       assert result.invalid_blobs["shots/.hidden"] =~ "is not a name"
       assert result.undeclared == []
     end
@@ -582,6 +591,27 @@ defmodule ForgeWorker.Job.RunnerTest do
     end
   end
 
+  # A job's directory is kept between its runs, and everything in it was the job's. A
+  # `prompt.md` or `correction-<n>.md` the last run left as a link would have this run's write go
+  # through it, as root, to whatever it names.
+  test "files the run writes are replaced, not written through, where the job left links",
+       context do
+    spec = spec()
+    job_dir = Path.join(context.root, spec.job_id)
+    File.mkdir_p!(job_dir)
+    victim = Path.join(tmp_dir("outside"), "victim")
+    File.write!(victim, "untouched")
+    names = ["prompt.md", "correction-1.md"]
+    Enum.each(names, &File.ln_s!(victim, Path.join(job_dir, &1)))
+
+    {:ok, _result} = context |> run("fixes_when_resumed", spec: spec) |> Runner.await(5_000)
+
+    assert File.read!(victim) == "untouched"
+
+    for name <- names,
+        do: assert({:ok, %File.Stat{type: :regular}} = File.lstat(Path.join(job_dir, name)))
+  end
+
   describe "correcting the outputs" do
     # Two refinements failed in production on a `question` block that was not YAML, and each
     # was discarded with its questions. The session that wrote it is told what is wrong and
@@ -593,7 +623,7 @@ defmodule ForgeWorker.Job.RunnerTest do
       assert result.status == :waiting
       assert [%Question{key: "split", blocking: true}] = result.questions
 
-      job_dir = Path.dirname(result.stderr_path)
+      job_dir = job_dir(result)
       assert File.read!(Path.join(job_dir, "fake-args.txt")) =~ "--resume sess-42"
 
       told = File.read!(Path.join(job_dir, "fake-prompt-2.txt"))
@@ -669,7 +699,7 @@ defmodule ForgeWorker.Job.RunnerTest do
 
     test "a correction is given what is left of the budget, not the whole of it", context do
       {:ok, result} = context |> run("fixes_when_resumed") |> Runner.await(5_000)
-      args = File.read!(Path.join(Path.dirname(result.stderr_path), "fake-args.txt"))
+      args = File.read!(Path.join(job_dir(result), "fake-args.txt"))
 
       assert args =~ "--max-turns 37"
       assert args =~ "--max-budget-usd 1.95"

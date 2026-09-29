@@ -163,6 +163,8 @@ defmodule Forge.PushTest do
             {item(:approval, ticket, %{detail: %{"to" => "planning"}}), "Approval on",
              "#{ticket.title} — to planning", "approval-#{ticket.id}"},
             {item(:stuck, ticket), "Stuck:", ticket.title, "stuck-#{ticket.id}"},
+            {item(:stuck, ticket, %{detail: %{reason: "approval rejected"}}), "Stuck:",
+             "#{ticket.title} — approval rejected", "stuck-#{ticket.id}"},
             {item(:review, ticket), "Waiting on you:", "#{ticket.title} — in #{ticket.state}",
              "review-#{ticket.id}"}
           ] do

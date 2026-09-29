@@ -41,8 +41,18 @@ in this product says "approve whatever is latest".
 A project may declare **commands**: fixed scripts, read from the workflow's pinned commit, that run
 as jobs of their own, possibly on another machine. A state may run them on entry, and a job's manifest
 may list commands its agent may run — by writing `$FORGE_JOB/invoke.json` and ending the run, which
-parks the job until they are done and resumes it with their exit statuses and logs. The format is
+parks the job until they are done and resumes it with their exit statuses and logs. A job
+that a command state sent the ticket to — a build that failed, sending it back — is handed that
+state's statuses and logs the same way, under *How you got here* in its manifest. The format is
 in the manifest of a job that may; a job whose manifest lists none needs nothing from this section.
+
+If you write or change a command script, know where it runs. It starts in the checkout, and
+`$FORGE_CHECKOUT` names the checkout too. The script itself is not in it: what runs is the pinned
+copy in the command job's own directory, so a path climbed from `dirname "$0"` leaves the
+repository. `$FORGE_OUT` is where it writes its groups of files. Its `HOME` is empty and never
+handed to another job, so a tool cache meant to carry from one job to the next — Gradle's, npm's, cargo's —
+belongs inside the checkout and ignored by git, where the project's seed and the ticket's own
+volume keep it.
 
 ## Questions
 
@@ -55,7 +65,8 @@ answer, and every later job on the ticket is handed them as `answers.md`.
 ## Ticket proposals
 
 Any job and any conversation may say a ticket should exist. None may create one: a proposal is a
-document you write to `$FORGE_JOB/out/proposals/`, and a person accepts or declines it. Accepting
+document you write to `$FORGE_JOB/out/proposals/`, and a person accepts or declines it. It is
+stored as `proposal-<your file name>`; the platform adds the prefix, so do not. Accepting
 admits it as an ordinary ticket, pinning the project's workflow **at that moment** rather than
 when it was proposed.
 

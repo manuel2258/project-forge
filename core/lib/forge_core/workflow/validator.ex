@@ -295,7 +295,7 @@ defmodule ForgeCore.Workflow.Validator do
         nil
 
       producers == [] ->
-        Error.new(Error.join(path, index), "#{inspect(name)} is not produced by any state")
+        unproduced_input_error(workflow, path, name, index)
 
       # `any?` and `all?` cannot differ here: an artifact with more than one producer is already
       # an error of its own ("is produced by more than one state"), so `producers` is a list of
@@ -311,6 +311,18 @@ defmodule ForgeCore.Workflow.Validator do
       true ->
         nil
     end
+  end
+
+  # A command's log is an input no state produces: read as the latest version the ticket has, and
+  # optional wherever it is read, so there is no ordering for it to break
+  # (`workflow-grammar-v1.md` § Inputs).
+  defp unproduced_input_error(workflow, path, name, index) do
+    if Workflow.log_producer(workflow, name) == nil,
+      do:
+        Error.new(
+          Error.join(path, index),
+          "#{inspect(name)} is not produced by any state or command"
+        )
   end
 
   defp produce_error(workflow, path, name, index) do

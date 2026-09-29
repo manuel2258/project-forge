@@ -73,6 +73,16 @@ defmodule Forge.Tickets.Ticket do
     |> unique_constraint([:project_id, :number])
   end
 
+  @doc """
+  Changeset for a person re-pinning the ticket's workflow (`Forge.Engine.repin/2`): the definition
+  and the commit it was read at, together, and nothing else.
+  """
+  def repin_changeset(ticket, attrs) do
+    ticket
+    |> cast(attrs, [:workflow, :workflow_commit])
+    |> validate_required([:workflow, :workflow_commit])
+  end
+
   @doc "Changeset for the engine moving a ticket: state, status and accumulated cost only."
   def progress_changeset(ticket, attrs) do
     ticket

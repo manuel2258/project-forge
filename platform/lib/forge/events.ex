@@ -77,6 +77,17 @@ defmodule Forge.Events do
     Repo.all(from e in Event, where: e.job_id == ^job_id, order_by: e.seq)
   end
 
+  @doc "The newest event of `type` for a job, or nil."
+  @spec latest_for_job(String.t(), String.t()) :: Event.t() | nil
+  def latest_for_job(job_id, type) do
+    Repo.one(
+      from e in Event,
+        where: e.job_id == ^job_id and e.type == ^type,
+        order_by: [desc: e.seq],
+        limit: 1
+    )
+  end
+
   @doc """
   The newest events of a project, newest first.
 
@@ -193,6 +204,11 @@ defmodule Forge.Events do
         payload: %{"statuses" => statuses, "outcome" => outcome}
       }),
       do: "statuses #{Enum.map_join(statuses, ", ", &(&1 || "none"))} → #{outcome}"
+
+  def summary(%Event{type: "ticket.stuck", payload: %{"reason" => reason}}), do: reason
+
+  def summary(%Event{type: "transition.taken", payload: %{"from" => from, "to" => to} = p}),
+    do: "#{from} → #{to}#{if p["outcome"], do: " on #{p["outcome"]}"}"
 
   def summary(%Event{payload: payload}) when map_size(payload) == 0, do: ""
 

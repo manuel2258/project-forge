@@ -26,6 +26,35 @@ json_escape() {
   printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
 
+# The session a run resumes, kept as Claude Code keeps one (docs/measurements.md § Session
+# resume): under $HOME/.claude/projects/<cwd, each character not a letter or digit a dash>/<id>.jsonl,
+# found on `--resume` under any project directory, and forked under a new id. Sets `resume` (the
+# id asked for, or empty), `here` (this working directory's), `found` (the file, or empty when a
+# resume finds nothing) and `sid` (the id this run goes on under).
+open_session() {
+  resume=""
+  fork=""
+  prev=""
+  for a in "$@"; do
+    [ "$prev" = "--resume" ] && resume="$a"
+    [ "$a" = "--fork-session" ] && fork=1
+    prev="$a"
+  done
+  projects="$HOME/.claude/projects"
+  here="$projects/$(pwd | sed 's/[^A-Za-z0-9]/-/g')"
+  mkdir -p "$here"
+  sid="sess-42"
+  found=""
+  if [ -n "$resume" ]; then
+    found="$(find "$projects" -name "$resume.jsonl" 2> /dev/null | head -n 1)"
+    if [ -n "$found" ]; then
+      sid="$resume"
+      [ -n "$fork" ] && sid="$resume-fork"
+      [ "$found" = "$here/$sid.jsonl" ] || cp "$found" "$here/$sid.jsonl"
+    fi
+  fi
+}
+
 if [ "${FAKE_SCENARIO:-success}" != "chat" ]; then
   prompt="$(cat)"
   printf '%s' "$prompt" > "$FORGE_JOB/fake-prompt.txt"
@@ -61,9 +90,40 @@ case "${FAKE_SCENARIO:-success}" in
     echo "copying path '/nix/store/abc-android-sdk' from 'https://cache.nixos.org'..." >&2
     sleep 60
     ;;
+  # A first run writes a session that remembers a word. A resume with nothing to find exits
+  # before `init` the way the real harness does; found, it says what it remembers in its
+  # document (`open_session` above).
+  session)
+    open_session "$@"
+    if [ -z "$resume" ]; then
+      printf '%s\n' "{\"type\":\"user\",\"sessionId\":\"$sid\",\"parentUuid\":null,\"uuid\":\"u1\",\"message\":{\"content\":\"remember ${FAKE_WORD:-PELICAN}\"}}" > "$here/$sid.jsonl"
+      remembered="nothing"
+    elif [ -z "$found" ]; then
+      echo "No conversation found with session ID: $resume" >&2
+      emit "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"num_turns\":0,\"duration_ms\":1,\"total_cost_usd\":0,\"session_id\":\"$resume\"}"
+      exit 1
+    else
+      remembered="$(sed -n 's/.*remember \([A-Z]*\).*/\1/p' "$found" | head -n 1)"
+    fi
+    printf 'args: %s\n' "$*" > "$FORGE_JOB/fake-args.txt"
+    emit "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$sid\",\"model\":\"fake-model\",\"claude_code_version\":\"9.9.9\",\"tools\":[]}"
+    printf -- '---\noutcome: done\n---\n# Plan\n\nRemembered %s.\n' "$remembered" > "$doc"
+    emit "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"num_turns\":1,\"duration_ms\":5,\"total_cost_usd\":0.01,\"result\":\"Done.\",\"session_id\":\"$sid\"}"
+    exit 0
+    ;;
   chat)
     turns=0
     cost=0
+    # Its session (`open_session` above): a resume with nothing to find ends before it reads a
+    # message. What the restored file remembered is written where a test can read it.
+    open_session "$@"
+    if [ -n "$resume" ]; then
+      if [ -z "$found" ]; then
+        echo "No conversation found with session ID: $resume" >&2
+        exit 1
+      fi
+      sed -n 's/.*remember \([A-Z]*\).*/\1/p' "$found" | head -n 1 > "$FORGE_JOB/fake-remembered.txt"
+    fi
     # Every message the runner writes arrives here as one JSON line. Reading until stdin closes
     # is what makes this a conversation: the process outlives each turn and ends on EOF.
     while IFS= read -r line; do
@@ -74,7 +134,7 @@ case "${FAKE_SCENARIO:-success}" in
           # What a cut turn really reports: an execution error with no result. Only the runner
           # knows it asked for this, which is the point of the test that reads it.
           turns=$((turns + 1))
-          emit "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"num_turns\":1,\"duration_ms\":20,\"total_cost_usd\":$cost,\"result\":null,\"session_id\":\"sess-42\"}"
+          emit "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"num_turns\":1,\"duration_ms\":20,\"total_cost_usd\":$cost,\"result\":null,\"session_id\":\"$sid\"}"
           continue
           ;;
       esac
@@ -86,7 +146,8 @@ case "${FAKE_SCENARIO:-success}" in
       # composed prompt is full of them. A test about what one message carried reads this.
       printf '%s\n' "$line" >> "$FORGE_JOB/fake-lines.jsonl"
 
-      emit '{"type":"system","subtype":"init","session_id":"sess-42","model":"fake-model","tools":["Read"]}'
+      emit "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$sid\",\"model\":\"fake-model\",\"claude_code_version\":\"9.9.9\",\"tools\":[\"Read\"]}"
+      printf '%s\n' "{\"type\":\"user\",\"sessionId\":\"$sid\",\"parentUuid\":null,\"uuid\":\"u$turns\",\"message\":{\"content\":\"remember ${FAKE_WORD:-PELICAN}\"}}" >> "$here/$sid.jsonl"
       # The echo, which the real harness writes only when it takes the message.
       emit "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"$(json_escape "$text")\"}]}}"
 
@@ -112,7 +173,7 @@ case "${FAKE_SCENARIO:-success}" in
           done
 
           if [ "$cut" = 1 ]; then
-            emit "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"num_turns\":1,\"duration_ms\":20,\"total_cost_usd\":$cost,\"result\":null,\"session_id\":\"sess-42\"}"
+            emit "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"num_turns\":1,\"duration_ms\":20,\"total_cost_usd\":$cost,\"result\":null,\"session_id\":\"$sid\"}"
             continue
           fi
           ;;
@@ -145,7 +206,7 @@ case "${FAKE_SCENARIO:-success}" in
       # Cumulative, as measured. A platform that adds this per turn over-counts every turn but
       # the first, and the number stays plausible while it does.
       cost=$(awk -v c="$cost" 'BEGIN { printf "%.4f", c + 0.01 }')
-      emit "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"num_turns\":1,\"duration_ms\":12,\"total_cost_usd\":$cost,\"usage\":{\"input_tokens\":1,\"output_tokens\":2},\"result\":\"reply to $(json_escape "$text")\",\"session_id\":\"sess-42\"}"
+      emit "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"num_turns\":1,\"duration_ms\":12,\"total_cost_usd\":$cost,\"usage\":{\"input_tokens\":1,\"output_tokens\":2},\"result\":\"reply to $(json_escape "$text")\",\"session_id\":\"$sid\"}"
     done
     exit 0
     ;;

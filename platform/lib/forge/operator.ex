@@ -161,6 +161,15 @@ defmodule Forge.Operator do
     end
   end
 
+  @doc "Re-pins a ticket's workflow to the default branch as it is now (`Forge.Engine.repin/2`)."
+  @spec repin(Ticket.t(), User.t()) :: {:ok, Ticket.t()} | {:error, term()}
+  def repin(%Ticket{} = ticket, %User{} = user) do
+    with :ok <- allow(ticket, user, :use),
+         {:ok, ticket} <- Engine.repin(ticket, user.id) do
+      notify(ticket)
+    end
+  end
+
   @doc """
   Cancels a ticket (`Forge.Engine.cancel/2`): its live jobs end and it is hidden everywhere a ticket
   is listed. Not a deletion; `restore/2` undoes it.

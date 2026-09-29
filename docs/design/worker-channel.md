@@ -116,7 +116,7 @@ Platform → worker:
 
 | Message | Payload | Meaning |
 |---|---|---|
-| `assign` | `job_id`, `kind`, spec JSON, slice limits (`memory_max`, `cpu_weight`), git endpoint + per-job token + branch + base, transcript key + token, seed key + token, the backlog, `resume_session`, wall clock, the job's inference credential sealed for this worker (`credentials.md` § Delivery to the machine); a chat adds `idle_ms`, `max_cost_usd` and `history` and a longer wall clock, and its spec a `replay` once it has been reopened | Run this job. |
+| `assign` | `job_id`, `kind`, spec JSON, slice limits (`memory_max`, `cpu_weight`), git endpoint + per-job token + branch + base, transcript key + token, a prefix and `put` token for the harness session's uploads, seed key + token, the backlog, `resume_session` (nil when there is nothing to resume), `fork_session`, the session file to restore (`session`: key, `get` token, id, the version that wrote it), wall clock, the job's inference credential sealed for this worker (`credentials.md` § Delivery to the machine); a chat adds `idle_ms`, `max_cost_usd` and `history` and a longer wall clock, and its spec a `replay` once it has been reopened | Run this job. |
 | `assign` for a command | `job_id`, `kind: "command"`, its spec (the script's text, argv, commit, env, timeout), slice limits, git endpoint + a read-only per-job token + branch + base, the log's store key + `put` token, seed key + token, wall clock | Run this command (`docs/design/commands.md`). No credential, no backlog, no session. |
 | — and for either, when it declares a group of files | `outputs`: a store prefix and a `put` token scoped to it (`docs/design/storage.md` § Serving) | Where the group's files go. |
 | `cancel` | `job_id`, reason | Stop it. The worker still sends a terminal message. |
@@ -389,6 +389,23 @@ a protocol 2 worker keeps taking commands only. The minimum stays 0 until every 
 permanent machine has moved, as below; until then an old machine is not refused, it is simply
 not given an agent. A template whose snapshot speaks protocol 2 makes no machine for an agent,
 for the same reason, and the templates page says which snapshot it is.
+
+**The batch a command state hands on is an addition** (`docs/design/job-prompt.md` § How the
+job arrived): `entered_commands` in the spec, and `entered-<n>-<command>.log` entries in
+`commands`. An older worker's spec parser drops `entered_commands`, so its manifest says nothing of
+the batch, and it refuses the `entered-` names and logs `commands.unwritten`: the job is told only
+where it came from and on which outcome, as before this existed. A log a state names in `inputs`
+still reaches it, since inputs are inlined. That is less, not wrong, which is what an addition may
+be.
+
+**The carried session is an addition** (`docs/design/claude-code-events.md` § Resume): a prefix
+to upload the harness session under, `session` to restore and `fork_session` on `assign`, and a
+`session_blob` and `version` in a result's or a turn's harness summary. An older worker ignores
+the first three and reports none of the last, and every combination is correct: it uploads
+nothing, so nothing is carried; a resume of its own session finds what that machine holds, as it
+always did; a fork of another attempt's session — a job directory the machine never had — finds
+nothing, is re-queued cold with the fork cleared, and runs as a new attempt always did; and a
+conversation it reopens never read `resume_session`, so it starts cold with the replay.
 
 **Raising `minimum`** is the platform dropping an older protocol: the day it stops handling the
 shape older workers send. It is the one edit here that refuses running machines, so, before it

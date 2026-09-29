@@ -132,6 +132,56 @@ defmodule ForgeWeb.CommandsLiveTest do
     refute row =~ "pl-8"
   end
 
+  # Why `failed` fired, under the command that failed, without opening the log: the end of it, from
+  # a whole line. Only the batch that decided where the ticket is; an agent's own commands and an
+  # older batch's failures were answered by the work after them.
+  test "a command state's failed command shows the end of its log", context do
+    [job] = Jobs.for_ticket(context.ticket.id)
+    written = %{"implementation.md" => "---\noutcome: done\n---\n# Done\n"}
+    {:ok, _} = FakeWorker.run(job, context.worker, "success", written: written)
+
+    [build] = commands(context.ticket)
+    log = String.duplicate("compiling\n", 1_000) <> "fatal: not a git repository\n"
+
+    {:ok, _} =
+      build |> FakeWorker.assign(context.worker) |> FakeWorker.finish_command(1, log: log)
+
+    assert Tickets.get!(context.ticket.id).state == "implementing"
+
+    {:ok, view, _html} =
+      live(context.conn, page(context.project, context.ticket, "?tab=timeline"))
+
+    tail = view |> element("#command-#{build.id}-tail") |> render()
+    assert tail =~ "fatal: not a git repository"
+    assert tail =~ "bytes cut, of #{byte_size(log)}"
+    refute tail =~ ~r/\n[a-z]{1,8}\n/
+
+    # The decision is said beside its event, not only its type.
+    assert render(view) =~ "statuses 1 → failed"
+    assert render(view) =~ "checking → implementing on failed"
+
+    # The next batch passes, and the old failure is no longer shown as the reason for anything.
+    [again] = Enum.filter(Jobs.for_ticket(context.ticket.id), &(&1.status == :pending))
+    {:ok, _} = FakeWorker.run(again, context.worker, "success", written: written)
+    [passed] = context.ticket |> commands() |> Enum.filter(&(&1.status == :pending))
+    {:ok, _} = passed |> FakeWorker.assign(context.worker) |> FakeWorker.finish_command(0)
+
+    {:ok, view, _html} =
+      live(context.conn, page(context.project, context.ticket, "?tab=timeline"))
+
+    refute has_element?(view, "#command-#{build.id}-tail")
+    refute has_element?(view, "#command-#{passed.id}-tail")
+  end
+
+  test "an agent's failed command shows no tail on the ticket", context do
+    %{finished: finished} = invoked(context)
+
+    {:ok, view, _html} =
+      live(context.conn, page(context.project, context.ticket, "?tab=timeline"))
+
+    refute has_element?(view, "#command-#{finished.id}-tail")
+  end
+
   test "a command's page shows the script, its arguments as a vector, its commit and log",
        context do
     %{finished: finished, parent: parent} = invoked(context)

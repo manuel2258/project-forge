@@ -85,7 +85,9 @@ set, and the pinning enforces what the preamble asks.
 The consequence is the familiar one from every CI system and should be stated rather than
 discovered: **a ticket that changes a command script sees the change only after it merges.** That
 is correct — a build script under review must not be the build script judging it — but the first
-person to hit it will think it is a bug.
+person to hit it will think it is a bug. The other half of it is that a fix merged by another
+ticket does not reach this one either, until a person re-pins it (`workflow-grammar-v1.md`
+§ Pinning).
 
 **The drift property is about the script, not the arguments.** With freeform argv, `verifying`
 running `build` and an agent running `build --profile release` are no longer the same invocation.
@@ -200,6 +202,12 @@ resumes when all *n* have landed. That is fan-out inside a job without the workf
 v1 rejects, and it is why the manifest of a job that may invoke tells the agent to ask for
 everything at once rather than one command at a time.
 
+**A command state's batch reaches the job it sends the ticket to** in the same shape, as that job's
+*How you got here* rather than its *Commands you ran*: `entered` names the batch, and the logs are
+`$FORGE_JOB/commands/entered-<n>-<command>.log` (`job-prompt.md` § How the job arrived). Without
+it the one job responsible for fixing a failed build was the one job that could not read why it
+failed.
+
 **What always-park costs is tokens, not seconds.** Every resume is a harness resume, and
 `docs/design/claude-code-events.md` § Resume says the session is reused where available and a
 freshly composed prompt used otherwise. The fallback re-sends context, and context is the
@@ -214,9 +222,10 @@ facts settled it without a run. A parked job holds no slice — which is the who
 feature — so a worker whose only job is parked has nothing running, goes `idle`, and was destroyed
 on its period while the command was still going. And `Workers.assignable/1` was first-fit by
 `inserted_at`, so even a machine that survived was not preferred for the resume. **Neither is
-true any more** (below). Claude Code's session lookup is per project directory
-(`docs/design/claude-code-events.md` § Resume), so a different worker cannot find it — which is
-why keeping the machine matters.
+true any more** (below). And the machine matters less than it did: the session is a file in the
+job's `HOME`, which the worker now uploads after every run and a resume on any machine puts back
+(`docs/design/claude-code-events.md` § Resume). Keeping the machine still saves the download and
+the warm worktree; it no longer decides whether the agent remembers.
 
 Nothing about correctness turns on this — that note is explicit that *"resume is never required
 for correctness, and no outcome depends on it"*, and `worker-tier.md` § Hibernation and resume
@@ -247,9 +256,11 @@ disk"; it runs against a sha that is on the branch and in the record.
   merge.
 - **Untracked-but-not-ignored files are staged; ignored files never are.** The commit has to pick
   up source files the agent created, which is what makes a blind sweep tempting and wrong — this
-  is the trap that puts a build directory into the branch. It does not bite here, because the
-  build directory is its own subvolume outside the worktree (`worker-tier.md` § Volumes and the
-  seed), but the rule is stated because the next person to touch it will not know that.
+  is the trap that puts a build directory into the branch. The build directory is inside the
+  worktree — the seed and a ticket's volume carry it there (`worker-tier.md` § Volumes and the
+  seed) — so what keeps it off the branch is the project's `.gitignore` and nothing else. This
+  note first said the build directory was a subvolume of its own outside the worktree; it never
+  was.
 
 This replaces an earlier idea — running the command on a btrfs snapshot of the live worktree — and
 is better than it. A snapshot gives the command a frozen tree but nothing to call it; a commit
@@ -278,6 +289,17 @@ audit trail, as every other git credential's are.
 it into the job directory and executes that copy. The checkout at the invocation's commit supplies
 everything else, and never the script — which is what "read at the pinned base commit" (§ The
 shape) needs to mean when the branch holds an edited `build.sh`.
+
+**So `$0` is not in the checkout, and that has to be said.** The copy is `$FORGE_JOB/command`, and
+the script starts in the checkout with `FORGE_CHECKOUT` naming it (`workflow-grammar-v1.md` §
+Commands has the table). Neither was written down at first, and a project's `build.sh` did what
+every CI script does — `cd "$(dirname "$0")/../.."` — which climbed out of the job directory rather
+than to the repository root. `cd` resolves `..` textually and the directory it reached exists, so
+nothing failed until the build found no build there. Every run of it from a checkout passed, which
+is why three jobs could not find it: the one condition that mattered, being the pinned copy, was
+the one nothing but a command job reproduces. Writing the copy over its own path in the checkout
+would have made that script work, and was not done: the worker would write, as root, to a path the
+ticket's branch controls, through whatever links the branch put on it.
 
 **A command worker is warm or it is not worth having.** The fetch is a delta against a checkout it
 already has, on a snapshot of a seed it already holds. `docs/measurements.md` § M1 variant (c) is
@@ -488,11 +510,12 @@ command job needs no harness and no credential, so the gate's harness clause doe
   reservation (`docs/design/provisioning.md` § The gate) stops a large job being jumped by small
   ones indefinitely. Whether an agent waiting on its own commands should outrank a stranger's is a
   priority, which the scheduler still has none of.
-- **Whether affinity on resume pays.** It is built (§ Always park), and § Always park no longer
-  asks whether the harness session survives a park, because the topology answers it. What is open
-  is the size of the prize — how many tokens a re-composed prompt costs against a resumed
-  session — and that one *is* a measurement, on the operator's real project rather than on a
-  sample.
+- **Whether affinity on resume pays.** It is built (§ Always park), and since the session is
+  carried between machines, what it saves is the download and a warm worktree rather than the
+  session. The size of the prize a resumed session is over a re-composed prompt is still a
+  measurement, on the operator's real project rather than on a sample, and the platform records
+  what it needs: the cost of each run, and whether a resume was asked for (`job.started`'s
+  `resume`; a resume the worker could not restore still counts, and logs `session.unrestored`).
 - **`disk` in `resources`.** Wanted the first time a build directory fills a worker; needs btrfs
   quota groups on the build subvolume and a free-space dimension on the gate.
 - **`arch` in `resources`.** A project whose toolchain is x86-only cannot run commands on an Arm

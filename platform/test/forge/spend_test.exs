@@ -65,6 +65,14 @@ defmodule Forge.SpendTest do
       # what stops a runaway before the ticket's allowance is gone.
       assert budget(assignment) == 0.30
       assert %{"binding" => "ticket", "effective_cost" => 0.3} = lowered(ticket)
+
+      # And the job is told: what it was lowered from and by which cap, and what the ticket has.
+      assert %{
+               "declared" => 0.5,
+               "lowered_by" => "ticket",
+               "ticket_left" => 0.3,
+               "ticket_limit" => 0.3
+             } = assignment["spec"]["budget"]
     end
 
     test "a job whose state budget is the smallest runs on it untouched", %{
@@ -79,6 +87,23 @@ defmodule Forge.SpendTest do
 
       assert budget(assignment) == 0.50
       refute lowered(ticket)
+
+      # Nothing lowered, and the allowance named all the same.
+      refute Map.has_key?(assignment["spec"]["budget"], "lowered_by")
+      assert %{"ticket_left" => 25.0, "ticket_limit" => 25.0} = assignment["spec"]["budget"]
+    end
+
+    # What is left, not what the ticket was allowed: the figure a job weighs another round by.
+    test "the allowance named is what is left of it after what the ticket spent", %{
+      user: user,
+      worker: worker
+    } do
+      ticket = admit(user, ticket_cost: 25.0)
+      spend!(ticket, "4.00")
+
+      assignment = ticket |> only_pending() |> FakeWorker.assign(worker)
+
+      assert %{"ticket_left" => 21.0, "ticket_limit" => 25.0} = assignment["spec"]["budget"]
     end
   end
 
@@ -101,6 +126,25 @@ defmodule Forge.SpendTest do
       assert Jobs.get!(job.id).status == :pending
       assert Enum.filter(Queue.items(), &(&1.ticket.id == ticket.id)) == []
       assert Spend.paused?()
+    end
+
+    # Below the state's budget but not spent: the job runs on what is left of the day, and is
+    # told that the day is what lowered it. Left is 1.50 less the 0.80 spent and the 0.50 this
+    # pending job is itself budgeted, which the day counts as committed.
+    test "narrows a job's budget to what is left of the day, and says so", %{
+      user: user,
+      worker: worker
+    } do
+      spend!(admit(user, ticket_cost: 25.0), "0.80", started: true)
+      ticket = admit(user, ticket_cost: 25.0)
+      Application.put_env(:forge, Forge.Spend, daily_cost_usd: 1.5)
+
+      assignment = ticket |> only_pending() |> FakeWorker.assign(worker)
+
+      assert %{"cost" => cost, "declared" => 0.5, "lowered_by" => "day"} =
+               assignment["spec"]["budget"]
+
+      assert_in_delta cost, 0.2, 0.001
     end
 
     # The pause is a wait like any other, and is said once. `Jobs.assign/2` asks the cap on every

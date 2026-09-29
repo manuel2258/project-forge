@@ -16,6 +16,7 @@ defmodule Forge.Jobs.Commands do
 
   alias Ecto.Multi
   alias Forge.{Artifacts, Engine, Events, Git, Jobs, Projects, Repo, Storage, Tickets}
+  alias Forge.Artifacts.Version
   alias Forge.Events.Event
   alias Forge.Jobs.{Job, Runs}
   alias Forge.Tickets.Ticket
@@ -624,24 +625,112 @@ defmodule Forge.Jobs.Commands do
   """
   @spec results(Job.t()) :: {[map()], [%{file: String.t(), key: String.t()}]}
   def results(%Job{id: id}) do
-    with %Event{payload: %{"batch" => batch}} <- latest(id, "job.resumed"),
+    with %Event{payload: %{"batch" => batch}} <- Events.latest_for_job(id, "job.resumed"),
          %Event{payload: %{"invocations" => invocations}} <- parked(id, batch) do
-      invocations
-      |> Enum.with_index(1)
-      |> Enum.map(&result_entry/1)
-      |> Enum.unzip()
-      |> then(fn {results, logs} -> {results, Enum.reject(logs, &is_nil/1)} end)
+      result_entries(invocations, "")
     else
       _none -> {[], []}
     end
   end
 
-  defp result_entry({%{"refused" => _reason} = refused, _n}), do: {refused, nil}
+  @doc """
+  The batch a command state last ran, if it ran to a decision: what a job entered from that state
+  is told about (`docs/design/job-prompt.md` § How the job arrived). Nil for a state with no
+  batch, and for one whose latest batch was never decided — cancelled, or still running — since
+  an older batch's results would describe a visit that is not the one the ticket came from.
+  """
+  @spec decided_batch(Ecto.UUID.t(), String.t()) :: String.t() | nil
+  def decided_batch(ticket_id, state) do
+    with %Event{payload: %{"batch" => batch}} <- latest_started(ticket_id, state),
+         :decided <- batch_state(Repo, ticket_id, batch) do
+      batch
+    else
+      _none -> nil
+    end
+  end
 
-  defp result_entry({%{"job_id" => job_id} = invocation, n}) do
-    finished = latest(job_id, "job.finished")
+  @doc """
+  What the batch `job` was entered after said, for its spec, as `results/1` returns a resume's:
+  the manifest's entries in `invoke` order, and each log's store key with the file it is written
+  under — `entered-<n>-<command>.log`, so it cannot collide with a log of the job's own.
+  """
+  @spec entered(Job.t()) :: {[map()], [%{file: String.t(), key: String.t()}]}
+  def entered(%Job{ticket_id: ticket_id, spec: %{"entered" => %{"batch" => batch}}})
+      when is_binary(batch) do
+    case started(ticket_id, batch) do
+      %Event{payload: %{"jobs" => ids}} ->
+        jobs = Map.new(Repo.all(from j in Job, where: j.id in ^ids), &{&1.id, &1})
+
+        ids
+        |> Enum.map(&Map.fetch!(jobs, &1))
+        |> Enum.map(&invocation/1)
+        |> result_entries("entered-")
+
+      nil ->
+        {[], []}
+    end
+  end
+
+  def entered(%Job{}), do: {[], []}
+
+  @doc """
+  The end of each failed command's log in the ticket's latest decided batch, by job id: what the
+  ticket page shows under a command that sent the ticket back, so why `build_failed` fired is on
+  the page rather than behind a download (`docs/design/ui.md` § Decide and Timeline). The latest
+  batch only, since an older failure was answered by the work after it, and at most `bytes` of
+  each log, from the start of a line.
+  """
+  @spec failure_tails(Ecto.UUID.t(), pos_integer()) :: %{Ecto.UUID.t() => String.t()}
+  def failure_tails(ticket_id, bytes) do
+    with %Event{payload: %{"batch" => batch}} <- latest_decided(ticket_id),
+         %Event{payload: %{"jobs" => ids}} <- started(ticket_id, batch) do
+      from(j in Job, where: j.id in ^ids)
+      |> Repo.all()
+      |> Enum.reject(&(exit_status(&1) == 0))
+      |> Enum.flat_map(&failure_tail(&1, bytes))
+      |> Map.new()
+    else
+      _none -> %{}
+    end
+  end
+
+  defp failure_tail(%Job{id: id}, bytes) do
+    with %Event{payload: %{"log" => key}} when is_binary(key) <-
+           Events.latest_for_job(id, "job.finished"),
+         {:ok, text} <- Artifacts.excerpt(%Version{blob_uri: Storage.uri(key)}, 0, bytes) do
+      [{id, text}]
+    else
+      _none -> []
+    end
+  end
+
+  # A command state's job carries what an agent's invocation would have said about it.
+  defp invocation(%Job{id: id, spec: %{"command" => command}}),
+    do: %{
+      "job_id" => id,
+      "command" => command["name"],
+      "args" => command["args"],
+      "at" => command["at"]
+    }
+
+  # Each invocation's manifest entry, numbered from one, and the logs there are to fetch: a
+  # refused invocation has an entry and no log.
+  defp result_entries(invocations, prefix) do
+    {results, logs} =
+      invocations
+      |> Enum.with_index(1)
+      |> Enum.map(&result_entry(&1, prefix))
+      |> Enum.unzip()
+
+    {results, Enum.reject(logs, &is_nil/1)}
+  end
+
+  defp result_entry({%{"refused" => _reason} = refused, _n}, _prefix), do: {refused, nil}
+
+  defp result_entry({%{"job_id" => job_id} = invocation, n}, prefix) do
+    finished = Events.latest_for_job(job_id, "job.finished")
     payload = (finished && finished.payload) || %{}
-    file = "#{n}-#{invocation["command"]}.log"
+    file = "#{prefix}#{n}-#{invocation["command"]}.log"
     key = payload["log"]
 
     result = %{
@@ -658,17 +747,38 @@ defmodule Forge.Jobs.Commands do
   end
 
   defp parked_on(job_id) do
-    case latest(job_id, "job.parked") do
+    case Events.latest_for_job(job_id, "job.parked") do
       %Event{payload: %{"batch" => batch}} -> batch
       _none -> nil
     end
   end
 
-  defp latest(job_id, type) do
+  defp latest_decided(ticket_id) do
     Repo.one(
       from e in Event,
-        where: e.job_id == ^job_id and e.type == ^type,
+        where: e.ticket_id == ^ticket_id and e.type == "commands.decided",
         order_by: [desc: e.seq],
+        limit: 1
+    )
+  end
+
+  defp latest_started(ticket_id, state) do
+    Repo.one(
+      from e in Event,
+        where:
+          e.ticket_id == ^ticket_id and e.type == "commands.started" and
+            fragment("?->>'state'", e.payload) == ^state,
+        order_by: [desc: e.seq],
+        limit: 1
+    )
+  end
+
+  defp started(ticket_id, batch) do
+    Repo.one(
+      from e in Event,
+        where:
+          e.ticket_id == ^ticket_id and e.type == "commands.started" and
+            fragment("?->>'batch'", e.payload) == ^batch,
         limit: 1
     )
   end

@@ -122,7 +122,8 @@ next conversation about the ticket reads every document.
 ## Proposing a ticket
 
 Asked to file something, or noticing work that deserves its own ticket, write one file per
-proposal in `$FORGE_JOB/out/proposals/`: an H1 that is the title, then the body. No front
+proposal in `$FORGE_JOB/out/proposals/`, named for what it proposes; the platform stores it with
+a `proposal-` prefix of its own, so do not add one. Inside, an H1 that is the title, then the body. No front
 matter, no `question` blocks — if you have a question, ask it in your reply, where the person
 can answer it.
 

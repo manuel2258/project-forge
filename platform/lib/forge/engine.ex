@@ -187,7 +187,11 @@ defmodule Forge.Engine do
   defp put_follow_up(multi, _ticket, workflow, transition, %State{prompt: prompt}, false, entered)
        when is_binary(prompt) do
     Multi.merge(multi, fn %{ticket: ticket} ->
-      Jobs.put_create(Multi.new(), :next_job, ticket, workflow, transition.to, entered)
+      entered = put_batch(entered, ticket)
+
+      Jobs.put_create(Multi.new(), :next_job, ticket, workflow, transition.to, entered,
+        came_back: true
+      )
     end)
   end
 
@@ -209,6 +213,19 @@ defmodule Forge.Engine do
 
   defp put_follow_up(multi, _ticket, _workflow, _transition, _human_state, false, _entered),
     do: multi
+
+  # Out of a command state, the job is handed what its commands said — whoever took the edge, so
+  # a person moving a stuck ticket on sends the log with it (`docs/design/job-prompt.md` § How
+  # the job arrived). Inside the merge, so a batch decided in this same transaction is seen.
+  # Found by the log and not by the workflow: only a command state's entry logs the
+  # `commands.started` a batch is found by, and a re-pin can change what a state is after its
+  # batch ran — the batch is still what sent the ticket on.
+  defp put_batch(%{"from" => from} = entered, ticket) do
+    case Forge.Jobs.Commands.decided_batch(ticket.id, from) do
+      batch when is_binary(batch) -> Map.put(entered, "batch", batch)
+      nil -> entered
+    end
+  end
 
   defp put_pending_approval(multi, ticket, %Transition{} = transition, outcome) do
     pending = %{
@@ -251,6 +268,26 @@ defmodule Forge.Engine do
     })
   end
 
+  @doc """
+  Why a stuck ticket is stuck: the reason on its latest `ticket.stuck`, or nil for a ticket that is
+  not. What the queue, the push and the ticket page say beside the flag — "stuck" alone sends a
+  person to the event log to find out whether a job failed, a `max` ran out or nothing matched.
+  """
+  @spec why_stuck(Ticket.t()) :: String.t() | nil
+  def why_stuck(%Ticket{status: :stuck} = ticket), do: latest_stick(ticket)["reason"]
+  def why_stuck(%Ticket{}), do: nil
+
+  # The payload of the ticket's latest `ticket.stuck`: its reason, and its cause when it has one.
+  defp latest_stick(%Ticket{id: id}) do
+    Repo.one(
+      from e in Event,
+        where: e.ticket_id == ^id and e.type == "ticket.stuck",
+        order_by: [desc: e.seq],
+        limit: 1,
+        select: e.payload
+    ) || %{}
+  end
+
   defp stuck_payload(reason, nil), do: %{"reason" => reason}
   defp stuck_payload(reason, cause), do: %{"reason" => reason, "cause" => to_string(cause)}
 
@@ -276,15 +313,7 @@ defmodule Forge.Engine do
     |> Enum.count(&(unstick(&1, actor) == :ok))
   end
 
-  defp stuck_for_placement?(%Ticket{id: id}) do
-    Repo.one(
-      from e in Event,
-        where: e.ticket_id == ^id and e.type == "ticket.stuck",
-        order_by: [desc: e.seq],
-        limit: 1,
-        select: e.payload["cause"]
-    ) == "placement"
-  end
+  defp stuck_for_placement?(%Ticket{} = ticket), do: latest_stick(ticket)["cause"] == "placement"
 
   defp pending_job?(%Ticket{id: id, state: state}) do
     Repo.exists?(
@@ -572,6 +601,58 @@ defmodule Forge.Engine do
         {:error, step, reason, _changes} ->
           {:error, {step, reason}}
       end
+    end
+  end
+
+  @doc """
+  Re-pins the ticket's workflow to the project's default branch as it is now: its definition, its
+  prompts and its command scripts are read from the new commit for every job made after this one.
+  The branch, its base and everything already written stay as they were.
+
+  **What it is for** is a ticket that cannot pass a state because of a file no job on it may edit
+  — a command script is read at the pin, never from the branch (`docs/design/commands.md` § The
+  shape). The fix lands on the default branch; without this, the ticket kept failing on the old
+  script for ever. Re-pinning is a person's act because it changes what "the build passed" means
+  for this ticket, which is exactly what no job may do.
+
+  Refused while a job for the state is live — it was made from the old pin, and would run on it
+  — while an approval is pending, whose transition the new workflow may not have, when the new
+  workflow has no state the ticket is in, and when there is nothing new to pin.
+  """
+  @spec repin(Ticket.t(), String.t()) :: {:ok, Ticket.t()} | {:error, term()}
+  def repin(%Ticket{} = ticket, user_id) do
+    with {:ok, prepared} <- Tickets.prepare_admission(Forge.Projects.get!(ticket.project_id)) do
+      Multi.new()
+      |> Multi.run(:open, fn repo, _changes -> lock_open(repo, ticket.id, :not_repinnable) end)
+      |> Multi.run(:repinnable, fn _repo, %{open: open} -> repinnable(open, prepared) end)
+      |> Multi.update(:ticket, fn %{open: open} ->
+        Ticket.repin_changeset(open, %{
+          workflow: prepared.yaml_map,
+          workflow_commit: prepared.base
+        })
+      end)
+      |> Events.log(:repin_event, "ticket.repinned", actor(user_id), %{
+        ticket_id: ticket.id,
+        payload: %{"from" => ticket.workflow_commit, "to" => prepared.base}
+      })
+      |> Repo.transaction()
+      |> case do
+        {:ok, %{ticket: ticket}} ->
+          Events.notify(ticket.id)
+          {:ok, ticket}
+
+        {:error, _step, reason, _changes} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  defp repinnable(%Ticket{} = ticket, %{base: base, workflow: workflow}) do
+    cond do
+      ticket.workflow_commit == base -> {:error, :already_pinned}
+      is_map(ticket.pending_transition) -> {:error, :pending_approval}
+      Workflow.state(workflow, ticket.state) == nil -> {:error, {:no_state, ticket.state}}
+      true -> with(:ok <- no_live_job(ticket), do: {:ok, :repinnable})
     end
   end
 

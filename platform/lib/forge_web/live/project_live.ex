@@ -140,7 +140,10 @@ defmodule ForgeWeb.ProjectLive do
   # The project is read from the row rather than matched against the tickets already loaded: a
   # ticket admitted *since* this page mounted is exactly the one that has to appear, and it is
   # not in that list. One indexed read is far less than what it saves.
+  # A project chat's changes are broadcast with no ticket, and are not this page's.
   @impl true
+  def handle_info({:ticket_changed, nil}, socket), do: {:noreply, socket}
+
   def handle_info({:ticket_changed, id}, socket) do
     project_id = socket.assigns.project.id
 

@@ -880,6 +880,210 @@ defmodule ForgeWorker.LinkTest do
              String.trim(git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"]))
   end
 
+  # `docs/design/claude-code-events.md` § Resume: the session a resume needs is a file in the
+  # harness's `HOME`, carried between machines through the store. `session` in the fake CLI keeps
+  # one where Claude Code does and reads it back on `--resume` — from any project directory, and
+  # with nothing there exits before `init`, as measured.
+  describe "the harness session" do
+    @session ~s({"type":"user","sessionId":"sess-42","parentUuid":null,"uuid":"u1","message":{"content":"remember PELICAN"}}\n)
+
+    # A store that serves `files` by path and records every upload.
+    defp store_serving(files) do
+      test = self()
+
+      Application.put_env(:forge_worker, :req_options,
+        plug: fn conn ->
+          case {conn.method, Map.fetch(files, conn.request_path)} do
+            {"GET", {:ok, body}} ->
+              Plug.Conn.send_resp(conn, 200, body)
+
+            {"GET", :error} ->
+              Plug.Conn.send_resp(conn, 404, "no such key")
+
+            _put ->
+              {:ok, body, conn} = Plug.Conn.read_body(conn, length: 8_000_000)
+              auth = Plug.Conn.get_req_header(conn, "authorization")
+              send(test, {:uploaded, conn.request_path, auth, conn.query_string, body})
+              Req.Test.json(conn, %{"key" => conn.request_path, "size" => byte_size(body)})
+          end
+        end
+      )
+    end
+
+    # One job id for the assignment and its spec, as the platform sends them: the job directory
+    # the runner prepares and the one the link reads the session back from are the same.
+    defp session_job(origin, extra \\ %{}) do
+      job = assignment(origin, scenario: "session")
+      job = put_in(job, ["spec", "job_id"], job["job_id"])
+
+      job
+      |> put_in(["store", "session_prefix"], "job/#{job["job_id"]}/session-abc/")
+      |> put_in(["store", "session_token"], "session-token")
+      |> Map.merge(extra)
+    end
+
+    defp carried(version \\ "9.9.9"),
+      do: %{
+        "key" => "job/j0/session-x/1.jsonl",
+        "token" => "get",
+        "id" => "sess-42",
+        "version" => version
+      }
+
+    defp run_job(client, job) do
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"job_id" => ^job_id, "result" => result}, _before} = take_push("result")
+      result
+    end
+
+    defp job_file(root, job, name), do: File.read!(Path.join([root, "jobs", job["job_id"], name]))
+
+    defp uploaded_paths(acc \\ []) do
+      receive do
+        {:uploaded, path, _auth, _q, _body} -> uploaded_paths([path | acc])
+      after
+        0 -> acc
+      end
+    end
+
+    setup %{client: client} do
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+      :ok
+    end
+
+    test "a run uploads its session under the assignment's prefix, and says what wrote it",
+         context do
+      %{client: client, origin: origin} = context
+      store_serving(%{})
+      job = session_job(origin)
+
+      result = run_job(client, job)
+
+      key = "job/#{job["job_id"]}/session-abc/1.jsonl"
+      assert result["harness"]["session_blob"] == key
+      assert result["harness"]["session_id"] == "sess-42"
+      assert result["harness"]["version"] == "9.9.9"
+
+      assert_receive {:uploaded, "/store/" <> ^key, ["Bearer session-token"], _q, body}
+      assert body =~ ~s("sessionId":"sess-42")
+    end
+
+    test "a run with nowhere to put its session keeps it to itself", context do
+      %{client: client, origin: origin} = context
+      store_serving(%{})
+      job = origin |> session_job() |> Map.update!("store", &Map.drop(&1, ["session_prefix"]))
+
+      result = run_job(client, job)
+
+      refute Map.has_key?(result["harness"], "session_blob")
+      refute Enum.any?(uploaded_paths(), &String.contains?(&1, "/session-"))
+    end
+
+    # The machine never ran this job: without the carried file there is nothing to resume.
+    test "a resume on another machine restores the carried session", context do
+      %{client: client, origin: origin, root: root} = context
+      store_serving(%{"/store/job/j0/session-x/1.jsonl" => @session})
+      job = session_job(origin, %{"resume_session" => "sess-42", "session" => carried()})
+
+      result = run_job(client, job)
+
+      assert result["documents"]["plan.md"]["raw"] =~ "Remembered PELICAN."
+      assert job_file(root, job, "fake-args.txt") =~ "--resume sess-42"
+      assert job_file(root, job, "prompt.md") =~ "# Continue this job"
+    end
+
+    test "a new attempt that came back forks its predecessor's session", context do
+      %{client: client, origin: origin, root: root} = context
+      store_serving(%{"/store/job/j0/session-x/1.jsonl" => @session})
+
+      job =
+        origin
+        |> session_job(%{
+          "resume_session" => "sess-42",
+          "fork_session" => true,
+          "session" => carried()
+        })
+        |> put_in(["spec", "attempt"], 2)
+
+      result = run_job(client, job)
+
+      assert result["harness"]["session_id"] == "sess-42-fork"
+      assert result["documents"]["plan.md"]["raw"] =~ "Remembered PELICAN."
+      assert job_file(root, job, "fake-args.txt") =~ "--resume sess-42 --fork-session"
+      assert job_file(root, job, "prompt.md") =~ "# A new attempt of"
+    end
+
+    # A fork is told its output directory is empty. Run again on the machine that lost it, what
+    # the lost run left there is not this run's.
+    test "a fork run again where it ran before starts with nothing in out/", context do
+      %{client: client, origin: origin, root: root} = context
+      store_serving(%{"/store/job/j0/session-x/1.jsonl" => @session})
+
+      job =
+        origin
+        |> session_job(%{
+          "resume_session" => "sess-42",
+          "fork_session" => true,
+          "session" => carried()
+        })
+        |> put_in(["spec", "attempt"], 2)
+
+      stale = Path.join([root, "jobs", job["job_id"], "out", "stale.md"])
+      File.mkdir_p!(Path.dirname(stale))
+      File.write!(stale, "left by the run that was lost\n")
+
+      result = run_job(client, job)
+
+      assert result["documents"]["plan.md"]["raw"] =~ "Remembered PELICAN."
+      refute File.exists?(stale)
+    end
+
+    # A file restored onto another CLI, or one that is not the session's own, starts a session
+    # with no memory rather than failing (`docs/measurements.md` § Session resume). So neither is
+    # restored, and the run is a cold start: no `--resume`, the whole prompt.
+    test "a session written by another version of the CLI is not restored", context do
+      %{client: client, origin: origin, root: root} = context
+      store_serving(%{"/store/job/j0/session-x/1.jsonl" => @session})
+      job = session_job(origin, %{"resume_session" => "sess-42", "session" => carried("1.0.0")})
+
+      result = run_job(client, job)
+
+      assert result["documents"]["plan.md"]["raw"] =~ "Remembered nothing."
+      refute job_file(root, job, "fake-args.txt") =~ "--resume"
+      assert job_file(root, job, "prompt.md") =~ "# You are one job in a ticket lifecycle"
+    end
+
+    test "a file that is not the session's own is not restored", context do
+      %{client: client, origin: origin, root: root} = context
+      # The harness's stdout: JSON, the session's id, and no chained record.
+      stdout = ~s({"type":"system","subtype":"init","session_id":"sess-42"}\n)
+      store_serving(%{"/store/job/j0/session-x/1.jsonl" => stdout})
+      job = session_job(origin, %{"resume_session" => "sess-42", "session" => carried()})
+
+      result = run_job(client, job)
+
+      assert result["documents"]["plan.md"]["raw"] =~ "Remembered nothing."
+      refute job_file(root, job, "fake-args.txt") =~ "--resume"
+    end
+
+    # Nothing to check, so nothing to drop: the resume goes ahead and finds what the machine
+    # holds, which here is nothing — and the harness says so before it starts, which the
+    # platform re-queues as a cold start.
+    test "a session that will not download leaves the resume to the machine", context do
+      %{client: client, origin: origin, root: root} = context
+      store_serving(%{})
+      job = session_job(origin, %{"resume_session" => "sess-42", "session" => carried()})
+
+      result = run_job(client, job)
+
+      assert job_file(root, job, "fake-args.txt") =~ "--resume sess-42"
+      assert result["outcome"] == "error"
+      assert result["harness"]["model"] == nil
+    end
+  end
+
   # `docs/design/storage.md` § Serving: each staged file goes to the assignment's prefix with its
   # prefix token, and the result names keys — never a path on this machine.
   test "a job's groups of files are uploaded under its prefix", context do
@@ -1935,6 +2139,186 @@ defmodule ForgeWorker.LinkTest do
         # written where the harness would never find it.
         "spec" => Map.put(assignment["spec"], "job_id", job_id)
       })
+    end
+
+    # `docs/design/conversations.md` § Lifetime: every turn leaves the session with the platform,
+    # because a conversation can stop by losing its machine, when nothing is left to upload it.
+    test "uploads its session after every turn, and says so with the turn", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job =
+        origin
+        |> chat()
+        |> put_in(["store", "session_prefix"], "job/c1/session-s/")
+        |> put_in(["store", "session_token"], "session-token")
+
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1, "harness" => harness}, _} = take_push("turn")
+
+      assert harness["session_blob"] == "job/c1/session-s/1.jsonl"
+      assert harness["version"] == "9.9.9"
+
+      assert_receive {:uploaded, "/store/job/c1/session-s/1.jsonl", ["Bearer session-token"], _q,
+                      body}
+
+      assert body =~ ~s("sessionId":"sess-42")
+
+      push(client, @topic, "message", %{
+        "job_id" => job["job_id"],
+        "message_id" => "m-2",
+        "text" => "more"
+      })
+
+      {%{"turn" => 2, "harness" => harness}, _} = take_push("turn")
+      assert harness["session_blob"] == "job/c1/session-s/2.jsonl"
+    end
+
+    # A reopen on another machine: the carried session is restored, forked so that its turns,
+    # numbered from one again, are not taken for the old process's, and the conversation is
+    # told only that it was reopened — not handed the replay a cold reopen reads.
+    test "a reopen resumes the carried session as a fork", context do
+      %{client: client, origin: origin, root: root} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      session =
+        ~s({"type":"user","sessionId":"sess-42","parentUuid":null,"uuid":"u1","message":{"content":"remember PELICAN"}}\n)
+
+      test = self()
+
+      Application.put_env(:forge_worker, :req_options,
+        plug: fn conn ->
+          if conn.method == "GET" do
+            Plug.Conn.send_resp(conn, 200, session)
+          else
+            {:ok, body, conn} = Plug.Conn.read_body(conn, length: 8_000_000)
+            send(test, {:uploaded, conn.request_path, [], "", body})
+            Req.Test.json(conn, %{"key" => conn.request_path, "size" => byte_size(body)})
+          end
+        end
+      )
+
+      job =
+        origin
+        |> chat()
+        |> put_in(["spec", "kind"], "chat")
+        |> put_in(["spec", "prompt"], "Did it land?")
+        |> put_in(["spec", "replay"], "# The conversation so far\n")
+        |> Map.merge(%{
+          "resume_session" => "sess-42",
+          "fork_session" => true,
+          "session" => %{
+            "key" => "job/c1/session-s/3.jsonl",
+            "token" => "get",
+            "id" => "sess-42",
+            "version" => "9.9.9"
+          }
+        })
+
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1, "harness" => harness}, _} = take_push("turn")
+
+      assert harness["session_id"] == "sess-42-fork"
+      dir = Path.join([root, "jobs", job_id])
+      assert File.read!(Path.join(dir, "fake-remembered.txt")) == "PELICAN\n"
+      assert File.read!(Path.join(dir, "fake-args.txt")) =~ "--resume sess-42 --fork-session"
+
+      opening = File.read!(Path.join(dir, "prompt.md"))
+      assert opening =~ "# This conversation was reopened"
+      assert opening =~ "Did it land?"
+      refute opening =~ "conversation.md"
+    end
+
+    # A job's resume that finds nothing is re-queued cold by the platform; a conversation's is not,
+    # so a session that will not download is a cold reopen, with the replay.
+    test "a reopen whose session will not download starts cold, with the replay", context do
+      %{client: client, origin: origin, root: root} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+      store_answers(404, "no such key")
+
+      job =
+        origin
+        |> chat()
+        |> put_in(["spec", "kind"], "chat")
+        |> put_in(["spec", "prompt"], "Did it land?")
+        |> put_in(["spec", "replay"], "# The conversation so far\n")
+        |> Map.merge(%{
+          "resume_session" => "sess-42",
+          "fork_session" => true,
+          "session" => %{
+            "key" => "job/c1/session-s/3.jsonl",
+            "token" => "get",
+            "id" => "sess-42",
+            "version" => "9.9.9"
+          }
+        })
+
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      dir = Path.join([root, "jobs", job_id])
+      refute File.read!(Path.join(dir, "fake-args.txt")) =~ "--resume"
+      assert File.read!(Path.join(dir, "prompt.md")) =~ "conversation.md"
+    end
+
+    # Everything said had been answered, so the process waits for the person — and what it sends
+    # with their message is still a resume's opening, not the cold one with the replay.
+    test "a reopen with nothing waiting resumes with the person's next message", context do
+      %{client: client, origin: origin, root: root} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      session =
+        ~s({"type":"user","sessionId":"sess-42","parentUuid":null,"uuid":"u1","message":{"content":"remember PELICAN"}}\n)
+
+      Application.put_env(:forge_worker, :req_options,
+        plug: fn conn ->
+          if conn.method == "GET",
+            do: Plug.Conn.send_resp(conn, 200, session),
+            else: Req.Test.json(conn, %{"key" => conn.request_path, "size" => 0})
+        end
+      )
+
+      job =
+        origin
+        |> chat()
+        |> put_in(["spec", "kind"], "chat")
+        |> put_in(["spec", "prompt"], nil)
+        |> put_in(["spec", "replay"], "# The conversation so far\n")
+        |> Map.merge(%{
+          "resume_session" => "sess-42",
+          "fork_session" => true,
+          "session" => %{
+            "key" => "job/c1/session-s/3.jsonl",
+            "token" => "get",
+            "id" => "sess-42",
+            "version" => "9.9.9"
+          }
+        })
+
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      dir = Path.join([root, "jobs", job_id])
+      wait_until(fn -> File.exists?(Path.join(dir, "fake-args.txt")) end)
+      refute File.exists?(Path.join(dir, "prompt.md"))
+
+      push(client, @topic, "message", %{
+        "job_id" => job_id,
+        "message_id" => "m-1",
+        "text" => "What now?"
+      })
+
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      opening = File.read!(Path.join(dir, "prompt.md"))
+      assert opening =~ "# This conversation was reopened"
+      assert String.ends_with?(opening, "What now?\n")
+      refute opening =~ "conversation.md"
     end
 
     # A workflow job blocks on `Runner.await/1` and does everything after it. A conversation has

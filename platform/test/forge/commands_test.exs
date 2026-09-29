@@ -34,7 +34,7 @@ defmodule Forge.CommandsTest do
   states:
     implementing:
       prompt: agents/implement.md
-      inputs: [ticket]
+      inputs: [ticket, build.log]
       produces: [implementation.md, changeset]
       may_invoke:
         build: { max: 2 }
@@ -111,6 +111,47 @@ defmodule Forge.CommandsTest do
            |> Enum.count(&(&1.type == "commands.started")) == 2
   end
 
+  # The commands an agent invokes share its state's name and number their own attempts, so the
+  # agent's previous attempt is found by kind as well as by number: a second attempt reading what
+  # changed since the first would find two rows at attempt 1, the agent and the build it ran.
+  # Both attempts are given a changeset input here, as a state after the first may read one.
+  test "an agent that invoked commands is the previous attempt its next one reads", context do
+    [first] = pending(context.ticket)
+    assignment = FakeWorker.assign(first, context.worker)
+    {:ok, _parked} = FakeWorker.park(assignment, [%{"command" => "build", "args" => []}])
+
+    [build] = pending(context.ticket, :command)
+    assert %Job{state: "implementing", attempt: 1} = build
+    {:ok, _job} = build |> FakeWorker.assign(context.worker) |> FakeWorker.finish_command(0)
+
+    written = %{"implementation.md" => "---\noutcome: done\n---\n# Done\n"}
+    {:ok, _job} = FakeWorker.run(Jobs.get!(first.id), context.worker, "success", written: written)
+
+    checks = context.ticket |> pending(:command) |> Enum.sort_by(& &1.attempt)
+
+    for {job, status} <- Enum.zip(checks, [0, 1]) do
+      {:ok, _job} = job |> FakeWorker.assign(context.worker) |> FakeWorker.finish_command(status)
+    end
+
+    [second] = pending(context.ticket)
+    assert %Job{state: "implementing", attempt: 2} = second
+
+    seen = String.duplicate("a", 40)
+    reads_changeset!(Jobs.get!(first.id), seen)
+    second = reads_changeset!(second, String.duplicate("b", 40))
+
+    spec = second |> FakeWorker.assign(context.worker) |> Map.fetch!("spec") |> Spec.from_map()
+    assert spec.previous_changeset == seen
+  end
+
+  defp reads_changeset!(job, sha) do
+    input = %{"name" => "changeset", "version" => sha, "content" => ""}
+
+    job
+    |> Ecto.Changeset.change(spec: Map.update!(job.spec, "inputs", &[input | &1]))
+    |> Repo.update!()
+  end
+
   defp head(repo, ticket) do
     {:ok, sha} = Forge.Git.resolve(repo, "refs/heads/" <> ticket.branch)
     sha
@@ -181,6 +222,8 @@ defmodule Forge.CommandsTest do
       refute Map.has_key?(assignment, "credential")
       refute Map.has_key?(assignment, "backlog")
       assert String.starts_with?(assignment["store"]["log_key"], "job/#{build.id}/")
+      # A script runs no harness, so it has no session to upload.
+      refute Map.has_key?(assignment["store"], "session_prefix")
 
       assert :ok =
                Storage.Token.verify(
@@ -279,6 +322,153 @@ defmodule Forge.CommandsTest do
 
       assert {:error, {:job_live, "checking"}} =
                Engine.choose(ticket, context.user.id, "review_ready")
+    end
+  end
+
+  # `docs/design/job-prompt.md` § How the job arrived: the job a failed batch sends the ticket to
+  # is the one that has to fix it, and the outcome's name is not the reason — the log is.
+  describe "the job a command state sends the ticket to" do
+    # One loop of implementing and a failing `checking`, each batch's logs saying which loop it was.
+    # `build_log` stands in for the build's, and `between` runs once the build has finished.
+    defp fail_checks(context, loop, build_log \\ nil, between \\ fn _build -> :ok end) do
+      ticket = implement(context)
+      [build, test] = pending(ticket, :command) |> Enum.sort_by(& &1.attempt)
+
+      {:ok, build} =
+        build
+        |> FakeWorker.assign(context.worker)
+        |> FakeWorker.finish_command(0, log: build_log || "built #{loop}\n")
+
+      between.(build)
+
+      {:ok, _job} =
+        test
+        |> FakeWorker.assign(context.worker)
+        |> FakeWorker.finish_command(2, log: "failed #{loop}\n")
+
+      Tickets.get!(ticket.id)
+    end
+
+    test "is handed what its commands said, and their logs", context do
+      ticket = fail_checks(context, 1)
+      assert ticket.state == "implementing"
+
+      [job] = pending(ticket)
+      assignment = FakeWorker.assign(job, context.worker)
+      spec = Spec.from_map(assignment["spec"])
+
+      assert %{"from" => "checking", "outcome" => "checks_failed", "batch" => batch} =
+               spec.entered
+
+      assert is_binary(batch)
+
+      assert [
+               %{"command" => "build", "exit_status" => 0, "log" => "entered-1-build.log"},
+               %{
+                 "command" => "test",
+                 "args" => ["--all"],
+                 "exit_status" => 2,
+                 "log" => "entered-2-test.log"
+               }
+             ] = spec.entered_commands
+
+      # Not a resume: nothing of its own ran.
+      assert spec.command_results == []
+
+      assert [
+               %{"file" => "entered-1-build.log"},
+               %{"file" => "entered-2-test.log", "key" => key, "token" => token}
+             ] = assignment["commands"]
+
+      assert :ok = Storage.Token.verify(token, :get, key)
+      assert {:ok, "failed 1\n"} = Storage.get(key)
+    end
+
+    # `workflow-grammar-v1.md` § Inputs: a state may name a command's log, and reads the latest
+    # version the ticket has — absent until the command has run, then inlined like a document.
+    test "reads the command's log when it names it as an input", context do
+      [first] = pending(context.ticket)
+      first_spec = Jobs.spec(first)
+      assert "build.log" in first_spec.absent_inputs
+      refute Enum.any?(first_spec.inputs, &(&1.name == "build.log"))
+
+      ticket = fail_checks(context, 1)
+      [job] = pending(ticket)
+
+      assert %{version: 1, content: "built 1\n"} =
+               Enum.find(Jobs.spec(job).inputs, &(&1.name == "build.log"))
+
+      refute "build.log" in Jobs.spec(job).absent_inputs
+    end
+
+    # Inlined into the spec, so a runaway build is cut to its two ends rather than copied into
+    # every later job's spec whole.
+    test "reads a log too long to inline as its two ends", context do
+      log = "BEGIN\n" <> String.duplicate("compiling a file\n", 20_000) <> "END\n"
+      assert byte_size(log) > 256 * 1024
+
+      ticket = fail_checks(context, 1, log)
+      [job] = pending(ticket)
+      %{content: content} = Enum.find(Jobs.spec(job).inputs, &(&1.name == "build.log"))
+
+      assert String.starts_with?(content, "BEGIN\n")
+      assert String.ends_with?(content, "END\n")
+      assert content =~ "bytes cut, of #{byte_size(log)}"
+      assert byte_size(content) < 256 * 1024 + 100
+    end
+
+    # An input that names a log is always optional, so one the store cannot give back is absent
+    # rather than the reason the next job cannot be made.
+    test "a log the store no longer has is an absent input", context do
+      ticket =
+        fail_checks(context, 1, nil, fn build ->
+          %{blob_uri: uri} = Artifacts.latest(build.ticket_id, "build.log")
+          {:ok, key} = Storage.key_from_uri(uri)
+          :ok = Storage.delete(key)
+        end)
+
+      [job] = pending(ticket)
+      assert "build.log" in Jobs.spec(job).absent_inputs
+      refute Enum.any?(Jobs.spec(job).inputs, &(&1.name == "build.log"))
+    end
+
+    # The ticket this was built for was stuck on an exhausted `max`, and the edge back was taken by
+    # a person twice. Those jobs are the ones that most need the log.
+    test "is handed the latest batch when a person moves a stuck ticket on", context do
+      stuck = Enum.reduce(1..4, nil, fn loop, _ticket -> fail_checks(context, loop) end)
+      assert %{state: "checking", status: :stuck} = stuck
+
+      {:ok, _ticket} = Engine.choose(stuck, context.user.id, "implementing")
+      [job] = pending(stuck)
+      assignment = FakeWorker.assign(job, context.worker)
+      spec = Spec.from_map(assignment["spec"])
+
+      assert %{"by" => "person", "batch" => _batch} = spec.entered
+      assert [_build, %{"exit_status" => 2}] = spec.entered_commands
+
+      [_build, %{"key" => key}] = assignment["commands"]
+      assert {:ok, "failed 4\n"} = Storage.get(key)
+    end
+
+    # A batch nothing decided describes a visit that did not end the way the ticket left; handing
+    # it over would give the job a reason that is not the one it is there for.
+    test "is handed nothing from a batch that was never decided", %{user: user} = context do
+      ticket = implement(context)
+
+      for job <- pending(ticket, :command) do
+        job |> Ecto.Changeset.change(status: :finished, outcome: :error) |> Repo.update!()
+      end
+
+      {:ok, stuck} = Engine.stick(Tickets.get!(ticket.id), "the batch was lost")
+      {:ok, _ticket} = Engine.choose(stuck, user.id, "implementing")
+
+      [job] = pending(ticket)
+      assignment = FakeWorker.assign(job, context.worker)
+      spec = Spec.from_map(assignment["spec"])
+
+      refute Map.has_key?(spec.entered, "batch")
+      assert spec.entered_commands == []
+      refute Map.has_key?(assignment, "commands")
     end
   end
 

@@ -16,6 +16,7 @@ defmodule Forge.LoopBackTest do
 
   alias Forge.{Engine, FakeWorker, Jobs, Operator, Tickets}
   alias Forge.Jobs.Job
+  alias ForgeCore.Job.Spec
 
   @workflow """
   version: 1
@@ -79,7 +80,7 @@ defmodule Forge.LoopBackTest do
 
     {:ok, ticket} = Tickets.admit(project, %{title: "Save scores", body: "."}, {:user, user.id})
 
-    %{ticket: ticket, user: user, worker: FakeWorker.connect()}
+    %{ticket: ticket, user: user, project: project, worker: FakeWorker.connect()}
   end
 
   defp pending(ticket) do
@@ -152,6 +153,49 @@ defmodule Forge.LoopBackTest do
              "by" => "engine",
              "comment" => nil
            }
+  end
+
+  # A second review opens with what changed since the first; it had the whole diff and nothing to
+  # say where the first one's view of it ended.
+  test "a second review is told which commit the first one read", context do
+    ticket = to_implementing(context)
+    commit_over_http(context.project, ticket.branch, "score.txt", "first")
+    ticket = run(ticket, context.worker, "implementation.md")
+
+    first = pending(ticket)
+    [%{version: seen}] = Enum.filter(Jobs.spec(first).inputs, &(&1.name == "changeset"))
+    ticket = run(ticket, context.worker, "review.md", "changes_requested")
+
+    commit_over_http(context.project, ticket.branch, "score.txt", "second")
+    ticket = run(ticket, context.worker, "implementation.md")
+
+    second = pending(ticket)
+    assert second.state == "reviewing" and second.attempt == 2
+
+    spec = second |> FakeWorker.assign(context.worker) |> Map.fetch!("spec") |> Spec.from_map()
+    assert spec.previous_changeset == seen
+    refute Enum.find(spec.inputs, &(&1.name == "changeset")).version == seen
+  end
+
+  # Only for a job that reads a changeset now. One whose previous attempt read one under an older
+  # pin would otherwise be told what changed since, in a diff it is not given.
+  test "a job that reads no changeset is not told which one the last attempt read", context do
+    ticket = to_implementing(context)
+    first = pending(ticket)
+    refute Enum.any?(Jobs.spec(first).inputs, &(&1.name == "changeset"))
+
+    read_one = %{"name" => "changeset", "version" => String.duplicate("a", 40), "content" => ""}
+    spec = Map.update!(first.spec, "inputs", &[read_one | &1])
+    first |> Ecto.Changeset.change(spec: spec) |> Forge.Repo.update!()
+
+    ticket = run(ticket, context.worker, "implementation.md")
+    ticket = run(ticket, context.worker, "review.md", "changes_requested")
+
+    second = pending(ticket)
+    assert second.state == "implementing" and second.attempt == 2
+
+    spec = second |> FakeWorker.assign(context.worker) |> Map.fetch!("spec") |> Spec.from_map()
+    assert spec.previous_changeset == nil
   end
 
   test "a tester's note and their reason for sending it back reach the next job", context do

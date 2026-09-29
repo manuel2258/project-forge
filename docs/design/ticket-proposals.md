@@ -112,6 +112,12 @@ a sentence. `ForgeCore.Workflow.proposal_artifact/1` and `proposal?/1` are the p
 tested together, because moving them apart means proposals written under one name and looked for
 under another — which shows up as no proposals at all rather than as an error.
 
+**A file already named `proposal-…` keeps its one prefix.** Nothing said whose the prefix was, and
+agents reading the backlog, where open proposals are listed under their stored names, copied it:
+six of one project's ten open proposals were stored as `proposal-proposal-…`, which is what the
+person read. The preamble, the conversation's preamble and `platform.md` now say the platform adds
+it, and `proposal_artifact/1` leaves a name that already carries it alone.
+
 `proposals/` is never in `produces`, so it is never the first document in `produces`, so it never
 carries the outcome. A job that writes nothing there is an ordinary job. The validator reserves
 both shapes — the directory name and the `proposal-` prefix — as it already reserves `ticket` and

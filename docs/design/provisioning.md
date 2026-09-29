@@ -756,7 +756,10 @@ reconstructs from the branch and the manifest, *never* from the conversation, an
 `claude-code-events.md` § Resume is explicit: *"Resume is never required for correctness, and no
 outcome depends on it."* A hibernated job resumes on any worker.
 
-What is lost is the harness session, and that costs tokens. `commands.md` § Always park said the
+What was lost was the harness session, and that costs tokens. It no longer is: the worker
+uploads the session's file after every run and puts it back wherever the job resumes
+(`claude-code-events.md` § Resume), so what the machine that ran it still saves is the download
+and a warm worktree. `commands.md` § Always park said the
 first thing to measure was whether the session survives a park. **It is no longer a
 measurement.** Two facts settled it: a parked job holds no slice, so its worker is
 idle-destroyable; and `Workers.assignable/1` was first-fit by `inserted_at`, so even a surviving
@@ -773,7 +776,7 @@ resumes unless a command outran its own timeout or a full template needed the sl
 no longer parked, not yet placed — is covered by a second claim: a job that last ran on a machine
 and has come back to the queue holds it for one idle period from its return. `may_invoke`'s
 `max` should still be set as a cap on park cycles rather than a generous safety number, because
-the fallback is a re-composed prompt and context is this system's expensive resource.
+every resume reads its context again and context is this system's expensive resource.
 
 ## What this gives up
 

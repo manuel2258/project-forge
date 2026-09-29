@@ -301,5 +301,98 @@ defmodule Forge.QueueTest do
     end
   end
 
+  # `docs/design/job-prompt.md` § Non-blocking questions: the document written on an assumption
+  # does not change when the answer comes, so the answer says which document it amends and
+  # whether it overturns what that document assumed. Ten jobs on one ticket each re-derived it.
+  describe "an answer to an assumed question" do
+    setup do
+      user = user_fixture()
+      ticket = ticket_fixture() |> join_ticket!(user)
+      %{user: user, ticket: ticket, job: job_fixture(%{ticket: ticket})}
+    end
+
+    defp answers(ticket), do: Artifacts.latest(ticket.id, "answers.md").content
+
+    test "that picks another option says it overturns the assumption, and where", context do
+      block = """
+      ```question
+      key: schema
+      anchor: A new drill is one file under core
+      text: Where are a drill's settings declared?
+      options:
+        - {label: declared-in-core, detail: Settings are declared in core, recommended: true}
+        - {label: own-composable, detail: Each drill composes its own settings}
+      blocking: false
+      assumption: declared-in-core
+      ```
+      """
+
+      ask(context.ticket, context.job, [block])
+
+      {:ok, _} =
+        Operator.answer(context.ticket, context.user, "schema", %{choice: "own-composable"})
+
+      assert answers(context.ticket) =~
+               "**This overturns an assumption.** `refinement.md` version 1 was written assuming " <>
+                 "`declared-in-core`, at the passage beginning \"A new drill is one file under core\". " <>
+                 "Where it says otherwise, this answer holds, not the document."
+    end
+
+    test "that picks the assumed option confirms it", context do
+      ask(context.ticket, context.job, [non_blocking("naming", "a")])
+      {:ok, _} = Operator.answer(context.ticket, context.user, "naming", %{choice: "a"})
+
+      assert answers(context.ticket) =~
+               "`refinement.md` version 1 assumed `a` and carried on; this confirms it."
+
+      refute answers(context.ticket) =~ "overturns"
+    end
+
+    # The version the question was asked in, not the first: a refinement that asked on its second
+    # round is amended there — as it is answered, and when a later answer renders it again.
+    test "names the version of the document that assumed it", context do
+      ask(context.ticket, context.job, [])
+      ask(context.ticket, context.job, [non_blocking("naming", "a"), blocking("backend")])
+      {:ok, _} = Operator.answer(context.ticket, context.user, "naming", %{choice: "b"})
+
+      assert answers(context.ticket) =~ "`refinement.md` version 2 was written assuming `a`"
+
+      {:ok, _} = Operator.answer(context.ticket, context.user, "backend", %{choice: "a"})
+
+      assert answers(context.ticket) =~ "## backend"
+      assert answers(context.ticket) =~ "`refinement.md` version 2 was written assuming `a`"
+    end
+
+    # Prose cannot be compared with a choice, so the entry names the assumption and leaves the
+    # comparison to the reader rather than guessing.
+    test "on an assumption in prose names it without claiming either way", context do
+      ask(context.ticket, context.job, [non_blocking("naming", "went with a")])
+      {:ok, _} = Operator.answer(context.ticket, context.user, "naming", %{choice: "b"})
+
+      assert answers(context.ticket) =~
+               "`refinement.md` version 1 was written assuming: went with a. " <>
+                 "Where this answer differs, the answer holds, not the document."
+
+      refute answers(context.ticket) =~ "overturns"
+    end
+
+    # Rendered again from the rows on every later answer, so an earlier entry keeps what it said.
+    test "keeps saying it when a later answer rewrites the document", context do
+      ask(context.ticket, context.job, [non_blocking("naming", "a"), blocking("backend")])
+      {:ok, _} = Operator.answer(context.ticket, context.user, "naming", %{choice: "b"})
+      {:ok, _} = Operator.answer(context.ticket, context.user, "backend", %{choice: "a"})
+
+      assert answers(context.ticket) =~ "## backend"
+      assert answers(context.ticket) =~ "`refinement.md` version 1 was written assuming `a`"
+    end
+
+    test "a blocking question's answer says nothing of an assumption", context do
+      ask(context.ticket, context.job, [blocking("backend")])
+      {:ok, _} = Operator.answer(context.ticket, context.user, "backend", %{choice: "b"})
+
+      refute answers(context.ticket) =~ "assum"
+    end
+  end
+
   defp event_types(ticket), do: ticket.id |> Events.for_ticket() |> Enum.map(& &1.type)
 end

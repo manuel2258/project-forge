@@ -405,6 +405,9 @@ defmodule ForgeWeb.QueueLive do
   defp sentence(%{kind: :approval} = item),
     do: "#{item.ticket.title} is ready to move to #{item.detail["to"]}."
 
+  defp sentence(%{kind: :stuck, detail: %{reason: reason}} = item) when is_binary(reason),
+    do: "#{item.ticket.title} is stuck: #{reason}."
+
   defp sentence(%{kind: :stuck} = item),
     do: "#{item.ticket.title} is stuck and needs a way forward."
 

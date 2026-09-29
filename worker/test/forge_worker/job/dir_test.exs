@@ -674,13 +674,20 @@ defmodule ForgeWorker.Job.DirTest do
         Dir.prepare(root, spec,
           command_logs: [
             {"1-build.log", source},
+            {"entered-1-build.log", source},
             {"../escape.log", source},
             {"1-../../escape.log", source},
+            {"entered-../escape.log", source},
+            {"other-1-build.log", source},
             {"2-test.txt", source}
           ]
         )
 
-      assert File.ls!(Path.join(job_dir, "commands")) == ["1-build.log"]
+      # `entered-` is the batch of the state that sent the ticket here
+      # (`docs/design/job-prompt.md` § How the job arrived), and the only prefix there is.
+      assert Enum.sort(File.ls!(Path.join(job_dir, "commands"))) ==
+               ["1-build.log", "entered-1-build.log"]
+
       assert File.read!(Path.join([job_dir, "commands", "1-build.log"])) == "ok\n"
 
       log = Path.join([job_dir, "commands", "1-build.log"])
@@ -701,6 +708,217 @@ defmodule ForgeWorker.Job.DirTest do
 
   # `docs/design/job-prompt.md` § Groups of files: staged through the guarded read, capped, and
   # refused with why rather than dropped.
+  # Everything in a job directory was the job's while it ran, and this process is the more
+  # privileged one: a file the preparation writes must not be written through a link the last
+  # run left in its place.
+  describe "what the preparation writes" do
+    test "replaces a link the job left at spec.json rather than writing through it", %{
+      root: root,
+      spec: spec
+    } do
+      job_dir = Dir.prepare(root, spec)
+      outside = Path.join(tmp_dir("outside"), "victim")
+      File.write!(outside, "untouched")
+      File.rm!(Path.join(job_dir, "spec.json"))
+      File.ln_s!(outside, Path.join(job_dir, "spec.json"))
+
+      Dir.prepare(root, spec, resume: true)
+
+      assert File.read!(outside) == "untouched"
+      assert {:ok, %File.Stat{type: :regular}} = File.lstat(Path.join(job_dir, "spec.json"))
+    end
+
+    test "write_new!/2 removes whatever is at the path, a directory included" do
+      dir = tmp_dir("write-new")
+      path = Path.join(dir, "prompt.md")
+      File.mkdir_p!(Path.join(path, "inside"))
+
+      Dir.write_new!(path, "the prompt")
+
+      assert File.read!(path) == "the prompt"
+    end
+  end
+
+  # `docs/design/claude-code-events.md` § Resume: the harness session, read out of the job's
+  # `HOME` for upload and put back into it for a resume — every part of that path the job's.
+  describe "the harness session" do
+    @sid "sess-42"
+    @record ~s({"type":"user","sessionId":"sess-42","parentUuid":null,"uuid":"u1"}\n)
+
+    setup %{root: root, spec: spec} do
+      job_dir = Dir.prepare(root, spec)
+      projects = Path.join([Dir.home_dir(job_dir), ".claude", "projects"])
+      File.mkdir_p!(Path.join(projects, "-work-job"))
+      File.write!(Path.join([projects, "-work-job", @sid <> ".jsonl"]), @record)
+
+      %{
+        job_dir: job_dir,
+        projects: projects,
+        target: Path.join(tmp_dir("staged"), "session.jsonl"),
+        owner: File.lstat!(job_dir).uid
+      }
+    end
+
+    test "is staged from whichever project directory holds it", %{
+      job_dir: job_dir,
+      target: target
+    } do
+      assert :ok = Dir.stage_session(job_dir, @sid, target)
+      assert File.read!(target) == @record
+    end
+
+    test "is not found under another id, and an id that is a path is refused", context do
+      assert {:error, :not_found} = Dir.stage_session(context.job_dir, "sess-43", context.target)
+      assert {:error, :bad_id} = Dir.stage_session(context.job_dir, "../x", context.target)
+      refute File.exists?(context.target)
+    end
+
+    test "is refused when the file is not the job's own", context do
+      assert {:error, reason} =
+               Dir.stage_session(context.job_dir, @sid, context.target, owner: context.owner + 1)
+
+      assert reason =~ "must be the job's own file"
+    end
+
+    test "is refused when it is larger than the cap", context do
+      assert {:error, reason} =
+               Dir.stage_session(context.job_dir, @sid, context.target, max_bytes: 4)
+
+      assert reason =~ "is larger than 4 bytes"
+    end
+
+    # A link standing in for a directory on the way would have the worker read, as root, a file
+    # the job's user could not: once the user has gone, every file in the tree is root's.
+    test "is not read through a link standing in for a directory", context do
+      elsewhere = tmp_dir("elsewhere")
+      File.mkdir_p!(Path.join(elsewhere, "-else"))
+      File.write!(Path.join([elsewhere, "-else", "sess-99.jsonl"]), "not the job's")
+      File.ln_s!(Path.join(elsewhere, "-else"), Path.join(context.projects, "-linked"))
+
+      assert {:error, :not_found} = Dir.stage_session(context.job_dir, "sess-99", context.target)
+
+      # And a `.claude` that is a link to a tree holding a session of the same id.
+      decoy = tmp_dir("decoy")
+      File.mkdir_p!(Path.join([decoy, "projects", "-x"]))
+      File.write!(Path.join([decoy, "projects", "-x", @sid <> ".jsonl"]), "not the job's")
+      claude = Path.join(Dir.home_dir(context.job_dir), ".claude")
+      File.rm_rf!(claude)
+      File.ln_s!(decoy, claude)
+
+      assert {:error, {:not_a_directory, _path}} =
+               Dir.stage_session(context.job_dir, @sid, context.target)
+
+      refute File.exists?(context.target)
+    end
+
+    test "a file is the session's own when it holds the session's chained records" do
+      path = Path.join(tmp_dir("check"), "s.jsonl")
+
+      File.write!(path, ~s({"type":"queue-operation","sessionId":"sess-42"}\n) <> @record)
+      assert Dir.session_file?(path, @sid)
+      refute Dir.session_file?(path, "sess-43")
+
+      # The harness's stdout: the session's id, and no record carrying `parentUuid`.
+      File.write!(path, ~s({"type":"system","subtype":"init","session_id":"sess-42"}\n))
+      refute Dir.session_file?(path, @sid)
+
+      File.write!(path, ~s({"type":"user","sessionId":"sess-42","uuid":"u1"}\n))
+      refute Dir.session_file?(path, @sid)
+
+      File.write!(path, @record <> "not json\n")
+      refute Dir.session_file?(path, @sid)
+
+      refute Dir.session_file?(Path.join(tmp_dir("check"), "missing.jsonl"), @sid)
+    end
+
+    # Only a conversation's own records chain it: a `summary` or `system` line that names the
+    # session and carries `parentUuid` is not one the harness rebuilds a conversation from.
+    test "a record that is not a turn does not make a file the session's own" do
+      path = Path.join(tmp_dir("check"), "s.jsonl")
+
+      File.write!(path, ~s({"type":"summary","sessionId":"sess-42","parentUuid":null}\n))
+      refute Dir.session_file?(path, @sid)
+    end
+
+    # Read line by line into memory, so a file past the cap is refused before it is read.
+    test "a file larger than the cap is not the session's own" do
+      path = Path.join(tmp_dir("check"), "s.jsonl")
+      pad = ~s({"pad":") <> String.duplicate("x", 64 * 1024 * 1024) <> ~s("}\n)
+      File.write!(path, [@record, pad])
+
+      refute Dir.session_file?(path, @sid)
+    end
+
+    # The id is joined into a path the worker writes as root; one that climbs out of the
+    # directory is refused before it is one, on the way back in as on the way out.
+    test "an id that is a path is neither checked nor put back", %{root: root, spec: spec} do
+      path = Path.join(tmp_dir("check"), "s.jsonl")
+      File.write!(path, ~s({"type":"user","sessionId":"../x","parentUuid":null}\n))
+      refute Dir.session_file?(path, "../x")
+
+      assert_raise MatchError, fn ->
+        Dir.prepare(root, spec, resume: true, session: %{id: "../x", source: path, cwd: "/w"})
+      end
+    end
+
+    test "is put back under the directory the harness will run in", %{root: root, spec: spec} do
+      source = Path.join(tmp_dir("fetched"), "restore.jsonl")
+      File.write!(source, @record)
+
+      job_dir =
+        Dir.prepare(root, spec,
+          resume: true,
+          session: %{id: @sid, source: source, cwd: "/var/lib/forge/worktrees/job_1"}
+        )
+
+      placed =
+        Path.join([
+          Dir.home_dir(job_dir),
+          ".claude",
+          "projects",
+          "-var-lib-forge-worktrees-job-1"
+        ])
+
+      assert File.read!(Path.join(placed, @sid <> ".jsonl")) == @record
+    end
+
+    # Written as root before the job's user exists: a `.claude` the last run left as a link is
+    # removed and made again, never written through.
+    test "is put back without writing through a link the job left", %{root: root, spec: spec} do
+      job_dir = Dir.prepare(root, spec)
+      elsewhere = tmp_dir("elsewhere")
+      claude = Path.join(Dir.home_dir(job_dir), ".claude")
+      File.rm_rf!(claude)
+      File.ln_s!(elsewhere, claude)
+      source = Path.join(tmp_dir("fetched"), "restore.jsonl")
+      File.write!(source, @record)
+
+      Dir.prepare(root, spec, resume: true, session: %{id: @sid, source: source, cwd: "/w"})
+
+      assert File.ls!(elsewhere) == []
+      assert {:ok, %File.Stat{type: :directory}} = File.lstat(claude)
+      assert File.exists?(Path.join([claude, "projects", "-w", @sid <> ".jsonl"]))
+    end
+
+    # And the file itself: the last run of a job resumed here left its session where this one
+    # goes, and could have left a link there instead.
+    test "is put back without writing through a link left at the file", %{root: root, spec: spec} do
+      job_dir = Dir.prepare(root, spec)
+      placed = Path.join([Dir.home_dir(job_dir), ".claude", "projects", "-w"])
+      File.mkdir_p!(placed)
+      victim = Path.join(tmp_dir("outside"), "victim")
+      File.write!(victim, "untouched")
+      File.ln_s!(victim, Path.join(placed, @sid <> ".jsonl"))
+      source = Path.join(tmp_dir("fetched"), "restore.jsonl")
+      File.write!(source, @record)
+
+      Dir.prepare(root, spec, resume: true, session: %{id: @sid, source: source, cwd: "/w"})
+
+      assert File.read!(victim) == "untouched"
+      assert {:ok, %File.Stat{type: :regular}} = File.lstat(Path.join(placed, @sid <> ".jsonl"))
+    end
+  end
+
   describe "stage_groups/4" do
     setup %{root: root, spec: spec} do
       job_dir = Dir.prepare(root, spec)

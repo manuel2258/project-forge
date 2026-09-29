@@ -88,7 +88,11 @@ defmodule ForgeWorker.Job.Command do
           {"FORGE_JOB", state.job_dir},
           # Where the script writes its groups of files, one directory each
           # (`docs/design/workflow-grammar-v1.md` § Commands).
-          {"FORGE_OUT", Path.join(state.job_dir, "out")}
+          {"FORGE_OUT", Path.join(state.job_dir, "out")},
+          # The checkout, which is also the working directory the script starts in. Named
+          # because the script is not in it: `$0` is the pinned copy in the job directory, so
+          # a path climbed from `dirname "$0"` leaves the repository.
+          {"FORGE_CHECKOUT", state.worktree}
         ]
 
     slice = Keyword.get(opts, :slice) || ForgeWorker.Slice.impl()

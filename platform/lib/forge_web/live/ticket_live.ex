@@ -31,6 +31,10 @@ defmodule ForgeWeb.TicketLive do
 
   @tabs ~w(decide timeline changes docs activity)
 
+  # How much of a failed command's log the timeline shows: the end, where a build says why it
+  # stopped. The whole log is one tap away on the command's page.
+  @tail_bytes 4096
+
   @impl true
   def mount(%{"project" => name, "number" => number}, _session, socket) do
     {ticket, project} = Tickets.fetch!(name, number)
@@ -106,6 +110,8 @@ defmodule ForgeWeb.TicketLive do
       current: current,
       steps: steps(work, artifacts, ticket, workflow),
       waits: waits(work),
+      # Why the last batch sent the ticket where it is, under the commands that failed in it.
+      tails: Forge.Jobs.Commands.failure_tails(ticket.id, @tail_bytes),
       artifacts: artifacts,
       docs: docs(project, ticket, artifacts),
       diff: diff,
@@ -115,6 +121,8 @@ defmodule ForgeWeb.TicketLive do
       activity: if(current, do: Events.for_job(current.id), else: []),
       transitions: Engine.offered_transitions(ticket, workflow),
       retry: Engine.retryable?(ticket),
+      stuck_reason: Engine.why_stuck(ticket),
+      drift: Tickets.drift(ticket, project),
       human_state:
         ticket.status in Forge.Tickets.Ticket.open_statuses() and
           Workflow.State.human?(Workflow.state(workflow, ticket.state)),
@@ -566,6 +574,13 @@ defmodule ForgeWeb.TicketLive do
                 ticket={@ticket}
                 wait={@waits[job.id]}
               />
+              <%!-- `job.kind == :command` is an equivalent mutant: a batch's `commands.started`
+                    names only its command jobs, which is all `failure_tails/2` keys by. --%>
+              <pre
+                :if={job.kind == :command and @tails[job.id]}
+                id={"command-#{job.id}-tail"}
+                class="max-h-72 overflow-auto border-l-2 border-error/60 bg-base-200/60 px-3 py-2 font-mono text-[12px]/[1.5] whitespace-pre-wrap break-words"
+              >{@tails[job.id]}</pre>
               <.link
                 :if={job.kind != :command}
                 navigate={~p"/tickets/#{@project.name}/#{@ticket.number}/jobs/#{job.id}"}
@@ -776,6 +791,28 @@ defmodule ForgeWeb.TicketLive do
       <.fact label="workflow">{String.slice(@ticket.workflow_commit || "", 0, 12)}</.fact>
       <.fact label="admitted">{Format.ago(@ticket.inserted_at, @now)} ago</.fact>
     </dl>
+    <%!-- A ticket reads its workflow, prompts and command scripts at its pin for its whole life,
+          so a fix that lands on the default branch does not reach it until a person says so
+          (`workflow-grammar-v1.md` § Pinning). Said where the pin is, with the way to take it. --%>
+    <div :if={@drift} id="pin-drift" class="mt-3 text-[12.5px]">
+      <p class="opacity-70">
+        {@project.default_branch} has changed what this ticket runs since it was pinned:
+      </p>
+      <ul class="mt-1 flex flex-col gap-0.5 font-mono break-all opacity-70">
+        <li :for={path <- @drift.paths}>{path}</li>
+      </ul>
+      <button
+        :if={@ticket.status in Forge.Tickets.Ticket.open_statuses()}
+        type="button"
+        id="repin-ticket"
+        phx-click="repin"
+        phx-value-ticket={@ticket.id}
+        data-confirm={"Re-pin at #{String.slice(@drift.head, 0, 12)}? Every job from now on reads the workflow, its prompts and its command scripts from there."}
+        class="flex min-h-[46px] items-center text-sm text-primary hover:underline"
+      >
+        Re-pin at {String.slice(@drift.head, 0, 12)}
+      </button>
+    </div>
 
     <h2
       :if={@proposals != []}
@@ -813,7 +850,12 @@ defmodule ForgeWeb.TicketLive do
         <span class="shrink-0 opacity-50">
           {Calendar.strftime(event.inserted_at, "%m-%d %H:%M")}
         </span>
-        <span class="truncate">{event.type}</span>
+        <span class="min-w-0">
+          <span class="block truncate">{event.type}</span>
+          <span :if={said(event)} class="block break-words font-sans text-sm/[1.4] opacity-70">
+            {said(event)}
+          </span>
+        </span>
       </li>
     </ol>
     <%!-- Cancelling is rare and undoable, so it sits at the foot of the rail rather than beside
@@ -884,10 +926,20 @@ defmodule ForgeWeb.TicketLive do
     """
   end
 
+  # The events whose type alone does not say what happened: which outcome a batch decided, why the
+  # ticket stuck, where it went. Every other type is its own sentence here.
+  @said ~w(commands.decided ticket.stuck transition.taken)
+
+  defp said(%{type: type} = event) when type in @said, do: Forge.Events.summary(event)
+  defp said(_event), do: nil
+
   defp turns(jobs), do: jobs |> Enum.map(& &1.turns) |> Enum.sum()
 
   defp stuck_or_human?(assigns),
     do: (assigns.ticket.status == :stuck or assigns.human_state) and assigns.transitions != []
+
+  defp waiting_clause(%{ticket: %{status: :stuck}, stuck_reason: reason}) when is_binary(reason),
+    do: "Stuck: #{reason}. Waiting for you to choose."
 
   defp waiting_clause(%{ticket: %{status: :stuck}}), do: "Stuck, and waiting for you to choose."
 

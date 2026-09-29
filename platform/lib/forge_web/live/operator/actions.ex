@@ -66,6 +66,12 @@ defmodule ForgeWeb.Operator.Actions do
     end
   end
 
+  defp act("repin", %{"ticket" => id}, socket) do
+    with {:ok, ticket} <- Operator.repin(ticket(id), user(socket)) do
+      {:ok, "Re-pinned at #{String.slice(ticket.workflow_commit, 0, 12)}"}
+    end
+  end
+
   # A document a human state declares, written from the ticket's Decide tab. The same write the
   # API's `POST …/artifacts/:name` makes (`docs/design/workflow-grammar-v1.md` § Semantics).
   defp act("write_document", %{"ticket" => id, "name" => name, "content" => content}, socket) do
@@ -106,6 +112,12 @@ defmodule ForgeWeb.Operator.Actions do
   defp describe({:not_cancellable, status}), do: "a #{status} ticket cannot be cancelled"
   defp describe({:not_cancelled, _status}), do: "only a cancelled ticket can be restored"
   defp describe({:not_active, :cancelled}), do: "the ticket is cancelled; restore it first"
+  defp describe({:not_repinnable, status}), do: "a #{status} ticket cannot be re-pinned"
+  defp describe(:already_pinned), do: "the ticket is already pinned at the default branch's head"
+  defp describe(:pending_approval), do: "decide the pending approval first"
+
+  defp describe({:no_state, state}),
+    do: "the default branch's workflow has no state #{state}; move the ticket first"
 
   defp describe({:ambiguous, outcomes}),
     do: "ambiguous; pick an outcome: #{Enum.join(outcomes, ", ")}"

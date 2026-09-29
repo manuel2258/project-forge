@@ -261,7 +261,7 @@ defmodule ForgeWeb.WorkerChannel do
   defp hibernate(job_id, payload) do
     case Jobs.get!(job_id) do
       %{kind: :chat} = chat ->
-        Conversations.ended(chat, payload["commit"], payload["reason"])
+        Conversations.ended(chat, payload["commit"], payload["reason"], result: payload["result"])
 
       %{} ->
         Jobs.hibernate(job_id, payload["commit"], payload["reason"], payload["result"])

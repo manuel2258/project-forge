@@ -75,35 +75,23 @@ defmodule ForgeWeb.ProjectLiveTest do
   # Commits a different workflow onto the project's default branch, so the repository's current
   # workflow and every pinned one disagree.
   defp rewrite_workflow(project) do
-    repo = Forge.Projects.repo_path(project)
-    work = tmp_dir("rewrite")
-    {_, 0} = System.cmd("git", ["clone", "--quiet", repo, work])
-
-    File.mkdir_p!(Path.join(work, ".forge/agents"))
-    File.write!(Path.join(work, ".forge/agents/survey.md"), "Survey it.\n")
-
-    File.write!(Path.join(work, ".forge/workflow.yml"), """
-    version: 1
-    initial: surveying
-    states:
-      surveying:
-        prompt: agents/survey.md
-        inputs: [ticket]
-        produces: [survey.md]
-        budget: { turns: 5, cost: 0.10 }
-      done_state: {}
-    transitions:
-      - { from: surveying, to: done_state }
-    limits: { ticket_cost: 1.00 }
-    """)
-
-    for args <- [
-          ["-C", work, "add", "-A"],
-          ["-C", work, "-c", "user.name=t", "-c", "user.email=t@forge", "commit", "-qm", "new"],
-          ["-C", work, "push", "-q", "origin", "HEAD:" <> project.default_branch]
-        ] do
-      {_out, 0} = System.cmd("git", args, env: [{"FORGE_INTERNAL", "1"}], stderr_to_stdout: true)
-    end
+    commit_to_default(project, %{
+      ".forge/agents/survey.md" => "Survey it.\n",
+      ".forge/workflow.yml" => """
+      version: 1
+      initial: surveying
+      states:
+        surveying:
+          prompt: agents/survey.md
+          inputs: [ticket]
+          produces: [survey.md]
+          budget: { turns: 5, cost: 0.10 }
+        done_state: {}
+      transitions:
+        - { from: surveying, to: done_state }
+      limits: { ticket_cost: 1.00 }
+      """
+    })
   end
 
   test "an empty project says so rather than drawing an empty board", %{conn: conn, user: user} do
@@ -148,6 +136,16 @@ defmodule ForgeWeb.ProjectLiveTest do
     {:ok, _ticket} = Tickets.admit(project, %{title: "Arrived later"}, :system)
 
     assert render(view) =~ "Arrived later"
+  end
+
+  # A project chat's changes are broadcast with no ticket, on the topic every ticket's are, and a
+  # page that looked the id up read nil and crashed.
+  test "a change with no ticket leaves the page as it is", %{conn: conn, project: project} do
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}")
+
+    Forge.Events.notify(nil)
+
+    assert render(view) =~ project.name
   end
 
   # `/chats` and this page share one row component, and it takes `project={false}` here. That attr

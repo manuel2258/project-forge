@@ -180,7 +180,7 @@ case "${FAKE_SCENARIO:-success}" in
     ;;
   blocking)
     # shellcheck disable=SC2016 # the fenced question block is literal; nothing here expands
-    printf -- '---\noutcome: done\n---\n# Plan\n\n```question\nkey: backend\ntext: Which backend?\noptions: [a, b]\ndefault: a\nblocking: true\n```\n' > "$doc"
+    printf -- '---\noutcome: done\n---\n# Plan\n\n```question\nkey: backend\ntext: Which backend?\noptions:\n  - {label: A, detail: The first., recommended: true}\n  - {label: B, detail: The second.}\nblocking: true\n```\n' > "$doc"
     emit "$result_success"
     ;;
   max_turns)
@@ -246,7 +246,7 @@ case "${FAKE_SCENARIO:-success}" in
       *) text='Split by region, e.g. Lesson 1: open strings?' ;;
     esac
     # shellcheck disable=SC2016 # the fenced question block is literal; nothing here expands
-    printf -- '---\noutcome: done\n---\n# Plan\n\n```question\nkey: split\ntext: %s\noptions: [region, string]\nblocking: true\n```\n' "$text" > "$doc"
+    printf -- '---\noutcome: done\n---\n# Plan\n\n```question\nkey: split\ntext: %s\noptions:\n  - {label: By region, detail: One lesson per region.}\n  - {label: By string, detail: One lesson per string.}\nblocking: true\n```\n' "$text" > "$doc"
     emit "$result_success"
     ;;
   hangs_when_resumed)

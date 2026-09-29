@@ -8,6 +8,7 @@ defmodule ForgeWeb.TicketWorkScreenTest do
 
   use ForgeWeb.ConnCase, async: false
 
+  import Ecto.Query, only: [from: 2]
   import Phoenix.LiveViewTest
   import Forge.GitFixtures
 
@@ -63,15 +64,20 @@ defmodule ForgeWeb.TicketWorkScreenTest do
   end
 
   defp blocking(key),
-    do: "```question\nkey: #{key}\ntext: Which #{key}?\noptions: [a, b]\nblocking: true\n```\n"
+    do:
+      "```question\nkey: #{key}\ntext: Which #{key}?\noptions: [{label: a, detail: About a}, {label: b, detail: About b}]\nblocking: true\n```\n"
 
+  # With an anchor, so "drawn without accent" is asked of a question that has one to draw.
   defp non_blocking(key),
     do:
-      "```question\nkey: #{key}\ntext: Which #{key}?\noptions: [a, b]\ndefault: a\n" <>
+      "```question\nkey: #{key}\nanchor: \"The #{key} passage\"\ntext: Which #{key}?\n" <>
+        "options: [{label: a, detail: About a, recommended: true}, {label: b, detail: About b}]\n" <>
         "blocking: false\nassumption: went with a\n```\n"
 
-  defp question_id(ticket, key) do
-    ticket.id |> Artifacts.open_questions() |> Enum.find(&(&1.key == key)) |> Map.fetch!(:id)
+  # A question is drawn in its document version's form, under that version and its key.
+  defp question(ticket, key) do
+    q = ticket.id |> Artifacts.open_questions() |> Enum.find(&(&1.key == key))
+    "#question-#{q.artifact_version_id}-#{key}"
   end
 
   defp running!(job) do
@@ -151,15 +157,14 @@ defmodule ForgeWeb.TicketWorkScreenTest do
           ```question
           key: backend
           text: Which backend?
-          options: [a, b]
+          options: [{label: a, detail: About a}, {label: b, detail: About b}]
           blocking: true
           ```
 
           ```question
           key: naming
           text: Which naming?
-          options: [a, b]
-          default: a
+          options: [{label: a, detail: About a, recommended: true}, {label: b, detail: About b}]
           blocking: false
           assumption: went with a
           ```
@@ -171,7 +176,9 @@ defmodule ForgeWeb.TicketWorkScreenTest do
     end
 
     # An assumption is answered here — the queue's digest sends it here — but nothing waits on
-    # the answer, so it is not under "Waiting on you" and it draws no accent.
+    # the answer, so it is not under "Waiting on you" and it draws no accent. Asked beside a
+    # blocking question, it is in that document's form instead, optional
+    # (`docs/design/ui.md` § Answering questions).
     test "keeps an assumption apart from what waits", %{
       conn: conn,
       project: project,
@@ -186,14 +193,77 @@ defmodule ForgeWeb.TicketWorkScreenTest do
       {:ok, view, _html} = live(conn, page(project, ticket, "?tab=decide"))
       assert has_element?(view, "#nothing-to-decide")
       refute has_element?(view, "#hoisted-decision")
-      assert has_element?(view, "#assumed #question-" <> question_id(ticket, "naming"))
+      assert has_element?(view, "#assumed " <> question(ticket, "naming"))
+
+      # Opened, so its passage is drawn — and drawn without accent too.
+      view |> element("#assumed button[phx-click='form:open']") |> render_click()
+      assert view |> element("#assumed") |> render() =~ "The naming passage"
       refute view |> element("#assumed") |> render() =~ "accent"
 
       ask!(ticket, job, [blocking("backend"), non_blocking("naming")])
       {:ok, view, _html} = live(conn, page(project, ticket))
 
-      assert has_element?(view, "#hoisted-decision #question-" <> question_id(ticket, "backend"))
-      refute has_element?(view, "#hoisted-decision #question-" <> question_id(ticket, "naming"))
+      assert has_element?(view, "#hoisted-decision " <> question(ticket, "backend"))
+      assert has_element?(view, "#hoisted-decision " <> question(ticket, "naming"))
+      refute has_element?(view, "#assumed")
+    end
+
+    # A form of assumptions only has nothing it must wait for — but nothing to send either, until
+    # one is answered: an untouched one is not a Send of nothing.
+    test "a form of assumptions waits for its first answer", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      [job] = Jobs.for_ticket(ticket.id)
+
+      ask!(ticket, job, [
+        "```question\nkey: naming\ntext: Which naming?\n" <>
+          "options: [{label: a, detail: About a}, {label: b, detail: About b}]\n" <>
+          "blocking: false\nassumption: went with a\n```\n"
+      ])
+
+      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=decide"))
+      assert has_element?(view, "#assumed button[type=submit][disabled]")
+
+      view
+      |> element("#assumed form")
+      |> render_change(%{
+        "_target" => ["answers", "naming", "choice"],
+        "answers" => %{"naming" => %{"choice" => "b", "text" => ""}}
+      })
+
+      refute has_element?(view, "#assumed button[type=submit][disabled]")
+    end
+
+    # Oldest version first, so the document a job stopped on longest ago is at the top.
+    test "draws the forms of two documents oldest first", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      [job] = Jobs.for_ticket(ticket.id)
+
+      {:ok, older} =
+        Artifacts.record_version(ticket.id, "plan.md", :document, {:job, job.id}, %{
+          content: "# Plan\n\n" <> blocking("backend")
+        })
+
+      {:ok, newer} =
+        Artifacts.record_version(ticket.id, "notes.md", :document, {:job, job.id}, %{
+          content: "# Notes\n\n" <> blocking("format")
+        })
+
+      Forge.Repo.update_all(
+        from(q in Forge.Artifacts.Question, where: q.artifact_version_id == ^older.id),
+        set: [inserted_at: DateTime.add(DateTime.utc_now(:second), -3600, :second)]
+      )
+
+      {:ok, _view, html} = live(conn, page(project, ticket, "?tab=decide"))
+
+      [{o, _}] = :binary.matches(html, "form-#{older.id}") |> Enum.take(1)
+      [{n, _}] = :binary.matches(html, "form-#{newer.id}") |> Enum.take(1)
+      assert o < n
     end
 
     test "with nothing waiting, says so and what would put something there", %{

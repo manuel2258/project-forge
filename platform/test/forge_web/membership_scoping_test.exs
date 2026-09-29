@@ -151,18 +151,27 @@ defmodule ForgeWeb.MembershipScopingTest do
       {:ok, view, html} = conn |> log_in_user(outsider) |> live(~p"/")
       refute html =~ chat.id
 
-      render_click(view, "chat:answer", %{"chat" => chat.id, "choice" => "rm -rf please"})
+      reply = asked(chat)
 
-      assert Forge.Conversations.messages(chat.id) == []
+      render_click(view, "chat:questions:send", %{
+        "form" => "chat-#{chat.id}-#{reply}",
+        "chat" => chat.id,
+        "reply" => reply,
+        "answers" => %{"which" => %{"choice" => "The first one", "text" => "rm -rf please"}}
+      })
+
+      refute Enum.any?(Forge.Conversations.messages(chat.id), &(&1.role == :user))
     end
 
     test "a member's answer does land", %{conn: conn, project: project, owner: owner} do
       chat = chat_fixture(%{project: project, status: :running})
+      asked(chat)
 
       {:ok, view, _html} = conn |> log_in_user(owner) |> live(~p"/")
-      render_click(view, "chat:answer", %{"chat" => chat.id, "choice" => "the first one"})
+      view |> element("#item-chat-#{chat.id} form") |> render_submit()
 
-      assert Enum.map(Forge.Conversations.messages(chat.id), & &1.text) == ["the first one"]
+      assert %{role: :user, text: "**Which one?**\nThe first one"} =
+               List.last(Forge.Conversations.messages(chat.id))
     end
 
     test "a plain member cannot change the model by sending the event", %{
@@ -527,5 +536,28 @@ defmodule ForgeWeb.MembershipScopingTest do
 
   defp api(conn, user) do
     put_req_header(conn, "authorization", "Bearer " <> Accounts.create_api_token(user, "test"))
+  end
+
+  # A reply that asks one question, recommending its first option; returns the reply's ref, which
+  # is what a form drawn for it carries.
+  defp asked(chat) do
+    :ok =
+      Forge.Jobs.record_harness_event(chat.id, %{
+        type: "job.harness.text",
+        payload: %{
+          text:
+            "```question\nkey: which\ntext: Which one?\noptions:\n" <>
+              "  - {label: The first one, detail: The one on top., recommended: true}\n" <>
+              "  - {label: The second one, detail: The one below.}\n```\n"
+        }
+      })
+
+    {:ok, _chat} =
+      Forge.Conversations.record_turn(chat, %{
+        "turn" => 1,
+        "harness" => %{"turns" => 1, "cost_usd" => 0.01, "subtype" => "success"}
+      })
+
+    chat.id |> Forge.Conversations.messages() |> Forge.Conversations.reply_ref()
   end
 end

@@ -345,8 +345,7 @@ defmodule Forge.FakeWorker do
       ```question
       key: backend
       text: Which backend?
-      options: [a, b]
-      default: a
+      options: [{label: a, detail: About a, recommended: true}, {label: b, detail: About b}]
       blocking: true
       ```
       """

@@ -560,17 +560,42 @@ defmodule Forge.CommandsTest do
       assert Workers.speaks?(old, 0) and Workers.speaks?(silent, 0)
     end
 
-    test "asks a command's and an invoking job's protocol, and nobody else's", context do
+    # A command needs the protocol commands arrived in; an agent — a workflow job, invoking or
+    # not, or a conversation — needs the one questions as a headline and a sentence arrived in,
+    # because its release teaches and corrects the block (`worker-channel.md` § Versions).
+    test "asks a command for protocol 2 and an agent for protocol 3", context do
       [job] = pending(context.ticket)
-      assert Jobs.protocol(job) == 2
+      assert Jobs.protocol(job) == 3
 
       ticket = implement(context)
       [build | _] = pending(ticket, :command)
       assert Jobs.protocol(build) == 2
       assert Jobs.harness(build) == nil
 
-      chat = %Job{kind: :chat}
-      assert Jobs.protocol(chat) == 0
+      assert Jobs.protocol(%Job{kind: :chat}) == 3
+    end
+
+    # The scheduler's own demand: a protocol 2 release serving the project is not handed an agent,
+    # whose result it would report in a shape this platform refuses to record.
+    test "the scheduler does not hand an agent to a protocol 2 release", context do
+      [job] = pending(context.ticket)
+      _old = FakeWorker.connect(protocol: 2, project: context.project)
+      start_supervised!(Forge.Jobs.Scheduler)
+
+      assert Forge.Jobs.Scheduler.tick() == 0
+      assert Jobs.get!(job.id).status == :pending
+    end
+
+    test "a worker of protocol 2 is not given an agent, and still is given a command", context do
+      [job] = pending(context.ticket)
+      old = Workers.get!(FakeWorker.connect(protocol: 2, project: context.project).id)
+      new = Workers.get!(FakeWorker.connect(protocol: 3, project: context.project).id)
+      agent = %{kind: :workflow, memory: 1, cores: 1, project_id: context.project.id}
+      agent = Map.put(agent, :protocol, Jobs.protocol(job))
+
+      refute Workers.fits?(old, agent)
+      assert Workers.fits?(new, agent)
+      assert Workers.fits?(old, %{agent | kind: :command, protocol: 2})
     end
 
     # The scheduler's own demand, not one built by hand: an older release serving the project is

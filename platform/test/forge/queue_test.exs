@@ -32,8 +32,7 @@ defmodule Forge.QueueTest do
     ```question
     key: #{key}
     text: Which #{key}?
-    options: [a, b]
-    default: a
+    options: [{label: a, detail: About a, recommended: true}, {label: b, detail: About b}]
     blocking: true
     ```
     """
@@ -44,8 +43,7 @@ defmodule Forge.QueueTest do
     ```question
     key: #{key}
     text: Which #{key}?
-    options: [a, b]
-    default: a
+    options: [{label: a, detail: About a, recommended: true}, {label: b, detail: About b}]
     blocking: false
     assumption: #{assumption}
     ```
@@ -156,6 +154,150 @@ defmodule Forge.QueueTest do
       assert {:ok, _ticket} = Operator.answer(ticket, user, "backend", %{choice: "a"})
       assert Jobs.get!(job.id).status == :pending
       assert "job.resumed" in event_types(ticket)
+    end
+  end
+
+  # `Operator.answer_all/4` is what the pages send: a document's answers together, written in one
+  # transaction and resumed once (`docs/design/job-prompt.md` § Answering a document's questions at
+  # once). Each refusal writes nothing, which is what "refused whole" means.
+  describe "answering a document at once" do
+    setup do
+      user = user_fixture()
+      ticket = ticket_fixture() |> join_ticket!(user)
+      job = job_fixture(%{ticket: ticket, status: :waiting})
+
+      version =
+        ask(ticket, job, [blocking("backend"), blocking("format"), non_blocking("naming")])
+
+      %{user: user, ticket: ticket, job: job, version: version}
+    end
+
+    test "writes every answer in one version and resumes the job once", %{
+      user: user,
+      ticket: ticket,
+      job: job,
+      version: version
+    } do
+      assert {:ok, _ticket} =
+               Operator.answer_all(ticket, user, version.id, %{
+                 "backend" => %{choice: "a", text: nil},
+                 "format" => %{choice: "b", text: "but keep it small"}
+               })
+
+      assert %{version: 1, content: content} = Artifacts.latest(ticket.id, "answers.md")
+      assert content =~ "## backend"
+      assert content =~ "A: b — but keep it small"
+      assert Jobs.get!(job.id).status == :pending
+      assert Enum.count(event_types(ticket), &(&1 == "job.resumed")) == 1
+      assert Enum.count(event_types(ticket), &(&1 == "question.answered")) == 2
+
+      # The assumption was optional and left out, so it is still open.
+      assert [%{key: "naming"}] = Artifacts.open_questions(ticket.id)
+    end
+
+    test "refuses a batch missing a blocking answer", %{
+      user: user,
+      ticket: ticket,
+      job: job,
+      version: version
+    } do
+      assert {:error, {:unanswered, ["format"]}} =
+               Operator.answer_all(ticket, user, version.id, %{
+                 "backend" => %{choice: "a", text: nil},
+                 "naming" => %{choice: "b", text: nil}
+               })
+
+      assert_nothing_written(ticket, job)
+    end
+
+    test "refuses a choice that is no label, and the rest of the batch with it", %{
+      user: user,
+      ticket: ticket,
+      job: job,
+      version: version
+    } do
+      assert {:error, {:not_an_option, "format", "c"}} =
+               Operator.answer_all(ticket, user, version.id, %{
+                 "backend" => %{choice: "a", text: nil},
+                 "format" => %{choice: "c", text: nil}
+               })
+
+      assert_nothing_written(ticket, job)
+    end
+
+    test "refuses a stale form: a newer version, or a question answered meanwhile", %{
+      user: user,
+      ticket: ticket,
+      job: job,
+      version: version
+    } do
+      answers = %{"backend" => %{choice: "a", text: nil}, "format" => %{choice: "a", text: nil}}
+
+      assert {:error, :stale} =
+               Operator.answer_all(
+                 ticket,
+                 user,
+                 version.id,
+                 Map.put(answers, "other", %{choice: "a", text: nil})
+               )
+
+      # Answered by someone else while the form was open: its key is no longer open.
+      {:ok, _ticket} = Operator.answer(ticket, user, "naming", %{choice: "a"})
+
+      assert {:error, :stale} =
+               Operator.answer_all(
+                 ticket,
+                 user,
+                 version.id,
+                 Map.put(answers, "naming", %{choice: "b", text: nil})
+               )
+
+      # The document written again: the form's version is not the latest, so nothing on it is open.
+      ask(ticket, job, [blocking("backend"), blocking("format")])
+      assert {:error, :stale} = Operator.answer_all(ticket, user, version.id, answers)
+
+      assert Jobs.get!(job.id).status == :waiting
+      assert [%{question: %{key: "naming"}}] = Artifacts.answered(ticket.id)
+    end
+
+    # The pages send `""` for a cleared choice; a blank choice beside text is the text, whichever
+    # surface sends it.
+    test "reads a blank choice as none", %{user: user, ticket: ticket, version: version} do
+      assert {:ok, _ticket} =
+               Operator.answer_all(ticket, user, version.id, %{
+                 "backend" => %{choice: "", text: "neither, use JSON"},
+                 "format" => %{choice: "a", text: " "}
+               })
+
+      answers = Map.new(Artifacts.answered(ticket.id), &{&1.question.key, &1.answer})
+      assert %{choice: nil, text: "neither, use JSON"} = answers["backend"]
+      assert %{choice: "a", text: nil} = answers["format"]
+    end
+
+    # `answers.md` lists a batch in the order the document asked, not the order the keys arrived
+    # in — here the reverse, and the reverse of the alphabet too.
+    test "records a batch in the order it was asked", %{user: user, ticket: ticket, job: job} do
+      version = ask(ticket, job, [blocking("zeta"), blocking("alpha")])
+
+      assert {:ok, _ticket} =
+               Operator.answer_all(ticket, user, version.id, %{
+                 "alpha" => %{choice: "a", text: nil},
+                 "zeta" => %{choice: "b", text: nil}
+               })
+
+      content = Artifacts.latest(ticket.id, "answers.md").content
+      assert :binary.match(content, "## zeta") < :binary.match(content, "## alpha")
+    end
+
+    test "refuses an empty batch", %{user: user, ticket: ticket, job: job, version: version} do
+      assert {:error, :no_answers} = Operator.answer_all(ticket, user, version.id, %{})
+      assert_nothing_written(ticket, job)
+    end
+
+    defp assert_nothing_written(ticket, job) do
+      assert Artifacts.latest(ticket.id, "answers.md") == nil
+      assert Artifacts.answered(ticket.id) == []
+      assert Jobs.get!(job.id).status == :waiting
     end
   end
 

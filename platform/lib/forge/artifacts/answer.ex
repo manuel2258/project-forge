@@ -30,6 +30,22 @@ defmodule Forge.Artifacts.Answer do
     |> foreign_key_constraint(:artifact_version_id)
   end
 
+  @doc """
+  Blank is none: a string of nothing but whitespace reads as nil, for a choice as for a text —
+  the pages send `""` for a cleared choice, and a client that sends one beside text means the
+  text. Anything else is returned as it is, for the caller to accept or refuse.
+  """
+  @spec blank(term()) :: term()
+  def blank(value) when is_binary(value), do: if(String.trim(value) == "", do: nil, else: value)
+  def blank(value), do: value
+
+  @doc """
+  How an answer reads, wherever it is read: the choice, then the note or the words beside it. The
+  one wording `answers.md`, a chat's answer message and a folded question all say.
+  """
+  @spec reads(String.t() | nil, String.t() | nil) :: String.t()
+  def reads(choice, text), do: [choice, text] |> Enum.reject(&is_nil/1) |> Enum.join(" — ")
+
   defp validate_choice_or_text(changeset) do
     if get_field(changeset, :choice) || get_field(changeset, :text),
       do: changeset,

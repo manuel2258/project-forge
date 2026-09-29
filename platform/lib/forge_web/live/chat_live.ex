@@ -16,6 +16,7 @@ defmodule ForgeWeb.ChatLive do
 
   import ForgeWeb.Indicators
   import ForgeWeb.Operator.Components
+  import ForgeWeb.Operator.QuestionForm, only: [question_form: 1]
 
   alias Forge.{Artifacts, Conversations, Events, Git, Jobs, Merge, Operator, Projects, Tickets}
   alias ForgeWeb.{Actions, Diff, Format, JobStream, Transcript, WorkScreen}
@@ -41,7 +42,8 @@ defmodule ForgeWeb.ChatLive do
        ticket: ticket,
        draft: "",
        tab: "talk",
-       page_title: title(project, ticket)
+       page_title: title(project, ticket),
+       forms: ForgeWeb.Operator.QuestionForm.init()
      )
      |> JobStream.init()
      |> ForgeWeb.Capacity.project(project)
@@ -255,10 +257,17 @@ defmodule ForgeWeb.ChatLive do
     end
   end
 
-  # Answering a question is sending what you chose as the next message, so the agent sees it
+  # Answering the reply's questions is sending every answer as one message, so the agent sees them
   # exactly where it expects to. Nothing is written to `answers`: the transcript is already the
-  # record, and a second one would be a second truth (§ Asking a question).
-  def handle_event("answer", %{"choice" => choice}, socket), do: say(socket, choice, force: false)
+  # record, and a second one would be a second truth (§ Asking a question). Until Send, what is
+  # locked in is the page's draft (`ForgeWeb.Operator.QuestionForm`).
+  def handle_event("form:change", params, socket),
+    do: question_form("form:change", params, socket)
+
+  def handle_event("form:open", params, socket), do: question_form("form:open", params, socket)
+
+  def handle_event("chat:questions:send", params, socket),
+    do: question_form("chat:questions:send", params, socket)
 
   # *Ask about this* on the Changes tab: the reference goes into the draft, beside anything
   # already typed, and the page moves to where the draft is. Nothing is sent.
@@ -273,6 +282,14 @@ defmodule ForgeWeb.ChatLive do
 
   def handle_event("notices", params, socket),
     do: JobStream.handle_event("notices", params, socket)
+
+  defp question_form(event, params, socket) do
+    case ForgeWeb.Operator.QuestionForm.handle(event, params, socket) do
+      {:state, socket} -> {:noreply, socket}
+      {:handled, socket} -> {:noreply, load(socket)}
+      :unknown -> {:noreply, socket}
+    end
+  end
 
   defp with_ref(socket, ref) do
     case String.trim_trailing(socket.assigns.draft) do
@@ -291,10 +308,10 @@ defmodule ForgeWeb.ChatLive do
     end
   end
 
-  # It can have ended between the render and the tap, and the answer rows are the case that
-  # matters: they are what a person taps from a phone without reading the page again. Reloading
-  # is what swaps the send box for the reopen button, so the page stops offering what it cannot
-  # do rather than only saying so.
+  # It can have ended between the render and the tap. Reloading is what swaps the send box for the
+  # reopen button, so the page stops offering what it cannot do rather than only saying so. The
+  # question form's Send takes the same road through `Operator.answer_chat/4` and is reloaded the
+  # same way.
   defp deliver(socket, text, opts) do
     case Operator.send_chat(socket.assigns.chat, socket.assigns.current_scope.user, text, opts) do
       {:ok, _event} ->
@@ -308,8 +325,16 @@ defmodule ForgeWeb.ChatLive do
     end
   end
 
-  # The queue asks the same thing of the same reply, so the asking lives in `Conversations`.
-  defp question(messages), do: messages |> List.last() |> Conversations.question()
+  # The queue asks the same thing of the same reply, so the asking lives in `Conversations`. What
+  # was *said* (`Conversations.said/1`), because that is the reading `Operator.answer_chat/4`
+  # checks the form's reply against: a turn that only acted is not the reply being answered.
+  # Reading the whole transcript's last instead is an equivalent mutant as the harness behaves:
+  # a turn starts with a person's message, so a silent turn is never directly after a reply that
+  # asked, and both readings find no form where they differ.
+  defp questions(messages),
+    do: messages |> Conversations.said() |> List.last() |> Conversations.questions()
+
+  defp reply(messages), do: messages |> Conversations.said() |> Conversations.reply_ref()
 
   # Waiting on *you*: the agent finished a turn and said something — the queue's reading, from
   # the same messages (`Conversations.said/1`), so the page and the queue agree. A reply still
@@ -349,7 +374,8 @@ defmodule ForgeWeb.ChatLive do
   def render(assigns) do
     assigns =
       assign(assigns,
-        question: question(assigns.messages),
+        questions: questions(assigns.messages),
+        reply: reply(assigns.messages),
         responding: responding?(assigns.chat, assigns.messages),
         live: live?(assigns.chat)
       )
@@ -448,23 +474,26 @@ defmodule ForgeWeb.ChatLive do
     """
   end
 
-  # From the bottom up: the composer, the now line with the plan above it, and any open
-  # question's answer rows — under the thumb (`docs/design/ui.md` § Talk).
+  # From the bottom up: the composer, the now line with the plan above it, and the last reply's
+  # question form — under the thumb (`docs/design/ui.md` § Talk).
   defp footer(assigns) do
     ~H"""
     <div class="flex flex-col gap-2 border-t border-base-300 pt-2 pb-2">
-      <%!-- Gone when the conversation is, for the same reason the box is: an answer row *is* a
+      <%!-- Gone when the conversation is, for the same reason the box is: the form's Send is a
             send button, and one offered on a dead conversation takes a tap and loses it. What it
             asked stays legible in the transcript. --%>
       <section
-        :if={@question && @live}
+        :if={@questions != [] && @live}
         id="answer-rows"
-        class="flex max-h-[30dvh] flex-col gap-2 overflow-y-auto"
+        class="flex max-h-[45dvh] flex-col gap-2 overflow-y-auto"
       >
-        <p class="text-sm/[1.55]">{@question.text}</p>
-        <.answer_row :for={option <- @question.options} phx-click="answer" phx-value-choice={option}>
-          {option}
-        </.answer_row>
+        <.question_form
+          id={"chat-#{@chat_id}-#{@reply}"}
+          questions={@questions}
+          forms={@forms}
+          submit="chat:questions:send"
+          hidden={[{"chat", @chat_id}, {"reply", @reply}]}
+        />
       </section>
 
       <details :if={@responding && @plan != []} id="plan" class="font-mono text-[12.5px]">

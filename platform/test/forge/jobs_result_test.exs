@@ -24,8 +24,8 @@ defmodule Forge.JobsResultTest do
       reason: "invalid documents: refinement.md (…)",
       invalid: %{
         "refinement.md" => [
-          Error.new("question[2].options", "must be a non-empty list of strings"),
-          Error.new("question[2].default", "must be a string")
+          Error.new("question[2].options", "must be a non-empty list of options"),
+          Error.new("question[2].text", "must be a non-empty string")
         ]
       }
     }
@@ -36,8 +36,8 @@ defmodule Forge.JobsResultTest do
 
     assert event.payload["invalid"] == %{
              "refinement.md" =>
-               "question[2].options: must be a non-empty list of strings\n" <>
-                 "question[2].default: must be a string"
+               "question[2].options: must be a non-empty list of options\n" <>
+                 "question[2].text: must be a non-empty string"
            }
   end
 

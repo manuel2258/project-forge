@@ -84,6 +84,19 @@ defmodule ForgeWeb.ReviewLiveTest do
   # the mark is there, missing or on the wrong document. Placement matters as much as presence —
   # `docs/design/ui.md` § Semantics that must not be lost — so the mark is looked for inside the
   # row of the document it belongs to, with the other document beside it left unmarked.
+  # The page hands what it does not match to `Operator.Actions`, which hands the question form's
+  # events to the form. The page draws no form, but the event can still be sent to it, and a result
+  # it had no clause for took the page down.
+  test "a question form's event, sent to a page that draws none, is ignored", context do
+    %{conn: conn, project: project, ticket: ticket} = context
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+
+    render_change(view, "form:change", %{"form" => "x", "answers" => %{}})
+    render_click(view, "form:open", %{"form" => "x", "key" => "k"})
+
+    assert render(view) =~ ticket.title
+  end
+
   test "a document is marked approved only once somebody has approved it", context do
     %{conn: conn, project: project, ticket: ticket, scope: scope} = context
     sha = commit_on_branch(context, "score.ex", "def persist, do: :ok")

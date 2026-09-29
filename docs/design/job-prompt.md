@@ -95,12 +95,17 @@ ticket's branch against its base, taken when the job was created.
   (`claude-code-events.md` § Correcting the outputs). The preamble says so in one sentence, so the
   correction message is not a surprise, and says nothing about what happens after the last round.
 - Ask questions inside the document, next to the passage they concern, as fenced `question`
-  blocks. Prefer few, specific questions with a recommended default. State the assumption taken
-  for non-blocking questions and continue. Use `blocking: true` only when no reasonable
+  blocks. Prefer few, specific questions with one option marked recommended. State the assumption
+  taken for non-blocking questions and continue. Use `blocking: true` only when no reasonable
   assumption exists; the job resumes with the answers.
-- **Put `text`, `anchor` and `assumption` in double quotes.** The block is YAML, and the failure
-  it prevents is the one production had: unquoted text holding `: ` is not YAML. One rule an agent
-  can follow without knowing YAML's indicator characters beats a list of them.
+- **Write a question for a person reading it on a phone.** Each option is a short headline and one
+  sentence saying what choosing it means; plain everyday words, no jargon, no words joined with
+  hyphens, as few words as carry the meaning. The limits below are enforced, but they are ceilings:
+  the preamble asks for shorter.
+- **Put `text`, `anchor`, `assumption`, `label` and `detail` in double quotes.** The block is
+  YAML, and the failure it prevents is the one production had: unquoted text holding `: ` is not
+  YAML. One rule an agent can follow without knowing YAML's indicator characters beats a list of
+  them.
 - Propose a ticket for work that is real but not this ticket's, instead of doing it or losing
   it: one file per proposal in `out/proposals/`, an H1 title and a body, with no front matter
   and no `question` blocks. A proposal is a suggestion; nothing runs until a person accepts it,
@@ -132,29 +137,62 @@ outcome: done
 ... prose ...
 
 ```question
-key: storage-backend
+key: storage
 anchor: "Persist the high score table"
-text: "Local file or the existing SQLite database?"
-options: [local-file, sqlite]
-default: sqlite
+text: "Where should the scores be kept?"
+options:
+  - label: "SQLite database"
+    detail: "The scores already live there."
+    recommended: true
+  - label: "Local file"
+    detail: "Simple, but another thing to back up."
 blocking: false
-assumption: "sqlite, which the scores already sit beside"
+assumption: "SQLite, which the scores already sit beside"
 ```
 ```
 
 `key` is stable within the document and is how answers attach. `anchor` quotes the passage
 so the queue can show the question in context. `options` is a short list; free text is
-always allowed as an answer but is not offered as a tap.
+always allowed as an answer, alone or as a note beside a chosen option, so options are for the
+common cases rather than every case.
 
-The block is YAML, and YAML types what it reads: `options: [5, 10, 20]` is three integers and
-`default: true` a boolean. **Wherever text is meant — `key`, `text`, `anchor`, `options`,
-`default`, `assumption` — a number or a boolean is read as the text it was written as**
-(`ForgeCore.Document.Question`), because an agent writing `[5, 10, 20]` meant three labels, and
-refusing it once dropped a whole refinement in production. The one loss is a number YAML
-normalises while reading (`1e3` arrives as `1000.0`). A list or a mapping where text is meant is
-still refused, and `blocking` is still a flag. What remains refusable — an unquoted value holding
-`: `, a key that is not lowercase — goes back to the agent before the job reports
-(`claude-code-events.md` § Correcting the outputs).
+**An option is a headline and a sentence.** `label` is what the person taps and what the answer
+records; `detail` says what choosing it means. Both are required, because the form they are drawn
+in is read on a phone by someone who did not write the plan: a bare `local-file` asks them to
+reconstruct the sentence the agent had in mind. `recommended: true` marks the one the agent would
+pick, at most one per question, and the form opens with it chosen. It sits on the option rather
+than in a `default` naming a label, because repeating a phrase exactly is where an agent slips,
+and every slip costs a correction round. `default` is refused with a sentence saying so.
+
+**The limits are enforced**, in characters: `text` 200, `label` 40, `detail` 140. They keep a
+question to what fits on a phone without scrolling past it, and they are refused rather than
+truncated, because a cut sentence can say the opposite of the whole one. Labels are unique within
+a question.
+
+The block is YAML, and YAML types what it reads: a `label: 10` is an integer and `true` a boolean.
+**Wherever text is meant — `key`, `text`, `anchor`, `label`, `detail`, `assumption` — a number or
+a boolean is read as the text it was written as** (`ForgeCore.Document.Question`), because an
+agent writing `label: 10` meant the label, and refusing it once dropped a whole refinement in
+production. The one loss is a number YAML normalises while reading (`1e3` arrives as `1000.0`). A
+list or a mapping where text is meant is still refused, and `blocking` and `recommended` are
+still flags. What remains refusable — an unquoted value holding `: `, a key that is not
+lowercase, an option that is a bare string, a limit exceeded — goes back to the agent before the
+job reports (`claude-code-events.md` § Correcting the outputs).
+
+**Questions recorded before options had details still stand; the documents they came from do
+not.** The migration that made an option a headline and a sentence kept each old option as a
+headline with no detail, and marked the old `default` as its recommendation; the form draws such
+an option without its sentence. The documents are text and were not rewritten, and the platform
+parses every document it records with the one strict parser. So a person editing a document
+written before the change rewrites its question blocks in the new shape, or the edit is refused
+and says which block; and an agent resumed on one is corrected like any other refused output.
+That was chosen over reading the old shape where documents are recorded: one format, refused the
+same way on every road in.
+
+**The worker is what teaches and checks the block**, from its own copy of the preamble, so a
+worker from before the change would teach the old shape and a result this platform refuses to
+record. That made the change a protocol bump: an agent needs protocol 3
+(`worker-channel.md` § Versions).
 
 ## Blocking questions and `waiting`
 
@@ -243,7 +281,9 @@ past reaches someone who has not opened its ticket. `Forge.Queue` serves each op
 kind, `:assumption` — never as a `:question`, so nothing that reads the queue can take it for
 one that halted a job — and the queue page draws them beneath its decisions under *Not waiting
 on you*, as lines that lead to the ticket rather than cards that answer in place
-(`ui.md` § Not waiting on you). The daily digest push counts them apart from what is waiting
+(`ui.md` § Not waiting on you). The exception is one asked in the same document as a blocking
+question: it is in that document's form, optional, and not in the digest as well
+(`ui.md` § Answering questions). The daily digest push counts them apart from what is waiting
 (`Forge.Push.digest/0`, `api-and-ui.md` § Push). They are never pushed on their own.
 
 **Answering one changes no job's flow.** `Forge.Operator.answer/4` writes the answer and a new
@@ -251,6 +291,30 @@ on you*, as lines that lead to the ticket rather than cards that answer in place
 question on the ticket is still open — and a non-blocking answer closes none, so a job waiting on
 a blocking question keeps waiting, and a job that is running or not yet started is untouched. The
 answer reaches the next run through `answers.md`, which is how every answer reaches a job.
+
+### Answering a document's questions at once
+
+The pages answer a document's questions together, not one at a time
+(`ui.md` § Answering questions): `Forge.Operator.answer_all/4` takes one artifact version and an
+answer per key, and writes them in one transaction — one `answers.md` version, and an `answers`
+row and a `question.answered` event each — then resumes the waiting job once, as above. The job is
+resumed by the batch, never by its first answer, so it reads every answer the person gave rather
+than whichever landed before the resume.
+
+It refuses the whole batch, and writes nothing, when:
+
+- **the page was stale** — a key is not an open question on that version: the document has a
+  newer version, or someone answered it meanwhile. Half a batch is not what the person sent;
+- **a blocking question on the version has no answer** — the Send is disabled until each is
+  locked, and the operation says so too, because a disabled button is the page again;
+- **an answer is empty or names no option** — a `choice` must be one of the question's labels,
+  whichever way the answer arrived. That rule is `Forge.Artifacts.answer_all/2`'s, so the API and
+  `mix forge.answer`, which still answer one key per call, keep to it as well.
+
+A non-blocking question in the batch is optional. One left on its recommendation is sent as that
+answer and takes it out of the digest. The recommendation is not always what was assumed — the
+parser ties neither to the other — which is why the form draws it folded with its choice on the
+line, and the assumption beside it once opened: what Send records is what the person saw.
 
 One case bends that, and it is a gap in editing rather than a rule of answering: a person's edit
 that drops a blocking block while its job waits leaves the job waiting with nothing open, because

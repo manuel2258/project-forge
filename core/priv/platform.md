@@ -48,8 +48,9 @@ in the manifest of a job that may; a job whose manifest lists none needs nothing
 
 A job asks inside the document it is writing, in a fenced `question` block, next to the passage
 the question is about. A blocking question stops the job until a person answers; a non-blocking
-one states the assumption the job proceeded with and carries on. The job that stopped resumes with
-the answers, and every later job on the ticket is handed them as `answers.md`.
+one states the assumption the job proceeded with and carries on. A person answers a document's
+questions together and sends them at once, so the job that stopped resumes once, with every
+answer, and every later job on the ticket is handed them as `answers.md`.
 
 ## Ticket proposals
 

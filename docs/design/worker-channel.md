@@ -378,6 +378,18 @@ protocol 1 platform would refuse a `parked` result it cannot read. The minimum s
 protocol 1 worker still takes every agent job whose state may not invoke, and the gate keeps the
 rest from it by its recorded protocol (`Workers.fits?/2`).
 
+**Protocol 3 is questions as a headline and a sentence** (`docs/design/job-prompt.md` § Output
+format): an option is `{label, detail, recommended}`, `default` is gone, and the lengths are
+limited. It is a bump because the worker is what teaches an agent the block — the preamble is the
+worker's own copy — and what corrects it, while the platform re-parses every document it records
+with the same strict parser: a protocol 2 worker's agent writes `options: [a, b]`, its worker
+accepts it, and the platform refuses the result, which is then re-sent and refused on every join.
+So an agent — a workflow job or a conversation — needs protocol 3 (`Forge.Jobs.protocol/1`), and
+a protocol 2 worker keeps taking commands only. The minimum stays 0 until every template and
+permanent machine has moved, as below; until then an old machine is not refused, it is simply
+not given an agent. A template whose snapshot speaks protocol 2 makes no machine for an agent,
+for the same reason, and the templates page says which snapshot it is.
+
 **Raising `minimum`** is the platform dropping an older protocol: the day it stops handling the
 shape older workers send. It is the one edit here that refuses running machines, so, before it
 ships:

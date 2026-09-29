@@ -57,6 +57,22 @@ defmodule Forge.ScopingTest do
       assert {:error, :forbidden} = Operator.answer(ticket, outsider, "any", %{choice: "a"})
     end
 
+    # Without the guard these answer `:stale` — no version, no reply — so the refusal is told
+    # apart from the argument that would also have failed.
+    test "answer_all", %{ticket: ticket, outsider: outsider} do
+      assert {:error, :forbidden} =
+               Operator.answer_all(ticket, outsider, Ecto.UUID.generate(), %{
+                 "any" => %{choice: "a", text: nil}
+               })
+    end
+
+    test "answer_chat", %{project: project, outsider: outsider} do
+      chat = chat_fixture(%{project: project})
+
+      assert {:error, :forbidden} =
+               Operator.answer_chat(chat, outsider, "any", %{"any" => %{choice: "a", text: nil}})
+    end
+
     test "nothing the outsider did was written", %{ticket: ticket, outsider: outsider} do
       Operator.edit(ticket, outsider, "plan.md", "theirs")
 

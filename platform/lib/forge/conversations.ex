@@ -1161,23 +1161,97 @@ defmodule Forge.Conversations do
   defp stamp(at), do: Calendar.strftime(at, "%Y-%m-%d %H:%M UTC")
 
   @doc """
-  The question a reply asked, if it asked one.
+  The questions a reply asked, in the order it asked them; empty when it asked none.
 
   A message *is* a body, so the parser a document uses parses it — nothing new in core. Every
   chat question is blocking, because the turn has ended and the agent is waiting whichever way
   the flag was written; `blocking: :always` also stops one question written without an assumption
-  from failing the parse of the whole message and taking the question with it.
+  from failing the parse of the whole message and taking the question with it. Nothing else is
+  lenient: a block the parser refuses leaves the reply as prose, with no form.
   See `docs/design/conversations.md` § Asking a question.
   """
-  @spec question(message() | nil) :: ForgeCore.Document.Question.t() | nil
-  def question(%{role: :assistant, text: text}) do
+  @spec questions(message() | nil) :: [ForgeCore.Document.Question.t()]
+  def questions(%{role: :assistant, text: text}) do
     case ForgeCore.Document.parse(text, blocking: :always) do
-      {:ok, %ForgeCore.Document{questions: [question | _rest]}} -> question
-      _none -> nil
+      {:ok, %ForgeCore.Document{questions: questions}} -> questions
+      _none -> []
     end
   end
 
-  def question(_message), do: nil
+  def questions(_message), do: []
+
+  @doc """
+  The one message that answers a reply's questions: each question's text in bold, and beneath it
+  the chosen label, the note beside it, or what was typed instead — in the order they were asked.
+
+  `answers` maps each key to `%{choice:, text:}`. Refused, so nothing is sent, when a key is not
+  one of the questions (`:stale` — the reply is not the one the form was drawn for), when a
+  question has no answer (`{:unanswered, keys}` — in a chat every question is required), or when
+  a choice is not one of its question's labels (`{:not_an_option, key, choice}`).
+  """
+  @spec answer_text([ForgeCore.Document.Question.t()], %{String.t() => map()}) ::
+          {:ok, String.t()} | {:error, term()}
+  def answer_text(questions, answers) do
+    answers = Map.new(answers, fn {key, answer} -> {key, blank_answer(answer)} end)
+
+    with :ok <- asked(questions, answers),
+         :ok <- all_answered(questions, answers),
+         :ok <- answer_choices(questions, answers) do
+      {:ok, Enum.map_join(questions, "\n\n", &answer_line(&1, answers[&1.key]))}
+    end
+  end
+
+  @doc """
+  Names the reply `messages` ends on — what was said, `messages/1` — so a form drawn for it can
+  tell whether it is still the reply waiting: a later reply may ask a question under the same key,
+  and answering it with the earlier form's choices would answer a question nobody saw. Nil when
+  the last thing said is not a reply.
+
+  Its place in what was said, and its time. A later reply comes after the person's message, so
+  its place differs; neither moves while the reply is still arriving — a name taken from its text
+  would change with every block, and the form's draft with it. The time is to the second only, so
+  it is not enough alone.
+  """
+  @spec reply_ref([message()]) :: String.t() | nil
+  def reply_ref(messages) do
+    case List.last(messages) do
+      %{role: :assistant, at: at} -> "#{length(messages)}-#{DateTime.to_unix(at)}"
+      _other -> nil
+    end
+  end
+
+  defp asked([], _answers), do: {:error, :stale}
+
+  defp asked(questions, answers) do
+    keys = MapSet.new(questions, & &1.key)
+    if Enum.all?(Map.keys(answers), &MapSet.member?(keys, &1)), do: :ok, else: {:error, :stale}
+  end
+
+  defp all_answered(questions, answers) do
+    case for(q <- questions, Map.get(answers, q.key, {nil, nil}) == {nil, nil}, do: q.key) do
+      [] -> :ok
+      keys -> {:error, {:unanswered, keys}}
+    end
+  end
+
+  defp blank_answer(answer) do
+    {Forge.Artifacts.Answer.blank(Map.get(answer, :choice)),
+     Forge.Artifacts.Answer.blank(Map.get(answer, :text))}
+  end
+
+  defp answer_choices(questions, answers) do
+    Enum.find_value(questions, :ok, fn question ->
+      {choice, _text} = answers[question.key]
+
+      if choice && not ForgeCore.Document.Question.offers?(question, choice),
+        do: {:error, {:not_an_option, question.key, choice}}
+    end)
+  end
+
+  defp answer_line(question, {choice, text}) do
+    answer = Forge.Artifacts.Answer.reads(choice, text)
+    "**#{question.text}**\n#{answer}"
+  end
 
   @doc "The conversations an operator can see for a project, newest first."
   @spec list_for_project(String.t()) :: [Job.t()]

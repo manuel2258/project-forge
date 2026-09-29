@@ -859,8 +859,10 @@ defmodule Forge.Workers do
   @doc """
   Whether this worker speaks at least `protocol`: what it said at its last join, and nothing for a
   worker that has not said. A command reaching a release from before commands would be run as an
-  agent job (`docs/design/commands.md` § Worker pools), so unknown is not enough here — unlike
-  `accepts?/2`, where an old release taking anything was the safe reading.
+  agent job (`docs/design/commands.md` § Worker pools), and an agent reaching one from before
+  protocol 3 would be taught a question block this platform refuses to record
+  (`Forge.Jobs.protocol/1`), so unknown is not enough here — unlike `accepts?/2`, where an old
+  release taking anything was the safe reading.
   """
   @spec speaks?(Worker.t(), non_neg_integer() | nil) :: boolean()
   def speaks?(%Worker{}, need) when need in [nil, 0], do: true

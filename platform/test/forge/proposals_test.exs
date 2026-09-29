@@ -380,7 +380,7 @@ defmodule Forge.ProposalsTest do
       ```question
       key: where
       text: Which module?
-      options: [a, b]
+      options: [{label: a, detail: About a}, {label: b, detail: About b}]
       blocking: true
       ```
       """

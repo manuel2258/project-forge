@@ -43,8 +43,10 @@ defmodule Forge.Jobs do
 
   require Logger
 
-  # The worker protocol commands arrived in (`docs/design/worker-channel.md` § Versions).
+  # The worker protocols commands, and then questions as a headline and a sentence, arrived in
+  # (`docs/design/worker-channel.md` § Versions). Facts about when, fixed once true.
   @commands_protocol 2
+  @questions_protocol 3
 
   # -- creation -------------------------------------------------------------------------------
 
@@ -519,22 +521,22 @@ defmodule Forge.Jobs do
   def harness(%Job{}), do: "claude_code"
 
   @doc """
-  The worker protocol a job needs, or 0 for any: commands and groups of files arrived in protocol
-  2, and a release from before them would run a command's spec as an agent job's, leave an
-  agent's `invoke.json` unread, and read a group `name/*` as a document it never finds — every
-  such job ending `error` however well it did (`docs/design/commands.md` § Worker pools).
+  The worker protocol a job needs, or 0 for any.
+
+  - **An agent — a workflow job or a conversation — needs protocol 3.** Its questions are a
+    headline and a sentence, and the release that composes its prompt and corrects its outputs is
+    what teaches and checks that. A release from before it teaches `options: [a, b]` and
+    `default:`, which this platform's parser refuses when it records the document — so the job's
+    result could never be recorded, and a chat's question would reach the page as prose
+    (`docs/design/job-prompt.md` § Output format).
+  - **A command needs protocol 2**, which commands and groups of files arrived in: a release from
+    before them would run a command's spec as an agent job's (`docs/design/commands.md`
+    § Worker pools). Its output is a script's, not an agent's, so the questions change asks
+    nothing more of it.
   """
   @spec protocol(Job.t()) :: non_neg_integer()
   def protocol(%Job{kind: :command}), do: @commands_protocol
-
-  def protocol(%Job{kind: :workflow} = job) do
-    decoded = spec(job)
-
-    if decoded.may_invoke != %{} or Spec.group_outputs(decoded) != [],
-      do: @commands_protocol,
-      else: 0
-  end
-
+  def protocol(%Job{kind: kind}) when kind in [:workflow, :chat], do: @questions_protocol
   def protocol(%Job{}), do: 0
 
   @doc "How many of `parent_id`'s invocations of `command` are running now."

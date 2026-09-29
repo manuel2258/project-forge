@@ -224,14 +224,26 @@ defmodule ForgeWeb.ChatLiveTest do
   # A message *is* a body, so a fenced question block in a reply parses with the same parser a
   # document uses, and answering sends the choice as the next message — nothing is written to
   # `answers`, because the transcript is already the record.
-  test "a question in the last reply gets one-tap answers", %{conn: conn, chat: chat} do
+  # Every question the reply asked is in one form, and Send posts one message holding every
+  # answer, each under its question (`docs/design/conversations.md` § Asking a question).
+  test "the last reply's questions are one form, answered in one message", %{
+    conn: conn,
+    chat: chat
+  } do
     text(chat, """
-    Which backend?
+    Two things.
 
     ```question
     key: backend
     text: Which backend should it use?
-    options: [postgres, sqlite]
+    options:
+      - {label: postgres, detail: About postgres, recommended: true}
+      - {label: sqlite, detail: About sqlite}
+    ```
+
+    ```question
+    key: rows
+    text: How many rows?
     ```
     """)
 
@@ -239,11 +251,79 @@ defmodule ForgeWeb.ChatLiveTest do
 
     {:ok, view, html} = live(conn, ~p"/chats/#{chat.id}")
     assert html =~ "Which backend should it use?"
+    assert html =~ "How many rows?"
 
-    html = view |> element("button", "postgres") |> render_click()
-    assert html =~ "postgres"
+    # In a chat every question is required, and only one is answered so far.
+    assert has_element?(view, "#answer-rows button[type=submit][disabled]")
+    assert view |> element("#answer-rows") |> render() =~ "1 question left"
 
-    assert Enum.any?(Conversations.messages(chat.id), &(&1.text == "postgres"))
+    view
+    |> element("#answer-rows form")
+    |> render_change(%{
+      "_target" => ["answers", "rows", "text"],
+      "answers" => %{
+        "backend" => %{"choice" => "postgres", "text" => ""},
+        "rows" => %{"text" => "a thousand"}
+      }
+    })
+
+    # Locking in sent nothing.
+    refute Enum.any?(Conversations.messages(chat.id), &(&1.role == :user and &1.text =~ "rows"))
+
+    view |> element("#answer-rows form") |> render_submit()
+
+    assert %{role: :user, text: text} = List.last(Conversations.messages(chat.id))
+
+    assert text ==
+             "**Which backend should it use?**\npostgres\n\n**How many rows?**\na thousand"
+  end
+
+  # chat_live hands the form's events to the form itself, and a payload of the wrong shape — no
+  # form, no chat, a chat id that is no id — used to take the page down with it.
+  test "a malformed form event is ignored", %{conn: conn, chat: chat} do
+    text(chat, "```question\nkey: rows\ntext: How many rows?\n```\n")
+    turn(chat, 1)
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+    render_change(view, "form:change", %{"answers" => %{}})
+    render_click(view, "form:open", %{})
+    render_submit(view, "chat:questions:send", %{"form" => "x"})
+    html = render_submit(view, "chat:questions:send", %{"form" => "x", "chat" => "not-a-uuid"})
+
+    assert html =~ "That no longer exists."
+    refute Enum.any?(Conversations.messages(chat.id), &(&1.role == :user and &1.text =~ "rows"))
+  end
+
+  # A later reply can ask under the same key; the form carries the reply it was drawn for, and a
+  # Send for any other is refused rather than answering a question nobody saw.
+  test "a form for an earlier reply sends nothing", %{conn: conn, chat: chat} do
+    ask = fn index ->
+      text(chat, "```question\nkey: backend\ntext: Which one, #{index}?\n```\n")
+      turn(chat, index)
+    end
+
+    ask.(1)
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+    [reply] =
+      view
+      |> element("#answer-rows form input[name=reply]")
+      |> render()
+      |> then(&Regex.run(~r/value="([^"]+)"/, &1, capture: :all_but_first))
+
+    {:ok, _event} = Conversations.send(chat, "go on")
+    ask.(2)
+
+    html =
+      render_click(view, "chat:questions:send", %{
+        "form" => "chat-#{chat.id}-#{reply}",
+        "chat" => chat.id,
+        "reply" => reply,
+        "answers" => %{"backend" => %{"text" => "the first"}}
+      })
+
+    assert html =~ "were answered or changed since the page showed them"
+    refute Enum.any?(Conversations.messages(chat.id), &(&1.text =~ "the first"))
   end
 
   describe "while the agent has the ball" do
@@ -485,7 +565,7 @@ defmodule ForgeWeb.ChatLiveTest do
     ```question
     key: backend
     text: Which backend should it use?
-    options: [postgres, sqlite]
+    options: [{label: postgres, detail: About postgres}, {label: sqlite, detail: About sqlite}]
     ```
     """)
 
@@ -511,26 +591,38 @@ defmodule ForgeWeb.ChatLiveTest do
     ```question
     key: backend
     text: Which backend should it use?
-    options: [postgres, sqlite]
+    options: [{label: postgres, detail: About postgres}, {label: sqlite, detail: About sqlite}]
     ```
     """)
 
     turn(chat, 1)
     {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
-    assert has_element?(view, "button", "postgres")
+    assert has_element?(view, "#answer-rows form")
+    reply = Conversations.reply_ref(Conversations.messages(chat.id))
 
-    # It ends while the page is open. The view is subscribed, so the row goes on its own.
+    # It ends while the page is open. The view is subscribed, so the form goes on its own.
     {:ok, _chat} = Conversations.ended(chat, nil, "worker_lost")
-    refute has_element?(view, "button", "postgres")
+    refute has_element?(view, "#answer-rows form")
 
     # A client that did not get that far still sends the event — a phone asleep in a pocket,
     # a tap landing as the update arrives. Pushed directly, because by now no DOM node carries
     # it and the point is precisely a click the page no longer offers.
-    html = render_click(view, "answer", %{"choice" => "postgres"})
+    html =
+      render_click(view, "chat:questions:send", %{
+        "form" => "chat-#{chat.id}-#{reply}",
+        "chat" => chat.id,
+        "reply" => reply,
+        "answers" => %{"backend" => %{"choice" => "postgres"}}
+      })
 
-    assert html =~ "This conversation has stopped"
+    # The refusal's own sentence: the stopped page says "This conversation has stopped" anyway.
+    assert html =~ "Reopen it to answer."
     assert html =~ "Reopen"
-    refute Enum.any?(Conversations.messages(chat.id), &(&1.text == "postgres"))
+
+    refute Enum.any?(
+             Conversations.messages(chat.id),
+             &(&1.role == :user and &1.text =~ "postgres")
+           )
   end
 
   defp wrote(chat, index, documents) do

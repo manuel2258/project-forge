@@ -13,18 +13,21 @@ defmodule ForgeWeb.QueueLive do
 
   Beneath the decisions, before the end, is what is **not waiting on you**: the questions agents
   did not stop for, as lines that lead to their tickets. They count towards nothing on this page
-  — `docs/design/ui.md` § Not waiting on you.
+  — `docs/design/ui.md` § Not waiting on you. One asked in the same document as a blocking
+  question is in that document's form instead, optional (§ Answering questions).
   """
 
   use ForgeWeb, :live_view
 
   import ForgeWeb.Operator.Components
+  import ForgeWeb.Operator.QuestionForm, only: [question_form: 1]
 
-  alias Forge.{Artifacts, Conversations, Events, Operator, Push, Queue, Tickets}
+  alias Forge.{Artifacts, Events, Push, Queue, Tickets}
   alias ForgeCore.Workflow
   alias ForgeWeb.Format
   alias ForgeWeb.Operator.Actions
   alias ForgeWeb.Operator.Board
+  alias ForgeWeb.Operator.QuestionForm
 
   @impl true
   def mount(_params, _session, socket) do
@@ -32,20 +35,31 @@ defmodule ForgeWeb.QueueLive do
 
     {:ok,
      socket
-     |> assign(page_title: "Queue", push_key: Push.enabled?() && Push.public_key())
+     |> assign(
+       page_title: "Queue",
+       push_key: Push.enabled?() && Push.public_key(),
+       forms: QuestionForm.init()
+     )
      |> load()}
   end
 
   # The decisions are grouped and counted; the assumptions are the digest beneath them, in the
   # order `Forge.Queue` gives them, and count towards nothing — see docs/design/ui.md § Not
-  # waiting on you.
+  # waiting on you. An assumption asked in the same document as a blocking question joins that
+  # question's form instead, optional, because it was asked in the same breath
+  # (docs/design/ui.md § Answering questions).
   defp load(socket) do
-    {waiting, digest} =
+    {waiting, assumed} =
       Queue.items(socket.assigns.current_scope.user)
       |> Enum.map(&Map.put(&1, :project, &1.project.name))
       |> Enum.split_with(&Queue.waiting?/1)
 
-    items = waiting |> group() |> Enum.map(&decorate/1)
+    {joined, digest} =
+      waiting
+      |> Enum.filter(&(&1.kind == :question))
+      |> QuestionForm.join_assumed(assumed, & &1.question.artifact_version_id)
+
+    items = (waiting ++ joined) |> group() |> Enum.map(&decorate/1)
 
     assign(socket,
       items: items,
@@ -56,9 +70,10 @@ defmodule ForgeWeb.QueueLive do
   end
 
   # One job, stopped, against one artifact version, carrying N questions. Everything else is
-  # already one interruption on its own.
+  # already one interruption on its own. `load/1` only passes an assumption here when a blocking
+  # question shares its version, so every group holds at least one of those.
   defp group(items) do
-    {questions, rest} = Enum.split_with(items, &(&1.kind == :question))
+    {questions, rest} = Enum.split_with(items, &(&1.kind in [:question, :assumption]))
 
     questions
     |> Enum.group_by(& &1.question.artifact_version_id)
@@ -69,7 +84,13 @@ defmodule ForgeWeb.QueueLive do
         kind: :questions,
         ticket: first.ticket,
         project: first.project,
-        since: group |> Enum.map(& &1.since) |> Enum.min(DateTime),
+        # When it started waiting, which the blocking questions say. Taking the assumptions too is
+        # an equivalent mutant as documents are recorded: a version's questions share one insert.
+        since:
+          group
+          |> Enum.filter(&(&1.kind == :question))
+          |> Enum.map(& &1.since)
+          |> Enum.min(DateTime),
         questions: Enum.map(group, & &1.question),
         version: first.question.artifact_version,
         detail: %{}
@@ -88,7 +109,7 @@ defmodule ForgeWeb.QueueLive do
     |> put_approve()
   end
 
-  defp decisions(%{kind: :questions} = item), do: length(item.questions)
+  defp decisions(%{kind: :questions} = item), do: Enum.count(item.questions, & &1.blocking)
   defp decisions(_item), do: 1
 
   defp put_approve(%{kind: :approval, ticket: ticket} = item) do
@@ -116,33 +137,6 @@ defmodule ForgeWeb.QueueLive do
   @impl true
   def handle_info({:ticket_changed, _id}, socket), do: {:noreply, load(socket)}
 
-  # Answering from the queue sends the choice as the next message, exactly as answering from the
-  # conversation does. Nothing is written to `answers`: the transcript is already the record.
-  def handle_event("chat:answer", %{"chat" => id, "choice" => choice}, socket) do
-    # The id comes off the wire, so the guard has to resolve it: `Operator.send_chat/4` takes
-    # the chat's own project and refuses a non-member. This handler was the hole a review found —
-    # the queue correctly hid the item, and hiding it was the only thing stopping anyone.
-    chat = Conversations.get!(id)
-
-    case Operator.send_chat(chat, socket.assigns.current_scope.user, choice) do
-      {:ok, _event} ->
-        {:noreply, load(socket)}
-
-      # The queue lists only live conversations, so this is the race rather than the rule: it
-      # ended between the page rendering and the tap. Reloading drops the item.
-      {:error, :not_live} ->
-        {:noreply,
-         socket
-         |> put_flash(:error, "That conversation stopped before the answer reached it.")
-         |> load()}
-
-      # Not reachable from a page that rendered honestly — the queue never listed it. Handled
-      # rather than left to crash, because the refusal is the point and a crash loses it.
-      {:error, :forbidden} ->
-        {:noreply, socket |> put_flash(:error, "That conversation is not yours.") |> load()}
-    end
-  end
-
   @impl true
   def handle_event("push:subscribe", %{"endpoint" => _} = subscription, socket) do
     case Push.subscribe(socket.assigns.current_scope.user, subscription) do
@@ -164,9 +158,14 @@ defmodule ForgeWeb.QueueLive do
     {:noreply, put_flash(socket, :error, "Notifications unavailable: #{reason}")}
   end
 
+  # A chat's questions are answered here with the form its page draws, sent as one message by
+  # `Operator.answer_chat/4` — which resolves the chat off the wire and refuses a non-member, the
+  # hole a review once found in this page's answer buttons. Nothing is written to `answers`: the
+  # transcript is already the record.
   def handle_event(event, params, socket) do
     case Actions.handle(event, params, socket) do
       {:handled, socket} -> {:noreply, load(socket)}
+      {:state, socket} -> {:noreply, socket}
       :unknown -> {:noreply, socket}
     end
   end
@@ -230,7 +229,14 @@ defmodule ForgeWeb.QueueLive do
             <p class="text-xl/[1.3] font-medium -tracking-[.01em]">{sentence(item)}</p>
           </.link>
 
-          <.questions_affordance :if={item.kind == :questions} item={item} />
+          <.question_form
+            :if={item.kind == :questions}
+            id={item.version.id}
+            questions={item.questions}
+            forms={@forms}
+            submit="questions:send"
+            hidden={[{"ticket", item.ticket.id}, {"version", item.version.id}]}
+          />
 
           <.approval_card
             :if={item.kind == :approval}
@@ -239,8 +245,8 @@ defmodule ForgeWeb.QueueLive do
             approve={item.approve}
           />
 
-          <%!-- A link, never an answer row: answering never navigates, and the answer row is the
-                one shape in the queue that commits something. --%>
+          <%!-- A link, never an answer row: answering never navigates, and the answer row and the
+                Send are the shapes in the queue that commit something. --%>
           <.link
             :if={reviewable?(item)}
             navigate={~p"/tickets/#{item.project}/#{item.ticket.number}/review"}
@@ -257,7 +263,7 @@ defmodule ForgeWeb.QueueLive do
 
           <.retry_row :if={item.kind == :stuck and item.detail[:retry]} ticket={item.ticket} />
 
-          <.chat_answer :if={item.kind == :chat} item={item} />
+          <.chat_answer :if={item.kind == :chat} item={item} forms={@forms} />
 
           <.identifiers
             :if={item.ticket}
@@ -314,24 +320,23 @@ defmodule ForgeWeb.QueueLive do
   defp destination(%{kind: :chat} = item), do: ~p"/chats/#{item.detail.chat_id}"
   defp destination(item), do: ~p"/tickets/#{item.project}/#{item.ticket.number}"
 
-  # A chat question gets the same answer rows a job's does, so it can be answered without
-  # opening the conversation — the difference between answering from a phone and not.
+  # A chat's questions get the same form a job's do, so they can be answered without opening the
+  # conversation — the difference between answering from a phone and not.
   attr :item, :map, required: true
+  attr :forms, :map, required: true
 
   defp chat_answer(assigns) do
     ~H"""
-    <div :if={@item.detail.question} class="flex flex-col gap-2">
-      <.answer_row
-        :for={option <- @item.detail.question.options}
-        phx-click="chat:answer"
-        phx-value-chat={@item.detail.chat_id}
-        phx-value-choice={option}
-      >
-        {option}
-      </.answer_row>
-    </div>
+    <.question_form
+      :if={@item.detail.questions != []}
+      id={"chat-#{@item.detail.chat_id}-#{@item.detail.reply}"}
+      questions={@item.detail.questions}
+      forms={@forms}
+      submit="chat:questions:send"
+      hidden={[{"chat", @item.detail.chat_id}, {"reply", @item.detail.reply}]}
+    />
 
-    <div :if={is_nil(@item.detail.question)} class="font-mono text-[12.5px] opacity-60">
+    <div :if={@item.detail.questions == []} class="font-mono text-[12.5px] opacity-60">
       <.link navigate={~p"/chats/#{@item.detail.chat_id}"} class="hover:opacity-100">
         Open the conversation ›
       </.link>
@@ -353,14 +358,6 @@ defmodule ForgeWeb.QueueLive do
     """
   end
 
-  attr :item, :map, required: true
-
-  defp questions_affordance(assigns) do
-    ~H"""
-    <.questions questions={@item.questions} ticket_id={@item.ticket.id} version_id={@item.version.id} />
-    """
-  end
-
   defp item_id(%{kind: :questions} = item), do: "item-questions-#{item.version.id}"
   defp item_id(%{kind: :chat} = item), do: "item-chat-#{item.detail.chat_id}"
   defp item_id(item), do: "item-#{item.kind}-#{item.ticket.id}"
@@ -376,10 +373,13 @@ defmodule ForgeWeb.QueueLive do
 
   defp reviewable?(_item), do: false
 
-  # Every question grouped here is blocking: a non-blocking one is an `:assumption`, which is in
-  # the digest and never reaches `group/1`.
-  defp kind_label(%{kind: :questions, questions: questions}),
-    do: "#{length(questions)} blocking #{noun(length(questions), "question")}"
+  # Counted as blocking: an assumption in the same form is optional and waits on nobody, so it is
+  # named apart rather than added to what is waiting.
+  defp kind_label(%{kind: :questions, questions: questions}) do
+    {blocking, optional} = Enum.split_with(questions, & &1.blocking)
+    label = "#{length(blocking)} blocking #{noun(length(blocking), "question")}"
+    if optional == [], do: label, else: "#{label} · #{length(optional)} optional"
+  end
 
   defp kind_label(%{kind: :chat}), do: "conversation"
   defp kind_label(%{kind: :approval}), do: "approval"
@@ -395,9 +395,10 @@ defmodule ForgeWeb.QueueLive do
   # What it said, not what it is: a conversation waiting on you is waiting with its last reply
   # on screen, and that reply is the thing you are deciding about.
   defp sentence(%{kind: :chat} = item) do
-    case item.detail.question do
-      nil -> first_line(item.detail.text)
-      question -> question.text
+    case item.detail.questions do
+      [] -> first_line(item.detail.text)
+      [question] -> question.text
+      questions -> "#{length(questions)} questions: #{hd(questions).text}"
     end
   end
 

@@ -618,10 +618,123 @@ defmodule Forge.ConversationsTest do
     ```question
     key: #{key}
     text: Local file or SQLite?
-    options: [local-file, sqlite]
+    options: [{label: local-file, detail: About local-file}, {label: sqlite, detail: About sqlite}]
     blocking: true
     ```
     """
+  end
+
+  # The message a chat's question form sends (`docs/design/conversations.md` § Asking a
+  # question): every answer under its question, in the order asked, or nothing at all.
+  describe "answering a reply's questions" do
+    setup do
+      {:ok, %{questions: questions}} =
+        ForgeCore.Document.parse(
+          """
+          ```question
+          key: store
+          text: Which backend?
+          options: [{label: Postgres, detail: Where the data is.}, {label: SQLite, detail: A file.}]
+          ```
+
+          ```question
+          key: rows
+          text: How many rows?
+          ```
+          """,
+          blocking: :always
+        )
+
+      %{questions: questions}
+    end
+
+    # `store` is asked before `rows` and sorts after it, so an answer in any order but the
+    # asking one reads differently.
+    test "is every answer under its question, in the order asked", %{questions: questions} do
+      assert {:ok, text} =
+               Conversations.answer_text(questions, %{
+                 "rows" => %{choice: nil, text: "a thousand"},
+                 "store" => %{choice: "SQLite", text: "for now"}
+               })
+
+      assert text == "**Which backend?**\nSQLite — for now\n\n**How many rows?**\na thousand"
+    end
+
+    test "refuses a question left unanswered, blank text included", %{questions: questions} do
+      assert {:error, {:unanswered, ["rows"]}} =
+               Conversations.answer_text(questions, %{
+                 "store" => %{choice: "Postgres", text: nil},
+                 "rows" => %{choice: nil, text: "   "}
+               })
+    end
+
+    # What the page sends for a question left empty is no key at all — the form drops it — so
+    # that is the case the rule has to hold for, or a forced Send posts half the answers.
+    test "refuses a question the answers leave out", %{questions: questions} do
+      assert {:error, {:unanswered, ["rows"]}} =
+               Conversations.answer_text(questions, %{"store" => %{choice: "Postgres", text: nil}})
+    end
+
+    test "refuses a choice that is no label", %{questions: questions} do
+      assert {:error, {:not_an_option, "store", "MySQL"}} =
+               Conversations.answer_text(questions, %{
+                 "store" => %{choice: "MySQL", text: nil},
+                 "rows" => %{choice: nil, text: "ten"}
+               })
+    end
+
+    test "refuses an answer to a question the reply did not ask", %{questions: questions} do
+      answers = %{
+        "store" => %{choice: "Postgres", text: nil},
+        "rows" => %{choice: nil, text: "ten"}
+      }
+
+      assert {:error, :stale} =
+               Conversations.answer_text(questions, Map.put(answers, "other", %{text: "x"}))
+
+      assert {:error, :stale} = Conversations.answer_text([], %{})
+    end
+
+    # A reply's name holds while it is still arriving, or a form drawn over its first block would
+    # be stale by its second; and a later reply is named apart even within the same second.
+    test "a reply keeps its name while it arrives, and the next is named apart", %{
+      project: project
+    } do
+      {:ok, chat} = Conversations.open(project, "which?")
+      text(chat, "```question\nkey: rows\ntext: How many rows?\n```\n")
+      first = chat.id |> Conversations.messages() |> Conversations.reply_ref()
+
+      text(chat, "And one more thing.")
+      assert chat.id |> Conversations.messages() |> Conversations.reply_ref() == first
+
+      {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.01))
+      assert chat.id |> Conversations.messages() |> Conversations.reply_ref() == first
+
+      {:ok, _event} = Conversations.send(chat, "ten")
+      assert chat.id |> Conversations.messages() |> Conversations.reply_ref() == nil
+
+      text(chat, "```question\nkey: rows\ntext: How many rows, again?\n```\n")
+      second = chat.id |> Conversations.messages() |> Conversations.reply_ref()
+      refute second in [nil, first]
+    end
+
+    # The form carries the reply it was drawn for. When the last thing said is the person's own,
+    # there is no reply waiting, and nothing is sent in its name.
+    test "is refused once the person has spoken since", %{project: project} do
+      {:ok, chat} = Conversations.open(project, "which?")
+      user = member_fixture(project, :member)
+
+      text(chat, "```question\nkey: rows\ntext: How many rows?\n```\n")
+      {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.01))
+      reply = chat.id |> Conversations.messages() |> Conversations.reply_ref()
+
+      {:ok, _event} = Conversations.send(chat, "never mind")
+
+      assert {:error, :stale} =
+               Forge.Operator.answer_chat(chat, user, reply, %{"rows" => %{text: "ten"}})
+
+      assert [_opening, _reply, %{text: "never mind"}] = Conversations.messages(chat.id)
+    end
   end
 
   describe "reaching the worker" do

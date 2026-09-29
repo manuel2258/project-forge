@@ -4,7 +4,7 @@ defmodule ForgeWeb.ChatsLive do
 
   This is for finding one again — the one about the parser last week, the one still running that
   you closed the tab on. It is not a queue: a conversation that needs you is already in the
-  queue, with its question and its answer rows, and does not wait for you to come looking
+  queue, with its questions as a form to answer, and does not wait for you to come looking
   (`docs/design/ui.md` § Space, measure and targets).
 
   Conversations are kept for ever, so this list only grows. Live first is what keeps it useful:

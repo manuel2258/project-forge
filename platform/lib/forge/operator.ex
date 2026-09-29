@@ -56,6 +56,65 @@ defmodule Forge.Operator do
     end
   end
 
+  @doc """
+  Answers a document's questions together: `answers` maps each key to `%{choice:, text:}`, for
+  questions on the artifact version `version_id`. One transaction writes them all and resumes the
+  waiting job once, so the job reads every answer the person gave rather than whichever landed
+  first (`docs/design/job-prompt.md` § Answering a document's questions at once).
+
+  Refused whole, writing nothing:
+
+  - `{:error, :stale}` — a key is not an open question on that version: the document has a newer
+    version, or someone answered it meanwhile. Half of what a person sent is not what they sent.
+  - `{:error, {:unanswered, keys}}` — a blocking question on the version has no answer. The page
+    disables Send until each is locked; this is the operation saying so as well.
+  - `{:error, :no_answers}` — nothing to send.
+  - whatever `Forge.Artifacts.answer_all/2` refuses: an empty answer, a choice that is no label.
+  """
+  @spec answer_all(Ticket.t(), User.t(), String.t(), %{String.t() => map()}) ::
+          {:ok, Ticket.t()} | {:error, term()}
+  def answer_all(%Ticket{} = ticket, %User{} = user, version_id, answers) when is_map(answers) do
+    with :ok <- allow(ticket, user, :use),
+         {:ok, _answers} <-
+           Forge.Repo.transact(fn -> answer_all_and_resume(ticket, user, version_id, answers) end) do
+      notify(ticket)
+    end
+  end
+
+  # Read inside the transaction that writes, so what is checked is what is answered.
+  defp answer_all_and_resume(ticket, user, version_id, answers) do
+    open =
+      ticket.id
+      |> Artifacts.open_questions()
+      |> Enum.filter(&(&1.artifact_version_id == version_id))
+
+    by_key = Map.new(open, &{&1.key, &1})
+
+    with :ok <- all_open(answers, by_key),
+         :ok <- blocking_answered(open, answers),
+         {:ok, written} <-
+           answers
+           |> Enum.map(fn {key, attrs} -> {by_key[key], attrs} end)
+           |> Enum.sort_by(fn {question, _attrs} -> question.line end)
+           |> Artifacts.answer_all(user.id),
+         :ok <- resume_if_unblocked(ticket) do
+      {:ok, written}
+    end
+  end
+
+  defp all_open(answers, _by_key) when answers == %{}, do: {:error, :no_answers}
+
+  defp all_open(answers, by_key) do
+    if Enum.all?(Map.keys(answers), &Map.has_key?(by_key, &1)), do: :ok, else: {:error, :stale}
+  end
+
+  defp blocking_answered(open, answers) do
+    case for(q <- open, q.blocking, not Map.has_key?(answers, q.key), do: q.key) do
+      [] -> :ok
+      keys -> {:error, {:unanswered, keys}}
+    end
+  end
+
   # The two facts a waiting job is held by, from the functions `Forge.Conversations` asks too
   # when it refuses a chat the document holding one of those questions: the refusal and the
   # resume have to agree on what holds a job.
@@ -166,6 +225,25 @@ defmodule Forge.Operator do
   @spec send_chat(Job.t(), User.t(), String.t(), keyword()) :: {:ok, term()} | {:error, term()}
   def send_chat(%Job{kind: :chat} = chat, %User{} = user, text, opts \\ []) do
     with :ok <- allow(chat, user, :use), do: Conversations.send(chat, text, opts)
+  end
+
+  @doc """
+  Answers the questions of a conversation's last reply, as one message
+  (`Forge.Conversations.answer_text/2`). `reply` is the `Forge.Conversations.reply_ref/1` of the
+  reply the form was drawn for: when the last reply is another one, nothing is sent and the
+  answer is `{:error, :stale}`, because the conversation moved on while the form was open.
+  """
+  @spec answer_chat(Job.t(), User.t(), String.t(), %{String.t() => map()}) ::
+          {:ok, term()} | {:error, term()}
+  def answer_chat(%Job{kind: :chat} = chat, %User{} = user, reply, answers) do
+    with :ok <- allow(chat, user, :use),
+         messages = Conversations.messages(chat.id),
+         true <-
+           (reply != nil and Conversations.reply_ref(messages) == reply) || {:error, :stale},
+         {:ok, text} <-
+           Conversations.answer_text(Conversations.questions(List.last(messages)), answers) do
+      Conversations.send(chat, text)
+    end
   end
 
   @doc "Interrupts a running conversation."

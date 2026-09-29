@@ -481,14 +481,14 @@ defmodule ForgeWeb.ChatWorkScreenTest do
     end
   end
 
-  # A one-tap answer is under the thumb: docked above the composer, in the footer that does not
+  # The answer is under the thumb: the form docked above the composer, in the footer that does not
   # scroll, not somewhere in the transcript.
-  test "docks the answer rows above the composer", %{conn: conn, chat: chat} do
+  test "docks the question form above the composer", %{conn: conn, chat: chat} do
     text(chat, """
     ```question
     key: backend
     text: Which backend should it use?
-    options: [postgres, sqlite]
+    options: [{label: postgres, detail: About postgres}, {label: sqlite, detail: About sqlite}]
     ```
     """)
 
@@ -496,7 +496,7 @@ defmodule ForgeWeb.ChatWorkScreenTest do
     {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
 
     refute has_element?(view, "#messages-pane #answer-rows")
-    assert has_element?(view, "#answer-rows button", "postgres")
+    assert has_element?(view, "#answer-rows form label", "postgres")
 
     footer = render(view) |> String.split(~s(id="answer-rows")) |> List.last()
     assert footer =~ ~s(id="say")

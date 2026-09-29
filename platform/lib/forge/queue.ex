@@ -145,19 +145,25 @@ defmodule Forge.Queue do
         []
 
       messages ->
-        last = List.last(messages)
-        if last.role == :assistant, do: [waiting_chat(chat, last)], else: []
+        if List.last(messages).role == :assistant, do: [waiting_chat(chat, messages)], else: []
     end
   end
 
-  defp waiting_chat(%Job{} = chat, last) do
+  defp waiting_chat(%Job{} = chat, messages) do
+    last = List.last(messages)
+
     %{
       kind: :chat,
       ticket: chat.ticket_id && Tickets.get!(chat.ticket_id),
       project: Projects.get!(chat.project_id),
       since: last.at,
       question: nil,
-      detail: %{chat_id: chat.id, text: last.text, question: Conversations.question(last)}
+      detail: %{
+        chat_id: chat.id,
+        text: last.text,
+        questions: Conversations.questions(last),
+        reply: Conversations.reply_ref(messages)
+      }
     }
   end
 

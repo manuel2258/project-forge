@@ -162,7 +162,7 @@ defmodule ForgeWeb.ApiTest do
         ```question
         key: naming
         text: What is the table called?
-        options: [scores, highscores]
+        options: [{label: scores, detail: About scores}, {label: highscores, detail: About highscores}]
         blocking: false
         assumption: scores
         ```
@@ -175,6 +175,52 @@ defmodule ForgeWeb.ApiTest do
                  "kind" => "assumption",
                  "question" => %{"key" => "naming", "blocking" => false},
                  "detail" => %{"assumption" => "scores"}
+               }
+             ]
+           } = conn |> get(~p"/api/v1/queue") |> json_response(200)
+  end
+
+  # A chat's questions are parsed from its reply, not stored, so they are the core's structs —
+  # which the JSON encoder refuses, and the whole queue with them. They are served in the shape a
+  # stored question is.
+  test "a conversation asking questions is served with them", %{conn: conn, project: project} do
+    {:ok, chat} = Forge.Conversations.open(project, "which?")
+
+    :ok =
+      Jobs.record_harness_event(chat.id, %{
+        type: "job.harness.text",
+        payload: %{
+          text:
+            "```question\nkey: backend\ntext: Which backend?\noptions:\n" <>
+              "  - {label: Postgres, detail: Where the data is., recommended: true}\n```\n"
+        }
+      })
+
+    {:ok, _chat} =
+      Forge.Conversations.record_turn(chat, %{
+        "turn" => 1,
+        "harness" => %{"turns" => 1, "cost_usd" => 0.01, "subtype" => "success"}
+      })
+
+    assert %{
+             "items" => [
+               %{
+                 "kind" => "chat",
+                 "detail" => %{
+                   "questions" => [
+                     %{
+                       "key" => "backend",
+                       "text" => "Which backend?",
+                       "options" => [
+                         %{
+                           "label" => "Postgres",
+                           "detail" => "Where the data is.",
+                           "recommended" => true
+                         }
+                       ]
+                     }
+                   ]
+                 }
                }
              ]
            } = conn |> get(~p"/api/v1/queue") |> json_response(200)
@@ -393,12 +439,18 @@ defmodule ForgeWeb.ApiTest do
                %{
                  "key" => "backend",
                  "blocking" => true,
-                 "options" => ["a", "b"],
+                 "options" => [
+                   %{"label" => "a", "detail" => "About a", "recommended" => true},
+                   %{"label" => "b", "detail" => "About b", "recommended" => false}
+                 ],
                  "artifact" => "plan.md"
-               }
+               } = question
              ]
            } =
              conn |> get(~p"/api/v1/tickets/#{name}/1") |> json_response(200)
+
+    # The recommendation is the option's flag; `default` went with the bare labels.
+    refute Map.has_key?(question, "default")
 
     assert %{"error" => %{"reason" => "job_live"}} =
              conn
@@ -409,6 +461,33 @@ defmodule ForgeWeb.ApiTest do
              conn
              |> post(~p"/api/v1/tickets/#{name}/1/answers", %{key: "nope", choice: "a"})
              |> json_response(404)
+
+    # A choice is one of the question's labels, whichever surface sends it: the pages only offer
+    # those, and a client can send anything.
+    assert %{
+             "error" => %{
+               "reason" => "not_an_option",
+               "detail" => ~s("c" is not an option of backend)
+             }
+           } =
+             conn
+             |> post(~p"/api/v1/tickets/#{name}/1/answers", %{key: "backend", choice: "c"})
+             |> json_response(422)
+
+    assert %{"error" => %{"reason" => "empty_answer"}} =
+             conn
+             |> post(~p"/api/v1/tickets/#{name}/1/answers", %{key: "backend", text: "  "})
+             |> json_response(422)
+
+    # JSON can put an object where text is meant; `answers.md` is text, and it used to be a 500.
+    assert %{"error" => %{"reason" => "invalid_answer"}} =
+             conn
+             |> put_req_header("content-type", "application/json")
+             |> post(
+               ~p"/api/v1/tickets/#{name}/1/answers",
+               Jason.encode!(%{key: "backend", text: %{"no" => "text"}})
+             )
+             |> json_response(422)
 
     assert %{"state" => "planning"} =
              conn

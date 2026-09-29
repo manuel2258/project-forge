@@ -129,7 +129,11 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"accounts_live.ex", "delete"} => :node_admin,
     {"chat_live.ex", "send"} => :member,
     {"chat_live.ex", "force"} => :member,
-    {"chat_live.ex", "answer"} => :member,
+    # The question form's draft is the page's alone; its Send goes through
+    # `Operator.answer_chat/4`, which resolves the chat off the wire and checks membership.
+    {"chat_live.ex", "form:change"} => :local,
+    {"chat_live.ex", "form:open"} => :local,
+    {"chat_live.ex", "chat:questions:send"} => :member,
     {"chat_live.ex", "stop"} => :member,
     {"chat_live.ex", "close"} => :member,
     {"chat_live.ex", "reopen"} => :member,
@@ -158,12 +162,14 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"project_settings_live.ex", "remove-member"} => :manage,
     # Same check as `issue`/`revoke`/`model`/`add-member`/`remove-member` above:
     # `Projects.put_mirror/5` and `delete_mirror/3` both call `manageable/2`.
+    # The version id is the client's; `Operator.accept_proposal/3` and `decline_proposal/3` resolve
+    # it to its project and refuse a non-member (`allow_proposal/2`).
+    {"project_live.ex", "decide_proposal"} => :member,
     {"project_settings_live.ex", "add-mirror"} => :manage,
     {"project_settings_live.ex", "remove-mirror"} => :manage,
     {"project_settings_live.ex", "dismiss"} => :local,
     {"project_settings_live.ex", "toggle-spent"} => :local,
     {"project_settings_live.ex", "validate"} => :local,
-    {"queue_live.ex", "chat:answer"} => :member,
     {"queue_live.ex", "push:subscribe"} => :self,
     {"queue_live.ex", "push:unsubscribe"} => :self,
     {"queue_live.ex", "push:error"} => :local,
@@ -218,7 +224,22 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"user_live/settings.ex", "update_email"} => :self,
     {"user_live/settings.ex", "update_password"} => :self,
     {"user_live/settings.ex", "validate_email"} => :self,
-    {"user_live/settings.ex", "validate_password"} => :self
+    {"user_live/settings.ex", "validate_password"} => :self,
+
+    # Dispatched rather than matched: the queue, the ticket and the review page hand every event
+    # they do not match to `ForgeWeb.Operator.Actions`, which hands the question form's to
+    # `ForgeWeb.Operator.QuestionForm`. Each that writes goes through `Forge.Operator`, and each
+    # takes its ticket or chat off the wire, which the operation resolves before it checks.
+    {"operator/actions.ex", "decide"} => :member,
+    {"operator/actions.ex", "transition"} => :member,
+    {"operator/actions.ex", "cancel-ticket"} => :member,
+    {"operator/actions.ex", "restore-ticket"} => :member,
+    {"operator/actions.ex", "retry"} => :member,
+    {"operator/actions.ex", "write_document"} => :member,
+    {"operator/question_form.ex", "form:change"} => :local,
+    {"operator/question_form.ex", "form:open"} => :local,
+    {"operator/question_form.ex", "questions:send"} => :member,
+    {"operator/question_form.ex", "chat:questions:send"} => :member
   }
 
   # Worker channel messages. Each addresses a job by an id off the wire, so each must resolve it
@@ -286,7 +307,12 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
       |> Enum.flat_map(fn path ->
         name = Path.relative_to(path, "lib/forge_web/live")
 
-        ~r/def handle_event\("([^"]+)"/
+        # A page's own handlers, and the ones the operator modules dispatch to by name — with the
+        # head split over lines too, as `mix format` lays out a long one. `project_live`'s
+        # `decide_proposal` was written that way and went unrecorded until this allowed for it.
+        # A head matching a variable (`def handle_event(event, …) when event in […]`) names no
+        # event, and is what no scan of source can see: write each event as its own head.
+        ~r/(?:def handle_event|defp act|defp dispatch)\(\s*"([^"]+)"/
         |> Regex.scan(File.read!(path))
         |> Enum.map(fn [_, event] -> {name, event} end)
       end)

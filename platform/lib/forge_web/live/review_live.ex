@@ -98,6 +98,7 @@ defmodule ForgeWeb.ReviewLive do
   def handle_event(event, params, socket) do
     case Actions.handle(event, params, socket) do
       {:handled, socket} -> {:noreply, load(socket)}
+      {:state, socket} -> {:noreply, socket}
       :unknown -> {:noreply, socket}
     end
   end

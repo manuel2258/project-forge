@@ -132,8 +132,17 @@ defmodule Forge.SchemasTest do
 
       attrs = Question.attrs_from_core(core_question, version.id)
 
-      assert {:ok, %Question{key: "storage-backend", line: 9, options: ["local-file", "sqlite"]}} =
+      assert {:ok, %Question{id: id, key: "storage-backend", line: 9}} =
                Repo.insert(Question.changeset(%Question{}, attrs))
+
+      # Read back rather than taken from the insert, so what is asserted is what was stored.
+      assert [
+               %{label: "Local file", detail: "Simple, but another thing to back up."} = file,
+               %{label: "SQLite database", detail: "The scores already live there."} = sqlite
+             ] = Repo.get!(Question, id).options
+
+      refute file.recommended
+      assert sqlite.recommended
 
       assert {:error, changeset} = Repo.insert(Question.changeset(%Question{}, attrs))
       assert %{artifact_version_id: ["has already been taken"]} = errors_on(changeset)

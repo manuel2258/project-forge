@@ -401,7 +401,8 @@ person's edit drops one; a blocking question a job waits on is the case refused 
   **Every affordance that sends is gone at the same moment**, and that is one rule rather than
   two. The send box was already swapped for Reopen; the one-tap answer rows were not, and an
   answer row *is* a send button — a real conversation on the dev node was tapped after it had
-  stopped, and the tap was recorded and lost. `Conversations.live?/1` is the single definition
+  stopped, and the tap was recorded and lost. The question form that replaced them goes with the
+  send box in the same way: its Send is a send button too. `Conversations.live?/1` is the single definition
   the page, the queue and `send/3` all read, because a surface offering what the context then
   refuses is the trap `CLAUDE.md` names: a guard must use the same model as the operation it
   guards. What the reply *asked* stays legible either way — it is in the transcript, which is
@@ -634,9 +635,18 @@ removed only after the last turn's commit and the head the ending reports.
 
 A conversation can ask, and it reuses the parser it already has. `ForgeCore.Document.parse/1`
 extracts fenced `question` blocks from a body, and a message *is* a body — so an agent that wants
-a structured answer writes the same block it would write into a document, and the platform renders
-an answer row beneath the message: the options as one-tap buttons, plus free text, which is always
-valid.
+a structured answer writes the same block it would write into a document — options as a headline
+and a sentence each, within the same limits (`job-prompt.md` § Output format) — and the platform
+draws the same form a ticket's questions get (`ui.md` § Answering questions): every question the
+reply asked, not only its first, each option a card to lock in, a free-text field beside them,
+and one Send.
+
+**The rules are the same as a job's, and so is the strictness.** A chat has no correction round,
+so a block that breaks them — a bare-string option, a label past its limit — fails the parse of
+the whole message, and the reply is drawn as prose with the block in it and no form. That was
+chosen over reading a chat leniently: one format, taught once, refused the same way everywhere,
+is what makes the preamble's instruction worth following. The composer is still there to answer
+in.
 
 **`blocking` means nothing here, and the note says so rather than leaving it to be discovered.**
 In a workflow a blocking question is what stops a job; in a conversation the turn has ended
@@ -647,22 +657,28 @@ That option had to exist, and the reason is worth recording because "ignored" wa
 The parser requires an `assumption` on any non-blocking question — what the job proceeded with
 instead — and a conversation has no instead. Without the option the rule does not merely mislead:
 one question written without an assumption fails the parse of the **whole message**, so the
-question disappears rather than being shown without its one-tap answers, and the reply reads as
+question disappears rather than being shown without its form, and the reply reads as
 though the agent asked nothing.
 
-**The answer is a message, not an `answers` row.** Answering sends the chosen option — or what
-you typed — as the next user message, so the agent sees it exactly where it expects to. Nothing
-is written to `questions` or `answers`, because those hang off an artifact version and a message
-is not one, and because **the transcript is already the record**: the question and the answer are
-both in it, in order, with times. A second record would be a second truth.
+**The answer is a message, not an `answers` row.** Send posts one user message holding every
+answer — each question's text in bold, then the chosen label, then the note or what you typed —
+so the agent sees them together, exactly where it expects to. Nothing is written to `questions` or
+`answers`, because those hang off an artifact version and a message is not one, and because **the
+transcript is already the record**: the questions and the answers are both in it, in order, with
+times. A second record would be a second truth.
+
+Every question in a chat is required, because every chat question is blocking (above): Send is
+enabled once each one is locked. The page holds what you locked until you send it and no longer;
+it refuses a Send whose questions are no longer the last reply's — the conversation moved on while
+the form was open — rather than answering a question nobody is asking any more.
 
 What the block buys, then, is the affordance and nothing else: tapping an option instead of
 typing it. That is worth having — it is the difference between answering from a phone and not —
 and it is worth being clear that it is all it is.
 
-The queue renders it too. A conversation waiting on you with a question in its last message gets
-the same answer row the queue already draws for a job's blocking question, so a chat question can
-be answered without opening the conversation.
+The queue renders it too. A conversation waiting on you with questions in its last message gets
+the same form a job's questions get, free text included, so a chat question can be answered
+without opening the conversation.
 
 ## The page
 

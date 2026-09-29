@@ -5,7 +5,7 @@ defmodule ForgeCore.Document do
 
   See `docs/design/job-prompt.md`. Parsing is pure and never raises on bad input; every
   problem is returned as a `ForgeCore.Error` with a path such as `front_matter.outcome` or
-  `question[1].default`.
+  `question[1].options[0].label`.
   """
 
   alias ForgeCore.Document.Question
@@ -35,7 +35,7 @@ defmodule ForgeCore.Document do
   A conversation has already stopped: the turn ended and the agent is waiting either way, and
   there is nothing for it to have proceeded with. Without this the rule does not merely mislead,
   it refuses the whole message: one question missing an assumption fails the parse, and the
-  question disappears rather than being shown without its one-tap answers.
+  question disappears rather than being shown without its form.
   See `docs/design/conversations.md` § Asking a question.
   """
   @type opts :: [blocking: :always | :declared]
@@ -146,9 +146,16 @@ defmodule ForgeCore.Document do
   defp decode_front_matter(yaml) do
     case YamlElixir.read_from_string(yaml) do
       {:ok, map} when is_map(map) ->
-        if nul?(map),
-          do: {%{}, [Error.new("front_matter", "must not contain a NUL character")]},
-          else: {map, []}
+        cond do
+          nul?(map) ->
+            {%{}, [Error.new("front_matter", "must not contain a NUL character")]}
+
+          not text_keys?(map) ->
+            {%{}, [Error.new("front_matter", "keys must be text")]}
+
+          true ->
+            {map, []}
+        end
 
       {:ok, nil} ->
         {%{}, []}
@@ -160,6 +167,18 @@ defmodule ForgeCore.Document do
         {%{}, [Error.new("front_matter", "invalid YAML: #{message}")]}
     end
   end
+
+  # The same trap by another road: `? {a: 1}` is a mapping key, which YAML allows and arrives as
+  # yamerl's tuples, and the JSON encoder that stores the front matter raises on one — inside the
+  # transaction, after every check. A key must be something JSON can name: text, a number or a
+  # flag, at every depth.
+  defp text_keys?(map) when is_map(map),
+    do: Enum.all?(map, fn {k, v} -> json_key?(k) and text_keys?(v) end)
+
+  defp text_keys?(list) when is_list(list), do: Enum.all?(list, &text_keys?/1)
+  defp text_keys?(_value), do: true
+
+  defp json_key?(key), do: is_binary(key) or is_number(key) or is_boolean(key)
 
   defp nul?(value) when is_binary(value), do: String.contains?(value, <<0>>)
   defp nul?(value) when is_list(value), do: Enum.any?(value, &nul?/1)

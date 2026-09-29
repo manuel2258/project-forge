@@ -175,8 +175,12 @@ defmodule ForgeWeb.OperatorLiveTest do
 
     assert render(view) =~ "Which backend?"
 
-    view |> element("button[phx-value-key=backend][phx-value-choice=b]") |> render_click()
-    assert render(view) =~ "Answered backend: b"
+    # Choosing only locks it in; Send is what answers, and the page's form is for the new version.
+    view
+    |> element("form[phx-submit='questions:send']")
+    |> render_submit(%{"answers" => %{"backend" => %{"choice" => "b", "text" => ""}}})
+
+    assert render(view) =~ "Sent 1 answer"
     refute render(view) =~ "blocking question"
 
     assert [%{status: :pending}] =

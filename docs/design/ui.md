@@ -27,9 +27,15 @@ and those files differ, this note wins — it is the one that tracks what was bu
 - **Identifier** — states, statuses, outcomes, branches, commits, artifact names and versions:
   plain mono text, no border, no padding, no background.
 - **Answer row** — 52px tall, 1px border, `base-200` ground, `--radius-field`, label left, `›`
-  right, sends on tap. The only shape in the queue that commits something.
-- **Filled button** — `base-content` fill, and only ever "commit what I typed": the Send beside a
-  free-text field.
+  right, sends on tap. The only shape in the queue that commits something on a single tap:
+  transitions, run again, and nothing inside a question form.
+- **Option card** — a question's option: 1px border, `--radius-field`, a radio mark, the label in
+  medium weight and its detail beneath. It **locks an answer in and sends nothing**; a primary
+  border and a filled mark show the one chosen — primary, not accent, because accent is spent on
+  what waits and a choice is a decision (§ Colour). It is not an answer row and does not wear the
+  `›`, because the row's promise is that a tap commits.
+- **Filled button** — `base-content` fill, and only ever "commit what I prepared": the Send beside
+  a free-text field, and the Send that closes a question form.
 - **Flag** — filled, uppercase, sharp corners. A label, never a control.
 
 Transition actions carry a verb: `Move to planning ›`, never `→ planning`.
@@ -109,7 +115,8 @@ Discipline matters more than the values:
   you" count, the usage meter fill. Nothing else may use it — its value is entirely its scarcity.
   The `RECOMMENDED` tag is outlined rather than accent for exactly this reason, and the window
   capacity gauge is neutral for it too: see `capacity.md`, which departs from the handoff here.
-- **Primary** — links, human states, decisions that advance state or spend capacity.
+- **Primary** — links, human states, decisions that advance state or spend capacity, and the
+  option chosen in a question form.
 - **Info** — the job-state glyph and harness tool calls. Nothing else.
 - **Success** — approval and the end of the queue. **Error** — engine errors, declared failures,
   failed sends.
@@ -126,7 +133,7 @@ collapsed and `py-[18px]` expanded, internal stack `gap-[11px]`. Timeline step `
 Radii: `--radius-selector: 0.3125rem`, `--radius-field: 0.375rem`, `--radius-box: 0.5rem`,
 `--border: 1px`, `--noise: 0`.
 
-Every tap target is at least 46px tall, answer rows are 52px and stacked option buttons 48px.
+Every tap target is at least 46px tall, answer rows are 52px and option cards at least 52px.
 **`btn-sm` does not appear on any operator page.** There is no global page padding and no global
 measure; each route sets its own:
 
@@ -166,7 +173,7 @@ surface the approval perimeter has, and without one nobody can discover that som
 waiting. See `design/identity.md` § Approval.
 
 **Chats is a destination on both.** A conversation that waits on a human is already in the
-queue with its answer rows; `/chats` is for finding one again — the one about the parser last
+queue with its question form; `/chats` is for finding one again — the one about the parser last
 week, the one still running whose tab was closed. That used to be called a laptop errand. It is
 not: on a phone it is how you get back to the work you were doing.
 
@@ -243,8 +250,9 @@ Getting these wrong makes the UI lie. They are acceptance criteria, not preferen
   counted in the daily digest push apart from what is waiting (§ Not waiting on you).
 - **`stuck` is a flag, not a state.** A stuck ticket is still in its workflow state, and stuck is
   drawn on the step rather than as a step.
-- **Free text is always a valid answer**, alongside any options — a real field with its own Send,
-  never an escape hatch behind a link.
+- **Free text is always a valid answer**, alongside any options — a real field in every question,
+  never an escape hatch behind a link. Beside a chosen option it is a note on it; alone it is the
+  answer.
 - The queue is **one ordered list**, oldest first. No tabs and no filters that can hide an item;
   the operator must be able to reach the end and know they are done. Its decisions come first,
   oldest first; the digest of non-blocking questions follows the last of them, oldest first
@@ -254,8 +262,8 @@ Getting these wrong makes the UI lie. They are acceptance criteria, not preferen
   nothing is hidden and the end is still the end.
 - A **human state with outgoing transitions** waits for a person; one without is terminal and
   never enters the queue. The topology glyph is the only thing distinguishing them.
-- **Answering never navigates.** Tapping an answer does not move you, open a page, or reorder the
-  list; the item changes to its sent state in place.
+- **Answering never navigates.** Tapping an option or pressing Send does not move you, open a page,
+  or reorder the list; the item changes in place.
 - **Presentations carry no approval slot at all**, so they cannot be misread as approvable.
   Experimental results are advisory and must never read as verified.
 - **The diff is bounded and says where.** Past the page's limit it offers the `git diff` command
@@ -263,8 +271,9 @@ Getting these wrong makes the UI lie. They are acceptance criteria, not preferen
   the map of the change. Dollars do not appear here either — the review page is the surface where
   they are most tempting and least useful.
 - A **merge decision** is reached from the queue by a link, never by an answer row. Answering
-  never navigates, and the answer row is the one shape in the queue that commits something; a
-  link that looked like one would make "read this" and "approve this" the same gesture.
+  never navigates, and the answer row and the Send are the shapes in the queue that commit
+  something; a link that looked like one would make "read this" and "approve this" the same
+  gesture.
 
 ## The queue item
 
@@ -290,6 +299,44 @@ sentence phrased as completion, and one line of evidence that work happened with
 block, alone, is the empty state. Every other empty state names what would fill it rather than
 announcing absence.
 
+### Answering questions
+
+A document's questions are **one form with one Send**, wherever they are drawn — a queue item, a
+ticket's Decide tab, a conversation's footer and its queue item. Answering one question locks its
+answer in; nothing is sent until Send. The reason is the agent's: a job that stopped with three
+questions resumed on the first answer that closed the last blocking one, and read whichever answers
+had landed by then — so a person answering in order was racing the resume. One Send makes the
+answers arrive together (`job-prompt.md` § Answering a document's questions at once).
+
+- **Every question on the version is in the form.** Blocking ones are required; non-blocking ones
+  are optional, carry their assumption and an `optional` tag, and are drawn in the same form rather
+  than only in the digest, because they were asked in the same breath. A version with no blocking
+  question keeps its form under *Assumed, and carried on* on the ticket, and its lines in the
+  queue's digest (§ Not waiting on you).
+- **Questions are in document order**, the order the agent wrote them in.
+- **An option is a card**: the headline, the sentence beneath it, and a radio mark. The recommended
+  one wears the outlined `RECOMMENDED` tag and **starts chosen**, so accepting every recommendation
+  is one tap on Send. There is no separate *Accept all* row any more; pre-choosing did its job.
+- **A locked question folds** to one line — a check, its question, what was chosen and any note —
+  so the form stays short on a phone. Tapping the line opens it again at full size; choosing an
+  option folds it again. A question that starts chosen starts folded. One with nothing chosen is
+  open. Typing keeps a question open, so the form does not move under a thumb that is writing.
+- **Free text beside the options**: *add a note, or answer in your own words*. With an option
+  chosen it is a note on that option; with none it is the answer. An open question with a chosen
+  option offers *Clear choice*, so an answer in your own words is reachable when a recommendation
+  started chosen.
+- **Send is disabled until the form can be sent** — every blocking question locked, and in a chat
+  every question, since a chat reads each as blocking — and names what it will send,
+  `Send 3 answers`. Above it, while it is disabled, one line says what is left:
+  `1 blocking question left`, or `1 question left` where every question in the form is required
+  and the word would tell nothing apart.
+- **The page holds the draft, and only the page.** Reloading, navigating away or opening the item
+  on another device starts from the recommendations again. Nobody else ever sees a half-answered
+  form, and there is no draft to expire.
+- **A stale form sends nothing.** When the document has a newer version, or another person answered
+  one of its questions, Send is refused whole and the page says so; it reloads with the current
+  questions.
+
 ### Not waiting on you
 
 A non-blocking question is an assumption an agent stated and carried on from, so it is not a
@@ -302,6 +349,10 @@ and the end of the queue:
   stated and that work continued, then one line each: the question, what was assumed, and the
   ticket and age as identifiers. No mark, no answer rows, no accent — nothing in it is waiting on
   a human.
+- **Only an assumption asked on its own.** One asked in the same document as a blocking question
+  is in that document's form, optional, and not in the digest as well — a second place to answer
+  it would be a second answer (§ Answering questions). `Forge.Queue` still serves it as an
+  `:assumption`; which surface draws it where is the page's arrangement.
 - **Each line navigates to its ticket**, where the question is answered. Answering never
   navigates and a navigation target never encloses a control that commits (§ The affordance
   rule), so the digest offers no answer of its own rather than a second place to give one.
@@ -360,7 +411,7 @@ count of zero is drawn muted, never hidden, so tabs never move. The tab is in th
 ### Talk
 
 The transcript, pinned to the bottom per § Motion and structure, then from the bottom up: the
-composer, the now line, and any open question's answer rows.
+composer, the now line, and any open question's form.
 
 - **The transcript is the turn in the order it happened**, not one message per speaker. A turn
   is its text blocks with the agent's actions between them, read from the event log in sequence.
@@ -399,8 +450,10 @@ composer, the now line, and any open question's answer rows.
   ellipsis; static text, nothing pulsing, with **Stop** and **Interrupt and send** beside it. The agent's latest `TodoWrite` list sits above it, collapsed to its
   current item, so where the agent is in its own plan is visible without scrolling. When no turn is open the composer is the box
   and Send alone.
-- **Answer rows** for the last message's question dock directly above the composer while it is
-  open, so a one-tap answer is under the thumb. Free text is the composer itself.
+- **The question form** for the last message's questions docks directly above the composer while
+  it is open, so the answers are under the thumb: every question the reply asked, folded as it is
+  locked, and one Send that posts them as a single message (§ Answering questions). The composer
+  stays for anything the form does not hold.
 - **The composer** grows from one line to six and then scrolls inside itself. Send is a 46px
   square with a label for assistive technology. Enter sends where the primary pointer is fine; on
   a coarse pointer (`(pointer: coarse)`) Enter is a new line and only Send sends, because a phone
@@ -450,8 +503,8 @@ The job page itself tails its job while it runs, for the same reason.
 ### Decide and Timeline (ticket)
 
 **Decide** is the ticket's *Waiting on you*: its blocking questions, approval card and
-transition card, drawn with the queue's components — a document's questions with *Accept all*
-when every one has a recommendation — answering in place and never navigating. Its count is what
+transition card, drawn with the queue's components — a document's questions as one form
+(§ Answering questions) — answering in place and never navigating. Its count is what
 the queue would count for this ticket (`Queue.for_ticket/1`), and it shows what it counts. With
 nothing waiting it says so and names what would put something there. Beneath, without accent and
 under no count, is what an agent **assumed and carried on from**: the non-blocking questions the

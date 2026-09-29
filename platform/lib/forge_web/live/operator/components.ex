@@ -1,11 +1,12 @@
 defmodule ForgeWeb.Operator.Components do
   @moduledoc """
-  The shapes a person decides with: answer rows, questions, approvals and transitions.
+  The shapes a person decides with: answer rows, approvals and transitions. Questions are a form
+  of their own, `ForgeWeb.Operator.QuestionForm`.
 
   The affordance rule governs all of them — a border means you can tap it. Identifiers are plain
   mono text with no box; the only bordered shapes here are the ones that commit something. A
-  filled button appears in exactly one place, beside a free-text field, because that is the only
-  case where the operator has typed something to send. See `docs/design/ui.md`.
+  filled button commits what the operator prepared: the Send beside a free-text field, and the
+  Send that closes a question form. See `docs/design/ui.md`.
   """
   use ForgeWeb, :html
 
@@ -178,12 +179,12 @@ defmodule ForgeWeb.Operator.Components do
   end
 
   @doc """
-  The one shape in the queue that commits something: 52px, label left, `›` right, sends on tap.
+  The shape that commits something on a single tap — a transition, running a state again: 52px,
+  label left, `›` right, sends on tap. A question's options are not this shape: they lock an
+  answer in and the form's Send commits (`ForgeWeb.Operator.QuestionForm`).
   """
   attr :rest, :global,
-    include:
-      ~w(phx-click phx-value-ticket phx-value-key phx-value-choice
-                                   phx-value-to phx-value-version phx-disable-with type name value form)
+    include: ~w(phx-click phx-value-ticket phx-value-to phx-disable-with type name value form)
 
   attr :class, :string, default: nil
   slot :inner_block, required: true
@@ -203,96 +204,6 @@ defmodule ForgeWeb.Operator.Components do
       <span class="text-sm font-medium">{render_slot(@inner_block)}</span>
       <span aria-hidden="true" class="opacity-40">›</span>
     </button>
-    """
-  end
-
-  @doc """
-  One question: its anchor, its options as stacked rows, and free text as a peer of the options.
-
-  Free text is always a valid answer and is labelled as always open — never an escape hatch
-  behind a link.
-  """
-  attr :question, :map, required: true
-  attr :ticket_id, :string, required: true
-
-  def question_card(assigns) do
-    ~H"""
-    <div class="flex flex-col gap-[11px]" id={"question-#{@question.id}"}>
-      <blockquote
-        :if={@question.anchor}
-        class="border-l-2 border-accent bg-accent/10 py-1 pl-3 text-sm/[1.55] opacity-80"
-      >
-        {@question.anchor}
-      </blockquote>
-
-      <p class="text-sm/[1.55]">{@question.text}</p>
-
-      <div class="flex flex-col gap-2">
-        <.answer_row
-          :for={option <- @question.options}
-          phx-click="answer"
-          phx-disable-with="Sending…"
-          phx-value-ticket={@ticket_id}
-          phx-value-key={@question.key}
-          phx-value-choice={option}
-          class="h-12"
-        >
-          {option}
-          <span
-            :if={option == @question.default}
-            class="ml-2 font-mono text-[11px] tracking-[.14em] uppercase opacity-50"
-          >
-            recommended
-          </span>
-        </.answer_row>
-      </div>
-
-      <form phx-submit="answer_text" class="flex gap-2">
-        <input type="hidden" name="ticket" value={@ticket_id} />
-        <input type="hidden" name="key" value={@question.key} />
-        <input
-          type="text"
-          name="text"
-          placeholder="or answer in your own words"
-          class="h-12 w-full rounded-field border border-base-300 bg-transparent px-3 text-sm placeholder:opacity-40 focus:outline-none focus:border-base-content/40"
-          required
-        />
-        <button
-          type="submit"
-          phx-disable-with="…"
-          class="h-12 shrink-0 rounded-field bg-base-content px-4 text-sm font-medium text-base-100"
-        >
-          Send
-        </button>
-      </form>
-    </div>
-    """
-  end
-
-  @doc """
-  One document's blocking questions, answered where they are: a card each, and — when every one
-  has a recommendation — one row that accepts them all. The queue draws a stopped job with this,
-  and so does a ticket's Decide tab, so the two are the same gesture.
-  """
-  attr :questions, :list, required: true
-  attr :ticket_id, :string, required: true
-  attr :version_id, :string, required: true
-
-  def questions(assigns) do
-    ~H"""
-    <div class="flex flex-col gap-4">
-      <.answer_row
-        :if={length(@questions) > 1 and Enum.all?(@questions, & &1.default)}
-        phx-click="answer_all"
-        phx-disable-with="Sending…"
-        phx-value-ticket={@ticket_id}
-        phx-value-version={@version_id}
-      >
-        Accept all {length(@questions)} recommendations
-      </.answer_row>
-
-      <.question_card :for={question <- @questions} question={question} ticket_id={@ticket_id} />
-    </div>
     """
   end
 

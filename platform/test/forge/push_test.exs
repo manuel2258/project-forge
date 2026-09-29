@@ -282,7 +282,7 @@ defmodule Forge.PushTest do
           Forge.Artifacts.record_version(ticket.id, doc, :document, {:job, job.id}, %{
             content:
               "---\noutcome: done\n---\n\n```question\nkey: backend\ntext: Which one?\n" <>
-                "options: [a, b]\nblocking: true\n```\n"
+                "options: [{label: a, detail: About a}, {label: b, detail: About b}]\nblocking: true\n```\n"
           })
       end
 
@@ -319,7 +319,7 @@ defmodule Forge.PushTest do
         blocks =
           for key <- keys,
               do:
-                "```question\nkey: #{key}\ntext: Which #{key}?\noptions: [a, b]\n" <>
+                "```question\nkey: #{key}\ntext: Which #{key}?\noptions: [{label: a, detail: About a}, {label: b, detail: About b}]\n" <>
                   "blocking: true\n```\n"
 
         {:ok, _version} =
@@ -572,8 +572,7 @@ defmodule Forge.PushTest do
         ```question
         key: naming
         text: What is the table called?
-        options: [scores, highscores]
-        default: scores
+        options: [{label: scores, detail: About scores, recommended: true}, {label: highscores, detail: About highscores}]
         blocking: false
         assumption: scores
         ```

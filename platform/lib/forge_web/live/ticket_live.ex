@@ -19,6 +19,7 @@ defmodule ForgeWeb.TicketLive do
 
   import ForgeWeb.Indicators
   import ForgeWeb.Operator.Components
+  import ForgeWeb.Operator.QuestionForm, only: [question_form: 1]
 
   alias Forge.{Artifacts, Conversations, Engine, Events, Git, Jobs, Projects, Proposals, Queue}
   alias Forge.{Spend, Tickets}
@@ -26,6 +27,7 @@ defmodule ForgeWeb.TicketLive do
   alias ForgeWeb.{Diff, Format, Indicators, JobStream, WorkScreen}
   alias ForgeWeb.Operator.Actions
   alias ForgeWeb.Operator.Board
+  alias ForgeWeb.Operator.QuestionForm
 
   @tabs ~w(decide timeline changes docs activity)
 
@@ -41,7 +43,8 @@ defmodule ForgeWeb.TicketLive do
        project: project,
        ticket_id: ticket.id,
        tab: nil,
-       following: nil
+       following: nil,
+       forms: QuestionForm.init()
      )
      |> JobStream.init()
      |> ForgeWeb.Capacity.project(project)
@@ -319,6 +322,7 @@ defmodule ForgeWeb.TicketLive do
   def handle_event(event, params, socket) do
     case Actions.handle(event, params, socket) do
       {:handled, socket} -> {:noreply, load(socket)}
+      {:state, socket} -> {:noreply, socket}
       :unknown -> {:noreply, socket}
     end
   end
@@ -445,13 +449,13 @@ defmodule ForgeWeb.TicketLive do
           Read the change first ›
         </.link>
         <div :if={!@ticket.pending_transition and blocking(assigns) != []} class="flex flex-col gap-6">
-          <.questions
-            :for={
-              {version_id, questions} <- Enum.group_by(blocking(assigns), & &1.artifact_version_id)
-            }
+          <.question_form
+            :for={{version_id, questions} <- forms(assigns, :waiting)}
+            id={version_id}
             questions={questions}
-            ticket_id={@ticket.id}
-            version_id={version_id}
+            forms={@forms}
+            submit="questions:send"
+            hidden={[{"ticket", @ticket.id}, {"version", version_id}]}
           />
         </div>
         <div
@@ -483,22 +487,41 @@ defmodule ForgeWeb.TicketLive do
 
     <%!-- What an agent assumed and carried on from: answerable here, where the queue's digest
           sends it, and drawn without accent because nothing waits on the answer. --%>
-    <section :if={assumed(assigns) != []} id="assumed" class="mt-8 border-t border-base-300 pt-5">
+    <section
+      :if={forms(assigns, :assumed) != []}
+      id="assumed"
+      class="mt-8 border-t border-base-300 pt-5"
+    >
       <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
         Assumed, and carried on
       </h2>
       <div class="mt-3 flex flex-col gap-6">
-        <div :for={question <- assumed(assigns)} class="flex flex-col gap-2">
-          <p class="text-[12.5px]/[1.5] opacity-70">Assumed: {question.assumption}</p>
-          <.question_card question={question} ticket_id={@ticket.id} />
-        </div>
+        <.question_form
+          :for={{version_id, questions} <- forms(assigns, :assumed)}
+          id={version_id}
+          questions={questions}
+          forms={@forms}
+          submit="questions:send"
+          hidden={[{"ticket", @ticket.id}, {"version", version_id}]}
+        />
       </div>
     </section>
     """
   end
 
   defp blocking(%{questions: {blocking, _assumed}}), do: blocking
-  defp assumed(%{questions: {_blocking, assumed}}), do: assumed
+
+  # One form per document version (`docs/design/ui.md` § Answering questions). A version holding a
+  # blocking question is waiting, and its assumptions join its form, optional; a version with only
+  # assumptions is answered beneath, where nothing waits on it. Oldest version first.
+  defp forms(%{questions: {blocking, assumed}}, which) do
+    {joined, alone} = QuestionForm.join_assumed(blocking, assumed)
+    questions = if which == :waiting, do: blocking ++ joined, else: alone
+
+    questions
+    |> Enum.group_by(& &1.artifact_version_id)
+    |> Enum.sort_by(fn {_version, [first | _]} -> first.inserted_at end, DateTime)
+  end
 
   defp timeline(assigns) do
     ~H"""

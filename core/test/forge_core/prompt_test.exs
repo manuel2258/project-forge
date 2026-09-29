@@ -213,7 +213,27 @@ defmodule ForgeCore.PromptTest do
           ] do
         [block] = Regex.run(~r/```question\n.*?\n```\n/s, preamble)
         assert {:ok, %{questions: [question]}} = ForgeCore.Document.parse(block, opts)
-        assert question.key == "storage-backend"
+        assert question.key == "storage"
+        assert Enum.all?(question.options, & &1.detail)
+        assert ForgeCore.Document.Question.recommended(question)
+      end
+    end
+
+    # What the parser refuses on length has to be what the agent was told, in both preambles: a
+    # limit the agent never read is a correction round it could not have avoided.
+    test "both preambles state the limits the parser enforces, and ask for plain words" do
+      %{text: text, label: label, detail: detail} = ForgeCore.Document.Question.limits()
+
+      stated =
+        "`text` at most #{text} characters, `label` at most #{label}, `detail` at most #{detail}"
+
+      for preamble <- [Prompt.preamble(), Prompt.chat_preamble()] do
+        # List items wrap with an indent, so every run of whitespace is one space.
+        flat = String.replace(preamble, ~r/\s+/, " ")
+
+        assert flat =~ stated
+        assert flat =~ "no words joined with hyphens"
+        assert flat =~ "`recommended: true`"
       end
     end
 
@@ -221,7 +241,7 @@ defmodule ForgeCore.PromptTest do
            "and what tools it has" do
       flat = Prompt.preamble() |> String.replace("\n", " ")
 
-      assert flat =~ "Put `text`, `anchor` and `assumption` in double quotes"
+      assert flat =~ "Put `text`, `anchor`, `assumption`, `label` and `detail` in double quotes"
       assert flat =~ "you are told exactly what is wrong and resumed to fix it"
       assert flat =~ "`python3`"
       refute ForgeCore.Workflow.platform_overview() =~ "`python3`"

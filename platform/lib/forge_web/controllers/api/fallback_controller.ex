@@ -71,6 +71,21 @@ defmodule ForgeWeb.Api.FallbackController do
   def call(conn, {:error, {:no_open_question, key}}),
     do: error(conn, :not_found, "no_open_question", key)
 
+  def call(conn, {:error, {:not_an_option, key, choice}}),
+    do:
+      error(
+        conn,
+        :unprocessable_entity,
+        "not_an_option",
+        "#{inspect(choice)} is not an option of #{key}"
+      )
+
+  def call(conn, {:error, {:invalid_answer, key}}),
+    do: error(conn, :unprocessable_entity, "invalid_answer", "#{key}: choice and text are text")
+
+  def call(conn, {:error, {:empty_answer, key}}),
+    do: error(conn, :unprocessable_entity, "empty_answer", "#{key} needs a choice or text")
+
   def call(conn, {:error, {:invalid_document, errors}}),
     do: error(conn, :unprocessable_entity, "invalid_document", ForgeCore.Error.format(errors))
 

@@ -507,19 +507,74 @@ defmodule Forge.Artifacts do
   """
   @spec answer(Question.t(), String.t(), map()) :: {:ok, Answer.t()} | {:error, term()}
   def answer(%Question{} = question, user_id, attrs) do
-    question = Repo.preload(question, artifact_version: :artifact)
-    ticket_id = question.artifact_version.artifact.ticket_id
-    choice = Map.get(attrs, :choice)
-    text = Map.get(attrs, :text)
+    with {:ok, [answer]} <- answer_all([{question, attrs}], user_id), do: {:ok, answer}
+  end
 
-    content = render_answers(ticket_id, [{question, choice, text}])
+  @doc """
+  Answers several questions on one ticket at once: an answer row and a `question.answered` event
+  each, and **one** new version of `answers.md` holding them all, in one transaction. Returns the
+  answers in the order given.
 
-    Multi.new()
-    |> put_version(:answers, ticket_id, @answers, :document, {:user, user_id}, %{
-      content: content,
-      parse: false
-    })
-    |> Multi.insert(:answer, fn changes ->
+  Each answer is a `choice`, a `text`, or both — a note beside the choice. A blank text is no
+  text. A `choice` must be one of the question's labels: the pages only offer those, and the API
+  and `mix forge.answer` take whatever they are sent, so the rule lives here where every answer
+  passes (`docs/design/job-prompt.md` § Answering a document's questions at once).
+  """
+  @spec answer_all([{Question.t(), map()}], String.t()) :: {:ok, [Answer.t()]} | {:error, term()}
+  def answer_all([_ | _] = entries, user_id) do
+    entries = Enum.map(entries, fn {question, attrs} -> entry(question, attrs) end)
+
+    with :ok <- valid_answers(entries) do
+      [{first, _choice, _text} | _rest] = entries
+      ticket_id = first.artifact_version.artifact.ticket_id
+      content = render_answers(ticket_id, entries)
+
+      entries
+      |> Enum.with_index()
+      |> Enum.reduce(
+        put_version(Multi.new(), :answers, ticket_id, @answers, :document, {:user, user_id}, %{
+          content: content,
+          parse: false
+        }),
+        fn {entry, index}, multi -> put_answer(multi, index, entry, ticket_id, user_id) end
+      )
+      |> Repo.transaction()
+      |> case do
+        {:ok, changes} -> {:ok, Enum.map(0..(length(entries) - 1), &changes[{:answer, &1}])}
+        {:error, _step, reason, _} -> {:error, reason}
+      end
+    end
+  end
+
+  defp entry(question, attrs) do
+    {Repo.preload(question, artifact_version: :artifact), Answer.blank(Map.get(attrs, :choice)),
+     Answer.blank(Map.get(attrs, :text))}
+  end
+
+  defp valid_answers(entries), do: Enum.find_value(entries, :ok, &invalid_answer/1)
+
+  defp invalid_answer({question, choice, text}) do
+    cond do
+      # A client sends JSON, which can put an object where text is meant; `answers.md` is text.
+      not (text?(choice) and text?(text)) ->
+        {:error, {:invalid_answer, question.key}}
+
+      is_nil(choice) and is_nil(text) ->
+        {:error, {:empty_answer, question.key}}
+
+      choice && not ForgeCore.Document.Question.offers?(question, choice) ->
+        {:error, {:not_an_option, question.key, choice}}
+
+      true ->
+        nil
+    end
+  end
+
+  defp text?(value), do: is_nil(value) or is_binary(value)
+
+  defp put_answer(multi, index, {question, choice, text}, ticket_id, user_id) do
+    multi
+    |> Multi.insert({:answer, index}, fn changes ->
       Answer.changeset(%Answer{}, %{
         question_id: question.id,
         user_id: user_id,
@@ -528,21 +583,16 @@ defmodule Forge.Artifacts do
         artifact_version_id: changes[{:answers, :version}].id
       })
     end)
-    |> Events.log(:event, "question.answered", {:user, user_id}, fn changes ->
+    |> Events.log({:event, index}, "question.answered", {:user, user_id}, fn changes ->
       %{
         ticket_id: ticket_id,
         payload: %{
           "question_id" => question.id,
           "key" => question.key,
-          "answer_id" => changes.answer.id
+          "answer_id" => changes[{:answer, index}].id
         }
       }
     end)
-    |> Repo.transaction()
-    |> case do
-      {:ok, %{answer: answer}} -> {:ok, answer}
-      {:error, _step, reason, _} -> {:error, reason}
-    end
   end
 
   @doc """
@@ -578,7 +628,7 @@ defmodule Forge.Artifacts do
 
     entries =
       Enum.map_join(existing ++ pending, "\n", fn {question, choice, text} ->
-        answer = [choice, text] |> Enum.reject(&is_nil/1) |> Enum.join(" — ")
+        answer = Answer.reads(choice, text)
         "## #{question.key}\n\nQ: #{question.text}\n\nA: #{answer}\n"
       end)
 

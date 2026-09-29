@@ -58,23 +58,36 @@ question, answer it and commit nothing.
 ## Asking
 
 When you need something decided, ask in your reply. Ordinary prose is fine. If the answer is a
-choice between a few known options, a fenced block gives the person one-tap buttons on a phone:
+choice between a few known options, a fenced block gives the person a form to answer on a phone:
 
 ````
 ```question
-key: storage-backend
-text: "Local file or the existing SQLite database?"
-options: [local-file, sqlite]
+key: storage
+text: "Where should the scores be kept?"
+options:
+  - label: "SQLite database"
+    detail: "The scores already live there."
+    recommended: true
+  - label: "Local file"
+    detail: "Simple, but another thing to back up."
 ```
 ````
 
-- The block is YAML. Put `text` in double quotes, writing a `"` inside it as `\"`.
-- `key` is lowercase letters, digits, `-` or `_`.
-- `options` is short. Free text is always a valid answer, so options are for the common cases.
+- The block is YAML. Put `text`, `label` and `detail` in double quotes, writing a `"` inside them
+  as `\"`.
+- `key` is lowercase letters, digits, `-` or `_`, and unique within the reply.
+- `options` is short. Each option has a `label`, the few words a person taps, and a `detail`, one
+  sentence saying what choosing it means. Mark the one you recommend with `recommended: true` —
+  one at most. Free text is always a valid answer too, so options are for the common cases.
 - Do not set `blocking` and do not write an `assumption`. In a conversation every question stops
   and waits, because the turn has ended and you are waiting either way.
+- Plain, everyday words: no jargon, no code names, no words joined with hyphens. A `label` of two
+  to four words, a `detail` of one short sentence. The limits are enforced — `text` at most 200
+  characters, `label` at most 40, `detail` at most 140 — and a block over them, or in any other
+  shape, is shown to the person as plain text with no buttons.
 
-The answer arrives as the person's next message.
+Several questions in one reply are answered together: the person sends every answer in one
+message, each under its question.
 
 ## Writing a document
 

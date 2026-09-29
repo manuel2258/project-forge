@@ -96,7 +96,7 @@ defmodule Forge.CLI do
     options =
       if q.options == [],
         do: "",
-        else: " options: #{Enum.join(q.options, " | ")} (default #{q.default})"
+        else: " options: #{Enum.map_join(q.options, " | ", &option/1)}"
 
     "QUESTION  #{label(ticket)}  [#{q.key}] #{q.text}#{options}"
   end
@@ -109,7 +109,13 @@ defmodule Forge.CLI do
   # what the page shows: its question when it asked one, else the first line of its reply.
   defp queue_line(%{kind: :chat, ticket: ticket, project: project, detail: d}) do
     about = if ticket, do: label(ticket), else: project.name
-    said = if d.question, do: d.question.text, else: first_line(d.text)
+
+    said =
+      case d.questions do
+        [question | _rest] -> question.text
+        [] -> first_line(d.text)
+      end
+
     "CHAT      #{about}  #{said}; reply with forge.chat say #{d.chat_id}"
   end
 
@@ -125,6 +131,11 @@ defmodule Forge.CLI do
   defp queue_line(%{kind: :review, ticket: ticket, detail: d}) do
     "REVIEW    #{label(ticket)}  in #{d.state}; next: #{Enum.join(d.transitions, ", ")}"
   end
+
+  # The label is what `mix forge.answer --choice` takes, so it is printed whole; the
+  # recommended one is marked where `(default x)` used to name it.
+  defp option(%{label: label, recommended: true}), do: "#{label} (recommended)"
+  defp option(%{label: label}), do: label
 
   defp first_line(text), do: text |> to_string() |> String.split("\n", parts: 2) |> hd()
 

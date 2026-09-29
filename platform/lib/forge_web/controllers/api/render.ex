@@ -87,8 +87,7 @@ defmodule ForgeWeb.Api.Render do
       key: q.key,
       text: q.text,
       anchor: q.anchor,
-      options: q.options,
-      default: q.default,
+      options: Enum.map(q.options, &option/1),
       blocking: q.blocking,
       assumption: q.assumption,
       line: q.line,
@@ -140,10 +139,24 @@ defmodule ForgeWeb.Api.Render do
       kind: kind,
       since: since,
       question: item.question && question(item.question),
-      detail: item.detail
+      detail: detail(item)
     }
     |> Map.merge(queue_subject(item.ticket, project_name))
   end
+
+  # A chat's questions are parsed from its reply and never stored, so they arrive as the core's
+  # structs, which the JSON encoder refuses; they are served as a key, a text and options shaped
+  # as a stored question's are — no id, line or anchor, which a message does not give them.
+  defp detail(%{kind: :chat, detail: detail}),
+    do: %{detail | questions: Enum.map(detail.questions, &chat_question/1)}
+
+  defp detail(item), do: item.detail
+
+  defp chat_question(q) do
+    %{key: q.key, text: q.text, options: Enum.map(q.options, &option/1)}
+  end
+
+  defp option(option), do: Map.take(option, [:label, :detail, :recommended])
 
   # A conversation about a project has no ticket, no title of its own and no state. Naming the
   # project is what an API client has to go on, and inventing the other three would be a lie

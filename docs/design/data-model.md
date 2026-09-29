@@ -65,11 +65,13 @@ job that produces it finishes, so approval attaches to an exact commit.
 `content_hash`, `meta` (parsed front matter, JSON), `inserted_at`. Never updated or deleted.
 
 **question** — `artifact_version_id`, `key` (stable within the document), `anchor` (the
-passage it concerns), `text`, `options` (list), `default`, `blocking` (bool),
-`assumption` (non-blocking only: what the job proceeded with). Extracted from a document
-version at write time.
+passage it concerns), `text`, `options` (`jsonb`: a list of `{label, detail, recommended}`, at
+most one recommended), `blocking` (bool), `assumption` (non-blocking only: what the job proceeded
+with). Extracted from a document version at write time. There is no `default` column: the
+recommendation is a flag on its option.
 
-**answer** — `question_id`, `user_id`, `choice`, `text` (free-form, optional),
+**answer** — `question_id`, `user_id`, `choice` (one of the question's labels, or nil), `text`
+(free-form: the whole answer without a choice, a note beside one),
 `artifact_version_id` of the `answers` document version that records it. Answers are
 themselves versioned, attributed artifacts; this row is the queryable index.
 

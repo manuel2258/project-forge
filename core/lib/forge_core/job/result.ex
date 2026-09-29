@@ -15,6 +15,7 @@ defmodule ForgeCore.Job.Result do
 
   alias ForgeCore.Document
   alias ForgeCore.Document.Question
+  alias ForgeCore.Document.Question.Option
   alias ForgeCore.Error
   alias ForgeCore.Proposal
 
@@ -222,7 +223,13 @@ defmodule ForgeCore.Job.Result do
     %Proposal{title: get.(:title), body: get.(:body), raw: get.(:raw)}
   end
 
-  defp question_to_map(%Question{} = question), do: Map.from_struct(question)
+  # Options are structs too, and a struct nested in `Map.from_struct/1` reaches the JSON encoder,
+  # which refuses one it has no implementation for.
+  defp question_to_map(%Question{} = question) do
+    question
+    |> Map.from_struct()
+    |> Map.update!(:options, fn options -> Enum.map(options, &Option.to_map/1) end)
+  end
 
   defp question_from_map(question) do
     get = fn key -> Map.get(question, to_string(key), Map.get(question, key)) end
@@ -231,8 +238,7 @@ defmodule ForgeCore.Job.Result do
       key: get.(:key),
       text: get.(:text),
       anchor: get.(:anchor),
-      options: or_default(get, :options, []),
-      default: get.(:default),
+      options: get |> or_default(:options, []) |> Enum.map(&Option.from_map/1),
       blocking: get.(:blocking) || false,
       assumption: get.(:assumption),
       line: get.(:line)

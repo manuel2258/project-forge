@@ -3,6 +3,7 @@ defmodule ForgeCore.DocumentTest do
 
   alias ForgeCore.Document
   alias ForgeCore.Document.Question
+  alias ForgeCore.Document.Question.Option
   alias ForgeCore.Error
 
   @fixture Path.expand("../fixtures/document_example.md", __DIR__)
@@ -33,8 +34,18 @@ defmodule ForgeCore.DocumentTest do
                  key: "storage-backend",
                  anchor: "Persist the high score table",
                  text: "Local file or the existing SQLite database?",
-                 options: ["local-file", "sqlite"],
-                 default: "sqlite",
+                 options: [
+                   %Option{
+                     label: "Local file",
+                     detail: "Simple, but another thing to back up.",
+                     recommended: false
+                   },
+                   %Option{
+                     label: "SQLite database",
+                     detail: "The scores already live there.",
+                     recommended: true
+                   }
+                 ],
                  blocking: false,
                  assumption: "sqlite",
                  line: 9
@@ -44,7 +55,7 @@ defmodule ForgeCore.DocumentTest do
                  blocking: true,
                  assumption: nil,
                  options: [],
-                 line: 32
+                 line: 36
                }
              ] = document.questions
     end
@@ -108,7 +119,7 @@ defmodule ForgeCore.DocumentTest do
     end
 
     # Ignored rather than refused, and for the stated reason: refusing it fails the whole message
-    # and the question vanishes rather than being shown without its one-tap answers.
+    # and the question vanishes rather than being shown without its form.
     test "an assumption written anyway is ignored, not refused" do
       text = "```question\nkey: a\ntext: t\nblocking: false\nassumption: I guessed\n```\n"
 
@@ -231,8 +242,9 @@ defmodule ForgeCore.DocumentTest do
       yaml = """
       ```question
       key: Bad Key
-      options: [a, a]
-      default: b
+      options:
+        - {label: a, detail: d}
+        - {label: a, detail: e}
       blocking: maybe
       assumption: [3]
       extra: 1
@@ -242,18 +254,16 @@ defmodule ForgeCore.DocumentTest do
       assert messages(yaml) == [
                {"question[0].assumption", "must be a non-empty string"},
                {"question[0].blocking", "must be true or false"},
-               {"question[0].default", "\"b\" is not one of the options"},
                {"question[0].extra", "unknown key"},
                {"question[0].key", "must be lowercase letters, digits, - or _"},
-               {"question[0].options", "must not repeat an option"},
+               {"question[0].options", "must not repeat a label"},
                {"question[0].text", "is required"}
              ]
     end
 
-    test "default requires options; assumption follows blocking" do
-      assert messages("```question\nkey: a\ntext: t\ndefault: x\n```\n") == [
-               {"question[0].assumption", "is required on a non-blocking question"},
-               {"question[0].default", "requires options"}
+    test "assumption follows blocking" do
+      assert messages("```question\nkey: a\ntext: t\n```\n") == [
+               {"question[0].assumption", "is required on a non-blocking question"}
              ]
 
       assert messages("```question\nkey: a\ntext: t\nblocking: true\nassumption: x\n```\n") == [
@@ -290,8 +300,8 @@ defmodule ForgeCore.DocumentTest do
     end
 
     # Emptiness is folded into each field's type check, and no test fed an empty string to any of
-    # them. A question with `text: ""` is drawn as an answer row with no question in it, and
-    # `options: []` is a row of buttons with no labels — both things the operator cannot act on.
+    # them. A question with `text: ""` is drawn as a form with no question in it, and `options: []`
+    # as a question with no options to choose — both things the operator cannot act on.
     test "a field that is present may not be empty" do
       yaml = """
       ```question
@@ -305,21 +315,22 @@ defmodule ForgeCore.DocumentTest do
 
       assert messages(yaml) == [
                {"question[0].anchor", "must be a non-empty string"},
-               {"question[0].options", "must be a non-empty list of strings"},
+               {"question[0].options", "must be a non-empty list of options"},
                {"question[0].text", "must be a non-empty string"}
              ]
     end
 
-    # An agent that wrote `options: [5, 10, 20]` meant three labels. YAML types them as integers,
-    # and refusing that dropped a whole refinement, questions and all, in production.
+    # An agent that wrote `label: 10` meant the label. YAML types it as an integer, and refusing
+    # that kind of thing dropped a whole refinement, questions and all, in production.
     test "numbers and booleans where text is meant are read as the text they were written as" do
       yaml = """
       ```question
       key: 10
       text: 42
       anchor: 1.5
-      options: [5, 10, true, until-wrong]
-      default: 10
+      options:
+        - {label: 5, detail: 1.5}
+        - {label: true, detail: false, recommended: true}
       blocking: false
       assumption: 5
       ```
@@ -329,19 +340,25 @@ defmodule ForgeCore.DocumentTest do
       assert question.key == "10"
       assert question.text == "42"
       assert question.anchor == "1.5"
-      assert question.options == ["5", "10", "true", "until-wrong"]
-      assert question.default == "10"
+
+      assert question.options == [
+               %Option{label: "5", detail: "1.5", recommended: false},
+               %Option{label: "true", detail: "false", recommended: true}
+             ]
+
       assert question.assumption == "5"
     end
 
     # Only scalars are text: a list or a mapping where text is meant is still refused, and
-    # `blocking` is a flag, not text.
+    # `blocking` and `recommended` are flags, not text.
     test "a value that is not a scalar is still refused" do
       yaml = """
       ```question
       key: a
       text: [t]
-      options: [[a], {b: c}]
+      options:
+        - {label: [a], detail: {b: c}, recommended: "true"}
+        - [a]
       blocking: "true"
       ```
       """
@@ -349,16 +366,31 @@ defmodule ForgeCore.DocumentTest do
       assert messages(yaml) == [
                {"question[0].assumption", "is required on a non-blocking question"},
                {"question[0].blocking", "must be true or false"},
-               {"question[0].options", "must be a non-empty list of strings"},
+               {"question[0].options[0].detail", "must be a non-empty string"},
+               {"question[0].options[0].label", "must be a non-empty string"},
+               {"question[0].options[0].recommended", "must be true or false"},
+               {"question[0].options[1]", "must be a mapping with a `label` and a `detail`"},
                {"question[0].text", "must be a non-empty string"}
              ]
     end
 
-    test "an option may not be an empty string" do
-      yaml = "```question\nkey: a\ntext: t\noptions: [\"\", b]\nblocking: true\n```\n"
+    test "an option's label and detail are required and may not be empty" do
+      yaml = """
+      ```question
+      key: a
+      text: t
+      options:
+        - {label: "", detail: d}
+        - {label: b}
+        - {detail: d}
+      blocking: true
+      ```
+      """
 
       assert messages(yaml) == [
-               {"question[0].options", "must be a non-empty list of strings"}
+               {"question[0].options[0].label", "must be a non-empty string"},
+               {"question[0].options[1].detail", "is required"},
+               {"question[0].options[2].label", "is required"}
              ]
     end
 
@@ -380,6 +412,177 @@ defmodule ForgeCore.DocumentTest do
     end
   end
 
+  describe "options" do
+    # The format this replaced, and the one an agent reaches for from habit: a bare label asks a
+    # person on a phone to reconstruct the sentence the agent had in mind.
+    test "a bare value is refused, with what to write instead" do
+      yaml = "```question\nkey: a\ntext: t\noptions: [local-file, 5, true]\nblocking: true\n```\n"
+      bare = "must be a mapping with a `label` and a `detail`, not a bare value"
+
+      assert messages(yaml) == [
+               {"question[0].options[0]", bare},
+               {"question[0].options[1]", bare},
+               {"question[0].options[2]", bare}
+             ]
+    end
+
+    # A conversation reads every question as blocking, and nothing else about it is lenient.
+    test "a bare value is refused in a conversation too" do
+      yaml = "```question\nkey: a\ntext: t\noptions: [local-file]\n```\n"
+
+      assert {:error, [%Error{path: "question[0].options[0]"}]} =
+               Document.parse(yaml, blocking: :always)
+    end
+
+    test "default is gone, and the refusal says where the recommendation went" do
+      yaml = """
+      ```question
+      key: a
+      text: t
+      options: [{label: A, detail: d}]
+      default: A
+      blocking: true
+      ```
+      """
+
+      assert messages(yaml) == [
+               {"question[0].default",
+                "is not a key: mark the recommended option with `recommended: true`"}
+             ]
+    end
+
+    test "an option has no keys but its own" do
+      yaml =
+        "```question\nkey: a\ntext: t\noptions: [{label: A, detail: d, id: x}]\nblocking: true\n```\n"
+
+      assert messages(yaml) == [{"question[0].options[0].id", "unknown key"}]
+    end
+
+    test "at most one option is recommended" do
+      two = """
+      ```question
+      key: a
+      text: t
+      options:
+        - {label: A, detail: d, recommended: true}
+        - {label: B, detail: d, recommended: true}
+        - {label: C, detail: d}
+      blocking: true
+      ```
+      """
+
+      assert messages(two) == [
+               {"question[0].options", "may mark one option recommended, not 2"}
+             ]
+
+      one =
+        String.replace(two, "{label: B, detail: d, recommended: true}", "{label: B, detail: d}")
+
+      assert {:ok, %{questions: [question]}} = Document.parse(one)
+      assert %Option{label: "A"} = Question.recommended(question)
+    end
+
+    test "a question need not recommend anything" do
+      yaml =
+        "```question\nkey: a\ntext: t\noptions: [{label: A, detail: d}]\nblocking: true\n```\n"
+
+      assert {:ok, %{questions: [question]}} = Document.parse(yaml)
+      assert Question.recommended(question) == nil
+    end
+  end
+
+  # The parser never raises on what an agent wrote, and never hands on a value the write after it
+  # cannot store. Each of these was a raise — in the parser, or inside the transaction recording
+  # the document — before it was a refusal.
+  describe "what cannot be stored is refused, not raised on" do
+    test "a key that is not text, on a question or an option" do
+      option =
+        "```question\nkey: a\ntext: t\noptions:\n  - {label: A, detail: d, ? {z: 1} : q}\nblocking: true\n```\n"
+
+      question = "```question\nkey: a\ntext: t\n? {z: 1}\n: y\nblocking: true\n```\n"
+
+      assert messages(option) == [
+               {"question[0].options[0].(a key that is not text)", "unknown key"}
+             ]
+
+      assert messages(question) == [{"question[0].(a key that is not text)", "unknown key"}]
+    end
+
+    test "a key that is not text in the front matter" do
+      assert messages("---\n? {a: 1}\n: b\n---\nbody\n") == [
+               {"front_matter", "keys must be text"}
+             ]
+
+      # At any depth, a list's items included.
+      assert messages("---\nitems:\n  - ? {a: 1}\n    : b\n---\nbody\n") == [
+               {"front_matter", "keys must be text"}
+             ]
+
+      # Numbers and flags are keys JSON can name.
+      assert {:ok, _document} = Document.parse("---\n1: a\ntrue: b\n---\nbody\n")
+    end
+
+    test "a NUL written as an escape, in any text field" do
+      nul = ~S("a\0b")
+
+      for {field, yaml} <- [
+            {"text", "text: #{nul}\nblocking: true"},
+            {"anchor", "text: t\nanchor: #{nul}\nblocking: true"},
+            {"assumption", "text: t\nassumption: #{nul}"},
+            {"options[0].label",
+             "text: t\noptions: [{label: #{nul}, detail: d}]\nblocking: true"},
+            {"options[0].detail",
+             "text: t\noptions: [{label: A, detail: #{nul}}]\nblocking: true"}
+          ] do
+        assert messages("```question\nkey: a\n#{yaml}\n```\n") == [
+                 {"question[0].#{field}", "must not contain a NUL character"}
+               ]
+      end
+    end
+
+    # A label of spaces is an option nobody can choose: the form reads a blank choice as none.
+    test "text that is only whitespace, in any text field" do
+      for {field, yaml} <- [
+            {"text", "text: \"  \"\nblocking: true"},
+            {"assumption", "text: t\nassumption: \" \""},
+            {"options[0].label", "text: t\noptions: [{label: \" \", detail: d}]\nblocking: true"},
+            {"options[0].detail",
+             "text: t\noptions: [{label: A, detail: \"\t\"}]\nblocking: true"}
+          ] do
+        assert messages("```question\nkey: a\n#{yaml}\n```\n") == [
+                 {"question[0].#{field}", "must be a non-empty string"}
+               ]
+      end
+    end
+  end
+
+  describe "limits" do
+    # Each limit at its ceiling and one past it, in characters: `é` is two bytes, so a limit
+    # counted in bytes refuses the ceiling.
+    for {field, max} <- [text: 200, label: 40, detail: 140] do
+      test "#{field} is at most #{max} characters" do
+        field = unquote(field)
+        max = unquote(max)
+
+        assert {:ok, _document} = Document.parse(sized(field, String.duplicate("é", max)))
+
+        path =
+          Map.fetch!(
+            %{
+              text: "question[0].text",
+              label: "question[0].options[0].label",
+              detail: "question[0].options[0].detail"
+            },
+            field
+          )
+
+        assert messages(sized(field, String.duplicate("é", max + 1))) == [
+                 {path, "must be at most #{max} characters, not #{max + 1}"}
+               ]
+      end
+    end
+  end
+
   test "parse!/1 raises with the errors listed" do
     assert_raise ArgumentError, ~r/front_matter: is not closed/, fn ->
       Document.parse!("---\n")
@@ -392,4 +595,17 @@ defmodule ForgeCore.DocumentTest do
   end
 
   defp messages(text), do: Enum.map(errors(text), &{&1.path, &1.message})
+
+  defp sized(field, value) do
+    fields = Map.merge(%{text: "t", label: "A", detail: "d"}, %{field => value})
+
+    """
+    ```question
+    key: a
+    text: "#{fields.text}"
+    options: [{label: "#{fields.label}", detail: "#{fields.detail}"}]
+    blocking: true
+    ```
+    """
+  end
 end

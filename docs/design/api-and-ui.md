@@ -12,6 +12,9 @@ outside `Operator` altogether (§ Operations).
 
 - `answer(ticket, user, key, %{choice, text})` — records the answer; resumes the waiting job
   when none of its blocking questions remain open.
+- `answer_all(ticket, user, version_id, answers)` — a document's answers together, in one
+  transaction, resuming the job once (`design/job-prompt.md` § Answering a document's questions
+  at once).
 - `decide(ticket, user, :approved | :rejected, comment)` — decides the pending transition.
 - `transition(ticket, user, to, opts)` — takes a declared transition by hand.
 - `retry(ticket, user)` — runs the state the ticket rests in again
@@ -23,12 +26,13 @@ outside `Operator` altogether (§ Operations).
 - `decline_proposal(version_id, user, comment)` — records that it will not be.
 - `admit(project, user, attrs)` — admits a ticket.
 - `open_chat(project, user, text, opts)`, `send_chat(chat, user, text, opts)`,
-  `stop_chat(chat, user)`, `close_chat(chat, user, reason)`, `reopen_chat(chat, user)`,
-  `merge_chat(chat, user)` — a conversation's life; see `design/conversations.md`.
+  `answer_chat(chat, user, reply, answers)`, `stop_chat(chat, user)`,
+  `close_chat(chat, user, reason)`, `reopen_chat(chat, user)`, `merge_chat(chat, user)` — a
+  conversation's life; see `design/conversations.md`.
 - `set_model(project, user, model)`, `issue_token(project, user, opts)`,
   `revoke_token(project, user, token_id)` — project settings, which need the admin capability.
 
-The first seven return `{:ok, ticket}` or `{:error, reason}` and, on success, notify subscribers
+The first eight return `{:ok, ticket}` or `{:error, reason}` and, on success, notify subscribers
 of the ticket so open pages refresh.
 
 The two proposal operations break that shape, and it is worth saying exactly how rather than
@@ -96,6 +100,15 @@ version, so an API that named the artifact would let a client accept text nobody
 is no endpoint that edits a proposal: `POST /tickets/:project/:number/artifacts/:name` writes at
 ticket scope and a proposal is scoped to its job.
 
+A question is served with its options as objects — `{label, detail, recommended}`, `detail` nil
+only on a question recorded before options had one — and no `default`: the recommendation is the
+option's flag. `POST …/answers` answers one key per call, as before; its `choice` must be one of
+the question's labels, and it is refused with 422 otherwise. The pages send a document's answers
+together (`Forge.Operator.answer_all/4`, `design/job-prompt.md` § Answering a document's questions
+at once). The API does not, and a script answering several keys should know what that costs: each
+call is its own transaction, the waiting job resumes on the call that answers its last blocking
+question, and an answer sent after that one reaches the job's next run rather than this one.
+
 Responses are plain JSON objects; errors are `{"error": {"reason": ..., "detail": ...}}`
 with 400, 401, 404, 409 or 422. No envelope, no HATEOAS, no versioning beyond the path.
 
@@ -106,12 +119,14 @@ flow; public registration is disabled. An account is created from the command li
 (`mix forge.user.add`) or by a first login through a configured OIDC provider, which makes a
 pending account that a node admin has to approve (`design/identity.md` § Approval).
 
-- `/` — the queue: one card per item, answerable in place. Options are buttons, free text a
-  field; approvals have approve and reject; stuck and review items list the transitions, and a
+- `/` — the queue: one card per item, answerable in place. A document's questions are one form
+  — options to lock in, free text beside them, one Send (`design/ui.md` § Answering questions);
+  approvals have approve and reject; stuck and review items list the transitions, and a
   stuck item says whether its state can be run again (`retry`).
-  Non-blocking questions follow the last card as a digest of lines, each leading to its ticket,
-  and are not cards (`design/ui.md` § Not waiting on you). `GET /queue` serves them as items of
-  kind `assumption`.
+  Non-blocking questions asked on their own follow the last card as a digest of lines, each
+  leading to its ticket, and are not cards (`design/ui.md` § Not waiting on you); one asked in
+  the same document as a blocking question is in that document's form instead, optional.
+  `GET /queue` serves every one as an item of kind `assumption`.
 - `/tickets/:project/:number` — timeline: state, cost, pending decision, open questions,
   jobs, artifacts with the latest document rendered, events.
 - `/tickets/:project/:number/review` — the merge decision: the diff, the documents the change was
@@ -164,7 +179,8 @@ banner. Offline compose and retry queues are out of the PoC.
 Documents are Markdown rendered server-side and sanitised before display, because agents
 wrote them; inline code is escaped at the AST level since the renderer leaves it raw, and
 front matter is stripped textually so an unparseable one never reaches the page. Open
-questions are shown as cards above the rendered text, each with its options as buttons.
+questions are answered on the ticket's Decide tab, as one form per document
+(`design/ui.md` § Answering questions).
 
 ## Not in this slice
 

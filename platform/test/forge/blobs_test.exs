@@ -206,21 +206,12 @@ defmodule Forge.BlobsTest do
 
   # A release from before groups reads `shots/*` as a document it never finds, and ends every such
   # job `error` however well it went (`docs/design/commands.md` § Worker pools).
-  test "a job that writes a group asks for a worker that speaks protocol 2", context do
+  # Groups arrived in protocol 2. Every agent now asks for 3, which is more — so what this holds is
+  # that a job writing a group is never offered to a release from before groups.
+  test "a job that writes a group asks for a worker that speaks protocol 2 or later", context do
     [job] = Jobs.for_ticket(context.ticket.id)
     assert Jobs.spec(job).may_invoke == %{}
-    assert Jobs.protocol(job) == 2
-
-    {:ok, plain} =
-      register_owned!(%{
-        name: "plain-#{System.unique_integer([:positive])}",
-        repo_path: seeded_repo()
-      })
-
-    user = member_fixture(plain)
-    {:ok, ticket} = Tickets.admit(plain, %{title: "t", body: "."}, {:user, user.id})
-    [none] = Jobs.for_ticket(ticket.id)
-    assert Jobs.protocol(none) == 0
+    assert Jobs.protocol(job) >= 2
   end
 
   # A workflow job, not a chat: a chat's is hard-wired empty, and would pass whatever this did.

@@ -1,7 +1,8 @@
 defmodule Forge.Artifacts.Question do
   @moduledoc """
   A question extracted from a document version at write time. The fields mirror
-  `ForgeCore.Document.Question`; `line` is the file line of the block.
+  `ForgeCore.Document.Question`; `line` is the file line of the block, and each option is a
+  `Forge.Artifacts.Question.Option`.
   """
 
   use Ecto.Schema
@@ -13,8 +14,7 @@ defmodule Forge.Artifacts.Question do
     field :key, :string
     field :anchor, :string
     field :text, :string
-    field :options, {:array, :string}, default: []
-    field :default, :string
+    embeds_many :options, Forge.Artifacts.Question.Option, on_replace: :delete
     field :blocking, :boolean, default: false
     field :assumption, :string
     field :line, :integer
@@ -32,12 +32,11 @@ defmodule Forge.Artifacts.Question do
       :key,
       :anchor,
       :text,
-      :options,
-      :default,
       :blocking,
       :assumption,
       :line
     ])
+    |> cast_embed(:options, with: &Forge.Artifacts.Question.Option.changeset/2)
     |> validate_required([:artifact_version_id, :key, :text, :line])
     |> foreign_key_constraint(:artifact_version_id)
     |> unique_constraint([:artifact_version_id, :key])
@@ -47,6 +46,7 @@ defmodule Forge.Artifacts.Question do
   def attrs_from_core(%ForgeCore.Document.Question{} = question, artifact_version_id) do
     question
     |> Map.from_struct()
+    |> Map.update!(:options, fn options -> Enum.map(options, &Map.from_struct/1) end)
     |> Map.put(:artifact_version_id, artifact_version_id)
   end
 end

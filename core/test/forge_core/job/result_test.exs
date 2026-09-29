@@ -2,15 +2,17 @@ defmodule ForgeCore.Job.ResultTest do
   use ExUnit.Case, async: true
 
   alias ForgeCore.{Document, Proposal}
+  alias ForgeCore.Document.Question
+  alias ForgeCore.Document.Question.Option
   alias ForgeCore.Job.Result
 
   # Every question field is populated deliberately. The moduledoc claims the round trip is
   # lossless — "a result that survived a round trip must record exactly as the one that did not"
   # — and a fixture whose `anchor`, `default` and `assumption` were all nil proved that claim
   # with nil on both sides of the `==`. `anchor` is what puts a question next to the passage it
-  # concerns, `default` is the pre-selected one-tap answer, and `assumption` is the record of
-  # what a non-blocking question proceeded with; all three could vanish between the worker and
-  # the platform with the suite green.
+  # concerns, an option's `recommended` is the answer the form starts with, and `assumption` is
+  # the record of what a non-blocking question proceeded with; all three could vanish between the
+  # worker and the platform with the suite green.
   defp result do
     document =
       Document.parse!("""
@@ -23,8 +25,12 @@ defmodule ForgeCore.Job.ResultTest do
       key: backend
       text: Which store?
       anchor: "## Storage"
-      options: [a, b]
-      default: a
+      options:
+        - label: "Postgres"
+          detail: "Where the rest of the data is."
+          recommended: true
+        - label: "A file"
+          detail: "Nothing to run."
       blocking: true
       ```
 
@@ -90,14 +96,39 @@ defmodule ForgeCore.Job.ResultTest do
 
     assert blocking.key == "backend"
     assert blocking.blocking
-    assert blocking.options == ["a", "b"]
+
+    assert blocking.options == [
+             %Option{
+               label: "Postgres",
+               detail: "Where the rest of the data is.",
+               recommended: true
+             },
+             %Option{label: "A file", detail: "Nothing to run.", recommended: false}
+           ]
 
     # The three fields the fixture used to leave nil at both ends of the `==`, named one by one
     # so that losing any of them is a failure with that field's name on it.
     assert blocking.anchor == "## Storage"
-    assert blocking.default == "a"
+    assert Question.recommended(blocking).label == "Postgres"
     assert proceeded.assumption == "proceeding without a cache"
     refute proceeded.blocking
+  end
+
+  # A worker released before options had details sends each one as its label alone. The wire is
+  # read, not refused: the platform re-parses the document itself, so what is lost is a detail
+  # nobody wrote, not the question.
+  test "reads an option sent as a bare label" do
+    map = Result.to_map(%{result() | status: :waiting, outcome: nil, declared_outcome: nil})
+    [question | rest] = map["questions"]
+    map = %{map | "questions" => [%{question | options: ["Postgres", 5]} | rest]}
+
+    # And a value that is neither is read rather than raised on: the channel would crash on it,
+    # for a field the platform does not read.
+    assert %Result{
+             questions: [
+               %{options: [%Option{label: "Postgres", detail: nil}, %Option{label: "5"}]} | _
+             ]
+           } = map |> Jason.encode!() |> Jason.decode!() |> Result.from_map()
   end
 
   # `docs/design/commands.md` § How an agent invokes: a parked run is reported with what it asked
@@ -195,16 +226,16 @@ defmodule ForgeCore.Job.ResultTest do
   # to show a person. They cross as the lines `ForgeCore.Error.format/1` writes.
   test "invalid outputs that are parse errors cross as their lines" do
     errors = [
-      ForgeCore.Error.new("question[0].options", "must be a non-empty list of strings"),
-      ForgeCore.Error.new("question[0].default", "must be a string")
+      ForgeCore.Error.new("question[0].options", "must be a non-empty list of options"),
+      ForgeCore.Error.new("question[0].text", "must be a non-empty string")
     ]
 
     map = Result.to_map(%{result() | invalid: %{"plan.md" => errors}})
 
     assert map["invalid"] == %{
              "plan.md" =>
-               "question[0].options: must be a non-empty list of strings\n" <>
-                 "question[0].default: must be a string"
+               "question[0].options: must be a non-empty list of options\n" <>
+                 "question[0].text: must be a non-empty string"
            }
   end
 end

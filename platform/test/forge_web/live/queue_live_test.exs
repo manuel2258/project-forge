@@ -67,8 +67,7 @@ defmodule ForgeWeb.QueueLiveTest do
     ```question
     key: #{key}
     text: #{text}
-    options: [a, b]
-    default: a
+    options: [{label: a, detail: About a, recommended: true}, {label: b, detail: About b}]
     blocking: true
     ```
     """
@@ -79,8 +78,7 @@ defmodule ForgeWeb.QueueLiveTest do
     ```question
     key: #{key}
     text: #{text}
-    options: [a, b]
-    default: a
+    options: [{label: a, detail: About a, recommended: true}, {label: b, detail: About b}]
     blocking: false
     assumption: went with a
     ```
@@ -114,55 +112,572 @@ defmodule ForgeWeb.QueueLiveTest do
              index(html, "item-questions-#{newer_version.id}")
   end
 
-  # "Accept all N recommendations" is one tap that commits N decisions, so what it may reach has
-  # to be exactly what the operator was shown. A non-blocking question is not shown here at all —
-  # it never stopped the job, and the agent already recorded the assumption it proceeded with —
-  # and answering it from this button would be the product deciding something on the operator's
-  # behalf and reporting it as theirs.
-  test "accepting all recommendations answers only the questions that were shown", %{
-    conn: conn,
-    project: project
-  } do
+  # A document's questions are one form (`docs/design/ui.md` § Answering questions): its
+  # recommendations start chosen, so one Send answers the whole document — the assumption asked
+  # beside the blocking pair included. It is in the form, drawn with its choice on its line, so
+  # what Send records for it is what the operator was shown.
+  test "one Send answers the document, recommendations and all", %{conn: conn, project: project} do
     ticket = admit(project, "Persist scores")
 
-    ask(ticket, [
-      blocking("backend", "Which backend?"),
-      blocking("format", "Which format?"),
-      non_blocking("naming", "What should the table be called?")
-    ])
+    version =
+      ask(ticket, [
+        blocking("backend", "Which backend?"),
+        blocking("format", "Which format?"),
+        non_blocking("naming", "What should the table be called?")
+      ])
 
     {:ok, view, _html} = live(conn, ~p"/")
 
-    # Only the blocking pair is an interruption, so only they are counted on the affordance.
-    assert view |> element(~s([phx-click="answer_all"])) |> render() =~
-             "Accept all 2 recommendations"
+    assert view |> element("#form-#{version.id} button[type=submit]") |> render() =~
+             "Send 3 answers"
 
-    view |> element(~s([phx-click="answer_all"])) |> render_click()
+    view |> element("#form-#{version.id}") |> render_submit()
 
-    assert render(view) =~ "Accepted 2 recommendations"
-
-    assert ticket.id |> Artifacts.open_questions() |> Enum.map(& &1.key) == ["naming"]
+    assert render(view) =~ "Sent 3 answers"
+    assert Artifacts.open_questions(ticket.id) == []
   end
 
-  # A non-blocking question is the assumption an agent recorded and carried on from, so it is
-  # not a decision: not a card among the decisions, and not part of the figure the header and the
-  # nav badge carry — counting it would put a number on the home screen that answering nothing
-  # ever lowers. It is a line in the digest instead (`docs/design/ui.md` § Not waiting on you).
+  # An assumption asked in the same document as a blocking question is in that document's form,
+  # optional — but it is still not a decision: not counted on the item, the header or the badge,
+  # and not a line in the digest as well, which would be a second place to answer it.
   test "a non-blocking question is not an interruption", %{conn: conn, project: project} do
     ticket = admit(project, "Persist scores")
 
-    ask(ticket, [
-      blocking("backend", "Which backend?"),
-      non_blocking("naming", "What should the table be called?")
-    ])
+    version =
+      ask(ticket, [
+        blocking("backend", "Which backend?"),
+        non_blocking("naming", "What should the table be called?")
+      ])
 
     {:ok, view, _html} = live(conn, ~p"/")
 
-    decisions = view |> element("#queue-decisions") |> render()
-    assert decisions =~ "Which backend?"
-    refute decisions =~ "What should the table be called?"
-    assert view |> element("#queue-digest") |> render() =~ "What should the table be called?"
+    item = view |> element("#item-questions-#{version.id}") |> render()
+    assert item =~ "1 blocking question · 1 optional"
+    assert item =~ "What should the table be called?"
+    refute has_element?(view, "#queue-digest")
     assert view |> element("main header span.font-mono") |> render() =~ "1 decision · 1 item"
+  end
+
+  describe "the question form" do
+    defp open_blocking(key, text) do
+      """
+      ```question
+      key: #{key}
+      text: #{text}
+      options: [{label: a, detail: About a}, {label: b, detail: About b}]
+      blocking: true
+      ```
+      """
+    end
+
+    defp choose(view, version, key, choice, text \\ "") do
+      view
+      |> element("#form-#{version.id}")
+      |> render_change(%{
+        "_target" => ["answers", key, "choice"],
+        "answers" => %{key => %{"choice" => choice, "text" => text}}
+      })
+    end
+
+    test "choosing locks an answer in and sends nothing", %{conn: conn, project: project} do
+      ticket = admit(project, "Persist scores")
+      version = ask(ticket, [open_blocking("backend", "Which backend?")])
+
+      {:ok, view, _html} = live(conn, ~p"/")
+      choose(view, version, "backend", "b")
+
+      assert [%{key: "backend"}] = Artifacts.open_questions(ticket.id)
+      assert Artifacts.latest(ticket.id, "answers.md") == nil
+
+      assert view |> element("#form-#{version.id} button[type=submit]") |> render() =~
+               "Send 1 answer"
+    end
+
+    test "Send waits for every blocking question", %{conn: conn, project: project} do
+      ticket = admit(project, "Persist scores")
+
+      version =
+        ask(ticket, [
+          open_blocking("backend", "Which backend?"),
+          open_blocking("format", "Which?"),
+          non_blocking("naming", "What should the table be called?")
+        ])
+
+      {:ok, view, _html} = live(conn, ~p"/")
+      send = "#form-#{version.id} button[type=submit]"
+
+      assert has_element?(view, send <> "[disabled]")
+
+      assert view |> element("#form-#{version.id}-left") |> render() =~
+               "2 blocking questions left"
+
+      view
+      |> element("#form-#{version.id}")
+      |> render_change(%{
+        "_target" => ["answers", "backend", "choice"],
+        "answers" => %{
+          "backend" => %{"choice" => "a", "text" => ""},
+          "format" => %{"choice" => "", "text" => ""}
+        }
+      })
+
+      assert has_element?(view, send <> "[disabled]")
+      assert view |> element("#form-#{version.id}-left") |> render() =~ "1 blocking question left"
+
+      view
+      |> element("#form-#{version.id}")
+      |> render_change(%{
+        "_target" => ["answers", "format", "text"],
+        "answers" => %{
+          "backend" => %{"choice" => "a", "text" => ""},
+          "format" => %{"choice" => "", "text" => "neither, use JSON"}
+        }
+      })
+
+      refute has_element?(view, send <> "[disabled]")
+      refute has_element?(view, "#form-#{version.id}-left")
+    end
+
+    # Folded, a question is one line that carries its answer in hidden inputs; tapping the line
+    # opens it; choosing folds it again; typing keeps it open.
+    test "a locked question folds, and opens again", %{conn: conn, project: project} do
+      ticket = admit(project, "Persist scores")
+      version = ask(ticket, [blocking("backend", "Which backend?")])
+      question = "#question-#{version.id}-backend"
+
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      # Recommended, so chosen, so folded: a line, no radios, and the line says what was chosen —
+      # the whole text of it, since a one-letter label is in any class list.
+      refute has_element?(view, question <> " input[type=radio]")
+      assert has_element?(view, question <> " button span.font-medium", ~r/^\s*a\s*$/)
+
+      view |> element(question <> " button[phx-click='form:open']") |> render_click()
+      assert has_element?(view, question <> " input[type=radio][value=b]")
+
+      view
+      |> element("#form-#{version.id}")
+      |> render_change(%{
+        "_target" => ["answers", "backend", "text"],
+        "answers" => %{"backend" => %{"choice" => "a", "text" => "and keep the old file"}}
+      })
+
+      assert has_element?(view, question <> " input[type=radio]")
+
+      choose(view, version, "backend", "b", "and keep the old file")
+      refute has_element?(view, question <> " input[type=radio]")
+      assert view |> element(question) |> render() =~ "b — and keep the old file"
+    end
+
+    test "a note rides the choice, and a cleared choice leaves your own words", %{
+      conn: conn,
+      project: project
+    } do
+      ticket = admit(project, "Persist scores")
+
+      version =
+        ask(ticket, [blocking("backend", "Which backend?"), blocking("format", "Which format?")])
+
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      view
+      |> element("#form-#{version.id}")
+      |> render_submit(%{
+        "answers" => %{
+          "backend" => %{"choice" => "b", "text" => "and keep the old file"},
+          "format" => %{"choice" => "", "text" => "JSON"}
+        }
+      })
+
+      answers = Map.new(Artifacts.answered(ticket.id), &{&1.question.key, &1.answer})
+      assert %{choice: "b", text: "and keep the old file"} = answers["backend"]
+      assert %{choice: nil, text: "JSON"} = answers["format"]
+    end
+
+    # An assumption is optional: left with nothing chosen, it is not sent — rather than sent empty
+    # and refusing the batch with it — and it stays open, for the digest or the ticket.
+    test "an optional question left alone is not sent", %{conn: conn, project: project} do
+      ticket = admit(project, "Persist scores")
+
+      version =
+        ask(ticket, [
+          blocking("backend", "Which backend?"),
+          """
+          ```question
+          key: naming
+          text: What should the table be called?
+          options: [{label: a, detail: About a}, {label: b, detail: About b}]
+          blocking: false
+          assumption: went with a
+          ```
+          """
+        ])
+
+      {:ok, view, _html} = live(conn, ~p"/")
+      view |> element("#form-#{version.id}") |> render_submit()
+
+      assert render(view) =~ "Sent 1 answer"
+      assert [%{key: "naming"}] = Artifacts.open_questions(ticket.id)
+    end
+
+    # What is left on a sent form is drawn as the agent asked it: the draft that cleared the
+    # recommendation went with the Send. On the ticket, where the assumption left over is drawn
+    # again under the same version; the queue moves it to the digest, which draws no form.
+    test "a sent form starts again from its recommendations", %{conn: conn, project: project} do
+      ticket = admit(project, "Persist scores")
+
+      version =
+        ask(ticket, [
+          blocking("backend", "Which backend?"),
+          non_blocking("naming", "What should the table be called?")
+        ])
+
+      naming = "#question-#{version.id}-naming"
+
+      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=decide")
+
+      view
+      |> element("#form-#{version.id}")
+      |> render_change(%{
+        "_target" => ["answers", "naming", "choice"],
+        "answers" => %{
+          "backend" => %{"choice" => "a", "text" => ""},
+          "naming" => %{"choice" => "", "text" => ""}
+        }
+      })
+
+      assert has_element?(view, naming <> " input[type=radio]")
+
+      view |> element("#form-#{version.id}") |> render_submit()
+
+      assert [%{key: "naming"}] = Artifacts.open_questions(ticket.id)
+      refute has_element?(view, naming <> " input[type=radio]")
+      assert view |> element(naming) |> render() =~ "change"
+    end
+
+    # The job reads every answer, not whichever landed before the resume: one `answers.md`
+    # version holds them all, and the job is resumed after it.
+    test "the waiting job resumes once, with every answer", %{conn: conn, project: project} do
+      ticket = admit(project, "Persist scores")
+      [job | _] = Jobs.for_ticket(ticket.id)
+      {:ok, _job} = job |> Ecto.Changeset.change(status: :waiting) |> Repo.update()
+
+      version =
+        ask(ticket, [blocking("backend", "Which backend?"), blocking("format", "Which format?")])
+
+      {:ok, view, _html} = live(conn, ~p"/")
+      view |> element("#form-#{version.id}") |> render_submit()
+
+      assert %{version: 1, content: content} = Artifacts.latest(ticket.id, "answers.md")
+      assert content =~ "## backend"
+      assert content =~ "## format"
+      assert Jobs.get!(job.id).status == :pending
+    end
+
+    # Stale because someone answered one of its questions: the same form is drawn again for what
+    # is still asked, and what the person locked in for that is kept, not reset.
+    test "a form made stale by another answer keeps its draft", %{conn: conn, project: project} do
+      user = Forge.ForgeFixtures.member_fixture(project, :member)
+      ticket = admit(project, "Persist scores")
+
+      version =
+        ask(ticket, [
+          open_blocking("backend", "Which backend?"),
+          open_blocking("format", "Which format?")
+        ])
+
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      view
+      |> element("#form-#{version.id}")
+      |> render_change(%{
+        "_target" => ["answers", "format", "text"],
+        "answers" => %{
+          "backend" => %{"choice" => "a", "text" => ""},
+          "format" => %{"choice" => "", "text" => "JSON, please"}
+        }
+      })
+
+      # From the command line, say: nothing this page hears before the Send.
+      {:ok, _ticket} = Forge.Operator.answer(ticket, user, "backend", %{choice: "b"})
+
+      render_submit(view, "questions:send", %{
+        "form" => version.id,
+        "ticket" => ticket.id,
+        "version" => version.id,
+        "answers" => %{
+          "backend" => %{"choice" => "a", "text" => ""},
+          "format" => %{"choice" => "", "text" => "JSON, please"}
+        }
+      })
+
+      assert render(view) =~ "were answered or changed since the page showed them"
+      assert [%{question: %{key: "backend"}}] = Artifacts.answered(ticket.id)
+      assert view |> element("#question-#{version.id}-format") |> render() =~ "JSON, please"
+    end
+
+    # Clearing a choice leaves the question to be answered in words, so it stays open even with a
+    # note already typed — it does not fold under the thumb.
+    test "clearing a choice keeps the question open", %{conn: conn, project: project} do
+      ticket = admit(project, "Persist scores")
+      version = ask(ticket, [blocking("backend", "Which backend?")])
+      question = "#question-#{version.id}-backend"
+
+      {:ok, view, _html} = live(conn, ~p"/")
+      view |> element(question <> " button[phx-click='form:open']") |> render_click()
+
+      view
+      |> element("#form-#{version.id}")
+      |> render_change(%{
+        "_target" => ["answers", "backend", "choice"],
+        "answers" => %{"backend" => %{"choice" => "", "text" => "neither"}}
+      })
+
+      assert has_element?(view, question <> " input[type=radio]")
+    end
+
+    # Off the wire, a payload of the wrong shape is ignored, not raised on: a crash here is the
+    # page going away under the person holding it.
+    test "a malformed event is ignored", %{conn: conn, project: project} do
+      ticket = admit(project, "Persist scores")
+      version = ask(ticket, [blocking("backend", "Which backend?")])
+
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      render_change(view, "form:change", %{"form" => version.id, "answers" => "abc"})
+      render_change(view, "form:change", %{"form" => version.id, "answers" => ["x"]})
+      render_change(view, "form:change", %{"answers" => %{}})
+      render_click(view, "form:open", %{"form" => version.id})
+
+      render_submit(view, "questions:send", %{
+        "form" => version.id,
+        "ticket" => ticket.id,
+        "version" => version.id,
+        "answers" => "abc"
+      })
+
+      render_submit(view, "chat:questions:send", %{"form" => "x", "chat" => "not-a-uuid"})
+      assert render(view) =~ "That no longer exists."
+      assert Artifacts.answered(ticket.id) == []
+    end
+
+    test "a stale form sends nothing", %{conn: conn, project: project} do
+      ticket = admit(project, "Persist scores")
+      stale = ask(ticket, [blocking("backend", "Which backend?")])
+
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      # The agent wrote the document again while the form was open, asking something else.
+      ask(ticket, [blocking("format", "Which format?")])
+
+      render_submit(view, "questions:send", %{
+        "form" => stale.id,
+        "ticket" => ticket.id,
+        "version" => stale.id,
+        "answers" => %{"backend" => %{"choice" => "a", "text" => ""}}
+      })
+
+      assert render(view) =~ "were answered or changed since the page showed them"
+      assert Artifacts.answered(ticket.id) == []
+    end
+  end
+
+  # What the form draws, and what its Send carries from what is drawn — the rendered inputs, not
+  # parameters a test hands in. `docs/design/ui.md` § Answering questions is the standard.
+  describe "what the form draws and carries" do
+    defp rich(key, opts) do
+      recommended = if opts[:recommended], do: ", recommended: true", else: ""
+
+      tail =
+        if opts[:blocking] == false,
+          do: "blocking: false\nassumption: went with Postgres",
+          else: "blocking: true"
+
+      """
+      ```question
+      key: #{key}
+      text: "Which #{key}?"
+      options:
+        - {label: Postgres, detail: "Where the data is."}
+        - {label: SQLite, detail: "A file beside it."#{recommended}}
+      #{tail}
+      ```
+      """
+    end
+
+    defp opened(view, version, key) do
+      view
+      |> element("#question-#{version.id}-#{key} button[phx-click='form:open']")
+      |> render_click()
+    end
+
+    test "an option is its headline and its sentence, the recommendation tagged", %{
+      conn: conn,
+      project: project
+    } do
+      ticket = admit(project, "Persist scores")
+      version = ask(ticket, [rich("store", recommended: true)])
+      {:ok, view, _html} = live(conn, ~p"/")
+      opened(view, version, "store")
+
+      question = "#question-#{version.id}-store"
+      assert has_element?(view, question <> " label", "Where the data is.")
+      assert has_element?(view, question <> " label", "A file beside it.")
+      assert view |> element(question <> " label", "SQLite") |> render() =~ "recommended"
+      refute view |> element(question <> " label", "Postgres") |> render() =~ "recommended"
+    end
+
+    test "Clear choice is offered with a choice, and only then", %{conn: conn, project: project} do
+      ticket = admit(project, "Persist scores")
+      version = ask(ticket, [rich("store", recommended: true), rich("size", [])])
+      {:ok, view, _html} = live(conn, ~p"/")
+      opened(view, version, "store")
+
+      assert has_element?(view, "#question-#{version.id}-store label", "Clear choice")
+      refute has_element?(view, "#question-#{version.id}-size label", "Clear choice")
+    end
+
+    test "an optional question says so, and a blocking one does not", %{
+      conn: conn,
+      project: project
+    } do
+      ticket = admit(project, "Persist scores")
+      version = ask(ticket, [rich("store", []), rich("naming", blocking: false)])
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      assert view |> element("#question-#{version.id}-naming") |> render() =~ "optional"
+      refute view |> element("#question-#{version.id}-store") |> render() =~ "optional"
+    end
+
+    # The queue serves blocking questions first; the form draws them as the agent wrote them.
+    test "questions are drawn in the order they were written", %{conn: conn, project: project} do
+      ticket = admit(project, "Persist scores")
+      version = ask(ticket, [rich("naming", blocking: false), rich("store", [])])
+      {:ok, _view, html} = live(conn, ~p"/")
+
+      assert index(html, "question-#{version.id}-naming") <
+               index(html, "question-#{version.id}-store")
+    end
+
+    # Folded, a question carries its answer in hidden inputs: a note typed before choosing is
+    # still there when the Send is taken from the page.
+    test "a note on a folded question rides the Send", %{conn: conn, project: project} do
+      ticket = admit(project, "Persist scores")
+      version = ask(ticket, [rich("store", [])])
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      view
+      |> element("#form-#{version.id}")
+      |> render_change(%{
+        "_target" => ["answers", "store", "text"],
+        "answers" => %{"store" => %{"text" => "and keep a copy"}}
+      })
+
+      view
+      |> element("#form-#{version.id}")
+      |> render_change(%{
+        "_target" => ["answers", "store", "choice"],
+        "answers" => %{"store" => %{"choice" => "SQLite", "text" => "and keep a copy"}}
+      })
+
+      refute has_element?(view, "#question-#{version.id}-store input[type=radio]")
+      view |> element("#form-#{version.id}") |> render_submit()
+
+      assert [%{answer: %{choice: "SQLite", text: "and keep a copy"}}] =
+               Artifacts.answered(ticket.id)
+    end
+
+    test "a question opened by hand sends the choice it shows", %{conn: conn, project: project} do
+      ticket = admit(project, "Persist scores")
+      version = ask(ticket, [rich("store", recommended: true)])
+      {:ok, view, _html} = live(conn, ~p"/")
+      opened(view, version, "store")
+
+      view |> element("#form-#{version.id}") |> render_submit()
+
+      assert [%{answer: %{choice: "SQLite", text: nil}}] = Artifacts.answered(ticket.id)
+    end
+
+    # Open because nothing is chosen, not because it was opened by hand: typing locks it, and it
+    # stays open all the same.
+    test "typing keeps a question open", %{conn: conn, project: project} do
+      ticket = admit(project, "Persist scores")
+      version = ask(ticket, [rich("store", [])])
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      view
+      |> element("#form-#{version.id}")
+      |> render_change(%{
+        "_target" => ["answers", "store", "text"],
+        "answers" => %{"store" => %{"text" => "neither"}}
+      })
+
+      assert has_element?(view, "#question-#{version.id}-store input[type=radio]")
+    end
+
+    # Whitespace is no answer: an optional question left with some is skipped, not sent blank and
+    # refused with the rest of the batch.
+    test "whitespace on an optional question is not sent", %{conn: conn, project: project} do
+      ticket = admit(project, "Persist scores")
+      version = ask(ticket, [rich("store", recommended: true), rich("naming", blocking: false)])
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      view
+      |> element("#form-#{version.id}")
+      |> render_submit(%{"answers" => %{"naming" => %{"text" => "   "}}})
+
+      assert render(view) =~ "Sent 1 answer"
+      assert [%{key: "naming"}] = Artifacts.open_questions(ticket.id)
+    end
+
+    # The refusals a page can be sent, said as the person reads them.
+    test "a refused Send says why", %{conn: conn, project: project} do
+      ticket = admit(project, "Persist scores")
+      version = ask(ticket, [rich("store", []), rich("size", [])])
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      send = fn answers ->
+        render_submit(view, "questions:send", %{
+          "form" => version.id,
+          "ticket" => ticket.id,
+          "version" => version.id,
+          "answers" => answers
+        })
+      end
+
+      assert send.(%{"store" => %{"choice" => "SQLite"}}) =~ "Not sent: answer size first"
+
+      assert send.(%{"store" => %{"choice" => "MySQL"}, "size" => %{"choice" => "SQLite"}}) =~
+               "Not sent: &quot;MySQL&quot; is not an option of store"
+
+      assert Artifacts.answered(ticket.id) == []
+    end
+  end
+
+  # A conversation asking several questions leads with how many, and the first of them: the
+  # sentence is what the item is about, and "Which backend?" alone would hide the rest.
+  test "a conversation asking several questions says how many", %{conn: conn, project: project} do
+    {:ok, chat} = Forge.Conversations.open(project, "which?")
+
+    :ok =
+      Jobs.record_harness_event(chat.id, %{
+        type: "job.harness.text",
+        payload: %{
+          text:
+            "```question\nkey: store\ntext: Which backend?\n```\n\n" <>
+              "```question\nkey: rows\ntext: How many rows?\n```\n"
+        }
+      })
+
+    {:ok, _chat} =
+      Forge.Conversations.record_turn(chat, %{
+        "turn" => 1,
+        "harness" => %{"turns" => 1, "cost_usd" => 0.01, "subtype" => "success"}
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    assert view |> element("#item-chat-#{chat.id}") |> render() =~ "2 questions: Which backend?"
   end
 
   describe "not waiting on you" do

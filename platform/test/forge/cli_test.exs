@@ -110,7 +110,7 @@ defmodule Forge.CLITest do
       lines = String.split(CLI.queue(), "\n")
 
       assert line(lines, "QUESTION") ==
-               "QUESTION  #{CLI.label(asking)}  [backend] Which backend? options: a | b (default a)"
+               "QUESTION  #{CLI.label(asking)}  [backend] Which backend? options: a (recommended) | b"
 
       assert line(lines, "APPROVAL") ==
                "APPROVAL  #{CLI.label(approving)}  refining -> planning: approve refinement.md"
@@ -151,8 +151,7 @@ defmodule Forge.CLITest do
         ```question
         key: naming
         text: What is the table called?
-        options: [scores, highscores]
-        default: scores
+        options: [{label: scores, detail: About scores, recommended: true}, {label: highscores, detail: About highscores}]
         blocking: false
         assumption: scores
         ```
@@ -178,8 +177,7 @@ defmodule Forge.CLITest do
         ```question
         key: backend
         text: Which backend?
-        options: [a, b]
-        default: a
+        options: [{label: a, detail: About a, recommended: true}, {label: b, detail: About b}]
         blocking: true
         ```
         """

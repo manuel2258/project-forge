@@ -75,7 +75,7 @@ defmodule Forge.QueueChatTest do
     ```question
     key: backend
     text: Which backend should it use?
-    options: [sqlite, postgres]
+    options: [{label: sqlite, detail: About sqlite}, {label: postgres, detail: About postgres}]
     ```
     """)
 
@@ -122,13 +122,26 @@ defmodule Forge.QueueChatTest do
     ```question
     key: backend
     text: Which backend?
-    options: [postgres, sqlite]
+    options: [{label: postgres, detail: About postgres}, {label: sqlite, detail: About sqlite}]
+    ```
+
+    ```question
+    key: size
+    text: How many rows?
     ```
     """)
 
     item = Enum.find(Queue.items(), &(&1.kind == :chat))
-    assert item.detail.question.text == "Which backend?"
-    assert item.detail.question.options == ["postgres", "sqlite"]
+
+    # Every question the reply asked, not only the first: they are answered as one form.
+    assert [backend, size] = item.detail.questions
+    assert backend.text == "Which backend?"
+    assert Enum.map(backend.options, & &1.label) == ["postgres", "sqlite"]
+    assert size.key == "size"
+
+    # And the reply they were asked in, which a form carries so a later reply is not answered.
+    assert item.detail.reply == chat.id |> Conversations.messages() |> Conversations.reply_ref()
+    assert item.detail.reply != nil
   end
 
   # One conversation's item is the one the queue would list for it — and the queue lists only a

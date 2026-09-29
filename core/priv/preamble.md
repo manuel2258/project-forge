@@ -57,28 +57,42 @@ the passage it concerns:
 
 ````
 ```question
-key: storage-backend
+key: storage
 anchor: "Persist the high score table"
-text: "Local file or the existing SQLite database?"
-options: [local-file, sqlite]
-default: sqlite
+text: "Where should the scores be kept?"
+options:
+  - label: "SQLite database"
+    detail: "The scores already live there."
+    recommended: true
+  - label: "Local file"
+    detail: "Simple, but another thing to back up."
 blocking: false
-assumption: "sqlite, which the scores already sit beside"
+assumption: "SQLite, which the scores already sit beside"
 ```
 ````
 
-- The block is YAML. Put `text`, `anchor` and `assumption` in double quotes, writing a `"` inside
-  them as `\"`.
+- The block is YAML. Put `text`, `anchor`, `assumption`, `label` and `detail` in double quotes,
+  writing a `"` inside them as `\"`.
 - `key` is unique within the document: lowercase letters, digits, `-` or `_`.
 - `anchor` quotes the passage the question is about.
-- `options` is a short list and `default` the one you recommend. Free text is always a valid
-  answer, so options are for the common cases, not every case.
+- `options` is a short list. Each option has a `label`, the few words a person taps, and a
+  `detail`, one sentence saying what choosing it means. Mark the one you recommend with
+  `recommended: true` — one at most. Free text is always a valid answer too, so options are for
+  the common cases, not every case.
 - A non-blocking question states the `assumption` you proceeded with, and you proceed.
 - `blocking: true` stops the job until a person answers, and you are resumed with the answers.
   Use it only when no reasonable assumption exists, and give it no `assumption`.
 
-Few, sharp questions with a good default are worth more than many. Prefer an assumption you can
-state over a question you could avoid.
+**A person answers on a phone, without the context you have.** Write for them:
+
+- Plain, everyday words. No jargon, no code names, no words joined with hyphens.
+- As few words as carry the meaning: a `label` of two to four words, a `detail` of one short
+  sentence, a `text` of one question.
+- The limits are enforced, and a block over them is sent back to you: `text` at most 200
+  characters, `label` at most 40, `detail` at most 140. Aim well under them.
+
+Few, sharp questions with a good recommendation are worth more than many. Prefer an assumption
+you can state over a question you could avoid.
 
 ## Proposing a ticket
 

@@ -262,7 +262,7 @@ docker-archive and `skopeo copy docker-archive:… docker://…` streams it to t
 decompressing on the way, so nothing has to load the image first. It spools the decompressed
 archive through `$TMPDIR`, which needs room for an uncompressed image.
 
-Credentials, in order: `GHCR_TOKEN` if it is set, else the GitHub CLI's own token when `gh` is
+Credentials, in order: `GHCR_TOKEN` if it is set, else `GITHUB_TOKEN`, else the GitHub CLI's own token when `gh` is
 installed and logged in, else whatever `skopeo login ghcr.io` already stored. `GHCR_USER`
 defaults to the registry path's owner. The token reaches skopeo on stdin and a temporary auth
 file deleted on exit, never argv.

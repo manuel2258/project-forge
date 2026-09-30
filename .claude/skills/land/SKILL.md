@@ -1,6 +1,6 @@
 ---
 name: land
-description: Land the current branch on main as one squashed commit, fast-forward only, resolving conflicts on the way. No pull request.
+description: Land the current branch on main as one squashed commit, fast-forward only, resolving conflicts on the way, then release it. No pull request.
 ---
 
 # land
@@ -8,6 +8,12 @@ description: Land the current branch on main as one squashed commit, fast-forwar
 Work lands on `main` directly. One branch of work becomes one commit on `main`; the branch
 is then reset onto the new `main` and stays the working branch. There are no pull requests
 and no merge commits.
+
+**Every landing is released.** Once the landed commit is on `main`, this goes straight on to the
+`release` skill, without asking: the human's request to land covers the release too. That skill
+decides the bump, publishes the platform image and builds a Hetzner snapshot when the worker
+changed, and stops to report only when something fails. If the release stops, the landing
+stands — it is on `main` either way.
 
 ## Preconditions
 
@@ -73,4 +79,9 @@ and no merge commits.
 
    The force is fine: the branch's only history is what `main` now carries.
 
-7. **Report** the landed commit's hash and subject.
+7. **Release.** Follow `.claude/skills/release/SKILL.md` from its step 0. Its preconditions
+   hold: the work is landed and `bin/check` passed on it. Do not stop between the two skills to
+   ask.
+
+8. **Report** the landed commit's hash and subject, then the release's report — or, if the
+   release stopped, where and why, and that the landing is on `main` unreleased.

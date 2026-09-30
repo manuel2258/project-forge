@@ -150,6 +150,12 @@ When asked, work lands on `main` directly, as one squashed commit per branch, fa
 Use the `land` skill (`.claude/skills/land/SKILL.md`); it rebases, resolves conflicts, squashes
 and pushes. No pull requests, no merge commits.
 
+**A landing is released without a second question.** `land` goes on to the `release` skill
+(`.claude/skills/release/SKILL.md`), which decides the bump, publishes the platform image with
+`GITHUB_TOKEN`, and builds the Hetzner worker snapshot with `HCLOUD_TOKEN` when the worker
+changed — checking both credentials before it writes anything, and stopping to report only when
+something fails. Pointing a template at a new snapshot stays the operator's.
+
 ## Rules
 
 - Dependency versions are pinned. Do not loosen constraints to get something to compile.

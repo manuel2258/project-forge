@@ -29,8 +29,8 @@
 # `dockerTools.buildLayeredImage` produces needs no `docker load` in between. It does spool the
 # decompressed archive through $TMPDIR, so that needs room for an uncompressed image.
 #
-# Credentials, in order: `GHCR_TOKEN` if it is set, else the GitHub CLI's own token if `gh` is
-# installed and logged in, else whatever `skopeo login` already stored. `GHCR_USER` defaults to
+# Credentials, in order: `GHCR_TOKEN` if it is set, else `GITHUB_TOKEN`, else the GitHub CLI's own
+# token if `gh` is installed and logged in, else whatever `skopeo login` already stored. `GHCR_USER` defaults to
 # the registry path's owner. The `gh` step is why publishing needs no second secret: a login that
 # can already push to the repository carries `write:packages`, and asking an operator to mint a
 # PAT that duplicates a credential they have is how tokens end up pasted into shell history.
@@ -130,7 +130,9 @@ trap 'rm -f "$digest_file" "$auth_file"' EXIT
 # own scopes include `write:packages`, so a machine that can push to the repository can push the
 # image. It is optional and stays optional — `gh` is not in the devshell, so `command -v` decides,
 # and a machine without it falls through to whatever `skopeo login` stored.
-token=${GHCR_TOKEN:-}
+# `GITHUB_TOKEN` is read here rather than left to `gh`, which honours it too, because `gh` is not
+# in the devshell: an unattended release (the `land` skill) has the variable and may not have `gh`.
+token=${GHCR_TOKEN:-${GITHUB_TOKEN:-}}
 
 if [ -z "$token" ] && command -v gh > /dev/null; then
   token=$(gh auth token 2> /dev/null || true)

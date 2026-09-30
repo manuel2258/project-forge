@@ -626,7 +626,7 @@ defmodule ForgeWeb.TemplatesLiveTest do
           name: "known",
           image: "snap-new",
           image_build: "aaaaaaaaaaaa",
-          image_protocol: 1
+          image_protocol: ForgeCore.WorkerProtocol.current()
         })
 
       old = template_for(user, %{name: "old-one", image: "snap-legacy"})
@@ -635,7 +635,9 @@ defmodule ForgeWeb.TemplatesLiveTest do
       known_row = view |> element("#template-#{known.id}") |> render()
       old_row = view |> element("#template-#{old.id}") |> render()
 
-      assert known_row =~ "build aaaaaaaaaaaa current · protocol 1"
+      assert known_row =~
+               "build aaaaaaaaaaaa current · protocol #{ForgeCore.WorkerProtocol.current()}"
+
       refute known_row =~ "no machine is made from it"
       assert old_row =~ "unlabelled"
     end

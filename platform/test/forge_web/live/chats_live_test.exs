@@ -156,7 +156,7 @@ defmodule ForgeWeb.ChatsLiveTest do
 
     assert has_element?(view, row(running))
     assert has_element?(view, row(finished))
-    assert view |> element("header span.font-mono") |> render() =~ "1 live"
+    assert view |> element("header span.font-mono", "live") |> render() =~ "1 live"
   end
 
   test "a node with no conversations says so instead of drawing an empty list", %{

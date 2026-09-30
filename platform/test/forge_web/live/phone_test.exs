@@ -47,6 +47,21 @@ defmodule ForgeWeb.PhoneTest do
   end
 
   describe "the More sheet" do
+    # The release this node runs, as the last line of the sheet: a phone has no top bar to put it
+    # beside the wordmark in (docs/design/ui.md § Navigation).
+    test "ends with the version the node runs", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/")
+      version = :forge |> Application.spec(:vsn) |> to_string()
+
+      assert version == String.trim(File.read!(Path.expand("../../../../VERSION", __DIR__)))
+      assert view |> element("dialog#more #more-version") |> render() =~ "forge #{version}"
+
+      sheet = view |> element("dialog#more") |> render()
+      {log_out, _length} = :binary.match(sheet, ~s(href="/users/log-out"))
+      {line, _length} = :binary.match(sheet, ~s(id="more-version"))
+      assert line > log_out, "the version is not the sheet's last line"
+    end
+
     test "holds the places and the account, in order, each a 46px row", %{
       conn: conn,
       user: user

@@ -21,12 +21,13 @@ defmodule ForgeCore.WorkerProtocol do
   @current @path |> File.read!() |> String.trim() |> String.to_integer()
 
   # **The oldest protocol this platform still accepts.** A worker that sends none is protocol 0,
-  # every release before the field existed, and 0 is where this starts so that shipping the check
-  # refused nobody. Raising it refuses running machines — managed ones are destroyed on their
-  # next join — so it is its own change, made after every template and permanent machine has
-  # moved (`worker-channel.md` § What needs a bump, and raising the minimum). It is code and not
-  # the file on purpose: the file is what this build speaks, this is what it still hears.
-  @minimum 0
+  # every release before the field existed; this started at 0 so that shipping the check refused
+  # nobody, and is 4 from release 0.7.0, when no machine outside the operator's own ran an older
+  # worker. Raising it refuses running machines — managed ones are destroyed on their next join —
+  # so it is made after every template and permanent machine has moved (`worker-channel.md`
+  # § What needs a bump, and raising the minimum). It is code and not the file on purpose: the
+  # file is what this build speaks, this is what it still hears.
+  @minimum 4
 
   @doc "The protocol this build speaks."
   @spec current() :: non_neg_integer()

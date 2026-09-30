@@ -138,7 +138,13 @@ defmodule ForgeWeb.WorkerLiveTest do
     {:ok, view, _html} = live(conn, ~p"/workers/#{w.id}")
     assert text_of(view, "#machine") =~ "not connected"
 
-    :ok = Workers.admit(w.id, %{"release" => "0.2.1 (8rh57whmgk6m)", "build" => "8rh57whmgk6m"})
+    :ok =
+      Workers.admit(w.id, %{
+        "protocol" => ForgeCore.WorkerProtocol.current(),
+        "release" => "0.2.1 (8rh57whmgk6m)",
+        "build" => "8rh57whmgk6m"
+      })
+
     :ok = Workers.connected(w.id)
     {:ok, _} = Workers.update(Workers.get!(w.id), %{status: :idle})
     send(view.pid, :refresh)

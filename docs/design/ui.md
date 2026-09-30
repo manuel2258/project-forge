@@ -168,6 +168,13 @@ Board, Chats and **More**, and everything else the laptop header holds is in the
 The phone). Tickets joins both when `/tickets` exists, and not before. Nothing on `/workers` waits
 on a human, which is why nothing on it is accent.
 
+**The platform's version is beside the wordmark**, in muted mono — `forge 0.7.0` — on a laptop, and
+the last line of the More sheet on a phone, for a signed-in account only: the log-in page tells
+nobody which release is running. It is the application's own version, which every
+`mix.exs` reads from `VERSION`, so it is the release the node is actually running: the first
+thing to say when reporting something, and the way to see that a deploy took. Not a link and not
+in the nav, because nothing is done with it but read it.
+
 **Accounts is not a nav item.** It is one link beside the address in the laptop header and one
 row in the phone's sheet, shown only to a node admin, because account governance is not a place
 work happens and most accounts never reach it. It needs *a* link all the same: it is the only
@@ -865,7 +872,7 @@ card and no box, in this order:
   `current` or `other build` (below); and, on the right, *Log* — on every row, destroyed ones
   too — and the control that ends it.
 - **A refusal line**, when the machine's last join spoke a protocol this platform does not
-  accept, in `error`: *refused: protocol 3, this platform accepts 0–1 — update it*. It is drawn
+  accept, in `error`: *refused: protocol 3, this platform accepts 4–4 — update it*. It is drawn
   from the protocol the row recorded and the range the platform accepts now, so it cannot say
   something the next join would not.
 - **An unhealthy line**, when the machine said its systemd stopped answering, in `error`:

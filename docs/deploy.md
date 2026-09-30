@@ -462,6 +462,14 @@ you add a provider whose workers dial in from outside, that property is what mak
 What changes for a node that is already running, where the change is in what the platform does
 with rows it already has. Newest first.
 
+- **0.7.0: workers before protocol 4 are refused** (`design/worker-channel.md` § What needs a bump,
+  and raising the minimum). Protocol 4 and the floor arrive together, so the order is: deploy the
+  platform; every managed machine still running a protocol 3 snapshot rejoins, is refused and
+  destroyed, and its jobs go back to the queue; a template labelled 3 makes nothing, and says so
+  on `/templates`. Then build a snapshot from the release's commit (`bin/hetzner-image`) and point
+  each template at it. Until then no managed machine runs anything. A permanent machine is refused
+  but kept: `bin/worker-update` it.
+
 - **Workers say which protocol they speak, and the platform can refuse one.** Nothing is refused
   by this upgrade: a worker that says nothing is protocol 0, and the platform accepts 0 to the
   current one (`design/worker-channel.md` § Versions). What changes is what is recorded — each

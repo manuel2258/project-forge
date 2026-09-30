@@ -20,9 +20,14 @@ defmodule ForgeCore.WorkerProtocolTest do
   end
 
   describe "what the platform accepts" do
-    test "a worker that sends none is protocol 0, which is accepted" do
-      assert WorkerProtocol.minimum() == 0
-      assert WorkerProtocol.compatible?(0)
+    # The floor is 4 from 0.7.0 (docs/design/worker-channel.md § What needs a bump, and raising
+    # the minimum): a worker that sends no protocol, and every one before the unhealthy message,
+    # is refused.
+    test "nothing before protocol 4, the unhealthy machine, and so no worker that sends none" do
+      assert WorkerProtocol.minimum() == 4
+      refute WorkerProtocol.compatible?(0)
+      refute WorkerProtocol.compatible?(3)
+      assert WorkerProtocol.compatible?(4)
     end
 
     test "every protocol from the minimum to the current one" do

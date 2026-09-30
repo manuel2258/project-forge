@@ -172,7 +172,15 @@ defmodule ForgeWeb.Layouts do
   defp top_bar(assigns) do
     ~H"""
     <header class="hidden sm:flex shrink-0 items-center gap-6 border-b border-base-300 px-6 lg:px-[30px] h-14">
-      <.link navigate={~p"/"} class="font-semibold -tracking-[.02em]">forge</.link>
+      <div class="flex items-baseline gap-2">
+        <.link navigate={~p"/"} class="font-semibold -tracking-[.02em]">forge</.link>
+        <%!-- The release this node runs, to report and to see a deploy took (docs/design/ui.md
+              § Navigation). Read, never clicked, so it is outside the wordmark's link; and only
+              for an account, so the log-in page tells nobody which release is running. --%>
+        <span :if={@current_scope} id="forge-version" class="font-mono text-[12.5px] opacity-60">
+          {version()}
+        </span>
+      </div>
       <nav :if={@nav} class="flex items-center gap-5 text-sm">
         <.nav_link navigate={~p"/"} active={@active == :queue} count={@queue_count}>Queue</.nav_link>
         <.nav_link navigate={~p"/board"} active={@active == :board}>Board</.nav_link>
@@ -265,9 +273,16 @@ defmodule ForgeWeb.Layouts do
       >
         Log out
       </.link>
+      <p id="more-version" class="flex min-h-[46px] items-center font-mono text-[12.5px] opacity-60">
+        forge {version()}
+      </p>
     </div>
     """
   end
+
+  @doc "The release this node runs: the platform application's version, which is `VERSION`'s."
+  @spec version() :: String.t()
+  def version, do: :forge |> Application.spec(:vsn) |> to_string()
 
   attr :capacity, :map, required: true
   attr :prefix, :string, required: true

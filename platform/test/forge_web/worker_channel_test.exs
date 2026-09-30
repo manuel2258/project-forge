@@ -122,10 +122,16 @@ defmodule ForgeWeb.WorkerChannelTest do
     socket
   end
 
+  # A join speaks the current protocol unless the test says otherwise: since the floor rose to it
+  # (docs/design/worker-channel.md § What needs a bump), one that says nothing is refused.
   defp join_worker(worker, token, payload \\ %{}) do
     worker
     |> connect_worker(token)
-    |> subscribe_and_join(WorkerChannel, "worker:#{worker.id}", payload)
+    |> subscribe_and_join(
+      WorkerChannel,
+      "worker:#{worker.id}",
+      Map.put_new(payload, "protocol", ForgeCore.WorkerProtocol.current())
+    )
   end
 
   # A join that declares the conversation, because the machine really is running it: a join that
@@ -251,7 +257,9 @@ defmodule ForgeWeb.WorkerChannelTest do
     } do
       socket = connect_worker(worker, token)
 
-      assert {:ok, _socket} =
+      # Said nothing, so it speaks protocol 0, which is below the floor: refused as any such join
+      # is, and not crashed on.
+      assert {:error, %{reason: "protocol", protocol: 0}} =
                WorkerChannel.join("worker:#{worker.id}", ["not", "an", "object"], socket)
 
       assert Workers.get!(worker.id).protocol == 0
@@ -262,7 +270,12 @@ defmodule ForgeWeb.WorkerChannelTest do
     # itself, have the machine destroyed, or teach its template a protocol that stops it making
     # machines.
     test "a second join while one is open changes nothing", %{worker: worker, token: token} do
-      {:ok, _reply, live} = join_worker(worker, token, %{"protocol" => 1, "release" => "real"})
+      {:ok, _reply, live} =
+        join_worker(worker, token, %{
+          "protocol" => ForgeCore.WorkerProtocol.current(),
+          "release" => "real"
+        })
+
       ref = Process.monitor(live.channel_pid)
       too_new = ForgeCore.WorkerProtocol.current() + 1
 
@@ -270,7 +283,10 @@ defmodule ForgeWeb.WorkerChannelTest do
                join_worker(worker, token, %{"protocol" => too_new, "release" => "forged"})
 
       kept = Workers.get!(worker.id)
-      assert {kept.protocol, kept.release, kept.status} == {1, "real", :creating}
+
+      assert {kept.protocol, kept.release, kept.status} ==
+               {ForgeCore.WorkerProtocol.current(), "real", :creating}
+
       refute_receive {:DOWN, ^ref, :process, _pid, _reason}
     end
 
@@ -883,18 +899,28 @@ defmodule ForgeWeb.WorkerChannelTest do
 
     test "a join is a line, with what the machine said", %{worker: worker, token: token} do
       {:ok, _reply, _socket} =
-        join_worker(worker, token, %{"protocol" => 1, "release" => "0.3.0", "build" => "abc123"})
+        join_worker(worker, token, %{
+          "protocol" => ForgeCore.WorkerProtocol.current(),
+          "release" => "0.3.0",
+          "build" => "abc123"
+        })
 
       wait_until(fn -> "joined" in log_types(worker) end)
-      assert line(worker, "joined").message == "release 0.3.0, build abc123, protocol 1"
+
+      assert line(worker, "joined").message ==
+               "release 0.3.0, build abc123, protocol #{ForgeCore.WorkerProtocol.current()}"
+
       assert line(worker, "joined").level == :info
     end
 
-    test "a join that said nothing about itself says so", %{worker: worker, token: token} do
+    # Its protocol it must say, or it is refused; its release and build it need not.
+    test "a join that said nothing about what it runs says so", %{worker: worker, token: token} do
       {:ok, _reply, _socket} = join_worker(worker, token)
 
       wait_until(fn -> "joined" in log_types(worker) end)
-      assert line(worker, "joined").message == "release unknown, build unknown, protocol 0"
+
+      assert line(worker, "joined").message ==
+               "release unknown, build unknown, protocol #{ForgeCore.WorkerProtocol.current()}"
     end
 
     test "leaving is a line, and not a warning", %{worker: worker, token: token} do

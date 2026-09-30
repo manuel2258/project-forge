@@ -698,12 +698,17 @@ defmodule ForgeWeb.WorkersLiveTest do
 
       :ok =
         Workers.admit(current.id, %{
+          "protocol" => ForgeCore.WorkerProtocol.current(),
           "release" => "0.2.1 (8rh57whmgk6m)",
           "build" => "8rh57whmgk6m"
         })
 
       :ok =
-        Workers.admit(other.id, %{"release" => "0.2.0 (aaaaaaaaaaaa)", "build" => "aaaaaaaaaaaa"})
+        Workers.admit(other.id, %{
+          "protocol" => ForgeCore.WorkerProtocol.current(),
+          "release" => "0.2.0 (aaaaaaaaaaaa)",
+          "build" => "aaaaaaaaaaaa"
+        })
 
       {:ok, view, _html} = live(conn, ~p"/workers")
 
@@ -714,10 +719,10 @@ defmodule ForgeWeb.WorkersLiveTest do
       refute view |> element("#worker-#{silent.id}") |> render() =~ "build"
     end
 
-    # A release too old to say is protocol 0, and not running the build this platform ships.
-    test "a machine that said nothing is not current", %{conn: conn, user: user} do
+    # A machine that says only its protocol is not running the build this platform ships.
+    test "a machine that said nothing of its release is not current", %{conn: conn, user: user} do
       w = worker(user)
-      :ok = Workers.admit(w.id, %{})
+      :ok = Workers.admit(w.id, %{"protocol" => ForgeCore.WorkerProtocol.current()})
 
       {:ok, view, _html} = live(conn, ~p"/workers")
 
@@ -733,7 +738,13 @@ defmodule ForgeWeb.WorkersLiveTest do
       )
 
       w = worker(user)
-      :ok = Workers.admit(w.id, %{"release" => "0.2.1 (8rh57whmgk6m)", "build" => "8rh57whmgk6m"})
+
+      :ok =
+        Workers.admit(w.id, %{
+          "protocol" => ForgeCore.WorkerProtocol.current(),
+          "release" => "0.2.1 (8rh57whmgk6m)",
+          "build" => "8rh57whmgk6m"
+        })
 
       {:ok, view, _html} = live(conn, ~p"/workers")
       row = view |> element("#worker-#{w.id}") |> render()

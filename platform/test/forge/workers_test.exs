@@ -2626,12 +2626,13 @@ defmodule Forge.WorkersTest do
                {current, "0.2.1 (8rh57whmgk6m)", "8rh57whmgk6m"}
     end
 
-    # Every release before the field is protocol 0, and 0 is accepted: shipping the check turned
-    # nobody away.
-    test "a worker that says nothing is protocol 0, and is taken" do
-      {:ok, worker, _token} = Workers.create(%{provider: "fake"})
+    # Every release before the field is protocol 0. It was accepted while the floor was 0, so that
+    # shipping the check turned nobody away; the floor is 4 from 0.7.0, and 0 is refused like any
+    # protocol below it — and still written down, so the page can say why.
+    test "a worker that says nothing is protocol 0, and is refused" do
+      {:ok, worker, _token} = Workers.create(%{provider: "fake", managed: false})
 
-      assert :ok = Workers.admit(worker.id, %{})
+      assert {:error, {:protocol, 0}} = Workers.admit(worker.id, %{})
       assert Workers.get!(worker.id).protocol == 0
     end
 
@@ -2785,20 +2786,36 @@ defmodule Forge.WorkersTest do
     test "what is not text is not kept, and text is kept to what the column holds" do
       {:ok, worker, _token} = Workers.create(%{provider: "fake", managed: false})
 
-      assert :ok = Workers.admit(worker.id, %{"release" => %{"no" => 1}, "build" => 12})
+      assert :ok =
+               Workers.admit(worker.id, %{
+                 "protocol" => ForgeCore.WorkerProtocol.current(),
+                 "release" => %{"no" => 1},
+                 "build" => 12
+               })
+
       assert {Workers.get!(worker.id).release, Workers.get!(worker.id).build} == {nil, nil}
 
-      assert :ok = Workers.admit(worker.id, %{"release" => String.duplicate("r", 400)})
+      assert :ok = Workers.admit(worker.id, speaking(%{"release" => String.duplicate("r", 400)}))
       assert String.length(Workers.get!(worker.id).release) == 255
 
       # The column counts code points. An accent written as its own code point is one grapheme
       # and two of them, so a cut by graphemes left 400 code points for a column of 255, and the
       # write — and with it the join — failed.
-      assert :ok = Workers.admit(worker.id, %{"release" => String.duplicate("e\u0301", 200)})
+      assert :ok =
+               Workers.admit(
+                 worker.id,
+                 speaking(%{"release" => String.duplicate("e\u0301", 200)})
+               )
+
       assert length(String.codepoints(Workers.get!(worker.id).release)) == 255
 
       # NUL is not text Postgres will store, and bytes that are not UTF-8 are not text at all.
-      assert :ok = Workers.admit(worker.id, %{"release" => "0.2.1\0x", "build" => <<255, 0>>})
+      assert :ok =
+               Workers.admit(
+                 worker.id,
+                 speaking(%{"release" => "0.2.1\0x", "build" => <<255, 0>>})
+               )
+
       assert {Workers.get!(worker.id).release, Workers.get!(worker.id).build} == {"0.2.1x", nil}
     end
   end
@@ -3112,4 +3129,8 @@ defmodule Forge.WorkersTest do
     |> Ecto.Changeset.change(Map.new(attrs))
     |> Forge.Repo.update!()
   end
+
+  # A join at the current protocol, for tests about the other fields: one that says none is
+  # refused since the floor rose (`docs/design/worker-channel.md` § What needs a bump).
+  defp speaking(payload), do: Map.put(payload, "protocol", ForgeCore.WorkerProtocol.current())
 end

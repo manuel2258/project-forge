@@ -350,7 +350,8 @@ standard for what goes in, how it is bounded, and what the platform adds of its 
 
 **The platform accepts protocol `P` if and only if `minimum ≤ P ≤ current`**, both from
 `ForgeCore.WorkerProtocol`. A worker that sends no `protocol` is protocol 0, which is every
-release before this field existed; `minimum` starts at 0, so shipping the check refused nobody.
+release before this field existed; `minimum` started at 0, so shipping the check refused nobody,
+and is 4 from release 0.7.0 (§ What needs a bump, and raising the minimum).
 A newer worker is refused as surely as an older one: a platform cannot know what a protocol
 from after it expects.
 
@@ -447,8 +448,23 @@ reply, and `unhealthy` in the join. It is a bump because a protocol 4 worker act
 acting on it — it stops its jobs and reports none of them, and drops what it is assigned — and a
 platform that ignored the message would leave every one of those jobs `running` on a machine that
 will never report it. A protocol 3 worker on a new platform never sends either, and the platform
-treats it exactly as before: a machine that stopped answering is found by the timeout, as it
-always was. The minimum stays 0.
+would have treated it exactly as before — a machine that stopped answering found by the timeout —
+had the minimum stayed where it was.
+
+**The minimum is 4, from release 0.7.0.** No machine outside the operator's own ran an older
+worker when protocol 4 shipped — no node served anyone else, and there were no permanent machines
+to update — so the steps below cost one snapshot built at protocol 4 and the templates moved to it,
+and the platform stops carrying three older protocols. **Here the order is the other way round**:
+protocol 4 and the floor ship in the same release, and a platform at 0.6.0 would have refused a
+snapshot labelled 4 as too new, so the platform is deployed first and the snapshot built after —
+with, in between, no managed machine to run anything (`docs/deploy.md` § Upgrading). A worker at
+0–3 is refused at its join, and a managed one is destroyed there (above); a template whose snapshot
+is labelled older makes no machine until it names another, and one whose snapshot is unlabelled
+makes one, which is refused and marks the image (below). What the floor leaves with nothing to decide is still in the
+code: `Forge.Jobs.protocol/1`'s per-kind protocols (2 for a command, 3 for an agent), the protocol
+dimension of `Workers.fits?/2` and the scheduler's demand, and the templates page's word for a
+snapshot that cannot run an agent — every worker it accepts can run anything. Taking them out is
+§ Open.
 
 What rides along without a bump, because an older side may ignore it: `job.harness.memory`
 events and the `memory` a `starting` event carries (`docs/design/claude-code-events.md` § Memory),
@@ -592,6 +608,14 @@ already has the framework for.
 
 ## Open
 
+- **What the protocol floor left behind** (§ What needs a bump, and raising the minimum). With
+  every accepted worker at protocol 4: `Forge.Jobs.protocol/1`'s per-kind numbers, the protocol
+  dimension of `Workers.fits?/2` and the scheduler's demand decide nothing and can go; the workers
+  page's *no stats — update it*, for a connected machine that spoke no protocol, can no longer be
+  drawn; and `Provisioning.holds?/2` still asks only whether a template's image is new enough for
+  the job, not whether this platform accepts it, so a project with a small template labelled 3 and
+  a larger one labelled 4 has the small one chosen and refused three times before the larger is
+  used. The last is the one that does something wrong; the rest are dead.
 - **No flow control on events.** A pathologically chatty harness could outrun the platform's event
   writer. The bound today is the harness's own output, which milestone 1 observed and did not find
   alarming; if it becomes one, the fix is batching events per job, not dropping them.

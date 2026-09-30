@@ -33,6 +33,11 @@ is what a failed `create` leaves.
 A worker joins the channel when the release boots, which is minutes before its Nix store and seed
 are usable. `docs/design/worker-channel.md` § Messages says why `ready` is a separate message.
 
+**Nor is a machine marked unhealthy**, whatever its status says. `unhealthy_at` is a mark beside
+the status rather than a status of its own, as reachability is: a machine whose systemd stopped
+answering is `busy` or `idle` in every other respect, and the status keeps meaning what it meant
+for the sweeps that read it (§ A machine whose systemd stops answering).
+
 ### Managed and unmanaged
 
 A `managed` worker is one the platform created through the driver and may therefore destroy. An
@@ -364,15 +369,73 @@ project's numbers. It is a configured default precisely so replacing it is a con
 One transient systemd unit per job, started by the worker:
 
 ```
-systemd-run --pipe --wait --collect --unit=forge-job-<job_id>
+systemd-run --pipe --wait --collect --unit=forge-job-<short id>
             --uid=<per-job user> --property=WorkingDirectory=<worktree>
-            --property=MemoryMax=<slice> --property=MemorySwapMax=0
-            --property=CPUWeight=100
+            --property=MemorySwapMax=0 --property=OOMPolicy=continue
+            --property=ExecStopPost=-+<the job's worker directory>/at-exit
+            --property=MemoryMax=<slice> --property=CPUWeight=100
             -- <nix develop .#env --command> <harness>
 ```
 
 - **`MemorySwapMax=0`.** A slice allowed to swap does not die at its ceiling, it drags the machine
   down to disk speed and takes its neighbours with it. The ceiling should kill.
+- **No ceiling below 512 MiB**, `ForgeCore.Workflow.Resources.minimum_memory/0` — the one
+  definition, which the grammar, the new-chat form, the templates page, the workers page's offer
+  form and the job row's changeset all refuse below, each with a message naming it, and which
+  the worker checks again before it makes a unit (below). It is chosen, not measured: nothing
+  here has measured Claude Code's footprint, and 512 MiB is a floor under which no agent is
+  expected to run, so a smaller ceiling is never a job that runs slowly; at its smallest it is a
+  machine that stops working (§ A machine whose systemd stops answering). **The worker refuses too**:
+  an assignment whose `memory_max` is below the minimum — or is not a number — is not started,
+  and ends at once as an error whose reason names the ceiling and the minimum (a workflow job's
+  or a command's `result`, a chat's `failed`). It is the last place a nonsense ceiling can be
+  kept from systemd, and it holds against a platform older than the worker. What a bare number
+  means is not this rule's business: it is bytes, as it always was.
+- **`OOMPolicy=continue`.** The default, `stop`, ends the whole unit the moment the kernel kills
+  any process in it for memory — which is what milestone 3's demo recorded as `Failed with
+  result 'oom-kill'` (`docs/measurements.md` § The isolation cross), and what turned an agent's
+  Gradle daemon dying into the agent dying with it. With `continue` the process the kernel chose
+  dies alone: the agent sees its command exit 137 (SIGKILL), and can run it again with less
+  parallelism. When the kernel chooses the harness itself, the unit ends anyway, because its main
+  process is gone. Under `continue` an OOM kill never touches the unit's result, so a harness
+  killed for memory ends with result `signal` and never `oom-kill` — which is why the reading
+  below exists. **Observed on the worker image** (systemd 261.2, `nix/worker-health.nix`,
+  `docs/measurements.md` § The worker at its ceiling, on the image): a child allocating past a
+  512 MiB ceiling was killed alone, its shell saw 137 and carried on, and the unit finished
+  `success`; a main process killed there ended the unit with `signal`, `code=killed,
+  status=9/KILL`, and `systemd-run` exited 255.
+- **The job is told its ceiling**: `FORGE_MEMORY_MAX`, in bytes, in the environment of an agent
+  and of a command, and a sentence in both preambles saying what a SIGKILL or an exit status of
+  137 most likely means and what to do instead of trying again. The preamble names the variable
+  rather than the size, because it is one document for every job and its hash is part of every
+  spec.
+- **Not `--quiet`.** Without it, `systemd-run` writes `Running as unit: forge-job-….service` once
+  the unit exists, and a summary — *Finished with result*, *Main processes terminated with*,
+  *Memory peak*, … — once it has ended, both into the same stderr the job writes to. The first
+  line is half of what lets the worker believe a bus error (§ How a machine finds out): a job's
+  own process only runs once the unit exists, so a stderr that never says the unit exists held
+  nothing the job wrote — unless the job rewrote it, which is why the unit's last reading is the
+  other half. The summary is taken out again wherever stderr's last line is used as a reason,
+  since *Memory peak: 30M* names nothing. **Observed on the image**, where both differ a little
+  from what this note first quoted: the unit line is `Running as unit: forge-job-….service;
+  invocation ID: <32 hex>` whenever PID 1 had given the unit one, and the summary's labels are
+  right-aligned, so each starts with spaces (`          Finished with result: success`).
+  `own_line?/1` trims and matches on the prefix, and took both out.
+- **The unit's last reading, `ExecStopPost=-+…/at-exit`.** `--collect` and the unit's end take its
+  cgroup away, so a reading made from outside after the process has gone finds nothing, and one
+  made every few seconds while it runs misses the kill that ended it. So the unit writes its own:
+  a script the worker writes into the job's worker directory at `prepare/1`, run by systemd once
+  the main process has ended and before the cgroup is removed. `+` runs it as root — the job's
+  user may not write into the worker's directory, which is the point: nothing the job ran can
+  forge the file — and `-` keeps a failure of it from failing the unit. It copies
+  `memory.events`, `memory.peak` and `memory.max`, and the `EXIT_CODE`, `EXIT_STATUS` and `SERVICE_RESULT`
+  systemd hands a stop command, into `at-exit.reading` beside it, which the slice reads and removes
+  when the process ends (`Slice.ended/2`). POSIX `sh` and nothing else, so it needs no `PATH`. This is how a run knows its
+  harness was killed for memory: its main process ended on `killed`/`KILL` and its cgroup
+  counted an OOM kill. **Observed on the image**: the reading was root's, and held the events,
+  the peak, the ceiling and `exit_code`, `exit_status` and `result` for a unit that finished and
+  for one whose main process the kernel killed. It runs in the unit's own cgroup, which is what
+  lets a job starve it (§ How a machine finds out).
 - **Equal `CPUWeight`.** Proportional shares, not quotas: an agent waiting on inference donates its
   share to whoever is compiling, which is the behaviour `docs/decisions.md` asks for and quotas
   would prevent. `measure/`'s M2 already runs its builds this way.
@@ -423,6 +486,35 @@ and it is the only implementation that can be exercised in a container. The same
 what `measure/`'s selftest already makes for the same reason
 (`docs/design/measurement-harness.md`), and stamping which one ran is part of the record there and
 here.
+
+### What the slice reads while a job runs
+
+A ceiling that binds is visible from outside the job only in its cgroup, and the cgroup is plain
+files: `/sys/fs/cgroup/system.slice/<unit>/` — `Slice.Systemd.unit_name/1` names the unit —
+read with ordinary file reads, which is also why they still answer when PID 1 does not. Behind
+`ForgeWorker.Slice` as `memory/1`, so the runner does not know which slice ran and `Slice.Direct`
+simply has nothing to say:
+
+- `memory.events` — `max` (the ceiling was reached and memory is being reclaimed or throttled),
+  `oom` and `oom_kill` (a process in the job was killed for memory);
+- `memory.current`, `memory.peak` and `memory.max` — now, the most so far, and the ceiling;
+- `memory.pressure` — the `full avg10` figure: the share of the last ten seconds in which every
+  process in the job was stalled on memory at once.
+
+**Sampled every five seconds, and only while a run is live** (`:memory_sample_ms`): from the
+process's spawn to its exit, each correction round from its own, a conversation for as long as
+its process lives. What a sample means is `ForgeWorker.Job.Memory`'s, which is pure, and the
+events it makes are `claude-code-events.md` § Memory's. What a run ends with — the ceiling, the
+peak and the OOM kills — comes from the unit's own last reading (`at-exit`, above) when there is
+one, and from the last sample when there is not.
+
+**Sustained pressure is `full avg10` at or above 20% on two samples in a row.** Twenty percent is
+a guess — nothing here has measured an agent at its ceiling — and it is a configuration key
+(`:memory_pressure_full`) rather than a constant, so moving it is a change to the worker's
+configuration and not to its code; nothing reads it from the environment, so on the image that
+is still a new release. Two samples is ten seconds of
+a job doing little but waiting for pages: short enough to say so while it is happening, long
+enough that one bad second is not an episode.
 
 ## Volumes and the seed
 
@@ -948,6 +1040,201 @@ creation, two if it counts the clock.
 [testflows]: https://github.com/testflows/TestFlows-GitHub-Hetzner-Runners
 [cloudtally]: https://cloudtally.eu/blog/hetzner-cloud-billing-explained
 
+## A machine whose systemd stops answering
+
+**What happened, on 2026-09-29, on release 0.6.0.** Gathered read-only from the production
+database; nothing below was observed on the machine itself, which is gone.
+
+1. A chat was created with `2` typed in the new-chat form's Memory field, meaning 2 GiB. A bare
+   number is bytes (`workflow-grammar-v1.md` § Resources), so the job was stored with
+   `memory_max = 2`, and nothing refused it.
+2. It was placed on a fresh Hetzner machine — worker `4eb64045…`, 4 GiB, 2 cores — which accepted
+   it and started the harness through `Slice.Systemd` with `--property=MemoryMax=2`.
+3. The harness never said it started: 30 minutes of `job.harness.starting`, every two minutes,
+   each with an empty stderr.
+4. A second chat, sized correctly at 2 GiB, was then placed on the same machine. Its `starting`
+   events carried `Failed to start transient service unit: Connection timed out` — `systemd-run`
+   could not get an answer from PID 1. From then on the machine could run nothing, while its
+   worker kept heartbeating and the platform kept placing work on it.
+5. That second job sat in `starting` too, although `systemd-run` had plainly failed.
+
+**The mechanism is confirmed on the worker image** (2026-09-30, systemd 261.2, `nix build
+.#checks.x86_64-linux.worker-health`; `docs/measurements.md` § The worker at its ceiling, on the
+image). Since v255 PID 1 starts a unit's process through `sd-executor`, with `CLONE_VFORK |
+CLONE_INTO_CGROUP`: the child is born inside the unit's cgroup and PID 1 is suspended until the
+child execs. With the worker's own flags and `MemoryMax=2` — which the cgroup holds as `0`, two
+bytes rounding down to no pages — PID 1 sat in `D` state in `kernel_clone`, and the kernel
+reported `Out of memory and no killable processes...` for the child over and over: it can
+neither fault in what exec needs nor be killed, so PID 1 never resumes. Every bus call after that
+times out, and new ssh logins hang, since they go through logind to PID 1. The kernel's
+repetition also floods the journal: the wedged boot's journal kept its last 8 seconds, 711,949
+lines, and rotated away everything before, the worker's own lines with it — the machine's log on
+the platform (`worker-log.md`) is what survives. Ceilings of a sensible size behave as designed
+(§ The job slice).
+
+**Why the second job did not end is confirmed**, by reading the code: the relay in front of a
+streaming harness waited on its stdin after `systemd-run` had exited, so nothing ever reported an
+exit (`claude-code-events.md` § A harness that never starts). That is fixed, and a run that fails
+to start now ends within seconds.
+
+Three things answer it, and the first is the minimum (§ The job slice): a ceiling that small is no
+longer made. The other two are for a machine that stops answering for any other reason.
+
+### How a machine finds out
+
+On the worker, and only under `Slice.Systemd` — `Slice.Direct` has no systemd to ask. Either of
+two signals marks the machine unhealthy (`ForgeWorker.Health`):
+
+- **A `systemd-run` that fails with a bus error.** When a run ends, the slice reads its output
+  (`Slice.ended/2`): a line that starts `Failed to start transient service unit: ` or
+  `Failed to connect to ` and ends in `Connection timed out`, `Transport endpoint is not
+  connected` or `Connection reset by peer`. Those are what systemd prints —
+  `bus_call_with_hint()` and `bus_log_connect_full()` in `run.c` and `bus-util.c`, with the errno
+  as text — and they are one list, `Slice.Systemd`'s `@bus_errors`. **Observed on the image**: a
+  `systemd-run` started while PID 1 was wedged gave up after 25 seconds (sd-bus's call timeout),
+  exited 1, and printed exactly `Failed to start transient service unit: Connection timed out`,
+  which `bus_error/1` found and `ended/2` believed.
+
+  **The run that wedged PID 1 is not one of them.** Its start call is answered — queueing the
+  start job needs no fork — and it is the next call that waits: after the same 25 seconds and with
+  exit 1 it printed either `Failed to request invocation ID for unit: Connection timed out` alone,
+  or `Running as unit: forge-job-….service` and then `Failed to query unit state: Connection timed
+  out`, depending on how far PID 1 got (both seen). Neither is in the list, and the second follows
+  a `Running as unit:`, so that run ends as the job's own failure and the probe below is what finds
+  the machine. Whether the first should join the list is open (§ Open). The invocation-ID call is
+  only made without `--quiet`, which is also why the 2026-09-29 chat that caused the wedge, under a
+  worker that still passed `--quiet`, had an empty stderr.
+
+  **It is believed only when the
+  unit never existed**: stderr is shared with the job, and a job's flake can print anything from
+  its `shellHook`. A job's own process runs only once its unit exists, and `systemd-run` says so
+  first (`Running as unit:`, which is why it is no longer `--quiet`), so an output that never says
+  the unit existed held nothing a job wrote — **until the job rewrites it**. With `--pipe` the
+  job's stderr is the very file `systemd-run` writes to, and a process holding it can truncate it
+  and put a bus error of its own where `Running as unit:` was; review found that, and reproduced
+  it against `Slice.Systemd.ended/2`, which believed the forgery and would have stopped every job
+  on the machine and rebooted it. So the output is not enough alone: a bus error is believed only
+  when, besides, the unit left **no last reading** (`at-exit.reading`, § The job slice). That file
+  is written by root, into the worker's own directory the job cannot reach, by a unit that
+  existed and stopped; a job can neither write it nor remove it. A stale one is removed when the
+  slice is prepared, so a reading from an earlier worker's run of the same job can neither hide a
+  genuine bus error nor lend its exit to a run that never started.
+
+  **What is left is not closed**, and a second review showed it is wider than it first looked:
+  the job can stop its unit's stop command from writing at all. The stop command runs in the
+  unit's own cgroup, and a job that fills that cgroup with pages that outlive its processes —
+  files in `/dev/shm`, which is world-writable, and which `MemorySwapMax=0` keeps in memory — has
+  the stop command killed for memory before it writes a byte. **Observed on the image, every
+  time**: a job that truncated its stderr, wrote `Failed to connect to bus: Connection timed out`
+  and filled `/dev/shm` until the writer was killed, then sixteen pages at a time after that, had its
+  stop command killed as `(at-exit)` in `task_memcg=/system.slice/forge-job-….service` before it
+  exec'd, left no reading, and was believed by `ended/2` — 10 times in 10 by hand and 5 in 5 in
+  each run of the check; a single fill without the squeeze got through 3 times in 12. A job that
+  does that takes its machine out of service — the thing this whole note exists to prevent.
+  **Asking PID 1 once before believing would close it**, since a forged bus error comes from a
+  machine whose PID 1 answers: straight after each forgery `probe/0` answered in 6 ms or less, and
+  against a truly wedged PID 1 it fails in 10.0 seconds (`timeout`'s TERM; exit 124, no output).
+  That is a change to the operator's rule that a bus error is enough on its own, so it is put to
+  the operator rather than made here. Until then the probe alone would still find a real wedge,
+  two minutes later. A job that fails
+  this way is the machine's failure, not the job's: the worker does not report it (below), and the
+  platform puts it back in the queue.
+- **A probe that cannot get an answer from PID 1 twice in a row.** `timeout -k 5 10 systemctl show
+  --property=Version --value`, once a minute (`:health_probe_ms`), in a task of its own, so a probe
+  that hangs is killed by `timeout` and never holds up anything else the worker does. Twice
+  because one missed answer on a loaded machine is not a wedge; two minutes is. **Observed on the
+  image**: against a wedged PID 1 the probe failed in 10.0 seconds with exit 124 and no output (an
+  unbounded `systemctl show` took 90 seconds to say `Transport endpoint is not connected`), and the
+  worker's own health process marked the machine 94–97 seconds after the wedge in three runs of
+  the check, and about two minutes after it on the local end-to-end run.
+
+### What happens then
+
+1. **The worker stops.** It writes `machine.unhealthy` with the reason (the machine's log,
+   `worker-log.md`), stops every job it is running and reports none of them, and starts nothing
+   it is given afterwards. The platform has put all of them back in the queue, and a result from
+   this machine after that — its git token revoked, its slice broken — would be recorded as the
+   job's answer (`worker-channel.md` § Delivery).
+2. **It tells the platform**, over the channel: `unhealthy` with the reason, acked like a result
+   (`worker-channel.md` § Messages), and its join says so until the worker restarts.
+3. **The platform stops placing work on it at once** — `Workers.assignable/3` passes over a row with
+   `unhealthy_at` set, and the channel puts back in the queue an assignment that reaches it after
+   the mark — and treats its running jobs exactly as a lost machine's, through the same
+   `requeue_running/2`: a chat goes dormant and can be reopened, a workflow job and a command go
+   back to `pending`, and each job's `job.interrupted` says `worker_unhealthy`.
+4. **It answers whether the machine should reboot**: yes for a managed machine that has not been
+   told to within the hour (`reboot_interval_ms`), and the time it said so is kept on the row as
+   `rebooted_at`. Asked again about the same episode — a reply lost to a dropped socket — it says
+   yes again, since `rebooted_at` is not older than `unhealthy_at`.
+5. **Only a managed machine reboots**, and it takes two keys: the platform's yes, and the machine's
+   own `FORGE_MANAGED=1`, which `Forge.Provider.MachineConfig` writes for every machine a driver
+   makes and `mix forge.worker.new` does not. So neither a platform's mistake nor a copied
+   environment file reboots somebody's own computer. The reboot is `systemctl --force --force
+   reboot`, behind a function the tests replace: with `--force` twice, `verb_start_special()`
+   skips logind's inhibitor check and goes straight to `halt_now()`, which is `sync()` and
+   `reboot(2)` with no bus call. **Observed with PID 1 wedged**: run by hand, the command printed
+   `Rebooting.`; run through `ForgeWorker.Health.reboot/0`, the kernel said `reboot: Restarting
+   system` and the console showed a login prompt again 7–8 seconds later, in the same QEMU. `/proc/sysrq-trigger` was not needed. Both
+   `--force`s matter: with one, the wedged machine had not rebooted three minutes later.
+
+**An unmanaged machine never reboots itself.** It is somebody's own computer. It says it is
+unhealthy, the platform places nothing on it, and the workers page says so, until it joins again
+without saying it — its owner restarted the machine, or the worker. There is no button to clear it
+on the page: the worker's own belief is what refuses work, and a platform-side clear would place
+jobs on a machine that still drops them. **Observed** with a machine from `mix forge.worker.new`
+wedged on purpose: the platform answered *not rebooted: it is not the platform's machine, and its
+owner restarts it*, and three minutes later it was still up and still wedged.
+
+**No reboot loops.** A managed machine that goes unhealthy again within an hour of being told to
+reboot is not told again. It stays unhealthy, holding its template's slot, and the workers page
+says it is waiting for a person — who can destroy it there, as any managed machine. **Observed**:
+wedged again a minute after it had rejoined from its reboot, a local machine was answered *not
+rebooted: it was told to at 2026-09-30 11:35:34 UTC, within the hour, so it waits for a person*,
+and its line on `/workers`
+read *unhealthy since 11:39 UTC: PID 1 did not answer twice in a row: … — rebooted within the
+hour, so not again: destroy it, or wait for it to rejoin healthy*
+(`docs/measurements.md` § The unhealthy machine, end to end).
+
+### The same machine, the same row
+
+**Observed for the local driver; not on Hetzner.** `forge-worker-config.service` is a oneshot wanted by
+`multi-user.target`, so it runs on every boot, not only the first; the blackhole route it puts on
+`169.254.169.254` is runtime state that a reboot clears, so its fetch from the metadata service
+works again, and `/etc/forge-worker.env` is written again with the same worker id and token — the
+token is long lived and the row keeps its hash (`nix/worker-image.nix`). The local driver's config
+disk stays attached across a guest reboot. The rejoin authenticates the row it always had; rows
+are made only by a create and by `mix forge.worker.new`. On the image under QEMU the unit ran again
+on the new boot and wrote `/etc/forge-worker.env` byte for byte as before, from the config disk;
+end to end, the rebooted machine joined as the same worker row, and the platform cleared its mark
+(`docs/measurements.md` § The unhealthy machine, end to end). **The metadata service's half — the
+route cleared, the fetch working again — has not been observed on a Hetzner machine.**
+
+**Its rejoin waits for the platform to let go of the old socket.** A machine that reboots sends no
+close, so the platform keeps its channel until the socket's read timeout, about a minute after the
+last frame; until then every join is refused as `already_connected` (`worker-channel.md` § Authentication),
+and the machine retries. Observed: the rebooted machine's joins were refused ten times, and it
+joined 68 seconds after it was told to reboot, eight seconds after the platform logged
+`disconnected: shut down: :read_timeout`. The grace below covers it with room to spare; whether the platform should close
+the channel itself when it answers yes is open (§ Open).
+
+What the platform's timers do to a machine gone for a minute or two:
+
+- **The unreachable sweep would take it after `worker_timeout_ms`**, three minutes from its last
+  heartbeat, and a managed one it takes is destroyed. So a row told to reboot, and still marked
+  unhealthy, is left alone for `reboot_grace_ms` (ten minutes) from `rebooted_at`. Past that it is
+  a machine that did not come back, and is lost like any other. **Observed**: a machine told to
+  reboot and then frozen so it could not come back kept its row four minutes past a 15-second
+  timeout, and `sweep_unreachable/0` took it the moment the grace was shortened to a second
+  (`docs/measurements.md` § The unhealthy machine, end to end).
+- **The idle sweep does not take it**: its jobs were requeued and nothing released it, so it is
+  still `busy`. A machine that was already `idle` when it went unhealthy keeps its clock and can go
+  at the end of its period, as it would have anyway.
+- **It is not counted twice.** `Provisioning.live_count/1` counts rows and there is one. It is not
+  assignable while it is marked, so a job that needs a machine meanwhile may have one made from
+  its template, if the template has room — which is capacity, not a second count.
+- **When it joins again without saying it is unhealthy**, the mark is cleared, its `ready` makes it
+  `idle` with a fresh clock (it was `busy`), and it takes work again.
+
 ## What the operator's machine settled
 
 Most of this milestone was written in a container with no KVM, no systemd as PID 1, no btrfs and
@@ -980,6 +1267,10 @@ Two things the demo showed that no test could: an assignment carries a `MemoryMa
 practice, and a worker really is destroyed after its idle period and recreated by the next
 ticket.
 
+The demo's `oom-kill` was the unit's default `OOMPolicy=stop` ending the whole job for one killed
+process. The unit now continues (§ The job slice), so a harness killed for memory is recognised
+from the unit's last reading rather than from that result, which it no longer produces.
+
 ## Open
 
 - **`slice_bytes` was one number for every job, and is not any more.** A state or the workflow's
@@ -998,7 +1289,7 @@ ticket.
   slice — and how big that is depends on how much of a project's closure substitutes rather than
   builds, which is also unmeasured. **Measure the idle footprint and the daemon's
   `memory.peak` before moving it**, because the failure is asymmetric: too small a *slice*
-  OOM-kills one job with `CONSTRAINT_MEMCG`, and too small a *reserve* lets the global OOM killer
+  OOM-kills a process in one job with `CONSTRAINT_MEMCG`, and too small a *reserve* lets the global OOM killer
   pick, which on this machine means the worker release.
 - **`max_workers` was 1 for the PoC, and is 1 by default on a template.** Nothing in the
   scheduler assumes it; nothing has tested it above 1 either. `docs/design/provisioning.md` moved
@@ -1008,6 +1299,23 @@ ticket.
   costs more than it saves is a dogfooding question.
 - **A partitioned worker is destroyed, not waited for.** Correct while jobs are re-runnable and
   machines are cattle; revisit if a job ever becomes expensive enough to want recovery.
+- **Whether a bus error is believed only once PID 1 has also failed a probe.** The forgery in
+  § How a machine finds out works on the image every time it is squeezed; after each one PID 1
+  answered `probe/0` in 6 ms or less, and a truly wedged PID 1 fails it in 10.0 seconds. So one
+  probe before believing would refuse every forgery seen and cost a genuine bus error ten
+  seconds. It changes the rule that a bus error is enough on its own, which is the operator's.
+- **Whether the run that wedges PID 1 is the machine's failure too.** It prints `Failed to request
+  invocation ID for unit: Connection timed out`, or `Failed to query unit state: …` after a
+  `Running as unit:`, and ends as the job's own failure while the probe finds the machine two
+  minutes later. Adding the first to `@bus_calls` would requeue that job instead — and a job that
+  wedges any machine it starts on would then be carried from machine to machine, one reboot each.
+  Since the minimum, no ceiling of a job's can do it; nothing else that does is known.
+- **Whether the platform closes a machine's channel when it tells it to reboot.** It does not, so
+  the rebooted machine's joins are refused until the old socket's read timeout, about a minute
+  (§ The same machine, the same row).
+- **What a job leaves in `/dev/shm` outlives it.** Nothing at a job's end removes it, and its owner
+  is a uid `useradd` may hand to the next job (`docs/measurements.md` § The worker at its ceiling,
+  on the image). Found while reproducing the forgery; not otherwise looked at.
 - **The model a job asks for is not part of what makes a worker assignable.** It cannot bite
   while `max_workers` is 1, which is the item above that gates it: this matters only once the
   fleet is large enough to be heterogeneous. Stated once, in

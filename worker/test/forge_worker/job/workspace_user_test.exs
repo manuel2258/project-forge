@@ -40,6 +40,14 @@ defmodule ForgeWorker.Job.WorkspaceUserTest.Recording do
   # The subcommand, past the credential helper's `-c` pairs `Checkout` puts in front of it.
   defp git_command(["-c", _setting | rest]), do: git_command(rest)
   defp git_command([command | _rest]), do: command
+  @impl ForgeWorker.Slice
+  defdelegate memory(context), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate ended(context, output), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate probe(), to: ForgeWorker.Slice.Direct
 end
 
 defmodule ForgeWorker.Job.WorkspaceUserTest do

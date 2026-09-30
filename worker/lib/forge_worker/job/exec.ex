@@ -15,6 +15,18 @@ defmodule ForgeWorker.Job.Exec do
   @spec inherited_env() :: [{String.t(), String.t()}]
   def inherited_env, do: for(key <- @inherited, value = System.get_env(key), do: {key, value})
 
+  @doc """
+  What a job is told of its ceiling: `FORGE_MEMORY_MAX`, in bytes, when the slice has one — for an
+  agent and a command alike, so a build can size its own parallelism and an agent can tell a
+  SIGKILL for what it most likely is (`docs/design/worker-tier.md` § The job slice). Nothing when
+  there is no ceiling, rather than a figure nobody set.
+  """
+  @spec memory_env(map() | nil) :: [{String.t(), String.t()}]
+  def memory_env(%{memory_max: bytes}) when is_integer(bytes),
+    do: [{"FORGE_MEMORY_MAX", Integer.to_string(bytes)}]
+
+  def memory_env(_slice_opts), do: []
+
   @doc "The command that runs `executable` inside the project's `env`, when asked to and named."
   @spec nix(String.t(), [String.t()], String.t() | nil, boolean()) :: {String.t(), [String.t()]}
   def nix(executable, args, env, true) when is_binary(env),

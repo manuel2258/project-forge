@@ -123,7 +123,9 @@ platform's other end of that chain, and `Forge.Jobs.default_resources/0` is wher
   more than talk can raise it without touching what a workflow job gets.
 - **The cost is that a chat cannot do a cold build.** `MemoryMax` is hard and swap is off, and
   M3 put a cold build of this repository at 1612 MiB debug and 1879 MiB release. A conversation
-  asked to run the full gate is killed rather than slowed. Conversations are the common case and
+  asked to run the full gate has its build killed rather than slowed — and, with
+  `OOMPolicy=continue` (`worker-tier.md` § The job slice), goes on: the agent sees the build exit
+  137 and can run it again with less parallelism, or say it cannot. Conversations are the common case and
   building is a workflow's job, which still resolves to `slice_bytes`.
 - **Cores stay whole.** `cpu` is `pos_integer` through the grammar, the job row, the worker row
   and the gate's arithmetic, so there is no fraction to give a chat — and there is nothing to
@@ -185,12 +187,15 @@ assignable(kind, memory, cores, harness, project, preferred) =
     and worker runs harness, taking the job's credential from the assignment
     and worker.memory_budget - promised_memory(worker) >= memory
     and worker.cores        - promised_cores(worker)  >= cores
+    and the worker is not marked unhealthy
 ```
 
 Whose machines a project may use is `Workers.serving/1`: a permanent machine through the
 `project_workers` its owner made, one the platform made through its template's `project_templates`
 (`identity.md` § Workers). A permanent machine nobody assigned serves nothing. The harness clause
-is `Workers.runs?/2` (`credentials.md` § What a worker offers now).
+is `Workers.runs?/2` (`credentials.md` § What a worker offers now). The last is `unhealthy_at`,
+set by a machine whose systemd stopped answering (`worker-tier.md` § A machine whose systemd stops
+answering).
 
 `promised` stops being `count * slice_bytes()` and becomes two sums over the worker's `:running`
 and `:waiting` jobs, which is what the denormalised columns above are for.
@@ -285,7 +290,11 @@ signal.
 template assigned to its project can ever provide is stuck with that as the reason, through the
 mechanism an exhausted allowance already uses. `forge_core` cannot make this call — it has no
 database and cannot know what machines exist (`commands.md` § Resources) — so the validator
-accepts `memory: 512GiB` and the scheduler is what says no. A job queued for ever against capacity
+accepts `memory: 512GiB` and the scheduler is what says no. The other end is `forge_core`'s to
+refuse, because it needs no machine to know: a ceiling below 512 MiB describes no job that runs,
+and the grammar, the forms and the job row all refuse it (`workflow-grammar-v1.md` § Resources) —
+as do the templates page, for a machine smaller than one job, and the workers page's offer form,
+for a machine offering less than one. A job queued for ever against capacity
 that will never exist is the failure this exists to prevent.
 
 **And four answers, not two, because the operator's next move differs in each.** With no node

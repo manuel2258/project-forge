@@ -159,6 +159,16 @@ defmodule ForgeWorker.Config do
     end
   end
 
+  @doc """
+  Whether a driver made this machine — `FORGE_MANAGED=1`, which `Forge.Provider.MachineConfig`
+  writes for every machine a driver makes and `mix forge.worker.new` does not. The second key a
+  reboot needs, beside the platform's yes: a machine somebody provisioned by hand is their own
+  computer, and nothing the platform says reboots it (`docs/design/worker-tier.md` § What happens
+  then). Anything but `1` or `true` is no — a copied, mistyped or absent line never reboots.
+  """
+  @spec managed?() :: boolean()
+  def managed?, do: get(:managed, "FORGE_MANAGED") in [true, "1", "true"]
+
   defp get(key, env) do
     case Application.get_env(:forge_worker, key) do
       nil -> System.get_env(env)

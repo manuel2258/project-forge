@@ -118,6 +118,18 @@ defmodule ForgeWeb.WorkersLive do
     %{memory_budget: memory, cores: cores, accepts: ticked(params)}
   end
 
+  # Less memory than one job can run in is said as that, naming the minimum
+  # (`docs/design/workflow-grammar-v1.md` § Resources); anything else a machine cannot have is one
+  # sentence, as it always was.
+  defp offer_error(%Ecto.Changeset{errors: errors}) do
+    too_little = ForgeCore.Workflow.Resources.too_little_memory()
+
+    case errors[:memory_budget] do
+      {^too_little, _opts} -> ForgeCore.Workflow.Resources.memory_refused()
+      _other -> "those are not figures a machine can have"
+    end
+  end
+
   # Nothing ticked is nil, which every reader treats as "takes anything" — the same reading a
   # machine that reported no kinds gets.
   defp ticked(params) do
@@ -210,8 +222,8 @@ defmodule ForgeWeb.WorkersLive do
       {:error, :made_by_the_platform} ->
         {:noreply, assign(socket, error: "a machine the platform made is replaced, not edited")}
 
-      {:error, %Ecto.Changeset{}} ->
-        {:noreply, assign(socket, error: "those are not figures a machine can have")}
+      {:error, %Ecto.Changeset{} = changeset} ->
+        {:noreply, assign(socket, error: offer_error(changeset))}
 
       {:error, :not_found} ->
         {:noreply, assign(socket, error: "that machine is not here")}
@@ -307,6 +319,38 @@ defmodule ForgeWeb.WorkersLive do
   end
 
   def refusal(_worker), do: nil
+
+  @doc """
+  What the machine said about its systemd, and what happens next, or nil when it is well
+  (`docs/design/ui.md` § The workers page; `docs/design/worker-tier.md` § A machine whose systemd
+  stops answering). Nothing is placed on a machine while this is drawn, and nothing on the page
+  clears it: rejoining healthy does.
+  """
+  @spec unhealthy(Forge.Workers.Worker.t()) :: String.t() | nil
+  def unhealthy(%{status: :destroyed}), do: nil
+  def unhealthy(%{unhealthy_at: nil}), do: nil
+
+  def unhealthy(worker),
+    do:
+      "unhealthy since #{clock(worker.unhealthy_at)}: #{worker.unhealthy_reason} — #{next(worker)}"
+
+  defp next(%{managed: false}),
+    do:
+      "not the platform's to reboot: restart it, and it takes work again when it rejoins healthy"
+
+  # Told in this episode, which is what `Workers.unhealthy/2` answers by: a reboot at or after
+  # the episode began. Compared as times — a guard's `>=` on two `DateTime`s compares the structs
+  # field by field, which is not chronological.
+  defp next(%{rebooted_at: %DateTime{} = at, unhealthy_at: since} = worker) do
+    if DateTime.compare(at, since) == :lt,
+      do: next(%{worker | rebooted_at: nil}),
+      else: "told to reboot at #{clock(at)}; takes work again when it rejoins healthy"
+  end
+
+  defp next(_worker),
+    do: "rebooted within the hour, so not again: destroy it, or wait for it to rejoin healthy"
+
+  defp clock(at), do: Calendar.strftime(at, "%H:%M UTC")
 
   # A share of a whole, as a whole percent, or nil when either figure is missing — never zero
   # standing in for one that could not be read.
@@ -562,6 +606,9 @@ defmodule ForgeWeb.WorkersLive do
       </div>
 
       <p :if={refusal(@row.worker)} class="mt-2 text-sm text-error">{refusal(@row.worker)}</p>
+      <p :if={unhealthy(@row.worker)} class="mt-2 text-sm text-error [overflow-wrap:anywhere]">
+        {unhealthy(@row.worker)}
+      </p>
 
       <.meters row={@row} />
 

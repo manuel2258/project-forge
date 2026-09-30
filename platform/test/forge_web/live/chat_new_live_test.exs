@@ -345,6 +345,30 @@ defmodule ForgeWeb.ChatNewLiveTest do
       assert Jobs.chats_for_project(project.id) == []
     end
 
+    # `2` is a size — two bytes — and the one that took a machine down: typed meaning 2 GiB, it
+    # was admitted, and the harness could never start in it. Refused by name, with the minimum.
+    test "a memory below the minimum is refused and the minimum is named", %{
+      conn: conn,
+      project: project
+    } do
+      {:ok, view, _html} = live(conn, ~p"/chats/new?project=#{project.name}")
+
+      html =
+        view
+        |> form("#chat-form", %{"chat" => %{"text" => "hello", "memory" => "2"}})
+        |> render_submit()
+
+      assert html =~ "memory must be at least 512MiB, the least a job can run in"
+      assert Jobs.chats_for_project(project.id) == []
+
+      view
+      |> form("#chat-form", %{"chat" => %{"text" => "hello", "memory" => "512MiB"}})
+      |> render_submit()
+
+      assert [chat] = Jobs.chats_for_project(project.id)
+      assert chat.memory_max == 536_870_912
+    end
+
     test "cores that are not a whole number above zero are refused", %{
       conn: conn,
       project: project

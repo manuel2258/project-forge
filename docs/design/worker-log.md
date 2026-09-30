@@ -45,6 +45,8 @@ Two sources, one log, told apart on every line:
 | `ready` | info | what the row now offers — memory, cores, kinds — which for a permanent machine is its owner's figures and not always what it reported |
 | `disconnected` | info when the channel was shut down — the machine or the platform closed the connection, it left, its row was retired, the platform is draining for a restart or stopping — and warning when it crashed | why, in words; for a crash only the kind of error, since the stack trace is the platform's and this page is the owner's |
 | `job.lost` | warning | a job the platform had running there that the machine rejoined without, requeued |
+| `unhealthy` | error | the machine said its systemd stopped answering, and why; how many jobs were requeued; and whether it was told to reboot — or why not: permanent, or told within the hour |
+| `healthy` | info | a machine marked unhealthy joined again without saying so, and takes work again |
 | `unreachable` | warning | not heard from since when, how many jobs were requeued, and whether the row stays — for a permanent machine only when it had jobs to requeue |
 | `destroyed` | info, or warning when forced, when its provider is gone, or when a machine arrived for a row retired while it was being made | by what: idle, idle and its slot wanted by a job it could not take, unreachable, its owner, the host's command line, a refused protocol |
 | `destroy.refused` | error | the driver's words, when it would not let the machine go — and that the next sweep tries again only when a sweep was what asked (`ui.md` § The workers page: a Destroy pressed on the page promises no retry) |
@@ -74,6 +76,11 @@ channel's `terminate/2`, and its refusal is the line.
 | `chat.missing` | warning | the platform spoke to a chat that is not running on this machine — a message, an interrupt or a close that reached nobody |
 | `message.unknown` | warning | a message from the platform this release does not know — a version apart |
 | `log.dropped` | warning | entries it could not keep while it was not connected |
+| `machine.unhealthy` | error | its systemd stopped answering — a `systemd-run` that failed on the bus, or PID 1 not answering the probe twice in a row — and that it has stopped its jobs and takes no more (`worker-tier.md` § A machine whose systemd stops answering) |
+| `machine.rebooting` | warning | the platform said to reboot and the machine is one a driver made, so it is rebooting now |
+| `machine.unrebooted` | warning, or error when the reboot command itself failed | it is not rebooting, and why: the platform said no, or it is not a machine a driver made, or the reboot command itself failed. It was `machine.not_rebooting` until the first end-to-end run (2026-09-30, `measurements.md` § The unhealthy machine, end to end) found the platform keeping it as `unknown`: an underscore is not in a type (below) |
+| `job.refused` | warning, or error for a ceiling | an assignment it did not start: its memory ceiling below the minimum or not a number, or the machine is unhealthy |
+| `job.abandoned` | warning | a job it stopped because the machine went unhealthy, whose ending it therefore did not report — the platform had already requeued it |
 
 And what it could not do for a job, each line carrying the job's id and the failure in the words
 it was reported in (git's, the store's, the filesystem's):

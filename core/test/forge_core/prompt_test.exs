@@ -276,6 +276,22 @@ defmodule ForgeCore.PromptTest do
   # opens. These are the four things it has to know: where to read, where to write, that a
   # proposal is a suggestion rather than a ticket, and that the format has no front matter —
   # which the parser refuses, so an agent that guesses wrong loses the proposal.
+  # A process the kernel killed at the job's ceiling exits 137 and says nothing else, and an agent
+  # that does not know that runs the same build again into the same wall. Both preambles name the
+  # variable that holds the ceiling, since the preamble is one document for every job.
+  describe "what the preambles say about memory" do
+    test "both name the ceiling and what a SIGKILL most likely means" do
+      for preamble <- [Prompt.preamble(), Prompt.chat_preamble()] do
+        flat = String.replace(preamble, "\n", " ")
+
+        assert flat =~ "$FORGE_MEMORY_MAX"
+        assert flat =~ "SIGKILL"
+        assert flat =~ "exit status 137"
+        assert flat =~ "less parallelism"
+      end
+    end
+  end
+
   describe "what the preamble says about proposing and reading" do
     test "a job is told where the other tickets are and what is not in them" do
       flat = Prompt.preamble() |> String.replace("\n", " ")

@@ -195,6 +195,68 @@ defmodule ForgeWeb.TemplatesLiveTest do
     refute html =~ "0 of 1 made"
   end
 
+  # A machine smaller than the least one job can run in makes nothing anybody can use, and the
+  # refusal names the minimum rather than leaving the operator to find it.
+  test "a machine smaller than one job is refused, and the minimum is named", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/templates")
+
+    html =
+      view
+      |> form("#template-form",
+        template: %{
+          name: "tiny",
+          provider: "fake",
+          memory: "256MiB",
+          cores: "1",
+          max_workers: "1"
+        }
+      )
+      |> render_submit()
+
+    assert html =~ "memory must be at least 512MiB, the least a job can run in"
+    refute html =~ "0 of 1 made"
+
+    html =
+      view
+      |> form("#template-form",
+        template: %{
+          name: "small",
+          provider: "fake",
+          memory: "512MiB",
+          cores: "1",
+          max_workers: "1"
+        }
+      )
+      |> render_submit()
+
+    refute html =~ "must be at least 512MiB"
+    assert html =~ "small"
+  end
+
+  # And an edit is the same form: shrinking a template below one job is refused, and the stored
+  # figure stays.
+  test "an edit below the minimum is refused, and the template keeps its memory", %{
+    conn: conn,
+    user: user
+  } do
+    template = template_for(user)
+    {:ok, view, _html} = live(conn, ~p"/templates")
+
+    view
+    |> element(~s(button[phx-click=edit-template][phx-value-id="#{template.id}"]))
+    |> render_click()
+
+    html =
+      view
+      |> form("#edit-template-#{template.id}",
+        template: %{name: template.name, memory: "2", cores: "4", max_workers: "2"}
+      )
+      |> render_submit()
+
+    assert html =~ "memory must be at least 512MiB, the least a job can run in"
+    assert Provisioning.template(user, template.id).memory == 8 * 1024 * 1024 * 1024
+  end
+
   test "a template is assigned to a project and taken off again", %{conn: conn, user: user} do
     project = project_for(user)
     template = template_for(user)

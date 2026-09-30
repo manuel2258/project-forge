@@ -388,3 +388,230 @@ is a pattern search, not an audit.
 before it is used (`docs/design/claude-code-events.md` § Resume): the last row is a restore that
 does not fail and does not work, and nothing downstream could tell. The second row is the
 assumption `resume_failed?` rested on, now observed.
+
+### The worker at its ceiling, on the image
+
+Run 2026-09-30 on the operator's machine, by hand first and then as
+`nix build .#checks.x86_64-linux.worker-health` (`nix/worker-health.nix`), which does the same
+thing and fails when what the code relies on stops being true — every item below except the
+forgery, which it only records (whether to close it is § Open in the note), and the timings, of
+which it bounds only the probe's and the health process's. The worker image as `nix build .#worker-image` makes it
+from this branch — **systemd 261.2** (the design notes had been reading 261.3's source), kernel
+6.18.50, cgroup v2 — booted under QEMU with SeaBIOS and virtio-scsi as a Hetzner x86 server
+presents it, 4 GiB and 2 cores, with the local driver's config disk and its ssh door. Every unit
+was started by the release inside the image: `Slice.Systemd.enter/1`, `prepare/1` and `wrap/3`
+made the user, the stop step and the command, and `ended/2`, `memory/1` and `bus_error/1` read
+what came back, so the flags were the worker's own:
+
+```
+systemd-run --pipe --wait --collect --unit=forge-job-aaaaaaaa00004000 --uid=forge-job-aaaaaaaa00004000
+  --property=WorkingDirectory=/var/lib/forge/worktrees/<id> --property=MemorySwapMax=0
+  --property=OOMPolicy=continue --property=ExecStopPost=-+/var/lib/forge/jobs/<id>.worker/at-exit
+  --property=MemoryMax=536870912 --property=CPUWeight=100 --setenv=PATH=… --setenv=HOME=/nonexistent
+  -- sh /var/lib/forge/worktrees/<id>/job.sh
+```
+
+Each job's stdout went to a file and its stderr to the job's `stderr.log`, as the runner sends
+them. What was seen, item by item:
+
+**A child killed at a 512 MiB ceiling dies alone.** The job's shell ran `python3` allocating
+1 GiB; the kernel killed it (`constraint=CONSTRAINT_MEMCG`, `oom_memcg=/system.slice/forge-job-….service`),
+the shell saw `child exit: 137` and went on to print `main still alive`, and `systemd-run` exited 0.
+The stderr, verbatim:
+
+```
+Running as unit: forge-job-aaaaaaaa00004000.service; invocation ID: bdf0eb2be35340a58a9cdaa7aa93e937
+/var/lib/forge/worktrees/<id>/job.sh: line 2:   925 Killed                     python3 -c '…'
+          Finished with result: success
+Main processes terminated with: code=exited, status=0/SUCCESS
+               Service runtime: 1.733s
+             CPU time consumed: 420ms
+                   Memory peak: 512M (swap: 0B)
+                      IO Bytes: read 8.1M
+```
+
+`Running as unit:` carries `; invocation ID: …` on 261.2 whenever PID 1 had given the unit one —
+the notes quoted it without — and the summary's labels are right-aligned, so they start with
+spaces. `own_line?/1` trims and matches on the prefix, so both are taken out of the last line, and
+`ended/2`'s `last_line` was the `Killed` line: the process's own. There is no *IP Traffic* line,
+because IP accounting is off.
+
+**The stop step runs as root and writes the whole reading.** `at-exit.reading` was owned by root
+and said `events oom_kill 1`, `max 536870912`, `peak 536870912`, `exit_code exited`,
+`exit_status 0`, `result success`; `ended/2` read the same.
+
+**A main process killed at its ceiling ends the unit with `signal`, never `oom-kill`.** With the
+job `exec`ing the allocation itself, `systemd-run` exited **255**, its summary said
+`Finished with result: signal` and `Main processes terminated with: code=killed, status=9/KILL`,
+the journal `The kernel OOM killer killed some processes in this unit` and `Failed with result
+'signal'`, and the reading `exit_code killed`, `exit_status KILL`, `result signal`, with
+`events oom_kill 1`. That is the combination the runner reads as *killed at its memory ceiling*.
+
+**The cgroup reads as the worker parses it.** A job holding 470 MiB and streaming a 1 GiB file
+through the rest of its 512 MiB, twenty seconds in (the by-hand run; the check's runs read the
+same shapes, with `full avg10` between 10.79 and 11.83):
+
+| File | Raw | `memory/1` a moment later |
+|---|---|---|
+| `memory.events` | `max 178565`, `oom 0`, `oom_kill 0` | `max_events: 182158`, `oom_kills: 0` |
+| `memory.current` | 536870912 | `current: 536776704` |
+| `memory.peak` | 536870912 | `peak: 536870912` |
+| `memory.max` | 536870912 | `ceiling: 536870912` |
+| `memory.pressure` | `full avg10=11.21 avg60=3.50 …` | `pressure: 11.53` |
+
+The file had to be dropped from the page cache first: written by root, its pages were charged to
+root's cgroup, and a job reading them paid nothing. `pressure` stayed under the 20 % threshold
+for this workload; nothing here has shown what an agent's own thrashing reads as.
+
+**The forgery works, and on the image it works every time.** A job truncated its stderr
+through its own file descriptor 2, wrote `Failed to connect to bus: Connection timed out` in
+place of `Running as unit:`, and filled `/dev/shm` until the kernel killed the writer. The stop
+step **does run in the unit's own cgroup** — the kernel names it: `task=(at-exit)`,
+`task_memcg=/system.slice/forge-job-….service`, killed before it had exec'd — and so left no
+reading, and `ended/2` answered `unreachable: "systemd-run could not reach PID 1: Failed to
+connect to bus: Connection timed out"`. With one fill that took 3 runs in 12; with the fill
+squeezed sixteen pages at a time after the first kill, **10 in 10 by hand and 5 in 5 in each of three check runs**.
+Each time, PID 1 answered `Slice.Systemd.probe/0` straight afterwards, the slowest in 6 ms. The
+`/dev/shm` file outlived the unit, still owned by the job's user. Nothing at a job's end removes
+it — `leave/2` takes back the paths it is given and removes the user, which is read from the
+code, not run here — so it would be left to a uid the next `useradd` may reuse.
+
+**A 2-byte ceiling wedges PID 1, as the incident note guessed.** With the worker's flags and
+`MemoryMax=2` (the unit's `memory.max` reads `0`: two bytes round down to no pages), PID 1 sat in
+`D` state in `kernel_clone` — `CLONE_VFORK`, waiting for a child that never execs — and the
+child, in the unit's cgroup, was the subject of an endless `Out of memory and no killable
+processes...`. Then:
+
+- `timeout -k 5 10 systemctl show --property=Version --value` failed in **10.0 s** with exit 124
+  and no output, every time; `probe/0` said `{:error, "systemctl show exited 124: "}`. Without
+  `timeout`, `systemctl show` gave up after 90 s with `Failed to get properties: Transport
+  endpoint is not connected`.
+- A second `systemd-run` failed after **25.0 s** (sd-bus's default call timeout) with exit 1 and
+  exactly `Failed to start transient service unit: Connection timed out` — `bus_error/1` found
+  it, and `ended/2` believed it, since no reading and no `Running as unit:` said otherwise.
+- **The run that caused the wedge said something else**, also after 25 s and with exit 1, and
+  in two ways depending on how far PID 1 got: `Failed to request invocation ID for unit:
+  Connection timed out` alone (by hand, and in the third check run), or `Running as unit:
+  forge-job-….service` with no invocation ID and then `Failed to query unit state: Connection
+  timed out` (the first two check runs).
+  Neither is in `@bus_calls`, and the second follows a `Running as unit:`, so `ended/2` gives
+  `unreachable: nil` for it: that run ends as the job's own failure, and it is the probe that
+  finds the machine. Read in 261.2's `run.c`: the start call is answered — queueing a job does
+  not need the fork — and the next call, `acquire_invocation_id()` or the unit-state query, is
+  the one that waits. `acquire_invocation_id()` is only made without `--quiet`, which is also why
+  the incident's first chat, under a worker that still passed `--quiet`, had an empty stderr.
+- A new ssh login hung (60 s and counting); one already open, multiplexed, went on working.
+- The kernel's OOM report for that child repeats without end: journald ran flat out, and (by
+  hand, after six minutes wedged) the journal of the wedged boot kept **8 seconds** of it — 711,949 lines, everything earlier rotated
+  away, the worker's own `PID 1 did not answer` lines with it. A follower started before the wedge
+  kept them.
+- **The worker's own health process noticed**: `PID 1 did not answer the probe: systemctl show
+  exited 124: ; asking again`, then `PID 1 did not answer twice in a row …`, **94–97 s** after
+  the wedge in three check runs, and about 2 min 5 s by hand.
+
+**`systemctl --force --force reboot` reboots it.** With PID 1 still wedged it printed
+`Rebooting.` (by hand; `ForgeWorker.Health.reboot/0` keeps what the command prints to itself), the
+kernel said `reboot: Restarting system`, Limine booted it again inside the same QEMU, and the
+console showed a login prompt **7–8 s** after the command — by hand, and through `reboot/0` in the
+check. `/proc/sysrq-trigger` was not needed. **Both
+`--force`s are needed**: with one (a mutation of `reboot/0`, below) the wedged machine had not
+rebooted three minutes later; by `systemctl(1)`, a single `--force` still has the service manager
+do it.
+
+**The same machine comes back with the same identity.** On the new boot `forge-worker-config.service`
+ran again (`identity: forge-config`), and `/etc/forge-worker.env` was byte for byte what the first
+boot had written (same sha256), with the ssh key line taken out again. That is the local driver's
+config disk; the metadata service on a Hetzner machine is still unobserved.
+
+**The check fails when what it checks stops being true.** Each of these was made to the worker
+in a copy of the tree, the image rebuilt from it, and the check run against it:
+
+| Mutation | Where the check failed |
+|---|---|
+| `OOMPolicy=stop` instead of `continue` | `oom-child`: `systemd-run exited 1; the main process should have lived` |
+| the stop step `-` instead of `-+`, so as the job's user | `oom-child`: `the stop step did not run as root` |
+| `Connection timed out` taken out of `@bus_errors` | `wedge`: `bus_error/1 does not know the line systemd-run printed` |
+| `memory/1` reading `max_events` from `high` | `readings`: `memory/1 read no reclaim at the ceiling` |
+| `Health` never marking, its count of failures held at one | `health`: `the worker did not mark itself unhealthy within four minutes` |
+| `Health.reboot/0` with one `--force` | the reboot: `no login prompt number 2 within three minutes` |
+| `parse_pressure/1` answering `0.0` (after review tightened the item) | `readings`: `memory/1 read no pressure, for a job stalled at its ceiling` |
+
+**What it does not say.** One machine, 4 GiB and 2 cores, under KVM on the operator's host; a
+local config disk, not Hetzner's metadata service; and the release not joined to any platform —
+what the platform does with the worker's `unhealthy` is § The unhealthy machine, end to end.
+
+### The unhealthy machine, end to end
+
+Run 2026-09-30 by hand on the operator's machine, as a checklist rather than a test: the platform
+from this branch (`elixir --sname forge -S mix phx.server`, driven from a remote shell), a
+`health` project whose one workflow state has its agent run a ten-minute wait, a template on the
+`local` provider booting the same image under QEMU (OVMF, as `LocalVm` boots it — no
+`-no-reboot`, so a guest's reboot stays in the same QEMU), the ssh door open
+(`FORGE_WORKER_SSH_KEY`, `FORGE_WORKER_SSH_PORT`), and `FORGE_WORKER_TIMEOUT_MS=15000` so that
+only the grace could keep a rebooting machine's row. `reboot_interval_ms` and `reboot_grace_ms`
+were the defaults, an hour and ten minutes, except where said. The worker's probe was its
+default minute. Each item, with what showed it:
+
+- [x] **`machine.unhealthy` in the machine's log.** A chat (idle between turns) and a workflow job
+  (in its wait) running on machine `9639a928`; PID 1 wedged over ssh with `systemd-run -p
+  MemoryMax=2` at 11:33:32; at 11:35:34 the machine's log had `machine.unhealthy: PID 1 did not
+  answer twice in a row: systemctl show exited 124: . It has stopped its jobs and takes no more; the
+  platform requeues them`,
+  then `job.abandoned` for each job.
+- [x] **The platform receives `unhealthy`.** Its own line, the same second: `unhealthy: PID 1 did
+  not answer twice in a row: …; requeued 2 job(s); told to reboot`; the row's `unhealthy_at` and
+  `rebooted_at` both 11:35:34.
+- [x] **The chat goes dormant and the workflow job back to `pending`, each with `job.interrupted`
+  `worker_unhealthy`.** The chat `hibernated`, the job `pending` and then running again on the
+  same machine once it had rejoined; both with `%{"reason" => "worker_unhealthy"}`.
+- [x] **The workers page shows the unhealthy line.** Fetched as the logged-in operator during the
+  second wedge below: *unhealthy since 11:39 UTC: PID 1 did not answer twice in a row: systemctl
+  show exited 124: — rebooted within the hour, so not again: destroy it, or wait for it to rejoin
+  healthy*; for the unmanaged machine, *… — not the platform's to reboot: restart it, and it takes
+  work again when it rejoins healthy*.
+- [x] **The platform answers reboot, and the guest reboots.** `machine.rebooting: the platform said
+  to reboot, and this is a machine it made: rebooting now` at 11:35:34; the console shows
+  `reboot: Restarting system` and a second login prompt, and the QEMU process is the one `create`
+  started.
+- [x] **The machine rejoins as the same worker row, and the mark clears.** `joined` and `healthy:
+  joined without saying it is unhealthy; takes work` at 11:36:42 on row `9639a928`, `idle` and
+  unmarked. Not sooner: the platform held the dead socket until `disconnected: shut down:
+  :read_timeout` at 11:36:34, and refused the rebooted machine's joins as `already_connected`
+  until then — ten of them in the node's log.
+- [x] **`sweep_unreachable/0` leaves the row alone during the grace.** Staged so that nothing
+  but the grace could keep the row: with `reboot_interval_ms` set to a second on the running node,
+  machine `41c055f6` was wedged at 12:15:47, told to reboot at 12:17:16, and its QEMU stopped
+  (`SIGSTOP`) 0.9 seconds later so that it could not come back. The platform dropped the socket at
+  12:18:17; at 12:21:43, four minutes past its last heartbeat against a 15-second timeout, the row
+  was still there and `sweep_unreachable/0` run by hand took nothing (`0`). With `reboot_grace_ms`
+  then set to a second, the same call took it at once (`1`: `unreachable: not heard from since
+  12:17:19 UTC; requeued 0 job(s) and destroying it`). A reboot that came back inside the grace is
+  the first wedge above.
+- [x] **A second wedge within the interval is not rebooted, and waits for a person.** Wedged again
+  at 11:37:39: `unhealthy … requeued 1 job(s); not rebooted: it was told to at 2026-09-30 11:35:34
+  UTC, within the hour, so it waits for a person`; the row stayed connected and marked, with no
+  reboot, for the nine minutes until it was rebooted by hand at 11:48.
+- [x] **An unmanaged machine never reboots.** A second VM from the same image, its config disk
+  from `mix forge.worker.new` with no `FORGE_MANAGED=1`, joined as row `ebb8a9f9` (`managed=false`)
+  and was wedged at 11:41:52: `not rebooted: it is not the platform's machine, and its owner
+  restarts it`, `rebooted_at` never set, and three minutes later it was still up (uptime 343 s,
+  one login prompt, no `Restarting`) and still wedged.
+
+**What it found that the checklist did not ask.**
+
+- The worker's line after the platform said no arrived as type **`unknown`**: it was
+  `machine.not_rebooting`, and the platform keeps a type only if it is lower-case words and dots
+  (`docs/design/worker-log.md`). Renamed `machine.unrebooted`, and a worker test now holds the
+  type of every `Log.line/4` call in the worker to that rule, and every call to naming its type
+  as a literal so the scan sees it.
+- **A person's reboot of a machine not told to reboot loses its row under a short timeout.** With
+  the timeout at 15 seconds, rebooting the second-wedged machine by hand got it destroyed: the
+  platform noticed the dead socket at its read timeout, 70 seconds after the last heartbeat, and
+  the sweep took the row that second, since only a machine told to reboot has a grace. At the
+  default three minutes the machine would have rejoined first.
+- **With the host's disk saturated, the database stalled and the channels crashed.** While six
+  image builds ran for the mutation tests, I/O pressure reached `full avg10=85%`, a heartbeat's
+  `UPDATE workers` waited more than 15 seconds and was cancelled (`57014 query_canceled`), the
+  channel crashed with it, and machine `5ec19979` was destroyed by the sweep in the same second it
+  rejoined. That is this host, not the design — but the sweep and a join are not ordered, and
+  under a stalled database a machine that has just joined can be swept as unreachable.

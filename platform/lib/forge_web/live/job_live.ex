@@ -6,6 +6,7 @@ defmodule ForgeWeb.JobLive do
   import ForgeWeb.Indicators
 
   alias Forge.{Artifacts, Events, Jobs, Tickets}
+  alias Forge.Jobs.Memory
   alias ForgeWeb.{Format, Indicators, JobStream, WorkScreen}
 
   # Newest first, a page at a time (`ForgeWeb.JobStream`). A finished job's stream is read
@@ -40,6 +41,7 @@ defmodule ForgeWeb.JobLive do
 
   defp load(%{assigns: %{job_id: job_id, ticket: ticket, project: project}} = socket) do
     job = Jobs.get!(job_id)
+    events = Events.for_job(job.id)
     spec = Jobs.spec(job)
     written = Artifacts.written_by(job.id)
 
@@ -49,9 +51,9 @@ defmodule ForgeWeb.JobLive do
       spec: spec,
       written: written,
       written_names: MapSet.new(written, fn {artifact, _v} -> artifact.name end),
-      refusals: Jobs.refusals(job),
-      events: Events.for_job(job.id)
+      refusals: Jobs.refusals(job)
     )
+    |> assign(events: events, memory: Memory.trouble(events))
   end
 
   # Per job, so the subscription is the filter. What the harness streams is added to the log the
@@ -63,8 +65,11 @@ defmodule ForgeWeb.JobLive do
   def handle_info({:job_event, id, event}, %{assigns: %{job_id: id}} = socket) do
     if JobStream.streamed?(event) do
       case JobStream.add(socket.assigns.events, event) do
-        :seen -> {:noreply, socket}
-        {:ok, events} -> {:noreply, assign(socket, events: events)}
+        :seen ->
+          {:noreply, socket}
+
+        {:ok, events} ->
+          {:noreply, assign(socket, events: events, memory: Memory.trouble(events))}
       end
     else
       {:noreply, load(socket)}
@@ -234,6 +239,12 @@ defmodule ForgeWeb.JobLive do
               <% else %>
                 The engine's outcome. The agent declared nothing.
               <% end %>
+            </p>
+
+            <%!-- Only when memory was the trouble, so it is seen without scrolling the timeline
+                  (`docs/design/capacity.md` § Memory, which a job holds rather than spends). --%>
+            <p :if={@memory} id="job-memory" class="font-mono text-[12.5px] text-warning">
+              ⚠ {Memory.words(@memory)}
             </p>
           </header>
 

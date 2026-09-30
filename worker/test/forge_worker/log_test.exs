@@ -155,4 +155,40 @@ defmodule ForgeWorker.LogTest do
       assert entry["message"] =~ "this job builds cold"
     end
   end
+
+  describe "the types it sends" do
+    # The platform keeps a type only if it is lower-case words and dots of at most 64 bytes, and
+    # stores anything else as `unknown` (`docs/design/worker-log.md` § The `log` message).
+    # `machine.not_rebooting` was sent for a whole branch and arrived as `unknown`, which no test on
+    # either side could see: the worker's tests check what it sends and the platform's what it
+    # keeps. So every type a `Log.line/4` call in the worker's source names is held to the
+    # platform's rule here — which is only every type sent while each call names its type as a
+    # literal, and so that is held too.
+    setup do
+      sources =
+        for path <- Path.wildcard(Path.expand("../../lib/**/*.ex", __DIR__)), do: File.read!(path)
+
+      %{sources: sources}
+    end
+
+    test "every one is lower-case words and dots, so the platform keeps it", %{sources: sources} do
+      types =
+        for source <- sources,
+            [_call, type] <- Regex.scan(~r/Log\.line\(\s*"([^"]+)"/, source),
+            do: type
+
+      assert "machine.unhealthy" in types, "the scan found none of the types it knows are sent"
+
+      assert Enum.reject(types, &(&1 =~ ~r/\A[a-z]+(\.[a-z]+)*\z/ and byte_size(&1) <= 64)) ==
+               []
+    end
+
+    test "every one is named where it is sent, so the scan above sees it", %{sources: sources} do
+      assert for(
+               source <- sources,
+               [call] <- Regex.scan(~r/Log\.line\(\s*[^"\s]/, source),
+               do: call
+             ) == []
+    end
+  end
 end

@@ -7,6 +7,8 @@ defmodule Forge.Workers.Worker do
   use Ecto.Schema
   import Ecto.Changeset
 
+  alias ForgeCore.Workflow.Resources
+
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id
   schema "workers" do
@@ -49,6 +51,14 @@ defmodule Forge.Workers.Worker do
     # by then (`docs/design/provisioning.md` § A snapshot that speaks the wrong protocol).
     field :image, :string
 
+    # **The machine's own word that it can run nothing** — its systemd stopped answering — and
+    # when the platform last told it to reboot (`docs/design/worker-tier.md` § A machine whose
+    # systemd stops answering). A row with `unhealthy_at` set is assignable to nothing; a join
+    # without the word clears it. `rebooted_at` outlives the episode: it is the hour.
+    field :unhealthy_at, :utc_datetime_usec
+    field :unhealthy_reason, :string
+    field :rebooted_at, :utc_datetime_usec
+
     # **Provenance, not authority.** The recipe this machine was made from, whose values were
     # copied onto this row at creation and are never read back through
     # (`docs/design/provisioning.md` § Two tables). Null for a machine the operator built by
@@ -87,6 +97,9 @@ defmodule Forge.Workers.Worker do
       :build,
       :protocol,
       :image,
+      :unhealthy_at,
+      :unhealthy_reason,
+      :rebooted_at,
       :template_id,
       :provider_credential_id,
       :user_id
@@ -110,6 +123,14 @@ defmodule Forge.Workers.Worker do
     |> cast(attrs, [:memory_budget, :cores, :accepts])
     |> validate_required([:memory_budget, :cores])
     |> validate_offer()
+    # Less than one job's worth is a figure no job fits, and a machine its owner wants to take
+    # nothing is one assigned to no project (`Workers.serving/1`): an empty `accepts` takes
+    # anything. The machine's own report may still be zero (below): it says it could not read its
+    # memory, which is not a figure somebody typed.
+    |> validate_number(:memory_budget,
+      greater_than_or_equal_to: Resources.minimum_memory(),
+      message: Resources.too_little_memory()
+    )
   end
 
   # Zero is a real offer and not an error: `ForgeWorker.Config` reports nothing rather than

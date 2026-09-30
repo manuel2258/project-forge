@@ -1030,6 +1030,134 @@ defmodule ForgeWeb.WorkerChannelTest do
     end
   end
 
+  # `docs/design/worker-channel.md` § An unhealthy machine.
+  describe "a machine whose systemd stopped answering" do
+    setup :ticket_with_job
+
+    # A payload that is not an object is a join that said nothing — and so clears the mark — not a
+    # channel that crashes once it has joined.
+    # `Phoenix.ChannelTest` will not send a null payload, and a client may; the channel hands the
+    # join's payload to itself as `{:after_join, payload}`, so that is sent as the join would.
+    test "a join whose payload is null says nothing, and does not crash", context do
+      %{worker: worker, token: token} = context
+      {:ok, _reply, socket} = join_worker(worker, token, %{"unhealthy" => "gone"})
+      {:ok, _answer} = Workers.unhealthy(worker.id, "gone")
+
+      send(socket.channel_pid, {:after_join, nil})
+      ref = push(socket, "heartbeat", %{})
+      assert_reply ref, :ok
+      assert Workers.get!(worker.id).unhealthy_at == nil
+    end
+
+    defp running_here(worker, token, job) do
+      {:ok, _reply, socket} = join_worker(worker, token)
+      {:ok, worker} = Workers.ready(worker, %{"memory_budget" => 8_000_000_000})
+      {:ok, _job} = Jobs.assign(job, worker)
+      job_id = job.id
+      assert_push "assign", %{"job_id" => ^job_id}
+      socket
+    end
+
+    test "is answered with the decision, and loses its jobs at once", context do
+      %{worker: worker, token: token, job: job} = context
+      socket = running_here(worker, token, job)
+
+      ref = push(socket, "unhealthy", %{"reason" => "systemd-run could not reach PID 1: x"})
+      assert_reply ref, :ok, %{"reboot" => true, "why" => "told to reboot"}
+
+      assert Jobs.get!(job.id).status == :pending
+
+      assert %{unhealthy_reason: "systemd-run could not reach PID 1: x", rebooted_at: %{}} =
+               Workers.get!(worker.id)
+    end
+
+    test "a permanent machine is told not to reboot", context do
+      %{worker: worker, token: token} = context
+      {:ok, worker} = Workers.update(worker, %{managed: false})
+      {:ok, _reply, socket} = join_worker(worker, token)
+
+      ref = push(socket, "unhealthy", %{"reason" => "gone"})
+      assert_reply ref, :ok, %{"reboot" => false, "why" => why}
+      assert why =~ "its owner restarts it"
+    end
+
+    # The scheduler read the row before the mark; the channel hands the assignment on after it.
+    # The worker would drop it, and it would sit `running` on a machine that never reports it.
+    test "an assignment that reaches it after the mark goes back to the queue", context do
+      %{worker: worker, token: token, job: job} = context
+      {:ok, _reply, socket} = join_worker(worker, token)
+      {:ok, worker} = Workers.ready(worker, %{"memory_budget" => 8_000_000_000})
+
+      ref = push(socket, "unhealthy", %{"reason" => "gone"})
+      assert_reply ref, :ok, _answer
+
+      {:ok, _job} = Jobs.assign(job, worker)
+
+      refute_push "assign", _assignment
+      wait_until(fn -> Jobs.get!(job.id).status == :pending end)
+
+      assert %{payload: %{"reason" => "worker_unhealthy"}} =
+               Events.latest_for_job(job.id, "job.interrupted")
+    end
+
+    # The assignment behind the mark may be for a job the mark already put back — or one placed on
+    # another machine since. Requeued again, it would say so twice, or be pulled off a machine that
+    # is running it.
+    test "an assignment for a job no longer running here is left alone", context do
+      %{worker: worker, token: token, job: job} = context
+      socket = running_here(worker, token, job)
+
+      ref = push(socket, "unhealthy", %{"reason" => "gone"})
+      assert_reply ref, :ok, _answer
+      assert Jobs.get!(job.id).status == :pending
+
+      {:ok, elsewhere, _token} = Workers.create(%{provider: "local"})
+      other = chat_fixture(%{status: :running})
+
+      {:ok, _other} =
+        other
+        |> Jobs.Job.progress_changeset(%{status: :running, worker_id: elsewhere.id})
+        |> Forge.Repo.update()
+
+      send(socket.channel_pid, {:assign, %{"job_id" => job.id}})
+      send(socket.channel_pid, {:assign, %{"job_id" => other.id}})
+      ref = push(socket, "heartbeat", %{})
+      assert_reply ref, :ok
+
+      assert [_once] =
+               job.id |> Events.for_job() |> Enum.filter(&(&1.type == "job.interrupted"))
+
+      assert %{status: :running, worker_id: still} = Jobs.get!(other.id)
+      assert still == elsewhere.id
+      refute_push "assign", _assignment
+    end
+
+    # **A join that does not say so is what clears the mark**, and nothing else does: the
+    # worker's own belief is what refuses work, so the platform keeps its mark while the machine
+    # still says it.
+    test "keeps its mark across a join that says so, and loses it on one that does not", %{
+      worker: worker,
+      token: token
+    } do
+      {:ok, _answer} = Workers.unhealthy(worker.id, "gone")
+
+      {:ok, _reply, first} = join_worker(worker, token, %{"unhealthy" => "gone"})
+      ref = push(first, "heartbeat", %{})
+      assert_reply ref, :ok
+      assert Workers.get!(worker.id).unhealthy_at
+
+      Process.unlink(first.channel_pid)
+      ref = leave(first)
+      assert_reply ref, :ok
+      wait_until(fn -> not Workers.connected?(worker.id) end)
+
+      {:ok, _reply, second} = join_worker(worker, token, %{"running" => []})
+      ref = push(second, "heartbeat", %{})
+      assert_reply ref, :ok
+      assert Workers.get!(worker.id).unhealthy_at == nil
+    end
+  end
+
   describe "rejoining" do
     setup :ticket_with_job
 

@@ -682,6 +682,46 @@ defmodule ForgeWeb.TicketWorkScreenTest do
     end
   end
 
+  # `docs/design/capacity.md` § Memory, which a job holds rather than spends: under the outcome,
+  # only when memory was the trouble, and its rows in the timeline with their type in `warning`.
+  test "the job page says memory was the trouble, and only when it was", %{
+    conn: conn,
+    project: project,
+    ticket: ticket
+  } do
+    [job] = Jobs.for_ticket(ticket.id)
+    running!(job)
+    tool(job, "b1", "gradle build")
+
+    {:ok, view, _html} = live(conn, page(project, ticket, "/jobs/#{job.id}"))
+    refute has_element?(view, "#job-memory")
+
+    :ok =
+      Jobs.record_harness_event(job.id, %{
+        type: "job.harness.memory",
+        payload: %{
+          what: "oom_kill",
+          oom_kills: 2,
+          new_kills: 2,
+          peak: 2 * 1024 ** 3,
+          ceiling: 2 * 1024 ** 3
+        }
+      })
+
+    assert has_element?(view, "#job-memory", "⚠ 2 OOM kills · peak 2.0 GiB of 2 GiB")
+
+    row = view |> element("#job-events li", "a process was killed for memory") |> render()
+    assert row =~ ~s(text-warning)
+    assert row =~ "(2 OOM kills · peak 2.0 GiB of 2 GiB)"
+
+    # And the other rows are not in warning.
+    refute view |> element("#job-events li", "gradle build") |> render() =~ "text-warning"
+
+    # Read again from the log, as a page opened afterwards reads it.
+    {:ok, reopened, _html} = live(conn, page(project, ticket, "/jobs/#{job.id}"))
+    assert has_element?(reopened, "#job-memory", "2 OOM kills")
+  end
+
   # The job page tails its job while it runs, for the reason the ticket's Activity does.
   test "the job page tails its running job", %{conn: conn, project: project, ticket: ticket} do
     [job] = Jobs.for_ticket(ticket.id)

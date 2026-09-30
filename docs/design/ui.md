@@ -119,7 +119,9 @@ Discipline matters more than the values:
   option chosen in a question form.
 - **Info** — the job-state glyph and harness tool calls. Nothing else.
 - **Success** — approval and the end of the queue. **Error** — engine errors, declared failures,
-  failed sends.
+  failed sends. **Warning** — non-completion outcomes (§ The three axes), and a job whose memory
+  was the trouble: its header line and its `memory` rows (`capacity.md` § Memory, which a job holds
+  rather than spends). Neither is waiting on a person, so neither is accent.
 - **Two surfaces per theme at most**: `base-100` for pages, `base-200` for the one row in a
   changed state. Structure is rules, not cards: `border-base-300` for section rules,
   `border-base-300/60` for rows within a section.
@@ -149,7 +151,7 @@ measure; each route sets its own:
 | `/projects/:name/settings` | 48rem | Forms and tables — tokens, people, mirrors. Narrower loses the row; wider is a rail with nothing to put in it. |
 | `/tickets/:project/:number` | 74rem | A work screen (§ The work screen): 53rem tabbed column plus a 21rem facts rail, divided by a 1px rule. Below `lg` the rail is the details sheet, opened from the context strip. |
 | `…/review` | 74rem | Not a work screen: a page that scrolls, its column beside a 21rem rail at `lg` and above it below. The diff needs the width; the rail carries the evidence. |
-| `…/jobs/:job_id` | 74rem | Laid out as the review page is. Manifest in the rail, the harness stream in the column — a bounded pane, since no tab body bounds it here — tailed while the job runs (§ Motion and structure). |
+| `…/jobs/:job_id` | 74rem | Laid out as the review page is. Manifest in the rail, the harness stream in the column — a bounded pane, since no tab body bounds it here — tailed while the job runs (§ Motion and structure). Under the outcome, and only when memory was the trouble, the `warning` line `capacity.md` § Memory describes. |
 | `/chats` | 34rem | One ordered list, so the queue's measure and for the queue's reason: width only lets a second row compete for the same glance. |
 | `/chats/:id` | 74rem | The same work screen: a conversation is work with a branch, a cost and a record. The tabs are the column; what it cost and its facts are the rail, or the details sheet below `lg`. |
 | `/chats/new` | 34rem | The first message is prose and needs the queue's measure, not a form field's — the same reason `/tickets/new` has it. |
@@ -395,7 +397,8 @@ shorter than everything fixed in it — the keyboard is up — the header and th
 give way, clipped, so the tabs and the composer stay. Beneath it, one
 line — the **context strip** — of identifiers: the branch, `+added −removed` over N files, turns,
 what it has spent in the same form the rail uses, and the compact capacity gauge for the page's
-pool. On a phone, tapping the strip opens the **details sheet** (the More sheet's component,
+pool; and, only when memory was the trouble, *⚠ 2 OOM kills · peak 2.0 GiB of 2 GiB* in `warning`
+(`capacity.md` § Memory, which a job holds rather than spends). On a phone, tapping the strip opens the **details sheet** (the More sheet's component,
 § The phone): everything the laptop rail holds, including *End it* and its confirm. At `lg` and up
 the rail is drawn beside the body as it is today and the strip opens nothing: it is still the
 same button in the markup, taking no pointer and reachable from the keyboard, and the sheet
@@ -452,7 +455,8 @@ composer, the now line, and any open question's form.
   every message typed there. This is a rule of the transcript's styles; § Documents is unchanged.
 - **The now line** is drawn only while a turn is open: the call that has no result yet, in
   words — *running mix test*, *editing lexer.ex*, *reading router.ex* — or *retrying (2 of 10)*,
-  or *rate limited, resumes 14:00 UTC*; with no call in flight, while the agent is writing, an
+  or *rate limited, resumes 14:00 UTC*, or what memory is doing when that is the latest thing the
+  turn reported — *a process was killed for memory (1 OOM kill · peak 2.0 GiB of 2 GiB)*; with no call in flight, while the agent is writing, an
   ellipsis; static text, nothing pulsing, with **Stop** and **Interrupt and send** beside it. The agent's latest `TodoWrite` list sits above it, collapsed to its
   current item, so where the agent is in its own plan is visible without scrolling. When no turn is open the composer is the box
   and Send alone.
@@ -502,7 +506,7 @@ The event stream of the conversation's job, or of the ticket's current job with 
 linked to their pages, newest first, notices behind their count. Its tool calls are drawn with
 the action lines of § Talk, each carrying its result — a result is not a row of its own — the same component, so an edit, a command and a failure read the
 same whether a conversation or a workflow job made them — and the job page draws them the same
-way; every other event keeps the job page's row. **Live while the job runs**, on a conversation and on a ticket alike (§ Motion
+way; every other event keeps the job page's row, a `memory` row with its type in `warning`. **Live while the job runs**, on a conversation and on a ticket alike (§ Motion
 and structure). A conversation's job is not opened on the job page; this tab is where it is read.
 The job page itself tails its job while it runs, for the same reason.
 
@@ -864,6 +868,14 @@ card and no box, in this order:
   accept, in `error`: *refused: protocol 3, this platform accepts 0–1 — update it*. It is drawn
   from the protocol the row recorded and the range the platform accepts now, so it cannot say
   something the next join would not.
+- **An unhealthy line**, when the machine said its systemd stopped answering, in `error`:
+  *unhealthy since 14:02 UTC: <its reason>*, then what happens next — *told to reboot at 14:02 UTC;
+  takes work again when it rejoins healthy*, or for a managed machine told within the hour
+  *rebooted within the hour, so not again: destroy it, or wait for it to rejoin healthy*, or for a
+  permanent one *not the platform's to reboot: restart it, and it takes work again when it rejoins
+  healthy* (`worker-tier.md` § A machine whose systemd stops answering). Nothing is placed on it
+  while the line is there, so it says so rather than leaving a `ready` row looking assignable.
+  There is no control to clear it: rejoining healthy is what clears it.
 - **Three meters — CPU, RAM and disk** — each a mono figure over a thin bar, from the machine's
   own last report (`worker-channel.md` § Live figures), re-read on the page's five-second
   refresh. The bars are **neutral and never accent**: a full machine is not waiting on a human,

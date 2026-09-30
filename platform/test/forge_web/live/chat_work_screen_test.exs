@@ -410,6 +410,35 @@ defmodule ForgeWeb.ChatWorkScreenTest do
     refute Enum.any?(Forge.Queue.items(), &(&1.kind == :chat and &1.detail.chat_id == chat.id))
   end
 
+  # `docs/design/capacity.md` § Memory, which a job holds rather than spends: in the context
+  # strip, only when memory was the trouble — from its events, or from what a turn ended with.
+  test "the strip says memory was the trouble, and only when it was", %{conn: conn, chat: chat} do
+    running!(chat)
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+    refute has_element?(view, "#chat-memory")
+
+    harness(chat, "job.harness.memory", %{
+      what: "ceiling",
+      peak: 2 * 1024 ** 3,
+      ceiling: 2 * 1024 ** 3
+    })
+
+    assert has_element?(view, "#chat-memory", "⚠ reached its ceiling · peak 2.0 GiB of 2 GiB")
+
+    {:ok, _chat} =
+      Conversations.record_turn(chat, %{
+        "turn" => 1,
+        "harness" => %{
+          "turns" => 1,
+          "cost_usd" => 0.01,
+          "memory" => %{"ceiling" => 2 * 1024 ** 3, "peak" => 2 * 1024 ** 3, "oom_kills" => 1}
+        }
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+    assert has_element?(view, "#chat-memory", "⚠ 1 OOM kill · peak 2.0 GiB of 2 GiB")
+  end
+
   describe "the now line" do
     test "says, in words, the call that has no result yet", %{conn: conn, chat: chat} do
       running!(chat)
@@ -421,6 +450,34 @@ defmodule ForgeWeb.ChatWorkScreenTest do
 
       harness(chat, "job.harness.retry", %{attempt: 2, max_retries: 10})
       assert has_element?(view, "#now-line", "retrying (2 of 10)")
+    end
+
+    # What memory did, until the agent does something else (`docs/design/ui.md` § Talk).
+    test "says what memory did when that is the latest thing the turn reported", %{
+      conn: conn,
+      chat: chat
+    } do
+      running!(chat)
+      tool(chat, "b1", "Bash", %{"command" => "gradle build"})
+
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+      harness(chat, "job.harness.memory", %{
+        what: "oom_kill",
+        oom_kills: 1,
+        new_kills: 1,
+        peak: 2 * 1024 ** 3,
+        ceiling: 2 * 1024 ** 3
+      })
+
+      assert has_element?(
+               view,
+               "#now-line",
+               "a process was killed for memory (1 OOM kill · peak 2.0 GiB of 2 GiB)"
+             )
+
+      tool(chat, "b2", "Bash", %{"command" => "gradle build --max-workers=1"})
+      assert has_element?(view, "#now-line", "running gradle build --max-workers=1")
     end
 
     test "carries the plan above it, collapsed to its current item", %{conn: conn, chat: chat} do

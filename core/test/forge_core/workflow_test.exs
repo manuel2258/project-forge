@@ -163,6 +163,62 @@ defmodule ForgeCore.WorkflowTest do
     end
   end
 
+  describe "parse_bytes/1" do
+    # One byte is absurd and a size, and it is the boundary `> 0` is guarding: a mutation to `> 1`
+    # refuses it. Whether it is a ceiling a job may have is `enough_memory?/1`'s question, not this.
+    test "a bare integer is bytes, and every binary unit multiplies" do
+      for {written, bytes} <- [
+            {1, 1},
+            {"1", 1},
+            {512, 512},
+            {"512B", 512},
+            {"2KiB", 2048},
+            {"1MiB", 1_048_576},
+            {"1GiB", 1_073_741_824},
+            {"1TiB", 1_099_511_627_776}
+          ] do
+        assert Resources.parse_bytes(written) == {:ok, bytes}, "#{inspect(written)}"
+      end
+
+      assert Resources.parse_bytes(0) == :error
+    end
+  end
+
+  describe "the minimum ceiling" do
+    test "is 512 MiB, and a sentence that names it" do
+      assert Resources.minimum_memory() == 536_870_912
+
+      assert Resources.too_little_memory() ==
+               "must be at least 512MiB, the least a job can run in"
+
+      # And as a form says it, beside the other fields it refuses.
+      assert Resources.memory_refused() ==
+               "memory must be at least 512MiB, the least a job can run in"
+    end
+
+    # Both sides of the boundary, and what is not a number at all: the worker asks this of what
+    # arrives over the wire, where a string is as likely as anything.
+    test "a job may have the minimum and not a byte less" do
+      assert Resources.enough_memory?(536_870_912)
+      assert Resources.enough_memory?(8 * 1024 ** 3)
+      refute Resources.enough_memory?(536_870_911)
+      refute Resources.enough_memory?(2)
+      refute Resources.enough_memory?(0)
+      refute Resources.enough_memory?("536870912")
+      refute Resources.enough_memory?(536_870_912.0)
+      refute Resources.enough_memory?(nil)
+    end
+  end
+
+  describe "size/1" do
+    test "the largest unit that divides exactly, spaced for reading" do
+      assert Resources.size(2 * 1024 ** 3) == "2 GiB"
+      assert Resources.size(512 * 1024 ** 2) == "512 MiB"
+      assert Resources.size(2) == "2 B"
+      assert Resources.size(2210 * 1024 ** 2) == "2210 MiB"
+    end
+  end
+
   describe "gib/1" do
     test "gibibytes to one decimal, and a dash for a figure nobody has" do
       assert Resources.gib(8 * 1024 ** 3) == "8.0 GiB"

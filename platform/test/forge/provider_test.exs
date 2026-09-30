@@ -102,6 +102,7 @@ defmodule Forge.ProviderTest do
            FORGE_WORKER_ID=w-1
            FORGE_WORKER_TOKEN=the-token
            FORGE_PLATFORM_URL=http://10.0.2.2:4000
+           FORGE_MANAGED=1
            """
 
     # No credential given, no line written: the machine still boots and its jobs fail visibly.

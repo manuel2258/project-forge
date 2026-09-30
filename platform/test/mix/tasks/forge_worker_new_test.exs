@@ -46,6 +46,13 @@ defmodule Mix.Tasks.Forge.Worker.NewTest do
     assert env["FORGE_PLATFORM_URL"] == "http://platform.example:4000"
   end
 
+  # **A machine somebody provisioned by hand never reboots itself**, whatever the platform tells
+  # it: the worker's own key of the two is `FORGE_MANAGED=1`, which only a driver writes
+  # (`docs/design/worker-tier.md` § What happens then).
+  test "the machine is not told a driver made it" do
+    refute Map.has_key?(mint(), "FORGE_MANAGED")
+  end
+
   test "the model is minted with the rest of it" do
     configure(harness_opts: [model: "claude-opus-5"])
 

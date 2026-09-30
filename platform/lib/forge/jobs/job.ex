@@ -8,6 +8,8 @@ defmodule Forge.Jobs.Job do
   use Ecto.Schema
   import Ecto.Changeset
 
+  alias ForgeCore.Workflow.Resources
+
   # `:parked` is a job waiting on commands it invoked: it holds no slice, unlike `:waiting`, and
   # is live for its ticket (`docs/design/commands.md` § Always park).
   @statuses [:pending, :running, :waiting, :parked, :hibernated, :finished]
@@ -97,7 +99,13 @@ defmodule Forge.Jobs.Job do
     |> validate_required([:kind, :project_id, :attempt, :memory_max, :cores])
     |> validate_shape()
     |> validate_number(:attempt, greater_than: 0)
-    |> validate_number(:memory_max, greater_than: 0)
+    # The least a job can run in, and the last refusal on the platform's side: a caller that
+    # bypassed the form and the grammar — the CLI, a future API — still cannot make a row with a
+    # ceiling that takes its machine down (`docs/design/workflow-grammar-v1.md` § Resources).
+    |> validate_number(:memory_max,
+      greater_than_or_equal_to: Resources.minimum_memory(),
+      message: Resources.too_little_memory()
+    )
     |> validate_number(:cores, greater_than: 0)
     |> foreign_key_constraint(:ticket_id)
     |> foreign_key_constraint(:project_id)

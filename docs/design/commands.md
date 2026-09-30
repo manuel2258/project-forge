@@ -129,7 +129,15 @@ a command that worked — `error` when it could not be run or outlived its timeo
 when stopped. The status itself is `jobs.exit_status`, nil when there was none. A script that
 would not start is not one of those: it is exec'd through `env`, which exits 127 for a missing
 file or interpreter, so it ends *with* a status — `converged`, exit 127. Only a slice that could
-not be made, a timeout or a cancel ends with none.
+not be made, a timeout or a cancel ends with none. **A script the kernel killed at its memory
+ceiling** ran to a status too — `systemd-run` reports a signal as 255 (`EXIT_EXCEPTION` for a
+`signal` result; observed on the worker image, `docs/measurements.md` § The worker at its
+ceiling, on the image) — and stays `converged`; its
+reason says *the script was killed at its 2 GiB memory ceiling*, read from the unit's last reading
+as an agent's is (`worker-tier.md` § The job slice), and its log ends with `systemd-run`'s own
+summary, which names the signal, for the agent that reads it. A command whose `systemd-run` failed on the bus is not a command that ran
+at all: it is the machine's failure, reported by nobody, and requeued with the rest of the
+machine's work (`worker-tier.md` § A machine whose systemd stops answering).
 
 **A command state's outcome** is its batch's: the first non-zero status in `invoke` order, or zero
 when every command exited zero, looked up in `exit`. A command that ended with no status — its
@@ -342,7 +350,7 @@ its workflow's `defaults`.
 
 | Key | Means | Enforced by |
 |---|---|---|
-| `memory` | The slice's hard ceiling, and what the scheduler's gate counts. | `MemoryMax`, with `MemorySwapMax=0` as now. |
+| `memory` | The slice's hard ceiling, and what the scheduler's gate counts. At least 512 MiB (`workflow-grammar-v1.md` § Resources). | `MemoryMax`, with `MemorySwapMax=0` and `OOMPolicy=continue` as for an agent (`worker-tier.md` § The job slice). |
 | `cpu` | How many cores the scheduler *reserves* when placing the job. | The gate. Not a quota. |
 
 **`cpu` is a reservation, not a cap, and that is the whole decision.** The obvious implementation

@@ -169,6 +169,23 @@ defmodule Forge.Events do
   def summary(%Event{type: "job.harness.started", payload: p}),
     do: "#{p["model"]} · session #{p["session_id"]}"
 
+  # What the worker read of the job's memory (`docs/design/claude-code-events.md` § Memory), in
+  # the words the job's header and a conversation's now line use (`Forge.Jobs.Memory`).
+  def summary(%Event{type: "job.harness.memory", payload: payload}),
+    do: Forge.Jobs.Memory.sentence(payload)
+
+  # A harness that has not said it started: how long, whether the worker gave up, the last thing
+  # it wrote and — so the row says whether memory is why — what the job holds against its ceiling.
+  def summary(%Event{type: "job.harness.starting", payload: p}) do
+    [
+      "not started after #{p["waited_s"]}s#{if p["gave_up"] == true, do: ", gave up"}",
+      last_line(p["stderr"]),
+      Forge.Jobs.Memory.snapshot(p["memory"])
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join(" · ")
+  end
+
   # Without this a message renders as an inspected map, which is how a conversation's own words
   # would read in the timeline and the queue.
   def summary(%Event{type: "chat.message", payload: %{"text" => text}}),
@@ -218,6 +235,17 @@ defmodule Forge.Events do
     |> Enum.map_join(" ", fn {k, v} -> "#{k}=#{inspect(v)}" end)
     |> String.slice(0, 160)
   end
+
+  # The tail the worker sent is up to two kilobytes of several lines; the last is the one that
+  # names what it was stuck on.
+  defp last_line(text) when is_binary(text) do
+    case text |> String.split("\n", trim: true) |> List.last() do
+      nil -> nil
+      line -> "stderr: " <> String.slice(line, 0, 120)
+    end
+  end
+
+  defp last_line(_none), do: nil
 
   defp argv([_ | _] = args), do: " " <> ForgeCore.Workflow.Command.argv(args)
   defp argv(_none), do: ""

@@ -176,6 +176,31 @@ defmodule ForgeWorker.ConfigTest do
     end
   end
 
+  # The machine's own key to a reboot: only one a driver made says so, and anything but a plain yes
+  # is no — a machine somebody provisioned by hand is their computer
+  # (`docs/design/worker-tier.md` § What happens then).
+  describe "whether a driver made this machine" do
+    setup do
+      Application.delete_env(:forge_worker, :managed)
+      on_exit(fn -> System.delete_env("FORGE_MANAGED") end)
+    end
+
+    test "is yes only when the environment says so" do
+      System.delete_env("FORGE_MANAGED")
+      refute Config.managed?()
+
+      for yes <- ["1", "true"] do
+        System.put_env("FORGE_MANAGED", yes)
+        assert Config.managed?(), yes
+      end
+
+      for no <- ["0", "false", "", "yes please", "TRUE "] do
+        System.put_env("FORGE_MANAGED", no)
+        refute Config.managed?(), no
+      end
+    end
+  end
+
   describe "the kinds a worker accepts" do
     setup do
       previous = Application.get_env(:forge_worker, :accepts)

@@ -26,6 +26,15 @@ defmodule ForgeWorker.Job.CommandTest.WrapReportingSlice do
 
   @impl ForgeWorker.Slice
   defdelegate leave(owner, paths), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate memory(context), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate ended(context, output), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate probe(), to: ForgeWorker.Slice.Direct
 end
 
 defmodule ForgeWorker.Job.CommandTest.RefusingSlice do
@@ -53,6 +62,15 @@ defmodule ForgeWorker.Job.CommandTest.RefusingSlice do
 
   @impl ForgeWorker.Slice
   defdelegate leave(owner, paths), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate memory(context), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate ended(context, output), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate probe(), to: ForgeWorker.Slice.Direct
 end
 
 defmodule ForgeWorker.Job.CommandTest do
@@ -139,6 +157,70 @@ defmodule ForgeWorker.Job.CommandTest do
 
     assert log(job_dir) ==
              "script in the job directory\nout under the job directory\nin the checkout\n"
+  end
+
+  # `systemd-run` reports a script killed by a signal as 255, which says nothing; the unit's last
+  # reading says it was SIGKILL and counted an OOM kill, and the reason says so in words. It ran to a
+  # status, so it stays `converged` (`docs/design/commands.md` § What the row holds).
+  test "a script killed at its ceiling says so, and still ran to a status", context do
+    {:ok, readings} = Agent.start_link(fn -> [nil] end)
+
+    ending = %{
+      exit: %{code: "killed", status: "KILL", result: "signal"},
+      memory: %{peak: 1_073_741_824, oom_kills: 1}
+    }
+
+    opts = [
+      slice: ForgeWorker.ScriptedSlice,
+      slice_opts: %{memory_max: 1_073_741_824, readings: readings, ending: ending}
+    ]
+
+    {result, _job_dir} = run(context, spec("#!/bin/sh\nexit 255\n"), opts)
+
+    assert %Result{outcome: :converged, exit_status: 255} = result
+    assert result.reason == "the script was killed at its 1 GiB memory ceiling"
+
+    # And a status of its own is only a status: with no kill counted, or with a kill of some other
+    # process in its tree while the script itself exited.
+    for ending <- [
+          %{ending | memory: %{peak: 1, oom_kills: 0}},
+          %{ending | exit: %{code: "exited", status: "255", result: "exit-code"}}
+        ] do
+      opts = put_in(opts, [:slice_opts, :ending], ending)
+      {result, _job_dir} = run(context, spec("#!/bin/sh\nexit 255\n"), opts)
+      assert result.reason == nil, inspect(ending)
+    end
+  end
+
+  # A command whose `systemd-run` could not reach PID 1 never ran: the machine's health hears of it
+  # before the result, which the link then withholds.
+  test "a command whose slice supervisor did not answer makes the machine unhealthy", context do
+    name = :"health-#{System.unique_integer([:positive])}"
+    {:ok, _pid} = ForgeWorker.Health.start_link(name: name, link: self(), probe_ms: nil)
+    {:ok, readings} = Agent.start_link(fn -> [nil] end)
+    reason = "systemd-run could not reach PID 1: Failed to connect to bus: Connection timed out"
+
+    opts = [
+      slice: ForgeWorker.ScriptedSlice,
+      slice_opts: %{readings: readings, ending: %{unreachable: reason}},
+      health: name
+    ]
+
+    {_result, _job_dir} = run(context, spec("#!/bin/sh\nexit 1\n"), opts)
+
+    assert_received {:unhealthy, ^reason}
+    assert ForgeWorker.Health.unhealthy(name) == reason
+  end
+
+  # A build that sizes its own parallelism by what it may use needs to be told it.
+  test "tells the script its memory ceiling", context do
+    script = "#!/bin/sh\necho \"ceiling ${FORGE_MEMORY_MAX-none}\"\n"
+
+    {_result, job_dir} = run(context, spec(script), slice_opts: %{memory_max: 1_073_741_824})
+    assert log(job_dir) == "ceiling 1073741824\n"
+
+    {_result, job_dir} = run(context, spec(script))
+    assert log(job_dir) == "ceiling none\n"
   end
 
   test "runs the spec's script in the worktree, with each argument as one argument", context do

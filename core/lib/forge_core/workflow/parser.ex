@@ -458,7 +458,7 @@ defmodule ForgeCore.Workflow.Parser do
         {nil, []}
 
       resources when is_map(resources) ->
-        {memory, e1} = bytes(resources, "memory", resources_path)
+        {memory, e1} = memory(resources, "memory", resources_path)
         {cpu, e2} = positive_integer(resources, "cpu", resources_path, required: false)
 
         errors =
@@ -549,32 +549,30 @@ defmodule ForgeCore.Workflow.Parser do
     |> Enum.map(&Error.new(Error.join(path, &1), "is reserved"))
   end
 
-  defp bytes(map, key, path) do
+  # A memory ceiling: a byte size, and no smaller than the least a job can run in. Refused by name
+  # below it, not as "must be a byte size" — `2` is one, and it is the one that took a machine
+  # down (`docs/design/workflow-grammar-v1.md` § Resources).
+  defp memory(map, key, path) do
     case Map.get(map, key) do
-      nil ->
-        {nil, []}
-
-      value ->
-        case Resources.parse_bytes(value) do
-          {:ok, bytes} ->
-            {bytes, []}
-
-          # Named rather than lumped in with "must be a byte size": `4GB` is what somebody who
-          # meant `4GiB` writes, and the two differ by enough to matter to a memory ceiling.
-          {:error, {:decimal_unit, binary}} ->
-            {nil,
-             [Error.new(Error.join(path, key), "must use a binary unit; did you mean #{binary}?")]}
-
-          :error ->
-            {nil,
-             [
-               Error.new(
-                 Error.join(path, key),
-                 "must be a positive number of bytes or a size in #{Enum.join(Resources.units(), ", ")}"
-               )
-             ]}
-        end
+      nil -> {nil, []}
+      value -> value |> Resources.parse_bytes() |> ceiling(Error.join(path, key))
     end
+  end
+
+  defp ceiling({:ok, bytes}, path) do
+    if Resources.enough_memory?(bytes),
+      do: {bytes, []},
+      else: {nil, [Error.new(path, Resources.too_little_memory())]}
+  end
+
+  # Named rather than lumped in with "must be a byte size": `4GB` is what somebody who meant
+  # `4GiB` writes, and the two differ by enough to matter to a memory ceiling.
+  defp ceiling({:error, {:decimal_unit, binary}}, path),
+    do: {nil, [Error.new(path, "must use a binary unit; did you mean #{binary}?")]}
+
+  defp ceiling(:error, path) do
+    units = Enum.join(Resources.units(), ", ")
+    {nil, [Error.new(path, "must be a positive number of bytes or a size in #{units}")]}
   end
 
   defp required_string(map, key, path) do

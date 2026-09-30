@@ -725,7 +725,7 @@ defmodule Forge.Workers do
     # do. It is only a step towards destruction if nothing arrives before the period is up.
     candidates =
       from(w in serving(demand[:project_id]),
-        where: w.status in [:ready, :busy, :idle],
+        where: w.status in [:ready, :busy, :idle] and is_nil(w.unhealthy_at),
         order_by: [asc: w.inserted_at]
       )
       |> Repo.all()
@@ -1527,6 +1527,24 @@ defmodule Forge.Workers do
     end
   end
 
+  @doc """
+  Refuses a slice no job can run in, when the node starts: `slice_bytes`, what a workflow job
+  declaring nothing gets, and `chat_slice_bytes`, a chat's. Both are configuration, and
+  `FORGE_SLICE_BYTES` takes a bare number of bytes, so `2` is a value an operator can set — and
+  every job made from it would be refused at its row (`Forge.Jobs.Job`), one ticket at a time,
+  rather than once here (`docs/design/workflow-grammar-v1.md` § Resources).
+  """
+  @spec check_slices!() :: :ok
+  def check_slices! do
+    for {key, bytes} <- [slice_bytes: slice_bytes(), chat_slice_bytes: chat_slice_bytes()],
+        not ForgeCore.Workflow.Resources.enough_memory?(bytes) do
+      raise ArgumentError,
+            "#{key} (#{inspect(bytes)}) #{ForgeCore.Workflow.Resources.too_little_memory()}"
+    end
+
+    :ok
+  end
+
   # **What still has a claim on this machine, and until when** — nil when nothing does.
   #
   # - **A job parked on it**, waiting on commands it invoked, until the last of its open commands
@@ -1597,14 +1615,30 @@ defmodule Forge.Workers do
   """
   @spec sweep_unreachable() :: non_neg_integer()
   def sweep_unreachable do
-    cutoff = DateTime.add(now(), -config(:worker_timeout_ms, :timer.minutes(3)), :millisecond)
+    now = now()
+    cutoff = DateTime.add(now, -config(:worker_timeout_ms, :timer.minutes(3)), :millisecond)
 
     from(w in Worker, where: w.status != :destroyed)
     |> Repo.all()
     |> Enum.reject(&connected?(&1.id))
     |> Enum.filter(&(DateTime.compare(last_seen(&1), cutoff) == :lt))
+    |> Enum.reject(&rebooting?(&1, now))
     |> Enum.count(&(lose(&1) == :ok))
   end
+
+  # **A machine told to reboot is away because it was told to**, and a reboot takes longer than
+  # the timeout allows a heartbeat: for `reboot_grace_ms` from when it was told, the row is left
+  # for it to come back to (`docs/design/worker-tier.md` § The same machine, the same row). Only
+  # while it is still marked and was told in this episode — one that rejoined healthy and went
+  # unhealthy again was not told this time, and is not rebooting.
+  defp rebooting?(%Worker{unhealthy_at: %DateTime{}, rebooted_at: %DateTime{}} = worker, now) do
+    grace = config(:reboot_grace_ms, :timer.minutes(10))
+
+    told_this_time?(worker) and
+      DateTime.compare(DateTime.add(worker.rebooted_at, grace, :millisecond), now) == :gt
+  end
+
+  defp rebooting?(%Worker{}, _now), do: false
 
   # A worker that has never reported is timed from when its row was made: a machine that never
   # finishes booting has to expire too, or a failed create holds the slot for ever.
@@ -1616,17 +1650,15 @@ defmodule Forge.Workers do
   # keeps its row. It is not assignable while it is out of touch either way: `assignable/1` asks
   # the registry, not the row.
   defp lose(%Worker{managed: false} = worker) do
-    case Forge.Jobs.running_on(worker.id) do
+    case requeue_running(worker, :worker_lost) do
       [] ->
         :skip
 
       jobs ->
         Logger.warning(
-          "worker #{worker.id} is unreachable; re-queueing #{length(jobs)} job(s). It is not " <>
+          "worker #{worker.id} is unreachable; re-queued #{length(jobs)} job(s). It is not " <>
             "the platform's to destroy, so its row stays and it may rejoin."
         )
-
-        Enum.each(jobs, &Forge.Jobs.requeue(&1.id, :worker_lost))
 
         Log.record(
           worker.id,
@@ -1643,8 +1675,7 @@ defmodule Forge.Workers do
   defp lose(%Worker{} = worker) do
     Logger.warning("worker #{worker.id} is unreachable; re-queueing its jobs and destroying it")
 
-    jobs = Forge.Jobs.running_on(worker.id)
-    Enum.each(jobs, &Forge.Jobs.requeue(&1.id, :worker_lost))
+    jobs = requeue_running(worker, :worker_lost)
 
     # **Said once, not every pass.** A destroy the driver refuses leaves the row as it was, and
     # this runs again on every scheduling pass until one goes through.
@@ -1679,6 +1710,107 @@ defmodule Forge.Workers do
     do: Provisioning.failed(worker.template_id, "made a machine that never connected")
 
   defp never_connected(%Worker{}), do: :ok
+
+  @doc """
+  Puts back in the queue every job the platform believes is running on this machine, and returns
+  them: a workflow job and a command to `pending`, a chat to dormant (`Forge.Jobs.requeue/2`).
+
+  **The one way a machine loses its jobs** — lost past the timeout, retired, or saying its systemd
+  stopped answering (`docs/design/worker-channel.md` § When the machine goes away). Each differs
+  in what it does to the row, and none in what it does to the jobs.
+  """
+  @spec requeue_running(Worker.t(), atom()) :: [Job.t()]
+  def requeue_running(%Worker{id: id}, reason) do
+    jobs = Forge.Jobs.running_on(id)
+    Enum.each(jobs, &Forge.Jobs.requeue(&1.id, reason))
+    jobs
+  end
+
+  # -- a machine that can run nothing ---------------------------------------------------------
+
+  @doc """
+  A machine saying its systemd stopped answering, and the platform's answer: whether it should
+  reboot, and why (`docs/design/worker-tier.md` § A machine whose systemd stops answering).
+
+  **The row is marked first**, and once: the first reason and the time the episode began stand
+  however often it is said. A marked row is assignable to nothing (`assignable/3`), and the
+  channel requeues an assignment that reaches it afterwards. Then what was running there goes back
+  to the queue, exactly as a lost machine's does (`requeue_running/2`). A yes is written down as
+  `rebooted_at` before it is given, so the hour is counted from an answer that was made.
+  """
+  @spec unhealthy(String.t(), term()) :: {:ok, %{reboot: boolean(), why: String.t()}}
+  def unhealthy(worker_id, reason) do
+    now = DateTime.utc_now()
+    worker = mark(get!(worker_id), reason, now)
+    jobs = requeue_running(worker, :worker_unhealthy)
+    {reboot, why} = reboot?(worker)
+    if reboot, do: {:ok, _worker} = update(worker, %{rebooted_at: now})
+
+    Log.record(
+      worker.id,
+      "unhealthy",
+      :error,
+      "#{worker.unhealthy_reason}; requeued #{length(jobs)} job(s); #{why}"
+    )
+
+    {:ok, %{reboot: reboot, why: why}}
+  end
+
+  defp mark(%Worker{unhealthy_at: nil} = worker, reason, now) do
+    {:ok, worker} =
+      update(worker, %{
+        unhealthy_at: now,
+        unhealthy_reason: Log.clean(reason, 500) || "it gave no reason"
+      })
+
+    worker
+  end
+
+  defp mark(%Worker{} = worker, _reason, _now), do: worker
+
+  # **The platform's key of the two** (`docs/design/worker-tier.md` § What happens then); the
+  # machine's own `FORGE_MANAGED=1` is the other. A permanent machine is somebody's own computer.
+  # A managed one is told to once in `reboot_interval_ms`, counted from when this episode began and
+  # not from now, so the same episode asked again later gets the same answer; and an episode
+  # already told yes is told yes again, since that reply may have been lost with its socket.
+  defp reboot?(%Worker{managed: false}),
+    do: {false, "not rebooted: it is not the platform's machine, and its owner restarts it"}
+
+  defp reboot?(%Worker{rebooted_at: nil}), do: {true, "told to reboot"}
+
+  defp reboot?(%Worker{} = worker) do
+    interval = config(:reboot_interval_ms, :timer.hours(1))
+
+    cond do
+      told_this_time?(worker) ->
+        {true, "told to reboot"}
+
+      DateTime.diff(worker.unhealthy_at, worker.rebooted_at, :millisecond) >= interval ->
+        {true, "told to reboot"}
+
+      true ->
+        {false,
+         "not rebooted: it was told to at #{utc(worker.rebooted_at)}, within the hour, so it " <>
+           "waits for a person"}
+    end
+  end
+
+  defp told_this_time?(%Worker{} = worker),
+    do: DateTime.compare(worker.rebooted_at, worker.unhealthy_at) != :lt
+
+  @doc """
+  A machine marked unhealthy joined again without saying it is: it rebooted, or its owner
+  restarted it. The mark goes and it takes work again; `rebooted_at` stays, because it is the
+  hour. There is no other way to clear it — the worker's own belief is what refuses work.
+  """
+  @spec healthy(Worker.t()) :: :ok
+  def healthy(%Worker{unhealthy_at: nil}), do: :ok
+
+  def healthy(%Worker{} = worker) do
+    {:ok, _worker} = update(worker, %{unhealthy_at: nil, unhealthy_reason: nil})
+    Log.record(worker.id, "healthy", :info, "joined without saying it is unhealthy; takes work")
+    :ok
+  end
 
   @doc """
   Destroys a worker's machine and records that it is gone — **only if it went**.
@@ -1821,11 +1953,7 @@ defmodule Forge.Workers do
   def retire(%Worker{} = worker, opts \\ []) do
     {reason, opts} = Keyword.pop(opts, :reason, :worker_retired)
 
-    with :ok <- destroy(worker, opts) do
-      jobs = Forge.Jobs.running_on(worker.id)
-      Enum.each(jobs, &Forge.Jobs.requeue(&1.id, reason))
-      {:ok, jobs}
-    end
+    with :ok <- destroy(worker, opts), do: {:ok, requeue_running(worker, reason)}
   end
 
   @doc """

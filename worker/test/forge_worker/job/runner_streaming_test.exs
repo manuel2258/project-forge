@@ -122,6 +122,46 @@ defmodule ForgeWorker.Job.RunnerStreamingTest do
     assert result.reason == "the harness had not started after 0s"
   end
 
+  # **The second chat of 2026-09-29.** `systemd-run` could not reach PID 1, said so and exited —
+  # and the run sat in `starting` for thirty minutes, because the relay in front of the harness was
+  # waiting on the port's stdin for a line that was never coming, and the shell waited for the
+  # relay. The prompt is written before the fake exits, which is what left the relay blocked.
+  test "a harness that exits without reading ends the run at once, and says why", context do
+    {_pid, spec} =
+      chat(context, extra_env: [{"FAKE_SCENARIO", "exits_unread"}], start_timeout_ms: 60_000)
+
+    assert_receive {:ended, _job_id, result}, 5_000
+    assert result.exit_status == 1
+
+    assert result.reason ==
+             "the harness exited with status 1 before it started; stderr: " <>
+               "Failed to start transient service unit: Connection timed out"
+
+    # And the relay went with it: nothing of the run is left in its process group.
+    pgid = context |> job_dir(spec) |> Path.join("fake-pgid.txt") |> File.read!() |> String.trim()
+    assert {_none, 1} = System.cmd("pgrep", ["-g", pgid])
+
+    # The wrapper ignores `USR1` so the relay's is the only process it ends; the harness is started
+    # with the default back, as it always was.
+    ignored = context |> job_dir(spec) |> Path.join("fake-sigign.txt") |> File.read!()
+    usr1 = Bitwise.bsl(1, 10 - 1)
+    assert ignored |> String.trim() |> String.to_integer(16) |> Bitwise.band(usr1) == 0
+  end
+
+  # Held, nothing has gone down the pipe at all, and the relay is in `read` from the start: no
+  # start watch either, since nothing was delivered — so this one used to wait for ever.
+  test "a held prompt whose harness exits ends the run too", context do
+    {_pid, _spec} =
+      chat(context,
+        hold_prompt: true,
+        extra_env: [{"FAKE_SCENARIO", "exits_unread"}, {"FAKE_EXIT_AFTER", "0"}]
+      )
+
+    assert_receive {:ended, _job_id, result}, 5_000
+    assert result.exit_status == 1
+    assert result.reason =~ "before it started"
+  end
+
   # `<"$prompt"` made stdin a regular file already at EOF and threw the port's pipe away, so
   # nothing written to a running harness could ever arrive. This is the blocker the whole
   # feature sat behind, and it is why the first message goes down the pipe like every other.
@@ -140,6 +180,24 @@ defmodule ForgeWorker.Job.RunnerStreamingTest do
   end
 
   defp job_dir(context, spec), do: Path.join(context.root, spec.job_id)
+
+  # A conversation reports a summary per turn, and its memory is part of it: as it stood when the
+  # turn ended (`docs/design/claude-code-events.md` § Memory).
+  test "each turn carries the job's memory as it ended", context do
+    gib = 1024 ** 3
+    reading = %{ceiling: gib, current: gib, peak: gib, max_events: 0, oom_kills: 1, pressure: 0.0}
+    {:ok, agent} = Agent.start_link(fn -> [reading] end)
+
+    {pid, _spec} =
+      chat(context,
+        slice: ForgeWorker.ScriptedSlice,
+        slice_opts: %{memory_max: gib, readings: agent}
+      )
+
+    assert_receive {:turn, _job_id, 1, turn}, 5_000
+    assert turn.payload.memory == %{"ceiling" => gib, "peak" => gib, "oom_kills" => 1}
+    Runner.close(pid)
+  end
 
   # The runner kept one `finished_event`, so every turn after the first overwrote the one
   # before it and the count of turns did not exist. Asserting on the runner's own turn index

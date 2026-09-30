@@ -250,8 +250,12 @@ defmodule ForgeWeb.TemplatesLive do
   def handle_event("add-template", %{"template" => params}, socket) do
     attrs = params |> template_attrs() |> labelled(socket.assigns.images)
 
-    case Provisioning.create_template(socket.assigns.current_scope.user, attrs) do
-      {:ok, _template} -> {:noreply, socket |> load() |> reset_forms()}
+    with :ok <- enough_memory(attrs),
+         {:ok, _template} <-
+           Provisioning.create_template(socket.assigns.current_scope.user, attrs) do
+      {:noreply, socket |> load() |> reset_forms()}
+    else
+      {:error, message} when is_binary(message) -> {:noreply, assign(socket, error: message)}
       {:error, changeset} -> {:noreply, assign(socket, error: errors(changeset))}
     end
   end
@@ -278,9 +282,12 @@ defmodule ForgeWeb.TemplatesLive do
 
     attrs = params |> template_attrs() |> labelled(socket.assigns.images)
 
-    case Provisioning.update_template(user, socket.assigns.editing, attrs) do
-      {:ok, _template} ->
-        {:noreply, socket |> load() |> reset_forms()}
+    with :ok <- enough_memory(attrs),
+         {:ok, _template} <- Provisioning.update_template(user, socket.assigns.editing, attrs) do
+      {:noreply, socket |> load() |> reset_forms()}
+    else
+      {:error, message} when is_binary(message) ->
+        {:noreply, assign(socket, error: message)}
 
       {:error, %Ecto.Changeset{} = changeset} ->
         {:noreply, assign(socket, error: errors(changeset))}
@@ -410,6 +417,20 @@ defmodule ForgeWeb.TemplatesLive do
       minutes -> minutes * 60_000
     end
   end
+
+  # **A machine smaller than the least one job can run in makes nothing anybody can use**, so it is
+  # refused here, by name, before anything is saved (`docs/design/workflow-grammar-v1.md`
+  # § Resources). On the page and not the schema: what a template may not be is decided by the
+  # job it would hold, and a job below the minimum is refused where its row is made — a template
+  # of eight thousand bytes that some other caller made holds no job, which the gate already
+  # says. A figure nobody typed is the changeset's to call blank.
+  defp enough_memory(%{memory: bytes}) when is_integer(bytes) do
+    if ForgeCore.Workflow.Resources.enough_memory?(bytes),
+      do: :ok,
+      else: {:error, ForgeCore.Workflow.Resources.memory_refused()}
+  end
+
+  defp enough_memory(_attrs), do: :ok
 
   # The same units the grammar accepts, so an operator who writes `8GiB` in a workflow can write
   # it here (`docs/design/workflow-grammar-v1.md` § Resources).

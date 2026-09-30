@@ -44,6 +44,10 @@ your checkout.
 Your `PATH` has general tools: `git`, `python3` (no extra packages), `rg`, `fd`, `jq`, `yq`,
 `curl`, `make` and the usual Unix tools. A project's toolchain comes from its devshell.
 
+Your job runs under a hard memory ceiling, `$FORGE_MEMORY_MAX` bytes. A process killed by
+SIGKILL — exit status 137 — has most likely hit it: run it again with less parallelism (fewer
+workers, `-j2`, one test partition at a time) rather than the same command again.
+
 ## Committing
 
 Work you commit is kept. Commit to the current branch as ordinary commits; the platform pushes

@@ -23,6 +23,15 @@ defmodule ForgeWorker.JobLinesTest.RefusingSlice do
 
   @impl ForgeWorker.Slice
   defdelegate leave(owner, paths), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate memory(context), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate ended(context, output), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate probe(), to: ForgeWorker.Slice.Direct
 end
 
 defmodule ForgeWorker.JobLinesTest.StuckVolume do

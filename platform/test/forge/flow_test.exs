@@ -427,10 +427,10 @@ defmodule Forge.FlowTest do
     Application.put_env(
       :forge,
       Forge.Workers,
-      Keyword.merge(previous, slice_bytes: 1_000)
+      Keyword.merge(previous, slice_bytes: 1024 ** 3)
     )
 
-    FakeWorker.connect(memory_budget: 4_000, cores: 4, project: project)
+    FakeWorker.connect(memory_budget: 4 * 1024 ** 3, cores: 4, project: project)
     {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
     start_supervised!(Forge.Jobs.Scheduler)
 
@@ -443,7 +443,7 @@ defmodule Forge.FlowTest do
     # The same job asking for more than the machine has does not, however small the constant is.
     {:ok, _} =
       Jobs.get!(job.id)
-      |> Ecto.Changeset.change(%{status: :pending, memory_max: 9_000, worker_id: nil})
+      |> Ecto.Changeset.change(%{status: :pending, memory_max: 9 * 1024 ** 3, worker_id: nil})
       |> Forge.Repo.update()
 
     assert Forge.Jobs.Scheduler.tick() == 0
@@ -453,7 +453,7 @@ defmodule Forge.FlowTest do
     # constant without any test noticing: the machine has four and the job wants five.
     {:ok, _} =
       Jobs.get!(job.id)
-      |> Ecto.Changeset.change(%{memory_max: 1_000, cores: 5})
+      |> Ecto.Changeset.change(%{memory_max: 1024 ** 3, cores: 5})
       |> Forge.Repo.update()
 
     assert Forge.Jobs.Scheduler.tick() == 0

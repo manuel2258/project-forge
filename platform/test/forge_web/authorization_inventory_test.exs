@@ -255,6 +255,10 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     # A line in the socket's own worker's log, bounded field by field and addressed by the socket,
     # never by the payload (`docs/design/worker-log.md` § The `log` message).
     "log" => :socket_worker,
+    # Marks the socket's own worker and requeues the jobs running on it, found by the socket's
+    # worker id and never by one in the payload (`docs/design/worker-channel.md` § An unhealthy
+    # machine).
+    "unhealthy" => :socket_worker,
     "event" => :owns_job,
     "result" => :owns_job,
     "turn" => :owns_job,

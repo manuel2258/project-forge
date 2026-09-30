@@ -83,6 +83,25 @@ defmodule Forge.ConversationsTest do
       assert Repo.aggregate(Jobs.Job, :count) == before
     end
 
+    # **The ceiling of 2026-09-29**, two bytes, reached the machine through the form and would
+    # through any caller that bypasses it. Refused by name, not as "not a figure" — it is one —
+    # and on both sides of the minimum.
+    test "a memory below the minimum is refused, and the minimum itself is not", %{
+      project: project
+    } do
+      before = Repo.aggregate(Jobs.Job, :count)
+
+      for bytes <- [2, 536_870_911] do
+        assert Conversations.open(project, "hi", memory: bytes) ==
+                 {:error, {:too_little_memory, bytes}}
+      end
+
+      assert Repo.aggregate(Jobs.Job, :count) == before
+
+      assert {:ok, chat} = Conversations.open(project, "hi", memory: 536_870_912)
+      assert chat.memory_max == 536_870_912
+    end
+
     test "a ticket chat starts from the ticket's branch", %{project: project} do
       {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
 
@@ -174,6 +193,18 @@ defmodule Forge.ConversationsTest do
                chat.id |> Events.for_job() |> Enum.filter(&(&1.type == "proposal.unreadable"))
 
       assert event.payload["reasons"]["half.md"] == "no heading"
+    end
+
+    # A turn's memory is kept on its `chat.turn` and nowhere else
+    # (`docs/design/claude-code-events.md` § Memory): it is what the strip reads when no event
+    # saw the kill.
+    test "the memory a turn ended with is kept on the turn", %{chat: chat} do
+      memory = %{"ceiling" => 2_147_483_648, "peak" => 2_147_483_648, "oom_kills" => 1}
+
+      {:ok, _chat} =
+        Conversations.record_turn(chat, put_in(turn(1, 0.01), ["harness", "memory"], memory))
+
+      assert %{payload: %{"memory" => ^memory}} = Events.latest_for_job(chat.id, "chat.turn")
     end
 
     # The harness reports total_cost_usd cumulatively across the session and num_turns per turn —
@@ -1210,6 +1241,17 @@ defmodule Forge.ConversationsTest do
       tool_result(chat, "t1", false, "ok")
 
       assert Conversations.now(Events.for_job(chat.id)) == nil
+    end
+
+    test "is what memory did, until the agent does something else", %{chat: chat} do
+      tool_use(chat, "t1", "Bash", %{"command" => "gradle build"})
+      harness(chat, "job.harness.memory", %{what: "oom_kill", oom_kills: 1})
+
+      assert {:memory, %{"what" => "oom_kill", "oom_kills" => 1}} =
+               Conversations.now(Events.for_job(chat.id))
+
+      tool_use(chat, "t2", "Bash", %{"command" => "gradle build --max-workers=1"})
+      assert {:action, %{id: "t2"}} = Conversations.now(Events.for_job(chat.id))
     end
 
     # A limit that did not stop anything is the provider saying how full the window is. It is

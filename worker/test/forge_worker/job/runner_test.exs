@@ -26,6 +26,15 @@ defmodule ForgeWorker.Job.RunnerTest.RecordingSlice do
 
   @impl ForgeWorker.Slice
   defdelegate leave(owner, paths), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate memory(context), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate ended(context, output), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate probe(), to: ForgeWorker.Slice.Direct
 end
 
 defmodule ForgeWorker.Job.RunnerTest.WrapReportingSlice do
@@ -56,6 +65,15 @@ defmodule ForgeWorker.Job.RunnerTest.WrapReportingSlice do
 
   @impl ForgeWorker.Slice
   defdelegate leave(owner, paths), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate memory(context), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate ended(context, output), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate probe(), to: ForgeWorker.Slice.Direct
 end
 
 defmodule ForgeWorker.Job.RunnerTest.RefusingSlice do
@@ -83,12 +101,22 @@ defmodule ForgeWorker.Job.RunnerTest.RefusingSlice do
 
   @impl ForgeWorker.Slice
   defdelegate leave(owner, paths), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate memory(context), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate ended(context, output), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate probe(), to: ForgeWorker.Slice.Direct
 end
 
 defmodule ForgeWorker.Job.RunnerTest do
   use ExUnit.Case, async: true
 
   alias ForgeWorker.Job.RunnerTest.{RecordingSlice, RefusingSlice, WrapReportingSlice}
+  alias ForgeWorker.ScriptedSlice
 
   import ForgeWorker.Fixtures
 
@@ -226,6 +254,20 @@ defmodule ForgeWorker.Job.RunnerTest do
     assert env =~ "ANTHROPIC_API_KEY=secret-key"
     # Secrets travel through the environment, never through argv.
     refute File.read!(Path.join(job_dir, "fake-args.txt")) =~ "secret-key"
+  end
+
+  # The ceiling is the job's to know: an agent that sees exit 137 can only tell it for what it
+  # most likely is if it can see the ceiling, and a build that sizes its parallelism by it has to
+  # be able to read it. Absent, not zero, when the slice has none.
+  test "the harness is told its memory ceiling, and nothing when there is none", context do
+    ceiling = 2 * 1024 ** 3
+    opts = [slice_opts: %{memory_max: ceiling}]
+    {:ok, result} = context |> run("success", opts) |> Runner.await(5_000)
+    env = File.read!(Path.join(job_dir(result), "fake-env-all.txt"))
+    assert env =~ "FORGE_MEMORY_MAX=#{ceiling}\n"
+
+    {:ok, result} = context |> run("success") |> Runner.await(5_000)
+    refute File.read!(Path.join(job_dir(result), "fake-env-all.txt")) =~ "FORGE_MEMORY_MAX"
   end
 
   test "a credential given as a function is resolved at spawn time", context do
@@ -488,6 +530,8 @@ defmodule ForgeWorker.Job.RunnerTest do
     end
   end
 
+  # It said it started, so what went wrong is not that it never did: the reason stays the plain
+  # fact, and stderr's last line is not dressed up as the cause.
   test "a crash without a result is an error, and odd lines still become events", context do
     {:ok, result} = context |> run("crash") |> Runner.await(5_000)
     assert result.outcome == :error
@@ -495,6 +539,16 @@ defmodule ForgeWorker.Job.RunnerTest do
     types = Enum.map(events(), & &1.type)
     assert "job.harness.malformed" in types
     assert "job.harness.unknown" in types
+  end
+
+  # It never said it started and never said why it ended, so what it wrote to stderr last is the
+  # only thing that can (`docs/design/claude-code-events.md` § A harness that never starts).
+  test "a harness that exits before it starts says so, with stderr's last line", context do
+    {:ok, result} = context |> run("no_start") |> Runner.await(5_000)
+    assert result.outcome == :error
+
+    assert result.reason ==
+             "the harness exited with status 1 before it started; stderr: some diagnostics on stderr"
   end
 
   test "a harness that never authenticated says so in the reason", context do
@@ -533,6 +587,274 @@ defmodule ForgeWorker.Job.RunnerTest do
 
     Runner.cancel(pid)
     {:ok, _result} = Runner.await(pid, 5_000)
+  end
+
+  # Stopped before it started is stopped, and says so: a cancel is the reason, not the harness's
+  # having exited, which it did only because it was told to.
+  test "a harness cancelled before it started is cancelled, not one that exited", context do
+    pid = run(context, "never_starts")
+    Process.sleep(200)
+    Runner.cancel(pid)
+
+    {:ok, result} = Runner.await(pid, 15_000)
+    assert result.killed == :operator
+    assert result.reason == "cancelled by the operator"
+  end
+
+  # A resume the harness could not honour ends before `system/init`, with a result message of its
+  # own: its words are the reason, and stderr's last line is not put in their place.
+  test "a harness that answered before it started keeps its own words", context do
+    {:ok, result} =
+      context
+      |> run("session",
+        harness_opts: [
+          executable: fake_executable(),
+          credential: {:api_key, "k"},
+          resume_session: "sess-nowhere"
+        ]
+      )
+      |> Runner.await(5_000)
+
+    assert result.exit_status == 1
+    assert result.reason == "harness error: error_during_execution"
+  end
+
+  # `docs/design/claude-code-events.md` § Memory: what the slice reads of the job's memory while it
+  # runs, said as `job.harness.memory`, and what the run ends with.
+  describe "memory" do
+    @gib 1024 ** 3
+
+    defp reading(fields) do
+      Map.merge(
+        %{
+          ceiling: 2 * @gib,
+          current: @gib,
+          peak: @gib,
+          max_events: 0,
+          oom_kills: 0,
+          pressure: 0.0
+        },
+        Map.new(fields)
+      )
+    end
+
+    defp scripted(readings, ending \\ %{}) do
+      {:ok, agent} = Agent.start_link(fn -> readings end)
+
+      [
+        slice: ScriptedSlice,
+        slice_opts: %{memory_max: 2 * @gib, readings: agent, ending: ending},
+        memory_sample_ms: 10
+      ]
+    end
+
+    defp memory_events do
+      for %{type: "job.harness.memory", payload: payload} <- events(), do: payload
+    end
+
+    # Sampled while the process lives, and each rule's one event reaches the timeline: a kill per
+    # increase, the ceiling once, and an episode of pressure once.
+    test "is read while the process runs, and what it is worth is said", context do
+      readings = [
+        reading(oom_kills: 0),
+        reading(oom_kills: 1, peak: 2 * @gib),
+        reading(oom_kills: 1, max_events: 4, pressure: 30.0),
+        reading(oom_kills: 1, max_events: 900, pressure: 35.0),
+        reading(oom_kills: 1, max_events: 1800, pressure: 35.0)
+      ]
+
+      pid = run(context, "hang", scripted(readings))
+
+      assert_receive {:event,
+                      %{type: "job.harness.memory", payload: %{what: "pressure"} = pressure}},
+                     5_000
+
+      Runner.cancel(pid)
+      {:ok, _result} = Runner.await(pid, 15_000)
+
+      # Before it, in order, and after it nothing more, however long the episode went on.
+      assert [kill, ceiling] = memory_events()
+      assert %{what: "oom_kill", new_kills: 1, oom_kills: 1, peak: 2_147_483_648} = kill
+      assert %{what: "ceiling", ceiling: 2_147_483_648} = ceiling
+      assert %{what: "pressure", pressure: 35.0} = pressure
+    end
+
+    # `:memory_pressure_full` is how a node moves the threshold: at 60, two samples at 50 are not
+    # an episode, where the default's twenty would have made one before the kill that follows.
+    test "pressure is measured against the node's threshold", context do
+      readings = [
+        reading(pressure: 50.0),
+        reading(pressure: 50.0),
+        reading(pressure: 50.0, oom_kills: 1)
+      ]
+
+      pid = run(context, "hang", scripted(readings) ++ [memory_pressure_full: 60.0])
+
+      assert_receive {:event, %{type: "job.harness.memory", payload: %{what: "oom_kill"}}}, 5_000
+      Runner.cancel(pid)
+      {:ok, _result} = Runner.await(pid, 15_000)
+
+      # The kill was taken above; a pressure event would have come before it, and be left.
+      assert memory_events() == []
+    end
+
+    # 2026-09-29's first chat: `starting` every two minutes with an empty stderr, and nothing that
+    # said its ceiling was two bytes.
+    test "a starting event says what memory is doing", context do
+      opts = scripted([reading(ceiling: 2, current: 2, max_events: 40_000, pressure: 99.0)])
+
+      {:ok, _result} =
+        context
+        |> run(
+          "never_starts",
+          opts ++ [start_notice_ms: 50, start_timeout_ms: 100, grace_ms: 100]
+        )
+        |> Runner.await(10_000)
+
+      assert %{"ceiling" => 2, "current" => 2, "max_events" => 40_000, "pressure" => 99.0} =
+               Enum.find_value(events(), fn
+                 %{type: "job.harness.starting", payload: %{memory: memory}} -> memory
+                 _other -> nil
+               end)
+    end
+
+    # The unit's own last reading is what the run ends with: a harness killed for memory takes its
+    # cgroup with it, and the sample before may be seconds older than the kill.
+    test "the result says the ceiling, the peak and the kills, from the unit's last word",
+         context do
+      ending = %{memory: reading(peak: 2 * @gib, oom_kills: 2, current: nil)}
+
+      {:ok, result} = context |> run("success", scripted([nil], ending)) |> Runner.await(5_000)
+
+      assert result.harness["memory"] ==
+               %{"ceiling" => 2 * @gib, "peak" => 2 * @gib, "oom_kills" => 2}
+
+      # And the kills no sample saw are still said, before the result.
+      assert [%{what: "oom_kill", new_kills: 2}] = memory_events()
+    end
+
+    test "nothing read is no memory at all", context do
+      {:ok, result} = context |> run("success") |> Runner.await(5_000)
+      assert result.harness["memory"] == nil
+      assert memory_events() == []
+    end
+
+    # Its main process ended on SIGKILL and its unit counted an OOM kill: said in words, not as
+    # "no result message" or an exit status.
+    test "a harness killed at its ceiling says so", context do
+      ending = %{
+        exit: %{code: "killed", status: "KILL", result: "signal"},
+        memory: reading(oom_kills: 1, peak: 2 * @gib)
+      }
+
+      {:ok, result} = context |> run("crash", scripted([nil], ending)) |> Runner.await(5_000)
+      assert result.reason == "the harness was killed at its 2 GiB memory ceiling"
+    end
+
+    # Each half of the rule, alone, is something else: a SIGKILL nobody counted as an OOM kill, and
+    # a kill of some other process while the harness went on to die of something else.
+    test "a SIGKILL without an OOM kill, or an OOM kill without a SIGKILL, is not that",
+         context do
+      for ending <- [
+            %{exit: %{code: "killed", status: "KILL"}, memory: reading(oom_kills: 0)},
+            %{exit: %{code: "exited", status: "1"}, memory: reading(oom_kills: 3)},
+            %{exit: %{code: "killed", status: "TERM"}, memory: reading(oom_kills: 3)}
+          ] do
+        {:ok, result} = context |> run("crash", scripted([nil], ending)) |> Runner.await(5_000)
+        assert result.reason == "harness produced no result message", inspect(ending)
+      end
+    end
+
+    # Each correction round's process has a cgroup of its own, whose counters start at nought: the
+    # run's kills are the rounds' added up, and a round's first kill is news.
+    test "a correction round counts its own kills, and the run adds them up", context do
+      ending = %{memory: reading(oom_kills: 1, current: nil)}
+
+      {:ok, result} =
+        context |> run("fixes_when_resumed", scripted([nil], ending)) |> Runner.await(10_000)
+
+      assert result.harness["corrections"] == 1
+      assert result.harness["memory"]["oom_kills"] == 2
+      assert [%{oom_kills: 1}, %{oom_kills: 2, new_kills: 1}] = memory_events()
+    end
+
+    # Stopped for never starting is that, and its reason says what it was waiting on.
+    test "a harness stopped for never starting is that, whatever its unit counted", context do
+      ending = %{exit: %{code: "killed", status: "KILL"}, memory: reading(oom_kills: 1)}
+
+      opts =
+        scripted([nil], ending) ++ [start_notice_ms: 50, start_timeout_ms: 100, grace_ms: 100]
+
+      {:ok, result} = context |> run("never_starts", opts) |> Runner.await(10_000)
+      assert result.reason =~ "the harness had not started after 0s"
+    end
+
+    # Stopped by the platform is stopped, whatever the unit counted on the way out.
+    test "a harness cancelled is cancelled, whatever its unit counted", context do
+      ending = %{exit: %{code: "killed", status: "KILL"}, memory: reading(oom_kills: 1)}
+      pid = run(context, "hang", scripted([nil], ending))
+      Process.sleep(200)
+      Runner.cancel(pid)
+
+      {:ok, result} = Runner.await(pid, 15_000)
+      assert result.reason == "cancelled by the operator"
+    end
+
+    # A harness that finished said why it ended; a kill in its tree along the way does not change
+    # that.
+    test "a harness that produced its result is not one killed at its ceiling", context do
+      ending = %{exit: %{code: "killed", status: "KILL"}, memory: reading(oom_kills: 1)}
+      {:ok, result} = context |> run("success", scripted([nil], ending)) |> Runner.await(5_000)
+      refute result.reason =~ "memory ceiling"
+    end
+
+    # Its reason names what the process wrote last, which is what the slice says it is — for a
+    # unit, `systemd-run`'s own summary taken out.
+    test "the last line a harness that never started gives is the slice's", context do
+      ending = %{last_line: "error: flake does not provide attribute 'devShells.env'"}
+
+      {:ok, result} = context |> run("no_start", scripted([nil], ending)) |> Runner.await(5_000)
+
+      assert result.reason ==
+               "the harness exited with status 1 before it started; stderr: " <>
+                 "error: flake does not provide attribute 'devShells.env'"
+    end
+  end
+
+  # `docs/design/worker-tier.md` § How a machine finds out: a `systemd-run` that could not reach
+  # PID 1 is the machine's failure, and the machine's health hears of it before the run reports.
+  describe "a slice supervisor that did not answer" do
+    defp health do
+      name = :"health-#{System.unique_integer([:positive])}"
+      {:ok, _pid} = ForgeWorker.Health.start_link(name: name, link: self(), probe_ms: nil)
+      name
+    end
+
+    test "makes the machine unhealthy, before the run's result", context do
+      {:ok, readings} = Agent.start_link(fn -> [nil] end)
+      health = health()
+      reason = "systemd-run could not reach PID 1: Failed to start transient service unit: x"
+
+      opts = [
+        slice: ScriptedSlice,
+        slice_opts: %{readings: readings, ending: %{unreachable: reason}},
+        health: health
+      ]
+
+      {:ok, _result} = context |> run("no_start", opts) |> Runner.await(5_000)
+
+      # Already here when the result came back: the link withholds a result it hears of after.
+      assert_received {:unhealthy, ^reason}
+      assert ForgeWorker.Health.unhealthy(health) == reason
+    end
+
+    test "a run that simply failed says nothing of the machine", context do
+      health = health()
+      {:ok, _result} = context |> run("no_start", health: health) |> Runner.await(5_000)
+
+      refute_received {:unhealthy, _}
+      assert ForgeWorker.Health.unhealthy(health) == nil
+    end
   end
 
   describe "a harness that never starts" do
@@ -822,10 +1144,11 @@ defmodule ForgeWorker.Job.RunnerTest do
     assert result.outcome == :error
 
     # Nothing ran: no harness event, no exit status, and the document the state declared is
-    # missing rather than invalid.
+    # missing rather than invalid. Nor does its reason say a harness exited: none was started.
     assert events() == []
     assert result.exit_status == nil
     assert result.missing == ["plan.md"]
+    refute result.reason =~ "exited"
   end
 
   # The race the test above lost one run in several: a refused slice concludes within the call

@@ -303,6 +303,13 @@
         image = self.packages.x86_64-linux.worker-image;
       };
 
+      # The worker at its memory ceiling and with its PID 1 wedged, on the real image. Needs KVM
+      # too; see nix/worker-health.nix.
+      checks.x86_64-linux.worker-health = import ./nix/worker-health.nix {
+        pkgs = nixpkgs.legacyPackages.x86_64-linux;
+        image = self.packages.x86_64-linux.worker-image;
+      };
+
       # `services.forge` for a NixOS host; the package defaults to this flake's release.
       nixosModules.forge = { pkgs, ... }: {
         imports = [ (import ./nix/module.nix { forgePackage = self.packages.${pkgs.stdenv.hostPlatform.system}.forge; }) ];

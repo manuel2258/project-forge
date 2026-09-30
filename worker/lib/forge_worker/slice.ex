@@ -51,6 +51,40 @@ defmodule ForgeWorker.Slice do
   @typedoc "How a command is run as the job's user: the command, and what runs instead."
   @type as :: (String.t(), [String.t()] -> {String.t(), [String.t()]})
 
+  @typedoc """
+  What a slice read of a job's memory, any of it nil where it could not be read
+  (`ForgeWorker.Job.Memory` says what it means): the ceiling, now, the most so far, how often the
+  ceiling was reached and a process killed for memory, and the share of the last ten seconds every
+  process in the job was stalled on memory.
+  """
+  @type reading :: %{
+          ceiling: non_neg_integer() | nil,
+          current: non_neg_integer() | nil,
+          peak: non_neg_integer() | nil,
+          max_events: non_neg_integer() | nil,
+          oom_kills: non_neg_integer() | nil,
+          pressure: float() | nil
+        }
+
+  @typedoc """
+  What a slice can say about a process once it has ended (`ended/2`):
+
+    * `memory` — the unit's own last reading, taken before its cgroup went, or nil;
+    * `exit` — how its main process ended, as the unit saw it (`code` `exited` or `killed`,
+      `status`, and the unit's `result`), or nil;
+    * `unreachable` — why the slice's supervisor could not be reached, when that is why the
+      process never ran: the machine's failure, not the job's;
+    * `last_line` — the last line the process itself wrote to its output, the slice's own lines
+      taken out, or nil.
+  """
+  @type ending :: %{
+          memory: reading() | nil,
+          exit:
+            %{code: String.t() | nil, status: String.t() | nil, result: String.t() | nil} | nil,
+          unreachable: String.t() | nil,
+          last_line: String.t() | nil
+        }
+
   @doc "Makes what the unit needs before the process starts. The job's user already exists."
   @callback prepare(opts()) :: {:ok, context()} | {:error, term()}
 
@@ -59,6 +93,24 @@ defmodule ForgeWorker.Slice do
 
   @doc "Removes what `prepare/1` made. Called whether the job succeeded or not."
   @callback cleanup(context()) :: :ok
+
+  @doc """
+  The job's memory as its slice can read it now, while its process runs; nil when there is
+  nothing to read. Plain reads, which answer even when the slice's supervisor does not.
+  """
+  @callback memory(context()) :: reading() | nil
+
+  @doc """
+  What the slice can say about a process that has ended, given the file its output went to.
+  Called once per process, after it has exited.
+  """
+  @callback ended(context(), output :: String.t()) :: ending()
+
+  @doc """
+  Whether the slice's supervisor still answers — for the machine's health
+  (`ForgeWorker.Health`). `:none` from a slice with nothing to ask.
+  """
+  @callback probe() :: :ok | {:error, String.t()} | :none
 
   @doc "Makes the job's Unix user, before anything of the job exists on this machine."
   @callback enter(job_id :: String.t()) :: {:ok, owner()} | {:error, term()}
@@ -99,6 +151,41 @@ defmodule ForgeWorker.Slice do
   @doc "Gives `paths` back and removes the job's user."
   @spec leave(user(), [String.t()]) :: :ok
   def leave({slice, owner}, paths), do: slice.leave(owner, paths)
+
+  @doc "The last `bytes` of a file, as text; empty when there is no file."
+  @spec tail(String.t(), pos_integer()) :: String.t()
+  def tail(path, bytes) do
+    case File.open(path, [:read, :binary]) do
+      {:ok, file} ->
+        try do
+          {:ok, size} = :file.position(file, :eof)
+          {:ok, _at} = :file.position(file, max(size - bytes, 0))
+
+          case IO.binread(file, bytes) do
+            data when is_binary(data) -> String.replace_invalid(data)
+            _eof -> ""
+          end
+        after
+          File.close(file)
+        end
+
+      {:error, _reason} ->
+        ""
+    end
+  end
+
+  @doc """
+  The last line of `text` that is the process's own, not one `own?` says the slice wrote; nil
+  when there is none.
+  """
+  @spec last_line(String.t(), (String.t() -> boolean())) :: String.t() | nil
+  def last_line(text, own? \\ fn _line -> false end) do
+    text
+    |> String.split("\n")
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == "" or own?.(&1)))
+    |> List.last()
+  end
 end
 
 defmodule ForgeWorker.Slice.Direct do
@@ -118,6 +205,20 @@ defmodule ForgeWorker.Slice.Direct do
 
   @impl ForgeWorker.Slice
   def cleanup(_context), do: :ok
+
+  # No cgroup of the job's own, and no supervisor to ask: all it can say is what the process
+  # wrote last.
+  @impl ForgeWorker.Slice
+  def memory(_context), do: nil
+
+  @impl ForgeWorker.Slice
+  def ended(_context, output) do
+    last = output |> ForgeWorker.Slice.tail(2048) |> ForgeWorker.Slice.last_line()
+    %{memory: nil, exit: nil, unreachable: nil, last_line: last}
+  end
+
+  @impl ForgeWorker.Slice
+  def probe, do: :none
 
   @impl ForgeWorker.Slice
   def enter(job_id), do: {:ok, %{kind: :direct, job_id: job_id}}
@@ -143,30 +244,125 @@ defmodule ForgeWorker.Slice.Systemd do
   is built around seeing the harness's stdout and its exit; the unit is a wrapper, not a
   different execution model.
 
-  **The unit is not exercised by the test suite.** It needs systemd as PID 1 and cgroup v2, which
-  the machine this was written on has neither of. What is tested is the command it builds. The
-  mechanism itself is what `measure/`'s M3 already measured, and what milestone 3's demo has
-  to show — `docs/measurements.md` says the crossing of M2 and M3, four builds with one under
-  a binding ceiling, has never been run and should be before the demo depends on it.
+  **The unit is not exercised by the test suite**, which needs neither systemd as PID 1 nor
+  cgroup v2; what it tests is the command this builds. **It is exercised on the worker image** by
+  `nix build .#checks.x86_64-linux.worker-health` (`nix/worker-health.nix`), which needs KVM: the
+  release in the image makes the user, the unit and its stop step with this module and reads what
+  came back with it — a child and a main process killed at a 512 MiB ceiling, the cgroup under
+  pressure, a forged bus error, and a PID 1 wedged by a 2-byte ceiling
+  (`docs/measurements.md` § The worker at its ceiling, on the image).
 
   **The user is, where the suite runs as root.** `enter/1`, `own/2`, `run_as/3` and `leave/2` need
   only `useradd`, `chown`, `setpriv` and `userdel`, and `ForgeWorker.JobUserTest` uses them to show
   a hook the job planted running as the job's user rather than root: `mix test --include root`.
+
+  **What it reads is, from fixture files.** The cgroup's files, the unit's last reading and what
+  `systemd-run` prints are plain text, so `memory/1`, `ended/2` and the script behind the unit's
+  `ExecStopPost` are tested against a directory standing in for the cgroup
+  (`docs/design/worker-tier.md` § What the slice reads while a job runs).
   """
 
   @behaviour ForgeWorker.Slice
 
+  alias ForgeWorker.Job.Dir
   alias ForgeWorker.Log
 
+  @cgroup_root "/sys/fs/cgroup/system.slice"
+  @tail_bytes 2048
+
+  # **What `systemd-run` prints when it could not reach PID 1**, read in systemd's source, and the
+  # first of them also seen on the worker image (261.2, `nix/worker-health.nix`): `run.c`'s
+  # `bus_call_with_hint()` says `Failed to start transient service unit: <errno>`, and
+  # `bus-util.c`'s `bus_log_connect_full()` says `Failed to connect to <scope> bus via <transport>
+  # transport: <errno>` (older releases: `Failed to connect to bus: <errno>`). The errno texts are
+  # the ones that mean nobody answered, not an answer that said no — `Unit … already exists` is
+  # PID 1 answering. One list, and the only one (`docs/design/worker-tier.md` § How a machine finds
+  # out). The run that wedges PID 1 prints neither — `Failed to request invocation ID for unit: `
+  # or `Failed to query unit state: ` — and is left to end as the job's own failure until the
+  # operator says otherwise (`docs/design/worker-tier.md` § Open).
+  @bus_calls ["Failed to start transient service unit: ", "Failed to connect to "]
+  @bus_errors [
+    "Connection timed out",
+    "Transport endpoint is not connected",
+    "Connection reset by peer"
+  ]
+
+  # `systemd-run`'s own lines, in the stderr it shares with the job now that it is not `--quiet`:
+  # the one saying the unit exists, and the summary it prints once the unit has ended.
+  @started "Running as unit:"
+  @summary [
+    "Finished with result",
+    "Main processes terminated with",
+    "Service runtime",
+    "CPU time consumed",
+    "Memory peak",
+    "IP Traffic",
+    "IO Bytes"
+  ]
+
   # The user is the job owner's (`enter/1`), and the worktree was given to it before any git ran
-  # in it. What is left is the job directory, which the runner has just written as root.
+  # in it. What is left is the job directory, which the runner has just written as root — and the
+  # script the unit runs as root when its process has ended, which goes in the worker's own
+  # directory beside it, where the job's user can write nothing.
   @impl ForgeWorker.Slice
   def prepare(opts) do
     user = user_name(opts.job_id)
 
     with :ok <- chown(user, [Map.get(opts, :job_dir)]) do
-      {:ok, Map.merge(opts, %{kind: :systemd, user: user})}
+      context = Map.merge(opts, %{kind: :systemd, user: user})
+      write_at_exit(context)
+      {:ok, context}
     end
+  end
+
+  # A reading left by an earlier worker's run of this job — a unit that outlived the worker that
+  # started it — would hide this run's genuine bus error and lend it an exit it never had
+  # (`docs/design/worker-tier.md` § How a machine finds out).
+  defp write_at_exit(%{job_dir: job_dir} = context) when is_binary(job_dir) do
+    Dir.worker_dir!(job_dir)
+    File.rm(at_exit_reading(context))
+    script = at_exit_path(context)
+    File.write!(script, at_exit_script(cgroup(context), at_exit_reading(context)))
+    File.chmod!(script, 0o755)
+  end
+
+  defp write_at_exit(_context), do: :ok
+
+  @doc """
+  The script the unit runs as its `ExecStopPost`, once its main process has ended and before its
+  cgroup is removed: `memory.events`, `memory.peak` and `memory.max`, and how the main process
+  ended as systemd hands a stop command it (`EXIT_CODE`, `EXIT_STATUS`, `SERVICE_RESULT`), into
+  `reading`. POSIX `sh` and its builtins alone, so it needs no `PATH`; each file only if it is
+  there, since `memory.peak` needs a kernel from 5.19 on; and it always exits 0, since a stop
+  command that failed would fail the unit a job had finished cleanly in.
+  """
+  @spec at_exit_script(String.t(), String.t()) :: String.t()
+  def at_exit_script(cgroup, reading) do
+    """
+    #!/bin/sh
+    # Written by the forge worker (ForgeWorker.Slice.Systemd): the unit's own last reading.
+    cg=#{sh_quote(cgroup)}
+    {
+      if [ -r "$cg/memory.events" ]; then
+        while IFS= read -r line; do printf 'events %s\\n' "$line"; done < "$cg/memory.events"
+      fi
+      [ -r "$cg/memory.peak" ] && read -r value < "$cg/memory.peak" && printf 'peak %s\\n' "$value"
+      [ -r "$cg/memory.max" ] && read -r value < "$cg/memory.max" && printf 'max %s\\n' "$value"
+      printf 'exit_code %s\\nexit_status %s\\nresult %s\\n' \\
+        "${EXIT_CODE-}" "${EXIT_STATUS-}" "${SERVICE_RESULT-}"
+    } > #{sh_quote(reading)} 2> /dev/null
+    exit 0
+    """
+  end
+
+  defp sh_quote(text), do: "'" <> String.replace(text, "'", ~S('"'"')) <> "'"
+
+  defp at_exit_path(context), do: Path.join(Dir.worker_dir(context.job_dir), "at-exit")
+  defp at_exit_reading(context), do: Path.join(Dir.worker_dir(context.job_dir), "at-exit.reading")
+
+  defp cgroup(context) do
+    root = context[:cgroup_root] || Application.get_env(:forge_worker, :cgroup_root, @cgroup_root)
+    Path.join(root, unit_name(context.job_id) <> ".service")
   end
 
   @impl ForgeWorker.Slice
@@ -178,6 +374,212 @@ defmodule ForgeWorker.Slice.Systemd do
   # job owner's to take back once its last git command has run (`leave/2`).
   @impl ForgeWorker.Slice
   def cleanup(_context), do: :ok
+
+  # -- what it reads -----------------------------------------------------------------------------
+
+  # Plain reads of the unit's cgroup, which answer whether or not PID 1 does. Nil when the cgroup
+  # is not there — the unit not made yet, or gone — which is nothing to say rather than zero.
+  @impl ForgeWorker.Slice
+  def memory(context) do
+    dir = cgroup(context)
+
+    case read(dir, "memory.events") do
+      nil ->
+        nil
+
+      events ->
+        events = parse_events(events)
+
+        %{
+          ceiling: dir |> read("memory.max") |> parse_bytes(),
+          current: dir |> read("memory.current") |> parse_bytes(),
+          peak: dir |> read("memory.peak") |> parse_bytes(),
+          max_events: events["max"],
+          oom_kills: events["oom_kill"],
+          pressure: dir |> read("memory.pressure") |> parse_pressure()
+        }
+    end
+  end
+
+  defp read(dir, file) do
+    case File.read(Path.join(dir, file)) do
+      {:ok, text} -> text
+      {:error, _reason} -> nil
+    end
+  end
+
+  @doc "`memory.events` as a map of counter to count: `max`, `oom`, `oom_kill` and the rest."
+  @spec parse_events(String.t()) :: %{String.t() => non_neg_integer()}
+  def parse_events(text) do
+    for line <- String.split(text, "\n", trim: true),
+        [key, count] <- [String.split(line, " ", trim: true)],
+        {n, ""} <- [Integer.parse(count)],
+        into: %{},
+        do: {key, n}
+  end
+
+  @doc "A cgroup's byte figure: a number, or nil for `max` — no ceiling — and for nothing read."
+  @spec parse_bytes(String.t() | nil) :: non_neg_integer() | nil
+  def parse_bytes(nil), do: nil
+
+  def parse_bytes(text) do
+    case Integer.parse(String.trim(text)) do
+      {n, ""} -> n
+      _max -> nil
+    end
+  end
+
+  @doc """
+  `memory.pressure`'s `full avg10`: the share of the last ten seconds in which every process in the
+  cgroup was stalled on memory at once, as a percentage. Nil when there is none to read.
+  """
+  @spec parse_pressure(String.t() | nil) :: float() | nil
+  def parse_pressure(nil), do: nil
+
+  def parse_pressure(text) do
+    case Regex.run(~r/^full avg10=(\d+(?:\.\d+)?)/m, text) do
+      [_line, figure] -> figure |> Float.parse() |> elem(0)
+      nil -> nil
+    end
+  end
+
+  # **Read once, and removed**: a correction round runs a unit of the same name, and a reading left
+  # behind would be the next round's if that round never got as far as a unit.
+  @impl ForgeWorker.Slice
+  def ended(context, output) do
+    tail = ForgeWorker.Slice.tail(output, @tail_bytes)
+    reading = take_reading(context)
+    {memory, exit} = parse_at_exit(reading)
+
+    %{
+      memory: memory,
+      exit: exit,
+      unreachable: if(is_nil(reading), do: unreachable(output, tail)),
+      last_line: ForgeWorker.Slice.last_line(tail, &own_line?/1)
+    }
+  end
+
+  defp take_reading(%{job_dir: job_dir} = context) when is_binary(job_dir) do
+    path = at_exit_reading(context)
+
+    case File.read(path) do
+      {:ok, text} ->
+        File.rm(path)
+        text
+
+      {:error, _none} ->
+        nil
+    end
+  end
+
+  defp take_reading(_context), do: nil
+
+  @doc """
+  The unit's last reading (`at_exit_script/2`) as a memory reading and how its main process ended;
+  `{nil, nil}` when there was none — a unit that never existed, or never stopped cleanly enough to
+  run its stop command.
+  """
+  @spec parse_at_exit(String.t() | nil) :: {ForgeWorker.Slice.reading() | nil, map() | nil}
+  def parse_at_exit(nil), do: {nil, nil}
+
+  def parse_at_exit(text) do
+    lines = String.split(text, "\n", trim: true)
+
+    fields =
+      for line <- lines,
+          [key, value] <- [String.split(line, " ", parts: 2)],
+          into: %{},
+          do: {key, String.trim(value)}
+
+    events =
+      lines
+      |> Enum.flat_map(fn
+        "events " <> event -> [event]
+        _other -> []
+      end)
+      |> Enum.join("\n")
+      |> parse_events()
+
+    memory = %{
+      ceiling: parse_bytes(fields["max"]),
+      current: nil,
+      peak: parse_bytes(fields["peak"]),
+      max_events: events["max"],
+      oom_kills: events["oom_kill"],
+      pressure: nil
+    }
+
+    exit = %{
+      code: blank(fields["exit_code"]),
+      status: blank(fields["exit_status"]),
+      result: blank(fields["result"])
+    }
+
+    {memory, exit}
+  end
+
+  defp blank(nil), do: nil
+  defp blank(""), do: nil
+  defp blank(value), do: value
+
+  # A bus error in the tail is believed only when nothing says the unit came to exist: not its
+  # last reading, which `ended/2` asks first and which root wrote where the job cannot reach — so
+  # the one proof a job cannot forge or remove — and not the output's `Running as unit:`, which a
+  # job can: its stderr is this very file, and it may truncate it and write a bus error of its own
+  # (`docs/design/worker-tier.md` § How a machine finds out). The whole output is read, but only
+  # when there is a bus error to check: a genuine one leaves a file of two lines.
+  defp unreachable(output, tail) do
+    case bus_error(tail) do
+      nil -> nil
+      line -> if started?(output), do: nil, else: "systemd-run could not reach PID 1: #{line}"
+    end
+  end
+
+  @doc """
+  The line of `output` saying `systemd-run` could not reach PID 1, or nil. Whether to believe it is
+  `started?/1`'s question.
+  """
+  @spec bus_error(String.t()) :: String.t() | nil
+  def bus_error(output) do
+    output
+    |> String.split("\n")
+    |> Enum.map(&String.trim/1)
+    |> Enum.find(&(String.starts_with?(&1, @bus_calls) and String.ends_with?(&1, @bus_errors)))
+  end
+
+  @doc """
+  Whether the output at `path` says the unit came to exist (`Running as unit:`). A job's process
+  runs only once its unit exists, and `systemd-run` says so as soon as it does, so an output that
+  never says it holds nothing a job wrote (`docs/design/worker-tier.md` § How a machine finds out).
+  """
+  @spec started?(String.t()) :: boolean()
+  def started?(path) do
+    path |> File.stream!() |> Enum.any?(&String.contains?(&1, @started))
+  rescue
+    File.Error -> false
+  end
+
+  @doc "Whether a line of the unit's output is `systemd-run`'s own rather than the process's."
+  @spec own_line?(String.t()) :: boolean()
+  def own_line?(line) do
+    line = String.trim(line)
+
+    String.starts_with?(line, @started) or
+      Enum.any?(@summary, &String.starts_with?(line, &1 <> ":"))
+  end
+
+  # **Asked of PID 1 itself**, with a deadline it cannot outlive: `timeout` ends `systemctl` at ten
+  # seconds and kills it five after, so a probe of a wedged PID 1 comes back as a failure rather
+  # than never (`docs/design/worker-tier.md` § How a machine finds out).
+  @impl ForgeWorker.Slice
+  def probe do
+    args = ["-k", "5", "10", "systemctl", "show", "--property=Version", "--value"]
+
+    case System.cmd("timeout", args, stderr_to_stdout: true) do
+      {_version, 0} -> :ok
+      {out, code} -> {:error, "systemctl show exited #{code}: #{String.trim(out)}"}
+    end
+  end
 
   @impl ForgeWorker.Slice
   def enter(job_id) do
@@ -245,15 +647,21 @@ defmodule ForgeWorker.Slice.Systemd do
   @spec flags(map()) :: [String.t()]
   def flags(context) do
     [
+      # Not `--quiet`: `Running as unit:` is what shows the unit came to exist, which is what lets
+      # a bus error in this output be believed (`ended/2`).
       "--pipe",
       "--wait",
       "--collect",
-      "--quiet",
       "--unit=" <> unit_name(context.job_id),
       "--uid=" <> context.user,
       "--property=WorkingDirectory=" <> context.worktree,
-      "--property=MemorySwapMax=0"
+      "--property=MemorySwapMax=0",
+      # A process the kernel kills for memory dies alone; the default, `stop`, ends the whole unit
+      # with it, so an agent's build dying took the agent with it. The harness dying still ends
+      # the unit, because its main process is gone (`docs/design/worker-tier.md` § The job slice).
+      "--property=OOMPolicy=continue"
     ] ++
+      at_exit(context) ++
       limit("MemoryMax", context[:memory_max]) ++
       limit("CPUWeight", context[:cpu_weight]) ++
       environment(context)
@@ -293,6 +701,13 @@ defmodule ForgeWorker.Slice.Systemd do
   @doc "The Unix user a job runs as. One per job, made before it starts and gone after."
   @spec user_name(String.t()) :: String.t()
   def user_name(job_id), do: "forge-job-" <> short(job_id)
+
+  # `+` runs it as root, so it may write into the worker's directory and nothing the job ran can
+  # forge what it writes; `-` keeps its failing from failing the unit.
+  defp at_exit(%{job_dir: job_dir} = context) when is_binary(job_dir),
+    do: ["--property=ExecStopPost=-+" <> at_exit_path(context)]
+
+  defp at_exit(_context), do: []
 
   defp limit(_name, nil), do: []
   defp limit(name, value), do: ["--property=#{name}=#{value}"]

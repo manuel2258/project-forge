@@ -120,7 +120,8 @@ defmodule ForgeWeb.Actions do
 
   @doc """
   The now line's words for what the agent is doing (`Forge.Conversations.now/1`): *running mix
-  test*, *editing lexer.ex*, *retrying (2 of 10)*, *rate limited, resumes 14:00 UTC*.
+  test*, *editing lexer.ex*, *retrying (2 of 10)*, *rate limited, resumes 14:00 UTC*, *a process
+  was killed for memory (1 OOM kill · peak 2.0 GiB of 2 GiB)*.
   """
   @spec now_words(Forge.Conversations.now()) :: String.t() | nil
   def now_words(nil), do: nil
@@ -130,6 +131,7 @@ defmodule ForgeWeb.Actions do
   def now_words({:rate_limited, %DateTime{} = at}),
     do: "rate limited, resumes #{Calendar.strftime(at, "%H:%M")} UTC"
 
+  def now_words({:memory, payload}), do: Forge.Jobs.Memory.sentence(payload)
   def now_words({:action, action}), do: doing(kind(action), action)
 
   defp doing(:bash, action), do: "running " <> truncate(command(action), 60)

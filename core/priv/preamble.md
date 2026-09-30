@@ -25,6 +25,10 @@ Your `PATH` has general tools: `git`, `python3` (no extra packages), `rg`, `fd`,
 `curl`, `make` and the usual Unix tools. The project's own toolchain comes from its devshell,
 which you are inside when your state names one.
 
+Your job runs under a hard memory ceiling, `$FORGE_MEMORY_MAX` bytes. A process killed by
+SIGKILL — exit status 137 — has most likely hit it: run it again with less parallelism (fewer
+workers, `-j2`, one test partition at a time) rather than the same command again.
+
 Code changes go into the repository you are running in, on the current branch, as ordinary
 commits. Commit before you finish; history is squashed later, so commit freely.
 

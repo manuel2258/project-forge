@@ -34,6 +34,8 @@ defmodule ForgeWorker.Job.Runner do
     * `:start_timeout_ms` - how long it may take before it is stopped as one that never started.
       Default thirty minutes (§ A harness that never starts in
       `docs/design/claude-code-events.md`).
+    * `:memory_sample_ms` - how often the slice's reading of the job's memory is taken while the
+      process runs (§ Memory in `docs/design/claude-code-events.md`). Default five seconds.
     * `:hold_prompt` - streaming only. When true nothing is delivered at start: the composed
       prompt waits for the first `send_message/2` and goes down with it, as one message. A
       reopened conversation with nothing waiting to be answered is the case
@@ -52,7 +54,7 @@ defmodule ForgeWorker.Job.Runner do
 
   alias ForgeCore.Job.{Correction, Outcome, Result, Spec}
   alias ForgeCore.Prompt
-  alias ForgeWorker.Job.{Dir, Exec}
+  alias ForgeWorker.Job.{Dir, Exec, Memory}
   alias ForgeWorker.Log
 
   require Logger
@@ -60,6 +62,7 @@ defmodule ForgeWorker.Job.Runner do
   @default_max_corrections 2
   @default_start_notice_ms :timer.minutes(2)
   @default_start_timeout_ms :timer.minutes(30)
+  @default_memory_sample_ms :timer.seconds(5)
   # The tail of stderr a `starting` event carries: enough for `nix develop`'s last lines.
   @stderr_tail_bytes 2048
   # How long a conversation waits on a runner still setting up before the call gives up. The
@@ -195,6 +198,18 @@ defmodule ForgeWorker.Job.Runner do
       prior: nil,
       start_notice_ms: setting(opts, :start_notice_ms, @default_start_notice_ms),
       start_timeout_ms: setting(opts, :start_timeout_ms, @default_start_timeout_ms),
+      memory_sample_ms: setting(opts, :memory_sample_ms, @default_memory_sample_ms),
+      # Who hears that this machine's slice supervisor did not answer (`ForgeWorker.Health`).
+      health: Keyword.get_lazy(opts, :health, &ForgeWorker.Health.server/0),
+      # What the job's memory has done so far, and what has been said about it
+      # (`ForgeWorker.Job.Memory`); and what the slice said of the process that last ended.
+      memory:
+        Memory.new(
+          opts |> Keyword.get(:slice_opts, %{}) |> Map.get(:memory_max),
+          # The node's, when it set one; `Memory`'s own default otherwise.
+          threshold: setting(opts, :memory_pressure_full, nil)
+        ),
+      ending: nil,
       # When the harness was given something to start on, and so from when its silence counts.
       waiting_since: nil,
       # Stopped because it never started, which is what the result's reason then says.
@@ -267,7 +282,11 @@ defmodule ForgeWorker.Job.Runner do
     # The environment is composed before the slice is made, not after, because a slice that
     # starts the process somewhere else has to be told what it is.
     {plain, secrets} = split_env(env ++ Keyword.get(opts, :extra_env, []))
-    plain = Exec.inherited_env() ++ [{"HOME", Dir.home_dir(job_dir)}] ++ plain
+
+    plain =
+      Exec.inherited_env() ++
+        [{"HOME", Dir.home_dir(job_dir)}] ++
+        Exec.memory_env(Keyword.get(opts, :slice_opts)) ++ plain
 
     case slice(opts, spec, job_dir, plain, secrets) do
       {:ok, slice, context} ->
@@ -334,6 +353,9 @@ defmodule ForgeWorker.Job.Runner do
 
     state = %{state | port: port}
 
+    # Read while the process lives, and only then: from its spawn, and from each round's own.
+    Process.send_after(self(), {:sample, state.corrections}, state.memory_sample_ms)
+
     # The prompt is composed the same way for both modes and written to the same file; in
     # streaming mode it goes down the pipe as the first message instead of being redirected in.
     case state.mode do
@@ -368,14 +390,46 @@ defmodule ForgeWorker.Job.Runner do
   # first message until 4 KiB arrive or the pipe closes. A conversation then answers nothing and
   # the machine looks hung. `read` is required to consume no more than one line from a pipe, so
   # a shell loop cannot have that bug on any POSIX shell; it also spares the slice a process.
+  #
+  # **And when the harness side exits, the relay goes with it.** It did not: the shell waits for
+  # every member of a pipeline, and the relay was blocked in `read` on the port's stdin for a line
+  # that was never coming — so a harness that exited before it started (`systemd-run` giving up on
+  # PID 1, say) was a run that never reported an exit, until the start timeout stopped it thirty
+  # minutes later (`docs/design/claude-code-events.md` § A harness that never starts). Now the
+  # harness side, once its process has exited, signals the port's process group with `USR1`: the
+  # relay has the default action and dies; the wrapper ignores it and carries on, and exits with
+  # the harness's status, which is the pipeline's; the harness side ignores it by then.
+  #
+  # **The relay says it is listening before it can be signalled.** The wrapper trapped `USR1` at
+  # first and left the relay, a forked subshell, to drop the trap — and a signal that arrived
+  # between the fork and the reset was caught there and lost, leaving the relay in `read`: 2 runs
+  # in 3,000 under dash, 3 under bash, with a harness that exits at once. So the wrapper ignores
+  # it; the relay restores the default and then writes an empty line; and the harness side reads
+  # that line before anything else, so it cannot signal a relay that is not ready, and restores the
+  # default for the harness it runs, which gets the signal dispositions it always had. Not `PIPE`,
+  # which would read better: the BEAM ignores it, an ignored signal stays ignored across `exec`,
+  # and a shell may not trap one it started ignoring — so nothing here could die of it, which is
+  # also why the relay never died writing into the pipe the harness had left. The pipeline's own
+  # stderr is `/dev/null`, because dash reports a member killed by a signal there, and it is the
+  # worker's journal; the harness's goes to its file as before. Dropping that redirect is an
+  # equivalent mutant as far as any test can see: what it removes is a line the BEAM's own stderr
+  # would have carried, which nothing here reads. POSIX `sh`, and the wrapper is still
+  # the process-group leader `Exec.signal/2` signals — there is simply no `exec` on the harness side
+  # any more, because something has to happen after it. Whatever else is still in the group goes
+  # too: on the image nothing is, the job being in its unit, and on a development machine it is
+  # what the harness left behind, which a unit would have ended.
   defp wrapper(secrets, :streaming) do
     relay =
-      ~s(while IFS= read -r line; do ) <>
+      ~s({ trap - USR1; echo; while IFS= read -r line; do ) <>
         ~s([ "$line" = "#{@close_sentinel}" ] && exit 0; ) <>
-        ~s(printf '%s\\n' "$line"; done)
+        ~s(printf '%s\\n' "$line"; done; })
 
-    ~s(stderr="$2"; shift 2; ) <>
-      relay <> ~s( | exec /usr/bin/env -i #{forwarded(secrets)} "$@" 2>"$stderr")
+    harness =
+      ~s({ read -r _; trap - USR1; ) <>
+        ~s(/usr/bin/env -i #{forwarded(secrets)} "$@" 2>"$stderr"; status=$?; ) <>
+        ~s(trap '' USR1; kill -s USR1 0; exit "$status"; })
+
+    ~s(stderr="$2"; shift 2; trap '' USR1; { ) <> relay <> " | " <> harness <> ~s(; } 2>/dev/null)
   end
 
   defp forwarded(secrets) do
@@ -476,6 +530,7 @@ defmodule ForgeWorker.Job.Runner do
     state =
       if state.buffer == "", do: state, else: handle_line(state.buffer, %{state | buffer: ""})
 
+    state = ended(state)
     result = conclude(state)
 
     # A run asked to stop whose outputs would have been corrected stopped as it was asked to: it
@@ -530,7 +585,10 @@ defmodule ForgeWorker.Job.Runner do
           payload: %{
             waited_s: div(waited, 1000),
             gave_up: gave_up,
-            stderr: stderr_tail(state.job_dir)
+            stderr: stderr_tail(state.job_dir),
+            # Whether memory is why it has not started: 2026-09-29's first chat could not exec in
+            # a ceiling of two bytes, and its `starting` events said nothing but the time.
+            memory: Memory.snapshot(reading(state))
           }
         },
         state
@@ -548,6 +606,24 @@ defmodule ForgeWorker.Job.Runner do
 
   def handle_info({:start_check, _round}, state), do: {:noreply, state}
 
+  # Tagged with the round, like the others, and only while its process lives: an exit already
+  # reported is a cgroup about to go, and the unit's own last reading says the rest.
+  def handle_info(
+        {:sample, round},
+        %{corrections: round, result: nil, exit_status: nil, slice: slice} = state
+      )
+      when slice != nil do
+    state = observe(state, slice.memory(state.slice_context))
+    Process.send_after(self(), {:sample, round}, state.memory_sample_ms)
+    {:noreply, state}
+  end
+
+  # `exit_status: nil` above is an equivalent mutant as far as the suite goes: a sample taken
+  # between the exit and the conclusion reads a cgroup about to go, and what it could add the
+  # unit's last reading adds anyway. Kept because a run that has ended is not one to watch.
+
+  def handle_info({:sample, _round}, state), do: {:noreply, state}
+
   # What an earlier round's process said after its round was concluded — the end of its output
   # arriving after the backstop had already stood in for it. That process is gone. Like the
   # `{:conclude, round}` tag, **no test reaches this**: it needs a round whose output pipe outlives
@@ -557,7 +633,15 @@ defmodule ForgeWorker.Job.Runner do
   defp finish(state, result) do
     File.close(state.transcript)
     if state.slice, do: state.slice.cleanup(state.slice_context)
-    result = result |> accumulate(state) |> stalled(state) |> stage(state)
+
+    result =
+      result
+      |> accumulate(state)
+      |> stalled(state)
+      |> unstarted(state)
+      |> killed_for_memory(state)
+      |> stage(state)
+
     Enum.each(state.waiters, &GenServer.reply(&1, {:ok, result}))
 
     # A conversation's owner is not blocked on `await/1` — it has been handling turns all
@@ -580,40 +664,92 @@ defmodule ForgeWorker.Job.Runner do
   defp stalled(result, %{stalled: false}), do: result
 
   defp stalled(result, state) do
-    last =
-      state.job_dir
-      |> stderr_tail()
-      |> String.split("\n", trim: true)
-      |> List.last()
-
     reason = "the harness had not started after #{duration(state.start_timeout_ms)}"
-    %{result | reason: if(last, do: "#{reason}; stderr: #{last}", else: reason)}
+    %{result | reason: with_stderr(reason, state)}
+  end
+
+  # **A harness that exited on its own before it said it started** — `systemd-run` giving up on
+  # PID 1, a `nix develop` that failed, a binary that is not there — says why the way a stopped
+  # one does: with stderr's last line, and not with "no result message", which is true and names
+  # nothing. Only one that exited (a status) with no result message and nothing asked it to stop:
+  # a resume the harness refused has a result, and its own words are the better reason.
+  defp unstarted(
+         result,
+         %{started_event: nil, finished_event: nil, kill_requested: nil, stalled: false} = state
+       )
+       when is_integer(state.exit_status) do
+    reason = "the harness exited with status #{state.exit_status} before it started"
+    %{result | reason: with_stderr(reason, state)}
+  end
+
+  defp unstarted(result, _state), do: result
+
+  # **Killed at its ceiling, said in words** rather than as no result message or an exit status
+  # (`docs/design/claude-code-events.md` § Memory): a run with no result message, not stopped by
+  # this runner, whose unit's last reading says so (`Memory.killed/2`, the one rule a command's
+  # reason uses too).
+  defp killed_for_memory(
+         result,
+         %{finished_event: nil, kill_requested: nil, stalled: false} = state
+       ) do
+    case Memory.killed(state.ending, state.memory.ceiling) do
+      nil -> result
+      killed -> %{result | reason: "the harness was " <> killed}
+    end
+  end
+
+  defp killed_for_memory(result, _state), do: result
+
+  # The slice's own lines taken out — `systemd-run`'s summary names nothing — where the slice said
+  # what they are; the raw tail where no process ended to ask about.
+  defp with_stderr(reason, state) do
+    last =
+      case state.ending do
+        %{last_line: line} -> line
+        nil -> state.job_dir |> stderr_tail() |> ForgeWorker.Slice.last_line()
+      end
+
+    if last, do: "#{reason}; stderr: #{last}", else: reason
+  end
+
+  # **The machine's failure, not the job's**: the slice's supervisor never answered, so the process
+  # never ran (`docs/design/worker-tier.md` § How a machine finds out). Said before the run
+  # concludes, and synchronously, so the link has stopped listening for this job's ending by the
+  # time it arrives.
+  defp unreachable(%{unreachable: reason}, health) when is_binary(reason),
+    do: ForgeWorker.Health.unreachable(reason, health)
+
+  defp unreachable(_ending, _health), do: :ok
+
+  # -- memory -----------------------------------------------------------------------------------
+
+  defp reading(%{slice: nil}), do: nil
+  defp reading(state), do: state.slice.memory(state.slice_context)
+
+  # A reading's events, said in order through the sink like any the harness makes.
+  defp observe(state, reading) do
+    {memory, events} = Memory.observe(state.memory, reading)
+
+    Enum.reduce(events, %{state | memory: memory}, fn payload, state ->
+      emit(%{type: "memory", payload: payload}, state)
+    end)
+  end
+
+  # What the slice can say of the process that just ended, once, and the unit's last reading run
+  # through the watch like any other — so a kill no sample saw is still an event before the result.
+  defp ended(%{slice: nil} = state), do: state
+
+  defp ended(state) do
+    ending = state.slice.ended(state.slice_context, Dir.stderr_path(state.job_dir))
+    unreachable(ending, state.health)
+    observe(%{state | ending: ending}, ending.memory)
   end
 
   defp duration(ms) when ms < 60_000, do: "#{div(ms, 1000)}s"
   defp duration(ms), do: "#{div(ms, 60_000)} minutes"
 
-  defp stderr_tail(job_dir) do
-    case File.open(Dir.stderr_path(job_dir), [:read, :binary]) do
-      {:ok, file} ->
-        tail = tail(file)
-        File.close(file)
-        tail
-
-      {:error, _reason} ->
-        ""
-    end
-  end
-
-  defp tail(file) do
-    {:ok, size} = :file.position(file, :eof)
-    {:ok, _at} = :file.position(file, max(size - @stderr_tail_bytes, 0))
-
-    case IO.binread(file, @stderr_tail_bytes) do
-      data when is_binary(data) -> String.replace_invalid(data)
-      _eof -> ""
-    end
-  end
+  defp stderr_tail(job_dir),
+    do: ForgeWorker.Slice.tail(Dir.stderr_path(job_dir), @stderr_tail_bytes)
 
   # -- correcting the outputs -----------------------------------------------------------------
 
@@ -661,12 +797,18 @@ defmodule ForgeWorker.Job.Runner do
     {executable, args, env} = state.harness.command(spec, state.job_dir, harness_opts)
     {executable, args} = Exec.nix(executable, args, spec.env, Keyword.get(opts, :nix_env, false))
     {plain, secrets} = split_env(env ++ Keyword.get(opts, :extra_env, []))
-    plain = Exec.inherited_env() ++ [{"HOME", Dir.home_dir(state.job_dir)}] ++ plain
+
+    plain =
+      Exec.inherited_env() ++
+        [{"HOME", Dir.home_dir(state.job_dir)}] ++
+        Exec.memory_env(Keyword.get(opts, :slice_opts)) ++ plain
+
     {executable, args} = state.slice.wrap(executable, args, state.slice_context)
 
     state = %{
       state
       | corrections: round,
+        memory: Memory.new_round(state.memory),
         prior: add_up(state.prior, harness),
         prompt_path: path,
         port: nil,
@@ -807,6 +949,10 @@ defmodule ForgeWorker.Job.Runner do
     state = %{state | finished_event: event, turns: state.turns + 1}
 
     if state.mode == :streaming do
+      # The job's memory as it stands at the turn's end, from a reading taken now: a conversation
+      # reports a summary per turn, and this is its memory's (§ Memory).
+      state = observe(state, reading(state))
+      event = put_in(event.payload[:memory], Memory.summary(state.memory))
       notify(state, {:turn, state.spec.job_id, state.turns, label(state, event)})
       %{state | interrupting: nil}
     else
@@ -875,7 +1021,14 @@ defmodule ForgeWorker.Job.Runner do
       undeclared: collected.undeclared,
       proposals: collected.proposals,
       invalid_proposals: collected.invalid_proposals,
-      harness: harness_summary(started, finished, state.exit_status, state.rate_limit)
+      harness:
+        harness_summary(
+          started,
+          finished,
+          state.exit_status,
+          state.rate_limit,
+          Memory.summary(state.memory)
+        )
     }
 
     decide(state, spec, run, base)
@@ -941,7 +1094,10 @@ defmodule ForgeWorker.Job.Runner do
   # account's limit stopped from one that failed at its work (`docs/design/credentials.md` § A
   # limit reached mid-run). In the result rather than left to the timeline: timeline events are
   # unacked, and a lost one would turn a limit back into a failure.
-  defp harness_summary(started, finished, exit_status, rate_limit) do
+  #
+  # `memory` is the ceiling, the peak and the OOM kills — the unit's own last reading where there is
+  # one (§ Memory in `docs/design/claude-code-events.md`) — and nil where nothing was read.
+  defp harness_summary(started, finished, exit_status, rate_limit, memory) do
     started = started || %{}
     finished = finished || %{}
 
@@ -959,7 +1115,8 @@ defmodule ForgeWorker.Job.Runner do
       "duration_ms" => Map.get(finished, :duration_ms),
       "usage" => Map.get(finished, :usage),
       "exit_status" => exit_status,
-      "rate_limit" => rate_limit && window_report(rate_limit)
+      "rate_limit" => rate_limit && window_report(rate_limit),
+      "memory" => memory
     }
   end
 

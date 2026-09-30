@@ -113,7 +113,10 @@ may say instead**.
 - **A figure that is not one is refused where it was typed, never replaced.** Starting a
   conversation on the default because `2 gigs` did not parse is the silent substitution
   `CLAUDE.md` names: a guard that quietly succeeds is not a guard. The context refuses a
-  non-positive number for the same reason, for callers that are not the form.
+  number below the 512 MiB minimum for the same reason, for callers that are not the form, and
+  so does the job row it makes (`workflow-grammar-v1.md` § Resources). The form refuses it too,
+  by name — *2 bytes* is a figure, just not one a conversation can run in, and the one that took
+  a machine down on 2026-09-29 (`worker-tier.md` § A machine whose systemd stops answering).
 - **Fixed for the life of the process, like the model.** Both are read when the harness starts,
   so a conversation that wants different ones is one you end and open again. Changing them on a
   running conversation is possible — the slice is a systemd unit and systemd will change a live
@@ -402,8 +405,9 @@ person's edit drops one; a blocking question a job waits on is the case refused 
   it stood after the last turn that ended, as it does after a timeout. A workflow job is re-queued because nothing is watching it and its spec is
   enough to run it again — a conversation has a person in it, who can say what was lost. It is
   the exception, and the sweeps that make it happen are minutes long.
-- **A conversation goes dormant, it is never re-queued.** `Jobs.recover/0` and
-  `Workers.sweep_unreachable/0` put a running job back in the queue, which for a chat would mean
+- **A conversation goes dormant, it is never re-queued.** `Jobs.recover/0`,
+  `Workers.sweep_unreachable/0` and a machine that says it is unhealthy put a running job back in
+  the queue, which for a chat would mean
   every platform restart silently starting conversations nobody is in — each taking a slice and
   spending the day's allowance on a greeting. A chat goes `:hibernated` instead, which already
   means "stopped without an outcome" and is already excluded from `Workers.promised/1`. It shows
@@ -593,7 +597,9 @@ Four additions to `docs/design/worker-channel.md` § Messages. Nothing that exis
 | `turn` | → platform | **yes** | a turn ended: its index, its cost, the commit it made, and the proposals and documents in `out/` (§ Commits) |
 
 `turn` is acked because it carries the cost, and the cost is what the daily cap is computed from —
-the one class of message § Delivery says must not be lost.
+the one class of message § Delivery says must not be lost. Its harness summary also carries the
+job's `memory` as it stood when the turn ended (`claude-code-events.md` § Memory), which the
+platform keeps on the turn's `chat.turn` event and nowhere else.
 
 **Delivery is an event, not a sixth message.** An earlier draft added `message_delivered` to the
 wire; it does not need to be there. The harness's echo already reaches the runner as an ordinary

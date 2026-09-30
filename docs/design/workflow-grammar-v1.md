@@ -446,6 +446,14 @@ than accepted as an approximation: the two differ by enough to matter to a ceili
 kill, and nobody sizing memory means the decimal one. Case-folding does not blur that — `mib` is
 still not `mb`.
 
+**`memory` is at least 512 MiB** (`ForgeCore.Workflow.Resources.minimum_memory/0`), and a smaller
+one is refused by name — *must be at least 512MiB, the least a job can run in* — wherever it is
+declared. The figure is chosen, not measured — a floor under which no agent is expected to run
+— so a smaller ceiling is never a job that runs slowly; at two bytes it described one that took its machine with it
+(`worker-tier.md` § A machine whose systemd stops answering). It is one definition, and every
+other place a size enters — the new-chat form, the templates page, the workers page, the job
+row, the worker itself — refuses below the same one.
+
 ## Pinning
 
 At admission the engine reads `.forge/workflow.yml` at the ticket's base commit, validates
@@ -494,10 +502,10 @@ is never produced; `answers.md` is platform-managed and never declared.
 - Every command has `run` and `timeout`; `run` is a path under `.forge/` that exists at the pinned
   commit, and `produces`, where present, is an artifact name — or a list of at most one and any
   number of groups — produced by no state and by no other command.
-- `resources`, where present, is a mapping of `memory` (a byte size) and `cpu` (a positive
-  integer), each optional and each falling back through the chain on its own. Any other key is an
-  error, and `disk` is rejected with a message saying it is *reserved* rather than unknown, so it
-  does not read as a typo. `defaults`, where present, is a mapping whose only key is `resources`.
+- `resources`, where present, is a mapping of `memory` (a byte size of at least 512 MiB) and
+  `cpu` (a positive integer), each optional and each falling back through the chain on its own.
+  Any other key is an error, and `disk` is rejected with a message saying it is *reserved* rather
+  than unknown, so it does not read as a typo. `defaults`, where present, is a mapping whose only key is `resources`.
 - A command's `env`, where present, is subject to the same rule as a state's.
 - `approve` entries are produced by `from` or an earlier state.
 - Prompt files exist at the pinned commit.

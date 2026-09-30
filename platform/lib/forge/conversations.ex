@@ -130,10 +130,20 @@ defmodule Forge.Conversations do
   defp resource(opts, key, default) do
     case Keyword.get(opts, key) do
       nil -> {:ok, default}
-      value when is_integer(value) and value > 0 -> {:ok, value}
+      value when is_integer(value) and value > 0 -> enough(key, value)
       _other -> {:error, {:invalid, key}}
     end
   end
+
+  # A number, and for memory not one below the least a job can run in: two bytes is a figure, and
+  # the one that took a machine down (`docs/design/conversations.md` § What it asks for).
+  defp enough(:memory, value) do
+    if ForgeCore.Workflow.Resources.enough_memory?(value),
+      do: {:ok, value},
+      else: {:error, {:too_little_memory, value}}
+  end
+
+  defp enough(_key, value), do: {:ok, value}
 
   @doc """
   Whether this conversation can still be spoken to: it holds a machine, or is waiting for one.
@@ -342,6 +352,9 @@ defmodule Forge.Conversations do
         "interrupted" => payload["interrupted"] == true,
         "cost_usd" => harness["cost_usd"],
         "subtype" => harness["subtype"],
+        # The job's memory as the turn ended, kept here and nowhere else
+        # (`docs/design/claude-code-events.md` § Memory).
+        "memory" => harness["memory"],
         # Every turn, empty or not: the page reads the newest, so a file the agent fixed stops
         # being listed as refused the turn it is fixed.
         "refused_documents" => refused
@@ -1029,23 +1042,26 @@ defmodule Forge.Conversations do
 
   @typedoc """
   What the agent is doing right now, when a turn is open: the call with no result yet, a retry,
-  or a limit that stopped it and when it lifts.
+  a limit that stopped it and when it lifts, or what the job's memory did.
   """
   @type now ::
           {:action, action()}
           | {:retrying, integer() | nil, integer() | nil}
           | {:rate_limited, DateTime.t() | nil}
+          | {:memory, map()}
           | nil
 
   @doc """
   What the now line says (`docs/design/ui.md` § Talk): the call the agent is in the middle of, or
-  — when the latest thing the harness reported since was a retry or a limit that refused it — that.
+  — when the latest thing the harness reported since was a retry, a limit that refused it or what
+  the job's memory did — that.
 
-  Nil when no turn is open. A retry or a limit is not a line in the transcript, because it is not
-  something the agent did; it is what is happening instead, until something else is reported.
+  Nil when no turn is open. A retry, a limit or a memory event is not a line in the transcript,
+  because it is not something the agent did; it is what is happening instead, until something
+  else is reported.
   """
-  @now_types ~w(job.harness.retry job.harness.rate_limit job.harness.text job.harness.tool_use
-                job.harness.tool_result)
+  @now_types ~w(job.harness.retry job.harness.rate_limit job.harness.memory job.harness.text
+                job.harness.tool_use job.harness.tool_result)
 
   @spec now([Event.t()]) :: now()
   def now(events) do
@@ -1058,6 +1074,11 @@ defmodule Forge.Conversations do
 
       %Event{type: "job.harness.rate_limit", payload: %{"status" => "rejected"} = payload} ->
         {:rate_limited, epoch(payload["resets_at"])}
+
+      # What memory is doing, until the agent does something else (`docs/design/capacity.md`
+      # § Memory, which a job holds rather than spends).
+      %Event{type: "job.harness.memory", payload: payload} ->
+        {:memory, payload}
 
       # The agent's side of the turn, both halves of it if a message sent mid-turn split it:
       # that message is queued behind the call in flight, which is still what the agent is doing.

@@ -23,6 +23,11 @@ defmodule ForgeWeb.ActionsTest do
   defp draw(action), do: render_component(&Actions.line/1, line: {:one, action})
 
   describe "the now line's words" do
+    test "say what memory did" do
+      assert Actions.now_words({:memory, %{"what" => "pressure", "pressure" => 40.0}}) ==
+               "thrashing at its memory ceiling (full pressure 40.0%)"
+    end
+
     test "say what each kind of call is doing" do
       assert Actions.now_words({:action, action("Bash", %{"command" => "mix test\nrest"})}) ==
                "running mix test"

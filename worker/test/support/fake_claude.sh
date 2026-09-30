@@ -17,6 +17,21 @@ if [ "${1:-}" = "--version" ]; then
   exit 0
 fi
 
+# What `systemd-run` does when PID 1 does not answer: it never reads its stdin, says why on stderr
+# and exits (docs/design/worker-tier.md § A machine whose systemd stops answering). After a moment,
+# so that a streaming runner has already written its prompt into the pipe, which is what left the
+# relay waiting for a line that never came. The process group is written down first, so a test
+# can see that nothing of the run is left in it afterwards.
+# The signals it was started ignoring are written down too: the wrapper ignores `USR1` itself, and
+# a harness has to be started with the default back.
+if [ "${FAKE_SCENARIO:-}" = "exits_unread" ]; then
+  ps -o pgid= -p $$ | tr -d ' ' > "$FORGE_JOB/fake-pgid.txt"
+  sed -n 's/^SigIgn:[[:space:]]*//p' /proc/self/status > "$FORGE_JOB/fake-sigign.txt"
+  sleep "${FAKE_EXIT_AFTER:-0.5}"
+  echo "Failed to start transient service unit: Connection timed out" >&2
+  exit 1
+fi
+
 out="$FORGE_JOB/out"
 doc="$out/${FAKE_DOC:-plan.md}"
 emit() { printf '%s\n' "$1"; }

@@ -645,7 +645,7 @@ defmodule ForgeCore.Workflow.ParserTest do
     # not carry a plain byte count, and the template page filled its own memory field with a
     # value it then refused. Found by an operator, not by this suite.
     test "a bare integer and the same digits as a string agree", %{map: map} do
-      for written <- [1, "1", 512, "512", 8_589_934_592, "8589934592"] do
+      for written <- [536_870_912, "536870912", 8_589_934_592, "8589934592"] do
         map = put_in(map, ["states", "refining", "resources"], %{"memory" => written})
         assert {:ok, workflow} = Parser.from_map(map)
 
@@ -654,15 +654,14 @@ defmodule ForgeCore.Workflow.ParserTest do
       end
     end
 
+    # Every unit, at a size a ceiling may be. What they multiply to at one of each is
+    # `Resources.parse_bytes/1`'s test, since the grammar refuses a ceiling that small.
     test "a bare integer is bytes, and every binary unit multiplies", %{map: map} do
       for {written, bytes} <- [
-            # One byte is absurd and legal, and it is the boundary `> 0` is guarding: a mutation
-            # to `> 1` refuses it, and nothing noticed until a mutation pass said so.
-            {1, 1},
-            {512, 512},
-            {"512B", 512},
-            {"2KiB", 2048},
-            {"1MiB", 1_048_576},
+            {536_870_912, 536_870_912},
+            {"536870912B", 536_870_912},
+            {"524288KiB", 536_870_912},
+            {"512MiB", 536_870_912},
             {"1GiB", 1_073_741_824},
             {"1TiB", 1_099_511_627_776}
           ] do
@@ -671,6 +670,36 @@ defmodule ForgeCore.Workflow.ParserTest do
 
         assert workflow.states["refining"].resources.memory == bytes,
                "#{inspect(written)} should be #{bytes} bytes"
+      end
+    end
+
+    # **The ceiling of 2026-09-29**: `2` typed meaning 2 GiB, stored as two bytes, and a machine
+    # whose PID 1 stopped answering. A size, and not one a job can run in — so refused by name,
+    # with the minimum said, on both sides of it.
+    test "a ceiling below the minimum is refused, and the minimum is named", %{map: map} do
+      for written <- [2, "2", 536_870_911, "511MiB", "524287KiB"] do
+        map = put_in(map, ["states", "refining", "resources"], %{"memory" => written})
+
+        assert messages(map) == [
+                 {"states.refining.resources.memory",
+                  "must be at least 512MiB, the least a job can run in"}
+               ],
+               "#{inspect(written)} should be refused"
+      end
+
+      map = Map.put(map, "defaults", %{"resources" => %{"memory" => "256MiB"}})
+
+      assert messages(map) == [
+               {"defaults.resources.memory",
+                "must be at least 512MiB, the least a job can run in"}
+             ]
+    end
+
+    test "the minimum itself is a ceiling a job may have", %{map: map} do
+      for written <- [536_870_912, "512MiB", "512mib"] do
+        map = put_in(map, ["states", "refining", "resources"], %{"memory" => written})
+        assert {:ok, workflow} = Parser.from_map(map)
+        assert workflow.states["refining"].resources.memory == 536_870_912
       end
     end
 

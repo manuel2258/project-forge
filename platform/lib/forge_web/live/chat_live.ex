@@ -99,6 +99,7 @@ defmodule ForgeWeb.ChatLive do
     assign(socket,
       messages: messages,
       now: Conversations.now(events),
+      memory: Forge.Jobs.Memory.trouble(events),
       plan: Transcript.plan(messages),
       at: DateTime.utc_now()
     )
@@ -421,6 +422,11 @@ defmodule ForgeWeb.ChatLive do
           <Diff.stat diff={@diff} />
           <span>{@chat.turns} {if @chat.turns == 1, do: "turn", else: "turns"}</span>
           <span>{Format.windows(@chat.cost_usd) || "—"}</span>
+          <%!-- Only when memory was the trouble (`docs/design/capacity.md` § Memory, which a job
+                holds rather than spends). --%>
+          <span :if={@memory} id="chat-memory" class="text-warning">
+            ⚠ {Forge.Jobs.Memory.words(@memory)}
+          </span>
         </:strip>
 
         <.talk :if={@tab == "talk"} {assigns} />

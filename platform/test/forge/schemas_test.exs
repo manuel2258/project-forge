@@ -54,6 +54,32 @@ defmodule Forge.SchemasTest do
       assert %{ticket_id: ["has already been taken"]} = errors_on(changeset)
     end
 
+    # The last refusal on the platform's side, under every caller — the grammar and the forms are
+    # only the first. Both sides of the minimum, for every kind a row can be.
+    test "carry no memory ceiling below the minimum" do
+      job = job_fixture()
+
+      attrs = fn memory ->
+        %{
+          ticket_id: job.ticket_id,
+          project_id: job.project_id,
+          state: "another",
+          attempt: 1,
+          spec: %{},
+          memory_max: memory,
+          cores: 1
+        }
+      end
+
+      for memory <- [2, 536_870_911] do
+        assert %{memory_max: ["must be at least 512MiB, the least a job can run in"]} =
+                 errors_on(Job.create_changeset(%Job{}, attrs.(memory)))
+      end
+
+      assert {:ok, %Job{memory_max: 536_870_912}} =
+               Repo.insert(Job.create_changeset(%Job{}, attrs.(536_870_912)))
+    end
+
     test "carry an outcome exactly when finished" do
       job = job_fixture()
 

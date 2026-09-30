@@ -147,6 +147,12 @@ ticket's branch against its base, taken when the job was created.
   reaches for it anyway and finds out, or does not reach for it at all (`worker-tier.md` § The
   worker image). The chat preamble names them too; `platform.md` does not repeat them.
 - Budgets are fixed. Stop when told to; the platform enforces them regardless.
+- **Memory is fixed too.** The job runs under a hard ceiling, in bytes in `$FORGE_MEMORY_MAX`, and
+  a process killed by SIGKILL — exit status 137 — has most likely hit it: run the command again
+  with less parallelism rather than the same way (`worker-tier.md` § The job slice). One sentence,
+  in both preambles, naming the variable rather than the size, because the preamble is one
+  document for every job. What the agent can act on is the retry; what the platform does about a
+  ceiling is not the agent's to know.
 - Do not edit `.forge/workflow.yml`, anything under `.forge/agents/` or anything under
   `.forge/commands/` in this job.
 - Do not write outside the repository and `$FORGE_JOB/out/` — and `$FORGE_JOB/invoke.json`, when

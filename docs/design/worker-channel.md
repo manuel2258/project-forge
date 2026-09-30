@@ -101,6 +101,9 @@ The join payload is the worker's self-report:
  "protocol": 1, "release": "0.2.1 (8rh57whmgk6m)", "build": "8rh57whmgk6m"}
 ```
 
+and, from a machine that believes it is unhealthy, `"unhealthy": "<why>"` — left out, never
+null, by one that does not (§ An unhealthy machine).
+
 `seeds` is a list because a worker is not pinned to a project — `docs/design/worker-tier.md` §
 Volumes and the seed says why — so it may hold one seed per project it has run a job for.
 
@@ -148,6 +151,14 @@ Worker → platform:
 | `result` | `job_id`, `ForgeCore.Job.Result` as JSON — `status` `parked` for an agent that invoked commands, with the invocations and the commit it pushed; a command's with its exit status, duration and log key; either's `blobs` (name → key and size) and `invalid_blobs` (name → why) for its groups of files | yes |
 | `hibernated` | `job_id`, commit sha, reason, the result as far as it got; a chat adds its turn count | yes |
 | `failed` | `job_id`, reason | yes |
+| `unhealthy` | reason; the reply says `reboot` (true or false) and `why` | yes |
+
+**A worker refuses an assignment whose ceiling it will not make a unit with**: a `memory_max`
+below `ForgeCore.Workflow.Resources.minimum_memory/0`, or one that is not a number, ends at once
+as an error — a `result` for a workflow job or a command, `failed` for a chat — whose reason names
+the ceiling and the minimum (`docs/design/worker-tier.md` § The job slice). A platform that minted
+it is refused too, since the job row's changeset refuses the same, so this is for a platform older
+than the worker.
 
 The conversation rows are `docs/design/conversations.md`'s — § The wire for the four messages, §
 Context for `history`, § Lifetime for `idle_ms` and the `replay`, and § Spend for `max_cost_usd` —
@@ -288,6 +299,30 @@ A platform older than this message logs it as unknown and replies with an error 
 ignores, so a worker that sends it takes nothing away from a platform that does not read it —
 which is what makes it an addition rather than a change (§ Versions).
 
+## An unhealthy machine
+
+`unhealthy` is a machine saying it can no longer run anything: its systemd stopped answering
+(`docs/design/worker-tier.md` § A machine whose systemd stops answering). It is acked like a
+terminal message and re-sent after a reconnect until it is, and **the reply is the platform's
+decision**, not an acknowledgement alone: `{"reboot": true | false, "why": "…"}`. The platform
+marks the row, stops placing work on it, requeues what was running there as it would a lost
+machine's, and says yes only for a managed machine not told to reboot within the hour. The worker
+reboots only on a yes, and only if it is itself a machine a driver made.
+
+From the moment it sends it, the worker runs nothing: every job it had is stopped and reported to
+nobody, and an assignment that reaches it afterwards is dropped with a `job.refused` line. That
+is correct only because the platform requeues them — the ones running when the message is handled,
+and any assignment the channel is handed after the mark, which it requeues rather than pushes
+while the job is still that machine's to run —
+and it is why this is protocol 4 (§ Versions).
+
+**It is said once per episode**: re-sent until the platform answers, then not again, and said
+afresh when `ForgeWorker.Health` marks the machine again — which a restarted health process does,
+having forgotten. **Its join says so too**, as `unhealthy` in the payload, for as long as the
+worker believes it — which is until the worker restarts. A join without it clears the mark: a machine that rejoins
+healthy takes work again, and that is how an unmanaged machine comes back once its owner has
+restarted it, and a managed one once it has rebooted.
+
 ## The machine's log
 
 `log` carries a line of the machine's own history — a job it accepted or finished, a seed it
@@ -407,6 +442,19 @@ always did; a fork of another attempt's session — a job directory the machine 
 nothing, is re-queued cold with the fork cleared, and runs as a new attempt always did; and a
 conversation it reopens never read `resume_session`, so it starts cold with the replay.
 
+**Protocol 4 is an unhealthy machine** (§ An unhealthy machine): the `unhealthy` message and its
+reply, and `unhealthy` in the join. It is a bump because a protocol 4 worker acts on the platform
+acting on it — it stops its jobs and reports none of them, and drops what it is assigned — and a
+platform that ignored the message would leave every one of those jobs `running` on a machine that
+will never report it. A protocol 3 worker on a new platform never sends either, and the platform
+treats it exactly as before: a machine that stopped answering is found by the timeout, as it
+always was. The minimum stays 0.
+
+What rides along without a bump, because an older side may ignore it: `job.harness.memory`
+events and the `memory` a `starting` event carries (`docs/design/claude-code-events.md` § Memory),
+which an older platform records like any other harness event; and `memory` in a result's or a
+turn's harness summary, which it keeps in the event's payload and reads nothing from.
+
 **Raising `minimum`** is the platform dropping an older protocol: the day it stops handling the
 shape older workers send. It is the one edit here that refuses running machines, so, before it
 ships:
@@ -494,6 +542,12 @@ machine it is:
 - **An unmanaged worker keeps its row.** Its running jobs are re-queued the same way, but the
   machine is the operator's and may well come back, and a `destroyed` row never can
   (`docs/design/worker-tier.md` § Managed and unmanaged).
+
+**A machine that says it is unhealthy loses its jobs the same way**, through the same
+`Workers.requeue_running/2`, without waiting for a timeout — it is connected, and saying so.
+A row told to reboot is left alone by this sweep for `reboot_grace_ms` from when it was told,
+so a machine rebooting is not destroyed for being away a minute
+(`docs/design/worker-tier.md` § The same machine, the same row).
 
 Destroying a managed machine that is merely partitioned is the right trade — the jobs are
 re-runnable by construction, and a worker that is unreachable is not doing anything the platform

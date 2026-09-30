@@ -530,7 +530,9 @@ defmodule ForgeWorker.Job.Conversation do
       "cost_usd" => payload[:total_cost_usd],
       "duration_ms" => payload[:duration_ms],
       "usage" => payload[:usage],
-      "result" => payload[:result]
+      "result" => payload[:result],
+      # The job's memory as the turn ended (`docs/design/claude-code-events.md` § Memory).
+      "memory" => payload[:memory]
     }
   end
 

@@ -89,6 +89,10 @@ defmodule ForgeWeb.WorkerChannel do
       worker ->
         {:ok, _worker} = Workers.touch(worker)
         Log.record(worker.id, "joined", :info, joined(worker))
+        # **A join that does not say it is unhealthy clears the mark**, and nothing else does
+        # (`docs/design/worker-channel.md` § An unhealthy machine). One that says so keeps it; its
+        # `unhealthy` message follows, and that is what the platform answers.
+        unless is_map(payload) and Map.has_key?(payload, "unhealthy"), do: Workers.healthy(worker)
         reconcile(worker.id, payload["running"] || [])
         {:noreply, assign(socket, :joined, true)}
     end
@@ -96,8 +100,28 @@ defmodule ForgeWeb.WorkerChannel do
 
   # The platform's side of `Workers.push/2`. Nothing else in the platform knows how to reach
   # a machine, so nothing else can forget the worker might not be there.
+  #
+  # **Not to a machine that has said it is unhealthy.** The scheduler read the row before the
+  # mark, and the channel handles the mark and the assignment one after the other: whichever
+  # comes second finds the other done. So an assignment that reaches a marked machine goes back
+  # to the queue here, as the machine's running jobs did — the worker would drop it, and it would
+  # sit `running` on a machine that will never report it.
+  #
+  # Only while the job is still this machine's to run: the mark requeues what is running here, and
+  # an assignment queued behind it may be for a job that is already back in the queue — or placed
+  # somewhere else since, which a second requeue would pull off a machine that is running it.
   def handle_info({:assign, assignment}, socket) do
-    push(socket, "assign", assignment)
+    mine = socket.assigns.worker_id
+
+    case Workers.get!(mine) do
+      %{unhealthy_at: nil} ->
+        push(socket, "assign", assignment)
+
+      %{} ->
+        with %{worker_id: ^mine, status: :running} <- Jobs.get(assignment["job_id"]),
+             do: Jobs.requeue(assignment["job_id"], :worker_unhealthy)
+    end
+
     {:noreply, socket}
   end
 
@@ -186,6 +210,16 @@ defmodule ForgeWeb.WorkerChannel do
       with(:ok <- owns(socket, job_id), do: Jobs.fail(job_id, {:worker, payload["reason"]})),
       socket
     )
+  end
+
+  # The machine can run nothing more: its systemd stopped answering. Acked like a terminal
+  # message, and **the reply is the decision**, which the worker acts on — it reboots only on a
+  # yes, and only if it is itself a machine a driver made (`docs/design/worker-channel.md` § An
+  # unhealthy machine).
+  def handle_in("unhealthy", payload, socket) do
+    reason = if is_map(payload), do: payload["reason"]
+    {:ok, answer} = Workers.unhealthy(socket.assigns.worker_id, reason)
+    {:reply, {:ok, %{"reboot" => answer.reboot, "why" => answer.why}}, socket}
   end
 
   def handle_in(message, _payload, socket) do

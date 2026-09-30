@@ -101,6 +101,48 @@ defmodule Forge.EventsTest do
     end
   end
 
+  # `docs/design/claude-code-events.md` § Memory: the worker's readings as sentences, the words
+  # `Forge.Jobs.Memory` gives the header and the now line.
+  describe "summary/1 of memory" do
+    test "a memory event is its sentence" do
+      assert Events.summary(%Event{
+               type: "job.harness.memory",
+               payload: %{
+                 "what" => "oom_kill",
+                 "oom_kills" => 2,
+                 "peak" => 1024 ** 3,
+                 "ceiling" => 2 * 1024 ** 3
+               }
+             }) == "a process was killed for memory (2 OOM kills · peak 1.0 GiB of 2 GiB)"
+    end
+
+    # 2026-09-29's first chat said nothing but the time; the second said what systemd-run did.
+    test "a harness not started says how long, its last line of stderr, and its memory" do
+      assert Events.summary(%Event{
+               type: "job.harness.starting",
+               payload: %{
+                 "waited_s" => 120,
+                 "gave_up" => false,
+                 "stderr" => "",
+                 "memory" => %{"current" => 0, "ceiling" => 2, "pressure" => 100.0}
+               }
+             }) == "not started after 120s · memory 0.0 GiB of 2 B · full pressure 100.0%"
+
+      assert Events.summary(%Event{
+               type: "job.harness.starting",
+               payload: %{
+                 "waited_s" => 1800,
+                 "gave_up" => true,
+                 "stderr" =>
+                   "Running as unit: x\nFailed to start transient service unit: Connection timed out\n",
+                 "memory" => nil
+               }
+             }) ==
+               "not started after 1800s, gave up · stderr: Failed to start transient service " <>
+                 "unit: Connection timed out"
+    end
+  end
+
   describe "summary/1" do
     # The clause order is the whole design of this function: the typed clauses render the events
     # a reader actually follows, the empty-payload clause keeps a bare event from rendering as

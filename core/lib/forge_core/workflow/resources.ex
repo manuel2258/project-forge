@@ -33,6 +33,15 @@ defmodule ForgeCore.Workflow.Resources do
 
   @decimal %{"KB" => "KiB", "MB" => "MiB", "GB" => "GiB", "TB" => "TiB"}
 
+  # **The least a job can be given** — chosen, not measured: nothing here has measured Claude
+  # Code's footprint, and this is a floor under which no agent is expected to run, so a smaller
+  # ceiling never describes a job that runs — and at two bytes it described one that took its
+  # machine with it: PID 1 starts a unit's process already inside its cgroup and waits for it to
+  # exec, and a process that cannot fault in enough to exec never lets it go
+  # (`docs/design/worker-tier.md` § A machine whose systemd stops answering). One definition: the
+  # grammar, the forms, the job row and the worker all refuse below this one.
+  @minimum_memory 512 * 1024 * 1024
+
   @doc """
   Parses a byte size: a positive integer, or a positive integer and a binary unit.
 
@@ -103,6 +112,43 @@ defmodule ForgeCore.Workflow.Resources do
   @spec gib(non_neg_integer() | nil) :: String.t()
   def gib(nil), do: "—"
   def gib(bytes), do: :erlang.float_to_binary(bytes / 1024 ** 3, decimals: 1) <> " GiB"
+
+  @doc "The smallest memory ceiling a job may have: 512 MiB."
+  @spec minimum_memory() :: pos_integer()
+  def minimum_memory, do: @minimum_memory
+
+  @doc """
+  Whether `bytes` is a ceiling a job can run in: a whole number of bytes, no fewer than
+  `minimum_memory/0`. Anything else — too small, not a number — is not.
+  """
+  @spec enough_memory?(term()) :: boolean()
+  def enough_memory?(bytes), do: is_integer(bytes) and bytes >= @minimum_memory
+
+  @doc """
+  What every refusal of a ceiling below the minimum says, naming it — the grammar's, the forms'
+  and the job row's, so that the sentence cannot drift between them. The worker's names the
+  ceiling it was given as well, so it says the minimum in its own sentence.
+  """
+  @spec too_little_memory() :: String.t()
+  def too_little_memory,
+    do: "must be at least #{humanize(@minimum_memory)}, the least a job can run in"
+
+  @doc """
+  `too_little_memory/0` with the field named, as a form says it beside the others it refuses —
+  the new-chat form, the templates page and the workers page's offer form.
+  """
+  @spec memory_refused() :: String.t()
+  def memory_refused, do: "memory " <> too_little_memory()
+
+  @doc """
+  A byte count as a person reads a size: the largest binary unit that divides it exactly, with a
+  space — `2 GiB`, `512 MiB`, `2 B`. `humanize/1` is the same figure for typing back.
+  """
+  @spec size(pos_integer()) :: String.t()
+  def size(bytes) when is_integer(bytes) and bytes > 0 do
+    [_all, count, unit] = Regex.run(~r/^(\d+)(.*)$/, humanize(bytes))
+    "#{count} #{unit}"
+  end
 
   @doc "The units a byte size may carry, for an error message that says what is accepted."
   @spec units() :: [String.t()]

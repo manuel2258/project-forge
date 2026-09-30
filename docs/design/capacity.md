@@ -172,6 +172,39 @@ invocation rather than towards burning one. A rejecting status has not been obse
 is, this path is written from the naming convention rather than from evidence, and it is the first
 thing to verify when a window is genuinely exhausted.
 
+## Memory, which a job holds rather than spends
+
+A job's memory is neither usage nor capacity in the sense above. It does not accumulate, and it
+does not refill: it is a **ceiling the job holds for as long as it runs** — its slice's
+`MemoryMax`, which the gate reserved on a machine (`docs/design/provisioning.md` § The gate) — and
+a **peak** the job reached under it. Nothing about it is a person's to wait on while it is fine,
+so a quiet job draws nothing about memory at all.
+
+**It is drawn only when it was the trouble**: a process in the job was killed for memory, the job
+reached its ceiling, or it thrashed there (`claude-code-events.md` § Memory). Then, and only then:
+
+- **In the job's header** — the job page's, under the outcome, and a conversation's context strip
+  — one mono line in `warning`, with a `⚠` in front: *2 OOM kills · peak 2.0 GiB of 2 GiB*, or
+  *reached its ceiling · peak 2.0 GiB of 2 GiB*, or *thrashing at its ceiling · peak …*. The
+  figures are the worst the job's events and its result report, so it is visible without
+  scrolling the timeline.
+- **In the timeline**, each `memory` event is a row like any other with its sentence
+  (`Forge.Events.summary/1`), the type in `warning`.
+- **In a conversation's now line**, when a memory event is the latest thing the turn reported.
+
+**`warning`, never accent and never error.** Not accent, for the reason the window gauge is not:
+a job at its ceiling is not waiting on a person, and the one loud colour is kept for what is. Not
+error, because a job whose child was killed and which retried with less parallelism has done
+nothing wrong; when the harness itself was killed the job's outcome says so in error colour
+already, and the reason says why in words. Peak against ceiling is two figures and no meter: the
+peak of a job that reached its ceiling *is* the ceiling, so a bar would be full whenever it
+mattered and say nothing the words do not.
+
+`Forge.Jobs.Memory` computes it from the job's events — `trouble/1`, reading the `memory` events
+and the `memory` a `job.finished` or a `chat.turn` ended with — and words it: `words/1` for the
+header, `sentence/1` for an event's row and the now line, so the three cannot disagree. A figure
+the worker sent that is not a whole number of bytes is left out of the line rather than raised on.
+
 ## Open
 
 - **`window_cost_usd` is uncalibrated.** Every absolute usage figure is wrong by whatever factor it

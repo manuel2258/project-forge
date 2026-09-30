@@ -345,6 +345,37 @@ defmodule ForgeWeb.WorkersLiveTest do
     end
   end
 
+  describe "setting less than one job's worth" do
+    # An owner's figure below the least a job can run in is a machine that takes nothing, and it
+    # is refused by name. The machine's own report of zero is another matter — it could not read
+    # its memory — and is not this form's to refuse.
+    test "is refused, naming the minimum, and the minimum itself is taken", %{
+      conn: conn,
+      user: user
+    } do
+      w = worker(user, %{managed: false})
+      {:ok, _} = Workers.ready(w, %{"memory_budget" => 0, "cores" => 4})
+      assert Workers.get!(w.id).memory_budget == 0
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+      view |> element("a[phx-click=edit][phx-value-id=\"#{w.id}\"]") |> render_click()
+
+      html =
+        view
+        |> element("form[phx-submit=save]")
+        |> render_submit(%{"worker_id" => w.id, "memory" => "511MiB", "cores" => "2"})
+
+      assert html =~ "memory must be at least 512MiB, the least a job can run in"
+      assert Workers.get!(w.id).memory_budget == 0
+
+      view
+      |> element("form[phx-submit=save]")
+      |> render_submit(%{"worker_id" => w.id, "memory" => "512MiB", "cores" => "2"})
+
+      assert Workers.get!(w.id).memory_budget == 536_870_912
+    end
+  end
+
   describe "whose machines, and which projects they serve" do
     # Another person's row names the projects it serves, and a project a person is not in is not
     # one they may learn exists.
@@ -731,6 +762,52 @@ defmodule ForgeWeb.WorkersLiveTest do
       {:ok, view, _html} = live(conn, ~p"/workers")
 
       refute view |> element("#worker-#{w.id}") |> render() =~ "refused"
+    end
+
+    # `docs/design/ui.md` § The workers page: what the machine said, and what happens next — which
+    # is one of three things, and the line says which.
+    test "a machine whose systemd stopped answering says so, and what happens next", %{
+      conn: conn,
+      user: user
+    } do
+      told = worker(user, %{managed: true})
+      {:ok, %{reboot: true}} = Workers.unhealthy(told.id, "PID 1 did not answer")
+
+      permanent = worker(user, %{managed: false})
+      {:ok, %{reboot: false}} = Workers.unhealthy(permanent.id, "PID 1 did not answer")
+
+      again = worker(user, %{managed: true})
+      earlier = DateTime.add(DateTime.utc_now(), -10, :minute)
+      {:ok, _} = Workers.update(again, %{rebooted_at: earlier})
+      {:ok, %{reboot: false}} = Workers.unhealthy(again.id, "PID 1 did not answer")
+
+      well = worker(user, %{managed: true})
+
+      # Gone past its grace: the row says it was destroyed, and a line about what happens next
+      # would be about a machine that is not there.
+      gone = worker(user, %{managed: true})
+      {:ok, _answer} = Workers.unhealthy(gone.id, "PID 1 did not answer")
+      {:ok, _} = Workers.status(Workers.get!(gone.id), :destroyed)
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+      row = &(view |> element("#worker-#{&1.id}") |> render())
+      at = Workers.get!(told.id).rebooted_at
+
+      assert row.(told) =~
+               "unhealthy since #{Calendar.strftime(at, "%H:%M UTC")}: PID 1 did not answer"
+
+      assert row.(told) =~
+               "told to reboot at #{Calendar.strftime(at, "%H:%M UTC")}; takes work again when " <>
+                 "it rejoins healthy"
+
+      assert row.(permanent) =~ "not the platform&#39;s to reboot: restart it"
+      refute row.(permanent) =~ "told to reboot"
+      assert row.(again) =~ "rebooted within the hour, so not again: destroy it"
+      refute row.(again) =~ "told to reboot"
+      refute row.(well) =~ "unhealthy"
+
+      view |> element("button[phx-click=toggle-destroyed]") |> render_click()
+      refute row.(gone) =~ "unhealthy"
     end
   end
 

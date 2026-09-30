@@ -26,7 +26,7 @@ defmodule ForgeWorker.MixProject do
       # lifts the percentage without anything being better tested.
       test_coverage: [
         summary: [threshold: 92],
-        ignore_modules: [ForgeWorker.Fixtures]
+        ignore_modules: [ForgeWorker.Fixtures, ForgeWorker.ScriptedSlice]
       ]
     ]
   end

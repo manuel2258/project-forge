@@ -98,6 +98,15 @@ defmodule ForgeWorker.LinkTest.RecordingSlice do
 
   @impl ForgeWorker.Slice
   defdelegate leave(owner, paths), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate memory(context), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate ended(context, output), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate probe(), to: ForgeWorker.Slice.Direct
 end
 
 defmodule ForgeWorker.LinkTest.UserSlice do
@@ -157,6 +166,14 @@ defmodule ForgeWorker.LinkTest.UserSlice do
 
   defp git_command(["-c", _setting | rest]), do: git_command(rest)
   defp git_command([command | _rest]), do: command
+  @impl ForgeWorker.Slice
+  defdelegate memory(context), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate ended(context, output), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate probe(), to: ForgeWorker.Slice.Direct
 end
 
 defmodule ForgeWorker.LinkTest do
@@ -878,6 +895,327 @@ defmodule ForgeWorker.LinkTest do
 
     assert result["commit"] ==
              String.trim(git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"]))
+  end
+
+  # `docs/design/worker-tier.md` § A machine whose systemd stops answering, as the link carries it:
+  # the platform is told, the jobs here are stopped and reported to nobody, nothing new is started,
+  # and the platform's answer decides the reboot — with the machine's own say on top.
+  describe "an unhealthy machine" do
+    setup do
+      name = :"link-health-#{System.unique_integer([:positive])}"
+      Application.put_env(:forge_worker, :health, name)
+      on_exit(fn -> Application.delete_env(:forge_worker, :health) end)
+      %{health: name}
+    end
+
+    defp health(%{health: name}, managed, link \\ ForgeWorker.Link) do
+      test = self()
+
+      start_supervised!(
+        {ForgeWorker.Health,
+         name: name,
+         link: link,
+         probe_ms: nil,
+         managed: fn -> managed end,
+         reboot: fn ->
+           send(test, :rebooted)
+           :ok
+         end}
+      )
+
+      name
+    end
+
+    @why "systemd-run could not reach PID 1: Failed to start transient service unit: " <>
+           "Connection timed out"
+
+    test "says so, stops its jobs and reports none of them", context do
+      %{client: client, origin: origin} = context
+      health = health(context, true)
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      # A command, because it says nothing while it runs: an agent's events are pushes the test
+      # would have to answer, and the stopping is the same either way.
+      job = command_assignment(origin, "#!/bin/sh\nexec sleep 30\n")
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      wait_until(fn ->
+        match?(%{runner: pid} when is_pid(pid), :sys.get_state(client).assigns.jobs[job_id])
+      end)
+
+      ForgeWorker.Health.unreachable(@why, health)
+      {%{"reason" => @why}, _before} = take_push("unhealthy")
+
+      # Stopped, and its ending reported to nobody: the platform has put it back in the queue,
+      # and a result from here would be recorded as the job's own.
+      wait_until(fn -> :sys.get_state(client).assigns.jobs == %{} end)
+      refute_push(@topic, "result", _payload, 200)
+      assert Link.unacked() == [{:machine, "unhealthy"}]
+    end
+
+    test "starts nothing it is given afterwards, and reports nothing of it", context do
+      %{client: client, origin: origin} = context
+      health = health(context, true)
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      ForgeWorker.Health.unreachable(@why, health)
+      take_push("unhealthy")
+
+      push(client, @topic, "assign", assignment(origin))
+      refute_push(@topic, "result", _payload, 500)
+      assert Link.running() == []
+    end
+
+    test "reboots on the platform's yes when a driver made it", context do
+      %{client: client} = context
+      health = health(context, true)
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      ForgeWorker.Health.unreachable(@why, health)
+      take_push("unhealthy")
+      reply(client, last_push_ref(), {:ok, %{"reboot" => true, "why" => "told to reboot"}})
+
+      assert_receive :rebooted, 2_000
+      wait_until(fn -> Link.unacked() == [] end)
+    end
+
+    # **An unmanaged machine never reboots itself**, whatever the platform says.
+    test "does not reboot on the platform's yes when no driver made it", context do
+      %{client: client} = context
+      health = health(context, false)
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      ForgeWorker.Health.unreachable(@why, health)
+      take_push("unhealthy")
+      reply(client, last_push_ref(), {:ok, %{"reboot" => true}})
+
+      refute_receive :rebooted, 500
+    end
+
+    test "does not reboot on the platform's no", context do
+      %{client: client} = context
+      health = health(context, true)
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      ForgeWorker.Health.unreachable(@why, health)
+      take_push("unhealthy")
+      reply(client, last_push_ref(), {:ok, %{"reboot" => false, "why" => "within the hour"}})
+
+      refute_receive :rebooted, 500
+    end
+
+    # A worker that restarted its link, or joined again, is still unhealthy: its join says so —
+    # which is what keeps the platform's mark — and the report goes again until it is acked. The
+    # health process here told a link that is not this one, as it would have told the link that
+    # crashed: this one hears of it only by asking, at its join.
+    test "says so in its join, and reports it after the join", context do
+      %{client: client} = context
+      health = health(context, true, :a_link_that_is_gone)
+      ForgeWorker.Health.unreachable(@why, health)
+
+      connect_and_assert_join(client, @topic, %{"unhealthy" => @why}, :ok)
+      assert_push(@topic, "ready", %{})
+      {%{"reason" => @why}, _before} = take_push("unhealthy")
+    end
+
+    # Re-sent after a reconnect because it was not acked — and once: the join asks too, and a
+    # report still waiting is not made again.
+    test "an unacked report goes again after a reconnect, once", context do
+      %{client: client} = context
+      health = health(context, true)
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      ForgeWorker.Health.unreachable(@why, health)
+      take_push("unhealthy")
+      disconnect(client, :closed)
+
+      accept_connect(client)
+      assert_join(@topic, %{"unhealthy" => @why}, :ok)
+      {%{"reason" => @why}, _before} = take_push("unhealthy")
+      refute_push(@topic, "unhealthy", _again, 200)
+    end
+
+    # Answered is answered: a rejoin keeps the platform's mark by its join alone, and asking again
+    # would move the time it said to reboot, and with it the hour and the grace.
+    test "an answered report is not made again after a reconnect", context do
+      %{client: client} = context
+      health = health(context, false)
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      ForgeWorker.Health.unreachable(@why, health)
+      take_push("unhealthy")
+      reply(client, last_push_ref(), {:ok, %{"reboot" => false, "why" => "not ours"}})
+      wait_until(fn -> Link.unacked() == [] end)
+
+      disconnect(client, :closed)
+      accept_connect(client)
+      assert_join(@topic, %{"unhealthy" => @why}, :ok)
+      assert_push(@topic, "ready", %{})
+      refute_push(@topic, "unhealthy", _again, 300)
+    end
+
+    # A health process that restarted has forgotten, and a mark it makes again is a new episode —
+    # said again, or a platform whose mark a healthy-looking join cleared would never hear of it.
+    test "a new mark after an answered one is reported again", context do
+      %{client: client} = context
+      health = health(context, false)
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      ForgeWorker.Health.unreachable(@why, health)
+      take_push("unhealthy")
+      reply(client, last_push_ref(), {:ok, %{"reboot" => false, "why" => "not ours"}})
+      wait_until(fn -> Link.unacked() == [] end)
+
+      stop_supervised!(ForgeWorker.Health)
+      health = health(context, false)
+      ForgeWorker.Health.unreachable(@why, health)
+      {%{"reason" => @why}, _before} = take_push("unhealthy")
+    end
+
+    # Abandoned between its assignment and its runner — the window of a clone, held still here —
+    # and stopped the moment the runner exists: the platform put it back in the queue already.
+    test "stops a job it abandoned before the job had a runner, once it has one", context do
+      %{client: client} = context
+      health = health(context, true)
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      :sys.replace_state(client, fn socket ->
+        put_in(socket.assigns.jobs["j-1"], %{runner: nil, kind: :command, attempt: 1, started: 0})
+      end)
+
+      ForgeWorker.Health.unreachable(@why, health)
+      take_push("unhealthy")
+
+      send(client, {:runner, "j-1", self()})
+      assert_receive {:"$gen_cast", :cancel}, 1_000
+    end
+
+    test "a healthy machine's join says nothing of it", context do
+      %{client: client} = context
+      health(context, true)
+
+      connect_and_assert_join(client, @topic, join, :ok)
+      refute Map.has_key?(join, "unhealthy")
+    end
+  end
+
+  # `docs/design/worker-tier.md` § The job slice: the worker refuses a ceiling too small to run in,
+  # whatever the platform sent — the last place one can be kept from systemd, where two bytes made
+  # a machine's PID 1 stop answering. Ended at once, as an error naming both figures.
+  describe "a ceiling below the minimum" do
+    @minimum 536_870_912
+
+    defp with_ceiling(job, bytes),
+      do: Map.put(job, "slice", %{"memory_max" => bytes, "cpu_weight" => 100})
+
+    test "a workflow job is not started, and ends as an error naming the ceiling and the minimum",
+         context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      before = git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"])
+      job = origin |> assignment() |> with_ceiling(2)
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      {%{"job_id" => ^job_id, "result" => result}, pushed} = take_push("result")
+
+      assert %{"status" => "finished", "outcome" => "error"} = result
+      assert result["reason"] =~ "memory ceiling of 2 B is below the 512 MiB minimum"
+      # Nothing ran: no harness said a word, and nothing reached the branch.
+      refute Enum.any?(pushed, &match?({"event", _}, &1))
+      assert git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"]) == before
+      assert Link.running() == []
+    end
+
+    test "the minimum itself runs", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = origin |> assignment() |> with_ceiling(@minimum)
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      {%{"job_id" => ^job_id, "result" => result}, _pushed} = take_push("result")
+      assert result["outcome"] == "converged"
+    end
+
+    test "a byte below it is refused, and so is a ceiling that is not a number", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      # Each names the ceiling and the minimum (`docs/design/worker-tier.md` § The job slice).
+      for {ceiling, says} <- [
+            {@minimum - 1, "ceiling of 536870911 B is below the 512 MiB minimum"},
+            {"2GiB",
+             ~s(ceiling "2GiB" is not a number of bytes, and the least a job can run in is ) <>
+               "the 512 MiB minimum"},
+            {0, "ceiling of 0 bytes is below the 512 MiB minimum"}
+          ] do
+        job = origin |> assignment() |> with_ceiling(ceiling)
+        job_id = job["job_id"]
+        push(client, @topic, "assign", job)
+
+        {%{"job_id" => ^job_id, "result" => result}, _pushed} = take_push("result")
+        assert result["outcome"] == "error"
+        assert result["reason"] =~ says
+      end
+    end
+
+    test "a command is refused the same way", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = origin |> command_assignment("#!/bin/sh\necho ran\n") |> with_ceiling(2)
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      {%{"job_id" => ^job_id, "result" => result}, _pushed} = take_push("result")
+      assert %{"outcome" => "error", "exit_status" => nil} = result
+      assert result["reason"] =~ "below the 512 MiB minimum"
+    end
+
+    # A chat can only fail, and that is what it does: it never had a process to hibernate.
+    test "a chat fails, with the same reason", %{client: client} do
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job_id = uuid()
+
+      job =
+        with_ceiling(
+          %{
+            "job_id" => job_id,
+            "kind" => "chat",
+            "spec" =>
+              spec()
+              |> Map.put(:job_id, job_id)
+              |> ForgeCore.Job.Spec.to_json()
+              |> Jason.decode!(),
+            "git" => %{"url" => "/nowhere", "branch" => "chat/" <> job_id}
+          },
+          2
+        )
+
+      push(client, @topic, "assign", job)
+      {%{"job_id" => ^job_id, "reason" => reason}, _pushed} = take_push("failed")
+      assert reason =~ "memory ceiling of 2 B is below the 512 MiB minimum"
+      assert ForgeWorker.Job.Conversation.whereis(job_id) == nil
+    end
   end
 
   # `docs/design/claude-code-events.md` § Resume: the session a resume needs is a file in the
@@ -2092,6 +2430,20 @@ defmodule ForgeWorker.LinkTest do
       assert Enum.any?(events, &match?({:leave, _, _}, &1))
     end
 
+    # Refused before anything of the job exists: no user, so nothing to take back.
+    test "a ceiling below the minimum makes no user", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = origin |> assignment() |> Map.put("slice", %{"memory_max" => 2})
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"job_id" => ^job_id}, _before} = take_push("result")
+
+      assert user_story() == []
+    end
+
     test "a command's checkout is its user's", context do
       %{client: client, origin: origin} = context
       connect_and_assert_join(client, @topic, %{}, :ok)
@@ -2139,6 +2491,33 @@ defmodule ForgeWorker.LinkTest do
         # written where the harness would never find it.
         "spec" => Map.put(assignment["spec"], "job_id", job_id)
       })
+    end
+
+    # The turn's summary carries the job's memory as the turn ended, which is what the platform
+    # keeps on its `chat.turn` (`docs/design/claude-code-events.md` § Memory).
+    test "each turn's summary says what memory did", context do
+      %{client: client, origin: origin} = context
+      gib = 1024 ** 3
+
+      {:ok, readings} =
+        Agent.start_link(fn ->
+          [%{ceiling: gib, current: gib, peak: gib, max_events: 1, oom_kills: 2, pressure: 0.0}]
+        end)
+
+      Application.put_env(:forge_worker, :slice, ForgeWorker.ScriptedSlice)
+      Application.put_env(:forge_worker, :scripted_readings, readings)
+      on_exit(fn -> Application.delete_env(:forge_worker, :scripted_readings) end)
+
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = origin |> chat() |> Map.put("slice", %{"memory_max" => gib, "cpu_weight" => 100})
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1, "harness" => harness}, _} = take_push("turn")
+
+      assert harness["memory"] == %{"ceiling" => gib, "peak" => gib, "oom_kills" => 2}
+      push(client, @topic, "close", %{"job_id" => job["job_id"], "reason" => "done"})
+      take_push("hibernated")
     end
 
     # `docs/design/conversations.md` § Lifetime: every turn leaves the session with the platform,

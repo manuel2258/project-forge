@@ -16,7 +16,10 @@ defmodule ForgeWorker.Application do
         # A conversation is reached by its job id for as long as it is running, because unlike
         # a job it is spoken to while it runs.
         {Registry, keys: :unique, name: ForgeWorker.Job.Registry},
-        {Task.Supervisor, name: ForgeWorker.TaskSupervisor}
+        {Task.Supervisor, name: ForgeWorker.TaskSupervisor},
+        # Whether this machine can still run anything: asks PID 1 once a minute, hears from a run
+        # whose `systemd-run` could not, and is what the link asks before it takes work.
+        ForgeWorker.Health
       ] ++ link()
 
     # See https://hexdocs.pm/elixir/Supervisor.html

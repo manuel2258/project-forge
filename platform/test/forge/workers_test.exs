@@ -431,8 +431,8 @@ defmodule Forge.WorkersTest do
       assert Workers.set_offer(outsider, worker.id, %{memory_budget: 1, cores: 1}) ==
                {:error, :not_found}
 
-      assert {:ok, %{memory_budget: 4_000, cores: 2}} =
-               Workers.set_offer(owner, worker.id, %{memory_budget: 4_000, cores: 2})
+      assert {:ok, %{memory_budget: 4_294_967_296, cores: 2}} =
+               Workers.set_offer(owner, worker.id, %{memory_budget: 4_294_967_296, cores: 2})
 
       {:ok, made, _token} = Workers.create(%{provider: "fake", managed: true, user_id: owner.id})
 
@@ -1466,6 +1466,195 @@ defmodule Forge.WorkersTest do
     end
   end
 
+  # `docs/design/worker-tier.md` § A machine whose systemd stops answering: the platform's half —
+  # the mark, the jobs, the hour, and the timeout that must not take a machine for rebooting.
+  describe "a machine whose systemd stopped answering" do
+    defp mark!(worker, reason \\ "PID 1 did not answer twice in a row: timed out"),
+      do: Workers.unhealthy(worker.id, reason)
+
+    defp ago(minutes), do: DateTime.add(DateTime.utc_now(), -minutes, :minute)
+
+    test "is offered nothing while it is marked, and everything again once it is not" do
+      worker = live_worker(%{"memory_budget" => 8_000, "cores" => 4})
+      assert %{} = Workers.assignable(demand(memory: 1_000))
+
+      {:ok, _answer} = mark!(worker)
+      refute Workers.assignable(demand(memory: 1_000))
+
+      :ok = Workers.healthy(Workers.get!(worker.id))
+      assert %{id: id} = Workers.assignable(demand(memory: 1_000))
+      assert id == worker.id
+    end
+
+    # Exactly as a lost machine's (`requeue_running/2`): a workflow job back to `pending`, a chat
+    # dormant, and none of it waiting on a timeout.
+    test "puts back in the queue what was running there, and says so" do
+      worker = live_worker(%{"memory_budget" => 8_000_000_000, "cores" => 4})
+      job = running(worker, [])
+
+      chat =
+        chat_fixture(%{status: :running})
+        |> Ecto.Changeset.change(worker_id: worker.id)
+        |> Forge.Repo.update!()
+
+      {:ok, _answer} = mark!(worker)
+
+      assert Forge.Jobs.get!(job.id).status == :pending
+      assert Forge.Jobs.get!(chat.id).status == :hibernated
+
+      # Said as why, on each job's timeline.
+      for id <- [job.id, chat.id] do
+        assert %{payload: %{"reason" => "worker_unhealthy"}} =
+                 Forge.Events.latest_for_job(id, "job.interrupted")
+      end
+
+      assert [line] = Enum.filter(Workers.Log.for_worker(worker.id), &(&1.type == "unhealthy"))
+      assert line.level == :error
+
+      assert line.message ==
+               "PID 1 did not answer twice in a row: timed out; requeued 2 job(s); told to reboot"
+    end
+
+    test "keeps the first reason and the time the episode began" do
+      worker = live_worker(%{"memory_budget" => 8_000, "cores" => 4})
+
+      {:ok, _answer} = mark!(worker, "first")
+      first = Workers.get!(worker.id)
+      {:ok, _answer} = mark!(worker, "second")
+
+      assert %{unhealthy_reason: "first", unhealthy_at: at} = Workers.get!(worker.id)
+      assert at == first.unhealthy_at
+
+      # A machine that sends no text still has a line on the page.
+      other = live_worker(%{"memory_budget" => 8_000, "cores" => 4})
+      {:ok, _answer} = Workers.unhealthy(other.id, %{"not" => "text"})
+      assert Workers.get!(other.id).unhealthy_reason == "it gave no reason"
+
+      # And one that sends a great deal has what a line on a page can hold.
+      long = live_worker(%{"memory_budget" => 8_000, "cores" => 4})
+      {:ok, _answer} = Workers.unhealthy(long.id, String.duplicate("x", 600))
+      assert String.length(Workers.get!(long.id).unhealthy_reason) == 500
+    end
+
+    # **The guard that matters most on the platform's side**: the machine's own key would stop a
+    # reboot anyway, and two keys are there so that neither alone decides.
+    test "a permanent machine is never told to reboot" do
+      {:ok, worker, _token} = Workers.create(%{provider: "fake", managed: false})
+
+      assert {:ok, %{reboot: false, why: why}} = mark!(worker)
+      assert why =~ "not the platform's machine"
+      assert {:ok, %{reboot: false}} = mark!(worker)
+      assert Workers.get!(worker.id).rebooted_at == nil
+    end
+
+    test "a managed one is told to, and told again for the same episode" do
+      worker = live_worker(%{"memory_budget" => 8_000, "cores" => 4})
+
+      assert {:ok, %{reboot: true, why: "told to reboot"}} = mark!(worker)
+      assert %{rebooted_at: %DateTime{} = told} = Workers.get!(worker.id)
+
+      # The reply went with a dropped socket, and the machine asks again.
+      assert {:ok, %{reboot: true}} = mark!(worker)
+      assert DateTime.compare(Workers.get!(worker.id).rebooted_at, told) != :lt
+    end
+
+    # No reboot loops: a machine that goes again within the hour of being told stays down for a
+    # person, however often it asks in that episode.
+    test "is not told again within the hour of the last time" do
+      configure(reboot_interval_ms: :timer.hours(1))
+      worker = live_worker(%{"memory_budget" => 8_000, "cores" => 4})
+      {:ok, _worker} = Workers.update(worker, %{rebooted_at: ago(59)})
+
+      assert {:ok, %{reboot: false, why: why}} = mark!(worker)
+      assert why =~ "within the hour, so it waits for a person"
+      assert {:ok, %{reboot: false}} = mark!(worker)
+      assert DateTime.compare(Workers.get!(worker.id).rebooted_at, ago(58)) == :lt
+
+      # And past it, a new episode is told.
+      other = live_worker(%{"memory_budget" => 8_000, "cores" => 4})
+      {:ok, _worker} = Workers.update(other, %{rebooted_at: ago(61)})
+      assert {:ok, %{reboot: true}} = mark!(other)
+    end
+
+    # The hour is measured from when the episode began, not from when it is asked: a machine told
+    # no at the start of an episode is not told yes by asking again once the hour has gone by.
+    test "the hour is counted from when the episode began" do
+      configure(reboot_interval_ms: :timer.hours(1))
+      worker = live_worker(%{"memory_budget" => 8_000, "cores" => 4})
+
+      {:ok, _worker} =
+        Workers.update(worker, %{
+          rebooted_at: ago(120),
+          unhealthy_at: ago(90),
+          unhealthy_reason: "went again half an hour after the last reboot"
+        })
+
+      assert {:ok, %{reboot: false}} = mark!(worker)
+    end
+
+    test "joining healthy clears the mark and keeps the hour" do
+      worker = live_worker(%{"memory_budget" => 8_000, "cores" => 4})
+      {:ok, _answer} = mark!(worker)
+      told = Workers.get!(worker.id).rebooted_at
+
+      assert :ok = Workers.healthy(Workers.get!(worker.id))
+
+      assert %{unhealthy_at: nil, unhealthy_reason: nil, rebooted_at: ^told} =
+               Workers.get!(worker.id)
+
+      assert [line] = Enum.filter(Workers.Log.for_worker(worker.id), &(&1.type == "healthy"))
+      assert line.level == :info
+
+      # A machine that was never marked says nothing about it.
+      :ok = Workers.healthy(Workers.get!(worker.id))
+      assert length(Enum.filter(Workers.Log.for_worker(worker.id), &(&1.type == "healthy"))) == 1
+    end
+
+    # A reboot takes longer than the timeout allows a heartbeat, and a managed machine the sweep
+    # takes is destroyed (`docs/design/worker-tier.md` § The same machine, the same row).
+    test "a machine told to reboot is not taken for lost until its grace is up" do
+      configure(worker_timeout_ms: 60_000, reboot_grace_ms: :timer.minutes(10))
+      {:ok, worker, _token} = Workers.create(%{provider: "fake"})
+      {:ok, worker} = Workers.update(worker, %{provider_id: "fake-r", status: :busy})
+      {:ok, %{reboot: true}} = mark!(worker)
+
+      {:ok, _worker} = Workers.update(Workers.get!(worker.id), %{last_seen_at: ago(5)})
+      assert Workers.sweep_unreachable() == 0
+      refute_receive {:provider_destroy, _id, _credential}
+
+      told = ago(11)
+
+      {:ok, _worker} =
+        Workers.update(Workers.get!(worker.id), %{rebooted_at: told, unhealthy_at: told})
+
+      assert Workers.sweep_unreachable() == 1
+      assert_receive {:provider_destroy, "fake-r", _credential}
+    end
+
+    # Only a machine told in this episode is rebooting: one that came back, went again and was
+    # told no is simply away, and so is one whose mark was cleared.
+    test "a machine not told to reboot this time is lost as any other" do
+      configure(worker_timeout_ms: 60_000, reboot_grace_ms: :timer.minutes(10))
+
+      for {told, since} <- [{ago(2), ago(1)}, {ago(2), nil}] do
+        {:ok, worker, _token} = Workers.create(%{provider: "fake"})
+
+        {:ok, _worker} =
+          Workers.update(worker, %{
+            provider_id: "fake-#{System.unique_integer([:positive])}",
+            status: :busy,
+            last_seen_at: ago(5),
+            rebooted_at: told,
+            unhealthy_at: since,
+            unhealthy_reason: since && "went again"
+          })
+
+        assert Workers.sweep_unreachable() == 1
+        assert Workers.get!(worker.id).status == :destroyed
+      end
+    end
+  end
+
   describe "the hour already paid for" do
     # Hetzner charges every hour a server has started, so an idle machine destroyed at its period
     # throws away the rest of an hour it has already paid for, and the next ticket in that hour
@@ -1929,6 +2118,25 @@ defmodule Forge.WorkersTest do
                )
     end
 
+    test "a slice no job can run in is refused at boot" do
+      assert Workers.check_slices!() == :ok
+
+      configure(slice_bytes: 2)
+
+      assert_raise ArgumentError,
+                   ~r/slice_bytes \(2\) must be at least 512MiB/,
+                   &Workers.check_slices!/0
+
+      configure(slice_bytes: 536_870_912, chat_slice_bytes: 536_870_911)
+
+      assert_raise ArgumentError,
+                   ~r/chat_slice_bytes \(536870911\) must be at least 512MiB/,
+                   &Workers.check_slices!/0
+
+      configure(chat_slice_bytes: 536_870_912)
+      assert Workers.check_slices!() == :ok
+    end
+
     test "a billing configuration that cannot work is refused at boot" do
       assert Workers.check_billing!() == :ok
 
@@ -2067,7 +2275,7 @@ defmodule Forge.WorkersTest do
 
       assert {:ok, _worker} =
                Workers.set_offer(user, worker.id, %{
-                 memory_budget: 2_000,
+                 memory_budget: 2_147_483_648,
                  cores: 2,
                  accepts: [:chat],
                  # None of these is a figure. `update/2` would have written every one.
@@ -2078,7 +2286,7 @@ defmodule Forge.WorkersTest do
                })
 
       saved = Workers.get!(worker.id)
-      assert {saved.memory_budget, saved.cores, saved.accepts} == {2_000, 2, [:chat]}
+      assert {saved.memory_budget, saved.cores, saved.accepts} == {2_147_483_648, 2, [:chat]}
       assert saved.managed == false
       assert saved.status == worker.status
       assert saved.token_hash == worker.token_hash

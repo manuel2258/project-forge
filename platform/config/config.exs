@@ -100,6 +100,12 @@ config :forge, Forge.Workers,
   # missed heartbeats would be a minute; this is generous because a machine that is booting
   # has not reported yet and is timed from when its row was made.
   worker_timeout_ms: 180_000,
+  # A machine whose systemd stopped answering is told to reboot at most once in this long: one
+  # that goes again within the hour stays down for a person (docs/design/worker-tier.md § A
+  # machine whose systemd stops answering). And a machine told to reboot is left alone by the
+  # timeout above for this long from when it was told, so a reboot is not taken for a loss.
+  reboot_interval_ms: 3_600_000,
+  reboot_grace_ms: 600_000,
   # The worker build this platform ships with: the first twelve characters of the `forge-worker`
   # package's store hash, which `flake.nix` sets while building the release — so it is read here,
   # at build time, and baked in, not read from the running host's environment. Unset outside a

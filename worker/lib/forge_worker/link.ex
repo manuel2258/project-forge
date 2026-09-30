@@ -17,7 +17,8 @@ defmodule ForgeWorker.Link do
 
   alias ForgeCore.Job.Result
   alias ForgeCore.WorkerProtocol
-  alias ForgeWorker.{Checkout, Config, Log, Slice, Stats, Store}
+  alias ForgeCore.Workflow.Resources
+  alias ForgeWorker.{Checkout, Config, Health, Log, Slice, Stats, Store}
 
   alias ForgeWorker.Job.{
     Blobs,
@@ -82,6 +83,14 @@ defmodule ForgeWorker.Link do
     socket =
       new_socket()
       |> assign(:jobs, %{})
+      # Jobs stopped because this machine went unhealthy, whose endings are reported to nobody:
+      # the platform has put them back in the queue (`docs/design/worker-tier.md` § What happens
+      # then).
+      |> assign(:abandoned, MapSet.new())
+      # Whether the platform has answered this machine's `unhealthy`: said until it has, and not
+      # again after — its join keeps the mark from then on (`docs/design/worker-channel.md` § An
+      # unhealthy machine).
+      |> assign(:unhealthy_answered, false)
       |> assign(:unacked, %{})
       |> assign(:acks, %{})
       |> assign(:root, Keyword.get(opts, :root, Config.root()))
@@ -113,7 +122,7 @@ defmodule ForgeWorker.Link do
 
     push(socket, socket.assigns.topic, "ready", ready_payload(socket))
 
-    {:ok, socket |> tick() |> send_held() |> resend_unacked()}
+    {:ok, socket |> tick() |> send_held() |> resend_unacked() |> report_unhealthy()}
   end
 
   # **Started once, at the first join, and never again.** These used to be started on every join,
@@ -157,21 +166,34 @@ defmodule ForgeWorker.Link do
 
   @impl Slipstream
   def handle_message(_topic, "assign", assignment, socket) do
-    if Map.has_key?(socket.assigns.jobs, assignment["job_id"]) do
-      Logger.info("already running job #{assignment["job_id"]}")
-      {:ok, socket}
-    else
-      Log.line("job.accepted", :info, accepted(assignment), job_id: assignment["job_id"])
-      {:ok, start_job(socket, assignment)}
+    cond do
+      Map.has_key?(socket.assigns.jobs, assignment["job_id"]) ->
+        Logger.info("already running job #{assignment["job_id"]}")
+        {:ok, socket}
+
+      # Nothing it is given now can run, and the platform has put it back in the queue — every
+      # job running here when the report reached it, and any assignment its channel is handed
+      # after that (`docs/design/worker-channel.md` § An unhealthy machine). So it is dropped, and
+      # nothing is reported: a result from this machine would be recorded as the job's answer.
+      why = Health.unhealthy() ->
+        Log.line("job.refused", :warning, "not started: this machine is unhealthy: #{why}",
+          job_id: assignment["job_id"]
+        )
+
+        {:ok, socket}
+
+      reason = ceiling_refused(assignment) ->
+        {:ok, refuse(socket, assignment, reason)}
+
+      true ->
+        Log.line("job.accepted", :info, accepted(assignment), job_id: assignment["job_id"])
+        {:ok, start_job(socket, assignment)}
     end
   end
 
   def handle_message(_topic, "cancel", %{"job_id" => job_id}, socket) do
-    # Two clauses that do the same today — both casts `:cancel` — and so an equivalent mutant:
-    # kept apart because they are two modules' APIs, and one may come to mean more.
     case socket.assigns.jobs[job_id] do
-      %{runner: runner, kind: :command} when is_pid(runner) -> Command.cancel(runner)
-      %{runner: runner} when is_pid(runner) -> Runner.cancel(runner)
+      %{runner: runner} = job when is_pid(runner) -> cancel(job)
       _other -> Logger.info("asked to cancel #{job_id}, which is not running here")
     end
 
@@ -206,11 +228,74 @@ defmodule ForgeWorker.Link do
     {:ok, socket}
   end
 
+  # **The last place a nonsense ceiling can be kept from systemd**, and it holds against a
+  # platform older than this worker: a unit whose `memory.max` is too small to exec in is how a
+  # machine's PID 1 stopped answering (`docs/design/worker-tier.md` § The job slice). A ceiling
+  # nobody set is not one — the slice then sets none — and anything else must be a number of
+  # bytes no smaller than the minimum.
+  defp ceiling_refused(assignment) do
+    case get_in(assignment, ["slice", "memory_max"]) do
+      nil ->
+        nil
+
+      bytes when is_integer(bytes) ->
+        unless Resources.enough_memory?(bytes) do
+          "its memory ceiling of #{bytes(bytes)} is below the #{minimum()} minimum, the least a " <>
+            "job can run in, so it was not started"
+        end
+
+      other ->
+        "its memory ceiling #{inspect(other)} is not a number of bytes, and the least a job can " <>
+          "run in is the #{minimum()} minimum, so it was not started"
+    end
+  end
+
+  # Every refusal names the ceiling and the minimum; a ceiling of nought or less has no unit to
+  # name it in (`Resources.size/1` takes a positive count), and says so in bytes.
+  defp bytes(bytes) when bytes > 0, do: Resources.size(bytes)
+  defp bytes(bytes), do: "#{bytes} bytes"
+
+  defp minimum, do: Resources.size(Resources.minimum_memory())
+
+  # Ended at once, as an error the platform records like any other: a workflow job's or a
+  # command's `result`, and a chat's `failed`, which is the only ending a chat can fail with.
+  defp refuse(socket, %{"job_id" => job_id} = assignment, reason) do
+    Log.line("job.refused", :error, reason, job_id: job_id)
+
+    terminal =
+      case assignment["kind"] do
+        "chat" ->
+          {:terminal, job_id, "failed", %{"job_id" => job_id, "reason" => reason}}
+
+        _job_or_command ->
+          result = %Result{status: :finished, outcome: :error, reason: reason}
+          {:terminal, job_id, "result", %{"job_id" => job_id, "result" => Result.to_map(result)}}
+      end
+
+    send(self(), terminal)
+    socket
+  end
+
+  # Two clauses that do the same today — both cast `:cancel` — and so an equivalent mutant: kept
+  # apart because they are two modules' APIs, and one may come to mean more.
+  defp cancel(%{runner: runner, kind: :command}), do: Command.cancel(runner)
+  defp cancel(%{runner: runner}), do: Runner.cancel(runner)
+
+  # The platform's answer to `unhealthy` is its decision whether this machine reboots, so it goes
+  # to the process that decides the rest (`ForgeWorker.Health`); every other reply only says a
+  # message was recorded.
   @impl Slipstream
-  def handle_reply(ref, _reply, socket) do
+  def handle_reply(ref, reply, socket) do
     case socket.assigns.acks[ref] do
-      nil -> {:ok, socket}
-      key -> {:ok, forget(socket, ref, key)}
+      nil ->
+        {:ok, socket}
+
+      {:machine, "unhealthy"} = key ->
+        Health.answered(reply)
+        {:ok, socket |> forget(ref, key) |> assign(:unhealthy_answered, true)}
+
+      key ->
+        {:ok, forget(socket, ref, key)}
     end
   end
 
@@ -246,8 +331,26 @@ defmodule ForgeWorker.Link do
 
   def handle_info({:rejoin, _topic, _stale}, socket), do: {:noreply, socket}
 
+  # A job abandoned before it had a runner is stopped the moment it has one: the platform has
+  # already put it back in the queue.
   def handle_info({:runner, job_id, pid}, socket) do
-    {:noreply, update_job(socket, job_id, &Map.put(&1, :runner, pid))}
+    socket = update_job(socket, job_id, &Map.put(&1, :runner, pid))
+
+    if MapSet.member?(socket.assigns.abandoned, job_id),
+      do: cancel(socket.assigns.jobs[job_id])
+
+    {:noreply, socket}
+  end
+
+  # **This machine can run nothing more** (`ForgeWorker.Health`): the platform is told — acked, so
+  # it hears even across a reconnect, and its reply decides the reboot — and every job here is
+  # stopped and reported to nobody, since the platform puts them back in the queue as it would a
+  # lost machine's (`docs/design/worker-tier.md` § What happens then).
+  #
+  # A mark is an episode, and said afresh: `ForgeWorker.Health` marks once per life, so a second
+  # one is a health process that restarted, forgot, and found the machine unhealthy again.
+  def handle_info({:unhealthy, _reason}, socket) do
+    {:noreply, socket |> assign(:unhealthy_answered, false) |> report_unhealthy() |> abandon()}
   end
 
   def handle_info({:event, job_id, event}, socket) do
@@ -265,16 +368,13 @@ defmodule ForgeWorker.Link do
     {:noreply, send_acked(socket, {job_id, "turn", index}, "turn", payload)}
   end
 
+  # An abandoned job's ending: its runner was stopped, or its `systemd-run` could not reach PID 1,
+  # and the platform has requeued it either way. Its own report would be recorded as its answer —
+  # an error for the machine's failure — so it goes nowhere.
   def handle_info({:terminal, job_id, message, payload}, socket) do
-    {level, how} = finished(message, payload)
-    Log.line("job.finished", level, how <> ran(socket.assigns.jobs[job_id]), job_id: job_id)
-
-    socket =
-      socket
-      |> update_in([Access.key!(:assigns), Access.key!(:jobs)], &Map.delete(&1, job_id))
-      |> send_terminal(job_id, message, payload)
-
-    {:noreply, socket}
+    if MapSet.member?(socket.assigns.abandoned, job_id),
+      do: {:noreply, withhold(socket, job_id)},
+      else: {:noreply, report(socket, job_id, message, payload)}
   end
 
   # A conversation that stopped without saying so. One that ends normally has already sent its
@@ -350,6 +450,61 @@ defmodule ForgeWorker.Link do
       {:ok, socket} -> {:ok, socket}
       {:error, _reason} -> {:ok, socket}
     end
+  end
+
+  defp report(socket, job_id, message, payload) do
+    {level, how} = finished(message, payload)
+    Log.line("job.finished", level, how <> ran(socket.assigns.jobs[job_id]), job_id: job_id)
+
+    socket
+    |> update_in([Access.key!(:assigns), Access.key!(:jobs)], &Map.delete(&1, job_id))
+    |> send_terminal(job_id, message, payload)
+  end
+
+  defp withhold(socket, job_id) do
+    Logger.info("job #{job_id} ended after this machine went unhealthy; not reported")
+
+    socket
+    |> update_in([Access.key!(:assigns), Access.key!(:jobs)], &Map.delete(&1, job_id))
+    |> update_in([Access.key!(:assigns), Access.key!(:abandoned)], &MapSet.delete(&1, job_id))
+  end
+
+  # Once, under its own key: re-sent after every reconnect until the platform answers it, never
+  # twice while one is waiting, and **not again once answered** — every rejoin would otherwise ask
+  # the platform again, which moves the time it said to reboot and with it the hour and the grace.
+  # Answered with an error is answered too: a platform that does not know the message will not
+  # know it on the next join either. Nothing when the machine is well.
+  defp report_unhealthy(socket) do
+    key = {:machine, "unhealthy"}
+
+    case Health.unhealthy() do
+      nil ->
+        socket
+
+      reason ->
+        if socket.assigns.unhealthy_answered or Map.has_key?(socket.assigns.unacked, key),
+          do: socket,
+          else: send_acked(socket, key, "unhealthy", %{"reason" => reason})
+    end
+  end
+
+  # The filter is an equivalent mutant today: `ForgeWorker.Health` says `{:unhealthy, _}` once, and
+  # the jobs it abandons leave `jobs` as they end. It keeps a second word, should there ever be
+  # one, from logging and cancelling the same job twice.
+  defp abandon(socket) do
+    socket.assigns.jobs
+    |> Enum.reject(fn {job_id, _job} -> MapSet.member?(socket.assigns.abandoned, job_id) end)
+    |> Enum.reduce(socket, fn {job_id, job}, socket ->
+      Log.line(
+        "job.abandoned",
+        :warning,
+        "stopped because this machine is unhealthy; the platform puts it back in the queue",
+        job_id: job_id
+      )
+
+      if is_pid(job.runner), do: cancel(job)
+      update_in(socket.assigns.abandoned, &MapSet.put(&1, job_id))
+    end)
   end
 
   defp refused("protocol", reply) do
@@ -910,6 +1065,9 @@ defmodule ForgeWorker.Link do
       "release" => version()
     }
     |> put_unless_nil("build", build())
+    # For as long as it believes it: a join without it is what clears the platform's mark
+    # (`docs/design/worker-channel.md` § An unhealthy machine).
+    |> put_unless_nil("unhealthy", Health.unhealthy())
   end
 
   defp running_list(socket) do

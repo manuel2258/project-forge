@@ -64,6 +64,7 @@ defmodule ForgeWorker.Job.Command do
       job_dir: job_dir,
       worktree: Keyword.fetch!(opts, :worktree),
       grace_ms: Keyword.get(opts, :grace_ms, @default_grace_ms),
+      health: Keyword.get_lazy(opts, :health, &ForgeWorker.Health.server/0),
       started: System.monotonic_time(:millisecond),
       port: nil,
       slice: nil,
@@ -93,7 +94,7 @@ defmodule ForgeWorker.Job.Command do
           # because the script is not in it: `$0` is the pinned copy in the job directory, so
           # a path climbed from `dirname "$0"` leaves the repository.
           {"FORGE_CHECKOUT", state.worktree}
-        ]
+        ] ++ Exec.memory_env(Keyword.get(opts, :slice_opts))
 
     slice = Keyword.get(opts, :slice) || ForgeWorker.Slice.impl()
 
@@ -186,6 +187,33 @@ defmodule ForgeWorker.Job.Command do
 
   defp kill(state, _reason), do: state
 
+  # What the slice can say of the script's process, once it has run: nothing when it never did.
+  # The second clause is an equivalent mutant as things stand: the only conclusion with no status
+  # is a slice that could not be made, which the first clause has already answered. It is kept for
+  # the day a status can be missing with a slice in hand, when asking the slice would be wrong.
+  defp ending(%{slice: nil}, _status), do: nil
+  defp ending(_state, nil), do: nil
+
+  defp ending(state, _status) do
+    ending = state.slice.ended(state.slice_context, log_path(state.job_dir))
+
+    # A command whose `systemd-run` could not reach PID 1 never ran: the machine's failure, said
+    # before the result so that the link withholds it (`docs/design/worker-tier.md` § How a machine
+    # finds out).
+    if reason = ending.unreachable, do: ForgeWorker.Health.unreachable(reason, state.health)
+    ending
+  end
+
+  # **A script killed at its ceiling ran to a status** — `systemd-run` reports the signal as 255 —
+  # and stays `converged`, but its reason says what the 255 was (`docs/design/commands.md` § What
+  # the row holds), by the rule a run's reason uses (`Memory.killed/2`).
+  defp killed_for_memory(ending, state) do
+    case ForgeWorker.Job.Memory.killed(ending, get_in(state, [:slice_context, :memory_max])) do
+      nil -> nil
+      killed -> "the script was " <> killed
+    end
+  end
+
   # `docs/design/commands.md` § An invocation is a job: `converged` whenever the script ran to a
   # status, whatever the status; `cancelled` when stopped; `error`, with no status, when it
   # outlived its timeout or its slice could not be made — a script that will not start still
@@ -193,13 +221,14 @@ defmodule ForgeWorker.Job.Command do
   # signal's, and reporting it would read as the script's own answer.
   defp conclude(state, status) do
     if state.slice, do: state.slice.cleanup(state.slice_context)
+    ending = ending(state, status)
 
     {outcome, exit_status, reason} =
       case {state.killed, status} do
         {:operator, _status} -> {:cancelled, nil, "cancelled"}
         {:wall_clock, _status} -> {:error, nil, "outlived its timeout"}
         {nil, nil} -> {:error, nil, "could not be confined"}
-        {nil, status} -> {:converged, status, nil}
+        {nil, status} -> {:converged, status, killed_for_memory(ending, state)}
       end
 
     result =

@@ -130,6 +130,39 @@ defmodule ForgeWorker.JobUserTest do
     assert ran_as(context.ran_as) |> Enum.uniq() == [as_the_job(second_owner)]
   end
 
+  # `prepare/1` is the only way the unit's stop command gets a script to run, and it runs only as
+  # root with a real user: no other test reaches it. Without the script, `ExecStopPost=-+` fails
+  # silently and every run loses its last reading — and with it *killed at its ceiling* and any
+  # kill no sample saw (`docs/design/worker-tier.md` § The job slice).
+  test "preparing writes the unit's stop command where only root can touch it", %{root: root} do
+    job = job("unused")
+    owner = enter(job)
+    job_dir = Path.join(root, "jobs/#{job["job_id"]}")
+    File.mkdir_p!(job_dir)
+
+    # A reading an earlier worker's run of this job left: it would hide this run's bus error.
+    File.mkdir_p!(job_dir <> ".worker")
+    stale = job_dir <> ".worker/at-exit.reading"
+    File.write!(stale, "exit_code killed\nexit_status KILL\nevents oom_kill 1\n")
+
+    {:ok, context} =
+      Systemd.prepare(
+        Map.merge(owner, %{job_id: job["job_id"], worktree: "/w", job_dir: job_dir})
+      )
+
+    script = job_dir <> ".worker/at-exit"
+    assert "--property=ExecStopPost=-+#{script}" in Systemd.flags(context)
+
+    %File.Stat{mode: mode, uid: 0} = File.stat!(script)
+    assert Bitwise.band(mode, 0o111) != 0, "the stop command must be executable"
+    assert File.read!(script) =~ "at-exit.reading"
+    refute File.exists?(stale)
+
+    # In a directory the job's user cannot enter, so nothing it runs can rewrite what root runs.
+    %File.Stat{mode: dir_mode, uid: 0} = File.stat!(job_dir <> ".worker")
+    assert Bitwise.band(dir_mode, 0o077) == 0
+  end
+
   test "leaving gives the tree back to root and removes the user", context do
     job = job(context.origin)
     owner = enter(job)

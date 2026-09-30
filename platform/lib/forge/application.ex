@@ -13,6 +13,7 @@ defmodule Forge.Application do
     # pass as a machine that is never destroyed (`Forge.Workers.check_billing!/0`). No test can see
     # this call go: the application starts once, before any test runs; the check itself is tested.
     Forge.Workers.check_billing!()
+    Forge.Workers.check_slices!()
 
     children =
       [

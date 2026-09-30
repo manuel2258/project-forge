@@ -28,7 +28,12 @@ defmodule Forge.Provider.MachineConfig do
       [
         "FORGE_WORKER_ID=#{opts.worker_id}",
         "FORGE_WORKER_TOKEN=#{opts.token}",
-        "FORGE_PLATFORM_URL=#{opts.platform_url}"
+        "FORGE_PLATFORM_URL=#{opts.platform_url}",
+        # **A driver made this machine**, and that is the machine's own key of the two a reboot
+        # needs (`docs/design/worker-tier.md` § What happens then). Written here, where only a
+        # driver writes, and never by `mix forge.worker.new`: a machine somebody provisioned by
+        # hand is their own computer, whatever the platform says.
+        "FORGE_MANAGED=1"
       ] ++
         for({name, value} <- Map.get(opts, :harness_env, []), do: "#{name}=#{value}") ++
         extra

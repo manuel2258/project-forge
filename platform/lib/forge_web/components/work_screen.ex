@@ -328,9 +328,13 @@ defmodule ForgeWeb.WorkScreen do
             </div>
           <% {:event, event} -> %>
             <span class="opacity-50">{Calendar.strftime(event.inserted_at, "%H:%M:%S")}</span>
+            <%!-- A memory row's type in `warning`: not waiting on a person, and not an error
+                  either (`docs/design/capacity.md` § Memory, which a job holds rather than
+                  spends). --%>
             <span class={[
               "min-w-0 truncate",
-              String.ends_with?(event.type, "error") && "text-error"
+              String.ends_with?(event.type, "error") && "text-error",
+              event.type == "job.harness.memory" && "text-warning"
             ]}>
               {String.replace_prefix(event.type, "job.harness.", "")}
             </span>

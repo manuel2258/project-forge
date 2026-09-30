@@ -144,11 +144,19 @@ defmodule ForgeWeb.ChatNewLive do
     end
   end
 
+  # A size, and one a conversation can run in: `2` is two bytes, which is a size and the one that
+  # took a machine down, so it is refused by name rather than started.
   defp parse_memory(text) do
     case Resources.parse_bytes(text) do
-      {:ok, bytes} -> {:ok, bytes}
+      {:ok, bytes} -> enough(bytes)
       _other -> {:error, "memory has to be a size, like 2GiB"}
     end
+  end
+
+  defp enough(bytes) do
+    if Resources.enough_memory?(bytes),
+      do: {:ok, bytes},
+      else: {:error, Resources.memory_refused()}
   end
 
   defp cores(value) do

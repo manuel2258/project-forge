@@ -65,7 +65,8 @@ Not used: `--bare` (it skips OAuth credentials, which the credential comparison 
 
 The harness process gets a clean environment built from an allowlist of the worker's own
 variables (PATH, locale, proxies, Nix settings), a private HOME inside the job directory,
-`FORGE_JOB`, and exactly one of `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`. Secrets
+`FORGE_JOB`, `FORGE_MEMORY_MAX` when the slice has a ceiling (`worker-tier.md` § The job slice),
+and exactly one of `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`. Secrets
 are forwarded through the environment, never placed on a command line, and are resolved by
 the driver at spawn time so they never sit in process state or crash reports.
 
@@ -123,7 +124,8 @@ All are `job.harness.*` in the event log, with `job_id`, `ticket_id`, `actor = {
 
 `started` (session_id, model, tools, version), `text` (text), `tool_use` (id, name, input),
 `correction` (round, of, problems — the worker's own, § Correcting the outputs), `starting`
-(waited_s, gave_up, stderr — the worker's own, § A harness that never starts),
+(waited_s, gave_up, stderr, memory — the worker's own, § A harness that never starts), `memory`
+(what, ceiling, current, peak, oom_kills, new_kills, pressure — the worker's own, § Memory),
 `tool_result` (tool_use_id, is_error, bytes, excerpt), `delivered` (text), `control`
 (request_id, subtype), `retry` (attempt, max_retries, error), `notice` (subtype), `rate_limit`
 (status, resets_at, rate_limit_type, utilization, is_using_overage, windows), `unknown` (type),
@@ -135,6 +137,55 @@ forwards `delivered` with the platform's `message_id` added, and does not forwar
 opening prompt (`conversations.md` § The wire). The process's exit status is not on `finished`: it
 arrives separately from the output (often before its last chunk, so the runner waits for both),
 and is reported with the run's result as `exit_status` in its harness summary.
+
+**The worker's own events are `job.harness.*` too**, and that is where the platform expects them:
+`Forge.Jobs.record_harness_event/2` keeps that namespace and nothing else from a worker, because
+the rest of the log is the platform's own record. `correction`, `starting` and `memory` are the
+worker speaking about the harness it runs, not the harness speaking.
+
+## Memory
+
+The worker reads the job's cgroup while a run is live (`worker-tier.md` § What the slice reads
+while a job runs) and says what it saw as `job.harness.memory`. Each event carries `what`, the
+ceiling, the current use and the peak so far in bytes, the OOM kills so far, and the pressure
+figure when there is one. `ForgeWorker.Job.Memory` decides, from each sample and what came
+before it, which to say — pure, so the rules are tested without a cgroup:
+
+- **`oom_kill` — a process in the job was killed for memory.** One event per increase of
+  `memory.events`' `oom_kill`, with `new_kills` saying by how many. Each correction round runs
+  in a cgroup of its own whose counters start at nought, so the run's count is the rounds'
+  summed.
+- **`ceiling` — the job reached its ceiling and is being reclaimed or throttled.** The first
+  time `max` rises in a run and never again: it counts every time the kernel had to reclaim at
+  the ceiling, which is thousands of times a minute for a build that fits only just.
+- **`pressure` — the job is thrashing at its ceiling.** `full avg10` at or above the threshold on
+  two samples in a row (twenty percent, `worker-tier.md` says why), once per episode: an episode
+  ends at the first sample below it, and the next one needs two above again. This is the case a
+  ceiling that binds without killing produces, and the case of 2026-09-29's first chat, whose
+  harness could not so much as exec.
+
+**A `starting` event carries the sample too**, as `memory`, so a harness that has not said it
+started says whether memory is why — and its row in the timeline says it: *not started after
+120s · stderr: Running as unit: forge-job-4eb6….service · memory 0.0 GiB of 2 B · full
+pressure 100.0%* (`Forge.Events.summary/1`). The stderr there is its last line as it is, and
+under `Slice.Systemd` that is usually `systemd-run`'s own `Running as unit:` — kept on purpose,
+since before the harness has said anything it is the one line that says the unit exists: the
+difference between a harness that is slow and a `systemd-run` that never got an answer. `Slice.Direct` has nothing to read, and there `memory` is
+nil and no `memory` event is ever made.
+
+**What a run ends with** is `memory: %{ceiling, peak, oom_kills}` in its harness summary
+(`ForgeWorker.Job.Runner`'s `harness_summary/5`), and in a conversation's per-turn summary as
+it stood when the turn ended. It comes from the unit's own last reading (`worker-tier.md` § The
+job slice) when there is one: a harness killed for memory takes its cgroup with it, and the
+sample before may be seconds older than the kill. The same reading is given to
+`Memory.observe/2` once more at the end, so an OOM kill no sample saw is still an event before
+the result.
+
+**When the harness itself was killed for memory, the reason says so in words** — *the harness
+was killed at its 2 GiB memory ceiling* — rather than *harness produced no result message* or an
+exit status. That is a run with no result message, not stopped by the platform, whose unit's
+last reading has its main process ending on `killed`/`KILL` and an OOM kill counted. The
+ceiling is named when the slice had one.
 
 ## Rate limit events
 
@@ -276,6 +327,48 @@ nothing that could have said was sent anywhere. The candidates are the ones a us
 a fresh one lacks (a disk near the Nix store's `min-free`, so a garbage collection under the
 store's lock; a leftover of the earlier chat), and they are guesses. What is fixed is that the
 next one says what it is waiting on while it waits.
+
+**2026-09-29 added a candidate with the same shape**, and it is only that: a machine whose PID 1
+had stopped answering, so that every `systemd-run` on it waited on the bus and a chat placed there
+never started (`worker-tier.md` § A machine whose systemd stops answering). In that case the second
+chat's `starting` events carried `Failed to start transient service unit: Connection timed out`;
+the 38-minute case sent no events at all, so nothing says whether it was the same thing. The wedge
+itself has since been reproduced on the worker image: a run that meets it now ends after 25
+seconds, when `systemd-run` gives up on the bus (`worker-tier.md` § How a machine finds out).
+
+**A harness that exits before it starts ends at once.** It did not: in streaming mode the wrapper
+was `<relay> | exec env -i … <harness>`, and when the harness side exited — `systemd-run` giving up
+on the bus, say — the shell went on waiting for the relay, which was blocked in `read` on the
+port's stdin for a line that was never coming. The port never reported an exit, and the run was
+stopped by the thirty-minute limit above instead. Now the harness side, once its process has
+exited, signals the port's process group with `USR1`: the relay, which has the default action,
+goes; the wrapper shell ignores it and carries on; and the shell exits with the harness's status.
+Not `PIPE`, which would have read better: the BEAM ignores it, an ignored signal stays ignored
+across `exec`, and a shell may not trap one it started ignoring — which is also why the relay
+never died writing into the pipe the harness had left.
+
+**And the relay is ready before it is signalled.** The first version had the wrapper trap `USR1`
+and relied on the relay, a forked subshell, dropping that trap: between the fork and the moment
+the subshell resets its traps the signal is caught and lost, and a harness that exits that fast
+leaves the relay in `read` for the thirty minutes this was meant to end. Review found it; it hung
+2 runs in 3,000 under dash and 3 under bash with a harness that exits at once. So the wrapper
+ignores `USR1`, the relay restores the default and then writes one empty line, and the harness
+side reads that line before it starts the harness — so it cannot signal a relay that is not
+listening yet. The line never reaches the harness; the harness side restores the default too, so
+the harness runs with `USR1` as it always had. 0 hangs in 3,000 runs under each shell.
+Everything the wrapper's comments defend still holds — the prompt goes down the pipe, the close
+sentinel still gives a clean EOF, it is POSIX `sh` with no `awk`, and the wrapper is still the
+leader of the process group `Exec.signal/2` signals. What goes with the relay is anything else
+still in that group, which on the image is nothing — the job's own processes are in its unit —
+and on a development machine is what the harness left behind it, which a unit would have ended.
+
+Such a run's reason is stderr's last line, as a stopped one's is: *the harness exited with status
+1 before it started; stderr: error: flake 'git+file:///w' does not provide attribute
+'devShells.x86_64-linux.default'*. Not a bus error, whose run nobody reports: it is the machine's
+failure, and the job goes back to the queue (`worker-tier.md` § How a machine finds out).
+`systemd-run`'s own lines are taken out first (`worker-tier.md` § The job slice, *Not `--quiet`*),
+so the last line is the one that names something. A run that produced a result message without
+starting — a resume the harness refused — keeps the harness's own words.
 
 The watch starts when the prompt is delivered, not when the process is spawned: a reopened
 conversation holding its prompt until someone writes (§ Invocation) is silent because it has been

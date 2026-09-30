@@ -631,9 +631,17 @@ the way a driver's is — which is the point: a template spending somebody else'
 of service after three scheduling passes rather than three sweeps, with *its provider credential
 belongs to another user* as the last error.
 
-A worker reaching `ready` sets the counter to zero: the recipe demonstrably works, and a template
+A machine reaching `ready` sets the counter to zero: the recipe demonstrably works, and a template
 that has made a hundred good machines should not be disabled by three bad ones spread across a
 year. Consecutive, not cumulative.
+
+**Only a machine's first `ready`, and only from the image the template still names.** It used to be
+every `ready`, and a reconnect says nothing about the recipe: every machine reconnects when the
+platform restarts, so a machine made from last month's image, still busy with a long job, put a
+template disabled by this month's image back in service at every deploy — and the loop this
+section exists to stop ran again, three billed machines at a time. The same two conditions as
+learning a protocol (§ A snapshot that speaks the wrong protocol): first is a row that has never
+been seen, and the image is the one copied onto the row at creation, null matching null.
 
 **A worker that connected and later went away is not a template's failure.** The machine worked;
 something else happened to it. `last_seen_at` being null is what separates the two, and it is the
@@ -647,6 +655,26 @@ needs in order to enable it again.
 and a template that quietly earns three more tries every time somebody touches it is the loop
 again with extra steps. The page shows the count and the last error beside a `DISABLED` flag, and
 `Enable` is its own action.
+
+**Putting it back is an arrival, like assigning it.** A ticket whose job no template could make a
+machine for is stuck with cause `placement`, and comes back by itself when the missing piece
+arrives (`credentials.md` § How a job picks). Assignment was the only arrival that knew to do that,
+so a ticket stuck on *every worker template assigned to this project is disabled* stayed stuck
+after its owner fixed the recipe and pressed `Enable`: its job pending, nothing offered to the
+scheduler, and nothing on the page to press — `Engine.retryable/2` refuses while the state's job is
+pending. It was found on a node whose only template named a snapshot speaking protocol 3, refused
+on three passes and disabled six seconds after the ticket's job was made; the owner pointed it at a
+protocol-4 snapshot and enabled it twenty seconds later, and no machine was ever made. So
+`enable/2` resumes placement in every project the template is assigned to, when it was disabled.
+So does the counter going back to zero by itself, when a machine from the template reports for
+the first time — but only when the counter was at the limit: from two to zero changes nothing the
+gate reads.
+
+**A wrong guess costs more than an event.** A resumed ticket the next pass cannot place is stuck
+again two seconds later, and a ticket that goes stuck is pushed to every member of its project
+(`Forge.Push.Watch` pushes each time an item starts waiting). So the arrivals are kept to things
+that can change the pass's answer, and not widened to "anything happened to a template": enabling
+one that was not disabled resumes nothing, and neither does a reconnect.
 
 ## A snapshot that speaks the wrong protocol
 
@@ -671,7 +699,8 @@ platform accepts A–B*, the job waiting with a sentence that sends its reader t
 page, and the template out of service after three passes. It is asked of the range at every
 create rather than stored as a flag, so a platform upgraded to accept the protocol creates from
 the template again without anybody touching it — unless it was disabled meanwhile, when `Enable`
-is its own action as ever.
+is its own action as ever, and brings back the tickets that stuck while it was out (§ A template
+that cannot make a working machine is taken out of service).
 
 **Unlabelled is unknown, not compatible.** A template whose snapshot carries no label makes a
 machine, logs a warning saying it is unlabelled, and lets the join decide — and the template
@@ -714,6 +743,31 @@ actor, with the page's scoped read as the only thing deciding whose row it was (
 a template only describes how *future* machines are made. Values are copied at creation (§ Two
 tables, and the second is only a recipe), so editing one never reaches a machine that exists,
 which is what makes editing safe rather than alarming.
+
+**An edit that changes what the template could hold is an arrival.** Of the answers that stick a
+ticket (§ The gate), the one an edit can change is `{:no_template, :none_fit}`, and it is decided
+by what `Provisioning.for_demand/2` and `could_ever_hold?/2` ask of a template: `memory`, `cores`,
+`accepts`, and the protocol known of its image. An edit changing any of those, or the image itself
+— which is how what is known of it changes (§ A snapshot that speaks the wrong protocol) — resumes
+placement in every project the template is assigned to, as `Enable` does. The rest do not:
+
+- `name` and `image_build` cannot turn a stick into a machine. `image_build` is read by nothing
+  that places a job; `name` only orders templates of equal size, which picks between two that both
+  fit and never finds one where none did. A rename is not a fix, here any more than for the failure
+  counter.
+- `max_workers`, `idle_ms`, `provider`, `provider_credential_id` and `size` decide whether a
+  create succeeds and when there is room for one — `idle_ms` through a full template's idle
+  machine giving its slot up — not whether the template could hold the job. A template wrong in
+  one of them makes the job *wait* — `at_capacity`, `credential_refused`, `create_failed` — with
+  its ticket active, and the first pass after the edit acts on it with nobody's help. Where those
+  failures end is a disabled template, which an edit does not re-enable, so a resume there could
+  only stick the ticket again; `Enable` is what brings it back.
+
+An edit to a disabled template that changes one of the fields it could hold still resumes, and
+the next pass sticks the ticket again with the same reason — two events and a push to the
+project's members, the price of a wrong guess (§ A template that cannot make a working machine is
+taken out of service). Whether a job can be placed is the pass's to decide, and a second copy of
+its rule here would be a second place for the two to disagree.
 
 ## Lifecycle is per template
 

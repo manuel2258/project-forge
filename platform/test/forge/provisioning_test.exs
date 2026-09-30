@@ -622,7 +622,8 @@ defmodule Forge.ProvisioningTest do
     test "a machine that works clears the count", %{template: template} do
       :ok = Provisioning.failed(template.id, "nope")
       :ok = Provisioning.failed(template.id, "nope")
-      :ok = Provisioning.succeeded(template.id)
+      # Below the limit it was never out of service, so nothing has arrived.
+      refute Provisioning.succeeded(template.id, template.image)
 
       assert reload(template).failures == 0
       assert reload(template).last_error == nil

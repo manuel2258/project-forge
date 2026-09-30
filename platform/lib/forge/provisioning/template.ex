@@ -81,6 +81,15 @@ defmodule Forge.Provisioning.Template do
       :image_build,
       :image_protocol
     ])
+    # **No kinds is nil, never `[]`.** Both mean "takes anything" (`holds?/2` in
+    # `Forge.Provisioning`), and a second spelling of it made an edit from one to the other look
+    # like a change to what the template could hold, which brings back stuck tickets
+    # (`Forge.Provisioning.update_template/3`) for nothing. Back to what the row already holds, the
+    # change is dropped.
+    |> update_change(:accepts, fn
+      [] -> nil
+      kinds -> kinds
+    end)
     |> validate_required([:user_id, :name, :provider, :memory, :cores, :max_workers])
     |> validate_length(:name, min: 1, max: 100)
     |> validate_number(:memory, greater_than: 0)

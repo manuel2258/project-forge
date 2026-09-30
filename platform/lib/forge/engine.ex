@@ -44,7 +44,8 @@ defmodule Forge.Engine do
 
   `cause` is `:placement` when the scheduler could not place the ticket's job — nothing to make a
   machine from, nothing to fund it with — and nil otherwise. It is recorded on the event so that
-  `resume_placement/2` can find the tickets that the arrival of an assignment may have unblocked.
+  `resume_placement/2` can find the tickets that an arrival — an assignment, a template enabled or
+  edited, a machine offering more — may have unblocked.
   """
   @spec stick(Ticket.t(), String.t(), :placement | nil) :: {:ok, Ticket.t()} | {:error, term()}
   def stick(%Ticket{} = ticket, reason, cause \\ nil) do
@@ -293,7 +294,10 @@ defmodule Forge.Engine do
 
   @doc """
   Brings back the tickets of `project_id` that are stuck only because their job could not be
-  placed, now that an assignment has arrived that may place it.
+  placed, now that something has arrived that may place it: a template, machine or credential
+  assigned; a template enabled, edited in what it could hold, or back in service at the first
+  report of a machine of its own; a permanent machine offering the gate something new
+  (`docs/design/credentials.md` § How a job picks lists them, and what is left out).
 
   **Without this a placement stick was a dead end.** The ticket is stuck holding a pending job,
   and `choose/4` refuses a transition while a job for the current state is live, so once the
@@ -302,8 +306,8 @@ defmodule Forge.Engine do
 
   Only a ticket whose latest stick was for placement, and that still holds a pending job for its
   state, comes back: a ticket stuck on its allowance, a rejected approval or a missing transition
-  was stuck for a reason no assignment answers. If the assignment was not the missing piece, the
-  next scheduling pass sticks it again — one event, not a loop.
+  was stuck for a reason no arrival answers. If the arrival was not the missing piece, the next
+  scheduling pass sticks it again — once, and pushed once, not a loop.
   """
   @spec resume_placement(String.t(), Forge.Events.actor()) :: non_neg_integer()
   def resume_placement(project_id, actor) do
@@ -321,18 +325,27 @@ defmodule Forge.Engine do
     )
   end
 
+  # **Locked and re-read, and only while it is still stuck**, as `stick/3` locks against a cancel:
+  # the candidates were read without a lock, and a ticket cancelled in between was written back
+  # `active` from the stale read — no live job, and `ticket.unstuck` after `ticket.cancelled`.
+  # Every machine's first report reaches this now, not only a person's assignment. No test pins
+  # it: the window is between two statements, and nothing in the suite can open it on demand.
   defp unstick(ticket, actor) do
     Multi.new()
-    |> Tickets.put_progress(:ticket, ticket, %{
-      state: ticket.state,
-      status: :active,
-      cost_usd: ticket.cost_usd,
-      pending_transition: nil
-    })
-    |> Events.log(:event, "ticket.unstuck", actor, %{
-      ticket_id: ticket.id,
-      payload: %{"reason" => "an assignment arrived that may place its job"}
-    })
+    |> Multi.run(:stuck, fn repo, _changes -> lock_stuck(repo, ticket.id) end)
+    |> Multi.merge(fn %{stuck: stuck} ->
+      Multi.new()
+      |> Tickets.put_progress(:ticket, stuck, %{
+        state: stuck.state,
+        status: :active,
+        cost_usd: stuck.cost_usd,
+        pending_transition: nil
+      })
+      |> Events.log(:event, "ticket.unstuck", actor, %{
+        ticket_id: stuck.id,
+        payload: %{"reason" => "something arrived that may place its job"}
+      })
+    end)
     |> Repo.transaction()
     |> case do
       {:ok, _changes} ->
@@ -517,6 +530,13 @@ defmodule Forge.Engine do
 
       {:error, step, reason, _changes} ->
         {:error, {step, reason}}
+    end
+  end
+
+  defp lock_stuck(repo, ticket_id) do
+    case repo.one!(from t in Ticket, where: t.id == ^ticket_id, lock: "FOR UPDATE") do
+      %Ticket{status: :stuck} = ticket -> {:ok, ticket}
+      %Ticket{status: status} -> {:error, {:not_stuck, status}}
     end
   end
 

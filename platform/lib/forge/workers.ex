@@ -130,12 +130,20 @@ defmodule Forge.Workers do
   `managed: false` itself and then called `update/2`, whose changeset casts every field the row
   has (`docs/design/identity.md` § Where the guard lives). Only the three figures are cast
   (`Worker.offer_changeset/2`), and both numbers are required.
+
+  **Every figure it sets is one the gate reads**, so a changed offer is an arrival in each project
+  the machine is assigned to, as assigning it is: a ticket stuck because no machine could ever hold
+  its job may be waiting for exactly this (`docs/design/credentials.md` § How a job picks). A save
+  that changed nothing is not one.
   """
   @spec set_offer(User.t(), String.t(), map()) ::
           {:ok, Worker.t()} | {:error, :not_found | :made_by_the_platform | Ecto.Changeset.t()}
   def set_offer(%User{} = user, id, attrs) do
-    with {:ok, worker} <- owned_permanent(user, id) do
-      worker |> Worker.offer_changeset(attrs) |> Repo.update()
+    with {:ok, worker} <- owned_permanent(user, id),
+         changeset = Worker.offer_changeset(worker, attrs),
+         {:ok, worker} <- Repo.update(changeset) do
+      if changeset.changes != %{}, do: arrived(worker, {:user, user.id})
+      {:ok, worker}
     end
   end
 
@@ -348,8 +356,47 @@ defmodule Forge.Workers do
     # **A destroyed row stays destroyed.** `readiness/1` would make it `idle` — assignable — and a
     # `ready` can be in flight on a channel when its row is retired, or arrive on a join made
     # before the row changed (`docs/design/worker-channel.md` § Authentication).
-    unless_destroyed(id, &record_ready(&1, report))
+    case unless_destroyed(id, &record_ready(&1, report)) do
+      # After the transaction, so the tickets come back while nothing holds this row and what
+      # tells a page about them is sent once they are there to read. Inside it would be an
+      # equivalent mutant for the suite, which shares one connection under the SQL sandbox and so
+      # cannot see the commit's order; it is kept out for the lock and the notification.
+      {:ok, {worker, template_back?, offer_changed?}} ->
+        if template_back?,
+          do:
+            Provisioning.resume_projects(%Provisioning.Template{id: worker.template_id}, :system)
+
+        if offer_changed?, do: arrived(worker, :system)
+        {:ok, worker}
+
+      # The row was destroyed, and `record_ready/2` never ran.
+      {:ok, %Worker{} = destroyed} ->
+        {:ok, destroyed}
+
+      {:error, _reason} = refused ->
+        refused
+    end
   end
+
+  # **A machine that may now take what it could not is an arrival in every project its owner
+  # assigned it to**, the way assigning it is to one (`Forge.Engine.resume_placement/2`) — and only
+  # those. A machine the platform made has none (`assign/3` refuses it): it reaches projects through
+  # its template, whose figures it was made with and which arrives on its own
+  # (`Forge.Provisioning.resume_projects/2`). Reading the template's projects here brought back
+  # every stuck ticket in them at every boot, since a first report's harness is always new — to be
+  # stuck, and pushed, again two seconds later.
+  defp arrived(%Worker{} = worker, actor),
+    do: worker |> projects() |> Enum.each(&Engine.resume_placement(&1.id, actor))
+
+  # **What `ready` can widen of what a machine offers the gate**: memory, which it fills where the
+  # row had none, and which jobs its harness takes — the driver, and per-job credentials
+  # (`runs?/2` reads those two and nothing else of the map, so a new `claude` version or a slow
+  # probe is not an arrival). Cores and kinds are left out on purpose: `ready` only ever fills
+  # them from nil, and nil is ungated, so filling them can narrow what the machine holds and never
+  # widen it. The protocol is written at the join, before the `ready` (`admit/2`), which is the
+  # gap `docs/design/credentials.md` § How a job picks records.
+  defp gate_offer(%Worker{memory_budget: memory, harness: harness}),
+    do: {memory, Map.take(harness || %{}, ["driver", "credential"])}
 
   defp record_ready(worker, report) do
     harness = report["harness"]
@@ -365,15 +412,23 @@ defmodule Forge.Workers do
       |> fill(worker, :accepts, accepts)
 
     # The recipe works: a machine from it booted and called home. Consecutive failures reset
-    # here and nowhere else, because this is the only event that proves anything
-    # (`docs/design/provisioning.md` § A template that cannot make a working machine is taken
-    # out of service).
-    Provisioning.succeeded(worker.template_id)
+    # here and nowhere else, because this is the only event that proves anything — and only at a
+    # machine's first `ready`, from the image its template still names: a reconnect of a machine
+    # made from an older snapshot put a template that the new one had taken out of service back
+    # in, at every restart of the platform (`docs/design/provisioning.md` § A template that cannot
+    # make a working machine is taken out of service). First is never seen, as the sweep that
+    # counts a machine that never called home reads it.
+    template_back? =
+      is_nil(worker.last_seen_at) and Provisioning.succeeded(worker.template_id, worker.image)
 
-    with {:ok, worker} <-
+    with {:ok, readied} <-
            update(worker, if(is_map(harness), do: Map.put(attrs, :harness, harness), else: attrs)) do
-      Log.record(worker.id, "ready", :info, offers(worker))
-      {:ok, worker}
+      Log.record(readied.id, "ready", :info, offers(readied))
+
+      # **An arrival is a template back in service, or a machine whose offer to the gate changed**
+      # (`docs/design/credentials.md` § How a job picks). A reconnect saying what it said before is
+      # neither.
+      {:ok, {readied, template_back?, gate_offer(readied) != gate_offer(worker)}}
     end
   end
 
@@ -974,7 +1029,7 @@ defmodule Forge.Workers do
 
   `:no_template` is not the same answer as `:at_capacity` and the caller must not read them
   alike: at capacity is a queue, and no template is a job that will wait for ever unless
-  somebody assigns one.
+  somebody assigns one, enables one, or makes one fit.
 
   **There is no node fallback.** A project with nothing assigned creates nothing, and this says
   which wall was hit rather than quietly making something else

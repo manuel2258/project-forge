@@ -174,7 +174,44 @@ for it. Without that, a stuck ticket holding a pending job was a dead end: `Engi
 refuses a transition while a job for the current state is live, so there was nothing a person
 could do from the product once the missing piece arrived. That was already true of the
 `{:no_template, _}` reasons; this closes it for them as well. If the assignment did not in fact
-fix it, the next pass sticks the ticket again, which is one event rather than a loop.
+fix it, the next pass sticks the ticket again, which is one stick — and one push to the project's
+members — rather than a loop.
+
+**An arrival is anything that can turn the pass's answer from a stick into a machine**, and an
+assignment is only the first. The tickets of every project concerned come back when:
+
+- a template, a permanent machine or a credential is assigned to the project;
+- a template assigned to it goes back into service — its owner's `Enable`, or the first `ready` of
+  a machine made from its current image while its counter was at the limit (`provisioning.md`
+  § A template that cannot make a working machine is taken out of service);
+- a template assigned to it is edited in what it could hold (`provisioning.md` § Editing a
+  template);
+- the owner of a permanent machine assigned to it changes what the machine offers
+  (`Workers.set_offer/3`: all three figures are ones the pass reads);
+- a permanent machine assigned to it reports `ready` offering the gate something its row did not:
+  memory where it had none, or a harness that takes other jobs — another driver, or per-job
+  credentials where it had none. Those are the two things `ready` can widen. A machine assigned before it ever booted has neither, so the pass after its
+  assignment sticks the ticket again, and its first report is when it actually arrives; a machine
+  updated to a release that takes each job's credential arrives at the reconnect that says so.
+  Cores and kinds are left out because `ready` only ever fills them from nothing, and nothing is
+  ungated: it can narrow what a machine holds, never widen it. A machine the platform made is
+  left out too — its figures are its template's, which arrives on its own — and counting it put
+  every stuck ticket in the template's projects through an unstick and a re-stick, and a push,
+  each time a machine booted. A reconnect reporting what it reported before is not an arrival:
+  every worker reconnects when the platform restarts.
+
+A wrong guess is not free: the next pass sticks the ticket again, and a ticket that goes stuck is
+pushed to its project's members (`provisioning.md` § A template that cannot make a working
+machine is taken out of service).
+
+What is left out never decided a stick. A credential re-checked: the pool is its assigned,
+unrevoked credentials, whatever the provider last said, and nothing un-revokes one. A machine
+leaving `unhealthy`: one that could hold the job when empty makes it a queue, `at_capacity`,
+whether healthy or not, and a queue sticks nothing. A machine given an owner (`Workers.adopt/2`):
+which machines serve a project is read from assignments, not owners. **One gap is known.** A
+machine's protocol is written at its join, before its `ready`, so a reconnect running a release
+that speaks a newer protocol but reports the same harness is not seen as arriving; a ticket stuck
+because its job needs a protocol no machine spoke waits for the next arrival of another kind.
 
 A conversation has no ticket to stick. One whose project has an empty pool stays pending, which
 is `provisioning.md` § The gate's standing gap for chats, not a new one.

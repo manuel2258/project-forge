@@ -213,7 +213,8 @@ defmodule Forge.Jobs.Scheduler do
     if ticket.status == :active do
       Logger.warning("#{inspect(why)} for job #{job.id}; sticking ticket #{ticket.number}")
 
-      # A placement stick, which an assignment to the project brings back (`Engine.resume_placement/2`).
+      # A placement stick, which an arrival brings back: an assignment, a template enabled or
+      # edited, a machine offering more (`Engine.resume_placement/2`).
       Engine.stick(ticket, reason(why), :placement)
     end
 

@@ -84,6 +84,11 @@ defmodule Forge.Provisioning do
     attrs |> put_user(user_id) |> then(&Template.changeset(%Template{}, &1)) |> Repo.insert()
   end
 
+  # What `holds?/2` reads of a template, and so what an edit has to change for `for_demand/2` or
+  # `could_ever_hold?/2` to answer differently. The image beside its protocol, because choosing
+  # another image is how what is known of it changes (`Template.changeset/2`).
+  @holds [:memory, :cores, :accepts, :image, :image_protocol]
+
   @doc """
   Edits one of `user`'s templates, named by an id that came off the wire.
 
@@ -97,12 +102,21 @@ defmodule Forge.Provisioning do
   credential it spends — to another account. It used to take the row and no actor, and the
   templates page's own scoped read was the only thing deciding whose row it was
   (`docs/design/identity.md` § Where the guard lives).
+
+  **An edit to what the template could hold brings back the tickets stuck for want of it**, in
+  every project it is assigned to — `@holds` above says which fields that is, and
+  `docs/design/provisioning.md` § Editing a template why the rest are not.
   """
   @spec update_template(User.t(), term(), map()) ::
           {:ok, Template.t()} | {:error, :not_found | Ecto.Changeset.t()}
   def update_template(%User{id: user_id} = user, id, attrs) do
-    with {:ok, template} <- owned(user, id) do
-      template |> Template.changeset(put_user(attrs, user_id)) |> Repo.update()
+    with {:ok, template} <- owned(user, id),
+         changeset = Template.changeset(template, put_user(attrs, user_id)),
+         {:ok, template} <- Repo.update(changeset) do
+      if Enum.any?(@holds, &Map.has_key?(changeset.changes, &1)),
+        do: resume_projects(template, {:user, user_id})
+
+      {:ok, template}
     end
   end
 
@@ -338,23 +352,44 @@ defmodule Forge.Provisioning do
   end
 
   @doc """
-  Records that a machine from this template reached `ready`: the recipe works.
+  Records that a machine made from `image` reached `ready` for the first time: the recipe works.
 
   Consecutive, not cumulative — a template that has made a hundred good machines is not
   disabled by three bad ones spread across a year.
+
+  **Only if the template still names that image**, as `learn_protocol/4` asks: a machine made from
+  the snapshot before the one that took the template out of service says nothing about the one it
+  names now. And only a first `ready` — the caller's to know — because a reconnect says nothing at
+  all (`docs/design/provisioning.md` § A template that cannot make a working machine is taken out
+  of service).
+
+  **True when this put the template back in service**, which is an arrival as `enable/2` is: the
+  caller brings back the tickets in its projects once the `ready` is written (`resume_projects/2`).
+  Only then: a counter going from two to zero changes nothing the gate reads. Asked by the
+  statement that does it, so two machines reporting at once cannot both say so.
   """
-  @spec succeeded(String.t() | nil) :: :ok
-  def succeeded(nil), do: :ok
+  @spec succeeded(String.t() | nil, String.t() | nil) :: boolean()
+  def succeeded(nil, _image), do: false
 
-  def succeeded(template_id) do
-    {_count, _} =
-      Repo.update_all(
-        from(t in Template, where: t.id == ^template_id and t.failures > 0),
-        set: [failures: 0, last_error: nil, updated_at: DateTime.utc_now(:second)]
-      )
+  def succeeded(template_id, image) do
+    reset = [failures: 0, last_error: nil, updated_at: DateTime.utc_now(:second)]
+    naming = naming(template_id, image)
 
-    :ok
+    {back, _} =
+      Repo.update_all(from(t in naming, where: t.failures >= ^failure_limit()), set: reset)
+
+    {_count, _} = Repo.update_all(from(t in naming, where: t.failures > 0), set: reset)
+    back == 1
   end
+
+  # The template, while it still names the image a machine was made from. Null matches null: a
+  # template naming no image boots the driver's default, and a machine made from it was made from
+  # that.
+  defp naming(template_id, nil),
+    do: from(t in Template, where: t.id == ^template_id and is_nil(t.image))
+
+  defp naming(template_id, image),
+    do: from(t in Template, where: t.id == ^template_id and t.image == ^image)
 
   @doc """
   Records that the image a machine was made from speaks `protocol`, learnt from the machine being
@@ -370,16 +405,12 @@ defmodule Forge.Provisioning do
   # image was made with, so it is as good as a label. One that said none leaves the build alone.
   @spec learn_protocol(String.t(), String.t() | nil, non_neg_integer(), String.t() | nil) :: :ok
   def learn_protocol(template_id, image, protocol, build \\ nil) do
-    query =
-      case image do
-        nil -> from(t in Template, where: t.id == ^template_id and is_nil(t.image))
-        image -> from(t in Template, where: t.id == ^template_id and t.image == ^image)
-      end
-
     learnt = [image_protocol: protocol] ++ if(build, do: [image_build: build], else: [])
 
     {_count, _} =
-      Repo.update_all(query, set: learnt ++ [updated_at: DateTime.utc_now(:second)])
+      Repo.update_all(naming(template_id, image),
+        set: learnt ++ [updated_at: DateTime.utc_now(:second)]
+      )
 
     :ok
   end
@@ -409,12 +440,34 @@ defmodule Forge.Provisioning do
   template that earns three more tries every time somebody touches it is the loop again with
   extra steps (`docs/design/provisioning.md` § A template that cannot make a working machine is
   taken out of service).
+
+  **And it is an arrival, like assigning it.** A ticket stuck because every template assigned to
+  its project was disabled holds a pending job the scheduler no longer offers, so the tickets stuck
+  for placement in every project this template is assigned to are brought back — when it was
+  disabled. Enabling one that was not changes nothing the gate reads, and a ticket brought back for
+  nothing is stuck again on the next pass and pushed to its project's members once more.
   """
   @spec enable(User.t(), String.t()) :: {:ok, Template.t()} | {:error, term()}
   def enable(%User{} = user, id) do
-    with {:ok, template} <- owned(user, id) do
-      template |> Ecto.Changeset.change(failures: 0, last_error: nil) |> Repo.update()
+    with {:ok, template} <- owned(user, id),
+         {:ok, enabled} <-
+           template |> Ecto.Changeset.change(failures: 0, last_error: nil) |> Repo.update() do
+      if disabled?(template), do: resume_projects(enabled, {:user, user.id})
+      {:ok, enabled}
     end
+  end
+
+  @doc """
+  Brings back the tickets stuck for want of a machine in every project `template` is assigned to,
+  now that it may make what it could not: enabled, edited in what it could hold, or back in
+  service after a machine of its own reported (`docs/design/credentials.md` § How a job picks).
+
+  Which tickets come back is `Forge.Engine.resume_placement/2`'s to decide. A wrong guess is stuck
+  again by the next pass, and pushed again, so the callers ask first whether anything changed.
+  """
+  @spec resume_projects(Template.t(), Forge.Events.actor()) :: :ok
+  def resume_projects(%Template{} = template, actor) do
+    template |> for_projects() |> Enum.each(&Forge.Engine.resume_placement(&1.id, actor))
   end
 
   @doc "How many machines exist from this template, against its own ceiling."

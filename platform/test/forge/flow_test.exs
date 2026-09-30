@@ -624,6 +624,322 @@ defmodule Forge.FlowTest do
     assert Tickets.get!(ticket.id).status == :active
   end
 
+  # **Enabling a template is an arrival, like assigning one.** The node this was found on: the only
+  # template named a snapshot speaking a protocol the platform refuses, three passes refused it and
+  # took it out of service, and the ticket stuck on *every worker template assigned to this project
+  # is disabled*. Its owner pointed the template at a good snapshot and enabled it, and the ticket
+  # stayed stuck with its job pending — no machine was made, and nothing on the page could make one
+  # (`docs/design/provisioning.md` § A template that cannot make a working machine is taken out of
+  # service).
+  test "a ticket stuck on a disabled template comes back when its owner enables it", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    Forge.Provider.Fake.watch()
+    Registry.unregister(Forge.Workers.Registry, worker.id)
+    {template, ticket} = stuck_on_a_refused_image(project, user)
+
+    # Fixing the recipe does not put it back in service. The edit is a guess that the ticket may
+    # now be placed, and the next pass, which decides, sticks it again.
+    before_edit = unstuck_count(ticket)
+
+    {:ok, _} =
+      Forge.Provisioning.update_template(user, template.id, %{
+        image: "snapshot-current",
+        image_protocol: ForgeCore.WorkerProtocol.current()
+      })
+
+    assert unstuck_count(ticket) == before_edit + 1
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert Tickets.get!(ticket.id).status == :stuck
+    refute_received {:provider_create, _opts}
+
+    unstuck = unstuck_count(ticket)
+    {:ok, _} = Forge.Provisioning.enable(user, template.id)
+
+    assert Tickets.get!(ticket.id).status == :active
+    assert unstuck_count(ticket) == unstuck + 1
+
+    # And the pass after that makes the machine the job was waiting for.
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert_received {:provider_create, _opts}
+  end
+
+  # Only the projects the template is assigned to, and only a ticket stuck for placement: one
+  # anywhere else, or stuck on its allowance, was not waiting for this template.
+  test "enabling a template brings back no ticket it was not holding up", %{
+    project: project,
+    user: user
+  } do
+    template = template_fixture(user, project)
+    out_of_service!(template)
+
+    held_up = stuck_for_placement(project, user)
+    {:ok, other_cause} = Tickets.admit(project, %{title: "y"}, {:user, user.id})
+    {:ok, _} = Engine.stick(Tickets.get!(other_cause.id), "ticket cost cap reached")
+
+    # Another project with a template of its own, out of service as well.
+    elsewhere_project = unrelated_project(user)
+    user |> template_fixture(elsewhere_project) |> out_of_service!()
+    elsewhere = stuck_for_placement(elsewhere_project, user)
+
+    # Somebody else's `Enable` is refused, and refused before it brings anything back.
+    stranger = Forge.AccountsFixtures.user_fixture()
+    join!(project, stranger)
+    assert {:error, :not_found} = Forge.Provisioning.enable(stranger, template.id)
+    assert Tickets.get!(held_up.id).status == :stuck
+
+    {:ok, _} = Forge.Provisioning.enable(user, template.id)
+
+    assert Tickets.get!(held_up.id).status == :active
+    assert "ticket.unstuck" in event_types(held_up)
+    assert Tickets.get!(other_cause.id).status == :stuck
+    assert Tickets.get!(elsewhere.id).status == :stuck
+
+    # Enabling it again, in service already, changes nothing the gate reads.
+    {:ok, _} = Engine.stick(Tickets.get!(held_up.id), "no template", :placement)
+    {:ok, _} = Forge.Provisioning.enable(user, template.id)
+    assert Tickets.get!(held_up.id).status == :stuck
+  end
+
+  # **An edit is an arrival when it changes what the template could hold**, and only then: the
+  # fields `Provisioning.for_demand/2` asks of a template, and the image whose protocol it reads.
+  # The rest decide whether a create succeeds, or nothing that places a job at all — a rename is
+  # not a fix (`docs/design/provisioning.md` § Editing a template).
+  test "an edit brings a stuck ticket back only when it changes what the template could hold", %{
+    project: project,
+    user: user
+  } do
+    {:ok, credential} =
+      Forge.Provisioning.create_credential(user, %{
+        name: "another-account",
+        provider: "fake",
+        secret: %{"token" => "t"}
+      })
+
+    template = template_fixture(user, project)
+    ticket = stuck_for_placement(project, user)
+
+    edits = [
+      # The templates page sends every field on every save, so a rename re-sends what the template
+      # could hold, unchanged (`ForgeWeb.TemplatesLive`): sent is not changed.
+      {%{
+         name: "renamed",
+         memory: template.memory,
+         cores: template.cores,
+         accepts: nil,
+         image: nil,
+         image_protocol: nil
+       }, :stuck},
+      {%{provider: "local"}, :stuck},
+      {%{provider: "fake"}, :stuck},
+      {%{max_workers: 4}, :stuck},
+      {%{idle_ms: 60_000}, :stuck},
+      {%{size: "bigger"}, :stuck},
+      {%{provider_credential_id: credential.id}, :stuck},
+      {%{image_build: "abc123"}, :stuck},
+      {%{memory: 128 * 1024 * 1024 * 1024}, :active},
+      {%{cores: 128}, :active},
+      # Nothing ticked is nil, which the template already says: not a change.
+      {%{accepts: []}, :stuck},
+      {%{accepts: [:workflow]}, :active},
+      {%{image: "snapshot-2"}, :active},
+      {%{image_protocol: ForgeCore.WorkerProtocol.current()}, :active}
+    ]
+
+    for {edit, expected} <- edits do
+      {:ok, _} = Engine.stick(Tickets.get!(ticket.id), "no template", :placement)
+      assert {:ok, _} = Forge.Provisioning.update_template(user, template.id, edit)
+
+      assert Tickets.get!(ticket.id).status == expected,
+             "#{inspect(edit)} should have left the ticket #{expected}"
+    end
+
+    assert unstuck_count(ticket) == Enum.count(edits, &(elem(&1, 1) == :active))
+
+    # An edit the changeset refuses changes nothing, and brings nothing back.
+    {:ok, _} = Engine.stick(Tickets.get!(ticket.id), "no template", :placement)
+    assert {:error, _} = Forge.Provisioning.update_template(user, template.id, %{memory: 0})
+    assert Tickets.get!(ticket.id).status == :stuck
+  end
+
+  # **A permanent machine is an arrival when it offers the gate more than it did.** Assigned before
+  # it ever booted, it has no memory and no harness, so the pass after its assignment sticks the
+  # ticket again, and its first `ready` is when it actually arrives. Updated to a release that takes
+  # each job's credential, it arrives at the reconnect that says so. A reconnect saying what it said
+  # before is not an arrival, and neither is a harness that changed in nothing the gate reads
+  # (`docs/design/credentials.md` § How a job picks).
+  test "a permanent machine brings the ticket back when it reports more than it did", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    Registry.unregister(Forge.Workers.Registry, worker.id)
+    mine = permanent_machine(user, project)
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    start_supervised!(Forge.Jobs.Scheduler)
+
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert Tickets.get!(ticket.id).status == :stuck
+
+    # A release from before the harness probe: memory it did not have, and no harness, so it
+    # cannot take this job and the next pass sticks the ticket again.
+    report = %{"memory_budget" => 64 * 1024 * 1024 * 1024, "cores" => 64}
+    {:ok, _} = Forge.Workers.ready(mine, report)
+
+    assert Tickets.get!(ticket.id).status == :active
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert Tickets.get!(ticket.id).status == :stuck
+
+    # Updated, it takes the job's credential from the assignment: that is the arrival — in the
+    # projects this machine serves, and not in another served by another machine.
+    elsewhere_project = unrelated_project(user)
+    permanent_machine(user, elsewhere_project)
+    elsewhere = stuck_for_placement(elsewhere_project, user)
+
+    per_job = %{"driver" => "claude_code", "credential" => "per_job", "version" => "2.0.1"}
+    {:ok, _} = Forge.Workers.ready(mine, Map.put(report, "harness", per_job))
+
+    assert Tickets.get!(ticket.id).status == :active
+    assert Tickets.get!(elsewhere.id).status == :stuck
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert Tickets.get!(ticket.id).status == :active
+
+    # The same again, or a newer `claude` behind the same harness, is not.
+    {:ok, _} = Engine.stick(Tickets.get!(ticket.id), "no template", :placement)
+    {:ok, _} = Forge.Workers.ready(mine, Map.put(report, "harness", per_job))
+    newer = Map.put(per_job, "version", "2.0.2")
+    {:ok, _} = Forge.Workers.ready(mine, Map.put(report, "harness", newer))
+
+    assert Tickets.get!(ticket.id).status == :stuck
+  end
+
+  # **A machine the platform made is not an arrival by booting.** Its figures are its template's,
+  # which arrives on its own, and its first report always carries a harness its row did not have:
+  # counted, every stuck ticket in the template's projects came back at every boot, to be stuck —
+  # and pushed to the project's members — again on the next pass.
+  test "a machine the platform made brings nothing back by booting", %{
+    project: project,
+    user: user
+  } do
+    template = template_fixture(user, project)
+    ticket = stuck_for_placement(project, user)
+    {:ok, made, _token} = Forge.Workers.create(Forge.Provisioning.Template.worker_attrs(template))
+    {:ok, _} = Forge.Workers.ready(made, template_report(template))
+
+    assert Tickets.get!(ticket.id).status == :stuck
+    assert unstuck_count(ticket) == 0
+  end
+
+  # **A template back in service by a machine of its own is an arrival**, as its owner's `Enable`
+  # is: a machine from it reported, so the recipe works. But only a machine's first report, and
+  # only from the image the template still names — a reconnect of a machine made from an older
+  # snapshot put a template the new one had taken out of service back in at every restart
+  # (`docs/design/provisioning.md` § A template that cannot make a working machine is taken out of
+  # service). Below the limit the template was never out, and nothing has arrived.
+  test "a template's own machine brings the ticket back when its first report puts it back", %{
+    project: project,
+    user: user
+  } do
+    template = template_fixture(user, project)
+    report = template_report(template)
+    ticket = stuck_for_placement(project, user)
+
+    # Another template, out of service in another project, which this machine says nothing about.
+    other = user |> unrelated_project() |> then(&template_fixture(user, &1))
+    out_of_service!(other)
+
+    # Past the limit, as a machine swept after the template went out makes it.
+    {:ok, made, _token} = Forge.Workers.create(Forge.Provisioning.Template.worker_attrs(template))
+    out_of_service!(template)
+    :ok = Forge.Provisioning.failed(template.id, "x")
+    {:ok, _} = Forge.Workers.ready(made, report)
+
+    assert Tickets.get!(ticket.id).status == :active
+    assert unstuck_count(ticket) == 1
+    refute Forge.Provisioning.disabled?(reload_template(template))
+    assert Forge.Provisioning.disabled?(reload_template(other))
+
+    # A reconnect says nothing about the recipe.
+    {:ok, _} = Engine.stick(Tickets.get!(ticket.id), "no template", :placement)
+    out_of_service!(template)
+    {:ok, _} = Forge.Workers.ready(made, report)
+
+    assert Tickets.get!(ticket.id).status == :stuck
+    assert Forge.Provisioning.disabled?(reload_template(template))
+
+    # Nor does a machine made from the image the template named before the one it names now.
+    {:ok, older, _token} =
+      Forge.Workers.create(Forge.Provisioning.Template.worker_attrs(template))
+
+    {:ok, _} = Forge.Provisioning.update_template(user, template.id, %{image: "snapshot-2"})
+    {:ok, _} = Engine.stick(Tickets.get!(ticket.id), "no template", :placement)
+    {:ok, _} = Forge.Workers.ready(older, report)
+
+    assert Tickets.get!(ticket.id).status == :stuck
+    assert Forge.Provisioning.disabled?(reload_template(template))
+
+    # Below the limit: the count goes back to zero, and nothing has arrived.
+    {:ok, _} = Forge.Provisioning.enable(user, template.id)
+    :ok = Forge.Provisioning.failed(template.id, "x")
+    {:ok, _} = Engine.stick(Tickets.get!(ticket.id), "no template", :placement)
+
+    {:ok, fresh, _token} =
+      Forge.Workers.create(Forge.Provisioning.Template.worker_attrs(reload_template(template)))
+
+    {:ok, _} = Forge.Workers.ready(fresh, report)
+
+    assert reload_template(template).failures == 0
+    assert Tickets.get!(ticket.id).status == :stuck
+  end
+
+  # **A permanent machine's owner changing what it offers is an arrival**: every figure is one the
+  # gate reads. Too small to ever hold the job, the machine sticks the ticket; given more, it brings
+  # it back and the next pass does not stick it again. A save that changes nothing brings nothing.
+  test "a permanent machine given a bigger offer brings the ticket back", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    Registry.unregister(Forge.Workers.Registry, worker.id)
+    mine = permanent_machine(user, project)
+    small = %{memory_budget: 1024 * 1024 * 1024, cores: 1}
+
+    {:ok, _} =
+      Forge.Workers.ready(mine, %{
+        "memory_budget" => small.memory_budget,
+        "cores" => small.cores,
+        "harness" => %{"driver" => "claude_code", "credential" => "per_job"}
+      })
+
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    start_supervised!(Forge.Jobs.Scheduler)
+
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert Tickets.get!(ticket.id).status == :stuck
+
+    # Another project of the owner's, served by another machine of theirs: not this one's to fix.
+    elsewhere_project = unrelated_project(user)
+    permanent_machine(user, elsewhere_project)
+    elsewhere = stuck_for_placement(elsewhere_project, user)
+
+    {:ok, _} = Forge.Workers.set_offer(user, mine.id, small)
+    assert Tickets.get!(ticket.id).status == :stuck
+
+    assert {:error, _} = Forge.Workers.set_offer(user, mine.id, %{memory_budget: 1, cores: 64})
+    assert Tickets.get!(ticket.id).status == :stuck
+
+    {:ok, _} =
+      Forge.Workers.set_offer(user, mine.id, %{memory_budget: 64 * 1024 * 1024 * 1024, cores: 64})
+
+    assert Tickets.get!(ticket.id).status == :active
+    assert "ticket.unstuck" in event_types(ticket)
+    assert Tickets.get!(elsewhere.id).status == :stuck
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert Tickets.get!(ticket.id).status == :active
+  end
+
   # **One queued chat, one machine.** A machine being made is not assignable, so the chat is
   # still pending on every pass until it boots — and each of those passes used to make another,
   # until the template's `max_workers` stopped it (`docs/design/provisioning.md` § The gate).
@@ -1563,6 +1879,108 @@ defmodule Forge.FlowTest do
   end
 
   defp only_job(ticket), do: hd(Jobs.for_ticket(ticket.id))
+
+  defp unstuck_count(ticket), do: Enum.count(event_types(ticket), &(&1 == "ticket.unstuck"))
+
+  # A template assigned to `project` that could hold any job the tests here make.
+  defp template_fixture(user, project) do
+    {:ok, template} =
+      Forge.Provisioning.create_template(user, %{
+        name: "t-#{System.unique_integer([:positive])}",
+        provider: "fake",
+        memory: 64 * 1024 * 1024 * 1024,
+        cores: 64,
+        max_workers: 1
+      })
+
+    {:ok, _} = Forge.Provisioning.assign(user, template.id, project.id)
+    template
+  end
+
+  # As many failures as take a template out of service.
+  defp out_of_service!(template) do
+    for _ <- 1..Forge.Provisioning.failure_limit(),
+        do: Forge.Provisioning.failed(template.id, "x")
+  end
+
+  defp reload_template(template), do: Repo.get!(Forge.Provisioning.Template, template.id)
+
+  # What a machine made from `template` says at its first join: the template's figures, and a
+  # current release's harness.
+  defp template_report(template) do
+    %{
+      "memory_budget" => template.memory,
+      "cores" => template.cores,
+      "harness" => %{"driver" => "claude_code", "credential" => "per_job"}
+    }
+  end
+
+  # A permanent machine of `user`'s assigned to `project` before it has ever booted: it has said
+  # what protocol it speaks at its join (`Workers.admit/2`), and nothing else yet.
+  defp permanent_machine(user, project) do
+    {:ok, machine, _token} =
+      Forge.Workers.create(%{provider: "fake", managed: false, user_id: user.id})
+
+    {:ok, machine} =
+      Forge.Workers.update(machine, %{protocol: ForgeCore.WorkerProtocol.current()})
+
+    {:ok, _} = Forge.Workers.assign(user, machine.id, project.id)
+    machine
+  end
+
+  # A ticket stuck as the scheduler sticks one it cannot place, holding its pending job.
+  defp stuck_for_placement(project, user) do
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    {:ok, _} = Engine.stick(Tickets.get!(ticket.id), "no template", :placement)
+    ticket
+  end
+
+  # Another project `user` is in, with nothing assigned to it yet.
+  defp unrelated_project(user) do
+    {:ok, elsewhere} =
+      register_owned!(%{
+        name: "elsewhere-#{System.unique_integer([:positive])}",
+        repo_path: seeded_repo()
+      })
+
+    join!(elsewhere, user)
+    elsewhere
+  end
+
+  # The only template assigned to `project` names a snapshot speaking a protocol this platform
+  # refuses: every pass refuses it before asking the driver, the passes up to the failure limit
+  # take it out of service, and the next sticks the ticket for placement
+  # (`Forge.Workers.create_machine/1`).
+  defp stuck_on_a_refused_image(project, user) do
+    {:ok, template} =
+      Forge.Provisioning.create_template(user, %{
+        name: "old-snapshot",
+        provider: "fake",
+        image: "snapshot-old",
+        image_protocol: ForgeCore.WorkerProtocol.minimum() - 1,
+        memory: 64 * 1024 * 1024 * 1024,
+        cores: 64,
+        max_workers: 1
+      })
+
+    {:ok, _} = Forge.Provisioning.assign(user, template.id, project.id)
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    start_supervised!(Forge.Jobs.Scheduler)
+
+    for _pass <- 0..Forge.Provisioning.failure_limit(),
+        do: assert(Forge.Jobs.Scheduler.tick() == 0)
+
+    assert Tickets.get!(ticket.id).status == :stuck
+
+    assert %{"cause" => "placement", "reason" => reason} =
+             Events.for_ticket(ticket.id)
+             |> Enum.find(&(&1.type == "ticket.stuck"))
+             |> Map.fetch!(:payload)
+
+    assert reason =~ "disabled"
+    refute_received {:provider_create, _opts}
+    {template, ticket}
+  end
 
   defp runs(job),
     do: Repo.all(from r in Forge.Jobs.Run, where: r.job_id == ^job.id, order_by: r.started_at)

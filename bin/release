@@ -5,7 +5,13 @@
 #   bin/release [--registry REF] [--skip-tag] [--dry-run]
 #
 # What it does, in order: refuse anything but a clean `main`, tag `v<version>` and push the tag,
-# build `.#platform-image`, copy it to the registry and print the digest.
+# build `.#platform-image`, copy it to the registry as `<version>` and then as `latest`, and print
+# the digest.
+#
+# **`latest` is the version just pushed, copied inside the registry**, so it names the same digest
+# rather than a second upload of the same archive that might not. It only ever moves forward: this
+# runs from a clean `main` and publishes the `VERSION` there, which is the newest release. A
+# deployment still pins the digest; `latest` is for finding the current one, and for a quick try.
 #
 # **The version comes from `VERSION` and from nowhere else.** `flake.nix` reads the same file for
 # the image tag and every `mix.exs` reads it for the release, so publishing twice from one commit
@@ -104,8 +110,9 @@ archive=$(nix build .#platform-image --no-link --print-out-paths | tail -1)
 echo "    $archive"
 
 destination="docker://$registry:$version"
+latest="docker://$registry:latest"
 if [ "$dry_run" = true ]; then
-  say "would copy to $destination"
+  say "would copy to $destination, and then to $latest"
   exit 0
 fi
 
@@ -131,6 +138,7 @@ if [ -z "$token" ] && command -v gh > /dev/null; then
 fi
 
 creds=()
+src_creds=()
 if [ -n "$token" ]; then
   registry_host=${registry%%/*}
   user=${GHCR_USER:-$(echo "$registry" | cut -d/ -f2)}
@@ -143,6 +151,7 @@ if [ -n "$token" ]; then
   printf '%s' "$token" |
     skopeo login --username "$user" --password-stdin --authfile "$auth_file" "$registry_host"
   creds=(--dest-authfile "$auth_file")
+  src_creds=(--src-authfile "$auth_file")
 fi
 
 # `--insecure-policy` is about signature policy and nothing else: skopeo refuses to run at all
@@ -151,6 +160,9 @@ fi
 # deployment pins is the digest printed below, which the registry cannot forge.
 skopeo --insecure-policy copy \
   "${creds[@]}" --digestfile "$digest_file" "docker-archive:$archive" "$destination"
+
+say "copying $destination to $latest"
+skopeo --insecure-policy copy "${src_creds[@]}" "${creds[@]}" "$destination" "$latest"
 
 say "published"
 printf '    %s@%s\n' "$registry" "$(cat "$digest_file")"

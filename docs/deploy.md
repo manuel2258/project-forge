@@ -253,8 +253,11 @@ bin/release                        # or --registry other.host/you/forge
 ```
 
 It refuses anything but a clean `main`, tags `v<version>` and pushes the tag, builds
-`.#platform-image`, copies the tarball to the registry and prints the digest it published —
-which is what a deployment pins. **No Docker daemon anywhere**: `nix build` writes a gzipped
+`.#platform-image`, copies the tarball to the registry as `:<version>`, copies that to `:latest`
+inside the registry — the same digest, not a second upload — and prints the digest it published,
+which is what a deployment pins. `:latest` only moves forward, since a release is only ever
+published from `main`'s own `VERSION`; it is for finding the current release and for a quick try,
+not for a deployment that should stay put. **No Docker daemon anywhere**: `nix build` writes a gzipped
 docker-archive and `skopeo copy docker-archive:… docker://…` streams it to the registry,
 decompressing on the way, so nothing has to load the image first. It spools the decompressed
 archive through `$TMPDIR`, which needs room for an uncompressed image.

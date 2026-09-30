@@ -6,7 +6,8 @@ description: Cut a forge release from main — decide the version bump, say whet
 # release
 
 A release is a `Version X.Y.Z` commit on `main` that changes `VERSION` and nothing else, the
-`vX.Y.Z` tag on it, and the platform image at `ghcr.io/manuel2258/forge:X.Y.Z`. `bin/release`
+`vX.Y.Z` tag on it, and the platform image at `ghcr.io/manuel2258/forge:X.Y.Z` — which
+`ghcr.io/manuel2258/forge:latest` then names too. `bin/release`
 does the tag, the build and the push; this skill decides what goes into `VERSION` first and says
 what the release means for the worker snapshots.
 
@@ -95,13 +96,16 @@ what the release means for the worker snapshots.
    ```
 
    It refuses a dirty tree or a tag that names another commit, tags `vX.Y.Z`, pushes the tag,
-   builds `.#platform-image` and copies it to the registry with skopeo — no Docker daemon. The
+   builds `.#platform-image` and copies it to the registry with skopeo — no Docker daemon — as
+   `:X.Y.Z`, then copies that to `:latest` inside the registry, so both name one digest. The
    token comes from `GHCR_TOKEN`, else `gh auth token`. The build is long; run it in the
    background and wait for it. If it fails after the tag was pushed, fix the cause and run it
    again: a tag that already names HEAD is a re-run and fine.
 
 7. **Report** the version, the digest `bin/release` printed (`ghcr.io/manuel2258/forge@sha256:…`,
-   what a deployment pins), and the Hetzner verdict again. When a snapshot is required or
+   what a deployment pins), that `:latest` now names it, and the Hetzner verdict again. Check
+   the last with `skopeo inspect --format '{{.Digest}}' docker://ghcr.io/manuel2258/forge:latest`
+   (with `--creds` from `gh auth token` if the package is private); it must print the same digest. When a snapshot is required or
    recommended, give the command and do not run it — it creates and pays for a Hetzner server,
    and needs the human's `HCLOUD_TOKEN`:
 

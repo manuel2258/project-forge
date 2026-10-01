@@ -408,11 +408,17 @@ it.
   rather than *the node's default* or *custom* for a field its provider requires. The token
   keeps a node fallback, `Provider.config(:token)`; nothing in `runtime.exs` sets it, and no
   other driver reads the key.
-- **The catalogue offers only what the node's location will sell.** `shapes/1` reads the
-  datacenters as well as the server types and keeps the intersection, because a size that cannot
-  be ordered where the platform creates fails at `create` with `422: unsupported location for
-  server type` and nothing before that says so. **Support is not the question**: `fsn1` supports
-  `cpx11` and will not sell one, so what is read is each datacenter's `server_types.available`.
+- **The catalogue offers only what the node's location will sell.** `shapes/1` keeps a server
+  type only when its own `locations` list has an entry for the node's location that is neither
+  deprecated nor unavailable, because a size that cannot be ordered where the platform creates
+  fails at `create` with `422: unsupported location for server type` and nothing before that
+  says so. **Support is not the question**: `fsn1` supports `cpx11` and will not sell one, so
+  what decides is that entry's `available`, not its presence. It used to be read from each
+  datacenter's `server_types.available`; Hetzner deprecated those fields for the per-location
+  ones and on 1 Oct. 2026 removed `GET /datacenters` outright, which answers `410 Gone` — and
+  with it went every catalogue, so no template could be made or edited. The deprecation is the
+  location's too: the type-wide `deprecation` is itself deprecated, and a type can be withdrawn
+  in one location while still sold in another.
   This was found on a node left on the driver's `fsn1` default, which was offering all
   twenty-five types while that datacenter had *none* orderable — every template made there
   failed, and the operator's only clue was the 422. It is the deprecated-type filter's argument

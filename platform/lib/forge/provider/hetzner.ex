@@ -112,16 +112,23 @@ defmodule Forge.Provider.Hetzner do
   @doc """
   The machine shapes this account can be sold **in the location this node creates in**.
 
-  Two filters, and both exist because offering a size that cannot be made is offering a trap:
+  Two filters, both read from the type's own entry for that location in its `locations` list,
+  and both exist because offering a size that cannot be made is offering a trap:
 
   - A **deprecated** type still runs and still lists, but a template built on one stops being
-    able to create the day Hetzner withdraws it.
+    able to create the day Hetzner withdraws it. The deprecation is per location: the type-wide
+    `deprecation` is itself deprecated in its favour, and a type can be withdrawn in one
+    location while still sold in another.
   - A type the configured location cannot currently order is worse, because it fails at create
     with no warning. Hetzner answers `422: unsupported location for server type`, which is how
     this was found: a node left on the default `fsn1` was offered all 25 types while that
-    datacenter had *none* orderable, and every template made there failed. Support is not the
-    question — `fsn1` supports `cpx11` and cannot sell one — so what is read is each
-    datacenter's `server_types.available`, which is the list Hetzner will actually act on.
+    location had *none* orderable, and every template made there failed. Support is not the
+    question — `fsn1` supports `cpx11` and cannot sell one — so what decides is the entry's
+    `available`, not its presence.
+
+  **Not the datacenters.** This used to read each datacenter's `server_types.available`, which
+  Hetzner deprecated for the per-location fields and then removed with `GET /datacenters`
+  itself: since 1 Oct. 2026 it answers `410 Gone`, and every catalogue failed with it.
 
   **Nothing orderable is an error and not an empty catalogue.** An empty list leaves the form a
   free-text box, which invites typing the name of a machine this location cannot make and
@@ -130,29 +137,23 @@ defmodule Forge.Provider.Hetzner do
   @impl Provider
   def shapes(credential) do
     with {:ok, token} <- token(%{credential: credential}),
-         {:ok, types} <- paginate("/server_types", "server_types", token, []),
-         {:ok, orderable} <- orderable(token) do
+         {:ok, types} <- paginate("/server_types", "server_types", token, []) do
       types
-      |> Enum.reject(&deprecated?/1)
-      |> Enum.filter(&MapSet.member?(orderable, &1["id"]))
+      |> Enum.filter(&orderable?(&1, location()))
       |> Enum.map(&shape/1)
       |> Enum.sort_by(& &1.memory)
       |> offered()
     end
   end
 
-  # The ids the configured location will sell today. A location is more than one datacenter in
-  # principle, so what is offered is the union of theirs.
-  defp orderable(token) do
-    with {:ok, datacenters} <- paginate("/datacenters", "datacenters", token, []) do
-      location = location()
-
-      {:ok,
-       datacenters
-       |> Enum.filter(&(get_in(&1, ["location", "name"]) == location))
-       |> Enum.flat_map(&(get_in(&1, ["server_types", "available"]) || []))
-       |> MapSet.new()}
-    end
+  # Listed for the location, not deprecated there, and available there today. **All three, and
+  # `available` must be `true`**: a type Hetzner lists here is only *supported* here, and an
+  # entry missing the field is not one this can vouch for.
+  defp orderable?(type, location) do
+    Enum.any?(
+      type["locations"] || [],
+      &(&1["name"] == location and &1["deprecation"] == nil and &1["available"] == true)
+    )
   end
 
   defp offered([]), do: {:error, {:hetzner, "no server type is orderable in #{location()}"}}
@@ -319,10 +320,6 @@ defmodule Forge.Provider.Hetzner do
   # included — config.exs always names a location — so no test pins it; it is here so that
   # removing that config line does not quietly bring `fsn1` back.
   defp location, do: Provider.config(:location, "nbg1")
-
-  # A deprecated type can still be seen and still be running, but a template built on one stops
-  # being able to create the day Hetzner withdraws it. Offering it in a form is offering a trap.
-  defp deprecated?(type), do: type["deprecation"] != nil
 
   defp address(server) do
     get_in(server, ["public_net", "ipv4", "ip"]) || get_in(server, ["public_net", "ipv6", "ip"])

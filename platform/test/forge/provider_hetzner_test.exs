@@ -262,18 +262,39 @@ defmodule Forge.Provider.HetznerTest do
   end
 
   describe "the catalogue" do
-    @types %{
-      "server_types" => [
+    # A type's entry for one location, as `GET /server_types` lists it: sold there unless a test
+    # says otherwise. Every field is the one Hetzner documents as always present.
+    defp sold(location, overrides \\ %{}) do
+      Map.merge(
+        %{
+          "id" => 1,
+          "name" => location,
+          "deprecation" => nil,
+          "recommended" => true,
+          "available" => true
+        },
+        overrides
+      )
+    end
+
+    defp price(location, net), do: %{"location" => location, "price_hourly" => %{"net" => net}}
+
+    defp withdrawn do
+      %{"announced" => "2024-01-01T00:00:00Z", "unavailable_after" => "2024-04-01T00:00:00Z"}
+    end
+
+    # cx11 is withdrawn in fsn1 and still sold in nbg1, which is what a per-location deprecation
+    # looks like; none of the three is listed in hel1 with a price.
+    defp types do
+      [
         %{
           "id" => 1,
           "name" => "cpx32",
           "cores" => 4,
           "memory" => 8.0,
           "deprecation" => nil,
-          "prices" => [
-            %{"location" => "fsn1", "price_hourly" => %{"net" => "0.0250"}},
-            %{"location" => "nbg1", "price_hourly" => %{"net" => "0.0270"}}
-          ]
+          "prices" => [price("fsn1", "0.0250"), price("nbg1", "0.0270")],
+          "locations" => [sold("fsn1"), sold("nbg1"), sold("hel1")]
         },
         %{
           "id" => 2,
@@ -281,50 +302,41 @@ defmodule Forge.Provider.HetznerTest do
           "cores" => 2,
           "memory" => 4.0,
           "deprecation" => nil,
-          "prices" => [
-            %{"location" => "fsn1", "price_hourly" => %{"net" => "0.0090"}},
-            %{"location" => "nbg1", "price_hourly" => %{"net" => "0.0090"}}
-          ]
+          "prices" => [price("fsn1", "0.0090"), price("nbg1", "0.0090")],
+          "locations" => [sold("fsn1"), sold("nbg1"), sold("hel1")]
         },
         %{
           "id" => 3,
           "name" => "cx11",
           "cores" => 1,
           "memory" => 2.0,
-          "deprecation" => "2024-01-01",
-          "prices" => [%{"location" => "fsn1", "price_hourly" => %{"net" => "0.0050"}}]
+          "deprecation" => nil,
+          "prices" => [price("fsn1", "0.0050"), price("nbg1", "0.0050")],
+          "locations" => [sold("fsn1", %{"deprecation" => withdrawn()}), sold("nbg1")]
         }
       ]
-    }
+    end
 
-    # The catalogue reads two endpoints — what exists and what this location will sell — so the
-    # seam answers by path rather than giving every call the same body.
-    defp answering_each(bodies) do
+    # **Anything but `/server_types` is answered as Hetzner answers `/datacenters` since 1 Oct.
+    # 2026**, `410 Gone`: the catalogue used to read it, and one that went back to asking would
+    # fail every test here rather than pass on an empty body.
+    defp catalogue(location, types \\ types()) do
+      configure(location: location)
       test = self()
 
       configure(
         request: fn method, path, token, request_body ->
           send(test, {:hetzner, method, path, token, request_body})
-          {:ok, 200, Map.get(bodies, path |> String.split("?") |> List.first(), %{})}
+
+          case path do
+            "/server_types?" <> _query ->
+              {:ok, 200, %{"server_types" => types}}
+
+            _removed ->
+              {:ok, 410, %{"error" => %{"message" => "API functionality was removed"}}}
+          end
         end
       )
-    end
-
-    defp selling(location, ids) do
-      %{
-        "datacenters" => [
-          %{
-            "name" => "#{location}-dc1",
-            "location" => %{"name" => location},
-            "server_types" => %{"supported" => [1, 2, 3], "available" => ids}
-          }
-        ]
-      }
-    end
-
-    defp catalogue(location, ids \\ [1, 2, 3]) do
-      configure(location: location)
-      answering_each(%{"/server_types" => @types, "/datacenters" => selling(location, ids)})
     end
 
     test "server types become shapes, smallest first" do
@@ -351,29 +363,38 @@ defmodule Forge.Provider.HetznerTest do
       refute Enum.any?(shapes, &(&1.size == "cx11"))
     end
 
-    # **The trap this was found as.** A node left on the driver's `fsn1` default was offered all
-    # twenty-five server types while that datacenter had none orderable, so every template made
-    # there failed at create with `422: unsupported location for server type`. Support is not
-    # the question — `fsn1` supports `cpx11` and will not sell one — so what decides is the
-    # datacenter's `available` list.
-    test "a type this location cannot order is not offered" do
-      catalogue("nbg1", [2])
+    # The deprecation is the location's: withdrawn in fsn1 is not withdrawn in nbg1, and reading
+    # it from any entry would take a machine off a location that still sells it.
+    test "a type withdrawn elsewhere is still offered here" do
+      catalogue("nbg1")
 
       assert {:ok, shapes} = Hetzner.shapes(%{"token" => "t"})
-
-      assert Enum.map(shapes, & &1.size) == ["cx23"]
-      assert_receive {:hetzner, :get, "/datacenters?" <> _query, "t", nil}
+      assert Enum.map(shapes, & &1.size) == ["cx11", "cx23", "cpx32"]
     end
 
-    # Another location's availability is not this one's, and reading the wrong datacenter would
+    # **The trap this was found as.** A node left on the driver's `fsn1` default was offered all
+    # twenty-five server types while that location had none orderable, so every template made
+    # there failed at create with `422: unsupported location for server type`. Support is not
+    # the question — `fsn1` supports `cpx11` and will not sell one — so what decides is the
+    # entry's `available`, not its presence.
+    test "a type this location cannot order is not offered" do
+      catalogue("fsn1", [
+        %{
+          "name" => "cpx11",
+          "memory" => 2.0,
+          "locations" => [sold("fsn1", %{"available" => false}), sold("nbg1")]
+        },
+        %{"name" => "cax11", "memory" => 4.0, "locations" => [sold("fsn1")]}
+      ])
+
+      assert {:ok, shapes} = Hetzner.shapes(%{"token" => "t"})
+      assert Enum.map(shapes, & &1.size) == ["cax11"]
+    end
+
+    # Another location's availability is not this one's, and reading the wrong entry would
     # rebuild the trap with an extra step.
     test "availability somewhere else is not availability here" do
-      configure(location: "nbg1")
-
-      answering_each(%{
-        "/server_types" => @types,
-        "/datacenters" => selling("fsn1", [1, 2])
-      })
+      catalogue("nbg1", [%{"name" => "cx23", "locations" => [sold("fsn1")]}])
 
       assert {:error, {:hetzner, message}} = Hetzner.shapes(%{"token" => "t"})
       assert message =~ "nbg1"
@@ -383,7 +404,9 @@ defmodule Forge.Provider.HetznerTest do
     # free-text box, which invites typing a machine this location cannot make and finding out
     # at create.
     test "a location with nothing orderable is an error and not an empty list" do
-      catalogue("fsn1", [])
+      catalogue("fsn1", [
+        %{"name" => "cx23", "locations" => [sold("fsn1", %{"available" => false})]}
+      ])
 
       assert {:error, {:hetzner, message}} = Hetzner.shapes(%{"token" => "t"})
       assert message =~ "no server type is orderable in fsn1"
@@ -403,12 +426,7 @@ defmodule Forge.Provider.HetznerTest do
     # machine made in Nuremberg — beside `max_workers`, which is the only ceiling on the bill.
     # Unknown is the honest answer; another location's number is a wrong one.
     test "a price this location does not have is no price rather than another's" do
-      configure(location: "hel1")
-
-      answering_each(%{
-        "/server_types" => @types,
-        "/datacenters" => selling("hel1", [1, 2])
-      })
+      catalogue("hel1")
 
       assert {:ok, shapes} = Hetzner.shapes(%{"token" => "t"})
       assert Enum.map(shapes, & &1.size) == ["cx23", "cpx32"]
@@ -417,25 +435,24 @@ defmodule Forge.Provider.HetznerTest do
 
     # A type Hetzner lists with no prices at all, and a row missing the fields this reads.
     # Neither should take the catalogue down: a panel that fails to render because one row is
-    # odd tells the operator nothing about the other twenty.
+    # odd tells the operator nothing about the other twenty. A location entry without
+    # `available` is the one omission that does count: nothing says the type is sold there.
     test "a malformed type is still a shape rather than a crash" do
-      configure(token: "t", location: "fsn1")
+      configure(token: "t")
 
-      answering_each(%{
-        "/server_types" => %{
-          "server_types" => [
-            %{
-              "id" => 7,
-              "name" => "priceless",
-              "cores" => 2,
-              "memory" => 4.0,
-              "deprecation" => nil
-            },
-            %{"id" => 8, "name" => "bare", "deprecation" => nil, "prices" => []}
-          ]
+      catalogue("fsn1", [
+        %{
+          "id" => 7,
+          "name" => "priceless",
+          "cores" => 2,
+          "memory" => 4.0,
+          "deprecation" => nil,
+          "locations" => [sold("fsn1")]
         },
-        "/datacenters" => selling("fsn1", [7, 8])
-      })
+        %{"id" => 8, "name" => "bare", "prices" => [], "locations" => [sold("fsn1")]},
+        %{"name" => "unvouched", "locations" => [Map.delete(sold("fsn1"), "available")]},
+        %{"name" => "nowhere"}
+      ])
 
       assert {:ok, [bare, priceless]} = Hetzner.shapes(%{"token" => "t"})
 

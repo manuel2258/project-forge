@@ -27,6 +27,24 @@ safe: every step is either re-runnable or leaves `main` in a state the next run 
   tree clean. Work that is not landed is not released — land it first (`land`).
 - `bin/check` passes on this commit. After a landing it just did; do not run it twice.
 
+## Setup
+
+Everything the release runs — `skopeo`, `hcloud`, the build — comes from the devshell. The only
+thing installed by hand is Nix itself, and only on a machine that lacks it (a fresh cloud
+session):
+
+```
+curl -sSfL https://install.determinate.systems/nix | sh -s -- install linux --init none --no-confirm --prefer-upstream-nix
+export PATH=/nix/var/nix/profiles/default/bin:$PATH
+nix --version
+```
+
+An "unable to parse existing receipt" error from the installer is harmless when `nix --version`
+then works: Nix was already there. Then run every command below, step 0 included, inside the
+devshell — `nix develop --command bash` for a shell, or prefix a command with
+`nix develop --command` — and not `apt-get install skopeo`. Behind a TLS-intercepting proxy, also
+`export NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt` (step 6).
+
 ## Steps
 
 0. **Check the credentials, before anything is written.** A release that pushes its version

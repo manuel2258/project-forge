@@ -5,11 +5,13 @@ description: Cut a forge release from main without stopping to ask — decide th
 
 # release
 
-A release is a `Version X.Y.Z` commit on `main` that changes `VERSION` and nothing else, the
-`vX.Y.Z` tag on it, and the platform image at `ghcr.io/manuel2258/forge:X.Y.Z` — which
-`ghcr.io/manuel2258/forge:latest` then names too. `bin/release`
-does the tag, the build and the push; this skill decides what goes into `VERSION` first and, when
-the worker changed, builds the Hetzner snapshot with `bin/hetzner-image`.
+A release is a `Version X.Y.Z` commit on `main` that changes `VERSION` and nothing else, and the
+platform image at `ghcr.io/manuel2258/forge:X.Y.Z` — which `ghcr.io/manuel2258/forge:latest` then
+names too. There is no git tag: the `Version` commit marks a release in git, and `bin/release`
+refuses a version the registry already holds, which is what the tag used to enforce. (Releases up
+to 0.7.0 also carry a `vX.Y.Z` tag.) `bin/release` does the build and the push; this skill decides
+what goes into `VERSION` first and, when the worker changed, builds the Hetzner snapshot with
+`bin/hetzner-image`.
 
 **It runs unattended.** The `land` skill runs it after every landing, and the human's request to
 land is the request to release: nothing below waits for a yes. It stops and reports only when
@@ -27,8 +29,8 @@ safe: every step is either re-runnable or leaves `main` in a state the next run 
 
 ## Steps
 
-0. **Check the credentials, before anything is written.** A release that tags and pushes and
-   then cannot publish is the half-done state this avoids.
+0. **Check the credentials, before anything is written.** A release that pushes its version
+   commit and then cannot publish is the half-done state this avoids.
 
    - **GitHub** (the image push). The token is `GHCR_TOKEN`, else `GITHUB_TOKEN`, else
      `gh auth token` — the order `bin/release` uses. Prove it can log in to the registry, into a
@@ -62,16 +64,22 @@ safe: every step is either re-runnable or leaves `main` in a state the next run 
      `git switch main && git merge --ff-only origin/main`. Remember the working branch for
      step 9.
 
-1. **What is being released.**
+1. **What is being released.** The last release is the last `Version` commit:
 
    ```
-   last=$(git describe --tags --abbrev=0)
+   last=$(git log -1 --format=%h --grep='^Version [0-9]')
    git log --format='%h %s%n%b' "$last"..HEAD
    git diff --stat "$last"..HEAD
    ```
 
-   If there is nothing after `$last`, stop and say so — that is not an error, and `land` reports
-   it as "nothing to release".
+   **A version committed and never published comes first.** If the registry does not hold
+   `:$(cat VERSION)` — a run that stopped after step 5, say on a refused push — that version is
+   not released yet: skip steps 2 to 5 and publish it at step 6, from `main` as it is now, so what
+   landed since rides with it. Ask with `skopeo inspect --authfile "$auth"
+   docker://ghcr.io/manuel2258/forge:$(cat VERSION)`; `manifest unknown` means not published.
+
+   If there is nothing after `$last` and its version is published, stop and say so — that is not
+   an error, and `land` reports it as "nothing to release".
 
 2. **Decide the bump.** forge is `0.x`, and has been bumped like this so far:
 
@@ -139,12 +147,19 @@ safe: every step is either re-runnable or leaves `main` in a state the next run 
    bin/release
    ```
 
-   It refuses a dirty tree or a tag that names another commit, tags `vX.Y.Z`, pushes the tag,
-   builds `.#platform-image` and copies it to the registry with skopeo — no Docker daemon — as
-   `:X.Y.Z`, then copies that to `:latest` inside the registry, so both name one digest. The
-   token comes from `GHCR_TOKEN`, else `GITHUB_TOKEN`, else `gh auth token`. The build is long; run it in the
-   background and wait for it. If it fails after the tag was pushed, fix the cause and run it
-   again: a tag that already names HEAD is a re-run and fine.
+   It refuses a dirty tree or a version the registry already holds, builds `.#platform-image`
+   and copies it to the registry with skopeo — no Docker daemon — as `:X.Y.Z`, then copies that
+   to `:latest` inside the registry, so both name one digest. The token comes from `GHCR_TOKEN`,
+   else `GITHUB_TOKEN`, else `gh auth token`. The build is long; run it in the background and
+   wait for it. If it fails, fix the cause and run it again: nothing reaches the registry before
+   the first copy, and a run that copied `:X.Y.Z` and stopped before `:latest` is finished by
+   running it again.
+
+   **Behind a TLS-intercepting proxy** — a cloud session's — the build's fixed-output fetchers
+   (the mix dependencies, some from git) need the proxy's CA, and they see only what Nix binds
+   into their sandbox: export `NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt` before
+   `bin/release`, when that system bundle carries the proxy's CA. A path elsewhere, such as the
+   proxy's own bundle, does not exist inside the sandbox and the fetch fails on the certificate.
 
 7. **Check the digest.** `:latest` must name what `bin/release` printed:
 

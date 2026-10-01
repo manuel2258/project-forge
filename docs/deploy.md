@@ -252,7 +252,7 @@ The platform is published as an OCI image at `ghcr.io/manuel2258/forge`;
 bin/release                        # or --registry other.host/you/forge
 ```
 
-It refuses anything but a clean `main`, tags `v<version>` and pushes the tag, builds
+It refuses anything but a clean `main` and a version the registry already holds, builds
 `.#platform-image`, copies the tarball to the registry as `:<version>`, copies that to `:latest`
 inside the registry — the same digest, not a second upload — and prints the digest it published,
 which is what a deployment pins. `:latest` only moves forward, since a release is only ever
@@ -267,16 +267,18 @@ installed and logged in, else whatever `skopeo login ghcr.io` already stored. `G
 defaults to the registry path's owner. The token reaches skopeo on stdin and a temporary auth
 file deleted on exit, never argv.
 
-`--skip-tag` publishes without making the `v<version>` tag when none exists; a tag naming another
-commit still stops the run. `--dry-run` makes no tag and copies nothing: it builds the image and
-says what it would have done.
+`--dry-run` copies nothing: it asks the registry, builds the image and says what it would have
+done. A run that copied `:<version>` and stopped before `:latest` moved is finished by running it
+again.
 
 **The version is `VERSION` at the repository root and nothing else.** `flake.nix` reads it for
 the image tag and each `mix.exs` reads it for the release, so a release is one edit: bump
 `VERSION`, land it, run `bin/release`. An image tag is only worth pinning if it means one build,
-and a git tag is what enforces that: a `v<version>` that already names a different commit stops
-the run before anything is pushed, so a second release from a second commit has to bump `VERSION`
-first.
+and the registry is what enforces that: a version it already holds stops the run before anything
+is built, so a second release from a later commit has to bump `VERSION` first. There is no git
+tag. It used to be the guard, made and pushed before the build, and a release now runs unattended
+from machines that may push branches but not tags; the `Version X.Y.Z` commit on `main` marks a
+release in git. Releases up to 0.7.0 carry a `v<version>` tag as well.
 
 Building one without publishing is still `nix build .#platform-image`, and `docker load < result`
 puts it in a local daemon. That is for trying a change before it is a release, not for deploying.

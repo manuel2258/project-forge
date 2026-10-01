@@ -1,28 +1,32 @@
 #!/usr/bin/env bash
-# Publishes the platform image: one command, from a clean checkout of `main` to a tag in the
+# Publishes the platform image: one command, from a clean checkout of `main` to a version in the
 # registry that a deployment can pin by digest.
 #
-#   bin/release [--registry REF] [--skip-tag] [--dry-run]
+#   bin/release [--registry REF] [--dry-run]
 #
-# What it does, in order: refuse anything but a clean `main`, tag `v<version>` and push the tag,
-# build `.#platform-image`, copy it to the registry as `<version>` and then as `latest`, and print
-# the digest.
+# What it does, in order: refuse anything but a clean `main`, log in, refuse a version the
+# registry already holds, build `.#platform-image`, copy it to the registry as `<version>` and
+# then as `latest`, and print the digest. A run that copied the version and stopped before
+# `latest` moved is finished by running it again.
 #
 # **`latest` is the version just pushed, copied inside the registry**, so it names the same digest
 # rather than a second upload of the same archive that might not. It only ever moves forward: this
 # runs from a clean `main` and publishes the `VERSION` there, which is the newest release. A
 # deployment still pins the digest; `latest` is for finding the current one, and for a quick try.
 #
-# **The version comes from `VERSION` and from nowhere else.** `flake.nix` reads the same file for
-# the image tag and every `mix.exs` reads it for the release, so publishing twice from one commit
-# publishes the same tag twice — which is why the git tag comes first and a tag that already
-# points somewhere else stops the run. Bump `VERSION`, land it, then run this.
+# **The version comes from `VERSION` and from nowhere else, and the registry says whether it has
+# been published.** `flake.nix` reads the same file for the image tag and every `mix.exs` reads
+# it for the release, so a run from a later commit that did not bump it would put a second build
+# under the same tag. An image tag is worth pinning only if it means one build, so a version the
+# registry already holds stops the run before anything is built. It used to be a git tag,
+# `v<version>`, made and pushed first; a release runs unattended now (the `land` skill), from
+# machines that may push branches and not tags, so the guard moved to the registry it protects.
+# In git, the `Version X.Y.Z` commit on `main` is what marks a release.
 #
-# There is deliberately no `--version`. There was, and it set the git tag and the registry tag
-# while `nix build` went on reading `VERSION` — so `--version 1.2.3` on a `0.1.1` tree pushed an
-# image labelled `0.1.1` to the registry tag `1.2.3`, under a git tag `v1.2.3` naming a commit
-# that says `0.1.1`. That is the exact "two different images claim one version" this file's own
-# header says it exists to prevent, reachable by a flag it offered.
+# There is deliberately no `--version`. There was, and it set the registry tag while `nix build`
+# went on reading `VERSION` — so `--version 1.2.3` on a `0.1.1` tree pushed an image labelled
+# `0.1.1` to the registry tag `1.2.3`. That is the exact "two different images claim one version"
+# this file exists to prevent, reachable by a flag it offered.
 #
 # **No Docker daemon.** `nix build` writes a gzipped docker-archive tarball and `skopeo` copies it
 # straight to the registry; containers/image auto-decompresses a docker-archive, so the gzip
@@ -38,11 +42,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 registry="ghcr.io/manuel2258/forge"
-skip_tag=false
 dry_run=false
 
 usage() {
-  sed -n '2,20p' "$0" >&2
+  sed -n '2,10p' "$0" >&2
   exit 64
 }
 
@@ -51,10 +54,6 @@ while [ $# -gt 0 ]; do
     --registry)
       registry="$2"
       shift 2
-      ;;
-    --skip-tag)
-      skip_tag=true
-      shift
       ;;
     --dry-run)
       dry_run=true
@@ -79,44 +78,14 @@ command -v skopeo > /dev/null || die "skopeo is not on PATH; enter the devshell 
 
 version=$(cat VERSION)
 [ -n "$version" ] || die "VERSION is empty"
-tag="v$version"
 
 branch=$(git rev-parse --abbrev-ref HEAD)
 [ "$branch" = "main" ] || die "on $branch: a release is published from main (CLAUDE.md § Landing)"
 [ -z "$(git status --porcelain)" ] || die "the working tree is dirty; commit or stash first"
 
-head=$(git rev-parse HEAD)
-
-# A tag that already names this commit is a re-run and fine. One that names another commit is the
-# thing this exists to catch: two different images would otherwise claim one version.
-if existing=$(git rev-parse -q --verify "refs/tags/$tag^{commit}"); then
-  [ "$existing" = "$head" ] || die "$tag already points at $existing, not HEAD; bump VERSION"
-  say "$tag already points here"
-elif [ "$skip_tag" = true ]; then
-  say "no $tag, and --skip-tag says not to make one"
-elif [ "$dry_run" = true ]; then
-  # A dry run makes no tag. It used to create the local one and skip only the push, which meant
-  # "pushes nothing" was true of the registry and false of the repository, and a second dry run
-  # then took the "already points here" path and reported something the first run had caused.
-  say "would tag $tag"
-else
-  say "tagging $tag"
-  git tag -a "$tag" -m "forge $version"
-  git push origin "$tag"
-fi
-
-say "building .#platform-image"
-archive=$(nix build .#platform-image --no-link --print-out-paths | tail -1)
-echo "    $archive"
-
 destination="docker://$registry:$version"
 latest="docker://$registry:latest"
-if [ "$dry_run" = true ]; then
-  say "would copy to $destination, and then to $latest"
-  exit 0
-fi
 
-say "copying to $destination"
 digest_file=$(mktemp)
 auth_file=$(mktemp)
 trap 'rm -f "$digest_file" "$auth_file"' EXIT
@@ -132,6 +101,9 @@ trap 'rm -f "$digest_file" "$auth_file"' EXIT
 # and a machine without it falls through to whatever `skopeo login` stored.
 # `GITHUB_TOKEN` is read here rather than left to `gh`, which honours it too, because `gh` is not
 # in the devshell: an unattended release (the `land` skill) has the variable and may not have `gh`.
+#
+# **Logged in before the build**, because the registry is asked below whether the version is
+# already there, and a build that ends in a refused login is a long way to find that out.
 token=${GHCR_TOKEN:-${GITHUB_TOKEN:-}}
 
 if [ -z "$token" ] && command -v gh > /dev/null; then
@@ -141,21 +113,66 @@ fi
 
 creds=()
 src_creds=()
+inspect_creds=()
 if [ -n "$token" ]; then
   registry_host=${registry%%/*}
   user=${GHCR_USER:-$(echo "$registry" | cut -d/ -f2)}
   say "logging in to $registry_host as $user"
   # **Seeded with `{}` because skopeo reads this file before it writes it**, and `mktemp` leaves
   # it empty — which is not JSON, and skopeo dies with `unexpected end of JSON input` rather than
-  # treating an empty file as no credentials. Found the hard way, after the git tag had been
-  # pushed and before the image had been.
+  # treating an empty file as no credentials. Found the hard way, half way through a release.
   printf '{}' > "$auth_file"
   printf '%s' "$token" |
     skopeo login --username "$user" --password-stdin --authfile "$auth_file" "$registry_host"
   creds=(--dest-authfile "$auth_file")
   src_creds=(--src-authfile "$auth_file")
+  inspect_creds=(--authfile "$auth_file")
 fi
 
+# What the registry holds under `$1`, or nothing when it holds no such tag. Any other failure — a
+# refused login, a registry that is down — stops the run: "not there" and "could not ask" are
+# different answers, and reading the second as the first is how a version gets published twice.
+digest_of() {
+  local out
+  if out=$(skopeo inspect "${inspect_creds[@]}" --format '{{.Digest}}' "$1" 2>&1); then
+    printf '%s' "$out"
+  elif ! grep -q 'manifest unknown\|name unknown' <<< "$out"; then
+    die "cannot ask the registry about $1: $out"
+  fi
+}
+
+# **Asked before the build, which is long.** A version the registry holds is a release already
+# made, and publishing it again would be a second build under one tag — unless `latest` does not
+# name it yet, which is a run that stopped between the two copies, and is finished here.
+#
+# Each answer is its own assignment, so a failure to ask stops the run under `set -e`; inside a
+# test's arguments it would read as an empty digest.
+published=$(digest_of "$destination")
+if [ -n "$published" ]; then
+  current=$(digest_of "$latest")
+  [ "$current" != "$published" ] ||
+    die "$registry:$version is already published ($published); bump VERSION to publish another build"
+  if [ "$dry_run" = true ]; then
+    say "would copy $destination, already published, to $latest"
+    exit 0
+  fi
+  say "$registry:$version is already published; copying it to $latest"
+  skopeo --insecure-policy copy "${src_creds[@]}" "${creds[@]}" "$destination" "$latest"
+  say "published"
+  printf '    %s@%s\n' "$registry" "$published"
+  exit 0
+fi
+
+say "building .#platform-image"
+archive=$(nix build .#platform-image --no-link --print-out-paths | tail -1)
+echo "    $archive"
+
+if [ "$dry_run" = true ]; then
+  say "would copy to $destination, and then to $latest"
+  exit 0
+fi
+
+say "copying to $destination"
 # `--insecure-policy` is about signature policy and nothing else: skopeo refuses to run at all
 # without a containers `policy.json`, which a devshell has no reason to have and NixOS only
 # installs with the container stack. Nothing here signs or verifies image signatures — what a

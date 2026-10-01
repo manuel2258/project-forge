@@ -21,8 +21,8 @@
           # One version for the whole repository: the three `mix.exs` read the same file, and so
           # does `nix/worker-image.nix` through the flake. A release is one edit rather than five
           # — the state it was in, with four of the five reachable only by remembering them — and
-          # the image tag this produces is `v<version>`'s commit and no other, which is what
-          # `bin/release` refuses to publish twice.
+          # the image tag this produces names one build, since `bin/release` refuses a version the
+          # registry already holds.
           version = lib.fileContents ./VERSION;
 
           esbuildPath = "${pkgs.esbuild}/bin/esbuild";

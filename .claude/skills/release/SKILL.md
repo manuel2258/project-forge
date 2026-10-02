@@ -65,14 +65,18 @@ devshell — `nix develop --command bash` for a shell, or prefix a command with
      `main` and unreleased, and why. Never print the token.
 
    - **Hetzner** (the snapshot, only if step 3 asks for one — check here anyway, so the answer is
-     known before the version commit). `HCLOUD_TOKEN` set, and the project answers with at least
-     one ssh key, which `bin/hetzner-image` needs for rescue:
+     known before the version commit). `bin/hetzner-image --check` asks everything the build will
+     need, and creates nothing: `HCLOUD_TOKEN` set and answered, `ssh` and the rest on `PATH` (the
+     devshell has them), and an ssh key in the project that ssh can use for rescue. In a cloud
+     session that key is `HETZNER_PRIVATE_KEY` — base64 of a private key with no passphrase — and
+     the script picks the project key with its fingerprint; elsewhere it is whatever ssh finds
+     (an agent, `~/.ssh`) and the project's first key. It never prints the private key:
 
      ```
-     hcloud ssh-key list -o noheader -o columns=name | head -n1
+     bin/hetzner-image --check
      ```
 
-     Unset, refused, or no key: the release goes ahead without a snapshot; step 10 says the
+     Unset, refused, or no usable key (it says which): the release goes ahead without a snapshot; step 10 says the
      snapshot was not built and why, and gives the command. That is a degraded release, not a
      failed one — unless the verdict is **Required** (run step 3's check now to know), when the
      new platform refuses every existing worker: then **stop before step 1**, because publishing `:latest` without a snapshot it can
@@ -198,7 +202,9 @@ devshell — `nix develop --command bash` for a shell, or prefix a command with
 
    It creates a rescue server, writes the image, verifies it, snapshots and deletes the server —
    a few minutes of one machine, then a snapshot costing cents a month. It is long: run it in the
-   background and wait. It cleans up its server on any exit; if it fails, check with
+   background and wait. **Leave the working tree alone until it prints `worker build …`**: it
+   reads the tree once, at that evaluation, and step 9's branch switch under it would build and
+   label the previous commit. It cleans up its server on any exit; if it fails, check with
    `hcloud server list` that no `forge-image-builder-*` is left, delete one that is, and report
    the failure with the command to run again. Do not retry it unattended — a second run is a
    second server.

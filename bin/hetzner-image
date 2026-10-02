@@ -22,7 +22,7 @@ set -euo pipefail
 usage() {
   cat << 'USAGE'
 usage: bin/hetzner-image [--flake REF] [--type TYPE] [--location LOC] [--name NAME]
-                         [--ssh-key NAME] [--wait SECONDS]
+                         [--ssh-key NAME] [--wait SECONDS] [--check]
 
   --flake     flake to build the image from. Default: . — `nix build REF#worker-image` is run,
               and its qcow2 is converted to raw in $TMPDIR first, so that much free space is
@@ -31,10 +31,15 @@ usage: bin/hetzner-image [--flake REF] [--type TYPE] [--location LOC] [--name NA
   --type      server type to rescue-boot on. Default: cx23
   --location  where to make it. Default: nbg1 (fsn1 sold no x86 type; see platform/config/config.exs)
   --name      the snapshot's description. Default: forge-worker-<date>
-  --ssh-key   name of a key already in the Hetzner project. Default: the first one listed
+  --ssh-key   name or id of a key already in the Hetzner project. Default: the one whose
+              fingerprint is HETZNER_PRIVATE_KEY's when that is set, else the first one listed
   --wait      seconds to wait for rescue to answer. Default: 300
+  --check     check the token, the tools and the key, say which key rescue would use, and stop:
+              nothing is built or created
 
-Needs HCLOUD_TOKEN in the environment, and an ssh key already in the Hetzner project.
+Needs HCLOUD_TOKEN in the environment, and an ssh key already in the Hetzner project whose
+private half ssh can use: HETZNER_PRIVATE_KEY (base64 of a private key with no passphrase, as a
+cloud session is given it), else whatever ssh finds itself — an agent, ~/.ssh.
 USAGE
 }
 
@@ -43,7 +48,10 @@ type="cx23"
 location="nbg1"
 name="forge-worker-$(date -u +%Y%m%d-%H%M%S)"
 key=""
+key_name=""
+fingerprint=""
 wait_seconds=300
+check=false
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -62,6 +70,18 @@ while [ $# -gt 0 ]; do
     --name)
       name="$2"
       shift 2
+      ;;
+    --ssh-key)
+      key="$2"
+      shift 2
+      ;;
+    --wait)
+      wait_seconds="$2"
+      shift 2
+      ;;
+    --check)
+      check=true
+      shift
       ;;
     -h | --help)
       usage
@@ -83,10 +103,118 @@ command -v hcloud > /dev/null || {
   echo "hcloud is not on PATH" >&2
   exit 1
 }
-command -v nix > /dev/null || {
-  echo "nix is not on PATH" >&2
+# **Every tool before anything is spent.** A cloud session without ssh built the image, made the
+# server, booted it into rescue and waited out the whole timeout before it found it had no way to
+# talk to it.
+for tool in nix ssh ssh-keygen qemu-img; do
+  command -v "$tool" > /dev/null || {
+    echo "$tool is not on PATH; run this from the devshell (nix develop)" >&2
+    exit 1
+  }
+done
+[[ "$wait_seconds" =~ ^[0-9]+$ ]] || {
+  echo "--wait takes seconds, not '$wait_seconds'" >&2
+  exit 2
+}
+
+server="forge-image-builder-$$"
+created=false
+raw=""
+keydir=""
+
+cleanup() {
+  [ -z "$raw" ] || rm -f "$raw"
+  [ -z "$keydir" ] || rm -rf "$keydir"
+  # **The server goes whatever happened.** A rescue box left running is a machine billing by
+  # the hour for nothing, which is exactly the leak the workers page exists to catch.
+  if $created && hcloud server describe "$server" > /dev/null 2>&1; then
+    echo "removing $server"
+    hcloud server delete "$server" > /dev/null
+  fi
+}
+trap cleanup EXIT INT TERM
+
+# **A rescue system regenerates its host key on every boot, so there is nothing to pin.**
+# `accept-new` records the key on the first run and then refuses every later one, because it
+# permits new hosts and not *changed* ones — so this worked exactly once per IP and then hung
+# for ever with the reason sent to /dev/null. Hetzner reuses addresses, so the second run is
+# usually the one that breaks.
+#
+# Not laxity: `CLAUDE.md` asks that a guard use the same model as the thing it guards, and a
+# pinned host key models a machine with a stable identity. This one is made by us through the
+# API thirty seconds earlier, written to, and destroyed at the end of the script. What is sent
+# over it is a public NixOS image, and what comes back is checked against the bytes we sent.
+ssh_opts=(
+  -o StrictHostKeyChecking=no
+  -o UserKnownHostsFile=/dev/null
+  -o LogLevel=ERROR
+  -o ConnectTimeout=5
+  -o BatchMode=yes
+)
+
+# **The key from the environment is the one rescue is booted with**, picked by fingerprint, so the
+# private half ssh offers and the public half Hetzner installs are one key. Taking the project's
+# first key instead let rescue in only whoever held that one — on a cloud session, nobody. The key
+# is written to a directory only this user can read and removed on exit; it is never printed.
+if [ -n "${HETZNER_PRIVATE_KEY:-}" ]; then
+  keydir="$(mktemp -d -t forge-hetzner-key.XXXXXX)"
+  chmod 700 "$keydir"
+  (umask 077 && printf '%s' "$HETZNER_PRIVATE_KEY" | base64 -d > "$keydir/id" 2> /dev/null) || {
+    echo "HETZNER_PRIVATE_KEY is not base64" >&2
+    exit 1
+  }
+  # `-P ""` and no stdin: given anything but a key with no passphrase, ssh-keygen otherwise asks
+  # for one and waits on a terminal nobody is at.
+  ssh-keygen -y -P "" -f "$keydir/id" < /dev/null > "$keydir/id.pub" 2> /dev/null || {
+    echo "HETZNER_PRIVATE_KEY is not an ssh private key without a passphrase" >&2
+    exit 1
+  }
+  ssh_opts+=(-i "$keydir/id" -o IdentitiesOnly=yes)
+  fingerprint="$(ssh-keygen -l -E md5 -f "$keydir/id.pub" | awk '{sub(/^MD5:/, "", $2); print $2}')"
+
+  if [ -z "$key" ]; then
+    # The id, which no name can be confused with; the name after it, for the person reading.
+    matched="$(hcloud ssh-key list -o noheader -o columns=fingerprint,id,name |
+      awk -v fp="$fingerprint" '$1 == fp {$1 = ""; print substr($0, 2); exit}')"
+    read -r key key_name <<< "$matched" || true
+    [ -n "$key" ] || {
+      echo "no ssh key in this Hetzner project has HETZNER_PRIVATE_KEY's fingerprint ($fingerprint)" >&2
+      echo "add its public half with:" >&2
+      echo "  hcloud ssh-key create --name forge-release --public-key '$(cat "$keydir/id.pub")'" >&2
+      exit 1
+    }
+  fi
+fi
+
+# **Named, not guessed.** This took the project's first key silently, so a project with no key
+# got `--ssh-key ""` — rescue then accepts only the root password, which this script captures
+# and never uses, and the wait below hung for ever with nothing said. A project with somebody
+# else's key first failed the same way.
+if [ -z "$key" ]; then
+  key="$(hcloud ssh-key list -o noheader -o columns=name | head -n1)"
+fi
+
+if [ -z "$key" ]; then
+  echo "this Hetzner project has no ssh key, so rescue would let nobody in" >&2
+  echo "add one with: hcloud ssh-key create --name NAME --public-key-from-file ~/.ssh/id_ed25519.pub" >&2
+  exit 1
+fi
+
+# **The key rescue is booted with is there, and is the one ssh will offer** when that is known.
+# Either wrong, rescue lets nobody in, and the run finds out a server and a timeout later.
+named="$(hcloud ssh-key describe "$key" -o format='{{.Fingerprint}}' 2> /dev/null)" || {
+  echo "no ssh key '$key' in this Hetzner project" >&2
   exit 1
 }
+if [ -n "${fingerprint:-}" ] && [ "$named" != "$fingerprint" ]; then
+  echo "ssh key '$key' is not HETZNER_PRIVATE_KEY's ($fingerprint), so rescue would let nobody in" >&2
+  exit 1
+fi
+
+if $check; then
+  echo "ready: rescue would be booted with ssh key '$key'${key_name:+ ($key_name)}"
+  exit 0
+fi
 
 # Built, and labelled, from one evaluation — before any server exists, so a flake that does not
 # evaluate costs nothing. The evaluation yields the image's derivation with its two labels, and
@@ -126,54 +254,12 @@ echo "worker build $build, protocol $protocol"
 # Debian disk while reporting success. So the conversion goes to a real file and the transfer
 # is checked afterwards.
 raw="$(mktemp -t forge-worker-raw.XXXXXX)"
-server="forge-image-builder-$$"
-
-# **A rescue system regenerates its host key on every boot, so there is nothing to pin.**
-# `accept-new` records the key on the first run and then refuses every later one, because it
-# permits new hosts and not *changed* ones — so this worked exactly once per IP and then hung
-# for ever with the reason sent to /dev/null. Hetzner reuses addresses, so the second run is
-# usually the one that breaks.
-#
-# Not laxity: `CLAUDE.md` asks that a guard use the same model as the thing it guards, and a
-# pinned host key models a machine with a stable identity. This one is made by us through the
-# API thirty seconds earlier, written to, and destroyed at the end of the script. What is sent
-# over it is a public NixOS image, and what comes back is checked against the bytes we sent.
-ssh_opts=(
-  -o StrictHostKeyChecking=no
-  -o UserKnownHostsFile=/dev/null
-  -o LogLevel=ERROR
-  -o ConnectTimeout=5
-  -o BatchMode=yes
-)
-
-cleanup() {
-  rm -f "$raw"
-  # **The server goes whatever happened.** A rescue box left running is a machine billing by
-  # the hour for nothing, which is exactly the leak the workers page exists to catch.
-  if hcloud server describe "$server" > /dev/null 2>&1; then
-    echo "removing $server"
-    hcloud server delete "$server" > /dev/null
-  fi
-}
-trap cleanup EXIT INT TERM
 
 echo "creating $server ($type, $location)"
+# Set before the call, so a create that succeeded and was then interrupted is still cleaned up.
+created=true
 hcloud server create --name "$server" --type "$type" --image debian-12 \
   --location "$location" --start-after-create=false > /dev/null
-
-# **Named, not guessed.** This took the project's first key silently, so a project with no key
-# got `--ssh-key ""` — rescue then accepts only the root password, which this script captures
-# and never uses, and the wait below hung for ever with nothing said. A project with somebody
-# else's key first failed the same way.
-if [ -z "${key:-}" ]; then
-  key="$(hcloud ssh-key list -o noheader -o columns=name | head -n1)"
-fi
-
-if [ -z "$key" ]; then
-  echo "this Hetzner project has no ssh key, so rescue would let nobody in" >&2
-  echo "add one with: hcloud ssh-key create --name NAME --public-key-from-file ~/.ssh/id_ed25519.pub" >&2
-  exit 1
-fi
 
 echo "booting it into rescue with ssh key '$key'"
 password="$(hcloud server enable-rescue "$server" --ssh-key "$key" | awk '/Root password/ {print $NF}')"

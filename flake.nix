@@ -154,6 +154,10 @@
                 # putting the worker image in a project means driving a rescue server through
                 # the CLI — see `docs/design/worker-tier.md` § Updating a worker.
                 pkgs.hcloud
+                # And talks to that rescue server over ssh, with the key a cloud session is given
+                # as HETZNER_PRIVATE_KEY; `ssh-keygen` picks the project's matching key. A cloud
+                # session's container has no ssh of its own.
+                pkgs.openssh
                 # `bin/release` copies the image tarball straight to the registry with it. No
                 # Docker daemon is involved, which is the whole reason it is this and not
                 # `docker load`.

@@ -1006,6 +1006,141 @@ defmodule Forge.WorkersTest do
     end
   end
 
+  # `docs/design/provisioning.md` § Whose account: the provider's id reaches the row only when the
+  # create answers, and a create cut off by a platform restart — or one that timed out after the
+  # provider acted — left a machine billing under a row that said none had been made. Destroying
+  # that row asked the provider for nothing.
+  describe "a machine whose id never reached its row" do
+    setup do
+      on_exit(&Provider.Fake.allow/0)
+      :ok
+    end
+
+    test "is found by the name its driver made it with, and destroyed with the row" do
+      {:ok, worker, _token} = Workers.create(%{provider: "fake", unanswered_create: true})
+      worker_id = worker.id
+      Provider.Fake.holding_made(worker_id, "fake-lost")
+
+      assert :ok = Workers.destroy(worker)
+
+      assert_receive {:provider_find, ^worker_id, _credential}
+      assert_receive {:provider_destroy, "fake-lost", _credential}
+
+      gone = Workers.get!(worker_id)
+      assert gone.status == :destroyed
+      assert gone.provider_id == "fake-lost"
+      assert Enum.any?(Workers.Log.for_worker(worker_id), &(&1.type == "machine.found"))
+    end
+
+    test "is not there to destroy when the driver holds nothing for the row" do
+      {:ok, worker, _token} = Workers.create(%{provider: "fake", unanswered_create: true})
+
+      assert :ok = Workers.destroy(worker)
+
+      assert_receive {:provider_find, _worker_id, _credential}
+      refute_received {:provider_destroy, _id, _credential}
+      assert Workers.get!(worker.id).status == :destroyed
+    end
+
+    # Not "nothing found": destroying the row on a provider that would not answer is the leak.
+    test "keeps its row when the provider will not say" do
+      Provider.Fake.refuse_find({:fake, "down"})
+      {:ok, worker, _token} = Workers.create(%{provider: "fake", unanswered_create: true})
+
+      assert {:error, {:fake, "down"}} = Workers.destroy(worker)
+
+      kept = Workers.get!(worker.id)
+      assert kept.status != :destroyed
+      assert kept.last_error =~ "down"
+    end
+
+    # A permanent machine was never the platform's, so there is nothing of the platform's to find.
+    # A refused create made nothing, and asking about it — with the credential the refusal was
+    # often about, deleted or unreadable — failed the same way and kept the row for ever.
+    test "is not looked for when its create was answered" do
+      Provider.Fake.refuse_find({:fake, "no credential to ask with"})
+      {:ok, worker, _token} = Workers.create(%{provider: "fake"})
+
+      assert :ok = Workers.destroy(worker)
+
+      refute_received {:provider_find, _worker_id, _credential}
+      assert Workers.get!(worker.id).status == :destroyed
+    end
+
+    # The mark is what tells the two apart: set before the driver is asked, cleared by its answer
+    # whichever way it went, so only a create the platform was stopped in the middle of keeps it.
+    test "a create is marked as asked until its driver answers, either way" do
+      %{project: project} = with_template(%{max_workers: 2})
+      test = self()
+
+      Provider.Fake.during_create(fn opts ->
+        send(test, {:asked, opts.worker_id, Workers.get!(opts.worker_id).unanswered_create})
+      end)
+
+      # A machine on its way is `{:error, :creating}`: nothing to place on yet.
+      assert {:error, :creating} =
+               Workers.create_machine(demand(memory: 1, project_id: project.id))
+
+      assert_received {:asked, made, true}
+      refute Workers.get!(made).unanswered_create
+
+      Provider.Fake.refuse({:fake, "no image"})
+
+      assert {:error, {:create_failed, _}} =
+               Workers.create_machine(demand(memory: 1, project_id: project.id))
+
+      refused = Enum.find(Workers.list(), &(&1.id != made and &1.status == :creating))
+      refute refused.unanswered_create
+    end
+
+    # The account that made the machine is the one asked about it, as it is for the destroy.
+    test "is looked for with the credential it was made with" do
+      {:ok, credential} =
+        Provisioning.create_credential(Forge.AccountsFixtures.user_fixture(), %{
+          name: "acct-#{System.unique_integer([:positive])}",
+          provider: "fake",
+          secret: %{"token" => "sekrit"}
+        })
+
+      {:ok, worker, _token} =
+        Workers.create(%{
+          provider: "fake",
+          unanswered_create: true,
+          provider_credential_id: credential.id
+        })
+
+      worker_id = worker.id
+      Provider.Fake.holding_made(worker_id, "fake-lost")
+
+      assert :ok = Workers.destroy(worker)
+      assert_receive {:provider_find, ^worker_id, %{"token" => "sekrit"}}
+      assert_receive {:provider_destroy, "fake-lost", %{"token" => "sekrit"}}
+    end
+
+    # There is no id to name, so the line says which machine the operator should go and look for.
+    test "a lost row retired by force names the machine it may have made" do
+      Provider.Fake.refuse_find({:fake, "down"})
+      {:ok, worker, _token} = Workers.create(%{provider: "fake", unanswered_create: true})
+
+      assert :ok = Workers.destroy(worker, force: true)
+
+      assert Enum.any?(
+               Workers.Log.for_worker(worker.id),
+               &(&1.message =~ "would not destroy the machine it may have made for this row:")
+             )
+    end
+
+    test "is never looked for on a permanent machine" do
+      {:ok, worker, _token} = Workers.create(%{provider: "fake", managed: false})
+      Provider.Fake.holding_made(worker.id, "fake-theirs")
+
+      assert :ok = Workers.destroy(worker)
+
+      refute_received {:provider_find, _worker_id, _credential}
+      refute_received {:provider_destroy, _id, _credential}
+    end
+  end
+
   describe "providing a worker" do
     test "creates a machine when there is none, and the job waits for it" do
       # Room for more than one, so that only waiting for the first stops a second.
@@ -1359,6 +1494,70 @@ defmodule Forge.WorkersTest do
 
       # And the capacity it was holding is available again.
       assert {:creating, _worker} = Workers.provide(demand(memory: 1_000, project_id: project.id))
+    end
+
+    # `docs/design/worker-channel.md` § A platform restart: a node down for longer than the
+    # timeout found every machine overdue on its first pass, two seconds after it started and
+    # before any had redialled, and destroyed them with the jobs they were still running. Overdue
+    # is counted from the node's boot at the earliest.
+    test "a machine is not overdue for the time the platform itself was down" do
+      configure(worker_timeout_ms: 60_000)
+      on_exit(fn -> Workers.booted!(nil) end)
+
+      {:ok, worker, _token} = Workers.create(%{provider: "fake"})
+      long_ago = DateTime.add(DateTime.utc_now(:second), -600)
+      {:ok, _worker} = Workers.update(worker, %{provider_id: "fake-1", last_seen_at: long_ago})
+
+      # Booted just now: the machine has its whole timeout from here to redial.
+      Workers.booted!(DateTime.utc_now(:second))
+      assert Workers.sweep_unreachable() == 0
+      assert Workers.get!(worker.id).status != :destroyed
+
+      # Booted long ago, and heard from since: the later of the two is the clock, not the boot.
+      Workers.booted!(DateTime.add(long_ago, -60))
+
+      {:ok, _worker} =
+        Workers.update(Workers.get!(worker.id), %{last_seen_at: DateTime.utc_now(:second)})
+
+      assert Workers.sweep_unreachable() == 0
+      assert Workers.get!(worker.id).status != :destroyed
+
+      # Booted before the machine went quiet: its silence is its own, and counts.
+      {:ok, _worker} = Workers.update(Workers.get!(worker.id), %{last_seen_at: long_ago})
+      assert Workers.sweep_unreachable() == 1
+      assert_receive {:provider_destroy, "fake-1", _credential}
+    end
+
+    # A forgotten boot is no boot: the sweep is back to measuring from `last_seen_at` alone.
+    test "a boot is recorded and forgotten" do
+      on_exit(fn -> Workers.booted!(nil) end)
+      at = DateTime.add(DateTime.utc_now(:second), -60)
+
+      assert :ok = Workers.booted!(at)
+      assert Workers.booted() == at
+      assert :ok = Workers.booted!(nil)
+      assert Workers.booted() == nil
+    end
+
+    # A destroy the driver refuses brings the row back every pass; counted every pass, one machine
+    # the driver would not let go disabled its own template within seconds.
+    test "a machine that never connected counts against its template once" do
+      configure(worker_timeout_ms: 60_000)
+      %{template: template} = with_template(%{max_workers: 1})
+      Provider.Fake.refuse_destroy({:fake, "nope"})
+      on_exit(&Provider.Fake.allow/0)
+
+      {:ok, worker, _token} = Workers.create(%{provider: "fake"})
+      {:ok, _worker} = Workers.update(worker, %{provider_id: "fake-1", template_id: template.id})
+
+      Forge.Repo.update_all(
+        from(w in Forge.Workers.Worker, where: w.id == ^worker.id),
+        set: [inserted_at: DateTime.add(DateTime.utc_now(:second), -600), last_seen_at: nil]
+      )
+
+      for _pass <- 1..3, do: Workers.sweep_unreachable()
+
+      assert Forge.Repo.get!(Forge.Provisioning.Template, template.id).failures == 1
     end
 
     test "a machine that never finished booting expires from when its row was made" do

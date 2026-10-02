@@ -20,7 +20,9 @@ defmodule ForgeWorker.Store do
       options(
         headers: [{"content-type", "application/octet-stream"} | bearer(token)],
         body: File.stream!(path, 1024 * 1024),
-        retry: :transient
+        retry: :transient,
+        max_retries: Application.get_env(:forge_worker, :upload_retries, 20),
+        retry_delay: &upload_delay/1
       )
     )
     |> case do
@@ -28,6 +30,16 @@ defmodule ForgeWorker.Store do
       {:ok, %{status: status, body: body}} -> {:error, {status, body}}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  # **An upload waits out a platform that is restarting** (`docs/design/worker-channel.md` § A
+  # platform restart): a run that ends during a deploy uploads its transcript, its session and its
+  # files to a platform that is not there for a minute or two, and Req's own three retries over
+  # seven seconds gave up long before it was back — the result went without them. So a transient
+  # failure is retried twenty times, backing off from a second to thirty: about eight minutes.
+  defp upload_delay(attempt) do
+    base = Application.get_env(:forge_worker, :upload_retry_base_ms, 1_000)
+    min(base * Integer.pow(2, attempt), 30_000)
   end
 
   # In a header and not the query string: a URL reaches every proxy log on the path. The rule is

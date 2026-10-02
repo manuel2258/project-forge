@@ -51,7 +51,7 @@ defmodule ForgeWeb.ReviewLive do
       documents: documents(ticket),
       answers: Artifacts.answered(ticket.id),
       pending: ticket.pending_transition,
-      approve: approve_pairs(ticket, changeset),
+      approve: approve_pins(project, ticket, changeset),
       now: DateTime.utc_now()
     )
   end
@@ -82,10 +82,10 @@ defmodule ForgeWeb.ReviewLive do
     |> Enum.sort_by(& &1.version.inserted_at, DateTime)
   end
 
-  defp approve_pairs(ticket, changeset) do
+  defp approve_pins(project, ticket, changeset) do
     for name <- Forge.Engine.awaiting_approval(ticket),
         changeset && name == Workflow.changeset_artifact(),
-        do: {name, changeset.version}
+        do: pinned(project.name, ticket, name, changeset)
   end
 
   @impl true

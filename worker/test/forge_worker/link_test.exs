@@ -591,6 +591,56 @@ defmodule ForgeWorker.LinkTest do
       end)
     end
 
+    # And it stops what it is running: nothing it reports from here can reach the platform, which
+    # puts a refused machine's jobs back in the queue (`docs/design/worker-channel.md` § Versions).
+    # A permanent machine that ran on would spend their credentials on runs nobody records.
+    test "a refused join stops what the machine is running, and reports none of it", context do
+      %{client: client, origin: origin} = context
+      Application.put_env(:forge_worker, :refused_retry_ms, 60_000)
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = command_assignment(origin, "#!/bin/sh\nexec sleep 30\n")
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      wait_until(fn ->
+        match?(%{runner: pid} when is_pid(pid), :sys.get_state(client).assigns.jobs[job_id])
+      end)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        disconnect(client, :closed)
+        accept_connect(client)
+        assert_join(@topic, %{}, {:error, %{"reason" => "destroyed"}})
+      end)
+
+      wait_until(fn -> :sys.get_state(client).assigns.jobs == %{} end)
+      assert Link.unacked(client) == []
+    end
+
+    # After a reconnect a retired row is turned away at the socket — `WorkerSocket.connect/3`
+    # answers 403 before any join — so the refused-join path above never hears of it.
+    test "a connection the platform refuses stops what the machine is running", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = command_assignment(origin, "#!/bin/sh\nexec sleep 30\n")
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      wait_until(fn ->
+        match?(%{runner: pid} when is_pid(pid), :sys.get_state(client).assigns.jobs[job_id])
+      end)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        disconnect(client, {:error, {:upgrade_failure, %{status_code: 403}}})
+        wait_until(fn -> :sys.get_state(client).assigns.jobs == %{} end)
+      end)
+
+      assert Link.unacked(client) == []
+    end
+
     test "a retired machine is asked about in minutes too", %{client: client} do
       Application.put_env(:forge_worker, :refused_retry_ms, 60_000)
 
@@ -851,6 +901,126 @@ defmodule ForgeWorker.LinkTest do
 
       {%{"job_id" => ^job_id, "reason" => reason}, _before} = take_push("failed")
       assert reason =~ "not_a_commit"
+    end
+
+    # `docs/design/worker-channel.md` § Reconnection: a run the platform has given up on — no
+    # longer this machine's, or its row retired — is stopped and its ending reported to nobody. It
+    # used to be reported, and the report landed on the job as it then was: a re-queued job
+    # finished as an error, or left hibernated where nothing resumes it.
+    test "a run the platform gave up on is stopped and reports nothing", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      for reason <- ["not_ours", "retired"] do
+        job = command_assignment(origin, "#!/bin/sh\nexec sleep 30\n")
+        job_id = job["job_id"]
+        push(client, @topic, "assign", job)
+
+        wait_until(fn ->
+          match?(%{runner: pid} when is_pid(pid), :sys.get_state(client).assigns.jobs[job_id])
+        end)
+
+        push(client, @topic, "cancel", %{"job_id" => job_id, "reason" => reason})
+
+        wait_until(fn -> :sys.get_state(client).assigns.jobs == %{} end)
+        refute_push(@topic, "result", _payload, 300)
+        assert Link.unacked(client) == []
+      end
+    end
+
+    # The scheduler prefers the machine a job last ran on, so a job re-queued off this machine can
+    # come straight back while its old run is stopping. Dropped as *already running*, the platform
+    # held a job marked `running` that nothing ran; it starts once the old run has stopped.
+    test "a job assigned again while its given-up run stops is started once it has", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = command_assignment(origin, "#!/bin/sh\nexec sleep 30\n")
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      wait_until(fn ->
+        match?(%{runner: pid} when is_pid(pid), :sys.get_state(client).assigns.jobs[job_id])
+      end)
+
+      push(client, @topic, "cancel", %{"job_id" => job_id, "reason" => "not_ours"})
+      push(client, @topic, "assign", put_in(job, ["spec", "command", "script"], "#!/bin/sh\n"))
+
+      # The second run's answer — it exits 0 — and not the first's, which was cancelled.
+      {%{"job_id" => ^job_id, "result" => result}, _before} = take_push("result")
+      assert result["exit_status"] == 0
+    end
+
+    # A give-up that arrives while the old run is still stopping is the platform giving up the
+    # held assignment too; started anyway, it ran on a credential the platform had let go of.
+    test "a held assignment goes when the platform gives the job up again", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = command_assignment(origin, "#!/bin/sh\nexec sleep 30\n")
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      wait_until(fn ->
+        match?(%{runner: pid} when is_pid(pid), :sys.get_state(client).assigns.jobs[job_id])
+      end)
+
+      push(client, @topic, "cancel", %{"job_id" => job_id, "reason" => "not_ours"})
+      push(client, @topic, "assign", put_in(job, ["spec", "command", "script"], "#!/bin/sh\n"))
+      push(client, @topic, "cancel", %{"job_id" => job_id, "reason" => "retired"})
+
+      wait_until(fn -> :sys.get_state(client).assigns.jobs == %{} end)
+      refute_push(@topic, "result", _payload, 500)
+      assert :sys.get_state(client).assigns.deferred == %{}
+    end
+
+    # Any cancel ends the platform's interest in the job here: a held assignment goes with a
+    # ticket's cancel as surely as with a give-up.
+    test "a held assignment goes when the job's ticket is cancelled", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = command_assignment(origin, "#!/bin/sh\nexec sleep 30\n")
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      wait_until(fn ->
+        match?(%{runner: pid} when is_pid(pid), :sys.get_state(client).assigns.jobs[job_id])
+      end)
+
+      push(client, @topic, "cancel", %{"job_id" => job_id, "reason" => "not_ours"})
+      push(client, @topic, "assign", put_in(job, ["spec", "command", "script"], "#!/bin/sh\n"))
+      push(client, @topic, "cancel", %{"job_id" => job_id, "reason" => "ticket_cancelled"})
+
+      wait_until(fn -> :sys.get_state(client).assigns.jobs == %{} end)
+      refute_push(@topic, "result", _payload, 500)
+    end
+
+    # A held assignment is taken as any assignment is when it starts — the ceiling, the machine's
+    # health — not started as it stood when it was held.
+    test "a held assignment is checked like any other when it starts", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = command_assignment(origin, "#!/bin/sh\nexec sleep 30\n")
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      wait_until(fn ->
+        match?(%{runner: pid} when is_pid(pid), :sys.get_state(client).assigns.jobs[job_id])
+      end)
+
+      push(client, @topic, "cancel", %{"job_id" => job_id, "reason" => "not_ours"})
+      push(client, @topic, "assign", Map.put(job, "slice", %{"memory_max" => 1}))
+
+      {%{"job_id" => ^job_id, "result" => result}, _before} = take_push("result")
+      assert result["outcome"] == "error"
+      assert result["reason"] =~ "minimum"
     end
 
     test "is stopped by a cancel, and says so", context do
@@ -1562,6 +1732,32 @@ defmodule ForgeWorker.LinkTest do
     {%{"job_id" => ^job_id}, _events} = take_push("result")
   end
 
+  # A reply belongs to the connection it came on. Refs are a counter that starts again with each
+  # connection, so the old connection's ref for an unacked result could be the new connection's
+  # ref for an untracked `ready` — and its reply forgot the result, which the next drop then lost.
+  test "a reply on a new connection cannot forget what the old one was waiting on", context do
+    %{client: client, origin: origin} = context
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    job = assignment(origin)
+    job_id = job["job_id"]
+    push(client, @topic, "assign", job)
+    {%{"job_id" => ^job_id}, _events} = take_push("result")
+    old = last_push_ref()
+
+    disconnect(client, :closed)
+    accept_connect(client)
+    assert_join(@topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+    {%{"job_id" => ^job_id}, _events} = take_push("result")
+    refute last_push_ref() == old
+
+    reply(client, old, :ok)
+    Process.sleep(100)
+    assert Link.unacked(client) == [{job_id, "result"}]
+  end
+
   # A channel the platform closed under us — a redeploy, a restart, a row it no longer believes
   # in — is not the end of this worker. Slipstream's default for this callback is to stop, which
   # on a `restart: :permanent` release means losing every unacked result this machine is holding;
@@ -1593,6 +1789,34 @@ defmodule ForgeWorker.LinkTest do
       stream = Application.get_env(:forge_worker, :log_stream)
       Application.put_env(:forge_worker, :log_stream, true)
       on_exit(fn -> Application.put_env(:forge_worker, :log_stream, stream) end)
+    end
+
+    # `job.abandoned`, once per run whichever give-up comes first: a second word about a run
+    # already given up neither says it again nor cancels it again.
+    test "a run given up on is a line once, and cancelled once", %{client: client} do
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+      test = self()
+
+      :sys.replace_state(client, fn socket ->
+        put_in(socket.assigns.jobs["j-1"], %{
+          runner: test,
+          kind: :command,
+          attempt: 1,
+          started: 0
+        })
+      end)
+
+      push(client, @topic, "cancel", %{"job_id" => "j-1", "reason" => "not_ours"})
+
+      assert_push(@topic, "log", %{"type" => "job.abandoned", "job_id" => "j-1", "message" => why})
+
+      assert why =~ "no longer has it running here"
+      assert_receive {:"$gen_cast", :cancel}, 1_000
+
+      push(client, @topic, "cancel", %{"job_id" => "j-1", "reason" => "retired"})
+      refute_push(@topic, "log", %{"type" => "job.abandoned"}, 300)
+      refute_receive {:"$gen_cast", :cancel}, 300
     end
 
     test "a job accepted and a job finished are a line each, tied to the job", context do
@@ -2042,6 +2266,9 @@ defmodule ForgeWorker.LinkTest do
     # result alone passed with the guard removed.
     assert Enum.all?(before, fn {name, _payload} -> name == "event" end)
     refute_push(@topic, _anything, %{"job_id" => ^job_id}, 500)
+
+    # Nor held for later: only a job whose run was given up has its next assignment held.
+    assert :sys.get_state(client).assigns.deferred == %{}
   end
 
   test "a cancelled job commits what it has and hibernates", context do
@@ -2053,15 +2280,68 @@ defmodule ForgeWorker.LinkTest do
     job_id = job["job_id"]
     push(client, @topic, "assign", job)
 
-    # Wait until the harness is really running before asking for it to stop.
+    # Wait until the harness is really running before asking for it to stop. A ticket cancelled
+    # is the reason that is still reported: it is how the platform settles what the run spent.
     {_payload, _seen} = take_push("event")
-    push(client, @topic, "cancel", %{"job_id" => job_id, "reason" => "not_ours"})
+    push(client, @topic, "cancel", %{"job_id" => job_id, "reason" => "ticket_cancelled"})
 
     {%{"job_id" => ^job_id, "commit" => commit}, _events} = take_push("hibernated")
     assert String.length(commit) == 40
 
     assert git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"]) |> String.trim() ==
              commit
+  end
+
+  # Cancelling a ticket revokes its jobs' credentials as it sends the `cancel`, so a run with work
+  # to push is refused when it gets there. It still says what it spent — the platform settles a
+  # cancelled run's cost from its `hibernated` — where it used to crash into a `failed` that
+  # carried nothing.
+  test "a cancelled run whose push is refused hibernates with its result", context do
+    %{client: client, origin: origin} = context
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+    refuse_pushes(origin)
+
+    # A run with work to push: it commits, then hangs until the cancel.
+    job = assignment(origin, scenario: "hang")
+
+    Application.put_env(:forge_worker, :extra_env, [
+      {"FAKE_SCENARIO", "hang"},
+      {"FAKE_COMMIT", "work.txt"}
+    ])
+
+    job_id = job["job_id"]
+    push(client, @topic, "assign", job)
+
+    {_payload, _seen} = take_push("event")
+    push(client, @topic, "cancel", %{"job_id" => job_id, "reason" => "ticket_cancelled"})
+
+    {%{"job_id" => ^job_id, "commit" => nil, "result" => result}, _events} =
+      take_push("hibernated")
+
+    assert result["killed"] == "operator"
+  end
+
+  # Any other run whose push is refused has lost its work, and says so as what it is.
+  test "a run whose push is refused fails, naming the push", context do
+    %{client: client, origin: origin} = context
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+    refuse_pushes(origin)
+
+    job = assignment(origin)
+    job_id = job["job_id"]
+    push(client, @topic, "assign", job)
+
+    {%{"job_id" => ^job_id, "reason" => reason}, _events} = take_push("failed")
+    assert reason =~ ":push"
+    assert reason =~ "pre-receive hook declined"
+  end
+
+  defp refuse_pushes(origin) do
+    hook = Path.join([origin, "hooks", "pre-receive"])
+    File.write!(hook, "#!/bin/sh\nexit 1\n")
+    File.chmod!(hook, 0o755)
   end
 
   # A workflow job takes a different path to the harness than a conversation does — its own

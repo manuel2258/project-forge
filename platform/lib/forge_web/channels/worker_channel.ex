@@ -175,8 +175,9 @@ defmodule ForgeWeb.WorkerChannel do
     {:noreply, socket}
   end
 
-  # Best-effort, and unacked: a lost event costs a line in the timeline, never a decision.
-  # The platform records the gap rather than pretending there was none.
+  # Best-effort, and unacked: a lost event costs a line in the timeline, never a decision. Nor
+  # is a lost one detectable — the worker sends no sequence, so a gap and a quiet job look the
+  # same (`docs/design/worker-channel.md` § Delivery).
   def handle_in("event", %{"job_id" => job_id} = payload, socket) do
     with :ok <- owns(socket, job_id),
          {:ok, event} <- Event.from_map(payload["event"] || %{}) do
@@ -202,12 +203,23 @@ defmodule ForgeWeb.WorkerChannel do
   end
 
   def handle_in("hibernated", %{"job_id" => job_id} = payload, socket) do
-    ack(with(:ok <- owns(socket, job_id), do: hibernate(job_id, payload)), socket)
+    ack(
+      with(
+        :ok <- owns(socket, job_id),
+        :ok <- still_its(socket, job_id, "hibernated"),
+        do: hibernate(job_id, payload)
+      ),
+      socket
+    )
   end
 
   def handle_in("failed", %{"job_id" => job_id} = payload, socket) do
     ack(
-      with(:ok <- owns(socket, job_id), do: Jobs.fail(job_id, {:worker, payload["reason"]})),
+      with(
+        :ok <- owns(socket, job_id),
+        :ok <- still_its(socket, job_id, "failed"),
+        do: Jobs.fail(job_id, {:worker, payload["reason"]})
+      ),
       socket
     )
   end
@@ -320,6 +332,38 @@ defmodule ForgeWeb.WorkerChannel do
     end
   end
 
+  # **A run the platform has given up on does not get to end the job**
+  # (`docs/design/worker-channel.md` § Delivery). A job that is back in the queue, waiting on a
+  # person or parked is not running anywhere this report could be about: the platform re-queued it
+  # — the machine was lost, unhealthy or retired, or a rejoin did not list it — or a person
+  # reopened the conversation, and a run of it will be scheduled again. Recorded, a `failed`
+  # finished a workflow job as an error, a `hibernated` left it where nothing resumes it, and a
+  # reopened chat's old ending put it back to sleep; so the report is acked, which ends its
+  # retries, and dropped. A `result` is not asked this (`Jobs.complete/2` records a late answer on
+  # purpose), and a dormant chat's ending still lands: dormant is `hibernated`.
+  #
+  # **Named by the statuses that are heard, not the ones that are not**, so a status added later is
+  # dropped until somebody decides otherwise. Running is the report's own; hibernated and finished
+  # are answered by the operations themselves — a re-sent report, a chat ending while dormant, a
+  # cancelled ticket's run settling what it spent. **It narrows the race and does not close it:** a
+  # job re-queued and placed on the same machine again in the milliseconds before a stale report is
+  # read is `running`, and the report lands on the new run. Only a run identity in the protocol
+  # would tell them apart.
+  defp still_its(socket, job_id, message) do
+    case Jobs.get(job_id) do
+      %{status: status} when status in [:running, :hibernated, :finished] ->
+        :ok
+
+      %{status: status} ->
+        Logger.info(
+          "worker #{socket.assigns.worker_id} reported #{message} for job #{job_id}, which is " <>
+            "#{status} and not running there; a run the platform gave up on, dropped"
+        )
+
+        {:ok, :dropped}
+    end
+  end
+
   defp ack(:ok, socket), do: {:reply, :ok, socket}
   defp ack({:ok, _anything}, socket), do: {:reply, :ok, socket}
 
@@ -330,8 +374,9 @@ defmodule ForgeWeb.WorkerChannel do
 
   # Platform says running, worker does not have it: the run is gone — the machine rebooted,
   # the release restarted, the slice was killed — so the job is re-queued and scheduled
-  # afresh. The other direction is a job the platform has already finished with, which the
-  # worker is told to stop.
+  # afresh. The other direction is a job the platform does not have running there — finished,
+  # back in the queue, waiting, parked, or running elsewhere — which the worker is told to stop
+  # (`docs/design/worker-channel.md` § Reconnection).
   defp reconcile(worker_id, running) do
     theirs = MapSet.new(running, fn job -> job["job_id"] end)
     ours = MapSet.new(Jobs.running_on(worker_id), & &1.id)
@@ -350,7 +395,19 @@ defmodule ForgeWeb.WorkerChannel do
     end)
 
     Enum.each(MapSet.difference(theirs, ours), fn job_id ->
-      Workers.push(worker_id, {:cancel, job_id, :not_ours})
+      Workers.push(worker_id, {:cancel, job_id, why_stop(job_id)})
     end)
+  end
+
+  # **A job its ticket's cancel finished is told so again**, if that `cancel` never reached the
+  # machine — it was away when the ticket was cancelled, and `Workers.push/2` had no channel to
+  # send it on. As `ticket_cancelled` the worker reports the run, which is how the platform settles
+  # what it spent (`Jobs.hibernate/4`); as `not_ours` it would report nothing. Everything else is
+  # a run the platform has given up on.
+  defp why_stop(job_id) do
+    case Jobs.get(job_id) do
+      %{status: :finished, outcome: :cancelled} -> :ticket_cancelled
+      _gone_or_not_its -> :not_ours
+    end
   end
 end

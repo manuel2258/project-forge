@@ -54,9 +54,7 @@ defmodule Forge.Provider.Hetzner do
          {:ok, image} <- image_for(opts),
          {:ok, size} <- size(opts) do
       body = %{
-        # The worker id, so a machine in Hetzner's console can be matched to a row here without
-        # a lookup. Hetzner names must be a valid hostname, and a UUID is one.
-        name: "forge-#{opts.worker_id}",
+        name: name(opts.worker_id),
         server_type: size,
         image: image,
         location: location(),
@@ -166,6 +164,27 @@ defmodule Forge.Provider.Hetzner do
       {:ok, Enum.map(servers, &instance/1)}
     end
   end
+
+  # Asked by name and label together: the name is the worker id, the label is what makes the
+  # server forge's at all, so an operator's own server that happens to share a name is not one.
+  @impl Provider
+  def find(worker_id, credential) do
+    with {:ok, token} <- token(%{credential: credential}) do
+      query = URI.encode_query(name: name(worker_id), label_selector: @label)
+
+      case request(:get, "/servers?" <> query, token, nil) do
+        {:ok, 200, %{"servers" => [server | _]}} -> {:ok, to_string(server["id"])}
+        {:ok, 200, %{"servers" => []}} -> {:ok, nil}
+        {:ok, status, body} -> {:error, {:hetzner, status, message(body)}}
+        {:error, reason} -> {:error, {:hetzner, reason}}
+      end
+    end
+  end
+
+  # The worker id, so a machine in Hetzner's console can be matched to a row here without a
+  # lookup — and so `find/2` can ask for it. Hetzner names must be a valid hostname, and a UUID
+  # is one.
+  defp name(worker_id), do: "forge-#{worker_id}"
 
   @impl Provider
   def images(credential) do

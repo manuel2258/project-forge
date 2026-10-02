@@ -110,6 +110,7 @@ The callbacks:
 @callback shapes(credential) :: {:ok, [shape]} | {:error, term}
 @callback images(credential) :: {:ok, [image]} | {:error, term}
 @callback list(credential) :: {:ok, [instance]} | {:error, term}
+@callback find(worker_id, credential) :: {:ok, provider_id | nil} | {:error, term}
 @callback credential_fields() :: [%{key: String.t(), label: String.t()}]
 @callback required_template_fields() :: [:size | :image]
 @callback billed_increment_ms() :: pos_integer() | nil
@@ -137,7 +138,9 @@ resolved per machine from the row rather than per node from configuration. All o
 A ninth came with billing: `billed_increment_ms/0`, how long a machine is billed for at a time
 when every started increment is charged whole — an hour for Hetzner, nil for the local driver —
 which is what keeps an idle machine to a leeway point of an hour it has paid for (§ The hour
-already paid for).
+already paid for). A tenth came with surviving a platform restart: `find/2`, the machine a driver
+made for a worker row whose create never answered, by the name it gave it
+(`docs/design/provisioning.md` § Whose account).
 
 **Nothing above the driver knows the provider.** Not the scheduler, not the channel, not the
 worker. A module that pattern-matches on `"local"` outside `Forge.Provider.*` is the bug this
@@ -827,18 +830,27 @@ to the branch or written to the store, history is squashed.
 
 The sequence: SIGTERM the harness, wait the grace period, `git add -A` and commit in the worktree,
 push to the ticket branch with the job's token, upload the transcript to the store, send
-`hibernated` with the commit sha. The platform records the sha and sets the job `hibernated` — a
-status that existed from milestone 1 and was unreachable until this one.
+`hibernated` with the commit sha. The platform records the sha and puts a workflow job back to
+`pending`, to resume from that commit wherever it is placed next; a conversation goes
+`hibernated` — dormant — until a person reopens it. A workflow job used to be set `hibernated`
+too, and nothing ever moved one on: the scheduler places only `pending` jobs, so the ticket sat
+with no job running and nothing in the queue to say so.
 
-**Only one of those three interruptions reaches it for a workflow job.** The worker sends
-`hibernated` when a `cancel` stopped the runner (`ForgeWorker.Link` maps `killed: :operator` to
-it), and the platform sends `cancel` in one place: rejoin reconciliation, for a job it has
-already finished with (`docs/design/worker-channel.md` § Reconnection). No operator action
-sends one. Out of budget ends in a `result` like any other ending, and a worker that is lost or
-swept re-queues its running jobs to `pending` (`Workers.sweep_unreachable/0`) rather than
-hibernating them. A conversation is the exception
-the other way: every chat ends by sending `hibernated`, and one whose run is lost is set
-`hibernated` — dormant — by the platform (`docs/design/conversations.md` § Lifetime).
+**Only one of those three interruptions reaches it for a workflow job, and rarely.** The worker
+sends `hibernated` when a `cancel` stopped the runner (`ForgeWorker.Link` maps `killed: :operator`
+to it). The platform sends `cancel` in three places: rejoin reconciliation, for a job the machine
+still runs that the platform does not have running there, as `not_ours`; a retired row's channel,
+for its running jobs, as `retired`; and cancelling a ticket, as `ticket_cancelled`
+(`docs/design/worker-channel.md` § Messages). The first two stop the run without a report, since
+the platform has already given it up, and the third's report finds the job finished as cancelled
+and settles what it spent. So a workflow job reaches `hibernate` running only from an older worker:
+its report of a `not_ours` run, arriving after the scheduler handed the job straight back to the
+same machine, which dropped that assignment as *already running* (`docs/design/worker-channel.md`
+§ Delivery says what that costs). Out of budget ends in a `result` like any other ending, and a
+worker that is lost or swept re-queues its running jobs to `pending`
+(`Workers.sweep_unreachable/0`) rather than hibernating them. A conversation is the exception the
+other way: every chat ends by sending `hibernated`, and one whose run is lost is set `hibernated` —
+dormant — by the platform (`docs/design/conversations.md` § Lifetime).
 
 Resume reconstructs from the branch and the manifest, never from the conversation. The spec is
 immutable and already in the row; inputs are re-pinned at run time as they are today; the worktree

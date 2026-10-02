@@ -1885,7 +1885,8 @@ defmodule Forge.Jobs do
   @doc """
   Records that a job committed its work and stopped. `commit` is where that work is on the
   ticket branch; resuming reconstructs from the branch and the manifest, never from the
-  conversation (`docs/decisions.md`).
+  conversation (`docs/decisions.md`). A workflow job is put back to `pending` to be resumed; a
+  conversation, which a person resumes, goes `hibernated`.
   """
   @spec hibernate(String.t(), String.t() | nil, String.t() | nil, map() | nil) ::
           {:ok, Job.t()} | {:error, term()}
@@ -1893,7 +1894,10 @@ defmodule Forge.Jobs do
     job = get!(job_id)
 
     cond do
-      # A re-sent report.
+      # A re-sent report, about a job hibernated before a workflow job's hibernation re-queued it.
+      # Since then the channel drops a re-sent one for a job back in the queue
+      # (`WorkerChannel.still_its/3`) and a conversation never comes here (`Conversations.ended/4`),
+      # so this is for rows from before, and for a direct call.
       job.status == :hibernated ->
         {:ok, job}
 
@@ -1909,9 +1913,16 @@ defmodule Forge.Jobs do
     end
   end
 
+  # **A workflow job that hibernated goes back to the queue, to resume from its commit**; a
+  # conversation would go dormant (`interrupted_status/1`) — an equivalent mutant today, since the
+  # channel sends a chat's `hibernated` to `Conversations.ended/4` and nothing else calls this with
+  # one; it is the one rule for "a run ended without an outcome" rather than a second copy of it.
+  # A workflow job used to be set `hibernated` too, and nothing ever moved one on — the scheduler
+  # places only `pending` jobs — so its ticket sat with no job running and nothing in the queue
+  # saying so (`docs/design/worker-tier.md` § Hibernation and resume).
   defp hibernate_running(job, commit, reason) do
     Multi.new()
-    |> Multi.update(:job, Job.progress_changeset(job, %{status: :hibernated}))
+    |> Multi.update(:job, Job.progress_changeset(job, %{status: interrupted_status(job)}))
     |> Runs.close(job.id, DateTime.utc_now(:second))
     |> Events.log(:event, "job.hibernated", {:job, job.id}, %{
       ticket_id: job.ticket_id,
@@ -1973,8 +1984,17 @@ defmodule Forge.Jobs do
     do: Repo.all(from j in Job, where: j.worker_id == ^worker_id and j.status == :running)
 
   @doc """
-  On boot: work left `running` by a previous node is dealt with. A job is re-queued — its spec
-  still holds and nothing is watching it. A conversation is **not**: it goes dormant.
+  On boot: the work a previous node left `running` that no machine can ever report on — on a
+  worker row that is `destroyed`, or on none (a deleted row nils `worker_id`) — is dealt with. A
+  job is re-queued — its spec still holds and nothing is watching it. A conversation is **not**:
+  it goes dormant.
+
+  **Every other running job is left exactly as it is**, its credential and its open run with it
+  (`docs/design/worker-channel.md` § A platform restart). Its machine is still running it, and
+  says so at its rejoin, seconds after the node is up: listed, the job runs on; not listed, the
+  rejoin re-queues it; never back, the unreachable sweep does. This used to re-queue everything,
+  and every rejoin after a deploy was then told to cancel the runs the platform had just given up
+  on — every run in flight thrown away by every restart.
 
   Re-queueing a chat would mean every platform restart silently starting conversations nobody is
   in, each taking a slice and spending the day's allowance on a greeting nobody reads. A chat has
@@ -1983,7 +2003,13 @@ defmodule Forge.Jobs do
   """
   @spec recover() :: non_neg_integer()
   def recover do
-    jobs = Repo.all(from j in Job, where: j.status == :running)
+    jobs =
+      Repo.all(
+        from j in Job,
+          left_join: w in Forge.Workers.Worker,
+          on: w.id == j.worker_id,
+          where: j.status == :running and (is_nil(w.id) or w.status == :destroyed)
+      )
 
     Enum.each(jobs, fn job ->
       {:ok, _} =

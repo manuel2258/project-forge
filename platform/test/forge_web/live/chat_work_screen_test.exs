@@ -506,6 +506,9 @@ defmodule ForgeWeb.ChatWorkScreenTest do
 
       assert summary =~ "1/3"
       assert summary =~ "Fixing the lexer"
+
+      # Redrawn as the plan moves, and opened by the reader: each patch leaves it open.
+      assert view |> element("#plan") |> render() =~ ~s(phx-mounted="[[&quot;ignore_attrs&quot;)
     end
 
     # The plan is where the agent is in the turn it is taking. Once the turn has ended it is in

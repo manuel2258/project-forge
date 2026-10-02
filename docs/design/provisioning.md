@@ -332,13 +332,15 @@ The driver for a create is resolved from the template's credential, not from nod
 Adding a provider is a config line and a module implementing the behaviour; no platform code
 learns its name.
 
-**`shapes/1` was the fourth callback, and five more followed it.** The behaviour now has nine:
+**`shapes/1` was the fourth callback, and six more followed it.** The behaviour now has ten:
 `create`, `destroy` and `status` from before, then `shapes/1`, `images/1` (below),
 `credential_fields/0` (§ Whose account), `required_template_fields/0` (below), `list/1` —
-every machine forge made in a credential's account, for reconciling against `workers` — and
+every machine forge made in a credential's account, for reconciling against `workers` — `find/2`,
+the machine made for one worker row, by the name its driver gave it (§ Whose account), and
 `billed_increment_ms/0`, the provider's billing unit, which decides when an idle machine goes
-(`worker-tier.md` § The hour already paid for). Nothing reconciles yet: `Forge.Provider.list/2` has
-no caller, so a machine the platform lost track of is still found in the provider's console.
+(`worker-tier.md` § The hour already paid for). Nothing reconciles the whole account yet:
+`Forge.Provider.list/2` has no caller, so a machine with no row at all is still found in the
+provider's console. A row that lost its machine's id is no longer such a case (`find/2`).
 The template UI has to offer machine sizes, and the sizes are the provider's. The driver answers
 — from the provider's API or from a table it embeds, which is the driver's business and
 changeable without touching the platform:
@@ -494,6 +496,29 @@ machine went.** A refusal keeps the row exactly where it is, with the driver's w
 replacement being made for a machine that never left, and the next sweep tries again. The cost is
 that a permanent refusal wedges the fleet at `max_workers` rather than leaking — which is the
 right way round, because a stuck fleet is visible and a leaking one is not.
+
+**A machine made but never recorded is found by its name before its row is destroyed.** The
+provider's id reaches the row only when the create's answer does, and a create is a request the
+platform waits on — Hetzner's `POST /servers`, inside a scheduling pass. A platform stopped
+mid-call left a machine billing under a row with no `provider_id`; that row reaches the
+unreachable sweep, timed from its creation, and destroying it used to ask the provider for
+nothing — *no machine had been made for it*. So a row is marked as asked just before its create
+is sent and unmarked by the driver's answer, whichever way it went (`workers.unanswered_create`),
+and a managed row still marked, with no `provider_id`, is asked about first
+(`Forge.Provider.find/3`): the driver looks for the machine it would have made for that worker —
+Hetzner by the server name `forge-<worker id>` it creates with, under forge's label; the local
+driver by the worker id its machine directory is named after — and what it finds is written onto
+the row and destroyed with it. A lookup the provider refuses keeps the row, exactly as a refused
+destroy does.
+
+**Only a create that never answered.** The first version asked about every managed row with no
+`provider_id`, and the commonest such row is a create the driver refused — often for want of a
+credential it could use, deleted or unreadable. Asking with that same credential failed the same
+way, so the row was kept for ever, holding its template's slot, where before it was retired at
+once. A refused create made nothing, so it is not asked about. **A create that timed out is not
+covered**: the driver answered — with a transport error — and the row is unmarked like any
+refusal, though the provider may have acted; such a machine is still found in the provider's
+console. A driver that told an unanswered create from a refused one would close it.
 
 Two ways out, and they are different on purpose:
 

@@ -124,6 +124,20 @@ defmodule Forge.JobsChatTest do
       assert Repo.get!(Job, chat.id).status == :hibernated
     end
 
+    # A restart alone loses nothing (`docs/design/worker-channel.md` § A platform restart): a
+    # conversation whose machine will rejoin with it carries on where it was.
+    test "a conversation on a machine that is still there carries on" do
+      {:ok, worker, _token} = Forge.Workers.create(%{provider: "fake"})
+
+      chat =
+        chat_fixture(%{status: :running})
+        |> Job.progress_changeset(%{worker_id: worker.id})
+        |> Repo.update!()
+
+      assert Jobs.recover() == 0
+      assert Repo.get!(Job, chat.id).status == :running
+    end
+
     test "losing the worker puts a conversation to sleep rather than back in the queue" do
       chat = chat_fixture(%{status: :running})
 

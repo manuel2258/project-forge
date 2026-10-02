@@ -502,7 +502,12 @@ defmodule ForgeWeb.ChatLive do
         />
       </section>
 
-      <details :if={@responding && @plan != []} id="plan" class="font-mono text-[12.5px]">
+      <details
+        :if={@responding && @plan != []}
+        id="plan"
+        class="font-mono text-[12.5px]"
+        phx-mounted={Actions.keep_open()}
+      >
         <summary class="flex min-h-[46px] cursor-pointer items-center gap-2 text-info">
           <span class="shrink-0 opacity-60">
             {Enum.count(@plan, &(&1["status"] == "completed"))}/{length(@plan)}

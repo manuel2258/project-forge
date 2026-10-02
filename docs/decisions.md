@@ -178,7 +178,7 @@ Settled for the project:
 Settled for the PoC, reversible afterwards on evidence from it (see `poc-plan.md`):
 
 - One repository, three Mix projects joined by path dependencies, no umbrella: `forge_core`, `forge`, `forge_worker`.
-- Postgres on the orchestrator. Durable background work is rows in Postgres: a job is a row, `Forge.Jobs.Scheduler` (one GenServer) hands pending ones out, and `Forge.Jobs.recover/0` re-queues on boot the workflow jobs a previous node left running. *This said "Oban for durable background work"; Oban was never added.*
+- Postgres on the orchestrator. Durable background work is rows in Postgres: a job is a row, `Forge.Jobs.Scheduler` (one GenServer) hands pending ones out, and `Forge.Jobs.recover/0` re-queues on boot the workflow jobs a previous node left running on a machine that is gone, and leaves the rest to their machines' rejoins (`design/worker-channel.md` § A platform restart). *This said "Oban for durable background work"; Oban was never added.*
 - Worker dials out over a Phoenix Channel, authenticated by a per-worker token injected at creation.
 - Git served by the platform over smart HTTP with a per-job short-lived token. No SSH: the operator reaches a repository over the same endpoint, with a token they mint — including the one shape that may write the default branch, fast-forward only, which is what seeds a repository and changes a workflow (`design/git-hosting.md` § The default-branch token, and what it costs).
 - The operator's Claude subscription (OAuth token) funds execution. API key billing remains a configuration choice; the comparison is not run.

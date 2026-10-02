@@ -154,29 +154,47 @@ defmodule Forge.Events do
 
   @doc "A one-line, bounded rendering of an event's payload for lists and logs."
   @spec summary(Event.t()) :: String.t()
-  def summary(%Event{type: "job.harness.text", payload: %{"text" => text}}),
-    do: String.slice(text, 0, 200)
+  def summary(%Event{} = event), do: describe(event, :bounded)
 
-  def summary(%Event{type: "job.harness.tool_use", payload: %{"name" => name, "input" => input}}),
-    do: tool_summary(name, input)
+  @doc """
+  The same rendering unbounded, for a page that wraps and clips the line itself — the job's
+  stream, which shows the first 200 characters and opens the rest in place (`ForgeWeb.Actions.clip/1`,
+  `docs/design/ui.md` § Activity). Whole here where `summary/1` cuts them short: an agent's text,
+  a message, and a payload with no sentence of its own. A tool call is not among them: that page
+  draws it as an action line (`ForgeWeb.Actions`), never as this.
+  """
+  @spec detail(Event.t()) :: String.t()
+  def detail(%Event{} = event), do: describe(event, :whole)
 
-  def summary(%Event{type: "job.harness.tool_result", payload: %{"bytes" => bytes} = p}),
-    do: "#{bytes} bytes#{if p["is_error"], do: " (error)"}"
+  defp describe(%Event{type: "job.harness.text", payload: %{"text" => text}}, bound),
+    do: bounded(text, 200, bound)
 
-  def summary(%Event{type: "job.harness.finished", payload: p}),
+  defp describe(
+         %Event{type: "job.harness.tool_use", payload: %{"name" => name, "input" => input}},
+         _bound
+       ),
+       do: tool_summary(name, input)
+
+  defp describe(
+         %Event{type: "job.harness.tool_result", payload: %{"bytes" => bytes} = p},
+         _bound
+       ),
+       do: "#{bytes} bytes#{if p["is_error"], do: " (error)"}"
+
+  defp describe(%Event{type: "job.harness.finished", payload: p}, _bound),
     do: "#{p["subtype"]} · #{p["num_turns"]} turns · $#{p["total_cost_usd"]}"
 
-  def summary(%Event{type: "job.harness.started", payload: p}),
+  defp describe(%Event{type: "job.harness.started", payload: p}, _bound),
     do: "#{p["model"]} · session #{p["session_id"]}"
 
   # What the worker read of the job's memory (`docs/design/claude-code-events.md` § Memory), in
   # the words the job's header and a conversation's now line use (`Forge.Jobs.Memory`).
-  def summary(%Event{type: "job.harness.memory", payload: payload}),
+  defp describe(%Event{type: "job.harness.memory", payload: payload}, _bound),
     do: Forge.Jobs.Memory.sentence(payload)
 
   # A harness that has not said it started: how long, whether the worker gave up, the last thing
   # it wrote and — so the row says whether memory is why — what the job holds against its ceiling.
-  def summary(%Event{type: "job.harness.starting", payload: p}) do
+  defp describe(%Event{type: "job.harness.starting", payload: p}, _bound) do
     [
       "not started after #{p["waited_s"]}s#{if p["gave_up"] == true, do: ", gave up"}",
       last_line(p["stderr"]),
@@ -188,53 +206,62 @@ defmodule Forge.Events do
 
   # Without this a message renders as an inspected map, which is how a conversation's own words
   # would read in the timeline and the queue.
-  def summary(%Event{type: "chat.message", payload: %{"text" => text}}),
-    do: String.slice(text, 0, 200)
+  defp describe(%Event{type: "chat.message", payload: %{"text" => text}}, bound),
+    do: bounded(text, 200, bound)
 
-  def summary(%Event{type: "chat.turn", payload: %{"turn" => turn}}), do: "turn #{turn}"
+  defp describe(%Event{type: "chat.turn", payload: %{"turn" => turn}}, _bound), do: "turn #{turn}"
 
   # The scheduler's sentence (`Forge.Jobs.record_wait/3`). The reason code beside it is for
   # comparing one pass with the next, not for reading; without this the operator would read
   # `reason="at_capacity" text="Waiting for room: …"` under a job.
-  def summary(%Event{type: "job.waiting", payload: %{"text" => text}}), do: text
+  defp describe(%Event{type: "job.waiting", payload: %{"text" => text}}, _bound), do: text
 
   # Commands (`docs/design/commands.md` § Events and the timeline), as the sentence a person reads
   # rather than the inspected map the fallback would draw.
-  def summary(%Event{type: "command.invoked", payload: %{"command" => command} = p}),
+  defp describe(%Event{type: "command.invoked", payload: %{"command" => command} = p}, _bound),
     do: "$ #{command}#{argv(p["args"])} at #{short(p["commit"])}"
 
-  def summary(%Event{type: "command.finished", payload: %{"command" => command} = p}),
+  defp describe(%Event{type: "command.finished", payload: %{"command" => command} = p}, _bound),
     do: "#{command}#{argv(p["args"])}: #{ended(p)}"
 
-  def summary(%Event{type: "job.parked", payload: %{"invocations" => invocations}}) do
+  defp describe(%Event{type: "job.parked", payload: %{"invocations" => invocations}}, _bound) do
     {refused, run} = Enum.split_with(invocations, &Map.has_key?(&1, "refused"))
 
     "parked on #{count(length(run), "command")}" <>
       if(refused == [], do: "", else: ", #{length(refused)} refused")
   end
 
-  def summary(%Event{type: "commands.started", payload: %{"jobs" => jobs} = p}),
+  defp describe(%Event{type: "commands.started", payload: %{"jobs" => jobs} = p}, _bound),
     do: "#{count(length(jobs), "command")} at #{short(p["at"])}"
 
-  def summary(%Event{
-        type: "commands.decided",
-        payload: %{"statuses" => statuses, "outcome" => outcome}
-      }),
-      do: "statuses #{Enum.map_join(statuses, ", ", &(&1 || "none"))} → #{outcome}"
+  defp describe(
+         %Event{
+           type: "commands.decided",
+           payload: %{"statuses" => statuses, "outcome" => outcome}
+         },
+         _bound
+       ),
+       do: "statuses #{Enum.map_join(statuses, ", ", &(&1 || "none"))} → #{outcome}"
 
-  def summary(%Event{type: "ticket.stuck", payload: %{"reason" => reason}}), do: reason
+  defp describe(%Event{type: "ticket.stuck", payload: %{"reason" => reason}}, _bound), do: reason
 
-  def summary(%Event{type: "transition.taken", payload: %{"from" => from, "to" => to} = p}),
-    do: "#{from} → #{to}#{if p["outcome"], do: " on #{p["outcome"]}"}"
+  defp describe(
+         %Event{type: "transition.taken", payload: %{"from" => from, "to" => to} = p},
+         _bound
+       ),
+       do: "#{from} → #{to}#{if p["outcome"], do: " on #{p["outcome"]}"}"
 
-  def summary(%Event{payload: payload}) when map_size(payload) == 0, do: ""
+  defp describe(%Event{payload: payload}, _bound) when map_size(payload) == 0, do: ""
 
-  def summary(%Event{payload: payload}) do
+  defp describe(%Event{payload: payload}, bound) do
     payload
     |> Map.drop(["raw", "harness", "input", "excerpt", "usage"])
     |> Enum.map_join(" ", fn {k, v} -> "#{k}=#{inspect(v)}" end)
-    |> String.slice(0, 160)
+    |> bounded(160, bound)
   end
+
+  defp bounded(text, most, :bounded), do: String.slice(text, 0, most)
+  defp bounded(text, _most, :whole), do: text
 
   # The tail the worker sent is up to two kilobytes of several lines; the last is the one that
   # names what it was stuck on.

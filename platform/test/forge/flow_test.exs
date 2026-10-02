@@ -1204,9 +1204,10 @@ defmodule Forge.FlowTest do
   end
 
   # A job has one open run at most, and every way a run can end closes it — a result, a failure,
-  # a cancel, a lost machine, a platform restart, a resume that never started, an assignment that
-  # never reached the worker. An open run under a job that is not running would be a run nothing
-  # will ever close, and the next start of the job would be a second open one.
+  # a cancel, a lost machine, a platform restart that finds its machine gone, a resume that never
+  # started, an assignment that never reached the worker. An open run under a job that is not
+  # running would be a run nothing will ever close, and the next start of the job would be a
+  # second open one.
   test "every way a run can end closes it", %{project: project, user: user, worker: worker} do
     started = fn ->
       {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
@@ -1230,9 +1231,12 @@ defmodule Forge.FlowTest do
     {:ok, _} = Jobs.requeue(job.id, :worker_lost)
     assert open_runs(job) == 0
 
+    # A restart ends the run only when no machine can report on it: its row is gone.
     {job, _} = started.()
+    {:ok, _} = Forge.Workers.update(worker, %{status: :destroyed})
     assert Jobs.recover() >= 1
     assert open_runs(job) == 0
+    {:ok, _} = Forge.Workers.update(Forge.Workers.get!(worker.id), %{status: :ready})
 
     {job, _} = started.()
     {:ok, _} = Repo.update(Job.progress_changeset(Jobs.get!(job.id), %{status: :pending}))
@@ -1988,6 +1992,37 @@ defmodule Forge.FlowTest do
   defp open_runs(job), do: job |> runs() |> Enum.count(&is_nil(&1.finished_at))
 
   defp job_status(ticket), do: Jobs.get!(only_job(ticket).id).status
+
+  # `docs/design/worker-channel.md` § A platform restart: a job on a machine that will rejoin is
+  # left exactly as it was — still running, its run open, its credential still opening the branch
+  # it will push to — and only one on a row that is gone is re-queued, its credential revoked.
+  # Re-queueing everything is what made every deploy throw away every run in flight.
+  test "recover/0 leaves a live machine's job alone and re-queues a gone one's", context do
+    %{project: project, user: user, worker: worker} = context
+
+    {:ok, live_ticket} = Tickets.admit(project, %{title: "live"}, {:user, user.id})
+
+    {live, _assignment} =
+      {only_job(live_ticket), FakeWorker.assign(only_job(live_ticket), worker)}
+
+    {:ok, live_secret, _} = Forge.Git.Tokens.issue_for_job(live, live_ticket, project)
+
+    {:ok, gone_ticket} = Tickets.admit(project, %{title: "gone"}, {:user, user.id})
+    gone = only_job(gone_ticket)
+    {:ok, lost, _token} = Forge.Workers.create(%{provider: "fake"})
+    {:ok, _} = Repo.update(Job.progress_changeset(gone, %{status: :running, worker_id: lost.id}))
+    {:ok, gone_secret, _} = Forge.Git.Tokens.issue_for_job(gone, gone_ticket, project)
+    {:ok, _} = Forge.Workers.update(lost, %{status: :destroyed})
+
+    assert Jobs.recover() == 1
+
+    assert Jobs.get!(live.id).status == :running
+    assert open_runs(live) == 1
+    assert {:ok, _token} = Forge.Git.Tokens.authorise(live_secret, project, :read)
+
+    assert Jobs.get!(gone.id).status == :pending
+    assert Forge.Git.Tokens.authorise(gone_secret, project, :read) == :error
+  end
 
   test "recover/0 re-queues jobs a dead node left running", %{project: project, user: user} do
     {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})

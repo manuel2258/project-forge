@@ -57,6 +57,10 @@ defmodule Forge.Workers.Log do
     end
   end
 
+  @doc "Whether the platform has written a line of `type` about `worker_id` since it last joined."
+  @spec said?(String.t(), String.t()) :: boolean()
+  def said?(worker_id, type), do: said_since_join?(worker_id, type)
+
   @doc """
   Keeps a line a machine sent about itself, bounded field by field (see the moduledoc). Called by
   the channel, which is what says whose machine it is — nothing in the payload names a worker —

@@ -170,6 +170,10 @@ defmodule ForgeWeb.QueueLiveTest do
       """
     end
 
+    # Folded is the form's state, drawn below `lg` only: the question's inputs are in the form
+    # whether or not it is folded, so whether radios are drawn says nothing about it.
+    defp folded?(view, question), do: has_element?(view, question <> "[data-folded]")
+
     defp choose(view, version, key, choice, text \\ "") do
       view
       |> element("#form-#{version.id}")
@@ -238,8 +242,8 @@ defmodule ForgeWeb.QueueLiveTest do
       refute has_element?(view, "#form-#{version.id}-left")
     end
 
-    # Folded, a question is one line that carries its answer in hidden inputs; tapping the line
-    # opens it; choosing folds it again; typing keeps it open.
+    # Folded, a question is one line, its answer in its own inputs hidden beside it; tapping the
+    # line opens it; choosing folds it again; typing keeps it open.
     test "a locked question folds, and opens again", %{conn: conn, project: project} do
       ticket = admit(project, "Persist scores")
       version = ask(ticket, [blocking("backend", "Which backend?")])
@@ -247,13 +251,14 @@ defmodule ForgeWeb.QueueLiveTest do
 
       {:ok, view, _html} = live(conn, ~p"/")
 
-      # Recommended, so chosen, so folded: a line, no radios, and the line says what was chosen —
-      # the whole text of it, since a one-letter label is in any class list.
-      refute has_element?(view, question <> " input[type=radio]")
+      # Recommended, so chosen, so folded: a line, and the line says what was chosen — the whole
+      # text of it, since a one-letter label is in any class list.
+      assert folded?(view, question)
       assert has_element?(view, question <> " button span.font-medium", ~r/^\s*a\s*$/)
 
       view |> element(question <> " button[phx-click='form:open']") |> render_click()
-      assert has_element?(view, question <> " input[type=radio][value=b]")
+      refute folded?(view, question)
+      refute has_element?(view, question <> " button[phx-click='form:open']")
 
       view
       |> element("#form-#{version.id}")
@@ -262,10 +267,10 @@ defmodule ForgeWeb.QueueLiveTest do
         "answers" => %{"backend" => %{"choice" => "a", "text" => "and keep the old file"}}
       })
 
-      assert has_element?(view, question <> " input[type=radio]")
+      refute folded?(view, question)
 
       choose(view, version, "backend", "b", "and keep the old file")
-      refute has_element?(view, question <> " input[type=radio]")
+      assert folded?(view, question)
       assert view |> element(question) |> render() =~ "b — and keep the old file"
     end
 
@@ -346,12 +351,12 @@ defmodule ForgeWeb.QueueLiveTest do
         }
       })
 
-      assert has_element?(view, naming <> " input[type=radio]")
+      refute folded?(view, naming)
 
       view |> element("#form-#{version.id}") |> render_submit()
 
       assert [%{key: "naming"}] = Artifacts.open_questions(ticket.id)
-      refute has_element?(view, naming <> " input[type=radio]")
+      assert folded?(view, naming)
       assert view |> element(naming) |> render() =~ "change"
     end
 
@@ -433,7 +438,7 @@ defmodule ForgeWeb.QueueLiveTest do
         "answers" => %{"backend" => %{"choice" => "", "text" => "neither"}}
       })
 
-      assert has_element?(view, question <> " input[type=radio]")
+      refute folded?(view, question)
     end
 
     # Off the wire, a payload of the wrong shape is ignored, not raised on: a crash here is the
@@ -485,6 +490,13 @@ defmodule ForgeWeb.QueueLiveTest do
   # What the form draws, and what its Send carries from what is drawn — the rendered inputs, not
   # parameters a test hands in. `docs/design/ui.md` § Answering questions is the standard.
   describe "what the form draws and carries" do
+    defp classes(view, selector) do
+      [{_tag, attrs, _children}] =
+        view |> element(selector) |> render() |> Floki.parse_fragment!()
+
+      attrs |> List.keyfind("class", 0, {"class", ""}) |> elem(1) |> String.split()
+    end
+
     defp rich(key, opts) do
       recommended = if opts[:recommended], do: ", recommended: true", else: ""
 
@@ -559,8 +571,56 @@ defmodule ForgeWeb.QueueLiveTest do
                index(html, "question-#{version.id}-store")
     end
 
-    # Folded, a question carries its answer in hidden inputs: a note typed before choosing is
-    # still there when the Send is taken from the page.
+    # `docs/design/ui.md` § Answering questions: the fold is the width's. Below `lg` a folded
+    # question is its line and its fields are hidden; at `lg` and up the line is hidden and the
+    # fields drawn, so choosing never shrinks a question under the pointer on a laptop. A media
+    # query is CSS, which no ExUnit test evaluates, so what is pinned is the classes that say it.
+    test "at lg and up nothing folds", %{conn: conn, project: project} do
+      ticket = admit(project, "Persist scores")
+      version = ask(ticket, [rich("store", recommended: true), rich("size", [])])
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      folded = "#question-#{version.id}-store"
+      assert folded?(view, folded)
+      assert "lg:hidden" in classes(view, folded <> " button[phx-click='form:open']")
+      group = classes(view, folded <> " [role=group]")
+      assert "hidden" in group
+      assert "lg:flex" in group
+
+      open = "#question-#{version.id}-size"
+      refute folded?(view, open)
+      group = classes(view, open <> " [role=group]")
+      assert "flex" in group
+      # Hidden at no width: an open question has no line to stand in for it.
+      refute Enum.any?(group, &(&1 =~ ~r/(^|:)(hidden|invisible|sr-only)$/))
+    end
+
+    # `docs/design/ui.md` § The affordance rule: Enter never sends a question form. A one-line
+    # input submitted it on Enter, before the questions after it were read. A key press is a
+    # browser event ExUnit cannot drive, so what is pinned is the box: a textarea, which Enter
+    # cannot submit, on the composer's hook with the query every pointer matches, and no hint.
+    test "Enter in a question's own words is a new line", %{conn: conn, project: project} do
+      ticket = admit(project, "Persist scores")
+      version = ask(ticket, [rich("store", [])])
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      box =
+        view |> element("#form-#{version.id} textarea[name='answers[store][text]']") |> render()
+
+      assert box =~ ~s(data-newline-on="all")
+      assert box =~ ~s(aria-label="Your own words on: Which store?")
+      refute has_element?(view, "#form-#{version.id} input[type=text]")
+      refute has_element?(view, "#form-#{version.id} [data-hint]")
+
+      # And Enter from the form's other inputs — a radio — is swallowed by the form's hook.
+      assert has_element?(
+               view,
+               ~s(#form-#{version.id}[phx-hook="ForgeWeb.Operator.QuestionForm.EnterNeverSends"])
+             )
+    end
+
+    # Folded, a question carries its answer in its own inputs, hidden: a note typed before
+    # choosing is still there when the Send is taken from the page.
     test "a note on a folded question rides the Send", %{conn: conn, project: project} do
       ticket = admit(project, "Persist scores")
       version = ask(ticket, [rich("store", [])])
@@ -580,7 +640,7 @@ defmodule ForgeWeb.QueueLiveTest do
         "answers" => %{"store" => %{"choice" => "SQLite", "text" => "and keep a copy"}}
       })
 
-      refute has_element?(view, "#question-#{version.id}-store input[type=radio]")
+      assert folded?(view, "#question-#{version.id}-store")
       view |> element("#form-#{version.id}") |> render_submit()
 
       assert [%{answer: %{choice: "SQLite", text: "and keep a copy"}}] =
@@ -612,7 +672,7 @@ defmodule ForgeWeb.QueueLiveTest do
         "answers" => %{"store" => %{"text" => "neither"}}
       })
 
-      assert has_element?(view, "#question-#{version.id}-store input[type=radio]")
+      refute folded?(view, "#question-#{version.id}-store")
     end
 
     # Whitespace is no answer: an optional question left with some is skipped, not sent blank and

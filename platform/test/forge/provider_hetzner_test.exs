@@ -600,6 +600,57 @@ defmodule Forge.Provider.HetznerTest do
     end
   end
 
+  # A row whose create never answered (`docs/design/provisioning.md` § Whose account) is destroyed
+  # by asking for the server made for it: by the name create gives it, **under forge's label** —
+  # an operator's own server that shares the name is not forge's to destroy.
+  describe "finding the machine made for a worker" do
+    test "it asks by the create's name and forge's label, with the credential it is given" do
+      answering(200, %{"servers" => [%{"id" => 7, "name" => "forge-w-1"}]})
+
+      assert Hetzner.find("w-1", %{"token" => "hcloud-abc"}) == {:ok, "7"}
+
+      assert_receive {:hetzner, :get, path, "hcloud-abc", nil}
+      assert %URI{path: "/servers", query: query} = URI.parse(path)
+
+      assert URI.decode_query(query) == %{
+               "name" => "forge-w-1",
+               "label_selector" => "forge=worker"
+             }
+    end
+
+    test "no such server is nothing found, not an error" do
+      answering(200, %{"servers" => []})
+      assert Hetzner.find("w-1", %{"token" => "t"}) == {:ok, nil}
+    end
+
+    # Not "nothing found": a row destroyed on a provider that would not answer would be the leak
+    # this exists to close.
+    test "a refusal is an error" do
+      answering(401, %{"error" => %{"message" => "unable to authenticate"}})
+
+      assert {:error, {:hetzner, 401, "unable to authenticate"}} =
+               Hetzner.find("w-1", %{"token" => "t"})
+    end
+
+    test "an API that cannot be reached is an error too" do
+      configure(request: fn _m, _p, _t, _b -> {:error, "connection refused"} end)
+
+      assert {:error, {:hetzner, "connection refused"}} = Hetzner.find("w-1", %{"token" => "t"})
+    end
+
+    test "the name it asks for is the one create gives the server" do
+      answering(201, %{"server" => %{"id" => 5}})
+      configure(location: "nbg1", token: nil)
+      {:ok, _machine} = Hetzner.create(@opts)
+      assert_receive {:hetzner, :post, "/servers", _token, %{name: created}}
+
+      answering(200, %{"servers" => []})
+      Hetzner.find(@opts.worker_id, %{"token" => "t"})
+      assert_receive {:hetzner, :get, path, _token, nil}
+      assert URI.decode_query(URI.parse(path).query)["name"] == created
+    end
+  end
+
   test "it declares the one field its credential is made of" do
     assert Hetzner.credential_fields() == [%{key: "token", label: "API token"}]
   end

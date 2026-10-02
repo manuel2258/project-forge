@@ -1263,8 +1263,12 @@ defmodule Forge.Workers do
 
   # `template` is the template's name, read while it was in hand: it may be deleted while the
   # driver is making the machine, and the row's `template_id` then names nothing.
+  #
+  # **Marked as asked before the driver is**, and unmarked by either answer (`made/4`,
+  # `refused/2`): a row still marked when nothing is creating it is a create the platform was
+  # stopped in the middle of, and the only kind of row `found/1` looks for a machine for.
   defp do_create(attrs, shape, credential, template) do
-    with {:ok, worker, token} <- create(attrs) do
+    with {:ok, worker, token} <- create(Map.put(attrs, :unanswered_create, true)) do
       case Provider.create(machine_opts(worker, token, shape, credential)) do
         {:ok, machine} ->
           made(worker, machine, credential, template)
@@ -1285,7 +1289,7 @@ defmodule Forge.Workers do
   defp made(worker, machine, credential, template) do
     case Repo.update_all(
            from(w in Worker, where: w.id == ^worker.id and w.status != :destroyed),
-           set: [provider_id: machine.provider_id, updated_at: now()]
+           set: [provider_id: machine.provider_id, unanswered_create: false, updated_at: now()]
          ) do
       {1, _} ->
         Logger.info("created worker #{worker.id} (#{machine.provider_id})")
@@ -1305,7 +1309,9 @@ defmodule Forge.Workers do
             "#{machine.provider_id} at once"
         )
 
-        {:ok, _} = update(get!(worker.id), %{provider_id: machine.provider_id})
+        {:ok, _} =
+          update(get!(worker.id), %{provider_id: machine.provider_id, unanswered_create: false})
+
         _ = Provider.destroy(worker.provider, machine.provider_id, open_secret(credential))
 
         Log.record(
@@ -1332,7 +1338,7 @@ defmodule Forge.Workers do
   defp refused(worker, reason) do
     message = message(reason)
     Logger.warning("could not make a machine for worker #{worker.id}: #{message}")
-    {:ok, _worker} = update(worker, %{last_error: message})
+    {:ok, _worker} = update(worker, %{last_error: message, unanswered_create: false})
     Log.record(worker.id, "create.refused", :error, "#{worker.provider} refused: #{message}")
     Provisioning.failed(worker.template_id, message)
     {:error, {:create_failed, reason}}
@@ -1667,6 +1673,11 @@ defmodule Forge.Workers do
   that is not `destroyed`, so one machine the platform has lost track of is one machine's worth
   of that template's capacity that never comes back, and with `max_workers` at 1 that is all of
   it.
+
+  **Overdue is counted from this node's boot at the earliest** (`booted/0`): a platform that was
+  down for longer than the timeout would otherwise find every machine overdue on its first pass,
+  two seconds after starting and before any of them had redialled, and destroy the managed ones
+  with the jobs they were still running (`docs/design/worker-channel.md` § A platform restart).
   """
   @spec sweep_unreachable() :: non_neg_integer()
   def sweep_unreachable do
@@ -1676,9 +1687,38 @@ defmodule Forge.Workers do
     from(w in Worker, where: w.status != :destroyed)
     |> Repo.all()
     |> Enum.reject(&connected?(&1.id))
-    |> Enum.filter(&(DateTime.compare(last_seen(&1), cutoff) == :lt))
+    |> Enum.filter(&(DateTime.compare(waited_since(&1), cutoff) == :lt))
     |> Enum.reject(&rebooting?(&1, now))
     |> Enum.count(&(lose(&1) == :ok))
+  end
+
+  @doc """
+  When this node booted, for the unreachable sweep's clock; nil until `booted!/1` is called.
+
+  Recorded by `Forge.Application` on a node that runs jobs, before anything starts — which is
+  the only kind that sweeps. Nil elsewhere, the tests included, where the sweep measures from
+  `last_seen_at` alone, as it did before there was a boot to measure from.
+  """
+  @spec booted() :: DateTime.t() | nil
+  def booted, do: :persistent_term.get({__MODULE__, :booted_at}, nil)
+
+  @doc "Records `at` as this node's boot; `nil` forgets it."
+  @spec booted!(DateTime.t() | nil) :: :ok
+  def booted!(at \\ now())
+
+  def booted!(nil) do
+    :persistent_term.erase({__MODULE__, :booted_at})
+    :ok
+  end
+
+  def booted!(%DateTime{} = at), do: :persistent_term.put({__MODULE__, :booted_at}, at)
+
+  # The later of when the machine was last heard from and when this node started listening.
+  defp waited_since(worker) do
+    case booted() do
+      nil -> last_seen(worker)
+      booted -> Enum.max([last_seen(worker), booted], DateTime)
+    end
   end
 
   # **A machine told to reboot is away because it was told to**, and a reboot takes longer than
@@ -1732,8 +1772,11 @@ defmodule Forge.Workers do
 
     jobs = requeue_running(worker, :worker_lost)
 
-    # **Said once, not every pass.** A destroy the driver refuses leaves the row as it was, and
-    # this runs again on every scheduling pass until one goes through.
+    # **Said once, not every pass, and counted once.** A destroy the driver refuses leaves the row
+    # as it was, and this runs again on every scheduling pass until one goes through; counted every
+    # pass, one machine the driver would not let go disabled its template within seconds.
+    first? = not Log.said?(worker.id, "unreachable")
+
     Log.record(
       worker.id,
       "unreachable",
@@ -1742,7 +1785,7 @@ defmodule Forge.Workers do
       once: true
     )
 
-    never_connected(worker)
+    if first?, do: never_connected(worker)
     destroy(worker, by: :unreachable)
   end
 
@@ -1902,7 +1945,13 @@ defmodule Forge.Workers do
     # the machine is still there, rather than after it has gone and before its row says so.
     why = cause(by)
 
-    case release_machine(worker) do
+    {worker, released} =
+      case found(worker) do
+        {:ok, worker} -> {worker, release_machine(worker)}
+        {:error, reason} -> {worker, {:error, reason}}
+      end
+
+    case released do
       :ok ->
         Logger.info("destroyed worker #{worker.id}")
         gone(worker, %{status: :destroyed}, {:info, "#{ended(worker)}#{why}"})
@@ -1916,7 +1965,7 @@ defmodule Forge.Workers do
       {:error, {:unknown_provider, _name} = reason} ->
         Logger.error(
           "worker #{worker.id} names provider #{worker.provider}, which this node does not " <>
-            "have; retiring the row. Check the provider's console for #{worker.provider_id}."
+            "have; retiring the row. Check the provider's console for #{machine(worker)}."
         )
 
         gone(
@@ -1924,7 +1973,7 @@ defmodule Forge.Workers do
           %{status: :destroyed, last_error: message(reason)},
           {:warning,
            "row retired#{why}, but its provider #{worker.provider} is not on this node, " <>
-             "so nothing was asked to destroy #{worker.provider_id}: check that provider's console"}
+             "so nothing was asked to destroy #{machine(worker)}: check that provider's console"}
         )
 
       # The operator has looked and said so. It is the only way out of a machine the platform
@@ -1951,7 +2000,7 @@ defmodule Forge.Workers do
       %{status: :destroyed, last_error: message},
       {:warning,
        "retired by force#{why}; #{worker.provider} would not destroy " <>
-         "#{worker.provider_id}: #{message}. If the machine is still there it is nobody's now"}
+         "#{machine(worker)}: #{message}. If the machine is still there it is nobody's now"}
     )
   end
 
@@ -2030,6 +2079,43 @@ defmodule Forge.Workers do
     end
   end
 
+  # **A row whose create was cut off may still have a machine** (`docs/design/provisioning.md`
+  # § Whose account): the id reaches the row only when the create returns, and a platform stopped
+  # mid-create left one billing under a row that said no machine had been made. So the driver is
+  # asked for the machine it would have made for this worker, by the name it made it with, and one
+  # it holds is written onto the row, which is then destroyed like any other.
+  #
+  # **Only a create that never answered.** A refused one made nothing, and asking about it — with
+  # the credential the refusal was often about, deleted or unreadable — failed the same way, kept
+  # the row for ever and held its template's slot. A permanent row is never asked either: it was
+  # never the platform's machine.
+  defp found(%Worker{managed: true, provider_id: nil, unanswered_create: true} = worker) do
+    case Provider.find(worker.provider, worker.id, credential_secret(worker)) do
+      {:ok, nil} ->
+        {:ok, worker}
+
+      {:ok, provider_id} ->
+        Logger.warning(
+          "worker #{worker.id} has no provider id, but #{worker.provider} holds #{provider_id} " <>
+            "made for it; destroying that"
+        )
+
+        Log.record(
+          worker.id,
+          "machine.found",
+          :warning,
+          "#{worker.provider} holds #{provider_id} for this row, whose create never said so"
+        )
+
+        update(worker, %{provider_id: provider_id, unanswered_create: false})
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp found(worker), do: {:ok, worker}
+
   # A row that never got a machine has nothing to release. The driver is the one that made it,
   # read from the row and never whichever is configured now — a node that has been reconfigured
   # would otherwise ask the wrong provider to destroy an id that means something else there —
@@ -2039,12 +2125,17 @@ defmodule Forge.Workers do
   defp release_machine(%Worker{} = worker),
     do: Provider.destroy(worker.provider, worker.provider_id, credential_secret(worker))
 
+  # Which machine a refusal was about. With no `provider_id` the refusal was to the lookup
+  # `found/1` makes, and there is no id to name.
+  defp machine(%Worker{provider_id: nil}), do: "the machine it may have made for this row"
+  defp machine(%Worker{provider_id: provider_id}), do: provider_id
+
   defp kept(worker, reason, by, why) do
     message = message(reason)
 
     Logger.error(
       "could not destroy worker #{worker.id}'s machine (#{worker.provider} " <>
-        "#{worker.provider_id}): #{message}#{retry(by)}."
+        "#{machine(worker)}): #{message}#{retry(by)}."
     )
 
     {:ok, _worker} = update(worker, %{last_error: message})
@@ -2055,7 +2146,7 @@ defmodule Forge.Workers do
       worker.id,
       "destroy.refused",
       :error,
-      "#{worker.provider} would not destroy #{worker.provider_id}#{why}: #{message}#{retry(by)}",
+      "#{worker.provider} would not destroy #{machine(worker)}#{why}: #{message}#{retry(by)}",
       once: true
     )
 

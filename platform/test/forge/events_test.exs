@@ -60,6 +60,31 @@ defmodule Forge.EventsTest do
              errors_on(Event.changeset(%Event{}, %{type: "a.b", actor: %{"kind" => "ghost"}}))
   end
 
+  # `summary/1` is a bounded line for lists and the CLI's log; `detail/1` is the same rendering
+  # whole, for the job's stream, which clips it itself (`docs/design/ui.md` § Activity).
+  describe "detail/1" do
+    test "is the whole of what summary/1 cuts short" do
+      long = String.duplicate("word ", 2000)
+
+      text = %Event{type: "job.harness.text", payload: %{"text" => long}}
+      assert Events.detail(text) == long
+      assert Events.summary(text) == String.slice(long, 0, 200)
+
+      message = %Event{type: "chat.message", payload: %{"text" => long}}
+      assert Events.detail(message) == long
+      assert Events.summary(message) == String.slice(long, 0, 200)
+
+      other = %Event{type: "job.harness.retry", payload: %{"error" => long}}
+      assert Events.detail(other) == ~s(error=#{inspect(long)})
+      assert Events.summary(other) == String.slice(~s(error=#{inspect(long)}), 0, 160)
+    end
+
+    test "is summary/1 where summary/1 already says all of it" do
+      event = %Event{type: "chat.turn", payload: %{"turn" => 3}}
+      assert Events.detail(event) == Events.summary(event)
+    end
+  end
+
   describe "summary/1 of commands" do
     test "reads as what ran and how it ended" do
       sha = String.duplicate("a", 40)

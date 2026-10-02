@@ -17,6 +17,10 @@ defmodule ForgeWorker.Job.Workspace do
   """
 
   alias ForgeWorker.{Checkout, Log, Slice, Volume}
+
+  # How long a run that ended while the platform was away waits to push before it gives up: long
+  # enough for a deploy, short of the job credential's own lifetime.
+  @push_patience_ms :timer.minutes(10)
   alias ForgeWorker.Job.Seed
 
   require Logger
@@ -283,8 +287,58 @@ defmodule ForgeWorker.Job.Workspace do
 
   defp maybe_push(_git, _dir, false, _as), do: :ok
 
-  defp maybe_push(git, dir, true, as),
-    do: Checkout.push(dir: dir, branch: git["branch"], token: git["token"], as: as)
+  defp maybe_push(git, dir, true, as) do
+    push = fn -> Checkout.push(dir: dir, branch: git["branch"], token: git["token"], as: as) end
+    patiently(push, Application.get_env(:forge_worker, :push_patience_ms, @push_patience_ms))
+  end
+
+  @doc false
+  # **A platform that is not there is waited for** (`docs/design/worker-channel.md` § A platform
+  # restart). The branch is the platform's, so a run that ended while the platform restarted
+  # could not push, and failed with its work unpushed — a job lost to a deploy. A push that did
+  # not reach the platform (`unreachable?/1`) is tried again, backing off from a second to thirty,
+  # until `patience` milliseconds have been waited; anything else — a credential refused, a ref
+  # rejected — fails at once, because waiting does not change it. Public, with the push and the
+  # sleep handed in, for its test.
+  @spec patiently((-> :ok | {:error, term()}), non_neg_integer(), (pos_integer() -> any())) ::
+          :ok | {:error, term()}
+  def patiently(push, patience, sleep \\ &Process.sleep/1),
+    do: patiently(push, patience, sleep, 0, 1_000)
+
+  defp patiently(push, patience, sleep, waited, delay) do
+    case push.() do
+      {:error, {_code, out}} = error when is_binary(out) ->
+        if waited < patience and unreachable?(out) do
+          sleep.(delay)
+          patiently(push, patience, sleep, waited + delay, min(delay * 2, 30_000))
+        else
+          error
+        end
+
+      other ->
+        other
+    end
+  end
+
+  # What git — through curl — says when the platform is not there to answer: no connection, a
+  # name that does not resolve, a proxy's 502/503/504, a timeout. A refused credential is a 401 or
+  # a 403 and is not among them.
+  @unreachable [
+    "failed to connect",
+    "couldn't connect",
+    "could not resolve host",
+    "connection refused",
+    "connection reset",
+    "empty reply from server",
+    "timed out",
+    "returned error: 502",
+    "returned error: 503",
+    "returned error: 504"
+  ]
+
+  @doc false
+  @spec unreachable?(String.t()) :: boolean()
+  def unreachable?(out), do: String.contains?(String.downcase(out), @unreachable)
 
   defp remote(git), do: "origin/" <> git["branch"]
 end

@@ -51,6 +51,32 @@ defmodule Forge.Provider.Fake do
     end
   end
 
+  # Nothing unless a test says otherwise with `holding_made/2`: a fake create always answers, so a
+  # machine with no recorded id is one a test arranged.
+  @impl Forge.Provider
+  def find(worker_id, credential) do
+    notify({:provider_find, worker_id, credential})
+
+    case :persistent_term.get({__MODULE__, :refuse_find}, nil) do
+      nil -> {:ok, Map.get(:persistent_term.get({__MODULE__, :made}, %{}), worker_id)}
+      reason -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Makes `find/2` answer `provider_id` for `worker_id`: a machine the provider made whose id never
+  reached the row, because the create was cut off by a shutdown.
+  """
+  @spec holding_made(String.t(), String.t()) :: :ok
+  def holding_made(worker_id, provider_id) do
+    made = :persistent_term.get({__MODULE__, :made}, %{})
+    :persistent_term.put({__MODULE__, :made}, Map.put(made, worker_id, provider_id))
+  end
+
+  @doc "Makes `find/2` fail with `reason`: a provider that will not answer."
+  @spec refuse_find(term()) :: :ok
+  def refuse_find(reason), do: :persistent_term.put({__MODULE__, :refuse_find}, reason)
+
   @impl Forge.Provider
   def status(provider_id, _credential \\ nil) do
     notify({:provider_status, provider_id})
@@ -136,14 +162,17 @@ defmodule Forge.Provider.Fake do
   def refuse_destroy(reason), do: :persistent_term.put({__MODULE__, :refuse_destroy}, reason)
 
   @doc """
-  Stops refusing, both kinds, stops requiring template fields and billing by the hour, and lists
-  the default images again. Called on exit by anything that called `refuse/1`, `refuse_destroy/1`,
-  `requiring/1`, `billing/1`, `listing/1` or `during_create/1`.
+  Stops refusing, all three kinds, stops requiring template fields and billing by the hour, holds
+  no unrecorded machine, and lists the default images again. Called on exit by anything that
+  called `refuse/1`, `refuse_destroy/1`, `refuse_find/1`, `holding_made/2`, `requiring/1`,
+  `billing/1`, `listing/1` or `during_create/1`.
   """
   @spec allow() :: :ok
   def allow do
     :persistent_term.erase({__MODULE__, :refuse})
     :persistent_term.erase({__MODULE__, :refuse_destroy})
+    :persistent_term.erase({__MODULE__, :refuse_find})
+    :persistent_term.erase({__MODULE__, :made})
     :persistent_term.erase({__MODULE__, :requires})
     :persistent_term.erase({__MODULE__, :billed_increment_ms})
     :persistent_term.erase({__MODULE__, :images})

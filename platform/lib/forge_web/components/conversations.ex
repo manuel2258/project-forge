@@ -27,6 +27,11 @@ defmodule ForgeWeb.Conversations do
 
   It grows from `rows` lines to six and then scrolls inside itself. With `send`, a 46px Send
   square sits beside it, labelled for assistive technology.
+
+  **With `enter: :newline` Enter is a new line at every pointer, and there is no hint**: the box
+  is one field of a form that holds more — a question's own words, an approval's comment — and
+  only that form's button sends (`docs/design/ui.md` § The affordance rule). The query becomes
+  `all`, which every pointer matches, so it is the same hook reading the same attribute.
   """
   attr :id, :string, required: true
   attr :name, :string, required: true
@@ -35,6 +40,8 @@ defmodule ForgeWeb.Conversations do
   attr :placeholder, :string, default: "Say something"
   attr :label, :string, default: nil
   attr :send, :boolean, default: false, doc: "draw the Send square beside the box"
+  attr :enter, :atom, values: [:send, :newline], default: :send
+  attr :rest, :global, doc: "for the box itself — an `aria-label` where there is no `label`"
 
   def message_box(assigns) do
     ~H"""
@@ -47,10 +54,11 @@ defmodule ForgeWeb.Conversations do
           rows={@rows}
           phx-hook=".Composer"
           phx-debounce="200"
-          data-newline-on="(pointer: coarse)"
+          data-newline-on={if @enter == :newline, do: "all", else: "(pointer: coarse)"}
           data-max-lines="6"
           placeholder={@placeholder}
           class="min-h-[46px] w-full min-w-0 resize-none rounded-box border border-base-300 bg-base-100 px-3 py-[11px] text-sm/[1.6]"
+          {@rest}
         >{@value}</textarea>
         <button
           :if={@send}
@@ -61,7 +69,11 @@ defmodule ForgeWeb.Conversations do
           <span aria-hidden="true" class="text-lg leading-none">↑</span>
         </button>
       </div>
-      <p class="mt-1 font-mono text-[11px] opacity-40 pointer-coarse:hidden" data-hint>
+      <p
+        :if={@enter == :send}
+        class="mt-1 font-mono text-[11px] opacity-40 pointer-coarse:hidden"
+        data-hint
+      >
         Enter sends · shift-enter for a new line
       </p>
     </div>
@@ -78,9 +90,10 @@ defmodule ForgeWeb.Conversations do
             // then would send half a word, so composition always wins.
             if (event.isComposing || event.keyCode === 229) return
 
-            // A phone: Enter is how a line is ended, and Send is how a message is sent. No
-            // ExUnit test can press a key, so deleting this line fails nothing there; what the
-            // tests pin is the query it reads, `data-newline-on`.
+            // A phone, or a box that is one field of a larger form (`all`): Enter is how a line
+            // is ended, and Send is how a message is sent. No ExUnit test can press a key, so
+            // deleting this line fails nothing there; what the tests pin is the query it reads,
+            // `data-newline-on`.
             if (this.coarse.matches) return
 
             event.preventDefault()

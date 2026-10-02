@@ -92,6 +92,10 @@ defmodule ForgeWeb.OperatorLiveTest do
     assert html =~ "refinement.md"
     assert html =~ ~s(/artifacts/refinement.md/1)
     refute html =~ "not written"
+
+    # Wider than the review page it is laid out like, for the stream's lines
+    # (`docs/design/ui.md` § Space, measure and targets).
+    assert html =~ "max-width: 96rem"
   end
 
   test "a job that did not write what it declared says so", %{
@@ -129,6 +133,83 @@ defmodule ForgeWeb.OperatorLiveTest do
     # Named, not decided: the affordance that commits lives on the project page.
     refute html =~ "Accept as a ticket"
     assert html =~ ~s(href="/projects/#{project.name}")
+  end
+
+  # `docs/design/ui.md` § The queue item: an approval shows what it approves. The pinned version
+  # is rendered between the sentence naming it and Approve, under a link to its source, wherever
+  # the card is drawn — the queue and the ticket's Decide.
+  test "an approval card renders the document it pins, before Approve", %{
+    conn: conn,
+    user: user,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
+    scenario("success", "refinement.md")
+    run_pending(ticket.id)
+
+    for path <- [~p"/", ~p"/tickets/#{project.name}/#{ticket.number}?tab=decide"] do
+      {:ok, view, _html} = live(conn, path)
+
+      pinned = view |> element(~s([id="approving-#{ticket.id}-refinement.md"])) |> render()
+      assert pinned =~ "<h1>Plan</h1>"
+      assert pinned =~ "Do the thing."
+
+      assert pinned =~
+               ~s(href="/tickets/#{project.name}/#{ticket.number}/artifacts/refinement.md/1")
+
+      # Read, then approve: the document is between the sentence naming it and the button that
+      # pins it, in a box that scrolls inside itself.
+      card = view |> element("#approval-#{ticket.id}") |> render()
+      [before, _after] = String.split(card, ~s(value="approved"), parts: 2)
+      [sentence, document] = String.split(before, "<h1>Plan</h1>", parts: 2)
+      assert sentence =~ "Approving pins"
+      refute document =~ "Approving pins"
+      assert pinned =~ "max-h-[50vh]"
+      assert pinned =~ "overflow-y-auto"
+    end
+  end
+
+  # `docs/design/ui.md` § The affordance rule: Enter never commits a decision. As a one-line input
+  # the comment submitted on Enter with the form's first button, which is Approve. A key press is
+  # a browser event ExUnit cannot drive, so what is pinned is the box: a
+  # textarea, which Enter cannot submit, on the composer's hook with the query every pointer
+  # matches, and no hint saying Enter sends.
+  test "Enter in an approval's comment is a new line", %{
+    conn: conn,
+    user: user,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
+    scenario("success", "refinement.md")
+    run_pending(ticket.id)
+
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    box = view |> element("#approval-#{ticket.id} textarea[name=comment]") |> render()
+    assert box =~ ~s(data-newline-on="all")
+    refute has_element?(view, "#approval-#{ticket.id} input[type=text]")
+    refute has_element?(view, "#approval-#{ticket.id} [data-hint]")
+  end
+
+  # A blob is never laid out: an approval pinning one names it and links to its bytes, and draws
+  # no document box. The changeset, a blob too, is not drawn at all (ticket_work_screen_test).
+  test "an approval card draws a blob as its link alone" do
+    version = %Forge.Artifacts.Version{version: 3, content: nil, blob_uri: "file:build.tar"}
+    pin = ForgeWeb.Operator.Components.pinned("game", %{number: 7}, "build.tar", version)
+
+    assert pin.href == "/tickets/game/7/artifacts/build.tar/3"
+    assert pin.html == nil
+
+    html =
+      render_component(&ForgeWeb.Operator.Components.approval_card/1,
+        ticket: %{id: "t1"},
+        pending: %{"to" => "shipping"},
+        approve: [pin]
+      )
+
+    assert html =~ ~s(href="/tickets/game/7/artifacts/build.tar/3")
+    refute html =~ ~s(class="doc")
+    refute html =~ "tabindex"
   end
 
   test "pages require login", %{project: _project} do

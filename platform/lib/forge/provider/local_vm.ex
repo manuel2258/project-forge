@@ -49,6 +49,13 @@ defmodule Forge.Provider.LocalVm do
     end
   end
 
+  # A local machine is its directory, named by the worker id at create, so whether there is one
+  # is whether the directory is there.
+  @impl Provider
+  def find(worker_id, _credential) do
+    if File.dir?(machine_dir(worker_id)), do: {:ok, worker_id}, else: {:ok, nil}
+  end
+
   @impl Provider
   def destroy(provider_id, _credential \\ nil) do
     dir = machine_dir(provider_id)

@@ -473,4 +473,64 @@ defmodule ForgeWorker.Job.WorkspaceTest do
     config = File.read!(Path.join([dir, ".git", "config"]))
     refute config =~ "secret-token"
   end
+
+  # `docs/design/worker-channel.md` § A platform restart: a run that ends while the platform is
+  # away waits to push rather than failing with its work unpushed. Only a push that did not reach
+  # the platform is retried; a refusal is final.
+  describe "pushing to a platform that is not there" do
+    @refused "fatal: unable to access 'https://forge.example/git/p/': Failed to connect to " <>
+               "forge.example port 443 after 3 ms: Couldn't connect to server"
+
+    defp pushes(answers) do
+      {:ok, agent} = Agent.start_link(fn -> answers end)
+
+      fn ->
+        Agent.get_and_update(agent, fn
+          [answer | rest] -> {answer, rest}
+          [] -> {:ok, []}
+        end)
+      end
+    end
+
+    defp sleeper do
+      test = self()
+      fn ms -> send(test, {:slept, ms}) end
+    end
+
+    test "waits, backing off, and pushes once the platform is back" do
+      push = pushes([{:error, {128, @refused}}, {:error, {128, @refused}}, :ok])
+
+      assert Workspace.patiently(push, 60_000, sleeper()) == :ok
+      assert_received {:slept, 1_000}
+      assert_received {:slept, 2_000}
+      refute_received {:slept, _ms}
+    end
+
+    test "a refusal is not waited on" do
+      denied = {:error, {128, "remote: Authentication failed\nfatal: Authentication failed"}}
+
+      assert Workspace.patiently(pushes([denied]), 60_000, sleeper()) == denied
+      refute_received {:slept, _ms}
+    end
+
+    test "gives up once its patience is spent" do
+      push = fn -> {:error, {128, @refused}} end
+
+      assert {:error, {128, @refused}} = Workspace.patiently(push, 3_000, sleeper())
+      assert_received {:slept, 1_000}
+      assert_received {:slept, 2_000}
+      refute_received {:slept, _ms}
+    end
+
+    test "what counts as the platform not being there" do
+      assert Workspace.unreachable?(@refused)
+      assert Workspace.unreachable?("Could not resolve host: forge.example")
+      assert Workspace.unreachable?("The requested URL returned error: 503")
+      refute Workspace.unreachable?("The requested URL returned error: 403")
+
+      refute Workspace.unreachable?(
+               "! [remote rejected] HEAD -> ticket/1 (pre-receive hook declined)"
+             )
+    end
+  end
 end

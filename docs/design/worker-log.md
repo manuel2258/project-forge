@@ -49,6 +49,7 @@ Two sources, one log, told apart on every line:
 | `healthy` | info | a machine marked unhealthy joined again without saying so, and takes work again |
 | `unreachable` | warning | not heard from since when, how many jobs were requeued, and whether the row stays — for a permanent machine only when it had jobs to requeue |
 | `destroyed` | info, or warning when forced, when its provider is gone, or when a machine arrived for a row retired while it was being made | by what: idle, idle and its slot wanted by a job it could not take, unreachable, its owner, the host's command line, a refused protocol |
+| `machine.found` | warning | a machine the driver holds for this row whose id never reached it — a create cut off by a platform restart — found by its name as the row was being destroyed, and destroyed with it (`provisioning.md` § Whose account) |
 | `destroy.refused` | error | the driver's words, when it would not let the machine go — and that the next sweep tries again only when a sweep was what asked (`ui.md` § The workers page: a Destroy pressed on the page promises no retry) |
 
 **What the platform would otherwise repeat is said once.** `sweep_unreachable` runs on every
@@ -80,7 +81,7 @@ channel's `terminate/2`, and its refusal is the line.
 | `machine.rebooting` | warning | the platform said to reboot and the machine is one a driver made, so it is rebooting now |
 | `machine.unrebooted` | warning, or error when the reboot command itself failed | it is not rebooting, and why: the platform said no, or it is not a machine a driver made, or the reboot command itself failed. It was `machine.not_rebooting` until the first end-to-end run (2026-09-30, `measurements.md` § The unhealthy machine, end to end) found the platform keeping it as `unknown`: an underscore is not in a type (below) |
 | `job.refused` | warning, or error for a ceiling | an assignment it did not start: its memory ceiling below the minimum or not a number, or the machine is unhealthy |
-| `job.abandoned` | warning | a job it stopped because the machine went unhealthy, whose ending it therefore did not report — the platform had already requeued it |
+| `job.abandoned` | warning | a job it stopped without reporting its ending, because the platform had already given that run up: the machine went unhealthy, the platform cancelled it as no longer this machine's (`not_ours`) or because the row was retired, or the platform refused the machine — its join, or its connection at the socket (`worker-channel.md` § Reconnection, § Versions) |
 
 And what it could not do for a job, each line carrying the job's id and the failure in the words
 it was reported in (git's, the store's, the filesystem's):

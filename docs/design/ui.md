@@ -36,6 +36,16 @@ and those files differ, this note wins — it is the one that tracks what was bu
   `›`, because the row's promise is that a tap commits.
 - **Filled button** — `base-content` fill, and only ever "commit what I prepared": the Send beside
   a free-text field, and the Send that closes a question form.
+- **Enter never commits a decision.** The free text beside one — a question form's own words, the
+  comment beside Approve or Accept — is a box Enter breaks a line in, and only the button sends. A
+  one-line input submits its form on Enter with the form's first button, which on an approval is
+  Approve: a comment ended with Enter approved the version, and an answer ended with Enter sent the
+  form before the questions after it were read; a radio may submit on Enter too, in some browsers,
+  so a question form swallows Enter from its inputs. The composer is the one box Enter sends from,
+  on a fine pointer (§ Talk), because there the box is the whole form. The create forms still
+  submit on Enter — a ticket's title, a conversation's limits, and a new conversation's first
+  message, which is the composer's box on a form that also holds its project, model and limits;
+  this rule is written for decisions, and has not been carried to them.
 - **Flag** — filled, uppercase, sharp corners. A label, never a control.
 
 Transition actions carry a verb: `Move to planning ›`, never `→ planning`.
@@ -151,7 +161,7 @@ measure; each route sets its own:
 | `/projects/:name/settings` | 48rem | Forms and tables — tokens, people, mirrors. Narrower loses the row; wider is a rail with nothing to put in it. |
 | `/tickets/:project/:number` | 74rem | A work screen (§ The work screen): 53rem tabbed column plus a 21rem facts rail, divided by a 1px rule. Below `lg` the rail is the details sheet, opened from the context strip. |
 | `…/review` | 74rem | Not a work screen: a page that scrolls, its column beside a 21rem rail at `lg` and above it below. The diff needs the width; the rail carries the evidence. |
-| `…/jobs/:job_id` | 74rem | Laid out as the review page is. Manifest in the rail, the harness stream in the column — a bounded pane, since no tab body bounds it here — tailed while the job runs (§ Motion and structure). Under the outcome, and only when memory was the trouble, the `warning` line `capacity.md` § Memory describes. |
+| `…/jobs/:job_id` | 96rem | Laid out as the review page is, wider: its column is the harness stream, whose lines are an agent's paragraphs and commands, and at 74rem the column beside the 21rem rail left them a ribbon. A command's page is the same route and takes the same width, its script in the column. Manifest in the rail, the harness stream in the column — a bounded pane, since no tab body bounds it here — tailed while the job runs (§ Motion and structure). Under the outcome, and only when memory was the trouble, the `warning` line `capacity.md` § Memory describes. |
 | `/chats` | 34rem | One ordered list, so the queue's measure and for the queue's reason: width only lets a second row compete for the same glance. |
 | `/chats/:id` | 74rem | The same work screen: a conversation is work with a branch, a cost and a record. The tabs are the column; what it cost and its facts are the rail, or the details sheet below `lg`. |
 | `/chats/new` | 34rem | The first message is prose and needs the queue's measure, not a form field's — the same reason `/tickets/new` has it. |
@@ -199,7 +209,11 @@ decorative.** No spinner that conveys nothing, no shimmer, no animation that exi
 otherwise — see the note below — so: a conversation streams its reply and its tool calls as they
 arrive, and a ticket's running job streams its activity to the ticket's work screen and to its
 job page (§ The work screen). None of them auto-scrolls away from something you are reading; a
-view that has been scrolled up stays there and says how much arrived beneath.
+view that has been scrolled up stays there and says how much arrived beneath. Nor does a patch
+close what the reader opened: a long line expanded, an edit's diff, a folded run, the plan — each
+`<details>` keeps its `open` while what is around it streams (`ForgeWeb.Actions.keep_open/0`), and
+a stream's rows are keyed by their event, so the row opened is still that event's when a newer one
+is drawn above it.
 
 **Output that accumulates scrolls inside itself rather than growing the page.** A conversation's
 messages and a job's stream are both bounded panes, because a page that grows downwards moves the
@@ -309,6 +323,16 @@ a rejected approval. The push carries it after the title, and the ticket's Decid
 of *Stuck, and waiting for you to choose*. The first ticket stuck on an exhausted `max` read only
 *needs a way forward*, which is true of every stuck ticket and says nothing about this one.
 
+**An approval shows what it approves.** Every document the approval pins is rendered (§ Documents)
+between the sentence naming what it pins and Approve, under its name and version — a link to that
+version's source — in a box that scrolls inside itself, so one long plan does not push the rest of
+the queue below the fold. Approving a version you have to leave the item to read made the approval
+the one decision in the queue taken on a name. A blob is its name and the link to its bytes, since
+a blob is never laid out; a changeset is not drawn here at all, because the diff is its rendering:
+*Read the change first* is beside the card in the queue and on Decide, and the card shares a page
+with the diff on the Changes tab, beneath it, and on the review page, above it. The same card does it on the ticket's Decide and
+Changes tabs.
+
 The end of the queue is the success state: a success-coloured `END OF QUEUE` micro-label, a
 sentence phrased as completion, and one line of evidence that work happened without you. The same
 block, alone, is the empty state. Every other empty state names what would fill it rather than
@@ -332,14 +356,20 @@ answers arrive together (`job-prompt.md` § Answering a document's questions at 
 - **An option is a card**: the headline, the sentence beneath it, and a radio mark. The recommended
   one wears the outlined `RECOMMENDED` tag and **starts chosen**, so accepting every recommendation
   is one tap on Send. There is no separate *Accept all* row any more; pre-choosing did its job.
-- **A locked question folds** to one line — a check, its question, what was chosen and any note —
-  so the form stays short on a phone. Tapping the line opens it again at full size; choosing an
-  option folds it again. A question that starts chosen starts folded. One with nothing chosen is
-  open. Typing keeps a question open, so the form does not move under a thumb that is writing.
+- **Below `lg` a locked question folds** to one line — a check, its question, what was chosen and
+  any note — so the form stays short on a phone. Tapping the line opens it again at full size;
+  choosing an option folds it again. A question that starts chosen starts folded. One with nothing
+  chosen is open. Typing keeps a question open, so the form does not move under a thumb that is
+  writing. **At `lg` and up nothing folds**: there is room for every question at full size, and a
+  question that shrank to a line under the pointer that had just chosen in it hid the other
+  options and the field for a note at the moment they were wanted. The fold is the width's, by
+  CSS, so one page held across a resize is right at both: the question's fields are always in the
+  form, and below `lg` a folded question hides them behind its line.
 - **Free text beside the options**: *add a note, or answer in your own words*. With an option
   chosen it is a note on that option; with none it is the answer. An open question with a chosen
   option offers *Clear choice*, so an answer in your own words is reachable when a recommendation
-  started chosen.
+  started chosen. It is the composer's box, growing to six lines, and **Enter in it is a new
+  line** at every pointer: only Send sends (§ The affordance rule).
 - **Send is disabled until the form can be sent** — every blocking question locked, and in a chat
   every question, since a chat reads each as blocking — and names what it will send,
   `Send 3 answers`. Above it, while it is disabled, one line says what is left:
@@ -468,15 +498,17 @@ composer, the now line, and any open question's form.
   current item, so where the agent is in its own plan is visible without scrolling. When no turn is open the composer is the box
   and Send alone.
 - **The question form** for the last message's questions docks directly above the composer while
-  it is open, so the answers are under the thumb: every question the reply asked, folded as it is
-  locked, and one Send that posts them as a single message (§ Answering questions). The composer
+  it is open, so the answers are under the thumb: every question the reply asked, folded below
+  `lg` as it is locked, and one Send that posts them as a single message (§ Answering questions). The composer
   stays for anything the form does not hold.
 - **The composer** grows from one line to six and then scrolls inside itself. Send is a 46px
   square with a label for assistive technology. Enter sends where the primary pointer is fine; on
   a coarse pointer (`(pointer: coarse)`) Enter is a new line and only Send sends, because a phone
   keyboard has no shift-enter and a composer that cannot take a second line cannot take a
   message. The hint names the gesture that applies and is drawn only for a fine pointer. This is
-  `message_box`'s behaviour, so it holds everywhere a message is typed.
+  `message_box`'s behaviour, so it holds everywhere a message is typed. A box that is one field of
+  a form holding more — a question's own words, an approval's comment — is the same box with Enter
+  a new line at every pointer and no hint (§ The affordance rule).
 - **A stopped conversation** replaces the composer, in the same place, with the reopen sentence
   and **Reopen**.
 
@@ -513,7 +545,15 @@ The event stream of the conversation's job, or of the ticket's current job with 
 linked to their pages, newest first, notices behind their count. Its tool calls are drawn with
 the action lines of § Talk, each carrying its result — a result is not a row of its own — the same component, so an edit, a command and a failure read the
 same whether a conversation or a workflow job made them — and the job page draws them the same
-way; every other event keeps the job page's row, a `memory` row with its type in `warning`. **Live while the job runs**, on a conversation and on a ticket alike (§ Motion
+way; every other event keeps the job page's row, a `memory` row with its type in `warning`. **A
+row wraps rather than truncating**, and a line longer than 200 characters — an agent's paragraph, a
+command on one long line — shows its first 200 and expands in place to the whole of it. A command's
+line, a URL and a query do so wherever they are drawn, the transcript's included, since it is the
+one component; a call drawn as its name and input is already cut short before it gets there
+(`Forge.Events.tool_summary/2`, 160 characters of its input), so it is never long enough to clip.
+The
+whole is already on the page: an agent's text is drawn in full here, where a list or the CLI's log
+draws `Forge.Events.summary/1`'s bounded line. **Live while the job runs**, on a conversation and on a ticket alike (§ Motion
 and structure). A conversation's job is not opened on the job page; this tab is where it is read.
 The job page itself tails its job while it runs, for the same reason.
 
@@ -1038,8 +1078,8 @@ appears nowhere in this product for the same reason approval attaches to a versi
 name.
 
 - A **document** serves its stored text as `text/plain`, front matter included. The rendered view
-  is a work screen's Docs tab — the ticket's or the conversation's; this route is the source
-  behind it.
+  is a work screen's Docs tab — the ticket's or the conversation's — and an approval card that pins
+  it; this route is the source behind it.
 - A **blob** is fetched from the store by its key and served as `text/plain` when it is text no
   larger than a document may be. Anything else — a package, a screenshot, a large log — is served
   as `application/octet-stream` with `content-disposition: attachment`, copied from the store to a

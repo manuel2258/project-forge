@@ -15,6 +15,12 @@ defmodule Forge.Application do
     Forge.Workers.check_billing!()
     Forge.Workers.check_slices!()
 
+    # The unreachable sweep counts from here at the earliest, so a machine is not overdue for the
+    # minutes the platform itself was down (`docs/design/worker-channel.md` § A platform
+    # restart). Only where jobs run, which is where the sweep runs. No test sees this call either;
+    # `Forge.Workers.booted!/1` is tested through the sweep.
+    if Forge.Jobs.config(:run_jobs, true), do: Forge.Workers.booted!()
+
     children =
       [
         ForgeWeb.Telemetry,
@@ -25,6 +31,9 @@ defmodule Forge.Application do
         # Where a connected worker's channel process registers itself, so the platform has
         # somewhere to look when it wants to speak to a machine.
         {Registry, keys: :unique, name: Forge.Workers.Registry},
+        # Before anything is served: a node whose `SECRET_KEY_BASE` opens none of the credentials
+        # it holds refuses to start, rather than starting broken in five places at once.
+        Forge.Credentials.KeyCheck,
         # Start to serve requests, typically the last entry
         ForgeWeb.Endpoint
       ] ++ scheduler() ++ digest()
@@ -56,7 +65,9 @@ defmodule Forge.Application do
   # Recovery is a task beside it rather than part of its `init/1`, and once per boot rather than
   # once per restart. In the scheduler it meant a crash in one scheduling pass recovered the
   # whole node: every running conversation went dormant because one job raised. A task runs when
-  # the tree comes up and then finishes, which is what "on boot" means.
+  # the tree comes up and then finishes, which is what "on boot" means. That it runs after the
+  # endpoint is up, while machines may already be rejoining, is harmless: it touches only jobs on
+  # rows no machine can join (`Forge.Jobs.recover/0`).
   defp scheduler do
     if Forge.Jobs.config(:run_jobs, true),
       do: [{Task, &recover/0}, Forge.Jobs.Scheduler],

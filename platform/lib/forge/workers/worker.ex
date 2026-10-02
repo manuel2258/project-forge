@@ -39,6 +39,9 @@ defmodule Forge.Workers.Worker do
     # Whether the platform may destroy this machine. False for one the operator provisioned;
     # see docs/design/worker-tier.md § Managed and unmanaged.
     field :managed, :boolean, default: true
+    # Asked to be made and not yet answered; see the migration that added it, and
+    # `docs/design/provisioning.md` § Whose account.
+    field :unanswered_create, :boolean, default: false
 
     # What the machine said at its last join, refused or not (`docs/design/worker-channel.md`
     # § Versions): the release string it logs, the twelve-character build of its store path, and
@@ -100,6 +103,7 @@ defmodule Forge.Workers.Worker do
       :unhealthy_at,
       :unhealthy_reason,
       :rebooted_at,
+      :unanswered_create,
       :template_id,
       :provider_credential_id,
       :user_id

@@ -337,8 +337,8 @@ person's edit drops one; a blocking question a job waits on is the case refused 
   from a new one by `(session, turn)`. Its opening is a short continuation — it was stopped and is
   resumed, the branch and where it stands — followed by what the person said since, or held for
   the next message as a cold reopen's is. After every turn rather than at the end, because a
-  conversation goes dormant when its worker is lost or the platform restarts (below), when
-  nothing is left to upload anything — and a turn cut short is not one to resume into.
+  conversation goes dormant when its worker is lost (below), when nothing is left to upload
+  anything — and a turn cut short is not one to resume into.
 
   **When there is no session to restore, or the one there fails its check, reopening is cold**:
   a new process with the conversation so far replayed as context — what was said, which is the
@@ -411,7 +411,9 @@ person's edit drops one; a blocking question a job waits on is the case refused 
   every platform restart silently starting conversations nobody is in — each taking a slice and
   spending the day's allowance on a greeting. A chat goes `:hibernated` instead, which already
   means "stopped without an outcome" and is already excluded from `Workers.promised/1`. It shows
-  as interrupted and waits for a person.
+  as interrupted and waits for a person. A restart of the platform alone loses nothing: a chat
+  whose machine rejoins with it still running carries on where it was, and only one on a machine
+  that is gone goes dormant (`docs/design/worker-channel.md` § A platform restart).
 - **A conversation that is not live refuses a message; it does not record one.** `send/3` reads
   the status from the row — not from the caller's struct, which a page rendered minutes ago — and
   answers `{:error, :not_live}` without writing. Recording it would put a message in the

@@ -210,30 +210,62 @@ defmodule ForgeWeb.Operator.Components do
   @doc """
   An approval. The version is inside the button label, because approval attaches to an exact
   version and never to whatever is latest.
+
+  **It shows what it approves** (`docs/design/ui.md` § The queue item): each pinned document
+  rendered, under its name and version, in a box that scrolls inside itself, between the sentence
+  and Approve. A blob is its name, linked; a changeset is not drawn, since `href` is nil for it —
+  the diff is its rendering, linked beside the card in the queue and on Decide, and on the same
+  page as the card on the Changes tab and the review page.
+
+  The comment is a box Enter breaks a line in: as a one-line input, Enter submitted the form with
+  its first button, and the first button is Approve (`docs/design/ui.md` § The affordance rule).
   """
   attr :ticket, :map, required: true
   attr :pending, :map, required: true
-  attr :approve, :list, default: [], doc: "`{name, version}` pairs the approval pins"
+  attr :approve, :list, default: [], doc: "what the approval pins, each built by `pinned/4`"
 
   def approval_card(assigns) do
     ~H"""
     <div class="flex flex-col gap-[11px]" id={"approval-#{@ticket.id}"}>
       <p class="text-sm/[1.55] opacity-70">
         Approving pins
-        <%= for {{name, version}, i} <- Enum.with_index(@approve) do %>
-          <span :if={i > 0}>, </span><span class="font-mono text-[12.5px]">{name} v{version}</span>
+        <%= for {pin, i} <- Enum.with_index(@approve) do %>
+          <span :if={i > 0}>, </span><span class="font-mono text-[12.5px]">{pin.name} v{pin.version}</span>
         <% end %>
         at <span class="font-mono text-[12.5px]">{@pending["to"]}</span>. A later edit does not
         inherit this approval.
       </p>
 
+      <section
+        :for={pin <- @approve}
+        :if={pin.href}
+        id={"approving-#{@ticket.id}-#{pin.name}"}
+        class="flex min-w-0 flex-col"
+      >
+        <.link
+          href={pin.href}
+          class="flex min-h-[46px] items-center gap-2 self-start font-mono text-[12.5px] hover:underline"
+        >
+          {pin.name} <span class="opacity-60">v{pin.version}</span>
+        </.link>
+        <div
+          :if={pin.html}
+          tabindex="0"
+          aria-label={"#{pin.name} v#{pin.version}"}
+          class="max-h-[50vh] min-w-0 overflow-y-auto overscroll-contain rounded-box bg-base-200 px-4 py-3"
+        >
+          <div class="doc">{pin.html}</div>
+        </div>
+      </section>
+
       <form phx-submit="decide" class="flex flex-col gap-2">
         <input type="hidden" name="ticket" value={@ticket.id} />
-        <input
-          type="text"
+        <ForgeWeb.Conversations.message_box
+          id={"approval-comment-#{@ticket.id}"}
           name="comment"
+          enter={:newline}
           placeholder="comment (optional)"
-          class="h-12 w-full rounded-field border border-base-300 bg-transparent px-3 text-sm placeholder:opacity-40 focus:outline-none focus:border-base-content/40"
+          aria-label="Comment on this approval"
         />
         <button
           type="submit"
@@ -260,8 +292,31 @@ defmodule ForgeWeb.Operator.Components do
   end
 
   defp approve_label([]), do: "Approve"
-  defp approve_label([{name, version}]), do: "Approve #{name} v#{version}"
-  defp approve_label(pairs), do: "Approve #{length(pairs)} versions"
+  defp approve_label([pin]), do: "Approve #{pin.name} v#{pin.version}"
+  defp approve_label(pins), do: "Approve #{length(pins)} versions"
+
+  @doc """
+  One version an approval pins, as `approval_card/1` draws it: `%{name, version, href, html}`.
+  `href` is the version's address, and nil for the changeset, whose rendering is the diff on
+  `…/review` rather than anything at an artifact address; `html` is the rendered document, and
+  nil for anything that is not one — a blob is never laid out.
+
+  Rendered here, when the page loads, and not in the card, which is drawn again on every change.
+  """
+  @spec pinned(String.t(), map(), String.t(), map()) :: map()
+  def pinned(project, ticket, name, version) do
+    changeset? = name == ForgeCore.Workflow.changeset_artifact()
+
+    %{
+      name: name,
+      version: version.version,
+      href:
+        if(not changeset?,
+          do: ~p"/tickets/#{project}/#{ticket.number}/artifacts/#{name}/#{version.version}"
+        ),
+      html: if(is_binary(version.content), do: ForgeWeb.Markdown.to_html(version.content))
+    }
+  end
 
   @doc """
   Open ticket proposals, each with the two things a person can do about it.
@@ -301,11 +356,14 @@ defmodule ForgeWeb.Operator.Components do
 
       <form phx-submit="decide_proposal" class="mt-3 flex flex-col gap-2">
         <input type="hidden" name="version_id" value={p.version_id} />
-        <input
-          type="text"
+        <%!-- Enter breaks a line: as a one-line input it submitted with the first button, which
+              is Accept (`docs/design/ui.md` § The affordance rule). --%>
+        <ForgeWeb.Conversations.message_box
+          id={"proposal-comment-#{p.version_id}"}
           name="comment"
+          enter={:newline}
           placeholder="comment (optional)"
-          class="h-12 w-full rounded-field border border-base-300 bg-transparent px-3 text-sm placeholder:opacity-40 focus:outline-none focus:border-base-content/40"
+          aria-label="Comment on this proposal"
         />
         <button
           :if={p.readable}

@@ -57,6 +57,14 @@ projects it should pay for, and each job picks one from its project's pool
 (`design/credentials.md`). `SECRET_KEY_BASE` is what seals those tokens at rest, so rotating it
 makes every stored credential unreadable and each has to be added again.
 
+**The node refuses to start on a `SECRET_KEY_BASE` that opens none of its stored credentials.**
+A changed key is otherwise found piecemeal: no job starts (*credential … cannot be decrypted*),
+no Hetzner machine can be made or destroyed, every session cookie is void, and the store tokens
+already in workers' hands stop working mid-job. If there are stored credentials — inference or
+provider — and not one of them opens, the release exits naming the cause. Restore the old value;
+or, if the rotation was deliberate, start once with `FORGE_ACCEPT_NEW_SECRET_KEY_BASE=1` and add
+the credentials again — the check passes on its own once one of them opens.
+
 **Mail, which is optional and is what magic-link login costs.** With no relay named the node
 keeps the local adapter — a mailbox in memory that nothing reads — and password login is the only
 one that works. Name one and both magic links and email-change confirmation start delivering:
@@ -464,8 +472,25 @@ you add a provider whose workers dial in from outside, that property is what mak
 
 ## Upgrading
 
+**Restarting the platform does not stop the jobs running on its machines**
+(`design/worker-channel.md` § A platform restart). Each worker redials within seconds and its
+jobs run on. One that is not back within `worker_timeout_ms` — three minutes, counted from the
+moment the node booted, so the downtime itself and the migrations, which run before the node
+starts, do not count against it — has its jobs re-queued, and a managed one is destroyed. A run
+that ends while the platform is down waits for it to push and upload, for up to ten minutes, and
+then reports as usual; one that would wait longer runs again. So a deploy needs no drain,
+provided it is back within those ten minutes and `SECRET_KEY_BASE` is unchanged (§ Secrets
+file). What a restart does lose is the live events a job produced while the platform was down,
+which are best-effort.
+
 What changes for a node that is already running, where the change is in what the platform does
 with rows it already has. Newest first.
+
+- **Jobs survive a restart** (above). Two things from before it stay as they were. A workflow
+  job an earlier restart left `hibernated` stays so — nothing resumed one, and nothing moves it
+  now; its ticket shows no job running and offers *Run again*. And a node whose stored
+  credentials all fail to open — a `SECRET_KEY_BASE` changed some time ago — now refuses to start
+  (§ Secrets file): start it once with `FORGE_ACCEPT_NEW_SECRET_KEY_BASE=1` and add them again.
 
 - **0.7.0: workers before protocol 4 are refused** (`design/worker-channel.md` § What needs a bump,
   and raising the minimum). Protocol 4 and the floor arrive together, so the order is: deploy the

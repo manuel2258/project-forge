@@ -51,7 +51,11 @@ defmodule ForgeWeb.TranscriptTest do
     test "fold once the turn has ended" do
       doc = draw([agent([call("t1", "Bash", %{"command" => "mix test"})], 1)])
 
-      assert [_folded] = Floki.find(doc, "[data-run=folded]")
+      assert [folded] = Floki.find(doc, "[data-run=folded]")
+
+      # Opened by the reader, it stays open while the conversation is patched.
+      assert [mounted] = folded |> Floki.find("details") |> Floki.attribute("phx-mounted")
+      assert mounted =~ "ignore_attrs"
     end
 
     # A conversation that has stopped will not finish the reply it was cut off in, so its calls

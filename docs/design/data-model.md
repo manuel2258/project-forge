@@ -178,9 +178,11 @@ of it writes the ticket row and an event in one transaction.
 The platform runs no job processes. A job is a process only while `status` is `running`, and
 that process is on the worker it was assigned to: one supervised process per job there, keyed
 by job id. A job in `waiting` (blocked on a human) or `hibernated` has none anywhere.
-On boot, `Forge.Jobs.recover/0` deals with rows a previous node left `running`: a workflow job
-goes back to `pending` for the scheduler to place again, a conversation goes `hibernated` until a
-person resumes it. Answering a waiting job's blocking questions sets it `pending` too; its next
+On boot, `Forge.Jobs.recover/0` deals with the rows a previous node left `running` that no
+machine can report on any more — on a destroyed or missing worker row: a workflow job goes back to
+`pending` for the scheduler to place again, a conversation goes `hibernated` until a person
+resumes it. Every other `running` row is left for its machine to report on at its rejoin
+(`docs/design/worker-channel.md` § A platform restart). Answering a waiting job's blocking questions sets it `pending` too; its next
 run rebuilds from the branch and the manifest.
 
 ## Invariants

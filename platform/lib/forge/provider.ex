@@ -111,6 +111,24 @@ defmodule Forge.Provider do
     with {:ok, driver} <- driver(provider), do: driver.list(credential)
   end
 
+  @doc """
+  The provider id of the machine this driver made for `worker_id`, if it holds one; nil if not.
+
+  **What a row that never heard its create's answer is destroyed by**
+  (`docs/design/provisioning.md` § Whose account). The id reaches the row only when the create
+  returns, and a platform stopped mid-create leaves a machine billing under a row with no
+  `provider_id`. Each driver finds it by the name it gave the machine at create, which is the
+  worker id in some form, so no guess is involved and nothing that is not forge's can match. An
+  error — the provider not answering, or the driver unable to ask — keeps the row as a refused
+  destroy does; nil is the provider saying there is no such machine.
+  """
+  @callback find(String.t(), map() | nil) :: {:ok, String.t() | nil} | {:error, term()}
+
+  @spec find(String.t(), String.t(), map() | nil) :: {:ok, String.t() | nil} | {:error, term()}
+  def find(provider, worker_id, credential \\ nil) do
+    with {:ok, driver} <- driver(provider), do: driver.find(worker_id, credential)
+  end
+
   @typedoc """
   An image a machine can be made from, as the platform reads it.
 

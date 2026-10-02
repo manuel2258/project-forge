@@ -15,7 +15,7 @@ defmodule ForgeWeb.WorkScreen do
 
   use Phoenix.Component
 
-  import ForgeWeb.Actions, only: [line: 1]
+  import ForgeWeb.Actions, only: [clip: 1, line: 1]
 
   alias Forge.Artifacts
   alias ForgeWeb.{Format, Layouts, Markdown, Sheet}
@@ -283,7 +283,8 @@ defmodule ForgeWeb.WorkScreen do
   @doc """
   A job's event stream (`docs/design/ui.md` § Activity): newest first, a page at a time
   (`ForgeWeb.JobStream.page/0`), notices behind their count. Tool calls are action lines, the
-  same component the transcript draws them with; every other event keeps the job page's row.
+  same component the transcript draws them with; every other event keeps the job page's row,
+  wrapped, its whole text past 200 characters behind a control (`ForgeWeb.Actions.clip/1`).
 
   Newest first needs no pinning: what arrives appears at the top, where the reader already is.
   The page owning it starts with `ForgeWeb.JobStream.init/1` and hands `more` and `notices` to
@@ -316,8 +317,12 @@ defmodule ForgeWeb.WorkScreen do
       <%!-- Two rows narrow, one row wide. The type column is 196px because the longest type in
             the product, `artifact.version_written`, is 24 mono characters and a column narrower
             than its content does not clip — it overlaps the next one. --%>
+      <%!-- Keyed and named by the event, so a row a reader opened is still that event's row after
+            a newer one is drawn above it — by index, every row was another event's next time. --%>
       <li
         :for={entry <- @entries}
+        :key={seq(entry)}
+        id={"#{@id}-#{seq(entry)}"}
         class="grid grid-cols-[64px_1fr] gap-x-2 border-b border-base-300/60 py-1.5 font-mono text-[12.5px] sm:grid-cols-[64px_196px_1fr]"
       >
         <%= case entry do %>
@@ -338,9 +343,12 @@ defmodule ForgeWeb.WorkScreen do
             ]}>
               {String.replace_prefix(event.type, "job.harness.", "")}
             </span>
-            <span class="col-start-2 min-w-0 truncate opacity-70 sm:col-start-3">
-              {Forge.Events.summary(event)}
-            </span>
+            <%!-- Wrapped, never truncated, and past 200 characters opened in place
+                  (`docs/design/ui.md` § Activity): the whole of an agent's text, not the
+                  bounded line a list draws. --%>
+            <div class="col-start-2 min-w-0 break-words opacity-70 sm:col-start-3">
+              <.clip text={Forge.Events.detail(event)} />
+            </div>
         <% end %>
       </li>
     </ol>
@@ -368,6 +376,9 @@ defmodule ForgeWeb.WorkScreen do
     </div>
     """
   end
+
+  defp seq({:action, event, _action}), do: event.seq
+  defp seq({:event, event}), do: event.seq
 
   @doc """
   A stream's heading: a run that has ended says so, one still going says how far it got. It

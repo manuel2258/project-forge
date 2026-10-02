@@ -207,7 +207,9 @@ defmodule ForgeWeb.JobLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_scope={@current_scope} capacity={@capacity} measure="74rem">
+    <%!-- Wider than the review page it is laid out like: its column is the harness stream, whose
+          lines are an agent's paragraphs (`docs/design/ui.md` § Space, measure and targets). --%>
+    <Layouts.app flash={@flash} current_scope={@current_scope} capacity={@capacity} measure="96rem">
       <.link
         navigate={~p"/tickets/#{@project.name}/#{@ticket.number}"}
         class="flex min-h-[46px] items-center font-mono text-[12.5px] opacity-60 hover:opacity-100"

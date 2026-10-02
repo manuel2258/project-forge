@@ -116,7 +116,7 @@ defmodule ForgeWeb.QueueLive do
     approve =
       for name <- Forge.Engine.awaiting_approval(ticket),
           version = Artifacts.latest(ticket.id, name),
-          do: {name, version.version}
+          do: pinned(item.project, ticket, name, version)
 
     Map.put(item, :approve, approve)
   end
@@ -366,7 +366,7 @@ defmodule ForgeWeb.QueueLive do
   # operator should take from a one-line summary. It arrives either as a pending approval or, when
   # the workflow leaves the ticket resting in a human state, as the transition out of it.
   defp reviewable?(%{kind: :approval, approve: approve}),
-    do: Enum.any?(approve, fn {name, _version} -> name == Workflow.changeset_artifact() end)
+    do: Enum.any?(approve, &(&1.name == Workflow.changeset_artifact()))
 
   defp reviewable?(%{kind: kind, detail: detail}) when kind in [:review, :stuck],
     do: Map.get(detail, :reviewable, false)

@@ -107,7 +107,8 @@ null, by one that does not (§ An unhealthy machine).
 `seeds` is a list because a worker is not pinned to a project — `docs/design/worker-tier.md` §
 Volumes and the seed says why — so it may hold one seed per project it has run a job for.
 
-`running` is what makes a reconnect survivable; see § Reconnection.
+`running` is what makes a reconnect survivable — a dropped socket and a restart of the platform
+alike; see § Reconnection and § A platform restart.
 
 `protocol`, `release` and `build` say what is speaking; see § Versions. They are in the join and
 not in `ready` because the platform has to decide before any work whether it will talk to this
@@ -122,7 +123,7 @@ Platform → worker:
 | `assign` | `job_id`, `kind`, spec JSON, slice limits (`memory_max`, `cpu_weight`), git endpoint + per-job token + branch + base, transcript key + token, a prefix and `put` token for the harness session's uploads, seed key + token, the backlog, `resume_session` (nil when there is nothing to resume), `fork_session`, the session file to restore (`session`: key, `get` token, id, the version that wrote it), wall clock, the job's inference credential sealed for this worker (`credentials.md` § Delivery to the machine); a chat adds `idle_ms`, `max_cost_usd` and `history` and a longer wall clock, and its spec a `replay` once it has been reopened | Run this job. |
 | `assign` for a command | `job_id`, `kind: "command"`, its spec (the script's text, argv, commit, env, timeout), slice limits, git endpoint + a read-only per-job token + branch + base, the log's store key + `put` token, seed key + token, wall clock | Run this command (`docs/design/commands.md`). No credential, no backlog, no session. |
 | — and for either, when it declares a group of files | `outputs`: a store prefix and a `put` token scoped to it (`docs/design/storage.md` § Serving) | Where the group's files go. |
-| `cancel` | `job_id`, reason | Stop it. The worker still sends a terminal message. |
+| `cancel` | `job_id`, reason | Stop it. For `ticket_cancelled` the worker still sends a terminal message — a `hibernated` carrying the run's result, even when its push is refused because the cancel revoked the job's credential — and that is how the platform settles what the run spent. For `not_ours` and `retired` it sends none: the platform has already given that run up — re-queued it, placed it elsewhere or finished with it — and a report would be recorded against whatever the job is now (§ Reconnection). |
 | `message` | `job_id`, `message_id`, text | A chat only: write this to the harness's stdin. |
 | `interrupt` | `job_id` | A chat only: end this turn, keep the process. |
 | `close` | `job_id`, reason | A chat only: end the conversation, release the machine. |
@@ -380,6 +381,16 @@ The refused join does **not** write `last_seen_at`. A permanent machine that kee
 still not a machine the platform can hear from, and its jobs have to reach
 `Workers.sweep_unreachable/0`'s timeout like any unreachable machine's.
 
+**The worker, refused, stops what it is running** — refused at the join, or turned away at the
+socket itself, where a row that is destroyed or a token that is not its gets a 403 before any join
+(`WorkerSocket.connect/3`); after a reconnect that is how a retired machine is refused, and the
+join's own `destroyed` is only met on a socket that outlived its row. Nothing it reports can reach
+the platform now: a refused join carries no messages, and the platform re-queues a refused
+machine's jobs — at once for a managed one it destroys, after the unreachable timeout for a
+permanent one. A permanent machine that ran on would spend its jobs' credentials on runs whose
+results nobody would ever record, while the same jobs ran again elsewhere. So it stops them as it
+does when it is unhealthy, reporting nothing.
+
 **The worker, refused, says so once and waits minutes, not seconds.** One log line naming the
 protocol it speaks and the range the platform accepts, and a rejoin after `refused_retry_ms`
 (five minutes) rather than Slipstream's own backoff, which settles at ten seconds and would
@@ -506,13 +517,35 @@ what was sent.
 reply expected, and so is a chat's `turn`, because it carries the cost the daily cap is computed
 from; the platform replies only after the transaction that records them commits. Until the ack
 arrives the worker keeps the message and re-sends it after any reconnect. The platform therefore
-must treat them as idempotent — keyed by the job, since a job row is one attempt and the payloads
-carry no attempt, and a `turn` by its place in the conversation (`Conversations.record_turn/2`):
-a second `result` for a job already `finished` is acked and dropped, not recorded twice.
+must treat them as idempotent — keyed by the job, since the payloads carry no attempt, and a
+`turn` by its place in the conversation (`Conversations.record_turn/2`): a second `result` for a
+job already `finished` is acked and dropped, not recorded twice. A job row is not one run — a
+re-queued job runs again under the same row — so a report about an earlier run is told apart by
+the job's status, below, and not by the key.
+
+**A report about a run the platform has given up on is acked and dropped.** A `failed` or a
+`hibernated` for a job that is back in the queue, waiting on a person or parked is the end of a
+run the platform already let go of: it re-queued the job when the machine was lost, unhealthy or
+retired, or after a rejoin that did not list it — or a person reopened the conversation — and a
+run of it will be scheduled again. Recording the report would finish a workflow job with an
+error, leave it hibernated where nothing resumes it, or put a reopened chat back to sleep. A
+current worker sends no such report (it stops a run cancelled as `not_ours` or `retired`
+silently, above); this rule is for the machines that predate that, and for a run that ended before
+any `cancel` reached it. **It narrows the race and does not close it**: a job re-queued and placed
+on the same machine again before the stale report is read is `running` once more, and the report
+lands on the new run. From a current worker that needs a report already queued while the socket
+was down, read in the milliseconds after the rejoin; from an older one, which drops a second
+assignment of a job it is still stopping as *already running*, it is the old bug — its refused
+push's `failed` finishing the re-run as an error — until the machine is updated. Only a run
+identity carried in the protocol would close it. A `result` is not dropped: it is the
+run's answer, which a job that finished while the socket was down still owes (`Jobs.complete/2`).
+Nor is a dormant chat's ending, which `Conversations.ended/4` records as before: dormant is
+`hibernated`, not one of the statuses above.
 
 That ordering — commit, then ack — is the one that fails safely. Acking first and crashing loses
 the job's outcome while the worker believes it is delivered. Committing first and crashing costs a
-duplicate delivery, which the idempotency key absorbs.
+duplicate delivery, which the idempotency key absorbs — for a `result` and a `turn`; a re-sent
+`hibernated` or `failed` is absorbed by the status rule above, with the race it states.
 
 **`assign` is not acked, and the row is marked before it goes out.** The opposite was written
 here first — ack, then mark — and it is wrong for the same reason milestone 1 already
@@ -535,18 +568,72 @@ against the platform's rows for this worker:
 
 - **Platform says running, worker does not have it.** The run is gone — the machine rebooted, the
   release restarted, the slice was killed. The job goes back to `pending` and is scheduled afresh.
-  This is the rule `Forge.Jobs.recover/0` already applies at platform boot, and PR #11's
-  cold-recovery fix is what makes it safe: a re-queued job clears `out/` rather than inheriting a
-  dead run's outputs.
-- **Worker has it, platform has already recorded a terminal state.** The platform sends `cancel`.
-  A duplicate terminal message then arrives and is dropped by the idempotency rule above.
-- **Both agree.** Nothing happens, and the worker re-sends anything unacked.
+  PR #11's cold-recovery fix is what makes that safe: a re-queued job clears `out/` rather than
+  inheriting a dead run's outputs.
+- **Worker has it, platform does not have it running there.** The job is finished, back in the
+  queue, waiting, parked, or running on another machine. The platform sends `cancel` with
+  `not_ours`, and the worker stops the run **and reports nothing** — the same as a run stopped
+  because the machine went unhealthy (§ An unhealthy machine). A job its ticket's cancel finished
+  is the exception: it is told `ticket_cancelled`, because that cancel may never have reached a
+  machine that was away when it was sent, and the report it asks for is how the run's spending is
+  settled. It used to report, and the report
+  landed on the job as it now was: a re-queued job finished as an error, because the run's final
+  push was refused with the credential the re-queue had revoked, or left `hibernated`, which
+  nothing resumes. A report that still arrives from an older worker is dropped (§ Delivery).
+- **An assignment for a job whose cancelled run is still stopping waits for it.** The scheduler
+  prefers the machine a job last ran on, so a job re-queued off this machine can be handed straight
+  back while its old run is still in its grace period. The worker used to drop that assignment
+  as *already running*, leaving the platform with a job marked `running` that nothing was; it now
+  holds it and starts it once the old run has stopped.
+- **Both agree.** Nothing happens, and the worker re-sends anything unacked. The job runs on.
+
+## A platform restart
+
+**A job running on a machine survives the platform restarting under it.** The worker holds its
+jobs, keeps its terminal messages until they are acked, and redials within seconds; the platform
+only has to not throw the work away before it does. So at boot `Forge.Jobs.recover/0` touches
+only what no machine can ever report: a job left `running` on a row that is `destroyed`, or
+missing, or no row at all. Those go back to the queue — a conversation dormant — and their git
+credentials are revoked. Every other `running` job is left as it is, credential and open run
+included, and what becomes of it is the worker's to say at its rejoin, by the rules above: listed,
+it runs on in place; not listed, it is re-queued; never back, the unreachable sweep re-queues it
+(§ When the machine goes away).
+
+It used to re-queue everything at boot. Every rejoin then found its jobs no longer its own and
+was told to cancel them, so every deploy threw away every run in flight — and the cancelled runs'
+reports finished those jobs as errors or left them hibernated.
+
+**There is no ordering to get right at boot**, and that is the reason for the rule rather than a
+consequence of it. The jobs recovery touches are on rows a machine cannot join, so a worker that
+rejoins in the first milliseconds, before recovery has run, meets nothing recovery is about to
+change. Recovery is still once per boot, beside the scheduler and not in its `init`.
+
+**The unreachable sweep's clock starts at boot at the earliest.** `last_seen_at` is written by a
+heartbeat every twenty seconds, and a platform that was down for longer than the timeout would
+otherwise find every machine overdue on its first pass, two seconds after it started — before the
+machines had had a chance to redial — and destroy the managed ones with their jobs. A row is
+overdue only once `worker_timeout_ms` has passed since the later of its `last_seen_at` and the
+moment this node booted (`Workers.booted/0`).
+
+**A run that ends while the platform is down waits for it.** Its branch and its store are the
+platform's, so its last push and its uploads have nowhere to go: the push is tried again while it
+cannot reach the platform, for up to ten minutes (`Workspace.commit_and_push/4`), and an upload
+retries for about eight (`ForgeWorker.Store`). Meanwhile the job is still the machine's, listed at
+its rejoin, and its result lands as usual once the platform is back. A credential refused is not
+waited on. A push that gives up fails the run; the job has left the machine's list by its rejoin,
+so it is re-queued there and the `failed` that follows is dropped as a run given up on.
+
+What a restart still costs: events a job produced while the platform was down, which are
+best-effort (§ Delivery); a run that ended and could not push or upload for longer than that
+patience, which runs again; and a job whose machine does not come back within the timeout, which
+runs again from its branch, as it would after any lost machine.
 
 ## When the machine goes away
 
 `last_seen_at` is written at a join the platform accepts, at `ready` and by every `heartbeat` —
-never by `stats`, and never by a refused join (§ Versions). Past `worker_timeout_ms`
-the platform stops waiting (`Workers.sweep_unreachable/0`), and what it does next depends on whose
+never by `stats`, and never by a refused join (§ Versions). Past `worker_timeout_ms` — counted
+from `last_seen_at`, or from this node's boot if that is later (§ A platform restart) — the
+platform stops waiting (`Workers.sweep_unreachable/0`), and what it does next depends on whose
 machine it is:
 
 - **A managed worker** has its running jobs re-queued — a workflow job to `pending`, a chat to

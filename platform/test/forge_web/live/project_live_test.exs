@@ -213,6 +213,22 @@ defmodule ForgeWeb.ProjectLiveTest do
       assert html =~ "Decline"
     end
 
+    # `docs/design/ui.md` § The affordance rule: as a one-line input the comment submitted on
+    # Enter with the form's first button, which is Accept. What is pinned is the box ExUnit can
+    # see: a textarea on the composer's hook, Enter a new line at every pointer.
+    test "Enter in a proposal's comment is a new line", %{
+      conn: conn,
+      project: project,
+      version: version
+    } do
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}")
+
+      box = view |> element("#proposal-comment-#{version.id}") |> render()
+      assert box =~ "<textarea"
+      assert box =~ ~s(data-newline-on="all")
+      refute has_element?(view, "input[name=comment]")
+    end
+
     test "accepting one admits a ticket and stops listing it", %{
       conn: conn,
       project: project,

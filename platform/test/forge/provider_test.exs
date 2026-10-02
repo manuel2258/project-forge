@@ -236,6 +236,15 @@ defmodule Forge.ProviderTest do
       assert Enum.all?(instances, &(&1.status == "pending"))
     end
 
+    # A row whose create never answered (`docs/design/provisioning.md` § Whose account): the
+    # machine is the directory named by its worker id, so finding it is asking for that.
+    test "a worker's machine is found by its id, and nothing is found for another", %{dir: dir} do
+      File.mkdir_p!(Path.join([dir, "machines", "w-1"]))
+
+      assert LocalVm.find("w-1", nil) == {:ok, "w-1"}
+      assert LocalVm.find("w-2", nil) == {:ok, nil}
+    end
+
     # No directory is no machines, not an error: nothing has been created on this host yet, and
     # a panel that errored on a fresh node would report a problem where there is none.
     test "a host that has created nothing holds nothing", %{dir: dir} do

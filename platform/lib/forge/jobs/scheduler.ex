@@ -1,8 +1,8 @@
 defmodule Forge.Jobs.Scheduler do
   @moduledoc """
-  Assigns pending jobs to workers that have room for them, and re-queues jobs left running by
-  a previous node on boot. Jobs are rows, so anything may enqueue one; only this process hands
-  them out.
+  Assigns pending jobs to workers that have room for them. Jobs are rows, so anything may enqueue
+  one; only this process hands them out. What a previous node left running is the application's
+  boot task's (`Forge.Jobs.recover/0`), not this process's.
 
   The gate is what the job asked for, not a count: a job is assigned only when its memory and
   cores fit what a worker has left and the worker takes its kind, because the tier rests on an

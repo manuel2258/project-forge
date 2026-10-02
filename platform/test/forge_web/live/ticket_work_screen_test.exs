@@ -359,6 +359,9 @@ defmodule ForgeWeb.TicketWorkScreenTest do
                "Approve changeset v1"
              )
 
+      # The card draws a pinned document, not a changeset: the diff above it is its rendering.
+      refute has_element?(view, "#approval-#{ticket.id} section")
+
       assert has_element?(view, ~s(#changes a[href="#{page(project, ticket, "/review")}"]))
     end
 

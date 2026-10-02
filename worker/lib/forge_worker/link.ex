@@ -83,10 +83,13 @@ defmodule ForgeWorker.Link do
     socket =
       new_socket()
       |> assign(:jobs, %{})
-      # Jobs stopped because this machine went unhealthy, whose endings are reported to nobody:
-      # the platform has put them back in the queue (`docs/design/worker-tier.md` § What happens
-      # then).
+      # Runs stopped because the platform has given them up — the machine went unhealthy, a
+      # `cancel` said so, or the platform refused this machine — whose endings are reported to
+      # nobody (`give_up/3`).
       |> assign(:abandoned, MapSet.new())
+      # Assignments for a job whose earlier run here is still stopping, started once it has
+      # (`docs/design/worker-channel.md` § Reconnection).
+      |> assign(:deferred, %{})
       # Whether the platform has answered this machine's `unhealthy`: said until it has, and not
       # again after — its join keeps the mark from then on (`docs/design/worker-channel.md` § An
       # unhealthy machine).
@@ -165,39 +168,29 @@ defmodule ForgeWorker.Link do
   defp put_unless_nil(payload, key, value), do: Map.put(payload, key, value)
 
   @impl Slipstream
-  def handle_message(_topic, "assign", assignment, socket) do
-    cond do
-      Map.has_key?(socket.assigns.jobs, assignment["job_id"]) ->
-        Logger.info("already running job #{assignment["job_id"]}")
-        {:ok, socket}
+  def handle_message(_topic, "assign", assignment, socket), do: {:ok, take(socket, assignment)}
 
-      # Nothing it is given now can run, and the platform has put it back in the queue — every
-      # job running here when the report reached it, and any assignment its channel is handed
-      # after that (`docs/design/worker-channel.md` § An unhealthy machine). So it is dropped, and
-      # nothing is reported: a result from this machine would be recorded as the job's answer.
-      why = Health.unhealthy() ->
-        Log.line("job.refused", :warning, "not started: this machine is unhealthy: #{why}",
-          job_id: assignment["job_id"]
-        )
-
-        {:ok, socket}
-
-      reason = ceiling_refused(assignment) ->
-        {:ok, refuse(socket, assignment, reason)}
-
-      true ->
-        Log.line("job.accepted", :info, accepted(assignment), job_id: assignment["job_id"])
-        {:ok, start_job(socket, assignment)}
-    end
+  # **A `cancel` that says the platform has given the run up stops it unreported** — `not_ours`
+  # from a rejoin, `retired` from a row the platform destroyed. The job is already back in the
+  # queue, placed elsewhere or finished, and the run's ending would land on the job as it now is:
+  # a re-queued job finished as an error, because its last push was refused with the credential the
+  # re-queue revoked (`docs/design/worker-channel.md` § Reconnection). Any other reason —
+  # `ticket_cancelled` — is reported as before, which is how the platform settles what the run
+  # spent. A job with no runner yet is stopped the moment it has one, as an unhealthy machine's is.
+  def handle_message(_topic, "cancel", %{"job_id" => job_id, "reason" => reason}, socket)
+      when reason in ["not_ours", "retired"] do
+    {:ok, give_up(socket, job_id, given_up(reason))}
   end
 
+  # Any cancel ends the platform's interest in the job here, so an assignment held for it — its
+  # next run on this machine, waiting for the old one to stop — goes with it, whatever the reason.
   def handle_message(_topic, "cancel", %{"job_id" => job_id}, socket) do
     case socket.assigns.jobs[job_id] do
       %{runner: runner} = job when is_pid(runner) -> cancel(job)
       _other -> Logger.info("asked to cancel #{job_id}, which is not running here")
     end
 
-    {:ok, socket}
+    {:ok, update_in(socket.assigns.deferred, &Map.delete(&1, job_id))}
   end
 
   # A conversation is spoken to while it runs, which no workflow job ever is. Each of these is
@@ -226,6 +219,43 @@ defmodule ForgeWorker.Link do
     )
 
     {:ok, socket}
+  end
+
+  # What to do with an assignment, wherever it comes from: the platform's `assign`, or one held
+  # until the earlier run of its job had stopped.
+  defp take(socket, %{"job_id" => job_id} = assignment) do
+    cond do
+      # **A job whose run here was given up on is assigned again once that run has stopped.** The
+      # scheduler prefers the machine a job last ran on, so a job re-queued off this machine can
+      # come straight back while its old run is in its grace period. Dropped as *already running*,
+      # it left the platform with a job marked `running` that nothing was running.
+      Map.has_key?(socket.assigns.jobs, job_id) and
+          MapSet.member?(socket.assigns.abandoned, job_id) ->
+        Logger.info("job #{job_id} assigned again; starting it once its earlier run has stopped")
+        put_in(socket.assigns.deferred[job_id], assignment)
+
+      Map.has_key?(socket.assigns.jobs, job_id) ->
+        Logger.info("already running job #{job_id}")
+        socket
+
+      # Nothing it is given now can run, and the platform has put it back in the queue — every
+      # job running here when the report reached it, and any assignment its channel is handed
+      # after that (`docs/design/worker-channel.md` § An unhealthy machine). So it is dropped, and
+      # nothing is reported: a result from this machine would be recorded as the job's answer.
+      why = Health.unhealthy() ->
+        Log.line("job.refused", :warning, "not started: this machine is unhealthy: #{why}",
+          job_id: job_id
+        )
+
+        socket
+
+      reason = ceiling_refused(assignment) ->
+        refuse(socket, assignment, reason)
+
+      true ->
+        Log.line("job.accepted", :info, accepted(assignment), job_id: job_id)
+        start_job(socket, assignment)
+    end
   end
 
   # **The last place a nonsense ceiling can be kept from systemd**, and it holds against a
@@ -332,7 +362,7 @@ defmodule ForgeWorker.Link do
   def handle_info({:rejoin, _topic, _stale}, socket), do: {:noreply, socket}
 
   # A job abandoned before it had a runner is stopped the moment it has one: the platform has
-  # already put it back in the queue.
+  # already given that run up.
   def handle_info({:runner, job_id, pid}, socket) do
     socket = update_job(socket, job_id, &Map.put(&1, :runner, pid))
 
@@ -350,7 +380,13 @@ defmodule ForgeWorker.Link do
   # A mark is an episode, and said afresh: `ForgeWorker.Health` marks once per life, so a second
   # one is a health process that restarted, forgot, and found the machine unhealthy again.
   def handle_info({:unhealthy, _reason}, socket) do
-    {:noreply, socket |> assign(:unhealthy_answered, false) |> report_unhealthy() |> abandon()}
+    socket = socket |> assign(:unhealthy_answered, false) |> report_unhealthy()
+
+    {:noreply,
+     abandon(
+       socket,
+       "stopped because this machine is unhealthy; the platform puts it back in the queue"
+     )}
   end
 
   def handle_info({:event, job_id, event}, socket) do
@@ -369,8 +405,8 @@ defmodule ForgeWorker.Link do
   end
 
   # An abandoned job's ending: its runner was stopped, or its `systemd-run` could not reach PID 1,
-  # and the platform has requeued it either way. Its own report would be recorded as its answer —
-  # an error for the machine's failure — so it goes nowhere.
+  # and the platform has given the run up either way — re-queued it, placed it elsewhere or
+  # finished with it. Its own report would land on the job as it now is, so it goes nowhere.
   def handle_info({:terminal, job_id, message, payload}, socket) do
     if MapSet.member?(socket.assigns.abandoned, job_id),
       do: {:noreply, withhold(socket, job_id)},
@@ -416,9 +452,34 @@ defmodule ForgeWorker.Link do
   # which on a worker booting before the platform is reachable is every dial. A socket with no
   # configuration cannot be reconnected in place; stopping lets the supervisor start it again
   # with one, which is the only repair there is.
+  #
+  # **The refs it was waiting on replies for go with the connection.** A ref is a counter that
+  # starts again on the next one, so a reply there to an untracked `ready` or `heartbeat` could
+  # match a ref the old connection used for a terminal message and forget it unsent. The messages
+  # themselves stay in `unacked`, and the next join sends every one of them again.
+  #
+  # **A platform that refuses the connection itself is a refusal too.** A row that is destroyed, or
+  # a token that is not its, is turned away at the socket — `WorkerSocket.connect/3` answers 403 —
+  # before any join, so `handle_topic_close/3` never hears of it; after a reconnect that is how a
+  # retired machine is refused. Nothing it reports can be recorded, so it stops what it runs, as a
+  # refused join does.
   @impl Slipstream
   def handle_disconnect(reason, socket) do
     Logger.warning("disconnected from the platform: #{inspect(reason)}")
+    socket = assign(socket, :acks, %{})
+
+    socket =
+      case reason do
+        {:error, {:upgrade_failure, %{status_code: status}}} when status in [401, 403] ->
+          abandon(
+            socket,
+            "stopped: the platform refused this machine's connection, so nothing it reports " <>
+              "can be recorded, and it puts the job back in the queue"
+          )
+
+        _other ->
+          socket
+      end
 
     case reconnect(socket) do
       {:ok, socket} -> {:ok, socket}
@@ -434,12 +495,26 @@ defmodule ForgeWorker.Link do
   # does not accept, or a row it has destroyed, is not answered differently ten seconds later, so
   # the machine says so in one line and asks again in minutes (`docs/design/worker-channel.md`
   # § Versions).
+  #
+  # **And it stops what it is running**, reporting nothing: no message reaches the platform from a
+  # refused join, and the platform re-queues a refused machine's jobs — at once for a managed one
+  # it destroys, after the unreachable timeout for a permanent one. A permanent machine that ran on
+  # would spend its jobs' credentials on runs nobody would record, while the same jobs ran again
+  # elsewhere (`docs/design/worker-channel.md` § Versions).
   @impl Slipstream
   def handle_topic_close(topic, {:failed_to_join, %{"reason" => reason} = reply}, socket)
       when reason in ["protocol", "destroyed"] do
     Logger.error(refused(reason, reply) <> "; asking again in #{div(refused_retry_ms(), 1000)}s")
     retry = make_ref()
     Process.send_after(self(), {:rejoin, topic, retry}, refused_retry_ms())
+
+    socket =
+      abandon(
+        socket,
+        "stopped: the platform refused this machine's join, so nothing it reports can be " <>
+          "recorded, and it puts the job back in the queue"
+      )
+
     {:ok, assign(socket, :retry, retry)}
   end
 
@@ -461,12 +536,20 @@ defmodule ForgeWorker.Link do
     |> send_terminal(job_id, message, payload)
   end
 
+  # An abandoned run's ending, reported to nobody — and then the job's next assignment, if the
+  # platform sent one while this run was stopping.
   defp withhold(socket, job_id) do
-    Logger.info("job #{job_id} ended after this machine went unhealthy; not reported")
+    Logger.info("job #{job_id} ended after the platform gave the run up; not reported")
 
-    socket
-    |> update_in([Access.key!(:assigns), Access.key!(:jobs)], &Map.delete(&1, job_id))
-    |> update_in([Access.key!(:assigns), Access.key!(:abandoned)], &MapSet.delete(&1, job_id))
+    {next, deferred} = Map.pop(socket.assigns.deferred, job_id)
+
+    socket =
+      socket
+      |> update_in([Access.key!(:assigns), Access.key!(:jobs)], &Map.delete(&1, job_id))
+      |> update_in([Access.key!(:assigns), Access.key!(:abandoned)], &MapSet.delete(&1, job_id))
+      |> assign(:deferred, deferred)
+
+    if next, do: take(socket, next), else: socket
   end
 
   # Once, under its own key: re-sent after every reconnect until the platform answers it, never
@@ -488,24 +571,45 @@ defmodule ForgeWorker.Link do
     end
   end
 
-  # The filter is an equivalent mutant today: `ForgeWorker.Health` says `{:unhealthy, _}` once, and
-  # the jobs it abandons leave `jobs` as they end. It keeps a second word, should there ever be
-  # one, from logging and cancelling the same job twice.
-  defp abandon(socket) do
+  # Every job here given up at once, for the reason `why`: the machine is unhealthy, or the
+  # platform refused it.
+  defp abandon(socket, why) do
     socket.assigns.jobs
-    |> Enum.reject(fn {job_id, _job} -> MapSet.member?(socket.assigns.abandoned, job_id) end)
-    |> Enum.reduce(socket, fn {job_id, job}, socket ->
-      Log.line(
-        "job.abandoned",
-        :warning,
-        "stopped because this machine is unhealthy; the platform puts it back in the queue",
-        job_id: job_id
-      )
+    |> Map.keys()
+    |> Enum.reduce(socket, &give_up(&2, &1, why))
+  end
 
+  # **One run stopped and its ending reported to nobody**, because the platform has already given
+  # it up (`docs/design/worker-log.md`, `job.abandoned`): the machine went unhealthy, the platform
+  # cancelled it as no longer this machine's or retired the row, or it refused the machine. Logged
+  # and cancelled once per run, whichever comes first — a second word (unhealthy, then a refused
+  # join; two `not_ours`) finds it already abandoned; a job with no runner yet is stopped when it
+  # has one.
+  #
+  # **An assignment held for the job goes too, whenever this is said.** It was the platform's next
+  # run of the job on this machine, and a give-up that arrives while the old run is still stopping
+  # is the platform giving that one up as well; started anyway, it ran on a credential the
+  # platform had already let go of.
+  defp give_up(socket, job_id, why) do
+    job = socket.assigns.jobs[job_id]
+    socket = update_in(socket.assigns.deferred, &Map.delete(&1, job_id))
+
+    if is_nil(job) or MapSet.member?(socket.assigns.abandoned, job_id) do
+      socket
+    else
+      Log.line("job.abandoned", :warning, why, job_id: job_id)
       if is_pid(job.runner), do: cancel(job)
       update_in(socket.assigns.abandoned, &MapSet.put(&1, job_id))
-    end)
+    end
   end
+
+  defp given_up("not_ours"),
+    do:
+      "stopped: the platform no longer has it running here — re-queued, placed elsewhere or " <>
+        "finished — so this run's ending goes unreported"
+
+  defp given_up("retired"),
+    do: "stopped: the platform retired this machine and put its jobs back in the queue"
 
   defp refused("protocol", reply) do
     "the platform refused this worker's protocol #{WorkerProtocol.current()}: it accepts " <>
@@ -682,47 +786,70 @@ defmodule ForgeWorker.Link do
 
       # The work goes to the branch before anything is reported: the platform records the
       # branch head as the changeset artifact the moment it hears from us, and a job that is
-      # stopping must not lose what it did (`docs/decisions.md`).
-      {:ok, head} =
-        Workspace.commit_and_push(assignment, worktree, commit_message(assignment), user)
-
-      # That was the last git command in the tree, so the files come back to root and the user
-      # goes — before the worker reads the job's outputs or keeps the tree as the ticket's
-      # template, which must not belong to a uid the next `useradd` may hand to another job.
-      Slice.leave(user, job_paths(assignment, root))
-
-      terminal =
-        {:ok,
-         result
-         |> upload_transcript(assignment)
-         |> upload_session(assignment, job_dir(root, job_id))
-         |> Blobs.upload(assignment, Dir.blobs_dir(job_dir(root, job_id)))
-         |> terminal(head)}
-
-      # What this run compiled is kept as the ticket's template, so its next job starts here
-      # rather than at the project's seed. After the push, never before: that is what leaves the
-      # tree holding nothing but the checkout and its ignored build output. See
-      # docs/design/worker-tier.md § The ticket volume.
-      Workspace.promote(assignment, root, worktree)
-
-      # Only once everything that had to leave the machine has left it. A worktree is a
-      # snapshot of the seed and the next attempt takes a fresh one; keeping this one would
-      # keep every job this machine ever ran.
-      Workspace.discard(assignment, root)
-
-      # And the job directories of runs old enough that nobody is going to resume them. A
-      # worker that is never destroyed has nothing else to collect them; the end of a job is
-      # already a moment spent on the filesystem. See docs/design/worker-tier.md § What a
-      # machine that never dies accumulates.
-      swept = Dir.sweep(Path.join(root, "jobs"), job_retention_ms())
-      if swept > 0, do: Logger.info("swept #{swept} job director(ies) past their retention")
-
-      # Ticket volumes go the same way and for the same reason. Nothing here is told that a
-      # ticket merged, so age is what there is.
-      Workspace.sweep(root, ticket_volume_retention_ms())
-
-      terminal
+      # stopping must not lose what it did (`docs/decisions.md`). A platform that is not there
+      # is waited for (`Workspace.commit_and_push/4`).
+      case Workspace.commit_and_push(assignment, worktree, commit_message(assignment), user) do
+        {:ok, head} -> finish(assignment, root, worktree, result, head, user)
+        {:error, reason} -> unpushed(result, reason)
+      end
     end
+  end
+
+  # **A cancelled run whose push is refused still says what it spent.** Cancelling a ticket
+  # revokes its jobs' credentials as it sends the `cancel`, so a run with work to push is refused
+  # by the time it gets there; reporting `failed` threw the run's result away, and with it the
+  # cost the platform settles from a cancelled run's `hibernated` (`Jobs.hibernate/4`). The work
+  # is the cancelled ticket's, and nobody is waiting for it. Any other run whose push failed has
+  # lost its work, and fails.
+  defp unpushed(%Result{killed: :operator} = result, reason) do
+    Logger.warning("a cancelled run's push was refused: #{inspect(reason)}")
+
+    {:ok,
+     {"hibernated",
+      %{"commit" => nil, "reason" => "cancelled", "result" => Result.to_map(result)}}}
+  end
+
+  defp unpushed(_result, reason), do: {:error, {:push, reason}}
+
+  defp finish(assignment, root, worktree, result, head, user) do
+    job_id = assignment["job_id"]
+
+    # That was the last git command in the tree, so the files come back to root and the user
+    # goes — before the worker reads the job's outputs or keeps the tree as the ticket's
+    # template, which must not belong to a uid the next `useradd` may hand to another job.
+    Slice.leave(user, job_paths(assignment, root))
+
+    terminal =
+      {:ok,
+       result
+       |> upload_transcript(assignment)
+       |> upload_session(assignment, job_dir(root, job_id))
+       |> Blobs.upload(assignment, Dir.blobs_dir(job_dir(root, job_id)))
+       |> terminal(head)}
+
+    # What this run compiled is kept as the ticket's template, so its next job starts here
+    # rather than at the project's seed. After the push, never before: that is what leaves the
+    # tree holding nothing but the checkout and its ignored build output. See
+    # docs/design/worker-tier.md § The ticket volume.
+    Workspace.promote(assignment, root, worktree)
+
+    # Only once everything that had to leave the machine has left it. A worktree is a
+    # snapshot of the seed and the next attempt takes a fresh one; keeping this one would
+    # keep every job this machine ever ran.
+    Workspace.discard(assignment, root)
+
+    # And the job directories of runs old enough that nobody is going to resume them. A
+    # worker that is never destroyed has nothing else to collect them; the end of a job is
+    # already a moment spent on the filesystem. See docs/design/worker-tier.md § What a
+    # machine that never dies accumulates.
+    swept = Dir.sweep(Path.join(root, "jobs"), job_retention_ms())
+    if swept > 0, do: Logger.info("swept #{swept} job director(ies) past their retention")
+
+    # Ticket volumes go the same way and for the same reason. Nothing here is told that a
+    # ticket merged, so age is what there is.
+    Workspace.sweep(root, ticket_volume_retention_ms())
+
+    terminal
   end
 
   # A job the platform stopped hibernates: it has committed, and it resumes from the branch

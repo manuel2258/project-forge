@@ -129,6 +129,7 @@ defmodule ForgeWeb.TicketLive do
       writable: writable(ticket, workflow),
       proposals: Proposals.open_for_ticket(ticket.id),
       reviewable: reviewable?(ticket, workflow),
+      approve: approve_pins(project, ticket, artifacts),
       changeset: Artifacts.latest(ticket.id, Workflow.changeset_artifact()),
       paused: ticket.status == :active and Spend.paused?(),
       until_midnight: until_midnight(),
@@ -446,7 +447,7 @@ defmodule ForgeWeb.TicketLive do
           :if={@ticket.pending_transition}
           ticket={@ticket}
           pending={@ticket.pending_transition}
-          approve={approve_pairs(@ticket, @artifacts)}
+          approve={@approve}
         />
 
         <.link
@@ -719,7 +720,7 @@ defmodule ForgeWeb.TicketLive do
         <.approval_card
           ticket={@ticket}
           pending={@ticket.pending_transition}
-          approve={approve_pairs(@ticket, @artifacts)}
+          approve={@approve}
         />
       </div>
     </section>
@@ -962,11 +963,11 @@ defmodule ForgeWeb.TicketLive do
     |> Enum.any?(&(Workflow.changeset_artifact() in &1.approve))
   end
 
-  defp approve_pairs(ticket, artifacts) do
+  defp approve_pins(project, ticket, artifacts) do
     for name <- Engine.awaiting_approval(ticket),
         entry = Enum.find(artifacts, &(&1.artifact.name == name)),
         entry && entry.latest,
-        do: {name, entry.latest.version}
+        do: pinned(project.name, ticket, name, entry.latest)
   end
 
   # The daily cap is resolved by the clock, so the figure beside it is a countdown, not an age.

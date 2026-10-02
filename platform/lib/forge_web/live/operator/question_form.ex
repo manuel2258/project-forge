@@ -7,10 +7,20 @@ defmodule ForgeWeb.Operator.QuestionForm do
   used to resume on the answer that closed the last blocking one, and read whichever answers had
   landed by then. One Send makes them arrive together.
 
+  **Folding is the width's, not the form's.** Every question is drawn with its radios and its
+  field whether or not it is folded; below `lg` a folded one hides them behind its line, and at
+  `lg` and up nothing folds (`docs/design/ui.md` § Answering questions). CSS decides, so a page held
+  across a resize is right at both widths, and the form's inputs are the same at every width.
+
+  **Enter never sends.** The free-text field is `ForgeWeb.Conversations.message_box/1` with Enter a
+  new line: a one-line input submitted the form on Enter, before the questions after it were read.
+  And the form swallows Enter from its inputs (`.EnterNeverSends`), since a browser may submit on
+  Enter from a radio as well.
+
   **The page holds the draft, and only the page.** Every change event carries the whole form —
-  an open question as its radios and field, a folded one as hidden inputs — so what the socket
-  keeps under `:forms` is the form's last state and nothing else. A form nobody has touched is
-  its recommendations. Reloading starts again from them, and nobody else sees a half-answer.
+  every question's radios and field, folded or not — so what the socket keeps under `:forms` is
+  the form's last state and nothing else. A form nobody has touched is its recommendations.
+  Reloading starts again from them, and nobody else sees a half-answer.
 
   The same form serves a ticket's document (sent with `questions:send`, as
   `Forge.Operator.answer_all/4`) and a conversation's reply (`chat:questions:send`, as
@@ -66,24 +76,29 @@ defmodule ForgeWeb.Operator.QuestionForm do
       id={"form-#{@id}"}
       phx-change="form:change"
       phx-submit={@submit}
+      phx-hook=".EnterNeverSends"
       class="flex flex-col gap-4"
     >
       <input type="hidden" name="form" value={@id} />
       <input :for={{name, value} <- @hidden} type="hidden" name={name} value={value} />
 
-      <div :for={question <- @questions} id={"question-#{@id}-#{question.key}"}>
-        <.open_question
-          :if={open?(@state, question)}
-          form={@id}
-          question={question}
-          answer={@state.answers[question.key]}
-          optional={not question.blocking}
-        />
+      <div
+        :for={question <- @questions}
+        id={"question-#{@id}-#{question.key}"}
+        data-folded={not open?(@state, question)}
+      >
         <.folded_question
           :if={not open?(@state, question)}
           form={@id}
           question={question}
           answer={@state.answers[question.key]}
+        />
+        <.open_question
+          form={@id}
+          question={question}
+          answer={@state.answers[question.key]}
+          optional={not question.blocking}
+          folded={not open?(@state, question)}
         />
       </div>
 
@@ -100,6 +115,20 @@ defmodule ForgeWeb.Operator.QuestionForm do
         Send {@locked} {if @locked == 1, do: "answer", else: "answers"}
       </button>
     </form>
+
+    <script :type={Phoenix.LiveView.ColocatedHook} name=".EnterNeverSends">
+      export default {
+        mounted() {
+          // A browser may submit a form on Enter from one of its inputs — a radio, in some — and
+          // only Send sends (`docs/design/ui.md` § The affordance rule). The free text is a
+          // textarea, where Enter is a new line. No ExUnit test can press a key; what the tests
+          // pin is that the form carries this hook.
+          this.el.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" && event.target.tagName === "INPUT") event.preventDefault()
+          })
+        }
+      }
+    </script>
     """
   end
 
@@ -107,10 +136,15 @@ defmodule ForgeWeb.Operator.QuestionForm do
   attr :question, :map, required: true
   attr :answer, :map, required: true
   attr :optional, :boolean, required: true
+  attr :folded, :boolean, required: true, doc: "hidden behind its line below `lg`, drawn at `lg`"
 
   defp open_question(assigns) do
     ~H"""
-    <div role="group" aria-label={@question.text} class="flex flex-col gap-[11px]">
+    <div
+      role="group"
+      aria-label={@question.text}
+      class={["flex-col gap-[11px]", if(@folded, do: "hidden lg:flex", else: "flex")]}
+    >
       <%!-- Not accent: accent is spent on what waits (`docs/design/ui.md` § Colour), and the
             passage a question is about is context, drawn beside an assumption too. --%>
       <blockquote
@@ -182,18 +216,17 @@ defmodule ForgeWeb.Operator.QuestionForm do
         </label>
       </div>
 
-      <input
-        type="text"
+      <ForgeWeb.Conversations.message_box
+        id={"answer-#{@form}-#{@question.key}"}
         name={"answers[#{@question.key}][text]"}
         value={@answer["text"]}
-        phx-debounce="300"
+        enter={:newline}
         aria-label={"Your own words on: #{@question.text}"}
         placeholder={
           if @question.options == [],
             do: "answer in your own words",
             else: "add a note, or answer in your own words"
         }
-        class="h-12 w-full rounded-field border border-base-300 bg-transparent px-3 text-sm placeholder:opacity-40 focus:outline-none focus:border-base-content/40"
       />
     </div>
     """
@@ -203,21 +236,16 @@ defmodule ForgeWeb.Operator.QuestionForm do
   attr :question, :map, required: true
   attr :answer, :map, required: true
 
-  # Folded, the answer still rides the form: every change and the Send carry the whole draft.
+  # The line a folded question is below `lg`. Its answer rides the form in the question's own
+  # inputs, drawn beside it and hidden, so every change and the Send carry the whole draft.
   defp folded_question(assigns) do
     ~H"""
-    <input
-      type="hidden"
-      name={"answers[#{@question.key}][choice]"}
-      value={@answer["choice"] || ""}
-    />
-    <input type="hidden" name={"answers[#{@question.key}][text]"} value={@answer["text"] || ""} />
     <button
       type="button"
       phx-click="form:open"
       phx-value-form={@form}
       phx-value-key={@question.key}
-      class="flex min-h-[52px] w-full items-center gap-3 rounded-field border border-base-300 px-4 py-2 text-left hover:border-base-content/30"
+      class="flex min-h-[52px] w-full items-center gap-3 rounded-field border border-base-300 px-4 py-2 text-left hover:border-base-content/30 lg:hidden"
     >
       <span aria-hidden="true" class="opacity-60">✓</span>
       <span class="flex min-w-0 flex-1 flex-col">
@@ -275,7 +303,8 @@ defmodule ForgeWeb.Operator.QuestionForm do
   defp locked?(_answer), do: false
 
   # Open while nothing is locked in, or while opened by hand: a locked question folds so the form
-  # stays short on a phone, and tapping its line brings it back.
+  # stays short on a phone, and tapping its line brings it back. Below `lg` only — the fold is
+  # drawn with `lg:hidden` and `hidden lg:flex`, so at `lg` and up this decides nothing visible.
   defp open?(state, question),
     do: not locked?(state.answers[question.key]) or MapSet.member?(state.open, question.key)
 

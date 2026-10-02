@@ -21,9 +21,16 @@ defmodule ForgeWeb.Actions do
   | anything else | its name and its input, as the job page's row summarises one |
 
   Any result with `is_error` is in error colour with its excerpt, whatever the call.
+
+  **An opened line stays open while the list it is in is patched.** Every `<details>` here is
+  marked with `keep_open/0`: the server never renders `open`, so each patch of a live transcript
+  or a running job's stream used to close whatever the reader had opened — the same reason
+  `ForgeWeb.Sheet` ignores `open` on its dialog.
   """
 
   use Phoenix.Component
+
+  alias Phoenix.LiveView.JS
 
   @edits ~w(Edit MultiEdit Write NotebookEdit)
   @looks ~w(Read Grep Glob LS)
@@ -32,6 +39,9 @@ defmodule ForgeWeb.Actions do
   # is a glance; the change itself is on the Changes tab and the output in the Activity tab.
   @shown_lines 40
   @failure_lines 6
+
+  # How much of one line of a log is drawn before the rest waits behind a control.
+  @clip 200
 
   @type kind :: :edit | :bash | :look | :todo | :task | :fetch | :search | :other
 
@@ -187,7 +197,7 @@ defmodule ForgeWeb.Actions do
     </div>
 
     <div :if={@folded} id={@id} class="flex flex-col py-1" data-run="folded">
-      <details class="peer">
+      <details class="peer" phx-mounted={keep_open()}>
         <summary class="flex min-h-[46px] cursor-pointer items-center gap-2 font-mono text-[12.5px] text-info">
           <span aria-hidden="true" class="opacity-60">▸</span>
           <span class="min-w-0 break-words">{fold_summary(@actions)}</span>
@@ -215,7 +225,11 @@ defmodule ForgeWeb.Actions do
     assigns = assign(assigns, actions: actions)
 
     ~H"""
-    <details class="font-mono text-[12.5px] text-info" data-action="look">
+    <details
+      class="font-mono text-[12.5px] text-info"
+      data-action="look"
+      phx-mounted={keep_open()}
+    >
       <summary class="flex min-h-[46px] cursor-pointer items-center gap-2">
         <span class="min-w-0 break-words">{looks_summary(@actions)}</span>
         <span :if={errors(@actions) != []} class="text-error">✗</span>
@@ -258,6 +272,7 @@ defmodule ForgeWeb.Actions do
     <details
       class={["font-mono text-[12.5px]", (@error && "text-error") || "text-info"]}
       data-action="edit"
+      phx-mounted={keep_open()}
     >
       <summary class="flex min-h-[46px] cursor-pointer items-center gap-2" title={path(@action)}>
         <span aria-hidden="true">✎</span>
@@ -276,8 +291,9 @@ defmodule ForgeWeb.Actions do
       class={["py-1 font-mono text-[12.5px]", (@error && "text-error") || "text-info"]}
       data-action="bash"
     >
-      <span class="break-all">$ {command(@action)}</span>
-      <span :if={@action.result} class="ml-1">{mark(@action)}</span>
+      <.clip text={"$ " <> command(@action)} class="break-all">
+        <span :if={@action.result} class="ml-1">{mark(@action)}</span>
+      </.clip>
     </div>
     <.failure :if={@error} action={@action} />
     """
@@ -302,6 +318,7 @@ defmodule ForgeWeb.Actions do
     <details
       class={["font-mono text-[12.5px]", (@error && "text-error") || "text-info"]}
       data-action="task"
+      phx-mounted={keep_open()}
     >
       <summary class="flex min-h-[46px] cursor-pointer items-center gap-2">
         <span aria-hidden="true">⤷</span>
@@ -324,7 +341,7 @@ defmodule ForgeWeb.Actions do
       class={["py-1 font-mono text-[12.5px]", (@error && "text-error") || "text-info"]}
       data-action={@kind}
     >
-      <span class="break-all">{plain(@kind, @action)}</span>
+      <.clip text={plain(@kind, @action)} class="break-all" />
     </div>
     <.failure :if={@error} action={@action} />
     """
@@ -345,6 +362,54 @@ defmodule ForgeWeb.Actions do
     >{@shown}</pre>
     """
   end
+
+  @doc """
+  One line of a log that may be longer than a glance: up to #{@clip} characters as they are,
+  wrapped and keeping their line breaks; past that, the first #{@clip} and a control that opens
+  the whole of it in place (`docs/design/ui.md` § Activity). The whole is already in the page, so
+  opening it fetches nothing and a test reads it without a click.
+
+  The slot is drawn after the text, open or not — a command's ✓ is read at a glance.
+  """
+  attr :text, :string, required: true
+  attr :class, :any, default: nil, doc: "for the text: how it breaks"
+  slot :inner_block
+
+  def clip(assigns) do
+    assigns = assign(assigns, clipped: String.length(assigns.text) > @clip, most: @clip)
+
+    # The text keeps its line breaks and the slot does not sit inside it: whitespace around a
+    # slot is the caller's indentation, and inside `pre-wrap` it put a command's ✓ on a line of
+    # its own. `phx-no-format` keeps the formatter's indentation out of the text for the same
+    # reason.
+    ~H"""
+    <span :if={not @clipped}>
+      <span class={["whitespace-pre-wrap", @class]} phx-no-format>{@text}</span>
+      {render_slot(@inner_block)}
+    </span>
+    <details :if={@clipped} class="group" data-clipped phx-mounted={keep_open()}>
+      <summary class="flex min-h-[46px] cursor-pointer list-none flex-col justify-center gap-0.5 [&::-webkit-details-marker]:hidden">
+        <span class="group-open:hidden">
+          <span class={["whitespace-pre-wrap", @class]} phx-no-format>{String.slice(@text, 0, @most)}…</span>
+          {render_slot(@inner_block)}
+        </span>
+        <span class="text-primary">
+          <span class="group-open:hidden">show all {String.length(@text)} characters</span>
+          <span class="hidden group-open:inline">show less</span>
+        </span>
+      </summary>
+      <span class={["whitespace-pre-wrap", @class]} phx-no-format>{@text}</span>
+      {render_slot(@inner_block)}
+    </details>
+    """
+  end
+
+  @doc """
+  What every `<details>` that LiveView patches carries: `open` is the reader's, not the server's,
+  so a patch leaves it as the reader left it (`ForgeWeb.Sheet` does the same for its dialog).
+  """
+  @spec keep_open() :: JS.t()
+  def keep_open, do: JS.ignore_attributes(["open"])
 
   attr :todos, :list, required: true
 

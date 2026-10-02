@@ -210,6 +210,12 @@ oidc_providers =
 # a release be asked what it thinks it has.
 config :forge, Forge.Accounts.Oidc, providers: oidc_providers
 
+# A node whose SECRET_KEY_BASE opens none of the credentials it holds refuses to start
+# (`Forge.Credentials.KeyCheck`, docs/deploy.md § Secrets file) unless this says the rotation was
+# meant.
+config :forge, Forge.Credentials.KeyCheck,
+  accept: System.get_env("FORGE_ACCEPT_NEW_SECRET_KEY_BASE") in ["1", "true"]
+
 # Both dev and prod bind to 127.0.0.1. FORGE_HTTP_IP is what the endpoint binds to when something
 # else has to reach it: a worker on another machine, or a proxy in another container.
 #

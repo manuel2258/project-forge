@@ -137,8 +137,12 @@ defmodule ForgeWeb.WorkerChannelTest do
   # A join that declares the conversation, because the machine really is running it: a join that
   # did not would be reconciled as a lost job and the chat would go dormant before a word could
   # be sent to it.
-  defp join_with_chat(worker, token, chat),
-    do: join_worker(worker, token, %{"running" => [%{"job_id" => chat.id, "attempt" => 1}]})
+  defp join_with_chat(worker, token, chat), do: join_running(worker, token, chat)
+
+  # The same for any job: a join that leaves it out re-queues it, and what the machine then says
+  # about it is a run the platform has given up on.
+  defp join_running(worker, token, job),
+    do: join_worker(worker, token, %{"running" => [%{"job_id" => job.id, "attempt" => 1}]})
 
   defp wait_until(fun, attempts \\ 100) do
     cond do
@@ -595,9 +599,12 @@ defmodule ForgeWeb.WorkerChannelTest do
       assert Forge.Artifacts.versions(ticket.id, "refinement.md") |> length() == 1
     end
 
+    # Recorded, and the job goes back to the queue to resume from that commit
+    # (`docs/design/worker-tier.md` § Hibernation and resume): set `hibernated`, nothing moved it
+    # on again. The join says the machine runs it, as one that is about to report it would.
     test "a hibernation is recorded with the commit it left behind", context do
       %{worker: worker, token: token, job: job, ticket: ticket} = context
-      {:ok, _reply, socket} = join_worker(worker, token)
+      {:ok, _reply, socket} = join_running(worker, token, job)
       sha = String.duplicate("a", 40)
 
       ref =
@@ -609,7 +616,7 @@ defmodule ForgeWeb.WorkerChannelTest do
 
       assert_reply ref, :ok
 
-      assert Jobs.get!(job.id).status == :hibernated
+      assert Jobs.get!(job.id).status == :pending
 
       assert %{type: "job.hibernated", payload: %{"commit" => ^sha}} =
                ticket.id |> Events.for_ticket() |> List.last()
@@ -617,12 +624,113 @@ defmodule ForgeWeb.WorkerChannelTest do
 
     test "a failure ends the job and lets the engine decide", context do
       %{worker: worker, token: token, job: job} = context
-      {:ok, _reply, socket} = join_worker(worker, token)
+      {:ok, _reply, socket} = join_running(worker, token, job)
 
       ref = push(socket, "failed", %{"job_id" => job.id, "reason" => "slice was killed"})
       assert_reply ref, :ok, %{}, 2_000
 
       assert %{status: :finished, outcome: :error} = Jobs.get!(job.id)
+    end
+
+    # `docs/design/worker-channel.md` § Messages: a cancelled ticket's run still reports, and its
+    # report is how the platform settles what the run spent — the one report about a job that is no
+    # longer running that is still heard.
+    test "a cancelled ticket's run settles what it spent", context do
+      %{worker: worker, token: token, job: job} = context
+      {:ok, _reply, socket} = join_running(worker, token, job)
+
+      {:ok, _job} =
+        job
+        |> Jobs.Job.progress_changeset(%{
+          status: :finished,
+          outcome: :cancelled,
+          finished_at: DateTime.utc_now(:second)
+        })
+        |> Forge.Repo.update()
+
+      ref =
+        push(socket, "hibernated", %{
+          "job_id" => job.id,
+          "commit" => nil,
+          "reason" => "cancelled",
+          "result" => %{"harness" => %{"cost_usd" => 0.25}}
+        })
+
+      assert_reply ref, :ok
+      assert Decimal.equal?(Jobs.get!(job.id).cost_usd, Decimal.new("0.25"))
+    end
+
+    # `docs/design/worker-channel.md` § Delivery: the end of a run the platform has given up on —
+    # here a job the join re-queued, because the machine's join did not list it — does not get to
+    # end the job. Recorded, a `failed` finished it as an error and a `hibernated` left it where
+    # nothing resumes it; acked, so the machine stops re-sending it, and dropped.
+    test "a run the platform gave up on does not end the job", context do
+      %{worker: worker, token: token, job: job, ticket: ticket} = context
+      {:ok, _reply, socket} = join_worker(worker, token)
+      assert Jobs.get!(job.id).status == :pending
+
+      ref = push(socket, "failed", %{"job_id" => job.id, "reason" => "the push was refused"})
+      assert_reply ref, :ok
+
+      ref =
+        push(socket, "hibernated", %{"job_id" => job.id, "commit" => nil, "reason" => "cancelled"})
+
+      assert_reply ref, :ok
+
+      assert Jobs.get!(job.id).status == :pending
+
+      refute Enum.any?(
+               Events.for_ticket(ticket.id),
+               &(&1.type in ["job.finished", "job.hibernated"])
+             )
+    end
+
+    # **The rule is the statuses a report may land on, not the one it may not.** A job waiting on
+    # a person or parked on its commands is not running anywhere either, and an old run's failure
+    # landing there finished a job somebody was about to answer.
+    test "nor does it end a job that is waiting or parked", context do
+      %{worker: worker, token: token, job: job} = context
+      {:ok, _reply, socket} = join_worker(worker, token)
+
+      for status <- [:waiting, :parked] do
+        job
+        |> Jobs.Job.progress_changeset(%{status: status, worker_id: worker.id})
+        |> Forge.Repo.update!()
+
+        ref = push(socket, "failed", %{"job_id" => job.id, "reason" => "the push was refused"})
+        assert_reply ref, :ok
+        assert Jobs.get!(job.id).status == status
+      end
+    end
+
+    # Nor does a reopened conversation's old ending put it back to sleep — but a dormant one's
+    # ending still lands, as it always did.
+    test "a conversation's ending lands only while it is not waiting to be placed", context do
+      %{worker: worker, token: token, project: project} = context
+
+      reopened =
+        %{project: project}
+        |> Forge.ForgeFixtures.chat_fixture()
+        |> Jobs.Job.progress_changeset(%{status: :pending, worker_id: worker.id})
+        |> Forge.Repo.update!()
+
+      dormant =
+        %{project: project}
+        |> Forge.ForgeFixtures.chat_fixture()
+        |> Jobs.Job.progress_changeset(%{status: :hibernated, worker_id: worker.id})
+        |> Forge.Repo.update!()
+
+      {:ok, _reply, socket} = join_worker(worker, token)
+
+      for chat <- [reopened, dormant] do
+        ref =
+          push(socket, "hibernated", %{"job_id" => chat.id, "commit" => nil, "reason" => "closed"})
+
+        assert_reply ref, :ok
+      end
+
+      assert Jobs.get!(reopened.id).status == :pending
+      assert Jobs.get!(dormant.id).status == :finished
     end
 
     test "a message nobody knows is refused rather than ignored", %{worker: w, token: token} do
@@ -1214,13 +1322,37 @@ defmodule ForgeWeb.WorkerChannelTest do
       assert {lost.level, lost.job_id} == {:warning, job.id}
     end
 
-    test "a job the platform has finished with is cancelled", context do
+    # The job is back in the queue here: anything the platform does not have running on this
+    # machine is a run it has given up on, which the worker stops without reporting.
+    test "a job the platform does not have running there is cancelled as not its own", context do
       %{worker: worker, token: token, job: job} = context
 
       {:ok, _reply, _socket} =
         join_worker(worker, token, %{"running" => [%{"job_id" => job.id, "attempt" => 1}]})
 
       assert_push "cancel", %{"job_id" => job_id, "reason" => "not_ours"}
+      assert job_id == job.id
+    end
+
+    # `docs/design/worker-channel.md` § Reconnection: a ticket cancelled while its machine was away
+    # sent its `cancel` to nobody. Told `not_ours` at the rejoin, the worker would report nothing and
+    # what the run spent would never be settled; told `ticket_cancelled`, it reports the run.
+    test "a job its ticket's cancel finished is told so again at the rejoin", context do
+      %{worker: worker, token: token, job: job} = context
+
+      {:ok, _job} =
+        job
+        |> Jobs.Job.progress_changeset(%{
+          status: :finished,
+          outcome: :cancelled,
+          finished_at: DateTime.utc_now(:second)
+        })
+        |> Forge.Repo.update()
+
+      {:ok, _reply, _socket} =
+        join_worker(worker, token, %{"running" => [%{"job_id" => job.id, "attempt" => 1}]})
+
+      assert_push "cancel", %{"job_id" => job_id, "reason" => "ticket_cancelled"}
       assert job_id == job.id
     end
   end

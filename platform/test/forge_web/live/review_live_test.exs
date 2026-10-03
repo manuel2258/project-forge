@@ -122,6 +122,32 @@ defmodule ForgeWeb.ReviewLiveTest do
     refute has_element?(view, ~s([id="review-doc-report.md"] .text-success))
   end
 
+  # `docs/design/ui.md` § Documents and § Artifact types: a document is drawn as what its name
+  # says it is — Markdown rendered, a log as it was written — and its row carries its type.
+  test "draws each document as its type, a log as it was written", context do
+    %{conn: conn, project: project, ticket: ticket} = context
+    sha = commit_on_branch(context, "score.ex", "def persist, do: :ok")
+    changeset!(ticket, sha)
+
+    for {name, content} <- [{"report.md", "# Report\n"}, {"check.log", "# step 1\nok\n"}] do
+      {:ok, _version} =
+        Artifacts.record_version(ticket.id, name, :document, :system, %{content: content})
+    end
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+
+    assert has_element?(view, ~s([id="review-doc-report.md"] summary [data-file-type="markdown"]))
+    assert has_element?(view, ~s([id="review-doc-report.md"] h1), "Report")
+
+    assert has_element?(view, ~s([id="review-doc-check.log"] summary [data-file-type="log"]))
+    assert view |> element(~s([id="review-doc-check.log"] pre)) |> render() =~ "# step 1\nok\n"
+    refute has_element?(view, ~s([id="review-doc-check.log"] h1))
+
+    # The page reloads on every change to its ticket; a document the reader opened stays open.
+    mounted = view |> element(~s([id="review-doc-report.md"])) |> render()
+    assert mounted =~ ~s(phx-mounted="[[&quot;ignore_attrs&quot;)
+  end
+
   test "the queue links to it only for an approval that pins the changeset", context do
     %{conn: conn, ticket: ticket} = context
     sha = commit_on_branch(context, "score.ex", "def persist, do: :ok")

@@ -175,7 +175,9 @@ defmodule ForgeWeb.Diff do
 
     <ul :if={@rows != []} id={@id} class="flex flex-col">
       <li :for={row <- @rows} class="relative border-b border-base-300/60" data-path={row.path}>
-        <details :if={row.lines} class="group">
+        <%!-- Kept open across a patch: a conversation's Changes tab is drawn again as its
+              branch moves (`ui.md` § Motion and structure). --%>
+        <details :if={row.lines} class="group" phx-mounted={ForgeWeb.Actions.keep_open()}>
           <summary class={[
             "flex min-h-[46px] cursor-pointer items-center gap-3 py-1.5 font-mono text-[12.5px]",
             @ask && "pr-16"

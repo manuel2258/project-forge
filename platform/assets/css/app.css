@@ -43,9 +43,10 @@
 }
 
 /* Themes are hand-authored rather than generated: every value is oklch, hue is constant across
-   both (300 neutrals, 290 primary, 62 accent, 240 info, 150 success, 22 error) and only lightness
-   and chroma move. The accent is deliberately identical in both, so the one loud mark in the
-   product does not shift meaning when the theme does. See docs/design/ui.md. */
+   both (300 neutrals, 290 primary, 62 accent, 240 info, 150 success, 22 error, and the file
+   types' own in --file-*) and only lightness and chroma move. The accent is deliberately
+   identical in both, so the one loud mark in the product does not shift meaning when the theme
+   does. See docs/design/ui.md. */
 @plugin "daisyui/packages/bundle/daisyui-theme" {
   name: "dark";
   default: false;
@@ -74,6 +75,14 @@
   --color-warning-content: oklch(18% 0.040 62);
   --color-error: oklch(72% 0.170 22);
   --color-error-content: oklch(16% 0.040 22);
+
+  /* File types (docs/design/ui.md § Artifact types): an icon's tile, and nothing else. */
+  --file-markdown: oklch(74% 0.100 210);
+  --file-code: oklch(74% 0.100 175);
+  --file-image: oklch(74% 0.120 340);
+  --file-archive: oklch(78% 0.090 95);
+  --file-apk: oklch(78% 0.120 125);
+  --file-plain: oklch(78% 0.010 300);
 
   --radius-selector: 0.3125rem;
   --radius-field: 0.375rem;
@@ -113,6 +122,13 @@
   --color-warning-content: oklch(18% 0.040 62);
   --color-error: oklch(48% 0.170 22);
   --color-error-content: oklch(98% 0.003 22);
+
+  --file-markdown: oklch(48% 0.100 210);
+  --file-code: oklch(48% 0.090 175);
+  --file-image: oklch(50% 0.120 340);
+  --file-archive: oklch(50% 0.080 95);
+  --file-apk: oklch(52% 0.120 125);
+  --file-plain: oklch(45% 0.012 300);
 
   --radius-selector: 0.3125rem;
   --radius-field: 0.375rem;
@@ -212,6 +228,20 @@
 
 .doc hr { border-color: var(--color-base-300); }
 .doc img { max-width: 100%; height: auto; }
+
+/* The tile an artifact's type icon sits in (docs/design/ui.md § Artifact types): the icon in
+   the type's hue and the ground the same hue at low strength, so the tile reads on either base.
+   Text, a log and any other file are neutral and told apart by their icon. */
+.file-icon {
+  --file: var(--file-plain);
+  color: var(--file);
+  background-color: color-mix(in oklch, var(--file) 16%, transparent);
+}
+.file-icon[data-file-type="markdown"] { --file: var(--file-markdown); }
+.file-icon[data-file-type="code"] { --file: var(--file-code); }
+.file-icon[data-file-type="image"] { --file: var(--file-image); }
+.file-icon[data-file-type="archive"] { --file: var(--file-archive); }
+.file-icon[data-file-type="apk"] { --file: var(--file-apk); }
 
 /* A chat message is not a document: a single newline is a break, where Markdown would join the
    lines into one paragraph. On a phone Enter is how a line is ended, so a transcript that drops

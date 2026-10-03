@@ -7,7 +7,7 @@ defmodule ForgeWeb.JobLive do
 
   alias Forge.{Artifacts, Events, Jobs, Tickets}
   alias Forge.Jobs.Memory
-  alias ForgeWeb.{Format, Indicators, JobStream, WorkScreen}
+  alias ForgeWeb.{FileType, Format, Indicators, JobStream, WorkScreen}
 
   # Newest first, a page at a time (`ForgeWeb.JobStream`). A finished job's stream is read
   # backwards from its outcome; a running one's is tailed, because someone who opened it is
@@ -192,6 +192,7 @@ defmodule ForgeWeb.JobLive do
           }
           class="mt-2 flex min-h-[46px] items-center gap-2 border-b border-base-300/60 font-mono text-[12.5px] hover:bg-base-200"
         >
+          <FileType.file_icon artifact={elem(@log, 0)} />
           <span class="min-w-0 flex-1 truncate">{elem(@log, 0).name}</span>
           <span class="shrink-0 opacity-60">v{elem(@log, 1).version}</span>
           <span class="shrink-0 opacity-40" aria-hidden="true">›</span>
@@ -370,6 +371,7 @@ defmodule ForgeWeb.JobLive do
                 }
                 class="flex min-h-[46px] items-center gap-2 border-b border-base-300/60 font-mono text-[12.5px] hover:bg-base-200"
               >
+                <FileType.file_icon artifact={artifact} />
                 <span class="min-w-0 flex-1 truncate">{artifact.name}</span>
                 <span class="shrink-0 opacity-60">v{version.version}</span>
                 <span class="shrink-0 opacity-40" aria-hidden="true">›</span>
@@ -380,7 +382,8 @@ defmodule ForgeWeb.JobLive do
             </li>
           </ul>
 
-          <details class="mt-6">
+          <%!-- A running job's page reloads on its events; the prompt stays open while it does. --%>
+          <details id="state-prompt" class="mt-6" phx-mounted={ForgeWeb.Actions.keep_open()}>
             <summary class="flex min-h-[46px] cursor-pointer items-center font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
               State prompt
             </summary>

@@ -88,10 +88,25 @@ defmodule ForgeWeb.OperatorLiveTest do
 
     assert html =~ "Declares"
     assert html =~ "Wrote"
+
+    # A running job's page reloads on its events; the prompt a reader opened stays open.
+    assert [mounted] =
+             html
+             |> Floki.parse_document!()
+             |> Floki.find("details#state-prompt")
+             |> Floki.attribute("phx-mounted")
+
+    assert mounted =~ "ignore_attrs"
     # What the run actually produced, linked to its exact version.
     assert html =~ "refinement.md"
     assert html =~ ~s(/artifacts/refinement.md/1)
     refute html =~ "not written"
+
+    # Each row of what it wrote says what kind of file it is (`ui.md` § Artifact types).
+    assert html
+           |> Floki.parse_document!()
+           |> Floki.find(~s(a[href$="/artifacts/refinement.md/1"] [data-file-type="markdown"]))
+           |> length() == 1
 
     # Wider than the review page it is laid out like, for the stream's lines
     # (`docs/design/ui.md` § Space, measure and targets).
@@ -198,7 +213,7 @@ defmodule ForgeWeb.OperatorLiveTest do
     pin = ForgeWeb.Operator.Components.pinned("game", %{number: 7}, "build.tar", version)
 
     assert pin.href == "/tickets/game/7/artifacts/build.tar/3"
-    assert pin.html == nil
+    assert pin.body == nil
 
     html =
       render_component(&ForgeWeb.Operator.Components.approval_card/1,
@@ -210,6 +225,32 @@ defmodule ForgeWeb.OperatorLiveTest do
     assert html =~ ~s(href="/tickets/game/7/artifacts/build.tar/3")
     refute html =~ ~s(class="doc")
     refute html =~ "tabindex"
+
+    # Its link row carries its type, as every artifact row does (`ui.md` § Artifact types).
+    assert html
+           |> Floki.parse_fragment!()
+           |> Floki.find(~s(a[href$="/build.tar/3"] [data-file-type="archive"]))
+           |> length() == 1
+  end
+
+  # `docs/design/ui.md` § Documents: what an approval pins is drawn as its name says it is, so a
+  # log is read line by line rather than joined into one paragraph by Markdown.
+  test "an approval card draws a text document as it was written" do
+    version = %Forge.Artifacts.Version{version: 2, content: "# step 1\nok\n"}
+    pin = ForgeWeb.Operator.Components.pinned("game", %{number: 7}, "check.log", version)
+
+    html =
+      render_component(&ForgeWeb.Operator.Components.approval_card/1,
+        ticket: %{id: "t1"},
+        pending: %{"to" => "shipping"},
+        approve: [pin]
+      )
+
+    assert [pre] =
+             html |> Floki.parse_fragment!() |> Floki.find(~s([id="approving-t1-check.log"] pre))
+
+    assert Floki.text(pre) == "# step 1\nok\n"
+    refute html =~ "<h1>"
   end
 
   test "pages require login", %{project: _project} do

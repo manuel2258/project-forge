@@ -466,12 +466,165 @@ defmodule ForgeWeb.TicketWorkScreenTest do
 
       {:ok, view, _html} = live(conn, page(project, ticket, "?tab=docs"))
 
-      links =
-        view
-        |> found(~s(section[id="doc-plan.md"] a), "#docs")
-        |> Enum.map(&String.trim(Floki.text(&1)))
+      links = found(view, ~s(section[id="doc-plan.md"] a), "#docs")
 
-      assert links == ["plan.md v3", "v2", "v1"]
+      assert Enum.map(links, &String.trim(Floki.text(&1))) == ["v3 ›", "v2", "v1"]
+
+      # Each to its own version's address: the latest's link is the latest's.
+      assert links |> Enum.flat_map(&Floki.attribute(&1, "href")) |> Enum.map(&Path.basename/1) ==
+               ["3", "2", "1"]
+    end
+
+    # `docs/design/ui.md` § Docs: collapsed until it is opened, so one long plan does not push
+    # every row after it a screen down; left as the reader left it by a patch; and its version
+    # linked beside the summary, never inside the control that opens it.
+    test "draws a document collapsed, with its version beside the row", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      {:ok, _v1} =
+        Artifacts.record_version(ticket.id, "plan.md", :document, :system, %{content: "# Plan\n"})
+
+      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=docs"))
+
+      assert [details] = found(view, ~s(section[id="doc-plan.md"] > details), "#docs")
+      assert Floki.attribute(details, "open") == []
+      assert [mounted] = Floki.attribute(details, "phx-mounted")
+      assert mounted =~ "ignore_attrs"
+      assert mounted =~ "open"
+
+      assert details |> Floki.find("summary") |> Floki.text() =~ "plan.md"
+      assert Floki.raw_html(details) =~ "<h1>Plan</h1>"
+
+      assert Floki.find(details, "a") == []
+      assert [link] = found(view, ~s(section[id="doc-plan.md"] > a), "#docs")
+
+      assert Floki.attribute(link, "href") == [
+               "/tickets/#{project.name}/#{ticket.number}/artifacts/plan.md/1"
+             ]
+
+      # "v1" alone says nothing to a screen reader, out of the row it sits beside.
+      assert Floki.attribute(link, "aria-label") == ["plan.md v1"]
+    end
+
+    # A presentation is not rendered and has no approval slot (`ui.md` § Semantics that must not
+    # be lost): its row is its link, marked view only.
+    test "draws a presentation as its link, view only", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      {:ok, _deck} =
+        Artifacts.record_version(ticket.id, "deck", :presentation, :system, %{content: "# Deck\n"})
+
+      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=docs"))
+
+      assert found(view, ~s(section[id="doc-deck"] details), "#docs") == []
+      assert [link] = found(view, ~s(section[id="doc-deck"] > a), "#docs")
+      assert Floki.text(link) =~ "view only"
+      refute Floki.raw_html(link) =~ "<h1>"
+    end
+
+    # Markdown would join a log's lines into one paragraph and make a heading of a `#` comment.
+    test "shows a document named as text as it was written", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      {:ok, _notes} =
+        Artifacts.record_version(ticket.id, "notes.txt", :document, :system, %{
+          content: "# not a heading\nsecond line\n"
+        })
+
+      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=docs"))
+
+      assert [pre] = found(view, ~s(section[id="doc-notes.txt"] details pre), "#docs")
+      assert Floki.text(pre) == "# not a heading\nsecond line\n"
+      refute view |> element(~s(section[id="doc-notes.txt"])) |> render() =~ "<h1>"
+    end
+
+    # `docs/design/ui.md` § Artifact types: each row says what kind of file it is. A file has no
+    # body — drawing its row reads nothing from the store — so its whole row is the link to its
+    # bytes; and an Android app says so in words as well as by its icon.
+    test "marks each row with its type, and a file's row is its link", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      {:ok, _plan} =
+        Artifacts.record_version(ticket.id, "plan.md", :document, :system, %{content: "# P\n"})
+
+      blobs = ~w(build.log package/app.apk shots/home.png package/manifest)
+
+      for name <- blobs do
+        key = "job/#{Ecto.UUID.generate()}/out-a/#{Path.basename(name)}"
+
+        {:ok, _version} =
+          Artifacts.record_version(ticket.id, name, :blob, :system, %{
+            blob_uri: Forge.Storage.uri(key),
+            content_hash: "sha256:" <> String.duplicate("0", 64)
+          })
+      end
+
+      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=docs"))
+
+      types =
+        for name <- ["plan.md" | blobs] do
+          view
+          |> found(~s(section[id="doc-#{name}"] [data-file-type]), "#docs")
+          |> Floki.attribute("data-file-type")
+        end
+
+      assert types == [["markdown"], ["log"], ["apk"], ["image"], ["file"]]
+
+      for name <- blobs do
+        assert found(view, ~s(section[id="doc-#{name}"] details), "#docs") == []
+      end
+
+      assert [apk] = found(view, ~s(section[id="doc-package/app.apk"] > a), "#docs")
+
+      assert Floki.attribute(apk, "href") == [
+               "/tickets/#{project.name}/#{ticket.number}/artifacts/package%2Fapp.apk/1"
+             ]
+
+      assert Floki.find(apk, ~s([role="img"][aria-label="Android app"])) != []
+      assert Floki.text(apk) =~ "Android app"
+      # Said once to a screen reader, by the icon, rather than again by the caption.
+      hidden =
+        apk |> Floki.find(~s(span[aria-hidden="true"])) |> Enum.map(&String.trim(Floki.text(&1)))
+
+      assert "Android app" in hidden
+
+      refute view |> element(~s(section[id="doc-shots/home.png"])) |> render() =~ "Android app"
+    end
+
+    # The ticket's chips are its artifacts too, and carry the same mark.
+    test "marks the rail's artifact chips with their type", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      {:ok, _plan} =
+        Artifacts.record_version(ticket.id, "plan.md", :document, :system, %{content: "# P\n"})
+
+      # The changeset is a commit and not a file, and says so.
+      sha = commit_over_http(project, ticket.branch, "lib/score.ex", "def persist, do: :ok")
+      changeset!(ticket, sha)
+
+      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=docs"))
+
+      # The chip's own size, smaller than a row's tile.
+      assert has_element?(
+               view,
+               ~s(#details a[href$="/artifacts/plan.md/1"] [data-file-type="markdown"].size-5)
+             )
+
+      assert has_element?(
+               view,
+               ~s(#details a[href$="/artifacts/changeset/1"] [data-file-type="changeset"]),
+               "±"
+             )
     end
 
     # Approval is marked only where the workflow can ask for it, and says which way it stands.

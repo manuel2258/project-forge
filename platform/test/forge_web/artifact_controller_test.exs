@@ -165,6 +165,38 @@ defmodule ForgeWeb.ArtifactControllerTest do
       assert [~s(attachment; filename="pkg-v1")] = get_resp_header(conn, "content-disposition")
       assert Path.wildcard(Path.join(System.tmp_dir!(), "forge-download/*")) == []
     end
+
+    # `docs/design/ui.md` § Artifact types: an Android app keeps its own type, which a phone's
+    # browser hands to the package installer — still an attachment, never laid out, whether it
+    # is read into memory or streamed from a file.
+    test "an Android app is served as one, small or large", %{
+      conn: conn,
+      project: project,
+      user: user
+    } do
+      ticket = admitted(project, user)
+      small = <<"PK", 3, 4, 0, 0>>
+      large = small <> :binary.copy(<<0>>, ForgeCore.Document.max_bytes())
+
+      for {name, bytes} <- [{"package/app.apk", small}, {"package/big.apk", large}] do
+        key = "job/#{Ecto.UUID.generate()}/out-a/#{Path.basename(name)}"
+        {:ok, _info} = Storage.put(key, bytes)
+        write_blob(ticket, name, Storage.uri(key), user)
+
+        conn = get(conn, ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/#{name}/1")
+
+        assert response(conn, 200) == bytes
+
+        assert get_resp_header(conn, "content-type") == [
+                 "application/vnd.android.package-archive"
+               ]
+
+        assert get_resp_header(conn, "x-content-type-options") == ["nosniff"]
+
+        assert [~s(attachment; filename="#{Path.rootname(Path.basename(name))}-v1.apk")] ==
+                 get_resp_header(conn, "content-disposition")
+      end
+    end
   end
 
   test "a changeset is a commit, so it goes to the diff instead", %{

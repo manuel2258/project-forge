@@ -24,7 +24,7 @@ defmodule ForgeWeb.TicketLive do
   alias Forge.{Artifacts, Conversations, Engine, Events, Git, Jobs, Projects, Proposals, Queue}
   alias Forge.{Spend, Tickets}
   alias ForgeCore.Workflow
-  alias ForgeWeb.{Diff, Format, Indicators, JobStream, WorkScreen}
+  alias ForgeWeb.{Diff, FileType, Format, Indicators, JobStream, WorkScreen}
   alias ForgeWeb.Operator.Actions
   alias ForgeWeb.Operator.Board
   alias ForgeWeb.Operator.QuestionForm
@@ -186,8 +186,8 @@ defmodule ForgeWeb.TicketLive do
         "refs/heads/" <> ticket.branch
       )
 
-  # Every document the ticket has, rendered, its latest version first and the earlier ones
-  # linked. The changeset is not a document: it is the Changes tab.
+  # Every artifact the ticket has, a row each — a document's rendered when opened — its latest
+  # version first and the earlier ones linked. The changeset is not one: it is the Changes tab.
   defp docs(project, ticket, artifacts) do
     for %{artifact: artifact, latest: latest} = entry <- artifacts,
         latest != nil,
@@ -916,6 +916,7 @@ defmodule ForgeWeb.TicketLive do
         )
       ]}
     >
+      <FileType.file_icon artifact={@entry.artifact} size={:chip} />
       {@entry.artifact.name}
       <span class="opacity-60">v{@entry.latest.version}</span>
       <span :if={@entry.artifact.kind == :presentation} class="tracking-[.14em] uppercase opacity-50">

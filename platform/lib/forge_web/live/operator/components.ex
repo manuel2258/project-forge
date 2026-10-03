@@ -246,15 +246,16 @@ defmodule ForgeWeb.Operator.Components do
           href={pin.href}
           class="flex min-h-[46px] items-center gap-2 self-start font-mono text-[12.5px] hover:underline"
         >
+          <ForgeWeb.FileType.file_icon artifact={pin} />
           {pin.name} <span class="opacity-60">v{pin.version}</span>
         </.link>
         <div
-          :if={pin.html}
+          :if={pin.body}
           tabindex="0"
           aria-label={"#{pin.name} v#{pin.version}"}
           class="max-h-[50vh] min-w-0 overflow-y-auto overscroll-contain rounded-box bg-base-200 px-4 py-3"
         >
-          <div class="doc">{pin.html}</div>
+          <ForgeWeb.FileType.document_body body={pin.body} />
         </div>
       </section>
 
@@ -296,10 +297,12 @@ defmodule ForgeWeb.Operator.Components do
   defp approve_label(pins), do: "Approve #{length(pins)} versions"
 
   @doc """
-  One version an approval pins, as `approval_card/1` draws it: `%{name, version, href, html}`.
+  One version an approval pins, as `approval_card/1` draws it: `%{name, kind, version, href,
+  body}`, `kind` read from what the version holds, since a pin is built from a version alone.
   `href` is the version's address, and nil for the changeset, whose rendering is the diff on
-  `…/review` rather than anything at an artifact address; `html` is the rendered document, and
-  nil for anything that is not one — a blob is never laid out.
+  `…/review` rather than anything at an artifact address; `body` is the document as
+  `ForgeWeb.FileType.render_document/2` draws it, and nil for anything that is not one — a blob
+  is never laid out.
 
   Rendered here, when the page loads, and not in the card, which is drawn again on every change.
   """
@@ -309,12 +312,16 @@ defmodule ForgeWeb.Operator.Components do
 
     %{
       name: name,
+      kind: if(is_binary(version.content), do: :document, else: :blob),
       version: version.version,
       href:
         if(not changeset?,
           do: ~p"/tickets/#{project}/#{ticket.number}/artifacts/#{name}/#{version.version}"
         ),
-      html: if(is_binary(version.content), do: ForgeWeb.Markdown.to_html(version.content))
+      body:
+        if(is_binary(version.content),
+          do: ForgeWeb.FileType.render_document(name, version.content)
+        )
     }
   end
 

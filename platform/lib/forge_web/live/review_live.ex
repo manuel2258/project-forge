@@ -18,7 +18,7 @@ defmodule ForgeWeb.ReviewLive do
 
   alias Forge.{Artifacts, Events, Merge, Projects, Tickets}
   alias ForgeCore.Workflow
-  alias ForgeWeb.{Diff, Format, Markdown}
+  alias ForgeWeb.{Diff, FileType, Format}
   alias ForgeWeb.Operator.Actions
   alias ForgeWeb.Operator.Board
 
@@ -76,7 +76,7 @@ defmodule ForgeWeb.ReviewLive do
         name: artifact.name,
         version: version,
         approved: Artifacts.approved?(version),
-        html: Markdown.to_html(version.content)
+        body: FileType.render_document(artifact.name, version.content)
       }
     end
     |> Enum.sort_by(& &1.version.inserted_at, DateTime)
@@ -149,18 +149,22 @@ defmodule ForgeWeb.ReviewLive do
             <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
               What it was built from
             </h2>
+            <%!-- The page reloads on every change to its ticket, and a patch must not close what
+                  the reader opened (`ui.md` § Motion and structure). --%>
             <details
               :for={doc <- @documents}
               class="mt-3 min-w-0"
               id={"review-doc-#{doc.name}"}
+              phx-mounted={ForgeWeb.Actions.keep_open()}
             >
               <summary class="flex min-h-[46px] cursor-pointer items-center gap-2 font-mono text-[12.5px]">
+                <FileType.file_icon artifact={%{name: doc.name, kind: :document}} />
                 {doc.name}
                 <span class="opacity-60">v{doc.version.version}</span>
                 <span :if={doc.approved} class="text-success">✓ approved</span>
               </summary>
               <div class="mt-2 min-w-0 rounded-box bg-base-200 px-4 py-3">
-                <div class="doc">{doc.html}</div>
+                <FileType.document_body body={doc.body} />
                 <.link
                   href={
                     ~p"/tickets/#{@project.name}/#{@ticket.number}/artifacts/#{doc.name}/#{doc.version.version}"

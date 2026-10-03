@@ -7,14 +7,16 @@ defmodule ForgeWeb.ArtifactController do
   meaning — when the margin-questions view lands it takes the HTML representation of this same
   address and raw moves behind a parameter.
 
-  Everything here is served `text/plain` and inline. The content was written by an agent, so it
-  is never served as a type a browser will execute or lay out: `X-Content-Type-Options: nosniff`
-  is what stops a `.md` full of markup being treated as HTML in the operator's own session.
+  Text is served `text/plain` and inline, and anything else as an attachment: bytes, or an
+  Android app's own type. The content was written by an agent, so it is never served as a type a
+  browser will execute or lay out: `X-Content-Type-Options: nosniff` is what stops a `.md` full of
+  markup being treated as HTML in the operator's own session.
   """
 
   use ForgeWeb, :controller
 
   alias Forge.{Artifacts, Conversations, Projects, Tickets}
+  alias ForgeWeb.FileType
 
   def show(conn, %{"project" => name, "number" => number, "name" => artifact} = params) do
     {ticket, project} = Tickets.fetch!(name, number)
@@ -45,7 +47,8 @@ defmodule ForgeWeb.ArtifactController do
 
   # Text is shown; anything else is a download, never laid out: `nosniff` on both, and the bytes of
   # something that is not text are `attachment`, so the browser saves them rather than guessing
-  # what they are (`docs/design/ui.md` § Addressable artifact versions).
+  # what they are (`docs/design/ui.md` § Addressable artifact versions). An Android app keeps its
+  # own type, which a phone's browser hands to the package installer (§ Artifact types).
   defp serve(conn, artifact, {:ok, version}) do
     case Artifacts.served(version, Path.join(System.tmp_dir!(), "forge-download")) do
       {:text, bytes} ->
@@ -53,13 +56,13 @@ defmodule ForgeWeb.ArtifactController do
 
       {:bytes, bytes} ->
         conn
-        |> headers("application/octet-stream", "attachment", artifact, version)
+        |> headers(FileType.download_type(artifact), "attachment", artifact, version)
         |> send_resp(200, bytes)
 
       {:file, path} ->
         try do
           conn
-          |> headers("application/octet-stream", "attachment", artifact, version)
+          |> headers(FileType.download_type(artifact), "attachment", artifact, version)
           |> send_file(200, path)
         after
           File.rm(path)

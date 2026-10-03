@@ -15,10 +15,10 @@ defmodule ForgeWeb.WorkScreen do
 
   use Phoenix.Component
 
-  import ForgeWeb.Actions, only: [clip: 1, line: 1]
+  import ForgeWeb.Actions, only: [clip: 1, keep_open: 0, line: 1]
 
   alias Forge.Artifacts
-  alias ForgeWeb.{Format, Layouts, Markdown, Sheet}
+  alias ForgeWeb.{FileType, Format, Layouts, Sheet}
 
   attr :tabs, :list, required: true, doc: "`{key, label, count | nil}`, in order"
   attr :tab, :string, required: true, doc: "the key of the tab being shown"
@@ -117,9 +117,14 @@ defmodule ForgeWeb.WorkScreen do
   end
 
   @doc """
-  The Docs tab (`docs/design/ui.md` § Docs): every document written, **rendered**, the latest
-  version of each first and earlier ones as links to their addresses; approval marks only where
-  approval is possible; and what the last turn wrote that was not recorded, with why.
+  The Docs tab (`docs/design/ui.md` § Docs): every artifact written, one row each with its type's
+  icon (§ Artifact types) and its latest version linked, earlier versions as links beneath;
+  approval marks only where approval is possible; and what the last turn wrote that was not
+  recorded, with why.
+
+  A document's row is collapsed until it is opened, and opens to the document **rendered** — or
+  to its text, when its name says text, a log or code. A file or a presentation has no body here:
+  its row is the link to its bytes.
 
   A doc is what `doc/4` builds.
   """
@@ -134,24 +139,43 @@ defmodule ForgeWeb.WorkScreen do
     <section
       :for={doc <- @docs}
       id={"doc-#{doc.name}"}
-      class="min-w-0 border-b border-base-300/60 pb-5 not-first:pt-5"
+      class="relative min-w-0 border-b border-base-300/60"
     >
-      <div class="flex flex-wrap items-center gap-x-3 font-mono text-[12.5px]">
-        <.link href={doc.latest.href} class="flex min-h-[46px] items-center gap-2 hover:underline">
-          {doc.name} <span class="opacity-60">v{doc.latest.version}</span>
-        </.link>
-        <span :if={doc.kind == :presentation} class="tracking-[.14em] uppercase opacity-50">
-          view only
-        </span>
-        <span :if={doc.approvable and doc.approved} class="text-success">✓ approved</span>
-        <span :if={doc.approvable and not doc.approved} class="text-warning">◇ unapproved</span>
-      </div>
+      <%!-- The version link is beside the summary, not inside it: the summary is a control of
+            its own, and one tap meaning two things is what `ui.md` § The affordance rule
+            forbids. --%>
+      <details :if={doc.latest.body} class="group" phx-mounted={keep_open()}>
+        <summary class="flex min-h-[46px] cursor-pointer list-none items-center gap-3 py-1.5 pr-16 [&::-webkit-details-marker]:hidden">
+          <span aria-hidden="true" class="w-3 shrink-0 text-[12.5px] opacity-40 group-open:rotate-90">
+            ▸
+          </span>
+          <.doc_name entry={doc} />
+        </summary>
+        <div class="mb-3 min-w-0 rounded-box bg-base-200 px-4 py-3">
+          <FileType.document_body body={doc.latest.body} />
+        </div>
+      </details>
+      <.link
+        :if={doc.latest.body}
+        href={doc.latest.href}
+        aria-label={"#{doc.name} v#{doc.latest.version}"}
+        class="absolute top-0 right-0 flex min-h-[46px] items-center gap-3 pl-3 font-mono text-[12.5px] hover:underline"
+      >
+        v{doc.latest.version} <span class="opacity-40" aria-hidden="true">›</span>
+      </.link>
 
-      <div :if={doc.latest.html} class="mt-1 min-w-0 rounded-box bg-base-200 px-4 py-3">
-        <div class="doc">{doc.latest.html}</div>
-      </div>
+      <.link
+        :if={!doc.latest.body}
+        href={doc.latest.href}
+        class="flex min-h-[46px] items-center gap-3 py-1.5 hover:bg-base-200"
+      >
+        <span aria-hidden="true" class="w-3 shrink-0"></span>
+        <.doc_name entry={doc} />
+        <span class="shrink-0 font-mono text-[12.5px]">v{doc.latest.version}</span>
+        <span class="shrink-0 font-mono text-[12.5px] opacity-40" aria-hidden="true">›</span>
+      </.link>
 
-      <p :if={doc.earlier != []} class="mt-2 flex flex-wrap items-center gap-x-3 text-[12.5px]">
+      <p :if={doc.earlier != []} class="flex flex-wrap items-center gap-x-3 pl-6 text-[12.5px]">
         <span class="opacity-50">earlier</span>
         <.link
           :for={version <- doc.earlier}
@@ -175,12 +199,35 @@ defmodule ForgeWeb.WorkScreen do
     """
   end
 
+  attr :entry, :map, required: true
+
+  # What a row says of its artifact, open or closed: its type, its name and where it stands.
+  defp doc_name(assigns) do
+    ~H"""
+    <FileType.file_icon artifact={@entry} />
+    <span class="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 font-mono text-[12.5px]">
+      <span class="min-w-0 break-all">{@entry.name}</span>
+      <span :if={@entry.kind == :presentation} class="tracking-[.14em] uppercase opacity-50">
+        view only
+      </span>
+      <span :if={@entry.approved} class="text-success">✓ approved</span>
+      <span :if={@entry.approvable and not @entry.approved} class="text-warning">◇ unapproved</span>
+      <%!-- The icon already says this to a screen reader; said again it is said twice. --%>
+      <span :if={@entry.type == :apk} class="basis-full opacity-60" aria-hidden="true">
+        Android app
+      </span>
+    </span>
+    """
+  end
+
   @doc """
-  One entry of the Docs tab: `%{name, kind, latest, earlier, approvable, approved}`, from an
-  artifact and the versions of it to show, oldest first. `latest` is `%{version, href, html}` —
-  rendered when it is a document — `earlier` the versions before it, newest first, and the
-  approval fields are about the latest. `href` gives a version number's address, and
-  `approvable` is the page's to say: where approval is possible at all.
+  One entry of the Docs tab: `%{name, kind, type, latest, earlier, approvable, approved}`, from an
+  artifact and the versions of it to show, oldest first. `type` is `ForgeWeb.FileType.of/1`'s.
+  `latest` is `%{version, href, body}`, where a document's body is
+  `ForgeWeb.FileType.render_document/2`'s and a blob's or a presentation's is nil. `earlier` is
+  the versions before it, newest first, and the approval fields are about the latest. `href`
+  gives a version number's address, and `approvable` is the page's to say: where approval is
+  possible at all.
   """
   @spec doc(map(), [map()], (pos_integer() -> String.t()), boolean()) :: map()
   def doc(artifact, versions, href, approvable) do
@@ -189,10 +236,15 @@ defmodule ForgeWeb.WorkScreen do
     %{
       name: artifact.name,
       kind: artifact.kind,
+      type: FileType.of(artifact),
       latest: %{
         version: latest.version,
         href: href.(latest.version),
-        html: artifact.kind == :document && Markdown.to_html(latest.content)
+        # A blob's bytes are in the store, and drawing its row does not read them.
+        body:
+          if(artifact.kind == :document,
+            do: FileType.render_document(artifact.name, latest.content)
+          )
       },
       earlier:
         for version <- versions |> Enum.drop(-1) |> Enum.reverse() do

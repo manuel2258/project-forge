@@ -132,6 +132,12 @@ Discipline matters more than the values:
   failed sends. **Warning** — non-completion outcomes (§ The three axes), and a job whose memory
   was the trouble: its header line and its `memory` rows (`capacity.md` § Memory, which a job holds
   rather than spends). Neither is waiting on a person, so neither is accent.
+- **File type** — the tile an artifact's icon sits in, and nothing else (§ Artifact types). Its
+  hues are its own and kept at least 25° from every hue above, so that a type never reads as a
+  state, an outcome or a wait: 210 Markdown, 175 code and data, 340 an image, 95 an archive,
+  125 an Android app. None is more saturated than the accent (chroma 0.12 at most, against its
+  0.13), so a tile is never the loudest thing on a page. Text, a log, the changeset and any other
+  file are neutral, told apart by their icon.
 - **Two surfaces per theme at most**: `base-100` for pages, `base-200` for the one row in a
   changed state. Structure is rules, not cards: `border-base-300` for section rules,
   `border-base-300/60` for rows within a section.
@@ -450,7 +456,7 @@ count of zero is drawn muted, never hidden, so tabs never move. The tab is in th
 |---|---|---|
 | first tab | **Talk** — default | **Decide** (open decisions) — default while anything waits |
 | | **Changes** (files) | **Timeline** — default otherwise |
-| | **Docs** (documents written) | **Changes** (files) |
+| | **Docs** (artifacts written) | **Changes** (files) |
 | | **Activity** | **Docs** |
 | | | **Activity** |
 
@@ -534,10 +540,24 @@ What the branch holds against its base, bounded per § Semantics that must not b
 
 ### Docs
 
-Every document written, **rendered** per § Documents — a conversation's included, which until
-now could only be opened as source. Latest version of each first, earlier versions as links to
-their addresses, approval marks only where approval is possible. What the last turn wrote that
-was not recorded is listed beneath, with why.
+Every artifact written — documents and files alike, a conversation's included, and on a ticket
+all but the changeset, which is the Changes tab — one row each:
+a `▸` where the row opens, the type's icon (§ Artifact types), the name, approval marks only
+where approval is possible, and the latest version at the row's end, linked to its address;
+earlier versions as links beneath. What the last turn wrote that was not recorded is listed
+beneath, with why.
+
+**A document is collapsed until it is opened.** Its row is a `<details>`, the `▸` turning as a
+Changes row's does, whose body is the document **rendered** per § Documents — or its text as
+written, when its name says it is text, a log or code. Open, one long plan pushed every row after
+it a screen down, and the tab is read for what is there before it is read for any one thing in
+it. An opened row stays open while the tab is patched (§ Motion and structure). The
+version link is beside the summary and never inside it: the row is a control of its own
+(§ The affordance rule).
+
+**A file has no body here**: its whole row is the link to its bytes, drawn at the same height.
+Reading every one of a build's outputs from the store to draw its row would be a store read per
+row per patch, and a file's bytes are one tap away at its address.
 
 ### Activity
 
@@ -1037,7 +1057,11 @@ and is drawn quietly all the same — the gap `provisioning.md` § The gate reco
 
 An agent's document is rendered, not shown as source. Source is one click away — every ticket
 artifact's name is a link to its exact version (below) — and the roadmap's margin-questions view
-needs structure, which source text cannot carry.
+needs structure, which source text cannot carry. A document whose name says it is text, a log or
+code and data (§ Artifact types) is the exception: it is shown as its text, in a `pre` that
+scrolls inside itself, because Markdown would join its lines into one paragraph. This holds
+wherever a document is drawn — the Docs tab, the review page and an approval card — because all
+three draw it with `ForgeWeb.FileType.render_document/2`.
 
 Rendered document bodies are the one place the product styles Markdown, and they do it from a
 scoped block in `app.css` rather than from `@tailwindcss/typography`. The plugin brings its own
@@ -1054,6 +1078,47 @@ never reaches the facts rail, which is the failure this rule was written for.
 The body sits on `base-200` inside a `--radius-box` block. This is the second sanctioned use of
 that surface — see Colour — and it is sanctioned because a document is the one thing on the page
 that is not the product's own writing, and the ground is what says so.
+
+## Artifact types
+
+An artifact's row carries an icon for the kind of file it is, so a build's package, its log and
+the plan beside them are told apart at a glance: a list of them is read by shape before it is
+read by name. It is drawn on every row and chip that is an artifact: the Docs tab, a job page's
+*Wrote* and a command's log, the ticket's chips, the review page's documents and an approval
+card's pinned versions. Where an artifact is named inline among other identifiers — the queue
+item's sentence and its footer, a question's answer, the Decide tab's document editor — it stays
+words. `ForgeWeb.FileType` is the one place a type is decided.
+
+The type is the name's extension. A document, which is text by construction, is Markdown unless
+its extension says text, a log or code; a blob with an extension not below is a *file*. It is
+never read from the bytes: drawing a row must not cost a store read.
+
+| Type | Extensions | Icon | Hue |
+|---|---|---|---|
+| Markdown | `.md` `.markdown`, and a document or presentation of any other name | a page with lines | 210 |
+| text | `.txt` `.csv` `.tsv` | lines | neutral |
+| log | `.log` | a terminal | neutral |
+| code and data | `.json` `.yaml` `.yml` `.toml` `.xml` `.html` `.css` `.js` `.ts` `.ex` `.exs` `.heex` `.py` `.rb` `.go` `.rs` `.java` `.kt` `.swift` `.c` `.h` `.sh` `.sql` `.nix` `.diff` `.patch` | brackets | 175 |
+| image | `.png` `.jpg` `.jpeg` `.gif` `.webp` `.svg` `.avif` | a picture | 340 |
+| archive | `.zip` `.tar` `.gz` `.tgz` `.xz` `.bz2` `.zst` `.7z` `.jar` `.aab` | a box | 95 |
+| Android app | `.apk` | a phone | 125 |
+| file | anything else | a cube | neutral |
+| changeset | the `changeset` blob, which is a commit and not a file | `±` | neutral |
+
+The icon sits in a 28px tile — 20px in a chip — tinted with its hue at low strength, on
+`--radius-field` and unbordered: it is not a control, and the row it sits in is. The tile is the
+only thing the type colours; the name beside it is an identifier and stays mono `base-content`.
+The hues are § Colour's *file type* and nothing else's. The icon carries its type's words for
+assistive technology, since an icon alone says nothing to a screen reader.
+
+**An Android app is first class.** Its Docs row says *Android app* beneath its name, and its
+address serves it as `application/vnd.android.package-archive` rather than
+`application/octet-stream`, still as an attachment — unless its bytes are small, valid text, which
+no real package is (an `.apk` is a zip), and which is then shown as text like any other
+(§ Addressable artifact versions). The media type is what tells a phone's browser the download is
+an app to hand to the package installer, rather than bytes it saved. That a phone then installs it
+from the row is unobserved here: it is tested as headers, and no package has yet been installed
+from a forge page.
 
 ## Addressable artifact versions
 
@@ -1082,7 +1147,8 @@ name.
   it; this route is the source behind it.
 - A **blob** is fetched from the store by its key and served as `text/plain` when it is text no
   larger than a document may be. Anything else — a package, a screenshot, a large log — is served
-  as `application/octet-stream` with `content-disposition: attachment`, copied from the store to a
+  as `application/octet-stream` with `content-disposition: attachment` — an `.apk` as
+  `application/vnd.android.package-archive` (§ Artifact types) — copied from the store to a
   temporary file and sent from there rather than read into memory: a download, never rendered. A group's file is named `group/file`,
   and its address carries the name as one encoded segment.
 - A **changeset** is not a file. `git:<sha>` names a commit, so the changeset links to `…/review`,

@@ -194,7 +194,7 @@ defmodule ForgeWeb.CommandsLiveTest do
     assert html =~ "exit 3"
     assert html =~ String.slice(Jobs.spec(finished).command["at"], 0, 12)
     assert has_element?(view, ~s(a[href$="/jobs/#{parent.id}"]), "invoked by implementing")
-    assert has_element?(view, ~s(a[href$="/artifacts/build.log/1"]))
+    assert has_element?(view, ~s(a[href$="/artifacts/build.log/1"] [data-file-type="log"]))
 
     # None of an agent's: no turns, no budget, no prompt.
     refute html =~ "State prompt"

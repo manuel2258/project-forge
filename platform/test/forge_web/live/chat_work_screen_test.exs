@@ -581,6 +581,8 @@ defmodule ForgeWeb.ChatWorkScreenTest do
 
       row = view |> element(~s(#changes-files li[data-path="lib/parser.ex"])) |> render()
       assert row =~ "<details"
+      # The tab is drawn again as the branch moves; a row the reader opened stays open.
+      assert row =~ ~s(phx-mounted="[[&quot;ignore_attrs&quot;)
       assert row =~ "+defmodule Parser do"
       assert row =~ ~s(data-hunk="1")
 
@@ -751,7 +753,7 @@ defmodule ForgeWeb.ChatWorkScreenTest do
         |> Floki.find("a")
         |> Enum.map(&String.trim(Floki.text(&1)))
 
-      assert links == ["notes.md v3", "v2", "v1"]
+      assert links == ["v3 ›", "v2", "v1"]
     end
 
     # Approval is a ticket's, and a project conversation's documents belong to no ticket: there

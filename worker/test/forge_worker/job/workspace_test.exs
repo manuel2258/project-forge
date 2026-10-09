@@ -141,6 +141,241 @@ defmodule ForgeWorker.Job.WorkspaceTest do
     assert String.trim(before) == head
   end
 
+  # `docs/design/job-prompt.md` § Integrating the default branch, and `git-hosting.md`
+  # § Non-fast-forward on a ticket branch: an integrating job sees the default branch, and its one
+  # squashed commit keeps the merge — the old ticket head first, the default branch second.
+  describe "an integrating job" do
+    setup %{origin: origin} do
+      work = tmp_dir("diverge")
+      git!(nil, ["clone", "--quiet", origin, work])
+      git!(work, ["config", "user.name", "elsewhere"])
+      git!(work, ["config", "user.email", "elsewhere@forge"])
+      git!(work, ["config", "commit.gpgsign", "false"])
+
+      # Both branches change README.md, as two tickets cut from one base and merged one after
+      # the other did in production.
+      git!(work, ["checkout", "--quiet", "ticket/1"])
+      File.write!(Path.join(work, "README.md"), "# Game, the ticket's\n")
+      git!(work, ["commit", "--quiet", "-am", "the ticket's work"])
+      git!(work, ["push", "--quiet", "origin", "ticket/1"])
+
+      git!(work, ["checkout", "--quiet", "main"])
+      File.write!(Path.join(work, "README.md"), "# Game, another ticket's\n")
+      git!(work, ["commit", "--quiet", "-am", "Merge ticket/2: another"])
+      git!(work, ["push", "--quiet", "origin", "main"])
+
+      %{
+        ticket: rev(origin, "refs/heads/ticket/1"),
+        main: rev(origin, "refs/heads/main")
+      }
+    end
+
+    defp integrating(origin, opts \\ []),
+      do: put_in(assignment(origin, opts), ["git", "default_branch"], "main")
+
+    defp rev(dir, ref), do: git!(nil, ["-C", dir, "rev-parse", ref]) |> String.trim()
+
+    # What the agent is told to do: merge, resolve, commit the merge.
+    defp merge_and_resolve(dir) do
+      {_out, 1} = System.cmd("git", ["-C", dir, "merge", "--quiet", "origin/main"])
+      File.write!(Path.join(dir, "README.md"), "# Game, both\n")
+      git!(dir, ["-c", "commit.gpgsign=false", "commit", "--quiet", "-am", "merge main"])
+    end
+
+    test "has the default branch beside its own", %{origin: origin, root: root, main: main} do
+      {:ok, dir} = Workspace.prepare(integrating(origin), root, @direct)
+
+      assert rev(dir, "refs/remotes/origin/main") == main
+      assert git!(dir, ["rev-parse", "--abbrev-ref", "HEAD"]) |> String.trim() == "ticket/1"
+      assert File.read!(Path.join(dir, "README.md")) == "# Game, the ticket's\n"
+    end
+
+    test "squashes its merge into one commit that keeps both parents", context do
+      %{origin: origin, root: root, ticket: ticket, main: main} = context
+      job = integrating(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      merge_and_resolve(dir)
+      File.write!(Path.join(dir, "NOTES.md"), "resolved by keeping both\n")
+
+      assert {:ok, head} = Workspace.commit_and_push(job, dir, "integrating: attempt 1", @direct)
+
+      assert rev(origin, "refs/heads/ticket/1") == head
+      assert rev(origin, head <> "^1") == ticket
+      assert rev(origin, head <> "^2") == main
+      assert git!(nil, ["-C", origin, "show", head <> ":README.md"]) == "# Game, both\n"
+      assert git!(nil, ["-C", origin, "show", head <> ":NOTES.md"]) =~ "keeping both"
+      assert git!(nil, ["-C", origin, "log", "-1", "--format=%s", head]) =~ "integrating"
+    end
+
+    # Told not to, and done anyway: the old head is still the first parent, so the commit the
+    # ticket's merge was last attempted for stays an ancestor of what is pushed.
+    test "a run that rebased is squashed into a merge all the same", context do
+      %{origin: origin, root: root, ticket: ticket, main: main} = context
+      job = integrating(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      git!(dir, ["reset", "--quiet", "--hard", "origin/main"])
+      File.write!(Path.join(dir, "README.md"), "# Game, both\n")
+      git!(dir, ["-c", "commit.gpgsign=false", "commit", "--quiet", "-am", "replayed"])
+
+      assert {:ok, head} = Workspace.commit_and_push(job, dir, "integrating: attempt 1", @direct)
+
+      assert rev(origin, head <> "^1") == ticket
+      assert rev(origin, head <> "^2") == main
+    end
+
+    # Fetched is not merged: a run that never merged the default branch did not bring it in, and
+    # a second parent would say it had.
+    test "a run that did not merge keeps one parent", context do
+      %{origin: origin, root: root, ticket: ticket} = context
+      job = integrating(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      File.write!(Path.join(dir, "NOTES.md"), "could not decide\n")
+
+      assert {:ok, head} = Workspace.commit_and_push(job, dir, "integrating: attempt 1", @direct)
+
+      assert rev(origin, head <> "^1") == ticket
+
+      assert {_out, 128} =
+               System.cmd("git", ["-C", origin, "rev-parse", "--verify", head <> "^2"],
+                 stderr_to_stdout: true
+               )
+    end
+
+    test "a later run that merged nothing new keeps one parent", context do
+      %{origin: origin, root: root, main: main} = context
+      job = integrating(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      merge_and_resolve(dir)
+      {:ok, merged} = Workspace.commit_and_push(job, dir, "integrating: attempt 1", @direct)
+
+      # A cold start of the next run, on the worktree the first left: the branch already has the
+      # default branch's head, so there is nothing for this run's commit to keep.
+      {:ok, ^dir} = Workspace.prepare(job, root, @direct)
+      assert rev(dir, "HEAD") == merged
+      assert rev(dir, "refs/remotes/origin/main") == main
+      File.write!(Path.join(dir, "MORE.md"), "a fix on top\n")
+
+      assert {:ok, head} = Workspace.commit_and_push(job, dir, "integrating: attempt 2", @direct)
+
+      assert rev(origin, head <> "^1") == merged
+
+      assert {_out, 128} =
+               System.cmd("git", ["-C", origin, "rev-parse", "--verify", head <> "^2"],
+                 stderr_to_stdout: true
+               )
+    end
+
+    # A run that merged and died before its squash is resumed on its own worktree — after the
+    # default branch moved on. The fetch brings the newer head, which the merge does not contain;
+    # what is kept is what the run merged.
+    test "a resumed run keeps what it merged, after the default branch moved", context do
+      %{origin: origin, root: root, ticket: ticket, main: main} = context
+      job = integrating(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      merge_and_resolve(dir)
+
+      work = tmp_dir("moves-on")
+      git!(nil, ["clone", "--quiet", "--branch", "main", origin, work])
+      File.write!(Path.join(work, "LATER.md"), "landed meanwhile\n")
+      git!(work, ["add", "."])
+
+      git!(
+        work,
+        ["-c", "user.name=t", "-c", "user.email=t@forge", "-c", "commit.gpgsign=false"] ++
+          ["commit", "--quiet", "-m", "later"]
+      )
+
+      git!(work, ["push", "--quiet", "origin", "main"])
+
+      resumed = %{job | "resume_session" => "sess-1"}
+      assert {:ok, ^dir} = Workspace.prepare(resumed, root, @direct)
+      refute rev(dir, "refs/remotes/origin/main") == main
+
+      assert {:ok, head} =
+               Workspace.commit_and_push(resumed, dir, "integrating: attempt 1", @direct)
+
+      assert rev(origin, head <> "^1") == ticket
+      assert rev(origin, head <> "^2") == main
+    end
+
+    # On every run, not only the clone: a later run on the worktree an earlier one left is handed
+    # the default branch as it is now.
+    test "a later run on its own worktree fetches the default branch again", context do
+      %{origin: origin, root: root, main: main} = context
+      job = integrating(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      assert rev(dir, "refs/remotes/origin/main") == main
+
+      work = tmp_dir("moves")
+      git!(nil, ["clone", "--quiet", "--branch", "main", origin, work])
+      File.write!(Path.join(work, "LATER.md"), "landed meanwhile\n")
+      git!(work, ["add", "."])
+
+      git!(work, [
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@forge",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--quiet",
+        "-m",
+        "later"
+      ])
+
+      git!(work, ["push", "--quiet", "origin", "main"])
+
+      assert {:ok, ^dir} = Workspace.prepare(job, root, @direct)
+      assert rev(dir, "refs/remotes/origin/main") == rev(origin, "refs/heads/main")
+    end
+
+    # The default branch is fetched after the ticket's, and a fetch writes FETCH_HEAD, which is
+    # what a cold start resets the worktree to: in the other order the ticket's worktree became
+    # the default branch.
+    test "a cold start on its own worktree is the ticket's branch, not the default", context do
+      %{origin: origin, root: root, ticket: ticket} = context
+      job = integrating(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      File.write!(Path.join(dir, "half-done.txt"), "from a run that died")
+
+      assert {:ok, ^dir} = Workspace.prepare(job, root, @direct)
+
+      assert rev(dir, "HEAD") == ticket
+      assert File.read!(Path.join(dir, "README.md")) == "# Game, the ticket's\n"
+    end
+
+    test "any other job neither fetches the default branch nor keeps a second parent", context do
+      %{origin: origin, root: root, ticket: ticket} = context
+      job = assignment(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+
+      assert {_out, 128} =
+               System.cmd("git", ["-C", dir, "rev-parse", "--verify", "refs/remotes/origin/main"],
+                 stderr_to_stdout: true
+               )
+
+      # Even if the default branch reached the worktree some other way, the squash is one parent.
+      git!(dir, ["fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main"])
+      merge_and_resolve(dir)
+
+      assert {:ok, head} = Workspace.commit_and_push(job, dir, "planning: attempt 1", @direct)
+      assert rev(origin, head <> "^1") == ticket
+
+      assert {_out, 128} =
+               System.cmd("git", ["-C", origin, "rev-parse", "--verify", head <> "^2"],
+                 stderr_to_stdout: true
+               )
+    end
+
+    test "a default branch that is not a branch name is refused", %{origin: origin, root: root} do
+      job = put_in(assignment(origin), ["git", "default_branch"], "main:refs/heads/ticket/1")
+
+      assert {:error, {:not_a_branch, "main:refs/heads/ticket/1"}} =
+               Workspace.prepare(job, root, @direct)
+    end
+  end
+
   describe "seeds" do
     setup %{origin: origin} do
       # What `mix forge.seed.publish` uploads: a full clone of the project with its build

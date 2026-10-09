@@ -9,8 +9,9 @@ defmodule Forge.MergeTest do
   import Forge.ForgeFixtures
   import Forge.AccountsFixtures
   import Forge.GitFixtures
+  import Forge.MergeFixtures
 
-  alias Forge.{Artifacts, Engine, Events, Git, Merge, Operator, Projects, Tickets}
+  alias Forge.{Engine, Events, Git, Merge, Operator, Projects, Tickets}
   alias Forge.Git.Tokens
 
   setup do
@@ -96,13 +97,13 @@ defmodule Forge.MergeTest do
     %{project: project, bare: bare, destination: destination, user: user, ticket: ticket}
   end
 
-  describe "perform/2" do
+  describe "perform/3" do
     test "puts the approved commit on the default branch and on the mirror", context do
       %{ticket: ticket, bare: bare, destination: destination, user: user} = context
       sha = commit_on_branch(context, "feature.txt", "the change")
       changeset!(ticket, sha)
 
-      assert {:ok, %{sha: merged, already: false}} = Merge.perform(ticket, user)
+      assert {:ok, %{sha: merged, already: false}} = Merge.perform(ticket, sha, user)
       assert {:ok, ^merged} = Git.resolve(bare, "refs/heads/main")
       assert Git.ancestor?(bare, sha, merged)
       assert {:ok, ^merged} = Git.resolve(Projects.repo_path(destination), "refs/heads/main")
@@ -113,7 +114,7 @@ defmodule Forge.MergeTest do
       sha = commit_on_branch(context, "feature.txt", "the change")
       changeset!(ticket, sha)
 
-      {:ok, %{sha: merged}} = Merge.perform(ticket, user)
+      {:ok, %{sha: merged}} = Merge.perform(ticket, sha, user)
       {:ok, message} = Git.run(bare, ["show", "--no-patch", "--format=%an%n%B", merged])
 
       assert message =~ user.email
@@ -131,7 +132,7 @@ defmodule Forge.MergeTest do
       sha = commit_on_branch(context, "feature.txt", "the change")
       changeset!(ticket, sha)
 
-      {:ok, %{sha: merged}} = Merge.perform(ticket, user)
+      {:ok, %{sha: merged}} = Merge.perform(ticket, sha, user)
       {:ok, who} = Git.run(bare, ["show", "--no-patch", "--format=%cn <%ce>|%an", merged])
 
       assert String.trim(who) == "forge <forge@localhost>|#{user.email}"
@@ -142,8 +143,8 @@ defmodule Forge.MergeTest do
       sha = commit_on_branch(context, "feature.txt", "the change")
       changeset!(ticket, sha)
 
-      {:ok, %{sha: merged, already: false}} = Merge.perform(ticket, context.user)
-      assert {:ok, %{sha: ^merged, already: true}} = Merge.perform(ticket, context.user)
+      {:ok, %{sha: merged, already: false}} = Merge.perform(ticket, sha, context.user)
+      assert {:ok, %{sha: ^merged, already: true}} = Merge.perform(ticket, sha, context.user)
       assert {:ok, [^merged]} = Git.commits_since(bare, sha, "refs/heads/main")
     end
 
@@ -152,18 +153,20 @@ defmodule Forge.MergeTest do
       sha = commit_on_branch(context, "feature.txt", "the change")
       changeset!(ticket, sha)
 
-      {:ok, _merged} = Merge.perform(ticket, context.user)
+      {:ok, _merged} = Merge.perform(ticket, sha, context.user)
       assert {:ok, ^sha} = Git.resolve(bare, "refs/forge/approved/#{ticket.number}")
     end
 
-    test "refuses when the approved commit is gone", %{ticket: ticket, user: user} do
-      changeset!(ticket, String.duplicate("a", 40))
+    test "refuses when the commit it was named is gone", %{ticket: ticket, user: user} do
+      gone = String.duplicate("a", 40)
+      changeset!(ticket, gone)
 
-      assert {:error, {:approved_commit_gone, _sha}} = Merge.perform(ticket, user)
+      assert {:error, {:approved_commit_gone, ^gone}} = Merge.perform(ticket, gone, user)
     end
 
-    test "refuses when nothing was ever approved", %{ticket: ticket, user: user} do
-      assert {:error, :no_changeset} = Merge.perform(ticket, user)
+    test "a ticket with no changeset names nothing to merge", %{ticket: ticket} do
+      assert {:error, :no_changeset} = Merge.changeset(ticket)
+      refute Merge.merged?(ticket)
     end
 
     test "reports the conflicted paths and changes nothing", context do
@@ -172,7 +175,7 @@ defmodule Forge.MergeTest do
       changeset!(ticket, sha)
       main = diverge_default_branch(context, "README.md", "the trunk's version")
 
-      assert {:conflict, ["README.md"]} = Merge.perform(ticket, user)
+      assert {:conflict, ["README.md"], ^main} = Merge.perform(ticket, sha, user)
       assert {:ok, ^main} = Git.resolve(bare, "refs/heads/main")
     end
   end
@@ -343,70 +346,6 @@ defmodule Forge.MergeTest do
 
   # -- helpers ---------------------------------------------------------------------------------
 
-  # A commit on top of `parent`, made in a scratch clone and fetched into the bare repository
-  # without moving any ref: something for the race below to move the default branch to.
-  defp commit_beside(bare, parent, path, content) do
-    dir = Path.join(tmp_dir("merge-beside"), "work")
-    {:ok, _out} = Git.run(tmp_dir("merge-beside-parent"), ["clone", "--quiet", bare, dir])
-
-    for args <- [
-          ["checkout", "--quiet", "--detach", parent],
-          ["config", "user.name", "elsewhere"],
-          ["config", "user.email", "elsewhere@forge"]
-        ],
-        do: {:ok, _out} = Git.run(dir, args)
-
-    File.write!(Path.join(dir, path), content <> "\n")
-    {:ok, _out} = Git.run(dir, ["add", path])
-    {:ok, _out} = Git.run(dir, ["commit", "--quiet", "-m", content])
-    {:ok, sha} = Git.resolve(dir, "HEAD")
-    {:ok, _out} = Git.run(bare, ["fetch", "--quiet", dir, "HEAD"])
-    sha
-  end
-
-  # Wraps the repository's `pre-receive`. On the n-th push it moves the default branch to the n-th
-  # of `moves`, if there is one, and then hands over to the real hook — or, with `refuse: true`,
-  # refuses without moving anything. Returns a function counting the pushes it saw.
-  #
-  # The move has to leave git's quarantine to be allowed at all: a hook may not update a ref
-  # while the pushed objects are still quarantined, which is the rule that makes this window
-  # otherwise impossible to reach from inside the push.
-  defp race(bare, opts) do
-    dir = tmp_dir("merge-race")
-    count = Path.join(dir, "pushes")
-    moves = Path.join(dir, "moves")
-    File.write!(moves, Enum.map_join(Keyword.get(opts, :moves, []), &(&1 <> "\n")))
-
-    hook = Path.join([bare, "hooks", "pre-receive"])
-    File.rename!(hook, hook <> ".real")
-
-    finish =
-      if Keyword.get(opts, :refuse, false),
-        do: ~s(echo "forge: refused by the test" >&2; exit 1),
-        else: ~s(exec "$0.real")
-
-    File.write!(hook, """
-    #!/usr/bin/env bash
-    set -eu
-    n=$(( $(cat "#{count}" 2>/dev/null || echo 0) + 1 ))
-    echo "$n" > "#{count}"
-    target=$(sed -n "${n}p" "#{moves}")
-    if [ -n "$target" ]; then
-      env -u GIT_QUARANTINE_PATH git update-ref refs/heads/main "$target"
-    fi
-    #{finish}
-    """)
-
-    File.chmod!(hook, 0o755)
-
-    fn ->
-      case File.read(count) do
-        {:ok, n} -> n |> String.trim() |> String.to_integer()
-        {:error, :enoent} -> 0
-      end
-    end
-  end
-
   defp stuck_reason(ticket) do
     ticket.id
     |> Events.for_ticket()
@@ -425,34 +364,6 @@ defmodule Forge.MergeTest do
   # directly, because the endpoint exists precisely to refuse this.
   defp diverge_default_branch(%{bare: bare}, path, content),
     do: commit_to(bare, "main", %{path => content <> "\n"}, content)
-
-  defp changeset!(ticket, sha) do
-    {:ok, _version} =
-      Artifacts.record_version(ticket.id, "changeset", :blob, :system, %{
-        blob_uri: "git:" <> sha
-      })
-
-    :ok
-  end
-
-  # The state the workflow leaves a ticket in just before the merge: resting in `review_ready`
-  # with the approval of `changeset` pending.
-  defp pend_merge(ticket) do
-    {:ok, ticket} =
-      ticket
-      |> Ecto.Changeset.change(
-        state: "review_ready",
-        pending_transition: %{
-          "from" => "review_ready",
-          "to" => "merged",
-          "outcome" => nil,
-          "approve" => ["changeset"]
-        }
-      )
-      |> Repo.update()
-
-    ticket
-  end
 
   defp event_types(ticket), do: ticket.id |> Events.for_ticket() |> Enum.map(& &1.type)
 

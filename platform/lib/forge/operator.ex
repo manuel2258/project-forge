@@ -161,6 +161,18 @@ defmodule Forge.Operator do
     end
   end
 
+  @doc """
+  Sends a ticket whose changeset no longer merges down its merging state's conflict route, before
+  anybody approves it (`Forge.Engine.integrate/2`).
+  """
+  @spec integrate(Ticket.t(), User.t()) :: {:ok, Ticket.t()} | {:error, term()}
+  def integrate(%Ticket{} = ticket, %User{} = user) do
+    with :ok <- allow(ticket, user, :use),
+         {:ok, ticket} <- Engine.integrate(ticket, user.id) do
+      notify(ticket)
+    end
+  end
+
   @doc "Re-pins a ticket's workflow to the default branch as it is now (`Forge.Engine.repin/2`)."
   @spec repin(Ticket.t(), User.t()) :: {:ok, Ticket.t()} | {:error, term()}
   def repin(%Ticket{} = ticket, %User{} = user) do
@@ -276,7 +288,15 @@ defmodule Forge.Operator do
   @doc "Merges a conversation's branch."
   @spec merge_chat(Job.t(), User.t()) :: {:ok, term()} | {:error, term()}
   def merge_chat(%Job{kind: :chat} = chat, %User{} = user) do
-    with :ok <- allow(chat, user, :use), do: Forge.Merge.perform_chat(chat, user)
+    with :ok <- allow(chat, user, :use),
+         {:ok, %{sha: sha, already: already}} = merged <- Forge.Merge.perform_chat(chat, user) do
+      # What the merge did to the project's open tickets (`Forge.Merge.Watch`). Nothing moved when
+      # the branch was already there.
+      unless already,
+        do: Forge.Merge.Watch.after_merge(chat.project_id, sha, %{"chat" => chat.id})
+
+      merged
+    end
   end
 
   ## Project settings — the admin's, not the member's

@@ -33,6 +33,7 @@ defmodule ForgeWorker.Checkout do
           resume: boolean(),
           clean: boolean(),
           identity: {String.t(), String.t()},
+          default: String.t() | nil,
           as: ForgeWorker.Slice.as()
         ]
 
@@ -54,6 +55,11 @@ defmodule ForgeWorker.Checkout do
   `as` runs git in a checkout that is already there, and the checkout must already be the job's
   user's. A clone is the worker's own — into a directory nothing has touched — and the caller
   gives it to the user afterwards.
+
+  `default` names the project's default branch, for an integrating job: it is fetched as well, on
+  every run, into `origin/<default>`, so the job can merge it (`docs/design/job-prompt.md`
+  § Integrating the default branch). Fetching is all: the job's token still writes nothing but
+  its own branch.
   """
   @spec ensure(opts()) :: :ok | {:error, term()}
   def ensure(opts) do
@@ -93,13 +99,61 @@ defmodule ForgeWorker.Checkout do
   finds nothing staged, nothing is committed, and a converged job's changes never leave the
   machine. `decisions.md` asks for one commit per run rather than an agent's keystrokes, and
   this is where that happens.
+
+  **`keep` names a branch the run may have merged** — an integrating job's `origin/<default>`. When
+  the run's head contains history of it that `base` does not — their merge base is no ancestor of
+  `base` — that merge base is the squashed commit's second parent, so the squash keeps the merge: one parent would put the merged tree on the branch while losing
+  that the default branch was merged, and the next `merge-tree` would start from the old merge
+  base and find the same conflict (`docs/design/git-hosting.md` § Non-fast-forward on a ticket
+  branch). The merge base and not `keep` itself, because a run resumed after the default branch
+  moved has fetched a newer head than the one it merged. `base` stays the first parent whatever the
+  run did, so a run that rebased instead of merging still leaves the commit before it an ancestor.
   """
-  @spec squash(String.t(), String.t(), String.t(), ForgeWorker.Slice.as()) ::
+  @spec squash(String.t(), String.t(), String.t(), ForgeWorker.Slice.as(), keyword()) ::
           {:ok, boolean()} | {:error, term()}
-  def squash(dir, base, message, as) do
-    with {:ok, _out} <- git(dir, ["reset", "--soft", base], as: as),
+  def squash(dir, base, message, as, opts \\ []) do
+    with {:ok, merged} <- merged(dir, base, Keyword.get(opts, :keep), as),
+         {:ok, _out} <- git(dir, ["reset", "--soft", base], as: as),
          {:ok, _out} <- git(dir, ["add", "-A"], as: as) do
-      commit(dir, message, as)
+      commit(dir, base, merged, message, as)
+    end
+  end
+
+  # The commit to keep as a second parent, or nil: the newest of `keep`'s history the run's head
+  # contains, when `base` does not contain it. Asked before the reset, while `HEAD` is the run's.
+  defp merged(_dir, _base, nil, _as), do: {:ok, nil}
+
+  defp merged(dir, base, keep, as) do
+    case git(dir, ["merge-base", "HEAD", keep], as: as) do
+      {:ok, out} ->
+        sha = String.trim(out)
+        if ancestor?(dir, sha, base, as), do: {:ok, nil}, else: {:ok, sha}
+
+      # `keep` not fetched, or nothing in common with the run: nothing of it to keep. No test reaches
+      # it, and failing here instead is an equivalent mutant: `keep` is set only for a checkout
+      # whose `ensure/1` fetched it, and a ticket branch is cut from the branch it names.
+      {:error, _none} ->
+        {:ok, nil}
+    end
+  end
+
+  defp ancestor?(dir, ancestor, of, as),
+    do: match?({:ok, _out}, git(dir, ["merge-base", "--is-ancestor", ancestor, of], as: as))
+
+  # With a merged commit, always a commit, and written with both parents: the merge is the point
+  # even when the tree it leaves is the one `base` had.
+  defp commit(dir, _base, nil, message, as), do: commit(dir, message, as)
+
+  defp commit(dir, base, merged, message, as) do
+    with {:ok, tree} <- git(dir, ["write-tree"], as: as),
+         {:ok, sha} <-
+           git(
+             dir,
+             ["commit-tree", String.trim(tree), "-p", base, "-p", merged, "-m", message],
+             as: as
+           ),
+         {:ok, _out} <- git(dir, ["reset", "--soft", String.trim(sha)], as: as) do
+      {:ok, true}
     end
   end
 
@@ -163,8 +217,9 @@ defmodule ForgeWorker.Checkout do
 
     args = ["clone", "--quiet", "--branch", branch, "--single-branch", url, dir]
 
-    with {:ok, _out} <- git(Path.dirname(dir), args, opts) do
-      identity(dir, opts)
+    with {:ok, _out} <- git(Path.dirname(dir), args, opts),
+         :ok <- identity(dir, opts) do
+      fetch_default(dir, opts)
     end
   end
 
@@ -172,11 +227,17 @@ defmodule ForgeWorker.Checkout do
     branch = Keyword.fetch!(opts, :branch)
 
     with {:ok, _out} <- git(dir, ["fetch", "--quiet", "origin", branch], opts),
-         :ok <- identity(dir, opts) do
-      if Keyword.get(opts, :resume, false),
-        do: :ok,
-        else: reset(dir, branch, Keyword.get(opts, :clean, true), opts[:as])
+         :ok <- identity(dir, opts),
+         :ok <- reset_unless_resuming(dir, branch, opts) do
+      # Last, because it writes FETCH_HEAD too, and the reset is to the branch's.
+      fetch_default(dir, opts)
     end
+  end
+
+  defp reset_unless_resuming(dir, branch, opts) do
+    if Keyword.get(opts, :resume, false),
+      do: :ok,
+      else: reset(dir, branch, Keyword.get(opts, :clean, true), opts[:as])
   end
 
   # `-B` rather than a bare reset: a snapshot of a seed is on whatever commit the seed was
@@ -188,6 +249,28 @@ defmodule ForgeWorker.Checkout do
       :ok
     end
   end
+
+  # Into `origin/<default>` and nowhere else, by an explicit refspec: the clone is single-branch,
+  # so nothing configured would fetch it. The name becomes part of a refspec, so it is matched
+  # rather than trusted — a `:` in it would name a second ref to write.
+  defp fetch_default(dir, opts) do
+    case Keyword.get(opts, :default) do
+      nil -> :ok
+      branch -> fetch_default(dir, branch, branch_name?(branch), opts)
+    end
+  end
+
+  defp fetch_default(dir, branch, true = _name?, opts) do
+    refspec = "+refs/heads/#{branch}:refs/remotes/origin/#{branch}"
+    with {:ok, _out} <- git(dir, ["fetch", "--quiet", "origin", refspec], opts), do: :ok
+  end
+
+  defp fetch_default(_dir, branch, false = _name?, _opts), do: {:error, {:not_a_branch, branch}}
+
+  # `..` is refused here and by git, which will not fetch into a ref named with one, so dropping
+  # this half is an equivalent mutant no test can tell; it stays so the refusal is ours and says so.
+  defp branch_name?(name),
+    do: Regex.match?(~r{^[A-Za-z0-9][A-Za-z0-9._/-]*$}, name) and not String.contains?(name, "..")
 
   defp maybe_clean(_dir, false, _as), do: {:ok, ""}
   defp maybe_clean(dir, true, as), do: git(dir, ["clean", "--quiet", "-fd"], as: as)

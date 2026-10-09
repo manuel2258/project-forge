@@ -1,6 +1,7 @@
 defmodule Forge.Merge do
   @moduledoc """
-  Merging a ticket's approved changeset into its project's default branch.
+  Merging a ticket's changeset — the version its transition into the merging state named — or a
+  conversation's branch into its project's default branch.
 
   Entirely in the object database: `merge-tree` is a real three-way merge from the merge base
   with no checkout and no temporary worktree, and a non-zero exit lists the conflicted paths, so
@@ -11,8 +12,13 @@ defmodule Forge.Merge do
   repository's own hooks — so the merge is guarded and mirrored by exactly the code path a job's
   push takes, rather than by a second implementation beside it.
 
-  `perform/2` is idempotent: an approved commit already on the default branch is left alone. See
+  `perform/3` is idempotent: a commit already on the default branch is left alone. See
   `docs/design/git-hosting.md`.
+
+  **What a ticket's merge merges is named by its caller**, never read here as "the latest
+  version": the transition into the merging state names the commit it was taken for, and the
+  merge is of that one (`docs/design/workflow-grammar-v1.md` § Merging). `changeset/1` is where
+  the transition reads it.
 
   **A merge that loses a race is retried once.** An attempt is written against the head it
   resolved; when it fails and the default branch has moved since, one more attempt is made
@@ -31,18 +37,47 @@ defmodule Forge.Merge do
   alias Forge.Tickets.Ticket
   alias ForgeCore.Workflow
 
-  @type outcome ::
-          {:ok, %{sha: String.t(), already: boolean()}}
-          | {:conflict, [String.t()]}
-          | {:error, term()}
+  @typedoc """
+  A ticket's merge that conflicted: the paths, and the default branch's head it conflicted with —
+  after the one retry, the head the retry was made against.
+  """
+  @type conflict :: {:conflict, [String.t()], String.t()}
+
+  @type outcome :: {:ok, %{sha: String.t(), already: boolean()}} | conflict() | {:error, term()}
 
   @doc """
-  Whether the ticket's approved changeset would merge cleanly. Reads the object database and
-  changes nothing, so it is safe to call before a transaction that must not be rolled back.
+  The ticket's latest `changeset` version: its commit, its number and the row. What a transition
+  into the merging state reads, once, as it is taken — and names, and a person's approval of it is
+  recorded against, so the merge after it is of that version and no later one
+  (`docs/design/workflow-grammar-v1.md` § Merging).
   """
-  @spec check(Ticket.t()) :: :ok | {:conflict, [String.t()]} | {:error, term()}
-  def check(%Ticket{} = ticket) do
-    with {:ok, plan} <- ticket_plan(ticket), do: check_refs(plan)
+  @spec changeset(Ticket.t()) ::
+          {:ok, %{sha: String.t(), version: pos_integer(), row: struct()}}
+          | {:error, term()}
+  def changeset(%Ticket{} = ticket) do
+    case Artifacts.latest(ticket.id, Workflow.changeset_artifact()) do
+      nil -> {:error, :no_changeset}
+      %{blob_uri: "git:" <> sha} = row -> {:ok, %{sha: sha, version: row.version, row: row}}
+      %{blob_uri: other} -> {:error, {:not_a_commit, other}}
+    end
+  end
+
+  @doc """
+  Whether `sha`, a commit of the ticket's, would merge cleanly into the default branch — at its
+  head, or at `head` when one is given: a merge just made, or what it was made on top of, for
+  `Forge.Merge.Watch`. Reads the object database and changes nothing, so it is safe to call before
+  a transaction that must not be rolled back.
+  """
+  @spec check(Ticket.t(), String.t(), String.t() | nil) :: :ok | conflict() | {:error, term()}
+  def check(%Ticket{} = ticket, sha, head \\ nil) do
+    with {:ok, plan} <- ticket_plan(ticket, sha) do
+      plan = if head, do: %{plan | head: head}, else: plan
+
+      case check_refs(plan) do
+        {:conflict, paths} -> {:conflict, paths, plan.head}
+        other -> other
+      end
+    end
   end
 
   @doc """
@@ -51,7 +86,7 @@ defmodule Forge.Merge do
   This is the second route into the default branch, which `pre-receive` exists to keep singular,
   so it is worth being exact: both routes are the platform's own merge, both are guarded by the
   same hook with `FORGE_INTERNAL`, and neither lets a job write the default branch. What
-  differs is what authorises it — a ticket's approved changeset version, or an operator pressing
+  differs is what authorises it — the changeset version a ticket's transition named, or an operator pressing
   merge on a diff they are looking at.
   """
   @spec check_chat(Job.t()) :: :ok | {:conflict, [String.t()]} | {:error, term()}
@@ -74,10 +109,10 @@ defmodule Forge.Merge do
   defp forget_tree({:ok, _tree}), do: :ok
   defp forget_tree(other), do: other
 
-  @doc "Merges the approved changeset and pushes it, as `user`."
-  @spec perform(Ticket.t(), User.t() | nil) :: outcome()
-  def perform(%Ticket{} = ticket, user \\ nil) do
-    with {:ok, plan} <- ticket_plan(ticket), do: perform_refs(plan, user)
+  @doc "Merges `sha`, the commit the ticket's transition into its merging state named, as `user`."
+  @spec perform(Ticket.t(), String.t(), User.t() | nil) :: outcome()
+  def perform(%Ticket{} = ticket, sha, user \\ nil) do
+    with {:ok, plan} <- ticket_plan(ticket, sha), do: perform_refs(plan, user)
   end
 
   @doc """
@@ -87,12 +122,23 @@ defmodule Forge.Merge do
   merged commit reachable; deleting `chat/<id>` first would leave the commit collectable between
   the two, and "the branch is deleted when done" would quietly mean the work was too.
   """
-  @spec perform_chat(Job.t(), User.t() | nil) :: outcome()
+  @spec perform_chat(Job.t(), User.t() | nil) ::
+          {:ok, %{sha: String.t(), already: boolean()}}
+          | {:conflict, [String.t()]}
+          | {:error, term()}
   def perform_chat(%Job{kind: :chat} = chat, user \\ nil) do
-    with {:ok, plan} <- chat_plan(chat),
-         {:ok, result} <- perform_refs(plan, user) do
-      Git.delete_branch(plan.repo, Jobs.chat_branch(chat))
-      {:ok, result}
+    with {:ok, plan} <- chat_plan(chat) do
+      case perform_refs(plan, user) do
+        {:ok, result} ->
+          Git.delete_branch(plan.repo, Jobs.chat_branch(chat))
+          {:ok, result}
+
+        {:conflict, paths, _head} ->
+          {:conflict, paths}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
     end
   end
 
@@ -165,11 +211,16 @@ defmodule Forge.Merge do
 
       failed ->
         case default_head(plan.repo, plan.project) do
-          {:ok, head} when head != plan.head -> attempt(%{plan | head: head}, user)
-          _unmoved -> failed
+          {:ok, head} when head != plan.head -> %{plan | head: head} |> attempt(user) |> at(head)
+          _unmoved -> at(failed, plan.head)
         end
     end
   end
+
+  # A conflict says which head it was found against, because that is what the job sent to resolve
+  # it has to merge and what the event records.
+  defp at({:conflict, paths}, head), do: {:conflict, paths, head}
+  defp at(other, _head), do: other
 
   defp attempt(plan, user) do
     %{repo: repo, head: head, source: source} = plan
@@ -185,11 +236,13 @@ defmodule Forge.Merge do
   defp default_head(repo, %Project{default_branch: default}),
     do: Git.resolve(repo, "refs/heads/" <> default)
 
-  @doc "Whether the ticket's approved changeset is already on the default branch."
+  @doc "Whether the ticket's latest changeset is already on the default branch."
   @spec merged?(Ticket.t()) :: boolean()
   def merged?(%Ticket{} = ticket) do
-    case ticket_plan(ticket) do
-      {:ok, %{repo: repo, head: head, source: source}} -> Git.ancestor?(repo, source, head)
+    with {:ok, %{sha: sha}} <- changeset(ticket),
+         {:ok, %{repo: repo, head: head, source: source}} <- ticket_plan(ticket, sha) do
+      Git.ancestor?(repo, source, head)
+    else
       {:error, _reason} -> false
     end
   end
@@ -203,26 +256,15 @@ defmodule Forge.Merge do
     end
   end
 
-  @doc "The commit an approval of `changeset` pinned, or an error naming why there is none."
-  @spec approved_sha(Ticket.t()) :: {:ok, String.t()} | {:error, term()}
-  def approved_sha(%Ticket{} = ticket) do
-    case Artifacts.latest(ticket.id, Workflow.changeset_artifact()) do
-      nil -> {:error, :no_changeset}
-      %{blob_uri: "git:" <> sha} -> {:ok, sha}
-      %{blob_uri: other} -> {:error, {:not_a_commit, other}}
-    end
-  end
-
   # -- internals -------------------------------------------------------------------------------
 
   # What a merge needs, whatever authorised it: the repository, where it is going, what is being
   # merged, the ref that keeps it reachable, and what the commit should say.
-  defp ticket_plan(%Ticket{} = ticket) do
+  defp ticket_plan(%Ticket{} = ticket, approved) do
     project = Tickets.project_of(ticket)
     repo = Projects.repo_path(project)
 
-    with {:ok, approved} <- approved_sha(ticket),
-         {:ok, source} <- resolve_approved(repo, approved),
+    with {:ok, source} <- resolve_approved(repo, approved),
          {:ok, head} <- default_head(repo, project) do
       {:ok,
        %{
@@ -255,7 +297,7 @@ defmodule Forge.Merge do
     end
   end
 
-  # A ticket branch may be rewritten, so the commit an approval pinned can in principle be gone.
+  # A ticket branch may be rewritten, so the commit a transition named can in principle be gone.
   # Refusing loudly is the point: merging the branch head instead would merge something nobody
   # approved.
   defp resolve_approved(repo, sha) do

@@ -83,8 +83,9 @@ platform's own git endpoint with a credential scoped to exactly one ref, and the
 `pre-receive` hook refuses anything else: another ticket's branch, a branch that is not
 `ticket/<n>`, a deletion, or the default branch, which only the platform's own merge may write.
 A rewrite of a ticket's own branch is allowed and noted, because a job squashes; what an approval
-attaches to is the changeset's sha, which is pinned under `refs/forge/approved/<n>` so a rewrite
-cannot lose it.
+attaches to is the changeset's sha, and each merge attempt pins the commit it merges under
+`refs/forge/approved/<n>` so a rewrite cannot lose it (`docs/design/git-hosting.md`
+§ Non-fast-forward on a ticket branch).
 
 ### Provider-reported capacity
 

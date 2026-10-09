@@ -30,6 +30,10 @@ config :forge, ForgeWeb.Endpoint,
 # modules run — which is how this suite has broken twice (`Forge.Harness.ClaudeCode`).
 config :forge, Forge.Harness.ClaudeCode, req_options: [plug: {Req.Test, Forge.Harness.ClaudeCode}]
 
+# What a merge did to the other open tickets is checked in the merging process rather than a task
+# of its own, which would outlive the test that merged and write to a sandbox nobody owns.
+config :forge, Forge.Merge.Watch, inline: true
+
 # Print only warnings and errors during test
 config :logger, level: :warning
 

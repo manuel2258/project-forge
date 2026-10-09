@@ -7,6 +7,7 @@ defmodule ForgeWeb.ReviewLiveTest do
   use ForgeWeb.ConnCase, async: false
 
   import Forge.GitFixtures
+  import Forge.MergeFixtures
   import Phoenix.LiveViewTest
 
   alias Forge.{Artifacts, Git, Projects, Tickets}
@@ -184,15 +185,6 @@ defmodule ForgeWeb.ReviewLiveTest do
     commit_over_http(project, ticket.branch, path, content)
   end
 
-  defp changeset!(ticket, sha) do
-    {:ok, _version} =
-      Artifacts.record_version(ticket.id, "changeset", :blob, :system, %{
-        blob_uri: "git:" <> sha
-      })
-
-    :ok
-  end
-
   # An operator's decision on one document version, as `Forge.Engine` records one.
   defp approve!(version, user) do
     {:ok, _changes} =
@@ -208,22 +200,5 @@ defmodule ForgeWeb.ReviewLiveTest do
       |> Forge.Repo.transaction()
 
     :ok
-  end
-
-  defp pend_merge(ticket) do
-    {:ok, ticket} =
-      ticket
-      |> Ecto.Changeset.change(
-        state: "review_ready",
-        pending_transition: %{
-          "from" => "review_ready",
-          "to" => "merged",
-          "outcome" => nil,
-          "approve" => ["changeset"]
-        }
-      )
-      |> Forge.Repo.update()
-
-    ticket
   end
 end

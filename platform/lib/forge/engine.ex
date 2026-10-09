@@ -84,7 +84,7 @@ defmodule Forge.Engine do
     if Core.within_ticket_budget?(workflow, Decimal.to_float(ticket.cost_usd)) do
       case Core.step(workflow, job.state, outcome, counts(ticket.id)) do
         {:transition, transition} ->
-          put_transition(multi, ticket, workflow, transition, outcome, :system)
+          put_engine_transition(multi, ticket, workflow, transition, outcome)
 
         {:approval, transition} ->
           put_pending_approval(multi, ticket, transition, outcome)
@@ -111,9 +111,16 @@ defmodule Forge.Engine do
   @doc """
   Adds taking `transition` to `multi`: ticket state, event, next job or done.
 
-  `comment` is what a person wrote as they took it, if anything. It is recorded on the event and
-  handed to the job the transition creates, which is how a tester's note on sending a build back
-  reaches the job that has to act on it (`docs/design/job-prompt.md` § How the job arrived).
+  Options:
+
+    * `:comment` - what a person wrote as they took it, if anything. It is recorded on the event
+      and handed to the job the transition creates, which is how a tester's note on sending a
+      build back reaches the job that has to act on it (`docs/design/job-prompt.md` § How the job
+      arrived).
+    * `:source` - for a transition into the merging state, the changeset version it is taken for,
+      as `Forge.Merge.changeset/1` read it when it was checked. Read now when not given. Either
+      way the event names it, and the merge after the transition merges it and no later version
+      (`docs/design/workflow-grammar-v1.md` § Merging).
   """
   @spec put_transition(
           Multi.t(),
@@ -122,7 +129,7 @@ defmodule Forge.Engine do
           Transition.t(),
           String.t() | nil,
           Events.actor(),
-          String.t() | nil
+          keyword()
         ) :: Multi.t()
   def put_transition(
         multi,
@@ -131,10 +138,11 @@ defmodule Forge.Engine do
         %Transition{} = transition,
         outcome,
         actor,
-        comment \\ nil
+        opts \\ []
       ) do
     target = Workflow.state(workflow, transition.to)
     terminal = Workflow.terminal?(workflow, transition.to)
+    comment = Keyword.get(opts, :comment)
 
     # The outcome a job ended with, or nil when a person chose the transition with no job's outcome
     # behind it — out of a human state, or to unstick a ticket. The event has always recorded the
@@ -162,12 +170,33 @@ defmodule Forge.Engine do
           "outcome" => outcome || Transition.outcome(transition)
         }
         |> put_comment(entered["comment"])
+        |> put_source(ticket, workflow, transition, opts)
     })
     |> put_follow_up(ticket, workflow, transition, target, terminal, entered)
   end
 
+  # Nil is a transition nothing checked, which reads the latest version as it is taken.
+  defp or_latest({:ok, %{} = source}, _ticket), do: {:ok, source}
+  defp or_latest(_unchecked, ticket), do: Merge.changeset(ticket)
+
   defp put_comment(payload, nil), do: payload
   defp put_comment(payload, comment), do: Map.put(payload, "comment", comment)
+
+  # The commit a transition into the merging state is taken for, named on its event: what the merge
+  # after it merges (`merge_now/3`), so a version written later is never what it merges.
+  defp put_source(payload, ticket, workflow, %Transition{to: to}, opts) do
+    if Workflow.merges_on_enter?(workflow, to) do
+      case opts |> Keyword.fetch(:source) |> or_latest(ticket) do
+        {:ok, %{sha: sha, version: version}} ->
+          Map.merge(payload, %{"changeset" => sha, "changeset_version" => version})
+
+        {:error, _none} ->
+          payload
+      end
+    else
+      payload
+    end
+  end
 
   defp blank_to_nil(text) when is_binary(text) do
     case String.trim(text) do
@@ -280,13 +309,10 @@ defmodule Forge.Engine do
 
   # The payload of the ticket's latest `ticket.stuck`: its reason, and its cause when it has one.
   defp latest_stick(%Ticket{id: id}) do
-    Repo.one(
-      from e in Event,
-        where: e.ticket_id == ^id and e.type == "ticket.stuck",
-        order_by: [desc: e.seq],
-        limit: 1,
-        select: e.payload
-    ) || %{}
+    case Events.latest_for_ticket(id, "ticket.stuck") do
+      %Event{payload: payload} -> payload
+      nil -> %{}
+    end
   end
 
   defp stuck_payload(reason, nil), do: %{"reason" => reason}
@@ -716,75 +742,184 @@ defmodule Forge.Engine do
     )
   end
 
-  # Records approvals (or rejections) for the transition's artifacts, then takes it if approved.
-  defp take(ticket, workflow, %Transition{} = transition, outcome, user_id, decision, comment) do
-    with :ok <- mergeable(ticket, workflow, transition, decision) do
-      commit_take(ticket, workflow, transition, outcome, user_id, decision, comment)
+  # Records approvals (or rejections) for the transition's artifacts, then takes it if approved —
+  # or, when the merge it leads to conflicts and the merging state says where a conflict goes,
+  # takes that edge instead.
+  defp take(ticket, workflow, transition, outcome, user_id, decision, comment) do
+    case mergeable(ticket, workflow, transition, decision) do
+      {:ok, source} ->
+        commit_take(ticket, workflow, transition, outcome, user_id, decision, comment, source)
+
+      {:conflict, edge, conflict} ->
+        commit_conflict(ticket, workflow, transition, edge, conflict, user_id, comment)
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
   # A git side effect can live neither inside the transaction, which may roll back, nor simply
   # after it: a conflict would then leave the ticket reading `merged` while the default branch
   # never moved, and a terminal state has no edges to get out by. So the merge is checked first,
-  # with no side effect, and the approval is refused while the ticket still has a way forward.
-  defp mergeable(ticket, workflow, %Transition{to: to}, :approved) do
+  # with no side effect, on the commit the transition will name — and a conflict either refuses
+  # the approval while the ticket still has a way forward, or, when the merging state names an
+  # `on_conflict`, is where the ticket goes (`docs/design/workflow-grammar-v1.md` § Merging).
+  defp mergeable(ticket, workflow, %Transition{to: to} = transition, :approved) do
     if Workflow.merges_on_enter?(workflow, to) do
-      case Merge.check(ticket) do
-        :ok -> :ok
-        {:conflict, paths} -> {:error, {:merge_conflict, paths}}
-        {:error, reason} -> {:error, {:merge_impossible, reason}}
-      end
+      check_merge(ticket, workflow, transition, :person)
     else
-      :ok
+      {:ok, nil}
     end
   end
 
-  defp mergeable(_ticket, _workflow, _transition, _decision), do: :ok
+  defp mergeable(_ticket, _workflow, _transition, _decision), do: {:ok, nil}
 
-  defp commit_take(
-         ticket,
-         workflow,
-         %Transition{} = transition,
-         outcome,
-         user_id,
-         decision,
-         comment
-       ) do
-    transition_map = %{"from" => transition.from, "to" => transition.to}
+  # The check before a transition into the merging state, for whoever is taking it: the commit it
+  # will name, and what a conflict on it does. `{:ok, source}` takes the transition as asked.
+  defp check_merge(ticket, workflow, %Transition{} = transition, by) do
+    case Merge.changeset(ticket) do
+      {:ok, source} ->
+        case Merge.check(ticket, source.sha) do
+          :ok ->
+            {:ok, source}
 
-    multi =
-      Enum.reduce(transition.approve, Multi.new(), fn name, multi ->
-        case Artifacts.latest(ticket.id, name) do
-          nil ->
-            Multi.error(multi, {:approval, name}, {:no_version, name})
+          {:conflict, paths, head} ->
+            conflict = %{paths: paths, head: head, source: source, by: by}
+            on_conflict(ticket, workflow, transition, conflict)
 
-          version ->
-            Artifacts.put_approval(
-              multi,
-              {:approval, name},
-              version,
-              user_id,
-              decision,
-              transition_map,
-              comment
-            )
+          {:error, reason} ->
+            {:error, {:merge_impossible, reason}}
         end
-      end)
 
-    multi =
-      if transition.approve == [] do
-        multi
-      else
-        Events.log(multi, :decision_event, "approval.#{decision}", {:user, user_id}, %{
-          ticket_id: ticket.id,
-          payload: Map.put(transition_map, "comment", comment)
-        })
+      {:error, reason} ->
+        {:error, {:merge_impossible, reason}}
+    end
+  end
+
+  defp on_conflict(ticket, workflow, %Transition{} = transition, %{by: by} = conflict) do
+    # A person is never bounded (`ForgeCore.Engine.conflict/5`), so what is passed for one is an
+    # equivalent mutant; nought spares counting the engine's rounds for nothing.
+    rounds = if by == :engine, do: engine_rounds(ticket.id), else: 0
+
+    case Core.conflict(workflow, transition.from, transition.to, by, rounds) do
+      {:route, edge} -> {:conflict, edge, conflict}
+      {:stuck, {:conflict_rounds, n}} -> {:stuck, n, conflict}
+      :refuse -> {:error, {:merge_conflict, conflict.paths}}
+    end
+  end
+
+  # How many times the engine has sent this ticket down `on_conflict` by itself since a person last
+  # moved it — took a transition or ran its state again: the count the loop round an integrating
+  # state is bounded by (`ForgeCore.Engine.conflict/5`). `>` and `>=` against the person's event
+  # are equivalent mutants: it is never itself a `ticket.merge_conflicted`.
+  defp engine_rounds(ticket_id) do
+    person =
+      Repo.one(
+        from e in Event,
+          where:
+            e.ticket_id == ^ticket_id and e.type in ["transition.taken", "ticket.retried"] and
+              fragment("?->>'kind'", e.actor) == "user",
+          select: max(e.seq)
+      ) || 0
+
+    Repo.one(
+      from e in Event,
+        where:
+          e.ticket_id == ^ticket_id and e.type == "ticket.merge_conflicted" and e.seq > ^person and
+            fragment("?->>'by'", e.payload) == "engine",
+        select: count()
+    )
+  end
+
+  # The engine's own transition. Into a merging state that names an `on_conflict` it is checked
+  # first, as a person's approval is; into any other state — a merging state that names none
+  # included, so a workflow without the key behaves as it always did — it is simply taken.
+  defp put_engine_transition(multi, ticket, workflow, %Transition{to: to} = transition, outcome) do
+    # Only a merging state may name an `on_conflict` (`ForgeCore.Workflow.Validator`), so naming
+    # one is the test, as in `conflict_route/2`.
+    if Workflow.on_conflict(workflow, to) != nil do
+      case check_merge(ticket, workflow, transition, :engine) do
+        {:ok, source} ->
+          put_transition(multi, ticket, workflow, transition, outcome, :system, source: source)
+
+        {:conflict, edge, conflict} ->
+          put_conflict(multi, ticket, workflow, edge, to, conflict, :system, nil)
+
+        {:stuck, rounds, conflict} ->
+          multi
+          |> put_conflict_event(ticket, nil, to, conflict, :system, "check")
+          |> put_stuck(
+            ticket,
+            "merge still conflicts after #{rounds} integrations in a row: " <>
+              "the integrate-then-merge loop stops here"
+          )
+
+        # Nothing to merge, or nowhere to merge it: stuck where it is, with its edges out, rather
+        # than in a terminal state that would offer none.
+        {:error, {:merge_impossible, reason}} ->
+          put_stuck(multi, ticket, "could not merge: #{inspect(reason)}")
       end
+    else
+      put_transition(multi, ticket, workflow, transition, outcome, :system)
+    end
+  end
+
+  # The edge to the merging state's `on_conflict`, taken in place of the transition into it, and
+  # the conflict that sent it, in one: the timeline shows the move, and the event says why.
+  defp put_conflict(multi, ticket, workflow, edge, merging, conflict, actor, comment) do
+    multi
+    |> put_transition(ticket, workflow, edge, Workflow.merge_conflict_outcome(), actor,
+      comment: comment
+    )
+    |> put_conflict_event(ticket, edge, merging, conflict, actor, stage(edge, merging))
+  end
+
+  # A conflict found by the check, before anything moved, or by the merge itself after the race.
+  defp stage(%Transition{from: merging}, merging), do: "merge"
+  defp stage(_edge, _merging), do: "check"
+
+  defp put_conflict_event(multi, ticket, edge, merging, conflict, actor, stage) do
+    Events.log(multi, :conflict_event, "ticket.merge_conflicted", actor, %{
+      ticket_id: ticket.id,
+      payload: %{
+        "state" => merging,
+        "from" => edge && edge.from,
+        "to" => edge && edge.to,
+        "paths" => conflict.paths,
+        "head" => conflict.head,
+        "changeset" => conflict.source.sha,
+        "changeset_version" => conflict.source.version,
+        "by" => Atom.to_string(conflict.by),
+        "stage" => stage
+      }
+    })
+  end
+
+  # A person's approval whose merge conflicted, sent down `on_conflict`: the approval is recorded
+  # against the version it approved — that is what the person did — and the ticket moves to the
+  # target rather than into the merging state. Nothing is merged, so there is no entry action.
+  defp commit_conflict(ticket, workflow, transition, edge, conflict, user_id, comment) do
+    ticket
+    |> put_decisions(transition, user_id, :approved, comment, conflict.source)
+    |> put_conflict(ticket, workflow, edge, transition.to, conflict, {:user, user_id}, comment)
+    |> Repo.transaction()
+    |> case do
+      # `Forge.Operator` announces what a person's act did, as it does for every other.
+      {:ok, %{ticket: moved}} -> {:ok, moved}
+      {:error, _step, reason, _} -> {:error, reason}
+    end
+  end
+
+  defp commit_take(ticket, workflow, transition, outcome, user_id, decision, comment, source) do
+    multi = put_decisions(ticket, transition, user_id, decision, comment, source)
 
     multi =
       case decision do
         :approved ->
-          put_transition(multi, ticket, workflow, transition, outcome, {:user, user_id}, comment)
+          put_transition(multi, ticket, workflow, transition, outcome, {:user, user_id},
+            comment: comment,
+            source: source
+          )
 
         # `docs/design/workflow-grammar-v1.md` § Approval: "Rejection keeps the ticket in `from`
         # and the operator chooses what happens next, including editing the artifact (which
@@ -811,21 +946,135 @@ defmodule Forge.Engine do
     end
   end
 
+  # The approvals (or rejections) a transition records on the latest version of each artifact it
+  # lists, and the decision's event — `changeset`'s on the version the check before the merge was
+  # made on, when there was one, so the approval and the commit the transition names are one read
+  # (`docs/design/workflow-grammar-v1.md` § Merging). Read again, they would differ only if a
+  # version were recorded between the check and the transaction, which nothing here can open: the
+  # only writer of a changeset is a job's result, and no job is live while a person takes an edge.
+  # So reading it again is an equivalent mutant as far as any test can tell.
+  defp put_decisions(ticket, %Transition{} = transition, user_id, decision, comment, source) do
+    transition_map = %{"from" => transition.from, "to" => transition.to}
+
+    multi =
+      Enum.reduce(transition.approve, Multi.new(), fn name, multi ->
+        case checked(name, source) || Artifacts.latest(ticket.id, name) do
+          nil ->
+            Multi.error(multi, {:approval, name}, {:no_version, name})
+
+          version ->
+            Artifacts.put_approval(
+              multi,
+              {:approval, name},
+              version,
+              user_id,
+              decision,
+              transition_map,
+              comment
+            )
+        end
+      end)
+
+    if transition.approve == [] do
+      multi
+    else
+      Events.log(multi, :decision_event, "approval.#{decision}", {:user, user_id}, %{
+        ticket_id: ticket.id,
+        payload: Map.put(transition_map, "comment", comment)
+      })
+    end
+  end
+
+  defp checked(name, %{row: row}) when is_binary(name) do
+    if name == Workflow.changeset_artifact(), do: row
+  end
+
+  defp checked(_name, nil), do: nil
+
+  # -- sending a ticket down the conflict route ------------------------------------------------
+
+  @doc """
+  Sends a ticket whose changeset no longer merges down its merging state's `on_conflict` before
+  anybody approves it (`docs/design/workflow-grammar-v1.md` § Merging): the action beside the
+  notice a merge leaves on the tickets it put in conflict (`Forge.Merge.Watch`).
+
+  The check is made again, and a conflict takes the route a conflicting approval takes, by this
+  person, less the approval — a pending one is cleared, since the version it would approve is
+  about to be replaced. Refused on a ticket that is not open, with a job live in its state, or in
+  a state with no edge into a merging state that names an `on_conflict`; and refused with
+  `:merges_cleanly` when there is nothing to integrate after all.
+  """
+  @spec integrate(Ticket.t(), String.t()) :: {:ok, Ticket.t()} | {:error, term()}
+  def integrate(%Ticket{} = ticket, user_id) do
+    workflow = Tickets.workflow(ticket)
+
+    with {:ok, transition} <- conflict_route(ticket, workflow) do
+      case check_merge(ticket, workflow, transition, :person) do
+        {:conflict, edge, conflict} ->
+          send_down(ticket, workflow, edge, transition.to, conflict, user_id)
+
+        {:ok, _source} ->
+          {:error, :merges_cleanly}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  defp send_down(ticket, workflow, edge, merging, conflict, user_id) do
+    Multi.new()
+    |> put_conflict(ticket, workflow, edge, merging, conflict, {:user, user_id}, nil)
+    |> Repo.transaction()
+    |> case do
+      {:ok, %{ticket: moved}} -> {:ok, moved}
+      {:error, _step, reason, _changes} -> {:error, reason}
+    end
+  end
+
+  @doc "The state `integrate/2` would send the ticket to, or nil where it would refuse."
+  @spec integrates_to(Ticket.t(), Workflow.t()) :: String.t() | nil
+  def integrates_to(%Ticket{} = ticket, %Workflow{} = workflow) do
+    case conflict_route(ticket, workflow) do
+      {:ok, transition} -> Workflow.on_conflict(workflow, transition.to)
+      {:error, _reason} -> nil
+    end
+  end
+
+  # The edge out of where the ticket rests into a merging state that names an `on_conflict` — only
+  # a merging state may name one (`ForgeCore.Workflow.Validator`), so naming one is the test.
+  defp conflict_route(%Ticket{status: status}, _workflow) when not Ticket.open?(status),
+    do: {:error, {:not_open, status}}
+
+  defp conflict_route(%Ticket{} = ticket, workflow) do
+    with :ok <- no_live_job(ticket) do
+      workflow
+      |> Workflow.transitions_from(ticket.state)
+      |> Enum.find(&(Workflow.on_conflict(workflow, &1.to) != nil))
+      |> case do
+        %Transition{} = transition -> {:ok, transition}
+        nil -> {:error, :no_conflict_route}
+      end
+    end
+  end
+
   # -- entry actions ---------------------------------------------------------------------------
 
   @doc """
   Runs what entering `state_name` does, after the transition into it has been recorded.
 
-  `merge` is the only action in v1. It was checked before the transition was taken, so a failure
-  here is a race — something else moved the default branch in between. `Forge.Merge.perform/2`
-  retries once against the moved head, and what it returns then is final: anything but success
-  sticks the ticket with the reason rather than leaving it claiming to be merged.
-  `Forge.Merge.perform/2` is idempotent, so retrying is always safe.
+  `merge` is the only action in v1, and it merges the commit the transition into the state named
+  (`docs/design/workflow-grammar-v1.md` § Merging). It was checked before the transition was taken,
+  so a failure here is a race — something else moved the default branch in between.
+  `Forge.Merge.perform/3` retries once against the moved head, and what it returns then is final:
+  a conflict leaves the merging state by its `on_conflict`, when it names one, and anything else
+  but success sticks the ticket with the reason rather than leaving it claiming to be merged.
+  `Forge.Merge.perform/3` is idempotent, so retrying is always safe.
   """
   @spec enter(Ticket.t(), Workflow.t(), String.t(), String.t() | nil) :: Ticket.t()
   def enter(%Ticket{} = ticket, %Workflow{} = workflow, state_name, user_id) do
     if Workflow.merges_on_enter?(workflow, state_name) do
-      merge_now(ticket, user_id)
+      merge_now(ticket, workflow, user_id)
     else
       ticket
     end
@@ -836,30 +1085,110 @@ defmodule Forge.Engine do
 
   defp run_entry_actions(ticket, _workflow, _transition, _decision, _user_id), do: ticket
 
-  defp merge_now(ticket, user_id) do
+  defp merge_now(ticket, workflow, user_id) do
     user = user_id && Repo.get(Forge.Accounts.User, user_id)
 
-    case Merge.perform(ticket, user) do
-      {:ok, %{sha: sha, already: already}} ->
-        Events.append("ticket.merged", actor(user_id), %{
-          ticket_id: ticket.id,
-          payload: %{"sha" => sha, "already" => already}
-        })
+    case named(ticket) do
+      {:ok, source} ->
+        case Merge.perform(ticket, source.sha, user) do
+          {:ok, merged} ->
+            merged(ticket, source, merged, user_id)
 
-        ticket
+          {:conflict, paths, head} ->
+            conflict = %{paths: paths, head: head, source: source, by: by(user_id)}
 
-      other ->
-        stick_after_merge(ticket, other)
+            leave_merging(
+              ticket,
+              workflow,
+              conflict,
+              Workflow.on_conflict(workflow, ticket.state)
+            )
+
+          {:error, reason} ->
+            stick_after_merge(ticket, "could not merge: #{inspect(reason)}")
+        end
+
+      {:error, reason} ->
+        stick_after_merge(ticket, "could not merge: #{inspect(reason)}")
     end
   end
 
-  defp stick_after_merge(ticket, outcome) do
-    reason =
-      case outcome do
-        {:conflict, paths} -> "merge conflict in #{Enum.join(paths, ", ")}"
-        {:error, reason} -> "could not merge: #{inspect(reason)}"
-      end
+  defp merged(ticket, source, %{sha: sha, already: already}, user_id) do
+    Events.append("ticket.merged", actor(user_id), %{
+      ticket_id: ticket.id,
+      payload: %{"sha" => sha, "already" => already, "changeset" => source.sha}
+    })
 
+    # What the merge did to the project's other open tickets (`Forge.Merge.Watch`). A merge that
+    # found its commit already there moved nothing.
+    unless already,
+      do: Merge.Watch.after_merge(ticket.project_id, sha, %{"ticket" => ticket.number})
+
+    ticket
+  end
+
+  defp by(nil), do: :engine
+  defp by(_user_id), do: :person
+
+  # The commit the transition into the merging state named: on its `transition.taken`, the latest
+  # into the state the ticket is in. Never the latest changeset version — that is the rule this
+  # exists to keep (`docs/design/workflow-grammar-v1.md` § Merging). Asking only for the latest
+  # transition of any kind is an equivalent mutant: every caller of `enter/4` calls it straight
+  # after the transition into the state; the filter keeps that from being something to remember.
+  defp named(%Ticket{id: id, state: state}) do
+    Repo.one(
+      from e in Event,
+        where:
+          e.ticket_id == ^id and e.type == "transition.taken" and
+            fragment("?->>'to'", e.payload) == ^state,
+        order_by: [desc: e.seq],
+        limit: 1,
+        select: e.payload
+    )
+    |> case do
+      %{"changeset" => sha, "changeset_version" => version} ->
+        {:ok, %{sha: sha, version: version}}
+
+      _none ->
+        {:error, :no_changeset}
+    end
+  end
+
+  # The late race lost twice: with nowhere to go, stuck as it always was; with an `on_conflict`,
+  # out of the merging state by it — locked and re-read, as `stick/3` is, so a ticket cancelled
+  # meanwhile stays cancelled. A merging state with transitions out leaves the ticket `active` in
+  # it, which `cancel/2` accepts. And when the move cannot be made — the target's job cannot be
+  # created — stuck there saying so, rather than left reading `done` with nothing merged.
+  defp leave_merging(ticket, _workflow, conflict, nil),
+    do: stick_after_merge(ticket, "merge conflict in #{Enum.join(conflict.paths, ", ")}")
+
+  defp leave_merging(ticket, workflow, conflict, target) do
+    edge = Workflow.conflict_transition(workflow, ticket.state, ticket.state)
+
+    Multi.new()
+    |> Multi.run(:open, fn repo, _changes -> lock_uncancelled(repo, ticket.id) end)
+    |> Multi.merge(fn %{open: open} ->
+      put_conflict(Multi.new(), open, workflow, edge, ticket.state, conflict, :system, nil)
+    end)
+    |> Repo.transaction()
+    |> case do
+      {:ok, %{ticket: moved}} ->
+        Events.notify(moved.id)
+        moved
+
+      {:error, :open, _cancelled, _changes} ->
+        ticket
+
+      {:error, _step, reason, _changes} ->
+        stick_after_merge(
+          ticket,
+          "merge conflict in #{Enum.join(conflict.paths, ", ")}, " <>
+            "and could not move to #{target}: #{inspect(reason)}"
+        )
+    end
+  end
+
+  defp stick_after_merge(ticket, reason) do
     case stick(ticket, reason) do
       {:ok, stuck} -> stuck
       {:error, _reason} -> ticket

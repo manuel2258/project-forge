@@ -72,6 +72,14 @@ defmodule ForgeWeb.Operator.Actions do
     end
   end
 
+  # The conflict notice's button: a ticket a merge put in conflict, sent down its merging state's
+  # `on_conflict` before anybody approves it (`docs/design/ui.md` § Decide and Timeline).
+  defp act("integrate", %{"ticket" => id}, socket) do
+    with {:ok, ticket} <- Operator.integrate(ticket(id), user(socket)) do
+      {:ok, "Sent to #{ticket.state}"}
+    end
+  end
+
   # A document a human state declares, written from the ticket's Decide tab. The same write the
   # API's `POST …/artifacts/:name` makes (`docs/design/workflow-grammar-v1.md` § Semantics).
   defp act("write_document", %{"ticket" => id, "name" => name, "content" => content}, socket) do
@@ -115,6 +123,10 @@ defmodule ForgeWeb.Operator.Actions do
   defp describe({:not_repinnable, status}), do: "a #{status} ticket cannot be re-pinned"
   defp describe(:already_pinned), do: "the ticket is already pinned at the default branch's head"
   defp describe(:pending_approval), do: "decide the pending approval first"
+  defp describe(:merges_cleanly), do: "it merges cleanly now, so there is nothing to integrate"
+
+  defp describe({:merge_conflict, paths}),
+    do: "it conflicts with the default branch in #{Enum.join(paths, ", ")}"
 
   defp describe({:no_state, state}),
     do: "the default branch's workflow has no state #{state}; move the ticket first"

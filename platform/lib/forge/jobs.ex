@@ -47,6 +47,12 @@ defmodule Forge.Jobs do
   # (`docs/design/worker-channel.md` § Versions). Facts about when, fixed once true.
   @commands_protocol 2
   @questions_protocol 3
+  @integration_protocol 5
+
+  # How many of the merges that landed on the default branch since a ticket's base an integrating
+  # job is told about by name; the rest are counted (`docs/design/job-prompt.md` § Integrating the
+  # default branch).
+  @landed_shown 20
 
   # How much of a command's log a state reading it as an input is handed: its first and last bytes,
   # a quarter of a document's size in all (`docs/design/workflow-grammar-v1.md` § Inputs).
@@ -199,9 +205,17 @@ defmodule Forge.Jobs do
          may_invoke: grants(state),
          produces: state.produces,
          outcomes: state.outcomes,
-         permitted_children: []
+         permitted_children: [],
+         integration: integration(workflow, state_name, project)
        }}
     end
+  end
+
+  # Only the branch's name is stored: what conflicted and what landed are read when the job runs
+  # (`runtime_spec/2`), so a job that waited reads the state of things then.
+  defp integration(workflow, state_name, project) do
+    if Workflow.integrating?(workflow, state_name),
+      do: %{"default_branch" => project.default_branch}
   end
 
   # String keys, as the spec crosses the wire in JSON and is read back from the row.
@@ -614,10 +628,18 @@ defmodule Forge.Jobs do
     before them would run a command's spec as an agent job's (`docs/design/commands.md`
     § Worker pools). Its output is a script's, not an agent's, so the questions change asks
     nothing more of it.
+  - **An integrating job needs protocol 5**: a release from before it neither fetches the default
+    branch nor keeps the merge through its squash, and would push a resolution whose next check
+    finds the same conflict (`docs/design/worker-channel.md` § Versions).
   """
   @spec protocol(Job.t()) :: non_neg_integer()
   def protocol(%Job{kind: :command}), do: @commands_protocol
-  def protocol(%Job{kind: kind}) when kind in [:workflow, :chat], do: @questions_protocol
+
+  def protocol(%Job{kind: :workflow} = job) do
+    if spec(job).integration, do: @integration_protocol, else: @questions_protocol
+  end
+
+  def protocol(%Job{kind: :chat}), do: @questions_protocol
   def protocol(%Job{}), do: 0
 
   @doc "How many of `parent_id`'s invocations of `command` are running now."
@@ -662,12 +684,14 @@ defmodule Forge.Jobs do
       "job_id" => job.id,
       "kind" => Atom.to_string(job.kind),
       "spec" => job |> runtime_spec(ticket) |> Spec.to_json() |> Jason.decode!(),
-      "git" => %{
-        "url" => Url.for_worker(project),
-        "token" => git_token,
-        "branch" => branch(job, ticket),
-        "base" => ticket && ticket.base_commit
-      },
+      "git" =>
+        %{
+          "url" => Url.for_worker(project),
+          "token" => git_token,
+          "branch" => branch(job, ticket),
+          "base" => ticket && ticket.base_commit
+        }
+        |> put_default_branch(job),
       "store" =>
         %{
           "transcript_key" => transcript,
@@ -974,7 +998,8 @@ defmodule Forge.Jobs do
       | may_invoke: Commands.remaining(job, spec.may_invoke),
         command_results: results,
         entered_commands: entered,
-        previous_changeset: previous_changeset(job, spec)
+        previous_changeset: previous_changeset(job, spec),
+        integration: integration_now(spec.integration, ticket)
     }
 
     case Artifacts.latest(ticket_id, Workflow.answers_artifact()) do
@@ -991,6 +1016,17 @@ defmodule Forge.Jobs do
         %{spec | inputs: spec.inputs ++ [answers]}
     end
   end
+
+  # An integrating job's checkout fetches the default branch too; every other job's does not
+  # (`docs/design/git-hosting.md` § The job's own git).
+  defp put_default_branch(git, %Job{kind: :workflow} = job) do
+    case spec(job).integration do
+      %{"default_branch" => branch} -> Map.put(git, "default_branch", branch)
+      nil -> git
+    end
+  end
+
+  defp put_default_branch(git, %Job{}), do: git
 
   @doc """
   What this job runs on: the most specific thing that says so.
@@ -1085,6 +1121,41 @@ defmodule Forge.Jobs do
   end
 
   defp previous_changeset(%Job{}, _spec), do: nil
+
+  # What an integrating job is told, read when it runs: the default branch's head, what the
+  # ticket's latest conflict was, and the merges that landed since its base, first-parent and
+  # newest first (`docs/design/job-prompt.md` § Integrating the default branch).
+  defp integration_now(nil, _ticket), do: nil
+
+  defp integration_now(%{"default_branch" => branch} = stored, %Ticket{} = ticket) do
+    repo = ticket |> Tickets.project_of() |> Projects.repo_path()
+
+    conflict =
+      case Events.latest_for_ticket(ticket.id, "ticket.merge_conflicted") do
+        %{payload: payload} -> payload
+        nil -> %{}
+      end
+
+    {head, landed} =
+      with {:ok, head} <- Git.resolve(repo, "refs/heads/" <> branch),
+           {:ok, log} <- Git.log(repo, ticket.base_commit, head, first_parent: true) do
+        {head, log}
+      else
+        _unreadable -> {nil, []}
+      end
+
+    Map.merge(stored, %{
+      "head" => head,
+      "base" => ticket.base_commit,
+      "paths" => conflict["paths"] || [],
+      "changeset" => conflict["changeset"],
+      "merges" =>
+        landed
+        |> Enum.take(@landed_shown)
+        |> Enum.map(&%{"sha" => &1.sha, "subject" => &1.subject}),
+      "more" => max(length(landed) - @landed_shown, 0)
+    })
+  end
 
   # What the ticket has left of its allowance, beside the job's own budget: a job weighing whether
   # another round is worth it was left to guess at the one figure that decides it
@@ -1515,12 +1586,23 @@ defmodule Forge.Jobs do
 
   defp record_and_follow_up(job, ticket, result) do
     case record(job, ticket, result) do
-      {:ok, %{job: job, ticket_cost: ticket}} -> followed_up(job, ticket, result)
+      {:ok, %{job: job, ticket_cost: ticket} = changes} ->
+        followed_up(job, moved_base(ticket, changes[:base]), result)
+
       # Finished between the read in `complete/2` and the lock below: its ticket was cancelled.
-      {:error, {:still_live, :finished}} -> settled(get!(job.id), result.harness)
-      {:error, _reason} = error -> error
+      {:error, {:still_live, :finished}} ->
+        settled(get!(job.id), result.harness)
+
+      {:error, _reason} = error ->
+        error
     end
   end
+
+  # The ticket the follow-up reads is the one the cost was added to, read before the result was
+  # recorded: a base the result moved has to reach it, or the job made next is handed a changeset
+  # diffed against the base from before the integration (`put_base/4`).
+  defp moved_base(ticket, nil), do: ticket
+  defp moved_base(ticket, %Ticket{base_commit: base}), do: %{ticket | base_commit: base}
 
   defp followed_up(job, ticket, result) do
     case job.status do
@@ -1772,8 +1854,13 @@ defmodule Forge.Jobs do
       repo_path = ticket |> Tickets.project_of() |> Projects.repo_path()
 
       case Git.resolve(repo_path, "refs/heads/" <> ticket.branch) do
-        {:ok, head} -> Artifacts.put_changeset(multi, :changeset, ticket.id, {:job, job.id}, head)
-        {:error, reason} -> Multi.error(multi, :changeset, reason)
+        {:ok, head} ->
+          multi
+          |> Artifacts.put_changeset(:changeset, ticket.id, {:job, job.id}, head)
+          |> put_base(ticket, repo_path, head)
+
+        {:error, reason} ->
+          Multi.error(multi, :changeset, reason)
       end
     else
       multi
@@ -1781,6 +1868,28 @@ defmodule Forge.Jobs do
   end
 
   defp put_changeset(multi, _ticket, _job, _result), do: multi
+
+  # **The base follows an integration** (`docs/design/workflow-grammar-v1.md` § Merging). A
+  # changeset whose commit has merged the default branch would otherwise be diffed against a base
+  # from before every other ticket's work since, and show all of it as this ticket's. So the base
+  # moves to where the commit and the default branch's head last met — when that is past the base,
+  # which it is only once the branch has the default branch's later history in it.
+  defp put_base(multi, %Ticket{base_commit: base} = ticket, repo_path, head) do
+    default = Projects.get!(ticket.project_id).default_branch
+
+    with {:ok, tip} <- Git.resolve(repo_path, "refs/heads/" <> default),
+         {:ok, met} when met != base <- Git.merge_base(repo_path, head, tip),
+         true <- Git.ancestor?(repo_path, base, met) do
+      multi
+      |> Multi.update(:base, Ticket.base_changeset(ticket, %{base_commit: met}))
+      |> Events.log(:base_event, "ticket.base_moved", :system, %{
+        ticket_id: ticket.id,
+        payload: %{"from" => base, "to" => met}
+      })
+    else
+      _unmoved -> multi
+    end
+  end
 
   # What any run adds to its job, however it ended.
   defp accounting(job, %Result{} = result) do

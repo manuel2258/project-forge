@@ -204,7 +204,8 @@ so the repository's own hooks run.
 This is a second route into the default branch, which the `pre-receive` hook exists to keep
 singular, so it is worth being exact: both routes are the platform's own merge, both are guarded
 by the same hook with `FORGE_INTERNAL`, and neither lets a job write the default branch. What
-differs is what authorises it — a ticket's approved changeset version, or an operator pressing
+differs is what authorises it — the changeset version a ticket's transition into its merging state
+named (`workflow-grammar-v1.md` § Merging), or an operator pressing
 merge on a diff they are looking at. It is one implementation with two callers, not two: the
 ticket's functions and the chat's both build the same plan — repository, destination, source, the
 ref that keeps it reachable, and what the commit should say — and hand it to the same merge.

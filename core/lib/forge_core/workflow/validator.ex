@@ -15,6 +15,7 @@ defmodule ForgeCore.Workflow.Validator do
       initial(workflow),
       state_shapes(workflow),
       entry_actions(workflow),
+      conflict_targets(workflow),
       artifact_names(workflow),
       commands(workflow, Keyword.get(opts, :file_exists)),
       invocations(workflow),
@@ -177,18 +178,32 @@ defmodule ForgeCore.Workflow.Validator do
   defp engine_exits(_path, nil), do: []
 
   defp engine_exits(path, exit) do
-    exit
-    |> Map.values()
-    |> Enum.uniq()
-    |> Enum.filter(&(&1 in Workflow.engine_outcomes()))
-    |> Enum.sort()
-    |> Enum.map(
-      &Error.new(
-        Error.join(path, "exit"),
-        "#{inspect(&1)} is an engine outcome and cannot be mapped to"
-      )
-    )
+    values = exit |> Map.values() |> Enum.uniq() |> Enum.sort()
+
+    Enum.flat_map(values, fn value ->
+      cond do
+        value in Workflow.engine_outcomes() ->
+          [
+            Error.new(
+              Error.join(path, "exit"),
+              "#{inspect(value)} is an engine outcome and cannot be mapped to"
+            )
+          ]
+
+        value == Workflow.merge_conflict_outcome() ->
+          [Error.new(Error.join(path, "exit"), merge_conflict_reserved(value))]
+
+        true ->
+          []
+      end
+    end)
   end
+
+  # The outcome the conflict route is recorded on (`docs/design/workflow-grammar-v1.md` § Merging).
+  # A job that could end on it would arrive in its next state told a conflict sent it, and an edge
+  # declared on it would share the route's count.
+  defp merge_conflict_reserved(outcome),
+    do: "#{inspect(outcome)} is the platform's: a merge conflict is recorded on it"
 
   # `on_enter` is a state's entry, and a job state's entry already runs a job: two things on one
   # entry would leave their order undefined. A ticket has one branch and merges once, so at most
@@ -254,6 +269,58 @@ defmodule ForgeCore.Workflow.Validator do
           "merge needs a state that produces #{changeset}"
         )
       ]
+    end
+  end
+
+  # `docs/design/workflow-grammar-v1.md` § Merging: where a conflict goes is the merging state's to
+  # say, and it has to be somewhere a conflict can be dealt with — an agent that integrates, or a
+  # person — and away from the state that could not merge.
+  defp conflict_targets(%Workflow{states: states} = workflow) do
+    states
+    |> Enum.filter(fn {_name, state} -> state.on_conflict != nil end)
+    |> Enum.flat_map(fn {name, state} ->
+      path = Error.join(Error.join("states", name), "on_conflict")
+      conflict_target(workflow, path, name, state, Workflow.state(workflow, state.on_conflict))
+    end)
+  end
+
+  defp conflict_target(workflow, path, name, %State{on_conflict: target_name} = state, target) do
+    cond do
+      not State.merges?(state) ->
+        [Error.new(path, "only the state that merges may say where a conflict goes")]
+
+      target == nil ->
+        [Error.new(path, "names an unknown state #{inspect(target_name)}")]
+
+      target_name == name ->
+        [Error.new(path, "cannot be the state that merges: a conflict has to leave it")]
+
+      State.command?(target) ->
+        [
+          Error.new(
+            path,
+            "must be a job state or a human state: a command's checkout has no default branch to merge"
+          )
+        ]
+
+      Workflow.terminal?(workflow, target_name) ->
+        [
+          Error.new(
+            path,
+            "names #{inspect(target_name)}, which has no transition out: a conflict there would end the ticket unmerged"
+          )
+        ]
+
+      State.job?(target) and Enum.any?(workflow.transitions, &(&1.to == target_name)) ->
+        [
+          Error.new(
+            path,
+            "names #{inspect(target_name)}, which a transition also leads into: an integrating state is reached by a conflict only"
+          )
+        ]
+
+      true ->
+        []
     end
   end
 
@@ -543,6 +610,7 @@ defmodule ForgeCore.Workflow.Validator do
   defp outcome_declaration(path, %State{outcomes: declared} = state) do
     path = Error.join(path, "outcomes")
     engine = Enum.filter(declared, &(&1 in Workflow.engine_outcomes()))
+    conflict = Enum.filter(declared, &(&1 == Workflow.merge_conflict_outcome()))
     duplicates = declared -- Enum.uniq(declared)
 
     needs_document =
@@ -554,6 +622,7 @@ defmodule ForgeCore.Workflow.Validator do
         engine,
         &Error.new(path, "#{inspect(&1)} is an engine outcome and cannot be declared")
       ),
+      conflict |> Enum.uniq() |> Enum.map(&Error.new(path, merge_conflict_reserved(&1))),
       Enum.map(
         Enum.uniq(duplicates),
         &Error.new(path, "#{inspect(&1)} is declared more than once")
@@ -678,8 +747,8 @@ defmodule ForgeCore.Workflow.Validator do
   # Skipped when initial is unknown: that is already one error, not one per state.
   defp reachability(%Workflow{initial: initial, states: states} = workflow)
        when is_map_key(states, initial) do
-    reachable =
-      walk(workflow, [initial], MapSet.new(), &Workflow.transitions_from(&1, &2), & &1.to)
+    # Along `on_conflict` too: an integrating state is reached by nothing else.
+    reachable = walk(workflow, [initial], MapSet.new(), &Workflow.edges_from(&1, &2), & &1.to)
 
     states
     |> Map.keys()
@@ -694,8 +763,10 @@ defmodule ForgeCore.Workflow.Validator do
     walk(workflow, [name], MapSet.new(), &transitions_to(&1, &2), & &1.from)
   end
 
-  defp transitions_to(%Workflow{transitions: transitions}, name),
-    do: Enum.filter(transitions, &(&1.to == name))
+  # Every edge, `on_conflict` included: what an integrating state reads was written before the
+  # merge it was sent from was tried.
+  defp transitions_to(%Workflow{} = workflow, name),
+    do: workflow |> Workflow.edges() |> Enum.filter(&(&1.to == name))
 
   # Generic graph walk over transitions; `edges` lists a node's edges, `next` picks the neighbour.
   defp walk(_workflow, [], seen, _edges, _next), do: seen

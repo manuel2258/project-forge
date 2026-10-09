@@ -10,6 +10,10 @@ defmodule ForgeCore.Engine do
   alias ForgeCore.Workflow
   alias ForgeCore.Workflow.{State, Transition}
 
+  # How many times in a row the engine sends a ticket down `on_conflict` by itself
+  # (`docs/design/workflow-grammar-v1.md` § Merging).
+  @conflict_rounds 3
+
   @typedoc "How many times each transition has fired for this ticket, keyed by `Transition.id/1`."
   @type counts :: %{Transition.id() => non_neg_integer()}
 
@@ -80,6 +84,35 @@ defmodule ForgeCore.Engine do
       [] -> {:error, :no_such_transition}
       [transition] -> {:ok, transition}
       many -> {:error, {:ambiguous, Enum.map(many, &Transition.outcome/1)}}
+    end
+  end
+
+  @doc """
+  What a conflict found by the check before a transition from `from` into the merging state
+  `merging` does, taken by `by`.
+
+    * `{:route, t}` - take `t`, the edge to `merging`'s `on_conflict`, instead.
+    * `:refuse` - `merging` names no `on_conflict`, and the conflict does what it did before the
+      key existed.
+    * `{:stuck, {:conflict_rounds, n}}` - the engine has already gone round `n` times in a row.
+
+  `rounds` is how many times the engine has taken `on_conflict` by itself since a person last
+  moved the ticket. A person is never bounded by it: a person in the loop is what the bound is for.
+  """
+  @spec conflict(
+          Workflow.t(),
+          Workflow.state_name(),
+          Workflow.state_name(),
+          :engine | :person,
+          non_neg_integer()
+        ) ::
+          {:route, Transition.t()} | :refuse | {:stuck, {:conflict_rounds, pos_integer()}}
+  def conflict(%Workflow{} = workflow, from, merging, by, rounds) do
+    case Workflow.conflict_transition(workflow, from, merging) do
+      nil -> :refuse
+      %Transition{} = edge when by == :person -> {:route, edge}
+      %Transition{} = edge when rounds < @conflict_rounds -> {:route, edge}
+      %Transition{} -> {:stuck, {:conflict_rounds, @conflict_rounds}}
     end
   end
 

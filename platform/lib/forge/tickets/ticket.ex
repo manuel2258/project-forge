@@ -83,6 +83,16 @@ defmodule Forge.Tickets.Ticket do
     |> validate_required([:workflow, :workflow_commit])
   end
 
+  @doc """
+  Changeset for the base a ticket's changeset is diffed against moving on, after its branch merged
+  the default branch (`docs/design/workflow-grammar-v1.md` § Merging), and nothing else.
+  """
+  def base_changeset(ticket, attrs) do
+    ticket
+    |> cast(attrs, [:base_commit])
+    |> validate_required([:base_commit])
+  end
+
   @doc "Changeset for the engine moving a ticket: state, status and accumulated cost only."
   def progress_changeset(ticket, attrs) do
     ticket

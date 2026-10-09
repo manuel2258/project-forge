@@ -118,6 +118,126 @@ defmodule ForgeCore.PromptTest do
     end
   end
 
+  # `docs/design/job-prompt.md` § Integrating the default branch: a job a conflict sent here is
+  # told what conflicted, what landed meanwhile, and to merge rather than rebase.
+  describe "an integrating job" do
+    defp integrating(integration) do
+      %{
+        spec()
+        | state: "integrating",
+          entered: %{
+            "from" => "review_ready",
+            "outcome" => "merge_conflict",
+            "by" => "person",
+            "comment" => nil
+          },
+          integration: integration
+      }
+    end
+
+    @head String.duplicate("e", 40)
+
+    test "is told the head, the paths, what landed, and to merge" do
+      manifest =
+        Prompt.manifest(
+          integrating(%{
+            "default_branch" => "main",
+            "head" => @head,
+            "base" => String.duplicate("b", 40),
+            "paths" => ["AppState.kt", "ui/HomeScreen.kt"],
+            "changeset" => String.duplicate("c", 40),
+            "merges" => [
+              %{"sha" => String.duplicate("1", 40), "subject" => "Merge ticket/12: Settings"},
+              %{"sha" => String.duplicate("2", 40), "subject" => "Merge ticket/10: Home"}
+            ],
+            "more" => 3
+          }),
+          "/j"
+        )
+
+      assert manifest =~ "## Integrating `main`"
+      assert manifest =~ "`main` was at `eeeeeeeeeeee` when this run was assigned"
+      assert manifest =~ "as `origin/main`, which may be a little newer: that is the one to merge"
+
+      assert manifest =~
+               "It conflicted in these paths when its changeset `cccccccccccc` was tried:\n\n" <>
+                 "- `AppState.kt`\n- `ui/HomeScreen.kt`"
+
+      assert manifest =~ "since this ticket's base `bbbbbbbbbbbb`, newest first"
+
+      assert manifest =~
+               "- `111111111111` Merge ticket/12: Settings\n" <>
+                 "- `222222222222` Merge ticket/10: Home\n- and 3 more"
+
+      assert manifest =~ "`git merge origin/main`"
+      assert manifest =~ "**Do not rebase, and do not reset the branch.**"
+      assert manifest =~ "keeps `origin/main` as its second parent"
+
+      # After how it got here, and before what it reads.
+      [arrival, rest] = String.split(manifest, "## Integrating `main`", parts: 2)
+      assert arrival =~ "The ticket came from `review_ready` on `merge_conflict`"
+      assert rest =~ "## Inputs (read-only)"
+    end
+
+    test "sent here by a person with nothing recorded, says so" do
+      # Nothing landed since the base: the platform sends an empty list, and nothing is listed.
+      manifest =
+        Prompt.manifest(
+          integrating(%{"default_branch" => "trunk", "merges" => [], "more" => 0}),
+          "/j"
+        )
+
+      assert manifest =~ "The checkout has `trunk` as `origin/trunk`: that is the one to merge."
+      assert manifest =~ "No conflict is recorded for this ticket: a person sent it here."
+      refute manifest =~ "What has landed"
+      refute manifest =~ "and 0 more"
+      # A part with nothing to say leaves no gap where it would have been.
+      [_before, section] = String.split(manifest, "## Integrating", parts: 2)
+      [section, _after] = String.split(section, "## Inputs", parts: 2)
+      refute section =~ "\n\n\n"
+    end
+
+    test "lists what landed without a count when there is no more" do
+      manifest =
+        Prompt.manifest(
+          integrating(%{
+            "default_branch" => "main",
+            "paths" => ["a"],
+            "merges" => [%{"sha" => @head, "subject" => "Merge ticket/3"}],
+            "more" => 0
+          }),
+          "/j"
+        )
+
+      assert manifest =~ "What has landed on `main`, newest first"
+      assert manifest =~ "It conflicted in these paths:\n\n- `a`"
+      refute manifest =~ "more"
+
+      # A count nobody sent is no count.
+      without =
+        Prompt.manifest(
+          integrating(%{
+            "default_branch" => "main",
+            "merges" => [%{"sha" => @head, "subject" => "Merge ticket/3"}]
+          }),
+          "/j"
+        )
+
+      refute without =~ "more"
+    end
+
+    test "every other job is told nothing about it" do
+      refute Prompt.manifest(spec(), "/j") =~ "Integrating"
+    end
+
+    test "survives the wire" do
+      spec = integrating(%{"default_branch" => "main", "paths" => ["a"]})
+      {:ok, decoded} = spec |> Spec.to_json() |> Spec.from_json()
+
+      assert decoded.integration == %{"default_branch" => "main", "paths" => ["a"]}
+    end
+  end
+
   # A second review's first question is what changed since the first; the manifest says which
   # commit that one read, beside the changeset this one reads.
   describe "the changeset a previous attempt read" do

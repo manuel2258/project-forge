@@ -128,6 +128,26 @@ defmodule Forge.EventsTest do
 
   # `docs/design/claude-code-events.md` § Memory: the worker's readings as sentences, the words
   # `Forge.Jobs.Memory` gives the header and the now line.
+  # The rail's last four events say what a conflict means beside its type (`ui.md` § Decide and
+  # Timeline): the first path, how many more, and the state that would have merged.
+  describe "summary/1 of a merge conflict" do
+    test "names the first path, how many more, and where it was going" do
+      conflicted = fn paths ->
+        Events.summary(%Event{
+          type: "ticket.merge_conflicted",
+          payload: %{"state" => "merged", "paths" => paths}
+        })
+      end
+
+      assert conflicted.(["README.md"]) == "README.md conflicted on the way into merged"
+
+      assert conflicted.(["AppState.kt", "Store.kt", "ui/HomeScreen.kt"]) ==
+               "AppState.kt and 2 more conflicted on the way into merged"
+
+      assert conflicted.([]) == "conflicted on the way into merged"
+    end
+  end
+
   describe "summary/1 of memory" do
     test "a memory event is its sentence" do
       assert Events.summary(%Event{

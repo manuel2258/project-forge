@@ -97,7 +97,17 @@ states:
 
   review_ready: {}                    # human state: no prompt, no job
   merged:
-    on_enter: merge                   # terminal: entering it merges the approved changeset
+    on_enter: merge                   # terminal: entering it merges the changeset its edge named
+    on_conflict: integrating          # where a conflict sends the ticket instead (§ Merging)
+
+  integrating:                        # an on_conflict target: its job also sees the default branch
+    prompt: agents/integrate.md
+    env: implement
+    may_invoke:
+      build: { max: 10 }
+    inputs: [plan.md, changeset]
+    produces: [integration.md, changeset]
+    budget: { turns: 80, cost: 4.00 }
 
 transitions:
   - { from: refining,     to: planning,     approve: [refinement.md] }
@@ -109,6 +119,7 @@ transitions:
   - { from: verifying,    to: review_ready }
   - { from: verifying,    to: implementing, when: tests_failed, max: 3 }
   - { from: review_ready, to: merged,       approve: [changeset] }
+  - { from: integrating,  to: checking }    # back through the checks and the approval (§ Merging)
 
 limits:
   ticket_cost: 25.00
@@ -152,8 +163,9 @@ carried by `pending_transition`, a separate field, and a ticket parked on the ed
 doing the state's work. The state name has one job, and it is to name the activity.
 
 **Entry actions.** `on_enter` names what the platform does when a ticket arrives in a state: one
-action, or a list of them. v1 has exactly one, `merge`, which merges the ticket's approved
-changeset into the project's default branch — see `git-hosting.md` for how. It is declared on the
+action, or a list of them. v1 has exactly one, `merge`, which merges the changeset the transition
+into the state named into the project's default branch — § Merging says which commit that is and
+what a conflict does, `git-hosting.md` how. It is declared on the
 state rather than on the edge because entering the state is the invariant: two edges into the same
 state would each have to carry it, and a transition a person takes by hand down a third would
 skip it silently. `on_enter` is not allowed on a job state, whose entry already runs a job.
@@ -283,11 +295,10 @@ The cancel locks the ticket and its live jobs, so a job starting or a result bei
 same moment happens wholly before it or is refused after it. The ticket's conversations are left
 as they are: a conversation is ended by closing it.
 
-**Merging.** A state declaring `on_enter: merge` merges the `changeset` the ticket's approval
-pinned, not whatever the branch head happens to be. The merge is checked before the transition is
-taken, so a conflict refuses the approval and leaves the ticket where it was, with its edges out
-intact; had it moved into a terminal `merged` first, there would be nowhere to go from there. It
-is idempotent, so entering the state twice merges once.
+**Merging.** A state declaring `on_enter: merge` merges the `changeset` version the transition
+into it named, not whatever the branch head happens to be, and checks it before a person's
+transition into it is taken — and before the engine's own, when the state names `on_conflict`.
+What a conflict does is the state's to say, with that key — § Merging.
 
 **Budget.** `turns` and `cost` (USD) are per job and required on every job state. A command state
 has neither — there is no inference to bound — and is bounded by each command's `timeout` instead;
@@ -329,6 +340,156 @@ for the same reason: the worker that has it may be asleep rather than gone.
 Parsing this file reaches no worker at all — `forge_core` has no network and no database — so the
 rule above is what the grammar checks, and it is unchanged. A workflow may name any model; only
 the form has a list.
+
+## Merging
+
+```yaml
+states:
+  merged:
+    on_enter: merge
+    on_conflict: integrating     # a job state or a human state of this workflow
+```
+
+**Which commit a merge merges.** Every transition into the merging state names the commit it is
+taken for: the latest `changeset` version at the moment it is taken, read once. For a person that
+is the version their approval of the edge records, in the same act; for the engine's own edge out
+of a job state it is the version that job's result recorded, since a result is recorded before the
+engine decides where it sends the ticket. The check before the transition is made on that commit,
+`transition.taken` names it (`changeset` and `changeset_version`), and the entry action merges
+*it*, read back from that event — never "the latest version" again. Two consequences, and they are
+why the rule is stated rather than left to the code:
+
+- a version written after the transition cannot be merged by it;
+- an approval never merges a version other than the one it was recorded against, because a
+  person's approval of `changeset` is recorded against the version the check was made on — the
+  one the transition names — and not against the latest read again. A version an integration
+  writes later reaches the default
+  branch only through a later transition, which names it — and, on an edge with `approve`, needs
+  approving in its own right.
+
+It replaces "the latest version, whenever the merge reads it", which was harmless only while every
+merge followed a person's approval in the same request. With the engine merging on its own (route
+(b), below) the read and the approval would have been minutes apart, and nothing tied them.
+
+`refs/forge/approved/<n>` is written by each merge attempt, at the commit it merges, whoever's
+transition named it — on route (b) nobody approved anything and the engine's attempt writes it. The
+name is history; what it means is *the commit this ticket's merge was last attempted for*, kept
+reachable (`git-hosting.md` § Non-fast-forward on a ticket branch).
+
+**The check.** Before a transition into the merging state is taken, `Forge.Merge.check/2` runs
+`merge-tree` on the commit it names against the default branch's head, and moves no ref. It runs
+for a person's approval, for an edge a person takes by hand, and — when the state has
+`on_conflict` — for the engine's own edge. What a conflict then does:
+
+- **Without `on_conflict`**, exactly what it did before the key existed. A person's approval or
+  hand-taken edge is refused, nothing is recorded, and the ticket stays where it was with its edges
+  out. The engine's own edge is not checked; the merge runs after it, and a failure sticks the
+  ticket in the merging state, which offers nothing.
+- **With `on_conflict: <state>`**, the ticket goes there instead. Whoever was taking the edge into
+  the merging state takes this one: `transition.taken` records it from where the ticket was to the
+  target, on the outcome `merge_conflict`, and `ticket.merge_conflicted` records the merging state,
+  the conflicting paths, the default branch's head it was checked against, the commit and its
+  version, and whether a person or the engine took it. The job the target runs is told how it got
+  there like any other (`job-prompt.md` § How the job arrived). A person's approval is still
+  recorded against the version they approved, because that is what they did; it merges nothing,
+  by the rule above.
+- **A failure that is not a conflict** — no changeset, a repository that is not there — refuses a
+  person's act, as before, and sticks the ticket where it is when the edge was the engine's.
+
+**The late race.** The check passed, the transition was recorded, and the merge itself then
+conflicts: another merge moved the default branch in between, and the one retry against the new
+head conflicts too (`git-hosting.md` § Where it runs, and what a conflict does). With
+`on_conflict` the ticket leaves the merging state by that edge — `transition.taken` from the
+merging state to the target, the same `ticket.merge_conflicted` — which is the only way out of a
+terminal state there is. A late failure that is not a conflict, a push the hook refused, still
+sticks the ticket in the merging state. `on_conflict` adds no transition: nobody chooses it and no
+outcome selects it, so a merging state with no transitions out is as terminal as it was. If the
+move cannot be made — the target's job cannot be created — the ticket is stuck in the merging
+state saying so, rather than left reading `done`.
+
+**The target is a job state or a human state, with a transition out.** A job state is the usual
+case, and a job state that is some merging state's `on_conflict` is an *integrating* state: its
+job's checkout also fetches the default branch, read-only, and its manifest says what conflicted
+and how to resolve it (`job-prompt.md` § Integrating the default branch). **Nothing but a conflict
+may lead into an integrating state** — no declared transition names it as `to`. What makes a job
+an integration is the state it is in, so a state that ordinary work also arrives at would make
+every one of its jobs fetch the default branch, need a newer worker, and be told a conflict sent
+it when none had; `implementing` as the target was the case that would have done it. A human
+state is allowed as the target too, and may be reached other ways, since it runs nothing: a team
+that wants a person to look at every conflict should not have to pay an agent to say it could not
+first, and the person has the moves its transitions offer — send it back to implementing,
+resolve it by hand on the ticket's branch with a token from the project's settings
+(`git-hosting.md` § Issuing a token) and move it on to a state whose job records the branch, or
+cancel it. A command state is
+refused: its checkout is given no default branch to merge, and a fixed script cannot decide what
+a conflict should become. Nor may the target be the merging state itself — a conflict has to leave
+it — or a state with no transitions out, where a conflict would end the ticket unmerged. And
+`merge_conflict`, the outcome the route is recorded on, is the platform's: no state declares it and
+no `exit` maps to it, so no job can end on it and no `when` can select it.
+
+**After integration, the workflow decides**, with ordinary edges out of the integrating state.
+Both of these are expressible, and both work:
+
+```yaml
+transitions:
+  # (a) back to an earlier step, then the usual approval into the merging state
+  - { from: integrating, to: human_testing }
+  - { from: human_testing, to: merged, approve: [changeset] }
+
+  # (b) straight to the merging state, with no person in between
+  - { from: integrating, to: merged }
+```
+
+On route (a) the approval names the integrated version and needs giving afresh; the approval of
+the version before integration cannot merge it. Route (b) is the engine's own edge into the merging
+state, so it is checked like any other: still conflicting — or the default branch moved again while
+the job ran — it takes `on_conflict` again.
+
+**That loop is bounded by the platform, not by `max`.** The engine sends a ticket down
+`on_conflict` by itself at most **three times in a row**: an engine-taken edge into the merging
+state whose check conflicts takes `on_conflict` only while fewer than three
+`ticket.merge_conflicted` the engine took have been recorded since a person last moved the ticket —
+took a transition, or ran its state again. The fourth sticks the ticket where it was, in the
+integrating state with its edges out, saying `merge still conflicts after 3 integrations in a row:
+the integrate-then-merge loop stops here`. A person moving it on starts the count again, and a
+person's own conflicting approval is never counted: there is a person in that loop already.
+
+`max` was the other way to bound it, and does not work. `max` counts an edge each time it fires,
+and the edge round this loop does not fire when it conflicts — the ticket goes to `on_conflict`
+instead — so `max: 3` on `integrating → merged` would bound successful merges, of which there is
+one. Counting the redirected attempt as a firing would make `transition.taken` say the ticket
+entered a state it never did. And a bound the author has to remember is one most workflows would
+not have, on the one loop that spends a credential with nobody watching.
+
+A late race takes `on_conflict` whatever the count, because sticking in the merging state is the
+dead end the key exists to remove; it is counted when the engine's edge led to it. The count is
+consulted at the check, which every round of route (b) passes. A round that ends in a late race
+instead has to lose to another merge twice inside its own merge, so a loop the count cannot stop
+is one where the default branch moves under every merge this ticket makes — paced by other
+tickets' merges, and bounded, like any job, by the ticket's cost cap.
+
+**The ticket's base follows an integration.** The `changeset` is the diff of the branch against the
+ticket's base, and once the branch has merged the default branch that diff would include every
+other ticket's work since. So when a job's result records a `changeset` version whose commit
+contains a later default-branch commit than the base — the merge base of that commit and the
+default branch's head, when it descends from the base — the base moves there, in the same
+transaction, and `ticket.base_moved` says from where to where. Only an integrating job's checkout
+can see the default branch, so in practice that is the integrating job's result; a person's hand
+resolution moves it the same way when the next job records the branch.
+
+**A conflict can be found before the merge.** After every merge into the default branch — a
+ticket's or a conversation's — the project's other open tickets with a changeset are checked, and
+one whose latest changeset no longer merges is told so on its page, once per commit, with which
+merge caused it
+(`docs/design/ui.md` § Decide and Timeline). Nothing starts by itself: a job spends a credential,
+and the ticket may be one its operator is about to cancel. A person can send it down the conflict
+route from there (`Forge.Engine.integrate/2`) when its state has an edge into a merging state with
+`on_conflict` and nothing is live in it: the check is run again, a conflict takes the same route an
+approval that conflicted takes — less the approval — and a pending approval is cleared, since the
+version it would approve is about to be replaced. A ticket that merges cleanly by then is refused,
+and the notice it acted on was stale.
+
+The merge itself is idempotent, so entering the merging state twice merges once.
 
 ## Commands
 
@@ -516,6 +677,14 @@ is never produced; `answers.md` is platform-managed and never declared.
 - Every `on_enter` entry is a known action (`merge` alone in v1); `on_enter` is absent from every
   job state and every command state; at most one state in a workflow merges; `initial` does not merge; and a workflow that
   merges has a state producing `changeset`.
+- `on_conflict`, where present, is on the state that merges, and names another state of the
+  workflow that is a job state or a human state with a transition out — never a command state,
+  and never the merging state itself; a job state it names is the `to` of no transition
+  (§ Merging). Every walk of the graph — whether each state is reachable, whether an input or an
+  approval comes before its reader, the order the board draws its columns in — follows it as an
+  edge out of the merging state, because the ticket can reach the target only by it. It is no
+  transition: no `when` selects it and no person chooses it.
+- `merge_conflict` is neither a declared outcome nor a value of an `exit` map.
 - Keys outside this grammar (`blocks`, `use`, `can_spawn`, `fanout`, `spawn_depth`,
   `child_budget`, `experiments`) are errors in v1.
 

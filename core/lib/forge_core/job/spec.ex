@@ -75,7 +75,12 @@ defmodule ForgeCore.Job.Spec do
     # The commit the previous attempt of this state read as its `changeset`, filled at run time
     # for a job that reads one too: what a second review asks first is what changed since the
     # first (`docs/design/job-prompt.md` § How the job arrived).
-    previous_changeset: nil
+    previous_changeset: nil,
+    # An integrating job's (`docs/design/job-prompt.md` § Integrating the default branch), string
+    # keys: `default_branch` when it is made, and at run time `head`, `base`, `paths`,
+    # `changeset`, `merges` (each `sha` and `subject`, newest first) and `more`, for the manifest.
+    # Nil for every other job.
+    integration: nil
   ]
 
   @workflow_keys [
@@ -98,6 +103,7 @@ defmodule ForgeCore.Job.Spec do
           command_results: [%{String.t() => term()}],
           entered_commands: [%{String.t() => term()}],
           previous_changeset: String.t() | nil,
+          integration: %{String.t() => term()} | nil,
           ticket: %{number: pos_integer(), title: String.t()} | nil,
           state: String.t() | nil,
           attempt: pos_integer() | nil,
@@ -205,6 +211,7 @@ defmodule ForgeCore.Job.Spec do
       command_results: or_default(get, :command_results, []),
       entered_commands: or_default(get, :entered_commands, []),
       previous_changeset: get.(:previous_changeset),
+      integration: get.(:integration),
       produces: or_default(get, :produces, []),
       outcomes: or_default(get, :outcomes, ["done"]),
       permitted_children: or_default(get, :permitted_children, []),

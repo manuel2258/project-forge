@@ -125,7 +125,7 @@ defmodule ForgeWorker.Job.Workspace do
     git = assignment["git"]
     as = Slice.as_user(user)
 
-    with {:ok, committed?} <- Checkout.squash(dir, remote(git), message, as),
+    with {:ok, committed?} <- Checkout.squash(dir, remote(git), message, as, keep: merged(git)),
          :ok <- maybe_push(git, dir, committed?, as) do
       Checkout.head(dir, as)
     end
@@ -279,6 +279,7 @@ defmodule ForgeWorker.Job.Workspace do
         branch: git["branch"],
         token: git["token"],
         resume: assignment["resume_session"] != nil,
+        default: git["default_branch"],
         as: Slice.as_user(user)
       ],
       extra
@@ -341,4 +342,11 @@ defmodule ForgeWorker.Job.Workspace do
   def unreachable?(out), do: String.contains?(String.downcase(out), @unreachable)
 
   defp remote(git), do: "origin/" <> git["branch"]
+
+  # An integrating job's default branch, as its checkout fetched it: what the squash keeps as a
+  # second parent when the run merged it (`Checkout.squash/5`).
+  defp merged(%{"default_branch" => default}) when is_binary(default),
+    do: "refs/remotes/origin/" <> default
+
+  defp merged(_git), do: nil
 end

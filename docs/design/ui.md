@@ -634,6 +634,24 @@ stuck, and which edge it took.
 confirm (`workflow-grammar-v1.md` § Pinning). Nothing is said while `.forge/` is unchanged —
 a default branch that moved on for other reasons changes nothing the ticket runs.
 
+**A ticket a merge has put in conflict says so in its rail too**, beneath the facts and shaped like
+the re-pin notice: *`main` no longer merges with this ticket's changeset since #12 merged* —
+or *since a conversation merged*, or *`main` no longer merges with this ticket's changeset* when
+it conflicted already — the paths, and **Send to `<target>`** behind a confirm, which takes the
+conflict route to the merging state's `on_conflict` target (`workflow-grammar-v1.md` § Merging).
+Found after every merge (`git-hosting.md` § After a merge, the other tickets) and shown while it
+is still true of the ticket: its latest changeset is the one found conflicting, and the ticket has
+not taken the conflict route since. It offers the action only where the engine would take it — an
+open ticket with nothing live in its state, an edge from there into a merging state, and an
+`on_conflict` on that state; otherwise it is the notice alone, because a conflict nobody can act
+on from here is still worth knowing before the approval. Nothing starts until the button is
+pressed: the confirm says a job will run when the target runs one, since that spends a credential
+on a ticket the person may be about to cancel.
+
+**The conflict route is a step like any other.** The transition it takes is in the timeline as the
+step it leads to, and the rail's last events say what `ticket.merge_conflicted` means beside its
+type — the first path that conflicted, how many more did, and the state that would have merged.
+
 **A command's page** is the job page with what a command has: its exit status as the largest thing
 on it, the script as it ran, the argument vector as JSON — it reached `exec` as a vector, and
 joined with spaces two arguments would read as one — the commit it ran at, its timeout, the job
@@ -932,7 +950,7 @@ card and no box, in this order:
   `current` or `other build` (below); and, on the right, *Log* — on every row, destroyed ones
   too — and the control that ends it.
 - **A refusal line**, when the machine's last join spoke a protocol this platform does not
-  accept, in `error`: *refused: protocol 3, this platform accepts 4–4 — update it*. It is drawn
+  accept, in `error`: *refused: protocol 3, this platform accepts 4–5 — update it*. It is drawn
   from the protocol the row recorded and the range the platform accepts now, so it cannot say
   something the next join would not.
 - **An unhealthy line**, when the machine said its systemd stopped answering, in `error`:

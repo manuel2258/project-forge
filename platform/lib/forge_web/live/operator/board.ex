@@ -111,7 +111,8 @@ defmodule ForgeWeb.Operator.Board do
     if state in seen do
       walk(workflow, rest, seen)
     else
-      next = workflow |> Workflow.transitions_from(state) |> Enum.map(& &1.to)
+      # Along `on_conflict` too: an integrating state is reached by nothing else.
+      next = workflow |> Workflow.edges_from(state) |> Enum.map(& &1.to)
       walk(workflow, rest ++ next, [state | seen])
     end
   end

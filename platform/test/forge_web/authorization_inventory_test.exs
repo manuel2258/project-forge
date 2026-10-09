@@ -236,6 +236,7 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"operator/actions.ex", "restore-ticket"} => :member,
     {"operator/actions.ex", "retry"} => :member,
     {"operator/actions.ex", "repin"} => :member,
+    {"operator/actions.ex", "integrate"} => :member,
     {"operator/actions.ex", "write_document"} => :member,
     {"operator/question_form.ex", "form:change"} => :local,
     {"operator/question_form.ex", "form:open"} => :local,

@@ -88,6 +88,17 @@ defmodule Forge.Events do
     )
   end
 
+  @doc "The newest event of `type` for a ticket, or nil."
+  @spec latest_for_ticket(String.t(), String.t()) :: Event.t() | nil
+  def latest_for_ticket(ticket_id, type) do
+    Repo.one(
+      from e in Event,
+        where: e.ticket_id == ^ticket_id and e.type == ^type,
+        order_by: [desc: e.seq],
+        limit: 1
+    )
+  end
+
   @doc """
   The newest events of a project, newest first.
 
@@ -250,6 +261,18 @@ defmodule Forge.Events do
          _bound
        ),
        do: "#{from} → #{to}#{if p["outcome"], do: " on #{p["outcome"]}"}"
+
+  # The state that would have merged, and what conflicted: the first path, and how many more.
+  defp describe(
+         %Event{type: "ticket.merge_conflicted", payload: %{"state" => state, "paths" => paths}},
+         _bound
+       ) do
+    case paths do
+      [only] -> "#{only} conflicted on the way into #{state}"
+      [first | rest] -> "#{first} and #{length(rest)} more conflicted on the way into #{state}"
+      [] -> "conflicted on the way into #{state}"
+    end
+  end
 
   defp describe(%Event{payload: payload}, _bound) when map_size(payload) == 0, do: ""
 

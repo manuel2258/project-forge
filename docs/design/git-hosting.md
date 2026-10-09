@@ -196,7 +196,7 @@ operator sees a mirror that stopped working rather than a mirror that was never 
 ### Non-fast-forward on a ticket branch: allowed, recorded, and pinned
 
 `decisions.md` says a job commits freely and history is squashed. The squash happens on the
-worker, once per run: `ForgeWorker.Checkout.squash/4` resets softly to the fetched branch head and
+worker, once per run: `ForgeWorker.Checkout.squash/5` resets softly to the fetched branch head and
 commits everything the run did as one commit, so the ticket branch gains one commit per run
 rather than the agent's keystrokes. The merge does not squash again — it keeps both parents
 (§ The merge). So the common case is append-only — but a resumed job amending its last commit, or
@@ -211,11 +211,31 @@ attaches to. A ref moving does not move an approval.
 The residual risk is that a rewrite makes an approved commit unreachable and therefore
 collectable, and the merge would then act on an object that has gone. Two things close it:
 
-1. On approval of `changeset`, the platform writes `refs/forge/approved/<ticket number>` at the
-   approved sha. Under `refs/forge/*`, so it is neither a branch nor mirrored, and the object is
-   permanently reachable.
-2. `Forge.Merge.perform/2` verifies the approved sha still resolves, and refuses loudly rather
-   than quietly merging whatever the branch head happens to be now.
+1. Each merge attempt writes `refs/forge/approved/<ticket number>` at the commit it is merging,
+   before it merges. Under `refs/forge/*`, so it is neither a branch nor mirrored, and the object
+   is permanently reachable. This note used to say the ref was written on approval; it never was —
+   the attempt, in the same request as the approval, wrote it. That is still the rule, and it is
+   now also what makes the ref mean something when nobody approved: an engine-taken merge
+   (`workflow-grammar-v1.md` § Merging, route (b)) pins the commit its transition named exactly as
+   a person's does.
+2. `Forge.Merge.perform/3` verifies the commit its transition named still resolves, and refuses
+   loudly rather than quietly merging whatever the branch head happens to be now.
+
+**An integration merges, it does not rebase**, and the squash keeps it a merge. A ticket whose
+changeset no longer merges is sent to its integrating state (`workflow-grammar-v1.md` § Merging),
+whose job merges the default branch into the ticket branch. A rebase would leave the commit the
+last merge attempt pinned off the branch, and the version a person approved no ancestor of the one
+that merges. A merge keeps both — the old head is the new commit's first parent — and so does the
+squash after it: `Checkout.squash/5` resets to the fetched ticket head and commits the run's tree
+as one commit as always, and when the run's head contains default-branch history the fetched
+ticket head does not — the merge base of the head and the fetched default branch is no ancestor of
+the ticket head — that merge base is the commit's second parent. The merge base and not the fetched
+head itself: a run resumed after the default branch moved fetches the newer head, which the merge
+it made before it stopped does not contain. Without
+it the squash would drop what made the commit a merge, and the next `merge-tree` would start from
+the old merge base and find the same conflict again. The rule holds whatever the agent did: an
+agent that rebased onto the default branch against its instructions still leaves a commit whose
+parents are the old ticket head and the default branch head.
 
 The rewrite is also visible: the hook prints a note on stderr, and `git http-backend` relays a
 hook's stderr to the *pushing client* over the smart-HTTP sideband — the "remote: " lines a git
@@ -382,7 +402,7 @@ needs no force; `pre-receive` asserts that. Its second parent is the approved sh
 own commits stay reachable from the default branch and `git log` says where the change came from.
 One parent would put the merged content on the branch and lose every commit that produced it.
 
-`perform/2` is idempotent: if the approved sha is already an ancestor of the default branch it
+`perform/3` is idempotent: if the commit it is given is already an ancestor of the default branch it
 returns without making a second commit. Safe to call twice, safe to retry.
 
 ### Where it runs, and what a conflict does
@@ -392,19 +412,26 @@ after the transaction either — a conflict would then leave the ticket reading 
 default branch never moved. The resolution is a **pre-flight check**, shaped like the existing
 `no_live_job/1` guard:
 
-1. Before the transaction, `Forge.Merge.check/1` runs `merge-tree` and nothing else. It has no
-   side effect. On a conflict the approval is refused, nothing is recorded, and **the ticket stays
-   in `review_ready`** — where the workflow does have edges out, back to `implementing`. Had the
+1. Before the transaction, `Forge.Merge.check/2` runs `merge-tree` on the commit the transition
+   names and nothing else. It has no side effect. On a conflict, a merging state with no
+   `on_conflict` refuses the approval, nothing is recorded, and **the ticket stays in
+   `review_ready`** — where the workflow does have edges out, back to `implementing`. Had the
    ticket been moved into terminal `merged` first, a stuck item there would offer no transitions
-   at all, because a terminal state has none. That dead end is the reason for the pre-flight.
-2. The transaction records the approvals, the transition and the events, as it does today.
-3. After it commits, the entry action runs the merge for real.
+   at all, because a terminal state has none. That dead end is the reason for the pre-flight. A
+   merging state *with* `on_conflict` takes that edge instead, in the same transaction the
+   approval would have been recorded in (`workflow-grammar-v1.md` § Merging), and the conflict is
+   recorded as `ticket.merge_conflicted` with its paths, the head it was checked against and the
+   commit.
+2. The transaction records the approvals, the transition and the events, as it does today, and
+   the transition names the commit it was checked on.
+3. After it commits, the entry action runs the merge for real, on that commit.
 4. A late failure — another merge moved the default branch while this one was being written — is
-   **retried once against the new head**. `Forge.Merge.perform/2` makes an attempt from the head
+   **retried once against the new head**. `Forge.Merge.perform/3` makes an attempt from the head
    it resolves; when the attempt fails and the default branch is no longer at that head, it
    resolves the branch again and makes one more attempt from there. Whatever the second attempt
-   returns is final, and the entry action (`Forge.Engine.enter/4`) sticks the ticket with its
-   reason on anything but success.
+   returns is final. A conflict leaves the merging state by its `on_conflict`, when it has one;
+   anything else but success — and a conflict where there is no `on_conflict` — makes the entry
+   action (`Forge.Engine.enter/4`) stick the ticket with its reason.
 
 **What decides a retry is the ref, read the way the attempt read it.** What the push asserts is
 that the branch is still where the attempt found it — a fast-forward of that head, checked by the
@@ -426,9 +453,27 @@ verb that closes the loop after a failed retry. What a failed retry leaves is mo
 the same merge again cannot fix — a conflict against the new head needs new work on the branch —
 and the one case a verb would close, a failure that is neither a race nor a conflict (a push
 refused while the disk was full), is rare enough to be named here rather than built. The dead end
-it was meant to close is still there: a ticket stuck in terminal `merged` has no transitions to
-offer, and getting it out is a way out of a stuck terminal state — a workflow question, not a git
-one. `perform/2` is idempotent, so a retry, whenever something asks for one, is safe.
+it was meant to close was a workflow question, not a git one, and the workflow now answers it for
+the common case: a merging state's `on_conflict` is the way out of a terminal state that a
+conflict takes (`workflow-grammar-v1.md` § Merging). What is left of the dead end is a failure
+that is not a conflict, and a workflow that names no `on_conflict`. `perform/3` is idempotent, so
+a retry, whenever something asks for one, is safe.
+
+### After a merge, the other tickets
+
+A merge moves the default branch under every other open ticket, and the one it moved into a
+conflict used to find out only when somebody approved it. So after every merge — a ticket's
+`ticket.merged`, and a conversation's — the project's other open tickets that have a changeset are
+checked with the same `merge-tree` (`Forge.Merge.Watch`), each against the new head. One whose
+latest changeset now conflicts is checked once more against the head the merge was made on top
+of, its first parent: clean there, and the merge is what caused it; conflicting there too, and it
+conflicted already. `ticket.conflict_found` records the paths, the head, the commit checked and
+the merge that caused it, or none, and the ticket's page says so (`docs/design/ui.md` § Decide and
+Timeline). It is recorded once per commit, so a ticket that conflicts after every merge
+of a busy day is told once until it changes. Nothing is started: what to do about it is a person's
+call (`workflow-grammar-v1.md` § Merging). The checks run in a task of their own beside the request,
+under the platform's task supervisor, so a project with many open tickets does not make pressing
+merge slow; they move no ref.
 
 ## The job's own git
 
@@ -447,6 +492,13 @@ in this one module, which is what keeps the credential's handling in one place.
 
 - Clone `--branch <ticket branch> --single-branch` on a first run; fetch and reset on a later one,
   keeping the working tree on a resume.
+- **An integrating job also fetches the default branch**, into `refs/remotes/origin/<default>`,
+  on every run — a job whose state is some merging state's `on_conflict` target
+  (`workflow-grammar-v1.md` § Merging), told so by `default_branch` in its assignment's `git`.
+  Read-only, and not by any new grant: a job's token already reads the whole project, and its
+  write scope is still exactly `refs/heads/ticket/<n>` (§ The per-job token), so `pre-receive`
+  refuses a push of the default branch from it as from any job. A test pushes one. The squash at
+  the end of the run keeps the merge (§ Non-fast-forward on a ticket branch).
 - The credential never reaches argv: git runs with a `credential.helper` that prints
   `$FORGE_GIT_TOKEN`, and the variable is in the environment only.
 - `user.name` and `user.email` are set on the clone. The harness runs with a private `HOME`, so
@@ -471,7 +523,8 @@ in this one module, which is what keeps the credential's handling in one place.
 - **`Forge.Operator.retry_merge/2`.** Cut, where it was pending. The automatic retry against a
   moved head is built; a verb that repeats the merge by hand is not, because what the retry
   leaves is mostly a conflict, which repeating cannot fix — § Where it runs, and what a conflict
-  does. A ticket stuck in terminal `merged` is still a dead end, and that is the gap to close.
+  does. A conflict now leaves terminal `merged` by its `on_conflict`; a ticket stuck there for
+  any other reason, or in a workflow that names none, is still a dead end.
 - **Reconciling a mirror** is still cut: a mirror that was unreachable is not retried and is not
   caught up, it is simply reported as failing until the next push to a matching ref succeeds.
   What is no longer cut is knowing — § What the mirrors say about themselves.

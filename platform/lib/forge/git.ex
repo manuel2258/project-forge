@@ -282,15 +282,26 @@ defmodule Forge.Git do
     end
   end
 
+  @doc "The best common ancestor of `a` and `b`."
+  @spec merge_base(repo(), String.t(), String.t()) :: {:ok, sha()} | {:error, term()}
+  def merge_base(repo, a, b) do
+    with {:ok, out} <- run(repo, ["merge-base", a, b]), do: {:ok, String.trim(out)}
+  end
+
   @doc """
   The commits on `head` since `base`, newest first: sha, subject, and when each was committed.
   The same range as `commits_since/3`, with what a list of commits shows a person.
   """
-  @spec log(repo(), String.t(), String.t()) ::
+  @spec log(repo(), String.t(), String.t(), keyword()) ::
           {:ok, [%{sha: sha(), subject: String.t(), at: DateTime.t()}]} | {:error, term()}
-  def log(repo, base, head) do
+  def log(repo, base, head, opts \\ []) do
+    # `first_parent: true` is the line a branch's own merges make, and not what each brought in.
+    first = if Keyword.get(opts, :first_parent, false), do: ["--first-parent"], else: []
+
     with {:ok, out} <-
-           run(repo, ["log", "--format=%H%x1f%ct%x1f%s", "#{base}..#{head}"], stderr: :separate) do
+           run(repo, ["log", "--format=%H%x1f%ct%x1f%s"] ++ first ++ ["#{base}..#{head}"],
+             stderr: :separate
+           ) do
       {:ok, out |> String.split("\n", trim: true) |> Enum.flat_map(&log_line/1)}
     end
   end

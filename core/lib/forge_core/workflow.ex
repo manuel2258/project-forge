@@ -46,6 +46,7 @@ defmodule ForgeCore.Workflow do
 
   @engine_outcomes ~w(did_not_converge budget_exhausted error cancelled)
   @default_outcome "done"
+  @merge_conflict "merge_conflict"
   @ticket "ticket"
   @changeset "changeset"
   @answers "answers.md"
@@ -84,6 +85,14 @@ defmodule ForgeCore.Workflow do
   @doc "The outcome a transition matches when it names none."
   @spec default_outcome() :: outcome()
   def default_outcome, do: @default_outcome
+
+  @doc """
+  The outcome a transition is recorded on when a merge conflict sends the ticket down its merging
+  state's `on_conflict` (`docs/design/workflow-grammar-v1.md` § Merging). No job ends on it and no
+  `when` selects it; it is what `transition.taken` says and what the next job is told it came on.
+  """
+  @spec merge_conflict_outcome() :: outcome()
+  def merge_conflict_outcome, do: @merge_conflict
 
   @doc "Reserved input name for the ticket body."
   def ticket_artifact, do: @ticket
@@ -232,7 +241,7 @@ defmodule ForgeCore.Workflow do
   @spec terminal?(t(), state_name()) :: boolean()
   def terminal?(workflow, name), do: transitions_from(workflow, name) == []
 
-  @doc "Whether entering `name` merges the ticket's approved changeset. See `State`."
+  @doc "Whether entering `name` merges the changeset its transition named. See `State`."
   @spec merges_on_enter?(t(), state_name()) :: boolean()
   def merges_on_enter?(workflow, name) do
     case state(workflow, name) do
@@ -240,6 +249,63 @@ defmodule ForgeCore.Workflow do
       state -> State.merges?(state)
     end
   end
+
+  @doc """
+  Where a merge conflict sends a ticket from the merging state `name`: its `on_conflict`, or nil
+  when it names none. Only a merging state may name one (`ForgeCore.Workflow.Validator`).
+  """
+  @spec on_conflict(t(), state_name()) :: state_name() | nil
+  def on_conflict(workflow, name) do
+    case state(workflow, name) do
+      %State{on_conflict: target} -> target
+      nil -> nil
+    end
+  end
+
+  @doc """
+  The edge a conflict takes into the merging state `merging`'s `on_conflict`, from wherever the
+  ticket is: `from` is the state it was leaving — the merging state itself after a late race, or
+  the state whose transition into it the check refused. Nil when `merging` names no target.
+
+  It is no declared transition, and nothing but a conflict takes it: the merging state stays
+  terminal (`docs/design/workflow-grammar-v1.md` § Merging).
+  """
+  @spec conflict_transition(t(), state_name(), state_name()) :: Transition.t() | nil
+  def conflict_transition(workflow, from, merging) do
+    case on_conflict(workflow, merging) do
+      nil -> nil
+      target -> %Transition{from: from, to: target, when: @merge_conflict}
+    end
+  end
+
+  @doc """
+  Whether `name` is an integrating state: the `on_conflict` of a state that merges. Its job's
+  checkout also fetches the default branch, and its manifest says what conflicted
+  (`docs/design/job-prompt.md` § Integrating the default branch).
+  """
+  @spec integrating?(t(), state_name()) :: boolean()
+  def integrating?(%__MODULE__{states: states} = workflow, name) do
+    Enum.any?(states, fn {merging, _state} -> on_conflict(workflow, merging) == name end)
+  end
+
+  @doc """
+  Every edge a ticket can move along: the declared transitions, and each merging state's
+  `on_conflict` as an edge out of it. What a walk of the graph follows — reachability, what runs
+  before what — because the ticket reaches an `on_conflict` target only by it. Not what
+  `transitions_from/2` answers: that is what a person or an outcome may choose, and the merging
+  state offers neither.
+  """
+  @spec edges(t()) :: [Transition.t()]
+  def edges(%__MODULE__{transitions: transitions, states: states} = workflow) do
+    conflicts =
+      states |> Map.keys() |> Enum.flat_map(&List.wrap(conflict_transition(workflow, &1, &1)))
+
+    transitions ++ conflicts
+  end
+
+  @doc "The edges out of `name`, as `edges/1` counts them."
+  @spec edges_from(t(), state_name()) :: [Transition.t()]
+  def edges_from(workflow, name), do: workflow |> edges() |> Enum.filter(&(&1.from == name))
 
   @doc """
   The command whose log is recorded as `artifact`, or nil. A command's log is a blob, and a state
@@ -308,7 +374,7 @@ defmodule ForgeCore.Workflow do
       true ->
         next =
           workflow
-          |> transitions_from(node)
+          |> edges_from(node)
           |> Enum.filter(&(not MapSet.member?(blocked, node) or unwritten?(&1)))
           |> Enum.map(& &1.to)
 

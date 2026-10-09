@@ -301,7 +301,7 @@ defmodule ForgeCore.Prompt do
 
     ## How you got here
 
-    #{arrival(spec.entered)}#{entered_commands(spec, job_dir)}
+    #{arrival(spec.entered)}#{entered_commands(spec, job_dir)}#{integration(spec)}
 
     ## Inputs (read-only)
 
@@ -395,6 +395,68 @@ defmodule ForgeCore.Prompt do
     "\n\nWhat `#{from}`'s commands said, in the order it ran them. Read the log of any that " <>
       "failed before you change anything: it is why you are here.\n\n" <> lines
   end
+
+  # `docs/design/job-prompt.md` § Integrating the default branch. A job of a merging state's
+  # `on_conflict` target is there to merge the default branch into the ticket's, and is told what
+  # conflicted, what landed meanwhile, and to merge rather than rebase.
+  defp integration(%Spec{integration: %{"default_branch" => branch} = integration}) do
+    remote = "origin/" <> branch
+
+    Enum.join(
+      [
+        "\n\n## Integrating `#{branch}`",
+        "This ticket's changeset no longer merges into `#{branch}`, which is why you are here. " <>
+          integration_head(integration["head"], branch, remote),
+        integration_conflict(integration["paths"] || [], integration["changeset"], remote),
+        integration_merges(integration, branch),
+        "Merge `#{remote}` into the branch — `git merge #{remote}` — resolve every conflict, and " <>
+          "commit the merge. **Do not rebase, and do not reset the branch.** The commit this " <>
+          "ticket's merge was last tried for has to stay an ancestor of what you leave, and only " <>
+          "a merge keeps it one. Your run is squashed into one commit when it ends, as always, " <>
+          "and that commit keeps `#{remote}` as its second parent, so the merge survives it."
+      ]
+      |> Enum.reject(&(&1 == "")),
+      "\n\n"
+    )
+  end
+
+  defp integration(%Spec{}), do: ""
+
+  defp integration_head(head, branch, remote) when is_binary(head),
+    do:
+      "`#{branch}` was at `#{short(head)}` when this run was assigned. The checkout has it as " <>
+        "`#{remote}`, which may be a little newer: that is the one to merge."
+
+  defp integration_head(_none, branch, remote),
+    do: "The checkout has `#{branch}` as `#{remote}`: that is the one to merge."
+
+  defp integration_conflict([], _changeset, remote),
+    do:
+      "No conflict is recorded for this ticket: a person sent it here. Merge `#{remote}` all " <>
+        "the same, and say what you found."
+
+  defp integration_conflict(paths, changeset, _remote) do
+    tried = if changeset, do: " when its changeset `#{short(changeset)}` was tried", else: ""
+
+    "It conflicted in these paths#{tried}:\n\n" <>
+      Enum.map_join(paths, "\n", &"- `#{&1}`")
+  end
+
+  defp integration_merges(%{"merges" => [_ | _] = merges} = integration, branch) do
+    since =
+      if integration["base"], do: " since this ticket's base `#{short(integration["base"])}`"
+
+    more = integration["more"] || 0
+
+    "What has landed on `#{branch}`#{since}, newest first — which ticket wrote the other side " <>
+      "of a conflict is what says how to resolve it:\n\n" <>
+      Enum.map_join(merges, "\n", &"- `#{short(&1["sha"])}` #{&1["subject"]}") <>
+      if(more > 0, do: "\n- and #{more} more", else: "")
+  end
+
+  defp integration_merges(_integration, _branch), do: ""
+
+  defp short(sha), do: String.slice(sha, 0, 12)
 
   # Optional inputs not written yet: named, so a missing file is not mistaken for a failure
   # (`docs/design/workflow-grammar-v1.md` § Inputs).

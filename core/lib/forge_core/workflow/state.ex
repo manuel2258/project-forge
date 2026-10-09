@@ -6,8 +6,9 @@ defmodule ForgeCore.Workflow.State do
   person or the engine.
 
   `on_enter` names actions the platform takes when a ticket arrives in the state. `merge` is
-  the only one in v1: entering the state merges the ticket's approved changeset into the
-  project's default branch.
+  the only one in v1: entering the state merges the changeset its transition named into the
+  project's default branch. `on_conflict`, on that state alone, names where a conflict sends the
+  ticket instead (`docs/design/workflow-grammar-v1.md` § Merging).
   """
 
   alias ForgeCore.Workflow
@@ -25,6 +26,7 @@ defmodule ForgeCore.Workflow.State do
     :outcomes,
     :resources,
     :exit,
+    :on_conflict,
     inputs: [],
     produces: [],
     on_enter: [],
@@ -57,6 +59,8 @@ defmodule ForgeCore.Workflow.State do
           # the part of that chain this project can see.
           resources: Resources.t() | nil,
           on_enter: [action()],
+          # The merging state's: where a conflict sends the ticket instead of refusing or sticking.
+          on_conflict: String.t() | nil,
           # A command state's: what it runs on entry, and the outcome each exit status selects —
           # keyed by the status, or `"*"` for any other.
           invoke: [invocation()],

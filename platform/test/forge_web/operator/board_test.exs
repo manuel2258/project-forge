@@ -68,6 +68,16 @@ defmodule ForgeWeb.Operator.BoardTest do
     assert Board.order(workflow) == names
   end
 
+  # An integrating state is reached by a conflict and nothing else, so a walk of the declared
+  # transitions alone left it off the project page's list, and drew it after `merged` on the board
+  # only while a ticket was in it.
+  test "a state only a conflict reaches is in the order, after the merge" do
+    {:ok, workflow} =
+      ForgeCore.Workflow.Parser.parse(Forge.GitFixtures.conflict_workflow(:b))
+
+    assert Board.order(workflow) == ["implementing", "review_ready", "merged", "integrating"]
+  end
+
   test "a state only a ticket knows is appended rather than dropped" do
     project = project_fixture()
     tickets(project, ["refining"])

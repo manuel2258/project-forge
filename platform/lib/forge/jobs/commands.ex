@@ -753,14 +753,7 @@ defmodule Forge.Jobs.Commands do
     end
   end
 
-  defp latest_decided(ticket_id) do
-    Repo.one(
-      from e in Event,
-        where: e.ticket_id == ^ticket_id and e.type == "commands.decided",
-        order_by: [desc: e.seq],
-        limit: 1
-    )
-  end
+  defp latest_decided(ticket_id), do: Events.latest_for_ticket(ticket_id, "commands.decided")
 
   defp latest_started(ticket_id, state) do
     Repo.one(

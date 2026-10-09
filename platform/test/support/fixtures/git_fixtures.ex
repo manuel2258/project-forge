@@ -198,6 +198,144 @@ defmodule Forge.GitFixtures do
     head
   end
 
+  @doc """
+  A workflow whose merging state sends a conflict to `integrating`
+  (`docs/design/workflow-grammar-v1.md` § Merging). `:b` sends an integration straight back to the
+  merge and `:a` back to a person who approves it again, `:reviewed` through a job reading the
+  changeset before that person, and `:human` makes the target a human state that sends the
+  ticket back to implementing; `:plain` is one from before `on_conflict` existed, with an edge
+  the engine takes into the merge by itself beside the person's approval. Its integrating and
+  reviewing states' prompt is `agents/integrate.md`, which `seeded_repo/1` does not write.
+  """
+  def conflict_workflow(route) do
+    {conflict, integrating, back, engine} =
+      case route do
+        :plain ->
+          {"", "", "", "  - { from: implementing, to: merged, when: engine_merges }\n"}
+
+        :human ->
+          {"    on_conflict: integrating\n", "  integrating: {}\n",
+           "  - { from: integrating, to: implementing }\n", ""}
+
+        :reviewed ->
+          {"    on_conflict: integrating\n",
+           """
+             integrating:
+               prompt: agents/integrate.md
+               inputs: [changeset]
+               produces: [changeset]
+               budget: { turns: 10, cost: 1.00 }
+             reviewing:
+               prompt: agents/integrate.md
+               inputs: [changeset]
+               produces: [review.md]
+               budget: { turns: 10, cost: 1.00 }
+           """,
+           "  - { from: integrating, to: reviewing }\n  - { from: reviewing, to: review_ready }\n",
+           ""}
+
+        route ->
+          to = if route == :a, do: "review_ready", else: "merged"
+
+          {"    on_conflict: integrating\n",
+           """
+             integrating:
+               prompt: agents/integrate.md
+               inputs: [changeset]
+               produces: [changeset]
+               budget: { turns: 10, cost: 1.00 }
+           """, "  - { from: integrating, to: #{to} }\n", ""}
+      end
+
+    """
+    version: 1
+    initial: implementing
+    states:
+      implementing:
+        prompt: agents/implement.md
+        produces: [implementation.md, changeset]
+        outcomes: [done, engine_merges]
+        budget: { turns: 10, cost: 1.00 }
+      review_ready: {}
+      merged:
+        on_enter: merge
+    #{conflict}#{integrating}transitions:
+      - { from: implementing, to: review_ready }
+      - { from: review_ready, to: merged, approve: [changeset] }
+    #{back}#{engine}limits:
+      ticket_cost: 25.00
+    """
+  end
+
+  @doc """
+  A commit on top of `parent`, made in a scratch clone and fetched into the bare repository
+  without moving any ref: something for `race/2` to move the default branch to.
+  """
+  def commit_beside(bare, parent, path, content) do
+    dir = Path.join(tmp_dir("merge-beside"), "work")
+    {:ok, _out} = Git.run(tmp_dir("merge-beside-parent"), ["clone", "--quiet", bare, dir])
+
+    for args <- [
+          ["checkout", "--quiet", "--detach", parent],
+          ["config", "user.name", "elsewhere"],
+          ["config", "user.email", "elsewhere@forge"]
+        ],
+        do: {:ok, _out} = Git.run(dir, args)
+
+    File.write!(Path.join(dir, path), content <> "\n")
+    {:ok, _out} = Git.run(dir, ["add", path])
+    {:ok, _out} = Git.run(dir, ["commit", "--quiet", "-m", content])
+    {:ok, sha} = Git.resolve(dir, "HEAD")
+    {:ok, _out} = Git.run(bare, ["fetch", "--quiet", dir, "HEAD"])
+    sha
+  end
+
+  @doc """
+  Wraps the repository's `pre-receive`. On the n-th push it moves the default branch to the n-th
+  of `moves`, if there is one, and then hands over to the real hook — or, with `refuse: true`,
+  refuses without moving anything. Returns a function counting the pushes it saw.
+
+  The move has to leave git's quarantine to be allowed at all: a hook may not update a ref
+  while the pushed objects are still quarantined, which is the rule that makes this window
+  otherwise impossible to reach from inside the push. It is how a merge is made to lose the race
+  `docs/design/git-hosting.md` § Where it runs, and what a conflict does describes.
+  """
+  def race(bare, opts) do
+    dir = tmp_dir("merge-race")
+    count = Path.join(dir, "pushes")
+    moves = Path.join(dir, "moves")
+    File.write!(moves, Enum.map_join(Keyword.get(opts, :moves, []), &(&1 <> "\n")))
+
+    hook = Path.join([bare, "hooks", "pre-receive"])
+    File.rename!(hook, hook <> ".real")
+
+    finish =
+      if Keyword.get(opts, :refuse, false),
+        do: ~s(echo "forge: refused by the test" >&2; exit 1),
+        else: ~s(exec "$0.real")
+
+    File.write!(hook, """
+    #!/usr/bin/env bash
+    set -eu
+    n=$(( $(cat "#{count}" 2>/dev/null || echo 0) + 1 ))
+    echo "$n" > "#{count}"
+    target=$(sed -n "${n}p" "#{moves}")
+    if [ -n "$target" ]; then
+      env -u GIT_QUARANTINE_PATH git update-ref refs/heads/main "$target"
+    fi
+    #{finish}
+    """)
+
+    File.chmod!(hook, 0o755)
+
+    fn ->
+      case File.read(count) do
+        {:ok, n} -> n |> String.trim() |> String.to_integer()
+        {:error, :enoent} -> 0
+      end
+    end
+  end
+
   defp git!(dir, args) do
     {:ok, _} = Git.run(dir, args)
   end

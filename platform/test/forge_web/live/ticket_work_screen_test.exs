@@ -11,6 +11,7 @@ defmodule ForgeWeb.TicketWorkScreenTest do
   import Ecto.Query, only: [from: 2]
   import Phoenix.LiveViewTest
   import Forge.GitFixtures
+  import Forge.MergeFixtures
 
   alias Forge.{Artifacts, Conversations, Jobs, Projects, Tickets}
 
@@ -29,32 +30,6 @@ defmodule ForgeWeb.TicketWorkScreenTest do
 
   defp page(project, ticket, query \\ ""),
     do: "/tickets/#{project.name}/#{ticket.number}" <> query
-
-  # Resting in `review_ready` with the merge waiting on the changeset's approval — the review
-  # page's own fixture, and the one case where the approval belongs at the foot of the diff.
-  defp pend_merge(ticket) do
-    {:ok, ticket} =
-      ticket
-      |> Ecto.Changeset.change(
-        state: "review_ready",
-        pending_transition: %{
-          "from" => "review_ready",
-          "to" => "merged",
-          "outcome" => nil,
-          "approve" => ["changeset"]
-        }
-      )
-      |> Forge.Repo.update()
-
-    ticket
-  end
-
-  defp changeset!(ticket, sha) do
-    {:ok, _version} =
-      Artifacts.record_version(ticket.id, "changeset", :blob, :system, %{blob_uri: "git:" <> sha})
-
-    :ok
-  end
 
   defp ask!(ticket, job, blocks) do
     {:ok, _version} =

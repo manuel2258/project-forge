@@ -462,6 +462,15 @@ will never report it. A protocol 3 worker on a new platform never sends either, 
 would have treated it exactly as before — a machine that stopped answering found by the timeout —
 had the minimum stayed where it was.
 
+**Protocol 5 is integrating the default branch** (`docs/design/job-prompt.md` § Integrating the
+default branch): `default_branch` in an assignment's `git`, which the worker must fetch, keep as a
+squashed run's second parent when the run merged it, and an `integration` in the spec it renders
+into the manifest. It is a bump because a protocol 4 worker would drop all three and still report
+success: it would push a resolution squashed onto one parent, whose next check against the default
+branch finds the conflict it was meant to resolve. So a job of an integrating state needs protocol
+5 (`Forge.Jobs.protocol/1`, from the stored spec's `integration`), and a protocol 4 worker keeps
+taking every other job. The minimum stays 4.
+
 **The minimum is 4, from release 0.7.0.** No machine outside the operator's own ran an older
 worker when protocol 4 shipped — no node served anyone else, and there were no permanent machines
 to update — so the steps below cost one snapshot built at protocol 4 and the templates moved to it,
@@ -472,10 +481,11 @@ with, in between, no managed machine to run anything (`docs/deploy.md` § Upgrad
 0–3 is refused at its join, and a managed one is destroyed there (above); a template whose snapshot
 is labelled older makes no machine until it names another, and one whose snapshot is unlabelled
 makes one, which is refused and marks the image (below). What the floor leaves with nothing to decide is still in the
-code: `Forge.Jobs.protocol/1`'s per-kind protocols (2 for a command, 3 for an agent), the protocol
-dimension of `Workers.fits?/2` and the scheduler's demand, and the templates page's word for a
-snapshot that cannot run an agent — every worker it accepts can run anything. Taking them out is
-§ Open.
+code: `Forge.Jobs.protocol/1`'s per-kind protocols (2 for a command, 3 for an agent), and the
+templates page's word for a snapshot that cannot run an agent — every worker it accepts can run
+those. **The protocol dimension of `Workers.fits?/2` and the scheduler's demand decides something
+again** since protocol 5: an integrating job needs it and a protocol 4 worker is still accepted,
+so the gate is what keeps such a job off it (above).
 
 What rides along without a bump, because an older side may ignore it: `job.harness.memory`
 events and the `memory` a `starting` event carries (`docs/design/claude-code-events.md` § Memory),
@@ -696,8 +706,9 @@ already has the framework for.
 ## Open
 
 - **What the protocol floor left behind** (§ What needs a bump, and raising the minimum). With
-  every accepted worker at protocol 4: `Forge.Jobs.protocol/1`'s per-kind numbers, the protocol
-  dimension of `Workers.fits?/2` and the scheduler's demand decide nothing and can go; the workers
+  every accepted worker at protocol 4 or later, `Forge.Jobs.protocol/1`'s numbers for a command and
+  an agent decide nothing; the protocol dimension of `Workers.fits?/2` and the scheduler's demand
+  stay, because an integrating job needs protocol 5 and the floor is still 4; the workers
   page's *no stats — update it*, for a connected machine that spoke no protocol, can no longer be
   drawn; and `Provisioning.holds?/2` still asks only whether a template's image is new enough for
   the job, not whether this platform accepts it, so a project with a small template labelled 3 and

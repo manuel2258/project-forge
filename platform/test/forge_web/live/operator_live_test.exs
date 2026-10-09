@@ -566,6 +566,164 @@ defmodule ForgeWeb.OperatorLiveTest do
     refute has_element?(view, "#pin-drift")
   end
 
+  # A merge moved the default branch into conflict with a ticket nobody has approved yet: the rail
+  # says so, naming the merge, and sends the ticket down its conflict route only when asked
+  # (`docs/design/ui.md` § Decide and Timeline).
+  test "a ticket a merge put in conflict says so, and is sent to integrate", %{
+    conn: conn,
+    user: user
+  } do
+    {:ok, project} =
+      Projects.register(
+        %{
+          name: "ui-conflict-#{System.unique_integer([:positive])}",
+          repo_path:
+            seeded_repo(%{
+              ".forge/workflow.yml" => conflict_workflow(:b),
+              ".forge/agents/integrate.md" => "Merge the default branch in.\n"
+            })
+        },
+        user
+      )
+
+    {:ok, ticket} = Tickets.admit(project, %{title: "Settings"}, {:user, user.id})
+    sha = commit_over_http(project, ticket.branch, "README.md", "the ticket's")
+
+    {:ok, _version} =
+      Forge.Artifacts.record_version(ticket.id, "changeset", :blob, :system, %{
+        blob_uri: "git:" <> sha
+      })
+
+    ticket |> Ecto.Changeset.change(state: "review_ready") |> Forge.Repo.update!()
+    path = ~p"/tickets/#{project.name}/#{ticket.number}"
+
+    {:ok, view, _html} = live(conn, path)
+    refute has_element?(view, "#merge-conflict")
+
+    head = commit_to_default(project, %{"README.md" => "the trunk's\n"})
+    [_found] = Forge.Merge.Watch.check(project.id, head, %{"ticket" => 4})
+
+    # Said on the page that was already open: the check announces what it found.
+    notice = view |> element("#merge-conflict") |> render()
+    assert notice =~ "main no longer merges with this ticket"
+    assert notice =~ "since #4 merged"
+    assert notice =~ "README.md"
+    assert notice =~ "A job starts there to merge main into its branch"
+
+    assert view |> element("#integrate-ticket") |> render_click() =~ "Sent to integrating"
+    assert Tickets.get!(ticket.id).state == "integrating"
+    refute has_element?(view, "#merge-conflict")
+
+    # And the rail's last events say what the conflict was, beside its type.
+    assert render(view) =~ "README.md conflicted on the way into merged"
+  end
+
+  # The other things the notice says: a conversation's merge, a conflict no merge caused, and a
+  # target that is a person's state, which starts no job.
+  test "a conflict notice names what caused it, or nothing, and what sending costs", %{
+    conn: conn,
+    user: user
+  } do
+    {:ok, project} =
+      Projects.register(
+        %{
+          name: "ui-human-#{System.unique_integer([:positive])}",
+          repo_path: seeded_repo(%{".forge/workflow.yml" => conflict_workflow(:human)})
+        },
+        user
+      )
+
+    {:ok, ticket} = Tickets.admit(project, %{title: "Settings"}, {:user, user.id})
+    path = ~p"/tickets/#{project.name}/#{ticket.number}"
+
+    record = fn content ->
+      sha = commit_over_http(project, ticket.branch, "README.md", content)
+
+      {:ok, _version} =
+        Forge.Artifacts.record_version(ticket.id, "changeset", :blob, :system, %{
+          blob_uri: "git:" <> sha
+        })
+    end
+
+    record.("the ticket's")
+    ticket |> Ecto.Changeset.change(state: "review_ready") |> Forge.Repo.update!()
+    head = commit_to_default(project, %{"README.md" => "the trunk's\n"})
+
+    [_found] = Forge.Merge.Watch.check(project.id, head, %{"chat" => Ecto.UUID.generate()})
+    {:ok, view, _html} = live(conn, path)
+    notice = view |> element("#merge-conflict") |> render()
+    assert notice =~ "since a conversation merged"
+
+    assert view |> element("#integrate-ticket") |> render() =~
+             "Send this ticket to integrating? It waits there for a person."
+
+    record.("the ticket's, again")
+    [_found] = Forge.Merge.Watch.check(project.id, head, nil)
+    {:ok, view, _html} = live(conn, path)
+    notice = view |> element("#merge-conflict") |> render()
+    assert notice =~ "no longer merges with this ticket"
+    refute notice =~ "since"
+
+    # The default branch came round to the ticket's own text meanwhile: the notice was stale, and
+    # pressing it says so rather than sending the ticket anywhere.
+    commit_to_default(project, %{"README.md" => "the ticket's, again\n"})
+
+    assert view |> element("#integrate-ticket") |> render_click() =~
+             "it merges cleanly now, so there is nothing to integrate"
+
+    assert Tickets.get!(ticket.id).state == "review_ready"
+  end
+
+  # A workflow from before `on_conflict`: the approval is refused as it always was, and the page
+  # now says why rather than that something went wrong.
+  test "an approval a conflict refuses says which paths", %{conn: conn, user: user} do
+    {:ok, project} =
+      Projects.register(
+        %{
+          name: "ui-plain-#{System.unique_integer([:positive])}",
+          repo_path: seeded_repo(%{".forge/workflow.yml" => conflict_workflow(:plain)})
+        },
+        user
+      )
+
+    {:ok, ticket} = Tickets.admit(project, %{title: "Settings"}, {:user, user.id})
+    sha = commit_over_http(project, ticket.branch, "README.md", "the ticket's")
+
+    {:ok, _version} =
+      Forge.Artifacts.record_version(ticket.id, "changeset", :blob, :system, %{
+        blob_uri: "git:" <> sha
+      })
+
+    head = commit_to_default(project, %{"README.md" => "the trunk's\n"})
+
+    ticket
+    |> Ecto.Changeset.change(
+      state: "review_ready",
+      pending_transition: %{
+        "from" => "review_ready",
+        "to" => "merged",
+        "outcome" => nil,
+        "approve" => ["changeset"]
+      }
+    )
+    |> Forge.Repo.update!()
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+
+    assert view
+           |> form("#approval-#{ticket.id} form")
+           |> render_submit(%{"decision" => "approved"}) =~
+             "it conflicts with the default branch in README.md"
+
+    assert Tickets.get!(ticket.id).state == "review_ready"
+
+    # Found after a merge, it is said here too — with nowhere to send it, so with no button.
+    [_found] = Forge.Merge.Watch.check(project.id, head, nil)
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}")
+    assert view |> element("#merge-conflict") |> render() =~ "README.md"
+    refute has_element?(view, "#integrate-ticket")
+  end
+
   # "Stuck" alone sends a person to the event log to learn whether a job failed, a `max` ran out or
   # nothing matched. The queue, the ticket's Decide and its rail say which, from the latest stick.
   test "a stuck ticket says why, on the queue and on its page", %{

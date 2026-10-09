@@ -55,6 +55,13 @@ defmodule Forge.ScopingTest do
       refute Operator.repin(ticket, member) == {:error, :forbidden}
     end
 
+    # Without the guard an outsider is answered as a member would be — here the refusal of a
+    # ticket whose state has no edge into a merge that names a conflict route.
+    test "integrate", %{ticket: ticket, outsider: outsider, member: member} do
+      assert {:error, :forbidden} = Operator.integrate(ticket, outsider)
+      refute Operator.integrate(ticket, member) == {:error, :forbidden}
+    end
+
     test "decide", %{ticket: ticket, outsider: outsider} do
       assert {:error, :forbidden} = Operator.decide(ticket, outsider, :approved, nil)
     end

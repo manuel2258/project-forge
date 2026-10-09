@@ -123,6 +123,7 @@ defmodule ForgeWeb.TicketLive do
       retry: Engine.retryable?(ticket),
       stuck_reason: Engine.why_stuck(ticket),
       drift: Tickets.drift(ticket, project),
+      conflict: Forge.Merge.Watch.notice(ticket),
       human_state:
         ticket.status in Forge.Tickets.Ticket.open_statuses() and
           Workflow.State.human?(Workflow.state(workflow, ticket.state)),
@@ -814,6 +815,28 @@ defmodule ForgeWeb.TicketLive do
         Re-pin at {String.slice(@drift.head, 0, 12)}
       </button>
     </div>
+    <%!-- A merge moved the default branch into conflict with this ticket's changeset: said before
+          anybody approves it, with the way down the conflict route — and nothing started until
+          it is pressed (`docs/design/ui.md` § Decide and Timeline). --%>
+    <div :if={@conflict} id="merge-conflict" class="mt-3 text-[12.5px]">
+      <p class="opacity-70">
+        {@project.default_branch} no longer merges with this ticket's changeset{since(@conflict.cause)}:
+      </p>
+      <ul class="mt-1 flex flex-col gap-0.5 font-mono break-all opacity-70">
+        <li :for={path <- @conflict.paths}>{path}</li>
+      </ul>
+      <button
+        :if={@conflict.send_to}
+        type="button"
+        id="integrate-ticket"
+        phx-click="integrate"
+        phx-value-ticket={@ticket.id}
+        data-confirm={send_confirm(@conflict.send_to, @workflow, @project.default_branch)}
+        class="flex min-h-[46px] items-center text-sm text-primary hover:underline"
+      >
+        Send to {@conflict.send_to}
+      </button>
+    </div>
 
     <h2
       :if={@proposals != []}
@@ -930,12 +953,29 @@ defmodule ForgeWeb.TicketLive do
 
   # The events whose type alone does not say what happened: which outcome a batch decided, why the
   # ticket stuck, where it went. Every other type is its own sentence here.
-  @said ~w(commands.decided ticket.stuck transition.taken)
+  @said ~w(commands.decided ticket.stuck transition.taken ticket.merge_conflicted)
 
   defp said(%{type: type} = event) when type in @said, do: Forge.Events.summary(event)
   defp said(_event), do: nil
 
   defp turns(jobs), do: jobs |> Enum.map(& &1.turns) |> Enum.sum()
+
+  # Which merge put the ticket in conflict, when it was one: one that conflicted already names none.
+  defp since(%{"ticket" => number}), do: " since ##{number} merged"
+  defp since(%{"chat" => _id}), do: " since a conversation merged"
+  defp since(_none), do: ""
+
+  # The confirm says what pressing it spends: a job, when the state it sends to runs one.
+  defp send_confirm(target, workflow, branch) do
+    case Workflow.state(workflow, target) do
+      %Workflow.State{prompt: prompt} when is_binary(prompt) ->
+        "Send this ticket to #{target}? A job starts there to merge #{branch} into its branch, " <>
+          "and spends a credential."
+
+      _human ->
+        "Send this ticket to #{target}? It waits there for a person."
+    end
+  end
 
   defp stuck_or_human?(assigns),
     do: (assigns.ticket.status == :stuck or assigns.human_state) and assigns.transitions != []

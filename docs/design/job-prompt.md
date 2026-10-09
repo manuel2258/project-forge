@@ -62,6 +62,44 @@ would have to guess whether a missing file was a failure.
 The repository's own `CLAUDE.md` is read by Claude Code as usual; project conventions need no
 special handling.
 
+## Integrating the default branch
+
+A job whose state is some merging state's `on_conflict` target is there because its ticket's
+changeset no longer merges (`workflow-grammar-v1.md` § Merging), and it cannot do anything about
+that from a checkout of its own branch alone: the clone is `--single-branch`, and the credential
+reaches no git the agent runs itself. So it is given the default branch and told what happened.
+
+**The checkout fetches the default branch** into `origin/<default>` on every run, read-only
+(`git-hosting.md` § The job's own git). The assignment says which branch: `default_branch` in its
+`git`, present only for such a job.
+
+**The manifest has a section of its own, *Integrating `<default>`***, after *How you got here*,
+filled at run time from the spec's `integration` (the stored spec carries only the branch's name,
+so a job that waits or parks reads the state of things when it resumes, not when it was made):
+
+- the default branch's head when the run was assigned, and that the checkout has it as
+  `origin/<default>` — which may be a little newer, and is the one to merge;
+- the paths the conflict was in and the commit that conflicted, from the ticket's latest
+  `ticket.merge_conflicted` — every way into an integrating state records one, since nothing but
+  a conflict leads there (`workflow-grammar-v1.md` § Merging), and a run of the state again reads
+  the one that sent it;
+- the merges that landed on the default branch since the ticket's base, first-parent, newest
+  first, each as its commit and subject line — at most twenty, with how many more there were —
+  because which ticket wrote the other side of a conflict is what says how to resolve it;
+- the instruction: **merge `origin/<default>` into the branch — `git merge origin/<default>` —
+  resolve every conflict, and commit the merge. Do not rebase, and do not reset the branch.**
+  The commit the ticket's merge was last attempted for has to stay an ancestor of what merges, and
+  a merge is the only resolution that keeps it one (`git-hosting.md` § Non-fast-forward on a
+  ticket branch). The worker's squash keeps the default branch as the commit's second parent, so
+  the merge survives being squashed into the run's one commit.
+
+It is the manifest's and not the preamble's because it is about this job: the preamble is one
+document for every job, and its hash is part of every spec.
+
+**It needs protocol 5** (`worker-channel.md` § Versions): a worker before it neither fetches the
+default branch nor keeps the merge through its squash, so an integration it ran would push a
+resolution whose next check finds the same conflict, and round the loop again.
+
 ## Job directory
 
 Outside the worktree, so nothing in it can be committed by accident:

@@ -79,8 +79,17 @@ defmodule ForgeWorker.Job.Command do
 
   @impl true
   def handle_continue({:spawn, opts, script}, %{spec: spec} = state) do
+    # The command's project secrets, opened here at spawn and only here, into the file the script's
+    # process loads before it runs (`ForgeWorker.Job.Exec`, `docs/design/secrets.md` § Delivery).
+    secrets =
+      for {name, {:secret, value}} <- ForgeWorker.Job.Secrets.env(Keyword.get(opts, :secrets)),
+          do: {name, value}
+
+    secrets_file = Exec.write_secrets(state.job_dir, secrets)
+    {executable, args} = Exec.load_secrets(script, spec.command["args"] || [], secrets_file)
+
     {executable, args} =
-      Exec.nix(script, spec.command["args"] || [], spec.env, Keyword.get(opts, :nix_env, false))
+      Exec.nix(executable, args, spec.env, Keyword.get(opts, :nix_env, false))
 
     env =
       Exec.inherited_env() ++
@@ -106,7 +115,7 @@ defmodule ForgeWorker.Job.Command do
         worktree: state.worktree,
         job_dir: state.job_dir,
         env: env,
-        secret_names: []
+        secrets_file: secrets_file
       })
 
     case slice.prepare(slice_opts) do
@@ -126,9 +135,11 @@ defmodule ForgeWorker.Job.Command do
     end
   end
 
-  # The shell redirects and then `exec`s `env -i` with only the assignments passed as arguments,
-  # which keeps it the process group leader a signal reaches everything through. The log is one
-  # file for both streams, because a build's error is only legible beside what it printed first.
+  # The shell redirects and then `exec`s `env -i` with only the assignments passed as arguments —
+  # none of them a secret, which the script's process loads itself, as the runner's does
+  # (`ForgeWorker.Job.Exec`); `exec` keeps it the process group leader a signal reaches everything
+  # through. The log is one file for both streams, because a build's error is only
+  # legible beside what it printed first.
   defp spawn_port(state, executable, args, env) do
     assignments = Enum.map(env, fn {k, v} -> "#{k}=#{v}" end)
 
@@ -220,6 +231,7 @@ defmodule ForgeWorker.Job.Command do
   # exits, 127 from `env`, and that is a status like any other. A killed command's status is the
   # signal's, and reporting it would read as the script's own answer.
   defp conclude(state, status) do
+    Exec.remove_secrets(state.job_dir)
     if state.slice, do: state.slice.cleanup(state.slice_context)
     ending = ending(state, status)
 

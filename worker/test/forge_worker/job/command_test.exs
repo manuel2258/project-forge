@@ -73,6 +73,45 @@ defmodule ForgeWorker.Job.CommandTest.RefusingSlice do
   defdelegate probe(), to: ForgeWorker.Slice.Direct
 end
 
+defmodule ForgeWorker.Job.CommandTest.PrepareReportingSlice do
+  @moduledoc "Reports what it was asked to prepare — the environment and the secrets' names — and runs it as `Direct` would."
+
+  @behaviour ForgeWorker.Slice
+
+  @impl ForgeWorker.Slice
+  def prepare(opts) do
+    send(opts.reply_to, {:prepared, opts})
+    ForgeWorker.Slice.Direct.prepare(opts)
+  end
+
+  @impl ForgeWorker.Slice
+  defdelegate wrap(executable, args, context), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate cleanup(context), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate enter(job_id), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate own(owner, paths), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate run_as(owner, executable, args), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate leave(owner, paths), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate memory(context), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate ended(context, output), to: ForgeWorker.Slice.Direct
+
+  @impl ForgeWorker.Slice
+  defdelegate probe(), to: ForgeWorker.Slice.Direct
+end
+
 defmodule ForgeWorker.Job.CommandTest do
   @moduledoc """
   One command job on the worker (`docs/design/commands.md`): the spec's script, the argument
@@ -81,11 +120,11 @@ defmodule ForgeWorker.Job.CommandTest do
 
   use ExUnit.Case, async: true
 
-  import ForgeWorker.Fixtures, only: [tmp_dir: 1, uuid: 0]
+  import ForgeWorker.Fixtures, only: [sealed_secrets: 2, tmp_dir: 1, uuid: 0]
 
   alias ForgeCore.Job.{Result, Spec}
   alias ForgeWorker.Job.Command
-  alias ForgeWorker.Job.CommandTest.{RefusingSlice, WrapReportingSlice}
+  alias ForgeWorker.Job.CommandTest.{PrepareReportingSlice, RefusingSlice, WrapReportingSlice}
 
   setup do
     %{root: tmp_dir("command-root"), worktree: tmp_dir("command-worktree")}
@@ -157,6 +196,29 @@ defmodule ForgeWorker.Job.CommandTest do
 
     assert log(job_dir) ==
              "script in the job directory\nout under the job directory\nin the checkout\n"
+  end
+
+  # A command's project secrets reach the script's environment through the file its process loads —
+  # never the argument list its other variables go in, nor anything the slice is told, which a unit
+  # shows every user on the machine (`docs/design/secrets.md` § Delivery).
+  test "a secret reaches the script's environment and the slice learns nothing of it", context do
+    spec = spec(~s(#!/bin/sh\n[ "$CARGO_REGISTRY_TOKEN" = "cio_the-value" ] && echo "holds it"\n))
+    secrets = sealed_secrets(%{"CARGO_REGISTRY_TOKEN" => "cio_the-value"}, spec.job_id)
+
+    {result, job_dir} =
+      run(context, spec,
+        secrets: secrets,
+        slice: PrepareReportingSlice,
+        slice_opts: %{reply_to: self()}
+      )
+
+    assert %Result{outcome: :converged, exit_status: 0} = result
+    assert log(job_dir) == "holds it\n"
+
+    assert_receive {:prepared, prepared}
+    assert Path.dirname(prepared.secrets_file) == job_dir <> ".worker"
+    refute inspect(prepared, limit: :infinity, printable_limit: :infinity) =~ "cio_the-value"
+    refute File.exists?(prepared.secrets_file)
   end
 
   # `systemd-run` reports a script killed by a signal as 255, which says nothing; the unit's last

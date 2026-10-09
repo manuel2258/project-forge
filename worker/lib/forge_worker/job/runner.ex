@@ -19,6 +19,8 @@ defmodule ForgeWorker.Job.Runner do
       implementation, which is `Slice.Direct` unless the image says otherwise.
     * `:slice_opts` - the ceiling and share for this job, from the assignment.
     * `:extra_env` - additional `{name, value}` pairs for the process environment.
+    * `:secrets` - the job's project secrets, sealed (`ForgeWorker.Job.Secrets`): opened at each
+      spawn into the process's environment, never its arguments, and held sealed otherwise.
     * `:backlog` - the project's tickets, as the platform composed them at assignment. Written
       to `tickets/` in the job directory; see `ForgeWorker.Job.Dir.prepare/3`.
     * `:command_logs` - `[{file, path}]`, the logs of the commands a parked job invoked, copied
@@ -43,8 +45,9 @@ defmodule ForgeWorker.Job.Runner do
 
   The harness process gets a clean environment: an allowlist of the worker's own variables
   (PATH, locale, proxies, Nix settings), a private HOME inside the job directory, what the
-  driver asks for, and `:extra_env`. Nothing else from the worker leaks in. Values the driver
-  marks `{:secret, value}` reach the process through the environment only, never argv.
+  driver asks for, and `:extra_env`. Nothing else from the worker leaks in. Values marked
+  `{:secret, value}` reach the process's environment through a file it loads itself, and through
+  no argv, no unit property and no other process's environment (`ForgeWorker.Job.Exec`).
   """
 
   # Temporary: a runner that exits, normally or not, is never restarted. A job that must run
@@ -277,22 +280,23 @@ defmodule ForgeWorker.Job.Runner do
   @impl true
   def handle_continue({:spawn, opts}, %{spec: spec, job_dir: job_dir, harness: harness} = state) do
     {executable, args, env} = harness.command(spec, job_dir, Keyword.get(opts, :harness_opts, []))
-    {executable, args} = Exec.nix(executable, args, spec.env, Keyword.get(opts, :nix_env, false))
 
     # The environment is composed before the slice is made, not after, because a slice that
     # starts the process somewhere else has to be told what it is.
-    {plain, secrets} = split_env(env ++ Keyword.get(opts, :extra_env, []))
+    {plain, secrets} = split_env(env ++ Keyword.get(opts, :extra_env, []) ++ secret_env(opts))
+    {executable, args, secrets_file} = load_secrets(executable, args, job_dir, secrets)
+    {executable, args} = Exec.nix(executable, args, spec.env, Keyword.get(opts, :nix_env, false))
 
     plain =
       Exec.inherited_env() ++
         [{"HOME", Dir.home_dir(job_dir)}] ++
         Exec.memory_env(Keyword.get(opts, :slice_opts)) ++ plain
 
-    case slice(opts, spec, job_dir, plain, secrets) do
+    case slice(opts, spec, job_dir, plain, secrets_file) do
       {:ok, slice, context} ->
         {executable, args} = slice.wrap(executable, args, context)
         state = %{state | slice: slice, slice_context: context}
-        {:noreply, spawn_harness(state, opts, executable, args, plain, secrets)}
+        {:noreply, spawn_harness(state, opts, executable, args, plain)}
 
       {:error, reason} ->
         {:noreply, conclude_without_starting(state, reason)}
@@ -301,7 +305,7 @@ defmodule ForgeWorker.Job.Runner do
 
   # The slice is made before the process and removed after it, whatever the outcome: a Unix
   # user left behind is a Unix user left behind on every job this worker ever ran.
-  defp slice(opts, %Spec{} = spec, job_dir, plain, secrets) do
+  defp slice(opts, %Spec{} = spec, job_dir, plain, secrets_file) do
     slice = Keyword.get(opts, :slice) || ForgeWorker.Slice.impl()
 
     slice_opts =
@@ -312,7 +316,7 @@ defmodule ForgeWorker.Job.Runner do
         worktree: Keyword.fetch!(opts, :worktree),
         job_dir: job_dir,
         env: plain,
-        secret_names: Enum.map(secrets, fn {name, _value} -> name end)
+        secrets_file: secrets_file
       })
 
     with {:ok, context} <- slice.prepare(slice_opts), do: {:ok, slice, context}
@@ -329,7 +333,7 @@ defmodule ForgeWorker.Job.Runner do
     state
   end
 
-  defp spawn_harness(state, opts, executable, args, plain, secrets) do
+  defp spawn_harness(state, opts, executable, args, plain) do
     job_dir = state.job_dir
     assignments = Enum.map(plain, fn {k, v} -> "#{k}=#{v}" end)
 
@@ -342,13 +346,12 @@ defmodule ForgeWorker.Job.Runner do
         {:args,
          [
            "-c",
-           wrapper(secrets, state.mode),
+           wrapper(state.mode),
            "forge-job",
            state.prompt_path,
            Dir.stderr_path(job_dir)
          ] ++ assignments ++ [executable | args]},
-        {:cd, Keyword.fetch!(opts, :worktree)},
-        {:env, Enum.map(secrets, fn {k, v} -> {String.to_charlist(k), String.to_charlist(v)} end)}
+        {:cd, Keyword.fetch!(opts, :worktree)}
       ])
 
     state = %{state | port: port}
@@ -366,16 +369,16 @@ defmodule ForgeWorker.Job.Runner do
   end
 
   # The shell reads the prompt into stdin, sends stderr to its file, and `exec`s `env -i`
-  # with only the assignments we pass as arguments plus the secrets forwarded by name from
-  # its own environment. `exec` keeps the wrapper the process group leader we signal.
+  # with only the assignments we pass as arguments: none of them a secret, which the process
+  # loads itself (`load_secrets/4`). `exec` keeps the wrapper the process group leader we signal.
   #
   # **In streaming mode the prompt redirect is omitted, and that is the whole point.** `<"$prompt"`
   # replaces the port's stdin pipe with a regular file already at EOF, so a harness started that
   # way can never be written to — the pipe Erlang holds is discarded before the process starts.
   # A conversation keeps the pipe and gets its first message through `Port.command/2` like every
   # message after it, which also means there is one path for the first turn and the rest.
-  defp wrapper(secrets, :prompt) do
-    ~s(prompt="$1"; stderr="$2"; shift 2; exec /usr/bin/env -i #{forwarded(secrets)} "$@" <"$prompt" 2>"$stderr")
+  defp wrapper(:prompt) do
+    ~s(prompt="$1"; stderr="$2"; shift 2; exec /usr/bin/env -i "$@" <"$prompt" 2>"$stderr")
   end
 
   # Ending a conversation is stdin reaching EOF — the harness exits cleanly on it and a turn in
@@ -418,7 +421,7 @@ defmodule ForgeWorker.Job.Runner do
   # any more, because something has to happen after it. Whatever else is still in the group goes
   # too: on the image nothing is, the job being in its unit, and on a development machine it is
   # what the harness left behind, which a unit would have ended.
-  defp wrapper(secrets, :streaming) do
+  defp wrapper(:streaming) do
     relay =
       ~s({ trap - USR1; echo; while IFS= read -r line; do ) <>
         ~s([ "$line" = "#{@close_sentinel}" ] && exit 0; ) <>
@@ -426,14 +429,23 @@ defmodule ForgeWorker.Job.Runner do
 
     harness =
       ~s({ read -r _; trap - USR1; ) <>
-        ~s(/usr/bin/env -i #{forwarded(secrets)} "$@" 2>"$stderr"; status=$?; ) <>
+        ~s(/usr/bin/env -i "$@" 2>"$stderr"; status=$?; ) <>
         ~s(trap '' USR1; kill -s USR1 0; exit "$status"; })
 
     ~s(stderr="$2"; shift 2; trap '' USR1; { ) <> relay <> " | " <> harness <> ~s(; } 2>/dev/null)
   end
 
-  defp forwarded(secrets) do
-    Enum.map_join(secrets, " ", fn {k, _} -> ~s(${#{k}+"#{k}=$#{k}"}) end)
+  # The job's project secrets, opened here at spawn and only here (`ForgeWorker.Job.Secrets`): the
+  # runner's state keeps the sealed form inside `spawn_opts`, and a correction opens them again.
+  defp secret_env(opts), do: opts |> Keyword.get(:secrets) |> ForgeWorker.Job.Secrets.env()
+
+  # Every secret — the credential, the git token, the project's — is written to the file the
+  # process loads before it `exec`s the harness, innermost, so not even `nix develop` holds them
+  # (`ForgeWorker.Job.Exec`). The file is removed when the process has ended.
+  defp load_secrets(executable, args, job_dir, secrets) do
+    path = Exec.write_secrets(job_dir, secrets)
+    {executable, args} = Exec.load_secrets(executable, args, path)
+    {executable, args, path}
   end
 
   defp split_env(env) do
@@ -530,6 +542,9 @@ defmodule ForgeWorker.Job.Runner do
     state =
       if state.buffer == "", do: state, else: handle_line(state.buffer, %{state | buffer: ""})
 
+    # Every process's end comes here, one that never started included
+    # (`conclude_without_starting/2`), so this is the one place its secrets file goes.
+    Exec.remove_secrets(state.job_dir)
     state = ended(state)
     result = conclude(state)
 
@@ -795,8 +810,9 @@ defmodule ForgeWorker.Job.Runner do
     spec = %{state.spec | budget: budget}
 
     {executable, args, env} = state.harness.command(spec, state.job_dir, harness_opts)
+    {plain, secrets} = split_env(env ++ Keyword.get(opts, :extra_env, []) ++ secret_env(opts))
+    {executable, args, _path} = load_secrets(executable, args, state.job_dir, secrets)
     {executable, args} = Exec.nix(executable, args, spec.env, Keyword.get(opts, :nix_env, false))
-    {plain, secrets} = split_env(env ++ Keyword.get(opts, :extra_env, []))
 
     plain =
       Exec.inherited_env() ++
@@ -819,7 +835,7 @@ defmodule ForgeWorker.Job.Runner do
         finished_event: nil
     }
 
-    spawn_harness(state, opts, executable, args, plain, secrets)
+    spawn_harness(state, opts, executable, args, plain)
   end
 
   # Turns and cost so far: every earlier round's, and this one's.

@@ -1,6 +1,8 @@
 defmodule Forge.Provisioning.Vault do
   @moduledoc """
-  Encrypts a provider credential's secret at rest.
+  Encrypts at rest the secrets the platform has to read back: a provider credential's, an inference
+  credential's (`Forge.Credentials.Credential`) and a project secret's (`Forge.Secrets.Secret`),
+  each table under a label of its own.
 
   A provider credential has to be *recoverable* — the platform makes an API call with it —
   which is what separates it from every other secret in this repository. A worker token and a
@@ -29,8 +31,8 @@ defmodule Forge.Provisioning.Vault do
   Encrypts a map of secret fields. The shape inside is the driver's business, not ours.
 
   `label` is the associated data, and it is what keeps one table's secrets out of another's: an
-  inference credential is sealed under its own (`Forge.Credentials.Credential`), so a provider
-  token's ciphertext pasted into that column does not open, and the reverse does not either.
+  inference credential and a project secret are each sealed under their own, so a provider
+  token's ciphertext pasted into either column does not open, and no other pairing does either.
   """
   @spec seal(map(), String.t()) :: String.t()
   def seal(secret, label \\ @aad) when is_map(secret) do

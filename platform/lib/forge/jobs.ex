@@ -25,6 +25,7 @@ defmodule Forge.Jobs do
     Projects,
     Proposals,
     Repo,
+    Secrets,
     Spend,
     Storage,
     Tickets,
@@ -48,6 +49,7 @@ defmodule Forge.Jobs do
   @commands_protocol 2
   @questions_protocol 3
   @integration_protocol 5
+  @secrets_protocol 6
 
   # How many of the merges that landed on the default branch since a ticket's base an integrating
   # job is told about by name; the rest are counted (`docs/design/job-prompt.md` § Integrating the
@@ -116,7 +118,8 @@ defmodule Forge.Jobs do
               ),
             spec: spec |> Spec.to_json() |> Jason.decode!(),
             memory_max: resources.memory,
-            cores: resources.cores
+            cores: resources.cores,
+            secret_names: Workflow.state(workflow, state_name).secrets
           })
         )
       end
@@ -503,12 +506,18 @@ defmodule Forge.Jobs do
     with :ok <- spend_gate(job, ticket),
          {:ok, credential} <- Credentials.for_job(job),
          {:ok, wire} <- sealed(credential, worker, job),
+         {:ok, secrets} <- secrets_for(job, worker),
          {:ok, token, _row} <- Tokens.issue_for_job(job, ticket, project),
          {:ok, started} <- mark_started(job, worker, credential),
-         assignment = Map.put(assignment(started, ticket, project, token), "credential", wire),
+         assignment =
+           started
+           |> assignment(ticket, project, token)
+           |> Map.put("credential", wire)
+           |> put_secrets(secrets),
          :ok <- Workers.push(worker.id, {:assign, assignment}) do
       {:ok, _worker} = Workers.busy(worker)
       log_backlog(started, assignment)
+      log_secrets(started, secrets)
       {:ok, started}
     else
       # Somebody else moved the row first — a conversation closed during the pass. It is theirs
@@ -542,11 +551,14 @@ defmodule Forge.Jobs do
     ticket = Tickets.get!(job.ticket_id)
     project = Projects.get!(job.project_id)
 
-    with {:ok, token, _row} <- Tokens.issue_for_job(job, ticket, project),
+    with {:ok, secrets} <- secrets_for(job, worker),
+         {:ok, token, _row} <- Tokens.issue_for_job(job, ticket, project),
          {:ok, started} <- mark_started(job, worker, nil),
-         assignment = command_assignment(started, ticket, project, token),
+         assignment =
+           started |> command_assignment(ticket, project, token) |> put_secrets(secrets),
          :ok <- Workers.push(worker.id, {:assign, assignment}) do
       {:ok, _worker} = Workers.busy(worker)
+      log_secrets(started, secrets)
       {:ok, started}
     else
       {:error, {:changed, _now}} = changed ->
@@ -590,6 +602,62 @@ defmodule Forge.Jobs do
     |> Map.merge(group_outputs(job))
   end
 
+  # **The job's secrets, resolved again**, as the credential is: the scheduler looked before it went
+  # for a machine, and this is the answer that counts (`docs/design/secrets.md` § Delivery). A
+  # workflow job or a command naming one deleted since goes back to pending, and the next pass
+  # sticks its ticket. A conversation holds what is still set, and its run's record names what is
+  # not, which its page shows (§ Conversations).
+  defp secrets_for(%Job{secret_names: []}, _worker), do: {:ok, nil}
+
+  defp secrets_for(%Job{} = job, worker) do
+    case Secrets.resolve(job.project_id, job.secret_names) do
+      {_found, [_ | _] = missing} when job.kind != :chat ->
+        {:error, {:no_secret, missing}}
+
+      {found, gone} ->
+        case Secrets.for_wire(found, worker, job.id) do
+          {:ok, sealed} ->
+            {:ok, %{sealed: sealed, held: Secrets.held(found), gone: gone}}
+
+          {:error, {:unreadable, names}} ->
+            Logger.error(
+              "secrets #{inspect(names)} cannot be decrypted on this node; set them again"
+            )
+
+            {:error, {:secrets_unreadable, names}}
+        end
+    end
+  end
+
+  # Only when the job names any: a job that names none sends what it always sent, so a protocol 4
+  # worker reads its assignment as before (`Forge.Jobs.protocol/1`).
+  defp put_secrets(assignment, nil), do: assignment
+
+  # The spec names what the run holds and, for a conversation, what it was opened with that has
+  # been deleted since — so the manifest, or a resumed conversation's continuation, tells the agent
+  # exactly what is in its environment and what is not any more.
+  defp put_secrets(assignment, %{sealed: sealed, held: held, gone: gone}) do
+    assignment
+    |> Map.put("secrets", sealed)
+    |> put_in(["spec", "secrets"], Enum.map(held, & &1["name"]))
+    |> put_in(["spec", "secrets_gone"], gone)
+  end
+
+  # What this run held, by id and version, and what a conversation named that is no longer set.
+  # Never a value: the event log is read by every member.
+  defp log_secrets(_job, nil), do: :ok
+
+  defp log_secrets(%Job{} = job, %{held: held, gone: gone}) do
+    {:ok, _event} =
+      Events.append("job.secrets", :system, %{
+        ticket_id: job.ticket_id,
+        job_id: job.id,
+        payload: %{"held" => held, "gone" => gone}
+      })
+
+    :ok
+  end
+
   # A credential whose secret this node cannot open — a rotated `secret_key_base` — is one no job
   # can run on, and it is said once per attempt rather than crashing the pass
   # (`Forge.Provisioning.Vault` records the same cost for provider credentials).
@@ -631,16 +699,22 @@ defmodule Forge.Jobs do
   - **An integrating job needs protocol 5**: a release from before it neither fetches the default
     branch nor keeps the merge through its squash, and would push a resolution whose next check
     finds the same conflict (`docs/design/worker-channel.md` § Versions).
+  - **A job that names a secret needs protocol 6**, whatever its kind: a release from before it
+    ignores the assignment's `secrets` and would run the job without them, where it should not
+    run at all (`docs/design/secrets.md` § Delivery). A job that names none asks nothing more.
   """
   @spec protocol(Job.t()) :: non_neg_integer()
-  def protocol(%Job{kind: :command}), do: @commands_protocol
+  def protocol(%Job{secret_names: [_ | _]} = job), do: max(kind_protocol(job), @secrets_protocol)
+  def protocol(%Job{} = job), do: kind_protocol(job)
 
-  def protocol(%Job{kind: :workflow} = job) do
+  defp kind_protocol(%Job{kind: :command}), do: @commands_protocol
+
+  defp kind_protocol(%Job{kind: :workflow} = job) do
     if spec(job).integration, do: @integration_protocol, else: @questions_protocol
   end
 
-  def protocol(%Job{kind: :chat}), do: @questions_protocol
-  def protocol(%Job{}), do: 0
+  defp kind_protocol(%Job{kind: :chat}), do: @questions_protocol
+  defp kind_protocol(%Job{}), do: 0
 
   @doc "How many of `parent_id`'s invocations of `command` are running now."
   @spec running_commands(String.t(), String.t()) :: non_neg_integer()

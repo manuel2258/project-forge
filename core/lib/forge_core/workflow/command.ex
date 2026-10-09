@@ -14,7 +14,7 @@ defmodule ForgeCore.Workflow.Command do
   alias ForgeCore.Workflow.Resources
 
   @enforce_keys [:name]
-  defstruct [:name, :run, :env, :produces, :timeout_ms, :resources, outputs: []]
+  defstruct [:name, :run, :env, :produces, :timeout_ms, :resources, outputs: [], secrets: []]
 
   @type t :: %__MODULE__{
           name: String.t(),
@@ -24,7 +24,10 @@ defmodule ForgeCore.Workflow.Command do
           # Groups of files the script writes into `$FORGE_OUT/<group>/`, as `package/*`.
           outputs: [String.t()],
           timeout_ms: pos_integer() | nil,
-          resources: Resources.t() | nil
+          resources: Resources.t() | nil,
+          # The project secrets the command's job is handed, by name, whoever invokes it
+          # (`docs/design/secrets.md` § The workflow is the access list).
+          secrets: [String.t()]
         }
 
   @doc """

@@ -426,6 +426,12 @@ could hold it take no younger work until it fits, commands included. Before that
 which sets `concurrent` high on a busy fleet delays agent work, and that is the trade the age
 decides.
 
+**A command that names a secret the project has not set is refused the same way**: *the command
+`publish` names `CARGO_REGISTRY_TOKEN`, which this project has not set; a project admin sets it in
+the project's settings* — the sentence its ticket would stick with (`Forge.Secrets.unset/2`). A command's `secrets` are its own (`secrets.md` § The workflow is the access
+list): the invoking agent's do not pass to it, and its do not pass back. Run from a command state
+instead, the command job sticks its ticket until the secret is set, as an agent's state would.
+
 ## Events and the timeline
 
 An agent's invocation writes events on the invoking job's timeline: `command.invoked` (name,

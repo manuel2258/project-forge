@@ -17,7 +17,7 @@ defmodule ForgeWeb.ChatNewLive do
 
   use ForgeWeb, :live_view
 
-  alias Forge.{Jobs, Operator, Projects, Tickets, Workers}
+  alias Forge.{Jobs, Operator, Projects, Secrets, Tickets, Workers}
 
   alias ForgeCore.Workflow.Resources
 
@@ -40,6 +40,7 @@ defmodule ForgeWeb.ChatNewLive do
        fixed: is_binary(named) and project != nil,
        error: nil,
        offered: Workers.offered(project && project.id),
+       secret_names: secret_names(project),
        defaults: defaults,
        # Empty means the platform's, which is what each placeholder says. All three are fixed
        # when the harness process starts, so this is the only moment they can be chosen. The
@@ -86,9 +87,14 @@ defmodule ForgeWeb.ChatNewLive do
     else
       project = Enum.find(socket.assigns.projects, &(&1.name == params["project"]))
 
-      # The models are the chosen project's pool's, so choosing another project changes them.
+      # The models are the chosen project's pool's, and the secrets its own, so choosing another
+      # project changes both.
       {:noreply,
-       assign(socket, project: project, offered: Workers.offered(project && project.id))}
+       assign(socket,
+         project: project,
+         offered: Workers.offered(project && project.id),
+         secret_names: secret_names(project)
+       )}
     end
   end
 
@@ -123,15 +129,33 @@ defmodule ForgeWeb.ChatNewLive do
            ticket: ticket,
            model: model,
            memory: memory,
-           cores: cores
+           cores: cores,
+           secrets: picked(socket.assigns.form.params["secrets"])
          ) do
       {:ok, chat} ->
         {:noreply, push_navigate(socket, to: ~p"/chats/#{chat.id}")}
+
+      # Deleted since the page was drawn, or never this project's: `Conversations.open/3` refuses
+      # rather than starting without it, and the page says which.
+      {:error, {:unknown_secrets, names}} ->
+        {:noreply,
+         assign(socket,
+           error: "no secret named #{Enum.join(names, ", ")} in this project any more",
+           secret_names: secret_names(project)
+         )}
 
       {:error, reason} ->
         {:noreply, assign(socket, error: "could not start it: #{inspect(reason)}")}
     end
   end
+
+  # The ticked boxes, by name; none ticked is none held (`docs/design/secrets.md` § Conversations).
+  # As the form sent them: `Conversations.open/3` is what refuses a name that is not one.
+  defp picked(names) when is_list(names), do: names
+  defp picked(_none), do: []
+
+  defp secret_names(nil), do: []
+  defp secret_names(project), do: Secrets.names(project.id)
 
   # Blank is nil and means the platform's default, exactly as it does on the templates page. A
   # figure that is not one is refused here rather than quietly becoming the default: a person
@@ -258,6 +282,30 @@ defmodule ForgeWeb.ChatNewLive do
             placeholder={to_string(@defaults.cores)}
           />
         </div>
+
+        <%!-- Picked here and only here, none by default, and fixed for the life of the process
+              like the model (`docs/design/secrets.md` § Conversations). What it holds, anyone
+              in the project can read through it, and the sentence says so where the choice is
+              made. --%>
+        <fieldset :if={@secret_names != []} id="chat-secrets" class="flex flex-col">
+          <legend class="text-sm font-medium">Secrets it may use</legend>
+          <label
+            :for={name <- @secret_names}
+            class="flex min-h-[46px] items-center gap-3 font-mono text-[12.5px]"
+          >
+            <input
+              type="checkbox"
+              name="chat[secrets][]"
+              value={name}
+              checked={name in picked(@form.params["secrets"])}
+              class="checkbox checkbox-sm"
+            />
+            {name}
+          </label>
+          <p class="text-sm/[1.55] opacity-60">
+            Set in its environment by name. Anyone in this project can ask it what they are.
+          </p>
+        </fieldset>
 
         <p :if={@error} class="text-sm text-error">{@error}</p>
 

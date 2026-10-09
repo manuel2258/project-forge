@@ -68,9 +68,10 @@ defmodule ForgeWorker.LinkTest.RecordingSlice do
 
   The interesting part of that note is how the environment was split. A plain value becomes
   `--setenv=NAME=VALUE` on the `systemd-run` command line and an assignment in the wrapper
-  shell's own argv; a secret is carried across by name only. That split is the difference
-  between a push credential the job's unprivileged user cannot see and one it can read out of
-  `/proc/*/cmdline` — `docs/design/worker-tier.md` § The job slice.
+  shell's own argv; a secret is in neither, nor anywhere else the slice is told, only in the file
+  the process loads itself. That split is the difference between a push credential no other user
+  can see and one any of them can read out of `/proc/*/cmdline` or the unit's properties —
+  `docs/design/secrets.md` § Delivery.
   """
 
   @behaviour ForgeWorker.Slice
@@ -864,6 +865,25 @@ defmodule ForgeWorker.LinkTest do
 
       # A command writes its log, not the branch.
       assert git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"]) == before
+    end
+
+    # The script holds its secret in its environment, and a log that prints it leaves masked: the
+    # log is what an agent that invoked the command reads, and what every member can open.
+    test "a command's log leaves masked", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job =
+        origin
+        |> command_assignment("#!/bin/sh\necho \"token: $CARGO_REGISTRY_TOKEN\"\n")
+        |> with_secrets(%{"CARGO_REGISTRY_TOKEN" => "cio_printed-by-a-build"})
+
+      push(client, @topic, "assign", job)
+      {%{"result" => %{"exit_status" => 0}}, _before} = take_push("result")
+
+      path = "/store/" <> job["store"]["log_key"]
+      assert_receive {:uploaded, ^path, _auth, _query, "token: [secret CARGO_REGISTRY_TOKEN]\n"}
     end
 
     # A packaging command's build, uploaded as a workflow job's groups are: without the upload the
@@ -2101,6 +2121,30 @@ defmodule ForgeWorker.LinkTest do
       assert line["message"] =~ "refused by the test"
     end
 
+    # The same line, when what the push was refused with names one of the chat's secrets: the
+    # machine's log is read off the machine, by its owner, who need not be in the project.
+    test "a turn refused on output naming its secret logs it masked", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      hook = Path.join([origin, "hooks", "pre-receive"])
+      File.write!(hook, "#!/bin/sh\necho 'refused: found sk_test_in-a-turn' >&2\nexit 1\n")
+      File.chmod!(hook, 0o755)
+
+      job =
+        origin
+        |> chat(env: [{"FAKE_COMMIT", "1"}])
+        |> with_secrets(%{"STRIPE_TEST_KEY" => "sk_test_in-a-turn"})
+
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1, "commit" => nil}, before} = take_push("turn")
+
+      assert [line] = for({"log", %{"type" => "turn.uncommitted"} = l} <- before, do: l)
+      assert line["message"] =~ "refused: found [secret STRIPE_TEST_KEY]"
+      refute line["message"] =~ "in-a-turn"
+    end
+
     test "a history entry that would leave its folder is refused, and says so", context do
       %{client: client, origin: origin} = context
       connect_and_assert_join(client, @topic, %{}, :ok)
@@ -2353,6 +2397,26 @@ defmodule ForgeWorker.LinkTest do
     assert reason =~ "pre-receive hook declined"
   end
 
+  # A failure's reason can quote what the run wrote — here a remote's secret scanner naming what
+  # it found in the push — and it leaves masked like a result (`ForgeWorker.Link`'s `report/4`).
+  test "a run that fails on output naming its secret reports it masked", context do
+    %{client: client, origin: origin} = context
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    hook = Path.join([origin, "hooks", "pre-receive"])
+    File.write!(hook, "#!/bin/sh\necho 'refused: found sk_test_in-a-hook' >&2\nexit 1\n")
+    File.chmod!(hook, 0o755)
+
+    job = origin |> assignment() |> with_secrets(%{"STRIPE_TEST_KEY" => "sk_test_in-a-hook"})
+    job_id = job["job_id"]
+    push(client, @topic, "assign", job)
+
+    {%{"job_id" => ^job_id, "reason" => reason}, _events} = take_push("failed")
+    assert reason =~ "refused: found [secret STRIPE_TEST_KEY]"
+    refute reason =~ "in-a-hook"
+  end
+
   defp refuse_pushes(origin) do
     hook = Path.join([origin, "hooks", "pre-receive"])
     File.write!(hook, "#!/bin/sh\nexit 1\n")
@@ -2419,6 +2483,79 @@ defmodule ForgeWorker.LinkTest do
 
     # Nothing that outlived the run held it: the link only ever had it sealed.
     refute inspect(:sys.get_state(client), limit: :infinity) =~ "sk-ant-oat01-the-jobs"
+  end
+
+  # The job's project secrets, sealed for this machine, this job and the purpose `:secrets`, the
+  # way the platform seals them (`Forge.Secrets.for_wire/3`).
+  defp with_secrets(job, secrets),
+    do: Map.put(job, "secrets", sealed_secrets(secrets, job["job_id"]).sealed)
+
+  # **What a job holds, it holds in its environment; what it prints is masked on the way out**
+  # (`docs/design/secrets.md` § Delivery, § Masking). The value has a quote in it, so the line the
+  # harness writes carries it escaped; a reserved name the platform should never have sent is
+  # refused here too.
+  test "a job's secrets reach its environment, and what it prints of them leaves masked",
+       context do
+    %{client: client, origin: origin, root: root} = context
+    Application.put_env(:forge_worker, :slice, RecordingSlice)
+    Application.put_env(:forge_worker, :slice_reporter, self())
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    value = ~s(sk_test_"leaked"-value)
+
+    job =
+      origin
+      |> assignment(scenario: "leaks_secret")
+      |> with_secrets(%{
+        "STRIPE_TEST_KEY" => value,
+        "ANTHROPIC_BASE_URL" => "https://evil.example"
+      })
+
+    push(client, @topic, "assign", job)
+    {%{"result" => result}, events} = take_push("result")
+
+    # In the harness's environment, by name through the slice and never as an argument.
+    env = File.read!(Path.join([root, "jobs", job["spec"]["job_id"], "fake-env-all.txt"]))
+    assert env =~ "STRIPE_TEST_KEY=#{value}"
+    refute env =~ "evil.example"
+    assert_receive {:slice, slice}
+    assert is_binary(slice.secrets_file)
+    refute inspect(slice, limit: :infinity, printable_limit: :infinity) =~ "leaked"
+    refute File.exists?(slice.secrets_file)
+
+    # Masked in what it reported, in every event, and in the transcript it uploaded.
+    assert inspect(result, limit: :infinity, printable_limit: :infinity) =~
+             "[secret STRIPE_TEST_KEY]"
+
+    refute inspect({result, events}, limit: :infinity, printable_limit: :infinity) =~ "leaked"
+
+    assert_receive {:uploaded, "/store/job/j1/transcript-1.jsonl", _auth, _query, transcript}
+    assert transcript =~ "[secret STRIPE_TEST_KEY]"
+    refute transcript =~ "leaked"
+
+    # Never in the link's own state, which only ever held it sealed.
+    refute inspect(:sys.get_state(client), limit: :infinity) =~ "leaked"
+  end
+
+  # Secrets that will not open — sealed for another job — fail the job before anything of it runs:
+  # a run without the secrets its state names would fail later and less clearly.
+  test "a job whose secrets do not open fails before it runs", context do
+    %{client: client, origin: origin, root: root} = context
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    job = origin |> assignment() |> with_secrets(%{"STRIPE_TEST_KEY" => "sk_test_x"})
+    job = Map.put(job, "secrets", sealed_secrets(%{}, "another").sealed)
+    job_id = job["job_id"]
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      push(client, @topic, "assign", job)
+      {%{"job_id" => ^job_id, "reason" => reason}, _before} = take_push("failed")
+      assert reason =~ "secrets_unopened"
+    end)
+
+    refute File.exists?(Path.join([root, "jobs", job["spec"]["job_id"], "fake-args.txt"]))
   end
 
   test "an api key is set as one", context do
@@ -2518,9 +2655,9 @@ defmodule ForgeWorker.LinkTest do
   #
   # What the mark buys is the route the value takes. A plain value becomes an assignment in the
   # wrapper shell's argv and a `--setenv=NAME=VALUE` on `systemd-run`'s command line, both of
-  # which the unprivileged user the job runs as can read straight out of `/proc/*/cmdline`. A
-  # secret crosses by name only and its value goes over systemd's own bus. See
-  # docs/design/worker-tier.md § The job slice.
+  # which any user on the machine can read — the second for the unit's whole life, from systemd.
+  # A secret is in neither: it is written to a file only root can read, and the process loads it
+  # itself. See docs/design/secrets.md § Delivery.
   test "the push credential reaches the job as a secret, never as an argument", context do
     %{client: client, origin: origin} = context
     Application.put_env(:forge_worker, :slice, RecordingSlice)
@@ -2534,11 +2671,9 @@ defmodule ForgeWorker.LinkTest do
     {%{"result" => _result}, _events} = take_push("result")
 
     assert_receive {:slice, slice}
-    assert "FORGE_GIT_TOKEN" in slice.secret_names
-
-    refute Enum.any?(slice.env, fn {name, value} ->
-             name == "FORGE_GIT_TOKEN" or value == "push-secret"
-           end)
+    assert is_binary(slice.secrets_file)
+    refute inspect(slice, limit: :infinity, printable_limit: :infinity) =~ "push-secret"
+    refute List.keyfind(slice.env, "FORGE_GIT_TOKEN", 0)
   end
 
   # The promotion is wired after the push and before the worktree goes, and the order is the
@@ -3230,11 +3365,115 @@ defmodule ForgeWorker.LinkTest do
       {%{"turn" => 1}, _} = take_push("turn")
 
       assert_receive {:slice, slice}
-      assert "FORGE_GIT_TOKEN" in slice.secret_names
+      assert is_binary(slice.secrets_file)
+      refute inspect(slice, limit: :infinity, printable_limit: :infinity) =~ "push-secret"
+      refute List.keyfind(slice.env, "FORGE_GIT_TOKEN", 0)
+    end
 
+    # A conversation takes its own route to the runner (`Conversation.runner_opts/1`), so the
+    # workflow job's test above proves nothing about it: its secrets reach the harness by name, and
+    # a message that carries one comes back masked in the echo and in the uploaded transcript.
+    test "a chat holds its secrets, and what it says of them leaves masked", context do
+      %{client: client, origin: origin} = context
+      Application.put_env(:forge_worker, :slice, RecordingSlice)
+      Application.put_env(:forge_worker, :slice_reporter, self())
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      # The fake harness writes this word into its session file, so the session holds the value.
+      job =
+        origin
+        |> chat(env: [{"FAKE_WORD", "sk_test_said-in-a-chat"}])
+        |> put_in(["store", "session_prefix"], "job/c1/session-s/")
+        |> put_in(["store", "session_token"], "session-token")
+        |> with_secrets(%{"STRIPE_TEST_KEY" => "sk_test_said-in-a-chat"})
+
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      assert_receive {:slice, slice}
+      assert is_binary(slice.secrets_file)
+
+      # `FAKE_WORD` is the test's own plain variable, set to the value so the session holds it.
       refute Enum.any?(slice.env, fn {name, value} ->
-               name == "FORGE_GIT_TOKEN" or value == "push-secret"
+               name != "FAKE_WORD" and value == "sk_test_said-in-a-chat"
              end)
+
+      assert_receive {:uploaded, "/store/job/c1/session-s/1.jsonl", _auth, _query, session}
+      assert session =~ "remember [secret STRIPE_TEST_KEY]"
+
+      push(client, @topic, "message", %{
+        "job_id" => job_id,
+        "message_id" => "m-2",
+        "text" => "the key is sk_test_said-in-a-chat"
+      })
+
+      {turn, events} = take_push("turn")
+      refute inspect({turn, events}, limit: :infinity, printable_limit: :infinity) =~ "said-in"
+
+      assert inspect(events, limit: :infinity, printable_limit: :infinity) =~
+               "[secret STRIPE_TEST_KEY]"
+
+      push(client, @topic, "close", %{"job_id" => job_id, "reason" => "done"})
+      {%{"result" => _result} = hibernated, _} = take_push("hibernated")
+      refute inspect(hibernated, limit: :infinity, printable_limit: :infinity) =~ "said-in"
+
+      assert_receive {:uploaded, "/store/job/j1/transcript-1.jsonl", _auth, _query, transcript}
+      refute transcript =~ "said-in"
+    end
+
+    # The conversation's own route to the same rule as a workflow job's: secrets that will not
+    # open — sealed for another job — stop it before a harness starts.
+    test "a chat whose secrets do not open fails before it starts", context do
+      %{client: client, origin: origin, root: root} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = origin |> chat() |> with_secrets(%{"STRIPE_TEST_KEY" => "sk_test_x"})
+      job = Map.put(job, "secrets", sealed_secrets(%{}, "another").sealed)
+      job_id = job["job_id"]
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        push(client, @topic, "assign", job)
+        {%{"job_id" => ^job_id, "reason" => reason}, _before} = take_push("failed")
+        assert reason == "the conversation's secrets would not open"
+      end)
+
+      refute File.exists?(Path.join([root, "jobs", job["spec"]["job_id"], "fake-args.txt"]))
+    end
+
+    # The report a chat ends with carries its result, and a result can carry what the agent wrote —
+    # a harness that died says why with its last line of stderr (`Runner`'s `with_stderr/2`). The
+    # fake harness's stderr never reaches a chat's result here, so the result is handed to the
+    # conversation directly and the runner stopped before it can send its own.
+    test "the report a chat ends with is masked", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = origin |> chat() |> with_secrets(%{"STRIPE_TEST_KEY" => "sk_test_on-stderr"})
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      conversation = ForgeWorker.Job.Conversation.whereis(job_id)
+      %{runner: runner} = :sys.get_state(conversation)
+
+      send(
+        conversation,
+        {:ended, job_id,
+         %ForgeCore.Job.Result{
+           status: :finished,
+           reason: "stderr: could not use sk_test_on-stderr"
+         }}
+      )
+
+      Process.exit(runner, :kill)
+
+      {%{"job_id" => ^job_id, "reason" => reason} = hibernated, _} = take_push("hibernated")
+      assert reason == "stderr: could not use [secret STRIPE_TEST_KEY]"
+      refute inspect(hibernated, limit: :infinity, printable_limit: :infinity) =~ "on-stderr"
     end
 
     test "closing ends it and gives the machine back", context do

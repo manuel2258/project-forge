@@ -14,7 +14,7 @@ defmodule Forge.Jobs.Scheduler do
 
   use GenServer
 
-  alias Forge.{Credentials, Engine, Jobs, Projects, Tickets, Workers}
+  alias Forge.{Credentials, Engine, Jobs, Projects, Secrets, Tickets, Workers}
 
   require Logger
 
@@ -107,6 +107,7 @@ defmodule Forge.Jobs.Scheduler do
 
     with :ok <- its_turn(job),
          {:ok, _credential} <- credential(job),
+         :ok <- secrets(job),
          {:ok, worker} <- Workers.provide(demand, job.worker_id, claims, reserved) do
       {assigned + assign(job, worker), claims, reserved, yields}
     else
@@ -119,6 +120,13 @@ defmodule Forge.Jobs.Scheduler do
       # brings the ticket back by itself (`Engine.resume_placement/2`).
       {:error, {:no_credential, why}} ->
         stick(job, {:no_credential, why})
+        {assigned, claims, reserved, yields}
+
+      # The job names a secret its project has not set: a project admin has to set it, which
+      # brings the ticket back by itself (`Forge.Secrets.set/4`, `docs/design/secrets.md`
+      # § Delivery). Before a machine, like the credential, so nothing is made for it meanwhile.
+      {:error, {:no_secret, _who, _names} = why} ->
+        stick(job, why)
         {assigned, claims, reserved, yields}
 
       # No room, and no machine to be made. A job that has waited long enough holds the machines
@@ -186,6 +194,22 @@ defmodule Forge.Jobs.Scheduler do
   defp credential(%{kind: :command}), do: {:ok, nil}
   defp credential(job), do: Credentials.for_job(job)
 
+  # A conversation holds what is still set and says what is not (`docs/design/secrets.md`
+  # § Conversations), so only a workflow job or a command waits on a secret.
+  defp secrets(%{kind: :chat}), do: :ok
+
+  defp secrets(job) do
+    case Secrets.missing(job.project_id, job.secret_names) do
+      [] -> :ok
+      names -> {:error, {:no_secret, names_it(job), names}}
+    end
+  end
+
+  defp names_it(%{kind: :command, spec: %{"command" => %{"name" => name}}}),
+    do: "the command `#{name}`"
+
+  defp names_it(%{state: state}), do: "the state `#{state}`"
+
   # `may_invoke`'s `concurrent` is the scheduler's to hold: a command whose invoking job already
   # has that many of the same command running waits for one of them (`commands.md` § Limits).
   defp its_turn(%{kind: :command, parent_job_id: parent, spec: %{"command" => command}})
@@ -230,12 +254,15 @@ defmodule Forge.Jobs.Scheduler do
     do:
       "every worker template assigned to this project is disabled after failing to make a machine"
 
-  # Big enough *and* taking this kind: `Provisioning.could_ever_hold?/2` asks both, and a template
-  # that refuses chats is this answer for a chat however large it is.
+  # Big enough, taking this kind *and* new enough: `Provisioning.could_ever_hold?/2` asks all
+  # three, so a template that refuses chats is this answer for a chat however large it is, and one
+  # whose snapshot speaks protocol 4 is this answer for a job holding secrets (`Jobs.protocol/1`).
   defp reason({:no_template, :none_fit}),
     do:
-      "no worker template assigned to this project both takes this kind of job and is big " <>
-        "enough for it"
+      "no worker template assigned to this project takes this kind of job, is big enough for " <>
+        "it and runs a worker new enough for it"
+
+  defp reason({:no_secret, who, names}), do: Secrets.unset(who, names)
 
   defp reason({:no_credential, :none_assigned}),
     do:

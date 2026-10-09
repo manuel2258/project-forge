@@ -58,6 +58,17 @@ unless it is small text. What a real build looks like on a real command pool is 
 the worker's side is tested against scripts in a temporary directory, not against `nix develop` on
 a machine.
 
+`docs/design/secrets.md` is the standard for project secrets: values the platform never uses and
+only carries, written by a project's admins, listed per state and per command in the workflow,
+picked per conversation by the person opening it, and masked where that is easy. **It is built**:
+secrets set, listed and deleted on project settings and sealed at rest; `secrets` on a job state
+and a command, and picked when a conversation is opened; each run holding them in its environment,
+sealed to its worker until spawn and needing protocol 6, a missing one sticking the ticket before
+a machine; and the worker masking the value and its JSON-escaped form in everything it uploads
+but commits and groups of files, holding no value between uses. What a real agent does with one
+on a real machine is unobserved here. It says plainly that every project secret is readable by
+every member, and its § Open holds the two checks a key no member should hold would need.
+
 ## Layout
 
 Three Mix projects joined by path dependencies. Not an umbrella.

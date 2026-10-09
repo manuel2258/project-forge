@@ -24,10 +24,11 @@ defmodule ForgeWorker.Slice do
   """
 
   @typedoc """
-  What the slice is made for. `env` and `secret_names` are the process environment the runner
-  composed, split as it splits it: an implementation that starts the process somewhere else —
-  which is what a transient unit is — has to carry it across, and a secret is named without its
-  value so it never reaches an argument vector.
+  What the slice is made for. `env` is the plain part of the process environment the runner
+  composed: an implementation that starts the process somewhere else — which is what a transient
+  unit is — has to carry it across. `secrets_file` is where the rest is, when there is any: the
+  file `ForgeWorker.Job.Exec.write_secrets/2` wrote, which the process loads itself, so no value
+  is in anything the slice is given (`ForgeWorker.Job.Exec`).
   """
   @type opts :: %{
           required(:job_id) => String.t(),
@@ -36,7 +37,7 @@ defmodule ForgeWorker.Slice do
           optional(:memory_max) => pos_integer() | nil,
           optional(:cpu_weight) => pos_integer() | nil,
           optional(:env) => [{String.t(), String.t()}],
-          optional(:secret_names) => [String.t()]
+          optional(:secrets_file) => String.t() | nil
         }
 
   @typedoc "What `prepare/1` set up and `wrap/3` and `cleanup/1` need back."
@@ -264,7 +265,7 @@ defmodule ForgeWorker.Slice.Systemd do
 
   @behaviour ForgeWorker.Slice
 
-  alias ForgeWorker.Job.Dir
+  alias ForgeWorker.Job.{Dir, Exec}
   alias ForgeWorker.Log
 
   @cgroup_root "/sys/fs/cgroup/system.slice"
@@ -664,19 +665,24 @@ defmodule ForgeWorker.Slice.Systemd do
       at_exit(context) ++
       limit("MemoryMax", context[:memory_max]) ++
       limit("CPUWeight", context[:cpu_weight]) ++
-      environment(context)
+      environment(context) ++
+      secrets(context)
   end
 
   # systemd-run hands the unit to systemd, which starts it with its own default environment and
   # not with systemd-run's: everything the runner composed — PATH, HOME, the job directory, the
-  # harness's own variables — has to be named here or the process starts without it. A secret is
-  # named without its value, which systemd-run then reads from its own environment, so the value
-  # crosses to systemd over its bus rather than sitting in an argument vector for the length of
-  # the job.
-  defp environment(context) do
-    Enum.map(context[:env] || [], fn {name, value} -> "--setenv=#{name}=#{value}" end) ++
-      Enum.map(context[:secret_names] || [], &("--setenv=" <> &1))
-  end
+  # harness's own variables — has to be named here or the process starts without it.
+  defp environment(context),
+    do: Enum.map(context[:env] || [], fn {name, value} -> "--setenv=#{name}=#{value}" end)
+
+  # **Never a secret's value, and never a secret as `--setenv`**: a unit's environment is a property
+  # systemd shows every user on the machine (`systemd.exec(5)`, under `Environment=`). The file is
+  # handed over instead: systemd reads it as root and gives the unit a copy only its user can read,
+  # and the bus carries the path. The process loads it itself (`ForgeWorker.Job.Exec`).
+  defp secrets(%{secrets_file: path}) when is_binary(path),
+    do: ["--property=LoadCredential=#{Exec.secrets_credential()}:#{path}"]
+
+  defp secrets(_context), do: []
 
   # The job's files belong to the job's user: it has to write them, and no other job on this
   # machine may read them. Without this the unit cannot even change into its working directory.

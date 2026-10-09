@@ -53,8 +53,17 @@ defmodule ForgeWeb.JobLive do
       written_names: MapSet.new(written, fn {artifact, _v} -> artifact.name end),
       refusals: Jobs.refusals(job)
     )
-    |> assign(events: events, memory: Memory.trouble(events))
+    |> assign(events: events, memory: Memory.trouble(events), held: held(events))
   end
+
+  # What each run held, by name and version, from its `job.secrets` record — never a value, which
+  # nothing on the platform side keeps in a form this page could show (`secrets.md` § Surfaces).
+  defp held(events), do: for(%{type: "job.secrets", payload: payload} <- events, do: payload)
+
+  # Only a workflow job's and a command's: a conversation is not opened here, and only a
+  # conversation runs without a secret it named, so a run on this page has nothing gone to show.
+  defp held_line(%{"held" => held}),
+    do: Enum.map_join(held, ", ", &"#{&1["name"]} v#{&1["version"]}")
 
   # Per job, so the subscription is the filter. What the harness streams is added to the log the
   # page holds (`ForgeWeb.JobStream`); anything else on the topic — a wait, the run ending —
@@ -172,6 +181,12 @@ defmodule ForgeWeb.JobLive do
           <div class="flex min-w-0 justify-between gap-3">
             <dt class="opacity-50">environment</dt>
             <dd class="font-mono">{@spec.env || "none"}</dd>
+          </div>
+          <div :if={@held != []} class="flex min-w-0 justify-between gap-3">
+            <dt class="opacity-50">secrets</dt>
+            <dd class="job-secrets min-w-0 text-right font-mono">
+              <div :for={run <- @held}>{held_line(run)}</div>
+            </dd>
           </div>
         </dl>
 
@@ -291,6 +306,12 @@ defmodule ForgeWeb.JobLive do
             <div class="flex min-w-0 justify-between gap-3">
               <dt class="opacity-50">branch</dt>
               <dd class="truncate font-mono">{@spec.branch}</dd>
+            </div>
+            <div :if={@held != []} class="flex min-w-0 justify-between gap-3">
+              <dt class="opacity-50">secrets</dt>
+              <dd class="job-secrets min-w-0 text-right font-mono">
+                <div :for={run <- @held}>{held_line(run)}</div>
+              </dd>
             </div>
             <div class="flex min-w-0 justify-between gap-3">
               <dt class="opacity-50">commit</dt>

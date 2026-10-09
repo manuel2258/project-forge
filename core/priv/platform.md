@@ -60,6 +60,17 @@ handed to another job, so a tool cache meant to carry from one job to the next �
 belongs inside the checkout and ignored by git, where the project's seed and the ticket's own
 volume keep it.
 
+## Secrets
+
+A project may hold **secrets**: values its admins set — a test-mode API key, a registry token —
+that the platform never uses and only carries. A job state or a command lists the ones it receives
+under `secrets` in `.forge/workflow.yml`, and a conversation's are picked by the person opening it.
+If your run holds any, your manifest names them, by variable and never by value: they are in your
+environment and nowhere else. Do not print them, commit them, or write them into a document, a
+proposal or a command's arguments — anything you print may be read by every member of the
+project, and the masking on the way out catches the exact value and nothing cleverer. A job state
+that lists a secret the project has not set waits until an admin sets it.
+
 ## Questions
 
 A job asks inside the document it is writing, in a fenced `question` block, next to the passage

@@ -28,7 +28,7 @@ context = %{
   memory_max: String.to_integer(System.get_env("FJ_MEM", "536870912")),
   cpu_weight: 100,
   env: [{"PATH", "/run/current-system/sw/bin"}, {"HOME", "/nonexistent"}],
-  secret_names: [],
+  secrets_file: nil,
   kind: :systemd,
   user: Systemd.user_name(id)
 }

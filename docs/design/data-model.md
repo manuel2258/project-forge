@@ -45,7 +45,10 @@ a state that attempt finished in, and cleared when a resume is refused), `worker
 `credential_id` (the inference credential its current or last run spent, nullable until it first
 starts), `model` (a conversation's, chosen when it was opened; a workflow job's is its state's and
 is not on the row), `memory_max` and `cores` (what the scheduler gates on, resolved once at creation
-and never rewritten — `design/provisioning.md` § What a job asks for), `started_at`, `finished_at`.
+and never rewritten — `design/provisioning.md` § What a job asks for), `secret_names` (the project
+secrets it asks for: its state's or command's `secrets`, or what was picked for a conversation —
+names only, resolved to values at each assignment; `design/secrets.md` § Delivery), `started_at`,
+`finished_at`.
 Its timestamps are sub-second: jobs are read back in creation order and that order is the ticket's
 timeline, so two jobs created within one second must still be ordered.
 
@@ -154,6 +157,11 @@ Revoked rather than deleted, because spend stays attributed to it. `design/crede
 
 **project_credential** — `project_id`, `credential_id` (unique together). A project's pool: the
 credentials its jobs may be paid for with, assigned by each credential's owner.
+
+**project_secret** — `project_id`, `name` (unique among the project's live ones), `value`
+(encrypted, never selected by default), `version`, `set_by_id`, `set_at`, `deleted_at`. A value a
+project's jobs may be handed and the platform never uses, written by a project admin. Deleted
+rather than removed, and deleting destroys the value. `design/secrets.md`.
 
 **job_run** — `job_id`, `credential_id`, `worker_id`, `started_at`, `finished_at`, `cost_usd`. One
 process of a job: a resume, a requeue or a reopened conversation is a new run. Spend is recorded

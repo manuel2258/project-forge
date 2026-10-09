@@ -73,4 +73,32 @@ defmodule ForgeCore.Job.CredentialTest do
     refute Credential.seal(@secret, hash(token), "job-1") ==
              Credential.seal(@secret, hash(token), "job-1")
   end
+
+  # A job's credential and its secrets are sealed under one key for one job; the purpose is what
+  # keeps either from opening as the other (`docs/design/secrets.md` § Delivery).
+  test "a seal opens only for the purpose it was made for" do
+    token = token()
+    credential = Credential.seal(@secret, hash(token), "job-1")
+    secrets = Credential.seal(~s({"STRIPE_TEST_KEY":"sk_test_x"}), hash(token), "job-1", :secrets)
+
+    assert {:ok, _} = Credential.open(secrets, hash(token), "job-1", :secrets)
+    assert Credential.open(secrets, hash(token), "job-1") == :error
+    assert Credential.open(credential, hash(token), "job-1", :secrets) == :error
+    assert Credential.open(secrets, hash(token), "job-2", :secrets) == :error
+  end
+
+  # A protocol 4 worker opens the credential with the job id alone as its associated data, and
+  # still must: the purpose did not change the credential's seal.
+  test "the credential's seal is the one a worker from before secrets opens" do
+    token = token()
+    sealed = Credential.seal(@secret, hash(token), "job-1")
+
+    <<nonce::binary-size(12), tag::binary-size(16), ciphertext::binary>> =
+      Base.url_decode64!(sealed, padding: false)
+
+    key = :crypto.mac(:hmac, :sha256, hash(token), "forge job credential v1")
+
+    assert :crypto.crypto_one_time_aead(:aes_256_gcm, key, nonce, ciphertext, "job-1", tag, false) ==
+             @secret
+  end
 end

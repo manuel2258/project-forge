@@ -116,6 +116,13 @@ defmodule ForgeWorker.Job.Session do
     with prefix when is_binary(prefix) <- store["session_prefix"],
          url when is_binary(url) <- Config.platform_url(),
          :ok <- Dir.stage_session(job_dir, session_id, staged),
+         # The staged copy, and not the session the harness resumes from on this machine: what
+         # leaves is masked (`docs/design/secrets.md` § Masking), what stays is the agent's own.
+         :ok <-
+           ForgeWorker.Job.Secrets.mask_file(
+             ForgeWorker.Job.Secrets.from_assignment(assignment),
+             staged
+           ),
          key = prefix <> "#{n}.jsonl",
          {:ok, _info} <- Store.put(url, key, store["session_token"], staged) do
       File.rm(staged)

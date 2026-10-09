@@ -285,6 +285,13 @@ case "${FAKE_SCENARIO:-success}" in
     emit '{"type":"result","subtype":"success","is_error":true,"num_turns":2,"duration_ms":99,"total_cost_usd":0.2,"result":"You have hit your session limit","session_id":"sess-42"}'
     exit 1
     ;;
+  leaks_secret)
+    # An agent that prints what it holds, two ways: into a document, and in an assistant message
+    # as the harness writes it — JSON-escaped (`docs/design/secrets.md` § Masking).
+    printf -- '---\noutcome: done\n---\n# Plan\n\nThe key is %s.\n' "$STRIPE_TEST_KEY" > "$doc"
+    emit "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"the key is $(json_escape "$STRIPE_TEST_KEY")\"}]}}"
+    emit "$result_success"
+    ;;
   crash)
     emit 'this is not json'
     emit '{"type":"weird_thing","x":1}'

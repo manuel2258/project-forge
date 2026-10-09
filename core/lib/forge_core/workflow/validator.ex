@@ -19,6 +19,7 @@ defmodule ForgeCore.Workflow.Validator do
       artifact_names(workflow),
       commands(workflow, Keyword.get(opts, :file_exists)),
       invocations(workflow),
+      secret_names(workflow),
       outcome_declarations(workflow),
       transitions(workflow),
       reachability(workflow),
@@ -102,7 +103,9 @@ defmodule ForgeCore.Workflow.Validator do
         produces: command.produces,
         outcomes: command.outcomes,
         budget: command.budget,
-        may_invoke: command.may_invoke
+        may_invoke: command.may_invoke,
+        # Each command brings its own, as it brings its own `env` (`docs/design/secrets.md`).
+        secrets: command.secrets
       ]
       |> Enum.reject(fn {_key, value} -> value in [nil, [], %{}] end)
       |> Enum.map(
@@ -142,7 +145,8 @@ defmodule ForgeCore.Workflow.Validator do
         # author believes is doing something.
         resources: human.resources,
         exit: human.exit,
-        may_invoke: human.may_invoke
+        may_invoke: human.may_invoke,
+        secrets: human.secrets
       ]
       |> Enum.reject(fn {_key, value} -> value in [nil, [], %{}] end)
       |> Enum.map(fn {key, _value} -> to_string(key) end)
@@ -448,6 +452,56 @@ defmodule ForgeCore.Workflow.Validator do
 
   defp command_producing(%Workflow{commands: commands}, group) do
     for {name, command} <- commands, group in command.outputs, do: name
+  end
+
+  # -- secrets ------------------------------------------------------------------------------
+
+  # `docs/design/secrets.md` § The workflow is the access list: a name is checked here against the
+  # same rule a secret is saved under (`ForgeCore.Secret`), so a workflow cannot ask for a name no
+  # secret could ever have. Whether the project has set it is the platform's question, when the
+  # job is scheduled, because secrets change after a workflow is pinned.
+  defp secret_names(%Workflow{states: states, commands: commands}) do
+    listed =
+      Enum.map(states, fn {name, state} -> {Error.join("states", name), state.secrets} end) ++
+        Enum.map(commands, fn {name, command} ->
+          {Error.join("commands", name), command.secrets}
+        end)
+
+    # Unsorted: the parser sorts every error it returns (`Parser.sort/1`).
+    Enum.flat_map(listed, fn {path, names} ->
+      secret_list_errors(Error.join(path, "secrets"), names)
+    end)
+  end
+
+  defp secret_list_errors(path, names) do
+    repeated =
+      names
+      |> Enum.frequencies()
+      |> Enum.filter(fn {_name, count} -> count > 1 end)
+      |> Enum.map(fn {name, _count} ->
+        Error.new(path, "#{inspect(name)} is listed more than once")
+      end)
+
+    Enum.flat_map(names, &secret_name_error(path, &1)) ++ repeated
+  end
+
+  defp secret_name_error(path, name) do
+    case ForgeCore.Secret.validate_name(name) do
+      :ok ->
+        []
+
+      {:error, :format} ->
+        [
+          Error.new(
+            path,
+            "#{inspect(name)} is not a secret's name: upper case letters, digits and _, " <>
+              "starting with a letter"
+          )
+        ]
+
+      {:error, :reserved} ->
+        [Error.new(path, "#{inspect(name)} is reserved: a job's environment needs it for itself")]
+    end
   end
 
   # -- commands -----------------------------------------------------------------------------

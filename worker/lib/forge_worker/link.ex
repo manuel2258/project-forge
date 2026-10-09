@@ -27,6 +27,7 @@ defmodule ForgeWorker.Link do
     Credential,
     Dir,
     Runner,
+    Secrets,
     Seed,
     Session,
     Workspace
@@ -528,6 +529,12 @@ defmodule ForgeWorker.Link do
   end
 
   defp report(socket, job_id, message, payload) do
+    # **Every ending leaves masked, from here** (`docs/design/secrets.md` § Masking): a result's
+    # documents and reason, a conversation's last report, and a failure's reason — which can be a
+    # hook's output, a crash's message or the harness's last line of stderr. One place, because
+    # every one of them comes through it.
+    job = socket.assigns.jobs[job_id]
+    payload = Secrets.mask(job && job[:secrets], payload)
     {level, how} = finished(message, payload)
     Log.line("job.finished", level, how <> ran(socket.assigns.jobs[job_id]), job_id: job_id)
 
@@ -639,6 +646,8 @@ defmodule ForgeWorker.Link do
           runner: nil,
           attempt: 1,
           kind: :chat,
+          # Sealed, as the assignment carried them: what its ending is masked with.
+          secrets: Secrets.from_assignment(assignment),
           started: System.monotonic_time(:millisecond)
         })
 
@@ -669,6 +678,7 @@ defmodule ForgeWorker.Link do
       runner: nil,
       attempt: assignment["spec"]["attempt"],
       kind: if(assignment["kind"] == "command", do: :command, else: :workflow),
+      secrets: Secrets.from_assignment(assignment),
       started: System.monotonic_time(:millisecond)
     })
   end
@@ -698,8 +708,15 @@ defmodule ForgeWorker.Link do
   # job it believes is running until the next rejoin.
   def run(link, assignment, root) do
     job_id = assignment["job_id"]
+    secrets = Secrets.from_assignment(assignment)
 
-    case as_user(assignment, root, &prepare_and_run(link, assignment, root, &1)) do
+    # What it reports is masked as it leaves, by the link (`report/4`).
+    outcome =
+      with :ok <- Secrets.check(secrets) do
+        as_user(assignment, root, &prepare_and_run(link, assignment, root, &1))
+      end
+
+    case outcome do
       {:ok, {"result", result}} ->
         send(link, {:terminal, job_id, "result", %{"job_id" => job_id, "result" => result}})
 
@@ -763,6 +780,11 @@ defmodule ForgeWorker.Link do
       send(link, {:runner, job_id, command})
       {:ok, result} = Command.await(command)
 
+      Secrets.mask_file(
+        Secrets.from_assignment(assignment),
+        Command.log_path(job_dir(root, job_id))
+      )
+
       result =
         result
         |> upload_log(assignment, job_dir(root, job_id))
@@ -818,6 +840,8 @@ defmodule ForgeWorker.Link do
     # goes — before the worker reads the job's outputs or keeps the tree as the ticket's
     # template, which must not belong to a uid the next `useradd` may hand to another job.
     Slice.leave(user, job_paths(assignment, root))
+
+    Secrets.mask_file(Secrets.from_assignment(assignment), result.transcript_path)
 
     terminal =
       {:ok,
@@ -877,6 +901,7 @@ defmodule ForgeWorker.Link do
       root: Path.join(root, "jobs"),
       worktree: worktree,
       slice_opts: %{memory_max: slice["memory_max"], cpu_weight: slice["cpu_weight"]},
+      secrets: Secrets.from_assignment(assignment),
       nix_env: Application.get_env(:forge_worker, :nix_env, true)
     )
   end
@@ -969,6 +994,7 @@ defmodule ForgeWorker.Link do
       Session.restore(assignment, job_dir(root, job_id), worktree, harness_opts, harness())
 
     harness_opts = Credential.put(harness_opts, assignment, harness().driver())
+    secrets = Secrets.from_assignment(assignment)
 
     slice = assignment["slice"] || %{}
 
@@ -981,8 +1007,9 @@ defmodule ForgeWorker.Link do
         memory_max: slice["memory_max"],
         cpu_weight: slice["cpu_weight"]
       },
-      sink: fn event -> send(link, {:event, job_id, event}) end,
+      sink: fn event -> send(link, {:event, job_id, Secrets.mask_event(secrets, event)}) end,
       harness_opts: harness_opts,
+      secrets: secrets,
       backlog: assignment["backlog"],
       command_logs: logs,
       session: session,
@@ -997,9 +1024,9 @@ defmodule ForgeWorker.Link do
   end
 
   # The agent works in a real clone and may fetch and push on its own, so it gets the same URL
-  # and credential the worker uses. Marked secret, which is what keeps it out of argv and out of
-  # the runner's state — and out of the slice's `--setenv`, which names a secret without its
-  # value (`docs/design/worker-tier.md` § The job slice).
+  # and credential the worker uses. Marked secret, which is what keeps it out of argv, out of the
+  # runner's state and out of the unit's properties: it reaches the process through the file the
+  # process loads itself (`ForgeWorker.Job.Exec`).
   defp git_env(%{"git" => %{"url" => url, "token" => token}}) when is_binary(token),
     do: [{"FORGE_GIT_URL", url}, {"FORGE_GIT_TOKEN", {:secret, token}}]
 

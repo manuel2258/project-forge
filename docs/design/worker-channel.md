@@ -84,7 +84,10 @@ a job carries its inference credential — sealed with a key derived from this t
 holds the token opens it. That is not a wider radius than before: the token used to sit in the
 machine's user data beside the machine's own inference credential, and whoever could read one
 could read both. What is new is that it is the *pool's* credential, for as long as the platform
-keeps assigning to that worker.
+keeps assigning to that worker. The same is true of the project secrets a job names, sealed with
+the same key since `docs/design/secrets.md`: a leaked worker token opens those of every job
+assigned to it while the platform keeps assigning, which is the radius of a member of every
+project the machine serves, not wider.
 
 ## Topic
 
@@ -123,6 +126,7 @@ Platform → worker:
 | `assign` | `job_id`, `kind`, spec JSON, slice limits (`memory_max`, `cpu_weight`), git endpoint + per-job token + branch + base, transcript key + token, a prefix and `put` token for the harness session's uploads, seed key + token, the backlog, `resume_session` (nil when there is nothing to resume), `fork_session`, the session file to restore (`session`: key, `get` token, id, the version that wrote it), wall clock, the job's inference credential sealed for this worker (`credentials.md` § Delivery to the machine); a chat adds `idle_ms`, `max_cost_usd` and `history` and a longer wall clock, and its spec a `replay` once it has been reopened | Run this job. |
 | `assign` for a command | `job_id`, `kind: "command"`, its spec (the script's text, argv, commit, env, timeout), slice limits, git endpoint + a read-only per-job token + branch + base, the log's store key + `put` token, seed key + token, wall clock | Run this command (`docs/design/commands.md`). No credential, no backlog, no session. |
 | — and for either, when it declares a group of files | `outputs`: a store prefix and a `put` token scoped to it (`docs/design/storage.md` § Serving) | Where the group's files go. |
+| — and for any of the three, when the job names project secrets | `secrets`: one JSON object of name to value, sealed for this worker, this job and the purpose `secrets` (`docs/design/secrets.md` § Delivery); its spec's `secrets` names them | Put these in the process's environment, and mask them in what leaves (§ Masking there). |
 | `cancel` | `job_id`, reason | Stop it. For `ticket_cancelled` the worker still sends a terminal message — a `hibernated` carrying the run's result, even when its push is refused because the cancel revoked the job's credential — and that is how the platform settles what the run spent. For `not_ours` and `retired` it sends none: the platform has already given that run up — re-queued it, placed it elsewhere or finished with it — and a report would be recorded against whatever the job is now (§ Reconnection). |
 | `message` | `job_id`, `message_id`, text | A chat only: write this to the harness's stdin. |
 | `interrupt` | `job_id` | A chat only: end this turn, keep the process. |
@@ -165,7 +169,7 @@ The conversation rows are `docs/design/conversations.md`'s — § The wire for t
 Context for `history`, § Lifetime for `idle_ms` and the `replay`, and § Spend for `max_cost_usd` —
 and the backlog is `docs/design/ticket-proposals.md` § Reading the backlog.
 `Forge.Jobs.assignment/4` builds what `assign` carries, and `Forge.Jobs.assign/2` adds the sealed
-credential to it.
+credential and secrets to it.
 
 **`ready` is not `join`.** A worker joins when its release boots; it is `ready` when it has
 worked out what it can offer — its memory budget, cores and kinds (§ What a worker offers), and
@@ -484,8 +488,17 @@ makes one, which is refused and marks the image (below). What the floor leaves w
 code: `Forge.Jobs.protocol/1`'s per-kind protocols (2 for a command, 3 for an agent), and the
 templates page's word for a snapshot that cannot run an agent — every worker it accepts can run
 those. **The protocol dimension of `Workers.fits?/2` and the scheduler's demand decides something
-again** since protocol 5: an integrating job needs it and a protocol 4 worker is still accepted,
-so the gate is what keeps such a job off it (above).
+again** since protocol 5: an integrating job needs it, a job that names a secret needs 6, and a
+protocol 4 worker is still accepted, so the gate is what keeps such a job off it (above).
+
+**Protocol 6 is project secrets** (`docs/design/secrets.md` § Delivery): `secrets` on an
+assignment, sealed under a purpose. It is a bump because ignoring it is wrong, not less: an older
+worker drops the unknown key and runs the job without the secrets its state names — a build
+without its registry token, a test against no key — and masks nothing. So a job naming secrets
+needs protocol 6 (`Forge.Jobs.protocol/1`), and a protocol 4 or 5 worker, still accepted, keeps
+taking every job that names none: an assignment without secrets is exactly what it was, and the
+credential's seal is unchanged. The minimum stays 4 until the templates and permanent machines
+have moved, as below.
 
 What rides along without a bump, because an older side may ignore it: `job.harness.memory`
 events and the `memory` a `starting` event carries (`docs/design/claude-code-events.md` § Memory),
@@ -708,7 +721,8 @@ already has the framework for.
 - **What the protocol floor left behind** (§ What needs a bump, and raising the minimum). With
   every accepted worker at protocol 4 or later, `Forge.Jobs.protocol/1`'s numbers for a command and
   an agent decide nothing; the protocol dimension of `Workers.fits?/2` and the scheduler's demand
-  stay, because an integrating job needs protocol 5 and the floor is still 4; the workers
+  stay, because an integrating job needs protocol 5, a job that names a secret needs 6, and the
+  floor is still 4; the workers
   page's *no stats — update it*, for a connected machine that spoke no protocol, can no longer be
   drawn; and `Provisioning.holds?/2` still asks only whether a template's image is new enough for
   the job, not whether this platform accepts it, so a project with a small template labelled 3 and

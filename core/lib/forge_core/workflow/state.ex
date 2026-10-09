@@ -31,7 +31,8 @@ defmodule ForgeCore.Workflow.State do
     produces: [],
     on_enter: [],
     invoke: [],
-    may_invoke: %{}
+    may_invoke: %{},
+    secrets: []
   ]
 
   @typedoc "One entry of `invoke`: the command's name and the argument vector it is run with."
@@ -66,7 +67,10 @@ defmodule ForgeCore.Workflow.State do
           invoke: [invocation()],
           exit: %{(non_neg_integer() | String.t()) => String.t()} | nil,
           # A job state's: which commands its agent may run, and how many.
-          may_invoke: %{String.t() => grant()}
+          may_invoke: %{String.t() => grant()},
+          # A job state's: the project secrets its job is handed, by name
+          # (`docs/design/secrets.md` § The workflow is the access list).
+          secrets: [String.t()]
         }
 
   @doc "The entry actions v1 knows."

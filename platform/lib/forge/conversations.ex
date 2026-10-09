@@ -17,7 +17,7 @@ defmodule Forge.Conversations do
   import Ecto.Query, only: [from: 2, where: 3]
 
   alias Ecto.Multi
-  alias Forge.{Events, Git, Jobs, Projects, Proposals, Repo, Tickets, Workers}
+  alias Forge.{Events, Git, Jobs, Projects, Proposals, Repo, Secrets, Tickets, Workers}
   alias Forge.Events.Event
   alias Forge.Git.Tokens
   alias Forge.Jobs.{Job, Runs}
@@ -39,10 +39,29 @@ defmodule Forge.Conversations do
     # this is not one. So the person opening it says, and the platform's defaults are what they
     # get when they do not (`docs/design/conversations.md` § What it asks for).
     with {:ok, memory} <- resource(opts, :memory, Jobs.default_resources().memory),
-         {:ok, cores} <- resource(opts, :cores, Jobs.default_resources().cores) do
-      insert(project, text, Keyword.merge(opts, memory: memory, cores: cores))
+         {:ok, cores} <- resource(opts, :cores, Jobs.default_resources().cores),
+         {:ok, secrets} <- secret_names(project, Keyword.get(opts, :secrets, [])) do
+      insert(project, text, Keyword.merge(opts, memory: memory, cores: cores, secrets: secrets))
     end
   end
+
+  # **Picked by the person opening it, from the project's own** (`docs/design/secrets.md`
+  # § Conversations). A name that is not one of this project's live secrets is refused, never
+  # dropped: the form's boxes are not a guard, and a name off the wire could be another project's.
+  defp secret_names(project, names) when is_list(names) do
+    names = Enum.uniq(names)
+
+    # A name that is not even a string is no secret's, and is never put in a query.
+    with true <- Enum.all?(names, &is_binary/1),
+         [] <- Secrets.missing(project.id, names) do
+      {:ok, names}
+    else
+      false -> {:error, {:unknown_secrets, []}}
+      unknown -> {:error, {:unknown_secrets, unknown}}
+    end
+  end
+
+  defp secret_names(_project, _names), do: {:error, {:unknown_secrets, []}}
 
   defp insert(project, text, opts) do
     ticket = Keyword.get(opts, :ticket)
@@ -62,14 +81,19 @@ defmodule Forge.Conversations do
         # one is a conversation you close and open again.
         model: model(opts),
         memory_max: Keyword.fetch!(opts, :memory),
-        cores: Keyword.fetch!(opts, :cores)
+        cores: Keyword.fetch!(opts, :cores),
+        # Fixed for the life of every process it has, as the model is; a reopened conversation
+        # holds these names at their current versions, less any deleted since.
+        secret_names: Keyword.fetch!(opts, :secrets)
       })
     )
     |> Events.log(:opened, "chat.opened", actor, fn %{chat: chat} ->
       %{
         ticket_id: chat.ticket_id,
         job_id: chat.id,
-        payload: %{"branch" => Jobs.chat_branch(chat)}
+        # Who picked which secrets is this event's actor and these names (`docs/design/secrets.md`
+        # § Conversations); each run's `job.secrets` says what it then held.
+        payload: %{"branch" => Jobs.chat_branch(chat), "secrets" => chat.secret_names}
       }
     end)
     |> Events.log(:first_message, "chat.message", actor, fn %{chat: chat} ->

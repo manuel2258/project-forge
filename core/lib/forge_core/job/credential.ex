@@ -20,6 +20,12 @@ defmodule ForgeCore.Job.Credential do
 
   What it buys is logs and crash reports, not a layer against the database: whoever can read
   `workers.token_hash` and a captured assignment can open it.
+
+  **A seal has a purpose**, and the purpose is part of the associated data: a job's credential and
+  its project secrets (`docs/design/secrets.md` § Delivery) are sealed under the same key for the
+  same job, and without it each would open in the other's place. The credential's associated data
+  is the job id alone, as it was before secrets existed, so a protocol 4 worker still opens it;
+  the secrets' is the job id behind a prefix of their own.
   """
 
   @label "forge job credential v1"
@@ -41,14 +47,27 @@ defmodule ForgeCore.Job.Credential do
 
   def token_hash(_token), do: :error
 
-  @doc "Seals `secret` for the worker whose token hashes to `token_hash`, and for `job_id` only."
-  @spec seal(String.t(), String.t(), String.t()) :: String.t()
-  def seal(secret, token_hash, job_id)
+  @typedoc "What a seal is for: a job's inference credential, or its project secrets."
+  @type purpose :: :credential | :secrets
+
+  @doc """
+  Seals `secret` for the worker whose token hashes to `token_hash`, for `job_id` only, and for
+  `purpose` only — the credential when none is named.
+  """
+  @spec seal(String.t(), String.t(), String.t(), purpose()) :: String.t()
+  def seal(secret, token_hash, job_id, purpose \\ :credential)
       when is_binary(secret) and is_binary(token_hash) and is_binary(job_id) do
     nonce = :crypto.strong_rand_bytes(@nonce_bytes)
 
     {ciphertext, tag} =
-      :crypto.crypto_one_time_aead(@cipher, key(token_hash), nonce, secret, job_id, true)
+      :crypto.crypto_one_time_aead(
+        @cipher,
+        key(token_hash),
+        nonce,
+        secret,
+        aad(purpose, job_id),
+        true
+      )
 
     Base.url_encode64(nonce <> tag <> ciphertext, padding: false)
   end
@@ -58,8 +77,11 @@ defmodule ForgeCore.Job.Credential do
   changed, or anything that is not a sealed credential at all. None of those is separately
   actionable, and all of them mean the harness runs without a credential and says so.
   """
-  @spec open(String.t() | nil, String.t() | nil, String.t() | nil) :: {:ok, String.t()} | :error
-  def open(sealed, token_hash, job_id)
+  @spec open(String.t() | nil, String.t() | nil, String.t() | nil, purpose()) ::
+          {:ok, String.t()} | :error
+  def open(sealed, token_hash, job_id, purpose \\ :credential)
+
+  def open(sealed, token_hash, job_id, purpose)
       when is_binary(sealed) and is_binary(token_hash) and is_binary(job_id) do
     with {:ok,
           <<nonce::binary-size(@nonce_bytes), tag::binary-size(@tag_bytes), ciphertext::binary>>} <-
@@ -70,7 +92,7 @@ defmodule ForgeCore.Job.Credential do
              key(token_hash),
              nonce,
              ciphertext,
-             job_id,
+             aad(purpose, job_id),
              tag,
              false
            ) do
@@ -80,7 +102,12 @@ defmodule ForgeCore.Job.Credential do
     end
   end
 
-  def open(_sealed, _token_hash, _job_id), do: :error
+  def open(_sealed, _token_hash, _job_id, _purpose), do: :error
 
   defp key(token_hash), do: :crypto.mac(:hmac, :sha256, token_hash, @label)
+
+  # The credential's is the job id alone, which every worker since credentials has opened; any
+  # other purpose's carries its name, so no two purposes share associated data for one job.
+  defp aad(:credential, job_id), do: job_id
+  defp aad(:secrets, job_id), do: "secrets:" <> job_id
 end

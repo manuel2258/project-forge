@@ -54,14 +54,16 @@ FORGE_VAPID_SUBJECT=mailto:you@example.org
 **No agent credential here.** `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` are not read by the
 platform or by a worker: a person adds their own token in `/users/settings` and assigns it to the
 projects it should pay for, and each job picks one from its project's pool
-(`design/credentials.md`). `SECRET_KEY_BASE` is what seals those tokens at rest, so rotating it
-makes every stored credential unreadable and each has to be added again.
+(`design/credentials.md`). `SECRET_KEY_BASE` is what seals those tokens at rest, and a project's
+secrets too (`design/secrets.md`), so rotating it makes every stored credential and secret
+unreadable and each has to be added again.
 
 **The node refuses to start on a `SECRET_KEY_BASE` that opens none of its stored credentials.**
 A changed key is otherwise found piecemeal: no job starts (*credential … cannot be decrypted*),
 no Hetzner machine can be made or destroyed, every session cookie is void, and the store tokens
 already in workers' hands stop working mid-job. If there are stored credentials — inference or
-provider — and not one of them opens, the release exits naming the cause. Restore the old value;
+provider, or a project's secrets (`design/secrets.md`) — and not one of them opens, the release
+exits naming the cause. Restore the old value;
 or, if the rotation was deliberate, start once with `FORGE_ACCEPT_NEW_SECRET_KEY_BASE=1` and add
 the credentials again — the check passes on its own once one of them opens.
 
@@ -485,6 +487,17 @@ which are best-effort.
 
 What changes for a node that is already running, where the change is in what the platform does
 with rows it already has. Newest first.
+
+- **Project secrets reach jobs, and a job naming any needs protocol 6**
+  (`design/secrets.md` § Delivery, `design/worker-channel.md` § Versions). Nothing is refused: the
+  minimum stays 4, and an older machine takes every job that names no secret, exactly as before.
+  A job whose state, command or conversation names one waits for a machine at protocol 6; until a
+  template's snapshot is built from this release (`bin/hetzner-image`) and the template points at
+  it, its ticket sticks with *no worker template … runs a worker new enough for it*, and a
+  permanent machine needs `bin/worker-update`. A worker at protocol 6 also stops passing secrets
+  to a unit as `--setenv` (`design/worker-tier.md` § The job slice): the credential and git token
+  of every job are no longer readable by the other jobs on its machine, which on an older worker
+  they still are.
 
 - **Jobs survive a restart** (above). Two things from before it stay as they were. A workflow
   job an earlier restart left `hibernated` stays so — nothing resumed one, and nothing moves it

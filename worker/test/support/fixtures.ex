@@ -37,6 +37,36 @@ defmodule ForgeWorker.Fixtures do
     )
   end
 
+  @doc """
+  `secrets` sealed for `job_id` the way the platform seals them (`Forge.Secrets.for_wire/3`): for
+  this machine's token and the purpose `:secrets`. The token is the one configured, or a new one,
+  removed again when the test exits.
+  """
+  def sealed_secrets(secrets, job_id) do
+    %ForgeWorker.Job.Secrets{
+      job_id: job_id,
+      sealed:
+        ForgeCore.Job.Credential.seal(Jason.encode!(secrets), token_hash(), job_id, :secrets)
+    }
+  end
+
+  defp token_hash do
+    token =
+      case Application.get_env(:forge_worker, :token) do
+        token when is_binary(token) ->
+          token
+
+        nil ->
+          token = Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
+          Application.put_env(:forge_worker, :token, token)
+          ExUnit.Callbacks.on_exit(fn -> Application.delete_env(:forge_worker, :token) end)
+          token
+      end
+
+    {:ok, hash} = ForgeCore.Job.Credential.token_hash(token)
+    hash
+  end
+
   @doc "A random UUID (the worker does not depend on Ecto)."
   def uuid do
     <<a::32, b::16, c::16, d::16, e::48>> = :crypto.strong_rand_bytes(16)

@@ -15,7 +15,7 @@ defmodule Forge.Jobs.Commands do
   require Logger
 
   alias Ecto.Multi
-  alias Forge.{Artifacts, Engine, Events, Git, Jobs, Projects, Repo, Storage, Tickets}
+  alias Forge.{Artifacts, Engine, Events, Git, Jobs, Projects, Repo, Secrets, Storage, Tickets}
   alias Forge.Artifacts.Version
   alias Forge.Events.Event
   alias Forge.Jobs.{Job, Runs}
@@ -184,7 +184,8 @@ defmodule Forge.Jobs.Commands do
           parent_job_id: invocation.parent,
           spec: spec |> Spec.to_json() |> Jason.decode!(),
           memory_max: resources.memory,
-          cores: resources.cores
+          cores: resources.cores,
+          secret_names: command.secrets
         })
       )
     end
@@ -216,14 +217,14 @@ defmodule Forge.Jobs.Commands do
     else
       {decided, _used} =
         Enum.map_reduce(result.invocations, invoked_counts(job.id), fn invocation, used ->
-          decide_one(invocation, grants, workflow, used)
+          decide_one(invocation, grants, workflow, job.project_id, used)
         end)
 
       decided
     end
   end
 
-  defp decide_one(%{"command" => name} = invocation, grants, workflow, used) do
+  defp decide_one(%{"command" => name} = invocation, grants, workflow, project_id, used) do
     args = Map.get(invocation, "args") || []
     grant = Map.get(grants, name)
     count = Map.get(used, name, 0)
@@ -240,9 +241,19 @@ defmodule Forge.Jobs.Commands do
           refusal(name, args, "no invocations of `#{name}` remain: #{grant["max"]} were allowed")},
          used}
 
+      # A command naming a secret the project has not set would stick the ticket once it was
+      # placed; the agent that asked for it is told instead, as for a breach of `max`, and the
+      # refusal does not count against it (`docs/design/secrets.md` § Delivery).
       true ->
-        {{:run, %{command: name, args: args, concurrent: grant["concurrent"]}},
-         Map.put(used, name, count + 1)}
+        case Secrets.missing(project_id, Workflow.command(workflow, name).secrets) do
+          [] ->
+            {{:run, %{command: name, args: args, concurrent: grant["concurrent"]}},
+             Map.put(used, name, count + 1)}
+
+          missing ->
+            {{:refused, refusal(name, args, Secrets.unset("the command `#{name}`", missing))},
+             used}
+        end
     end
   end
 

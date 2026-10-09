@@ -16,8 +16,10 @@ defmodule ForgeWeb.ProjectSettingsLive do
   import ForgeWeb.Operator.Components
 
   alias Forge.Git.{Tokens, Url}
-  alias Forge.{Operator, Projects, Tickets, Workers}
+  alias Forge.{Operator, Projects, Secrets, Tickets, Workers}
   alias ForgeWeb.Format
+
+  require Logger
 
   @impl true
   def mount(%{"name" => name}, _session, socket) do
@@ -34,6 +36,12 @@ defmodule ForgeWeb.ProjectSettingsLive do
        show_spent: false,
        error: nil,
        member_error: nil,
+       # The secret form's errors and the name it was sent with — never its value, which this
+       # process is not given to keep. The nonce renews the form after a save, so the browser
+       # drops the value it was holding rather than leaving it on screen.
+       secret_error: nil,
+       secret_name: "",
+       secret_nonce: 0,
        # Whether this page may change who is in the project. The section is hidden without it,
        # and `Forge.Projects` refuses without it, which is the half that matters.
        manage: Forge.Access.can?(scope, :manage)
@@ -46,6 +54,7 @@ defmodule ForgeWeb.ProjectSettingsLive do
   defp load(%{assigns: %{project: project}} = socket) do
     now = DateTime.utc_now()
     tokens = Tokens.list(project)
+    secrets = Secrets.list(project)
 
     assign(socket,
       model_form: to_form(%{"model" => project.model || ""}, as: :project),
@@ -55,6 +64,12 @@ defmodule ForgeWeb.ProjectSettingsLive do
       tickets: Tickets.list(project),
       members: Projects.members(project),
       mirrors: Projects.list_mirrors(project),
+      secrets: secrets,
+      # Each row says who receives it — the access list read backwards — the last run that held
+      # it, and the live conversations holding it (`docs/design/secrets.md` § Surfaces).
+      received_by: Secrets.received_by(project),
+      last_held: Secrets.last_held(project, secrets),
+      held_by_chats: Secrets.held_by_conversations(project),
       clone_url: Url.for(project),
       now: now
     )
@@ -195,6 +210,85 @@ defmodule ForgeWeb.ProjectSettingsLive do
       {:error, reason} -> {:noreply, put_flash(socket, :error, mirror_error(reason))}
     end
   end
+
+  # `Operator.set_secret/4` is the guard; this refuses the event sent by hand past the hidden form.
+  # The value is passed straight through and never assigned: neither the reply nor this process's
+  # state carries it, whatever happens (`docs/design/secrets.md` § Surfaces).
+  def handle_event("set-secret", %{"secret" => %{} = params}, socket) do
+    %{project: project, current_scope: scope} = socket.assigns
+    name = params["name"]
+
+    case set_secret(project, scope.user, name, params["value"]) do
+      {:ok, secret} ->
+        {:noreply,
+         socket
+         |> assign(secret_error: nil, secret_name: "")
+         |> update(:secret_nonce, &(&1 + 1))
+         |> put_flash(:info, "Saved #{secret.name}, version #{secret.version}.")
+         |> load()}
+
+      {:error, :forbidden} ->
+        {:noreply, assign(socket, secret_error: "Only an administrator can do that.")}
+
+      {:error, %Ecto.Changeset{} = changeset} ->
+        {:noreply,
+         assign(socket,
+           secret_error: secret_error(changeset),
+           secret_name: if(is_binary(name), do: name, else: "")
+         )}
+
+      :failed ->
+        {:noreply, assign(socket, secret_error: "That did not work, and nothing was saved.")}
+    end
+  end
+
+  # Not this page's form: a client may send any shape under the event's name, and a clause that
+  # raised on one would be a crash report carrying it.
+  def handle_event("set-secret", _params, socket),
+    do: {:noreply, assign(socket, secret_error: "That did not work, and nothing was saved.")}
+
+  def handle_event("delete-secret", %{"id" => id}, socket) do
+    case Operator.delete_secret(socket.assigns.project, socket.assigns.current_scope.user, id) do
+      {:ok, secret} ->
+        {:noreply, socket |> put_flash(:info, "Deleted #{secret.name}.") |> load()}
+
+      {:error, :forbidden} ->
+        {:noreply, assign(socket, secret_error: "Only an administrator can do that.")}
+
+      {:error, :not_found} ->
+        {:noreply, load(socket)}
+    end
+  end
+
+  def handle_event("delete-secret", _params, socket), do: {:noreply, load(socket)}
+
+  # The one call on this page that holds a value, and so the one whose failure must not escape. A
+  # LiveView that raises is logged with its last message, unfiltered — `:filter_parameters` covers
+  # the event log and not a crash report — and this one's last message is the form, value and all.
+  # So any failure is caught here and logged by its kind, never its reason or stacktrace: a reason
+  # can quote what it was given, and a stacktrace's top frame can carry the arguments.
+  defp set_secret(project, user, name, value) do
+    Operator.set_secret(project, user, name, value)
+  catch
+    kind, reason ->
+      Logger.error("setting a project secret failed: #{failure(kind, reason)}")
+      :failed
+  end
+
+  defp failure(:error, %{__exception__: true, __struct__: module}), do: inspect(module)
+  defp failure(kind, _reason), do: to_string(kind)
+
+  # The changeset's messages, field first. Never the value: a changeset's errors carry the rule
+  # broken, and the rule is all a person needs to see.
+  defp secret_error(changeset) do
+    changeset
+    |> Ecto.Changeset.traverse_errors(fn {message, _opts} -> message end)
+    |> Enum.flat_map(fn {field, messages} -> Enum.map(messages, &"#{label(field)} #{&1}") end)
+    |> Enum.join(" ")
+  end
+
+  defp label(:name), do: "The name"
+  defp label(:value), do: "The value"
 
   # Each reason names the rule it broke, because "invalid" sends an operator to read the source.
   defp mirror_error(:scheme), do: "A mirror must be https:// or http://."
@@ -517,6 +611,103 @@ defmodule ForgeWeb.ProjectSettingsLive do
         </.form>
       </section>
 
+      <%!-- `docs/design/secrets.md` § Surfaces: the list for every member, because a workflow's
+            author needs the names; setting and deleting for an admin, refused by
+            `Operator.set_secret/4` and `delete_secret/3` without one. No value is ever drawn,
+            because none is ever loaded. --%>
+      <section class="mt-10" id="secrets">
+        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Secrets</h2>
+        <p class="mt-2 text-sm/[1.55] opacity-70">
+          Values a job is handed when its workflow state or command names them, and a
+          conversation when the person opening it picks them. Once set, a value is never shown
+          again, to anyone. Jobs do not receive them yet.
+        </p>
+
+        <p :if={@secrets == []} class="mt-3 text-sm opacity-60">None yet.</p>
+
+        <table
+          :if={@secrets != []}
+          id="secret-rows"
+          class="reflow mt-3 w-full text-left text-[12.5px]"
+        >
+          <thead class="font-mono text-[11px] tracking-[.14em] uppercase opacity-50">
+            <tr class="border-b border-base-300">
+              <th class="py-2 pr-3 font-normal">Name</th>
+              <th class="py-2 pr-3 font-normal">Version</th>
+              <th class="py-2 pr-3 font-normal">Set</th>
+              <th class="py-2 pr-3 font-normal">Received by</th>
+              <th class="py-2 font-normal"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr :for={secret <- @secrets} class="border-b border-base-300/60 align-top">
+              <td class="py-3 pr-3 font-mono break-all">{secret.name}</td>
+              <td data-label="Version" class="py-3 pr-3 font-mono">{secret.version}</td>
+              <td data-label="Set" class="py-3 pr-3 font-mono">
+                <div>{Format.ago(secret.set_at, @now)}</div>
+                <div class="text-[11px] opacity-50">
+                  {(secret.set_by && secret.set_by.email) || "an account since removed"}
+                </div>
+              </td>
+              <td data-label="Received by" class="py-3 pr-3 text-[12.5px]">
+                <div>{received(@received_by, secret.name)}</div>
+                <div :if={@held_by_chats[secret.name]} class="text-[11px] opacity-60">
+                  {chats(@held_by_chats[secret.name])}
+                </div>
+                <div class="text-[11px] opacity-50">
+                  {held(@last_held[secret.id], @now)}
+                </div>
+              </td>
+              <td class="py-3 text-right">
+                <button
+                  :if={@manage}
+                  type="button"
+                  phx-click="delete-secret"
+                  phx-value-id={secret.id}
+                  data-confirm={"Delete #{secret.name}? Its value is destroyed, and a job whose workflow names it stops until it is set again."}
+                  class="min-h-[46px] text-sm text-primary hover:underline reflow-control"
+                >
+                  Delete
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <.form
+          :let={f}
+          :if={@manage}
+          for={to_form(%{"name" => @secret_name}, as: :secret)}
+          id={"secret-form-#{@secret_nonce}"}
+          phx-submit="set-secret"
+          class="mt-4 flex flex-col gap-4"
+        >
+          <.input field={f[:name]} type="text" label="Name" placeholder="STRIPE_TEST_KEY" />
+          <%!-- Write-only: rendered empty every time, because nothing keeps a value to render.
+                No `phx-change`, so what is typed reaches the server once, on submit. --%>
+          <.input
+            field={f[:value]}
+            type="textarea"
+            label="Value"
+            rows="3"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <p class="text-sm/[1.55] opacity-60">
+            Setting a name that exists replaces its value.
+          </p>
+          <p :if={@secret_error} class="text-sm text-error">{@secret_error}</p>
+          <button
+            type="submit"
+            class="min-h-[52px] rounded-field bg-base-content px-4 text-sm font-medium text-base-100"
+          >
+            Set it
+          </button>
+        </.form>
+
+        <p :if={not @manage and @secret_error} class="mt-2 text-sm text-error">{@secret_error}</p>
+      </section>
+
       <section class="mt-10">
         <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Repository</h2>
         <dl class="mt-3 flex flex-col gap-2 text-[12.5px]">
@@ -604,6 +795,35 @@ defmodule ForgeWeb.ProjectSettingsLive do
     </Layouts.app>
     """
   end
+
+  # The access list read backwards. A name no state or command names is said to be one, because a
+  # secret set and listed nowhere is a secret nothing receives — which may be what someone meant,
+  # and may be a misspelling.
+  defp received(:none, _name), do: "the default branch has no workflow yet"
+
+  defp received(%{names: names, invalid: [nil]}, _name) when names == %{},
+    do: "the default branch's workflow is not valid"
+
+  defp received(%{names: names, invalid: invalid}, name) do
+    case Map.get(names, name, []) do
+      [] -> "no state or command names it"
+      by -> Enum.join(by, ", ")
+    end <> unread(invalid)
+  end
+
+  # A type whose workflow is refused names nothing that can be read, so the list above may be
+  # short by what it would have said.
+  defp unread([]), do: ""
+
+  defp unread(types),
+    do:
+      "; not read: the workflow of #{Enum.map_join(types, ", ", &"`#{&1}`")}, which is not valid"
+
+  defp chats(1), do: "held by 1 live conversation"
+  defp chats(count), do: "held by #{count} live conversations"
+
+  defp held(nil, _now), do: "no run has held it"
+  defp held(at, now), do: "last held " <> Format.ago(at, now)
 
   defp spent(%{revoked_at: at}, now) when not is_nil(at), do: "revoked " <> Format.ago(at, now)
   defp spent(%{expires_at: at}, now), do: "expired " <> Format.ago(at, now)

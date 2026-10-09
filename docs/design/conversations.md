@@ -123,6 +123,12 @@ may say instead**.
   unit's `MemoryMax` — and is not built; what it would need is a gate check against the worker's
   remaining budget and a verb on the wire.
 
+- **Secrets, on the create view, none ticked.** The project's secrets as boxes; the ones ticked
+  are in the conversation's environment for every process it has, by name, at their current
+  versions — and readable by every member, which the view says where the choice is made
+  (`secrets.md` § Conversations). A name that is not one of the project's live secrets is refused
+  by the context, never dropped.
+
 **This is what makes a small machine usable.** The figures are what `Provisioning.holds?/2`
 compares against a template, so a conversation that will compile something says so before it is
 placed, and one that will not is no longer refused by a 2 GiB machine for a number it never

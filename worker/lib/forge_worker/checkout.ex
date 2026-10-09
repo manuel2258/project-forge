@@ -8,8 +8,8 @@ defmodule ForgeWorker.Checkout do
   repository is not available and this module is the whole of what changes: nothing.
 
   The credential never reaches argv. git is run with a `credential.helper` that prints
-  `$FORGE_GIT_TOKEN`, and the variable is passed through the process environment only — the same
-  rule `ForgeWorker.Job.Runner` applies to every `{:secret, _}` value.
+  `$FORGE_GIT_TOKEN`, and the variable is passed through git's own process environment only, which
+  no other user can read — never an argument.
 
   **Git runs as whoever `as` says, and in a job's worktree that is the job's user.** A
   repository's hooks and configuration are programs — a `pre-commit`, a `core.fsmonitor` — and

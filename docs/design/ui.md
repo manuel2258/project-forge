@@ -167,7 +167,7 @@ measure; each route sets its own:
 | `/projects/:name/settings` | 48rem | Forms and tables — tokens, people, mirrors. Narrower loses the row; wider is a rail with nothing to put in it. |
 | `/tickets/:project/:number` | 74rem | A work screen (§ The work screen): 53rem tabbed column plus a 21rem facts rail, divided by a 1px rule. Below `lg` the rail is the details sheet, opened from the context strip. |
 | `…/review` | 74rem | Not a work screen: a page that scrolls, its column beside a 21rem rail at `lg` and above it below. The diff needs the width; the rail carries the evidence. |
-| `…/jobs/:job_id` | 96rem | Laid out as the review page is, wider: its column is the harness stream, whose lines are an agent's paragraphs and commands, and at 74rem the column beside the 21rem rail left them a ribbon. A command's page is the same route and takes the same width, its script in the column. Manifest in the rail, the harness stream in the column — a bounded pane, since no tab body bounds it here — tailed while the job runs (§ Motion and structure). Under the outcome, and only when memory was the trouble, the `warning` line `capacity.md` § Memory describes. |
+| `…/jobs/:job_id` | 96rem | Laid out as the review page is, wider: its column is the harness stream, whose lines are an agent's paragraphs and commands, and at 74rem the column beside the 21rem rail left them a ribbon. A command's page is the same route and takes the same width, its script in the column. Manifest in the rail, the harness stream in the column — a bounded pane, since no tab body bounds it here — tailed while the job runs (§ Motion and structure). Under the outcome, and only when memory was the trouble, the `warning` line `capacity.md` § Memory describes. A job whose runs held project secrets has a *secrets* row in the manifest, a line per run — *`STRIPE_TEST_KEY` v2, `SENTRY_TOKEN` v1* — by name and version, never a value. |
 | `/chats` | 34rem | One ordered list, so the queue's measure and for the queue's reason: width only lets a second row compete for the same glance. |
 | `/chats/:id` | 74rem | The same work screen: a conversation is work with a branch, a cost and a record. The tabs are the column; what it cost and its facts are the rail, or the details sheet below `lg`. |
 | `/chats/new` | 34rem | The first message is prose and needs the queue's measure, not a form field's — the same reason `/tickets/new` has it. |
@@ -441,7 +441,10 @@ give way, clipped, so the tabs and the composer stay. Beneath it, one
 line — the **context strip** — of identifiers: the branch, `+added −removed` over N files, turns,
 what it has spent in the same form the rail uses, and the compact capacity gauge for the page's
 pool; and, only when memory was the trouble, *⚠ 2 OOM kills · peak 2.0 GiB of 2 GiB* in `warning`
-(`capacity.md` § Memory, which a job holds rather than spends). On a phone, tapping the strip opens the **details sheet** (the More sheet's component,
+(`capacity.md` § Memory, which a job holds rather than spends). A conversation holding project
+secrets adds *holds `STRIPE_TEST_KEY`* — names, never a value — and, for one picked when it was
+opened and deleted since, *⚠ `GONE_KEY` was deleted and this conversation no longer holds it* in
+`warning`, read from its latest run (`secrets.md` § Conversations). On a phone, tapping the strip opens the **details sheet** (the More sheet's component,
 § The phone): everything the laptop rail holds, including *End it* and its confirm. At `lg` and up
 the rail is drawn beside the body as it is today and the strip opens nothing: it is still the
 same button in the markup, taking no pointer and reachable from the keyboard, and the sheet
@@ -730,6 +733,13 @@ every conversation in every project you are in, so it is the one surface with no
 and the only place a create affordance has to ask. A conversation is still never started from
 nowhere; the asking moved to the one page that does not know.
 
+**A conversation's secrets are boxes, none ticked**, below the model and the resources, and only
+when the project has any: each secret's name, and two sentences saying what ticking one means —
+*Set in its environment by name. Anyone in this project can ask it what they are*
+(`secrets.md` § Conversations). A name deleted
+between drawing the page and submitting it is refused by name, and the conversation is not
+started without it.
+
 **A list row that navigates may still carry a control, beside it and never inside it.** The chats
 list ends a live conversation from its row, because a live row is a machine running and the
 alternative was opening it first. The row is the link and the control is its sibling, which is
@@ -867,6 +877,13 @@ themselves). Tokens, people, mirrors and the model are drawn only for a project 
 branch is drawn for every member. Saving the model is refused without the admin capability —
 `Operator.set_model/3` is the guard, not the form — and the form is not offered to anyone the
 guard would refuse.
+
+**Its secrets are listed for every member and set only by an admin** (`secrets.md` § Surfaces).
+A member reads the names, because a workflow's author needs them; each row is a name, its version,
+who set it when, and who receives it — the commands and states of the default branch's workflows
+that name it, each with its ticket type when there are types, how many live conversations hold it, and when a run last held it. No value is ever
+drawn, to anyone, because none is ever loaded — the value field is write-only, sent once on submit
+and rendered empty again after a save.
 
 ## Account settings
 

@@ -98,6 +98,8 @@ defmodule ForgeCore.Prompt do
       left them. Nothing of it needs reading again.
       """,
       chat_branch(spec, head),
+      # What it holds now, which a session resumed from before a deletion still believes it has.
+      blank_to_nil(secrets(spec)),
       if(blank?(spec.prompt), do: nil, else: "---\n\n" <> String.trim(spec.prompt))
     ]
     |> Enum.reject(&is_nil/1)
@@ -188,6 +190,8 @@ defmodule ForgeCore.Prompt do
   defp blank?(nil), do: true
   defp blank?(text), do: String.trim(text) == ""
 
+  defp blank_to_nil(text), do: if(blank?(text), do: nil, else: text)
+
   # Longer than any run of backticks in what it wraps, so a person's answer that quotes a fenced
   # block cannot close this one early and leave the rest of the prompt inside it.
   defp fence(content) do
@@ -237,7 +241,7 @@ defmodule ForgeCore.Prompt do
 
     #{inputs(spec, job_dir)}
     #{history(spec, job_dir)}
-    #{replay(spec, job_dir)}
+    #{replay(spec, job_dir)}#{secrets(spec)}
     """
   end
 
@@ -320,7 +324,7 @@ defmodule ForgeCore.Prompt do
     ## Allowed outcomes
 
     #{outcomes(spec)}
-    #{may_invoke(spec, job_dir)}#{command_results(spec, job_dir)}
+    #{may_invoke(spec, job_dir)}#{command_results(spec, job_dir)}#{secrets(spec)}
 
     ## Budget
 
@@ -498,9 +502,49 @@ defmodule ForgeCore.Prompt do
     end)
   end
 
+  # Named, never valued: the values are in the environment and nowhere in this prompt. What it asks
+  # is a request, and says so — masking is the worker's, and catches only the exact value
+  # (`docs/design/secrets.md` § Masking). A conversation reopened after one of its secrets was
+  # deleted is told which, here and in its continuation, rather than finding the variable missing.
+  defp secrets(%Spec{secrets: [], secrets_gone: []}), do: ""
+
+  defp secrets(%Spec{secrets: names, secrets_gone: gone}) do
+    """
+
+    ## Secrets in your environment
+    #{held(names)}#{gone(gone)}
+    """
+  end
+
+  defp held([]), do: ""
+
+  defp held(names) do
+    """
+
+    #{vars(names)} — set for your work by the project. Use them where
+    your work needs them. Do not print them, commit them, or write them into a document, a
+    proposal or a command's arguments: anything you print may be read by every member of the
+    project. The exact value is masked where it leaves the machine, which is a safety net and
+    not a reason to print it.
+    """
+  end
+
+  defp gone([]), do: ""
+
+  defp gone(names) do
+    """
+
+    #{vars(names)} — deleted by the project since this conversation was opened, and no longer
+    set. Anything earlier in it that used them will not work now.
+    """
+  end
+
+  defp vars(names), do: Enum.map_join(names, ", ", &"`$#{&1}`")
+
   # `docs/design/job-prompt.md` § Commands: what this job's agent may run, how many remain, and
   # the one way to ask. Absent for a state that may not invoke, so no other job is told how to use
   # a file the preamble names only as one to leave alone.
+
   defp may_invoke(%Spec{may_invoke: grants}, _job_dir) when map_size(grants) == 0, do: ""
 
   defp may_invoke(%Spec{may_invoke: grants}, job_dir) do

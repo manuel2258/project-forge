@@ -80,7 +80,15 @@ defmodule ForgeCore.Job.Spec do
     # keys: `default_branch` when it is made, and at run time `head`, `base`, `paths`,
     # `changeset`, `merges` (each `sha` and `subject`, newest first) and `more`, for the manifest.
     # Nil for every other job.
-    integration: nil
+    integration: nil,
+    # The names of the project secrets this run holds in its environment, filled at assignment —
+    # never a value, which travels sealed beside the spec (`docs/design/secrets.md` § Delivery).
+    # What the manifest names, so the agent knows they are there and what not to do with them.
+    secrets: [],
+    # A conversation's: what it was opened with that has been deleted since, so a reopened one is
+    # told the variable is gone rather than finding it missing (`docs/design/secrets.md`
+    # § Conversations). Always empty for a workflow job, which does not run without them.
+    secrets_gone: []
   ]
 
   @workflow_keys [
@@ -104,6 +112,8 @@ defmodule ForgeCore.Job.Spec do
           entered_commands: [%{String.t() => term()}],
           previous_changeset: String.t() | nil,
           integration: %{String.t() => term()} | nil,
+          secrets: [String.t()],
+          secrets_gone: [String.t()],
           ticket:
             %{number: pos_integer(), title: String.t(), ticket_type: String.t() | nil} | nil,
           state: String.t() | nil,
@@ -216,7 +226,9 @@ defmodule ForgeCore.Job.Spec do
       produces: or_default(get, :produces, []),
       outcomes: or_default(get, :outcomes, ["done"]),
       permitted_children: or_default(get, :permitted_children, []),
-      answered_keys: or_default(get, :answered_keys, [])
+      answered_keys: or_default(get, :answered_keys, []),
+      secrets: or_default(get, :secrets, []),
+      secrets_gone: or_default(get, :secrets_gone, [])
     }
   end
 

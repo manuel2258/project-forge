@@ -1,11 +1,11 @@
 defmodule Forge.Credentials.KeyCheck do
   @moduledoc """
-  Refuses to start a node whose `SECRET_KEY_BASE` opens none of the credentials it holds
-  (`docs/deploy.md` § Secrets file).
+  Refuses to start a node whose `SECRET_KEY_BASE` opens none of the credentials and secrets it
+  holds (`docs/deploy.md` § Secrets file).
 
-  Inference credentials and provider credentials are both sealed under a key derived from it
-  (`Forge.Provisioning.Vault`), and a changed key is otherwise found piecemeal, long after the
-  restart that caused it: no job starts (*credential … cannot be decrypted*), no Hetzner machine
+  Inference credentials, provider credentials and project secrets are all sealed under a key
+  derived from it (`Forge.Provisioning.Vault`), and a changed key is otherwise found piecemeal,
+  long after the restart that caused it: no job starts (*credential … cannot be decrypted*), no Hetzner machine
   can be made or destroyed, every session cookie is void, and the store tokens already in workers'
   hands stop working mid-job. So before the endpoint serves anything, a sample of each table's
   sealed secrets is opened — **with each schema's own way of opening them**, the model the platform
@@ -25,6 +25,7 @@ defmodule Forge.Credentials.KeyCheck do
   alias Forge.Credentials.Credential
   alias Forge.Provisioning
   alias Forge.Repo
+  alias Forge.Secrets.Secret
 
   require Logger
 
@@ -66,18 +67,19 @@ defmodule Forge.Credentials.KeyCheck do
       accepted ->
         Logger.warning(
           "SECRET_KEY_BASE opens none of the stored credentials; starting anyway because " <>
-            "FORGE_ACCEPT_NEW_SECRET_KEY_BASE is set. Add each credential again."
+            "FORGE_ACCEPT_NEW_SECRET_KEY_BASE is set. Add each credential and secret again."
         )
 
         :ok
 
       true ->
         {:error,
-         "SECRET_KEY_BASE opens none of the #{length(sealed)} stored credentials sampled, so it " <>
+         "SECRET_KEY_BASE opens none of the #{length(sealed)} stored credentials and project " <>
+           "secrets sampled, so it " <>
            "is not the key they were sealed with. Started like this, no job could run, no " <>
            "machine could be made or destroyed, and every session would be void. Restore the " <>
            "previous SECRET_KEY_BASE; or, if it was changed on purpose, start once with " <>
-           "FORGE_ACCEPT_NEW_SECRET_KEY_BASE=1 and add the credentials again."}
+           "FORGE_ACCEPT_NEW_SECRET_KEY_BASE=1 and add the credentials and secrets again."}
     end
   end
 
@@ -108,10 +110,24 @@ defmodule Forge.Credentials.KeyCheck do
           limit: @sample
       )
 
-    Enum.map(inference, &{:inference, &1}) ++ Enum.map(provider, &{:provider, &1})
+    # A project secret is replaced in place, so its newest is the one set most recently; a deleted
+    # one has no value to open.
+    project =
+      Repo.all(
+        from s in Secret,
+          where: not is_nil(s.value),
+          order_by: [desc: s.set_at],
+          select: s.value,
+          limit: @sample
+      )
+
+    Enum.map(inference, &{:inference, &1}) ++
+      Enum.map(provider, &{:provider, &1}) ++ Enum.map(project, &{:project, &1})
   end
 
   defp opens?({:inference, sealed}), do: match?({:ok, _secret}, Credential.open(sealed))
+
+  defp opens?({:project, sealed}), do: match?({:ok, _value}, Secret.open(sealed))
 
   defp opens?({:provider, sealed}),
     do:

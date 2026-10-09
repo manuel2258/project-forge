@@ -418,6 +418,26 @@ edit is the one way left to get there. A conversation about the ticket was the o
 the ticket's documents every turn — and it is refused that document while the job waits, and
 never raises a question of its own (`conversations.md` § Commits).
 
+## Secrets
+
+An agent whose run holds project secrets (`secrets.md` § The workflow is the access list) — its
+state names them, or they were picked for its conversation — is told so in its manifest, under
+*Secrets in your environment*: each variable by name, as `$NAME`, never its value, which is in the
+process's environment and nowhere in the prompt. The section asks it not to print them, commit
+them, or write them into a document, a proposal or a command's arguments, because anything it
+prints may be read by every member, and says that masking is a safety net and not a reason to print
+one. That is a request, and the section says it as one (`secrets.md` § What a secret can protect).
+The names come from the spec's `secrets`, which the platform fills at assignment with what the run
+holds, so the manifest names exactly what is set. A command holds secrets too, and has no manifest
+to be told in; its script reads the variables it was written for.
+
+A conversation reopened after one of its secrets was deleted holds the rest, and the spec's
+`secrets_gone` names what is not set any more. The section says so — deleted by the project, and
+anything earlier that used them will not work now — in the manifest of a cold start and in the
+continuation a resumed session reads, which carries this section and nothing else of the
+manifest: the session still holds the first manifest, which named the variable as set. A job
+holding none and missing none has no section.
+
 ## Groups of files
 
 A state producing `package/*` is told, in its manifest's outputs, to write any number of files to

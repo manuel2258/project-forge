@@ -164,20 +164,20 @@ defmodule Forge.Credentials do
     end
   end
 
-  # The owner and not-yet-revoked conditions repeat what `get/2` and the match in `revoke/2`
-  # established, so removing either is an **equivalent mutant** in every sequential test and has
-  # none: they are for two revocations racing, where the second must find nothing to update and
-  # write no second event — which is what `:won` refuses.
+  # The owner is `get/2`'s to check, once: repeated here it guarded nothing — a credential's owner
+  # never changes — and it hid the removal of the check in `get/2`, since either copy alone refused
+  # somebody else's id (`docs/design/secrets.md` § Sequencing, step 2, found the same in
+  # `Forge.Secrets`). The not-yet-revoked condition does repeat the match in `revoke/2`, and
+  # removing it — or `:won`, which reads its count — is an **equivalent mutant** in every
+  # sequential test: both are for two revocations racing, where the second must find nothing to
+  # update and write no second event.
   defp revoke_live(%Credential{} = credential) do
     now = now()
 
     Multi.new()
     |> Multi.update_all(
       :revoke,
-      from(c in Credential,
-        where:
-          c.id == ^credential.id and c.user_id == ^credential.user_id and is_nil(c.revoked_at)
-      ),
+      from(c in Credential, where: c.id == ^credential.id and is_nil(c.revoked_at)),
       set: [revoked_at: now, secret: nil, updated_at: now]
     )
     |> Multi.run(:won, fn _repo, %{revoke: {count, _rows}} ->

@@ -128,9 +128,10 @@ url-safe base64, stored as a sha256 hash, looked up by hash so no secret is ever
   its own BEAM; milestone 3 moved them to a worker and the choke point moved with them, which is
   the whole of what changed here (`docs/design/worker-tier.md` § Git).
 - **Delivery.** In the assignment, and from there into the job's process environment as
-  `FORGE_GIT_TOKEN`, through the runner's existing `{:secret, _}` path, so it reaches the
-  environment and never argv — not the runner's, and not the transient unit's either, which names
-  a secret without its value. **It is never written into the job's `spec`**, which is stored on
+  `FORGE_GIT_TOKEN`, through the runner's `{:secret, _}` path, so it reaches the process's
+  environment and never argv, and not the transient unit's environment either: it is in a file the
+  unit is handed with `LoadCredential=` and the process loads itself (`worker-tier.md` § The job
+  slice). **It is never written into the job's `spec`**, which is stored on
   the row forever. The worker holds it for the length of the job and dies with it.
 - **Revocation.** When the job finishes or fails, and when it is requeued because its worker was
   lost, retired or rejoined without it (`Jobs.requeue/2`) — the next run is issued its own, and

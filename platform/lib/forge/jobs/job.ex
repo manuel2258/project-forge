@@ -34,6 +34,9 @@ defmodule Forge.Jobs.Job do
     # a job with no figures is one the gate cannot place.
     field :memory_max, :integer
     field :cores, :integer
+    # The project secrets it is handed, by name: its state's, its command's, or what the person
+    # opening a conversation picked. Written once, like `spec` (`docs/design/secrets.md`).
+    field :secret_names, {:array, :string}, default: []
     field :status, Ecto.Enum, values: @statuses, default: :pending
     field :outcome, Ecto.Enum, values: @outcomes
     field :declared_outcome, :string
@@ -94,7 +97,8 @@ defmodule Forge.Jobs.Job do
       :worker_id,
       :model,
       :memory_max,
-      :cores
+      :cores,
+      :secret_names
     ])
     |> validate_required([:kind, :project_id, :attempt, :memory_max, :cores])
     |> validate_shape()

@@ -155,6 +155,14 @@ These decisions are settled. They are not to be reopened.
   cannot reach for someone else's machine, because the machine is paid for by its owner. A machine
   made from a template reaches the projects its template is assigned to, read at placement. A job
   runs only on a worker assigned to its project.
+- **A project's secrets are the project's, written by its admins and named by every member.**
+  Nobody reads a value back. The platform never uses one; it carries it to the jobs that list it.
+- **The workflow is the access list for jobs.** A job state or a command names the secrets it
+  receives, and a ticket entering that state gets them; the secret itself carries no rule about
+  where it may go. A conversation's secrets are picked by the person opening it, so every project
+  secret is readable by every member. Delivered values are masked in what the worker uploads where
+  that is easy — the exact value and its JSON-escaped form — and nothing more is claimed. See
+  `design/secrets.md`.
 
 See `design/identity.md`.
 

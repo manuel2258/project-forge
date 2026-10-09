@@ -101,8 +101,19 @@ defmodule ForgeWeb.ChatLive do
       now: Conversations.now(events),
       memory: Forge.Jobs.Memory.trouble(events),
       plan: Transcript.plan(messages),
+      secrets_gone: secrets_gone(events),
       at: DateTime.utc_now()
     )
+  end
+
+  # What its latest run could not hold because it was deleted since the conversation was opened
+  # (`docs/design/secrets.md` § Conversations): said on the page, rather than left for the agent
+  # to find its variable missing halfway through a turn.
+  defp secrets_gone(events) do
+    case List.last(for %{type: "job.secrets", payload: payload} <- events, do: payload) do
+      nil -> []
+      run -> run["gone"]
+    end
   end
 
   # Against the default branch, which is where a merge would put it — the question the review
@@ -426,6 +437,13 @@ defmodule ForgeWeb.ChatLive do
                 holds rather than spends). --%>
           <span :if={@memory} id="chat-memory" class="text-warning">
             ⚠ {Forge.Jobs.Memory.words(@memory)}
+          </span>
+          <%!-- What it was opened with, less what has gone since: the names, never a value. --%>
+          <span :if={@chat.secret_names -- @secrets_gone != []} id="chat-secrets">
+            holds {Enum.join(@chat.secret_names -- @secrets_gone, ", ")}
+          </span>
+          <span :for={name <- @secrets_gone} class="chat-secret-gone text-warning">
+            ⚠ {name} was deleted and this conversation no longer holds it
           </span>
         </:strip>
 

@@ -308,6 +308,26 @@ defmodule Forge.Operator do
     with :ok <- allow(project, user, :manage), do: Projects.set_model(project, model)
   end
 
+  @doc """
+  Sets one of the project's secrets: a new one, or a new version of the live one with that name.
+  A project admin's (`docs/design/secrets.md` § What a secret is).
+  """
+  @spec set_secret(Project.t(), User.t(), term(), term()) ::
+          {:ok, Forge.Secrets.Secret.t()} | {:error, term()}
+  def set_secret(%Project{} = project, %User{} = user, name, value) do
+    with :ok <- allow(project, user, :manage), do: Forge.Secrets.set(project, user, name, value)
+  end
+
+  @doc """
+  Deletes one of the project's secrets, destroying its value. The id is the client's, so
+  `Forge.Secrets.delete/3` resolves it within this project, as `revoke_token/3` does a token.
+  """
+  @spec delete_secret(Project.t(), User.t(), term()) ::
+          {:ok, Forge.Secrets.Secret.t()} | {:error, term()}
+  def delete_secret(%Project{} = project, %User{} = user, id) do
+    with :ok <- allow(project, user, :manage), do: Forge.Secrets.delete(project, user, id)
+  end
+
   @doc "Mints a git token for the project's repository."
   @spec issue_token(Project.t(), User.t(), keyword()) ::
           {:ok, String.t(), Forge.Git.Token.t()} | {:error, term()}

@@ -182,10 +182,16 @@ defmodule ForgeWorker.Job.RunnerTest do
     assert List.keyfind(opts.env, "FORGE_JOB", 0)
     assert List.keyfind(opts.env, "PATH", 0)
 
-    # The credential is named and not valued: it is the one thing that must not be copied into
-    # a list that ends up in an argument vector.
-    assert "ANTHROPIC_API_KEY" in opts.secret_names
+    # The credential is not in anything the slice is given, by name or by value: a unit's
+    # environment is shown to every user on the machine. It is in the file the process loads, in
+    # the worker's own directory, and the file is gone once the process has ended.
     refute List.keyfind(opts.env, "ANTHROPIC_API_KEY", 0)
+    refute inspect(opts, limit: :infinity, printable_limit: :infinity) =~ "secret-key"
+    assert Path.dirname(opts.secrets_file) == opts.job_dir <> ".worker"
+    refute File.exists?(opts.secrets_file)
+
+    # And the harness had it all the same.
+    assert File.read!(Path.join(opts.job_dir, "fake-env.txt")) =~ "ANTHROPIC_API_KEY=secret-key"
   end
 
   test "a successful run converges with the declared outcome and full accounting", context do
@@ -579,11 +585,18 @@ defmodule ForgeWorker.Job.RunnerTest do
   # The git token rides in `:extra_env` as a secret, and the runner keeps its spawn options for a
   # correction. A value in a process's state is a value in every crash report of it.
   test "the runner's state holds no secret it was given", context do
-    pid =
-      run(context, "hang", extra_env: [{"FORGE_GIT_TOKEN", {:secret, "tok-never-shown"}}])
+    # A project secret too, which the runner keeps sealed and opens only at spawn.
+    secrets = sealed_secrets(%{"STRIPE_TEST_KEY" => "sk_never_shown"}, "runner-secrets")
 
-    refute inspect(:sys.get_state(pid), limit: :infinity, printable_limit: :infinity) =~
-             "tok-never-shown"
+    pid =
+      run(context, "hang",
+        extra_env: [{"FORGE_GIT_TOKEN", {:secret, "tok-never-shown"}}],
+        secrets: secrets
+      )
+
+    state = inspect(:sys.get_state(pid), limit: :infinity, printable_limit: :infinity)
+    refute state =~ "tok-never-shown"
+    refute state =~ "sk_never_shown"
 
     Runner.cancel(pid)
     {:ok, _result} = Runner.await(pid, 5_000)
@@ -958,6 +971,22 @@ defmodule ForgeWorker.Job.RunnerTest do
       assert problem =~ "plan.md: question[0]"
     end
 
+    # A correction round is a process of its own, spawned anew: it holds the job's secrets as the
+    # first did, or a fix that needs one fails where the first round would not have.
+    test "a correction round holds the job's secrets too", context do
+      secrets = sealed_secrets(%{"STRIPE_TEST_KEY" => "sk_test_round-two"}, "runner-secrets")
+
+      {:ok, result} =
+        context |> run("fixes_when_resumed", secrets: secrets) |> Runner.await(5_000)
+
+      assert result.harness["corrections"] == 1
+      job_dir = job_dir(result)
+      assert File.read!(Path.join(job_dir, "fake-args.txt")) =~ "--resume sess-42"
+
+      assert File.read!(Path.join(job_dir, "fake-env-all.txt")) =~
+               "STRIPE_TEST_KEY=sk_test_round-two"
+    end
+
     # The platform adds a result's cost and turns to the job once. Reporting only the last
     # process's would lose what the first spent.
     test "the result reports what every round spent, and how many corrections ran", context do
@@ -1120,14 +1149,27 @@ defmodule ForgeWorker.Job.RunnerTest do
         slice_opts: %{reply_to: self()}
       )
 
+    # The secrets' loader is innermost, inside the environment: `nix develop` never holds them.
     assert_receive {:wrapped, "nix", ["develop", ".#implement", "--command" | rest]}
-    assert [executable | _flags] = rest
+    assert ["/bin/sh", "-c", _loader, "forge-secrets", _file, executable | _flags] = rest
     assert executable == fake_executable()
     {:ok, _result} = Runner.await(pid, 5_000)
   end
 
   test "without it the harness is run as it is", context do
     pid = run(context, "success", slice: WrapReportingSlice, slice_opts: %{reply_to: self()})
+
+    assert_receive {:wrapped, "/bin/sh", ["-c", _loader, "forge-secrets", _file, executable | _]}
+    assert executable == fake_executable()
+    {:ok, _result} = Runner.await(pid, 5_000)
+
+    # A harness given no secret at all is started as it is.
+    pid =
+      run(context, "success",
+        slice: WrapReportingSlice,
+        slice_opts: %{reply_to: self()},
+        harness_opts: [executable: fake_executable()]
+      )
 
     assert_receive {:wrapped, executable, _args}
     assert executable == fake_executable()
@@ -1138,10 +1180,16 @@ defmodule ForgeWorker.Job.RunnerTest do
   # harness anyway — is an agent running unconfined as the worker's own user, which is the one
   # thing the slice exists to prevent, so this concludes with nothing started.
   test "a slice that cannot be made ends the job rather than running unconfined", context do
-    pid = run(context, "success", slice: RefusingSlice)
+    spec = spec()
+    pid = run(context, "success", slice: RefusingSlice, spec: spec)
 
     assert {:ok, result} = Runner.await(pid)
     assert result.outcome == :error
+
+    # The credential written for a process that never started does not outlive it.
+    worker_dir = Path.join(context.root, spec.job_id <> ".worker")
+    assert File.dir?(worker_dir)
+    refute File.exists?(Path.join(worker_dir, "secrets.env"))
 
     # Nothing ran: no harness event, no exit status, and the document the state declared is
     # missing rather than invalid. Nor does its reason say a harness exited: none was started.

@@ -477,10 +477,23 @@ systemd-run --pipe --wait --collect --unit=forge-job-<short id>
   execution model.
 - **The environment is named, not inherited.** systemd starts the unit with its own default
   environment rather than `systemd-run`'s, so everything the runner composed — `PATH`, `HOME`, the
-  job directory, the harness's own variables — is passed as `--setenv`. A secret is named without
-  its value, which `systemd-run` then reads from its own environment: the value reaches systemd
-  over the bus instead of sitting in an argument vector for the length of the job. This is why the
-  slice is told the environment in `prepare/1` rather than only the command in `wrap/3`.
+  job directory, the harness's own variables — is passed as `--setenv`. This is why the slice is
+  told the environment in `prepare/1` rather than only the command in `wrap/3`.
+- **A secret is never in the unit's environment.** It was: named as `--setenv=NAME` without its
+  value, which `systemd-run` read from its own environment, on the reasoning that the value then
+  reached systemd over the bus rather than sitting in an argument vector. The bus is the problem.
+  A unit's `Environment=` is a property systemd shows every user on the machine — `systemctl show
+  -p Environment` needs no privilege, and `systemd.exec(5)` says so under `Environment=` — so every
+  job on a machine could read every other job's credential, git token and project secrets for as
+  long as it ran, another project's included, and the forwarding shell had put each value in
+  `env`'s argv besides. Now every `{:secret, _}` value is written to a file in the worker's own
+  directory, which only root can enter, and the unit is handed the file with
+  `LoadCredential=forge-secrets:<path>`: systemd reads it as root and gives the unit a copy only
+  its user can read, at `$CREDENTIALS_DIRECTORY/forge-secrets`. A shell inside the process loads it
+  and `exec`s the harness or the script, innermost, inside `nix develop`
+  (`ForgeWorker.Job.Exec`). The bus carries the path; no argv carries a value; the worker removes
+  the file when the process has ended. `Slice.Direct` has no unit, and its process reads the file
+  where it is.
 
 This is behind `ForgeWorker.Slice`, with two implementations: `Slice.Systemd` as above, and
 `Slice.Direct`, which is what the runner does today — spawn the process with no unit and no limit.

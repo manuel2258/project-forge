@@ -76,13 +76,13 @@ defmodule ForgeWorker.SliceTest do
       assert byte_size(Systemd.user_name("d7cf4946-0e0d-177c-11c8-f66c8966e9f0")) <= 31
     end
 
-    test "carries the runner's environment across, and a secret by name only" do
+    test "carries the runner's environment across, and its secrets as a file it never names" do
       {:ok, context} =
         prepared(%{
           job_id: @job,
           worktree: "/w",
           env: [{"PATH", "/run/current-system/sw/bin"}, {"HOME", "/var/lib/forge/jobs/x/home"}],
-          secret_names: ["CLAUDE_CODE_OAUTH_TOKEN"]
+          secrets_file: "/var/lib/forge/jobs/x.worker/secrets.env"
         })
 
       flags = Systemd.flags(context)
@@ -92,10 +92,18 @@ defmodule ForgeWorker.SliceTest do
       assert "--setenv=PATH=/run/current-system/sw/bin" in flags
       assert "--setenv=HOME=/var/lib/forge/jobs/x/home" in flags
 
-      # The value is not here: systemd-run reads it from its own environment and passes it to
-      # systemd over the bus, so it never sits in an argument vector for the job's lifetime.
-      assert "--setenv=CLAUDE_CODE_OAUTH_TOKEN" in flags
-      refute Enum.any?(flags, &String.starts_with?(&1, "--setenv=CLAUDE_CODE_OAUTH_TOKEN="))
+      # A secret is not in the unit's environment at all, by value or by name: systemd shows a
+      # unit's `Environment=` to every user on the machine. The unit is handed the file, which
+      # systemd reads as root and gives the job's user alone a copy of.
+      assert "--property=LoadCredential=forge-secrets:/var/lib/forge/jobs/x.worker/secrets.env" in flags
+
+      assert Enum.filter(flags, &String.starts_with?(&1, "--setenv=")) == [
+               "--setenv=PATH=/run/current-system/sw/bin",
+               "--setenv=HOME=/var/lib/forge/jobs/x/home"
+             ]
+
+      {:ok, none} = prepared(%{job_id: @job, worktree: "/w", env: []})
+      refute Enum.any?(Systemd.flags(none), &(&1 =~ "LoadCredential"))
     end
   end
 

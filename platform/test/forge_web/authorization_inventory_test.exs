@@ -165,6 +165,10 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     # The version id is the client's; `Operator.accept_proposal/4` and `decline_proposal/3` resolve
     # it to its project and refuse a non-member (`allow_proposal/2`).
     {"project_live.ex", "decide_proposal"} => :member,
+    # Both resolve inside the project and ask for `:manage` in `Forge.Operator`; the value is
+    # passed through and never assigned (`docs/design/secrets.md` § Surfaces).
+    {"project_settings_live.ex", "set-secret"} => :manage,
+    {"project_settings_live.ex", "delete-secret"} => :manage,
     {"project_settings_live.ex", "add-mirror"} => :manage,
     {"project_settings_live.ex", "remove-mirror"} => :manage,
     {"project_settings_live.ex", "dismiss"} => :local,

@@ -66,9 +66,15 @@ Not used: `--bare` (it skips OAuth credentials, which the credential comparison 
 The harness process gets a clean environment built from an allowlist of the worker's own
 variables (PATH, locale, proxies, Nix settings), a private HOME inside the job directory,
 `FORGE_JOB`, `FORGE_MEMORY_MAX` when the slice has a ceiling (`worker-tier.md` § The job slice),
-and exactly one of `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`. Secrets
-are forwarded through the environment, never placed on a command line, and are resolved by
-the driver at spawn time so they never sit in process state or crash reports.
+and exactly one of `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`, and the project secrets the
+run holds, by their own names (`secrets.md` § Delivery) — none of them a name this list or the
+harness reads, which `ForgeCore.Secret` refuses on both ends. Secrets
+are written at spawn to a file only root can read, which the unit is handed with `LoadCredential=`
+and the process loads itself (`worker-tier.md` § The job slice): never placed on a command line,
+never in the unit's environment, which systemd shows every user on the machine, and resolved at
+spawn time so they never sit in process state or crash reports. What the harness
+prints of a project secret — in an event, the transcript, the session file — is masked by the
+worker before it leaves the machine (`secrets.md` § Masking).
 
 The harness runs on a worker, not beside the platform, in a worktree the worker made for the job
 and pushes back over the git endpoint with a token scoped to one ref (`worker-tier.md` § Git). On

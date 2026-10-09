@@ -396,6 +396,11 @@ report of any of them.
   can read `workers.token_hash` and a captured assignment can open it. Before this the machine's
   token was in its environment file, readable by root on that machine, for the machine's whole
   life; now it is in a job's environment for that job's run, which the agent could always read.
+- **And in that job's environment only.** It went to the unit as `--setenv`, and a unit's
+  environment is a property systemd shows every user on the machine, so every other job there
+  could read it while the job ran. It now reaches the process through a file the unit is handed
+  with `LoadCredential=`, as every secret does (`worker-tier.md` § The job slice,
+  `secrets.md` § Delivery).
 
 One implementation of the seal, in `forge_core`, used by both ends: two implementations of a
 cipher that have to agree are two places to disagree.

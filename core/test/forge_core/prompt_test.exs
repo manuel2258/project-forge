@@ -47,6 +47,69 @@ defmodule ForgeCore.PromptTest do
     assert manifest =~ "- Turns: 40\n- Cost: 2.0 USD"
   end
 
+  # `docs/design/secrets.md` § Delivery: a job is told which variables it holds — by name, never
+  # by value — and asked not to print them; one that holds none is told nothing about secrets.
+  describe "secrets" do
+    test "a job holding secrets is told their names and what not to do with them" do
+      manifest = Prompt.manifest(%{spec() | secrets: ["STRIPE_TEST_KEY", "SENTRY_TOKEN"]}, "/j")
+
+      assert manifest =~ "## Secrets in your environment"
+      assert manifest =~ "`$STRIPE_TEST_KEY`, `$SENTRY_TOKEN` — set for your work by the project."
+      assert manifest =~ "Do not print them, commit them"
+
+      refute Prompt.manifest(spec(), "/j") =~ "Secrets"
+    end
+
+    test "a conversation holding secrets is told the same" do
+      manifest = Prompt.chat_manifest(chat_spec(%{secrets: ["STRIPE_TEST_KEY"]}), "/j")
+      assert manifest =~ "## Secrets in your environment"
+      assert manifest =~ "`$STRIPE_TEST_KEY`"
+
+      refute Prompt.chat_manifest(chat_spec(), "/j") =~ "Secrets"
+    end
+
+    # A spec stored before secrets existed — a job pending when the release goes out — has
+    # neither key, and reads as holding none, not as a manifest that cannot be drawn.
+    test "a spec from before secrets holds none" do
+      map = spec() |> Spec.to_json() |> Jason.decode!() |> Map.drop(["secrets", "secrets_gone"])
+      spec = Spec.from_map(map)
+
+      assert spec.secrets == []
+      assert spec.secrets_gone == []
+      refute Prompt.manifest(spec, "/j") =~ "Secrets"
+    end
+
+    test "the names survive the spec's trip through JSON" do
+      spec = %{spec() | secrets: ["STRIPE_TEST_KEY"], secrets_gone: ["OLD_KEY"]}
+
+      assert {:ok, %Spec{secrets: ["STRIPE_TEST_KEY"], secrets_gone: ["OLD_KEY"]}} =
+               spec |> Spec.to_json() |> Spec.from_json()
+    end
+
+    # A conversation reopened after a deletion resumes a session whose first manifest named the
+    # secret; the continuation is what it reads now, and it says what holds and what is gone.
+    test "a reopened conversation is told what it holds now, and what was deleted" do
+      spec = chat_spec(%{secrets: ["STRIPE_TEST_KEY"], secrets_gone: ["OLD_KEY"]})
+      continuation = Prompt.continuation(spec, "/j", "abc123")
+
+      assert continuation =~ "## Secrets in your environment"
+      assert continuation =~ "`$STRIPE_TEST_KEY` — set for your work by the project."
+
+      assert continuation =~
+               "`$OLD_KEY` — deleted by the project since this conversation was opened"
+
+      # All of them gone is still said; none at all says nothing.
+      gone = Prompt.continuation(chat_spec(%{secrets_gone: ["OLD_KEY"]}), "/j", "abc123")
+      assert gone =~ "`$OLD_KEY` — deleted"
+      refute gone =~ "set for your work"
+
+      refute Prompt.continuation(chat_spec(), "/j", "abc123") =~ "Secrets"
+
+      # A cold reopen reads the manifest, which says the same.
+      assert Prompt.chat_manifest(spec, "/j") =~ "`$OLD_KEY` — deleted"
+    end
+  end
+
   # `docs/design/job-prompt.md` § Commands: a job is told what it may run and how to ask, and a
   # resumed one what came back — in the manifest, so a cold start knows too.
   describe "commands" do

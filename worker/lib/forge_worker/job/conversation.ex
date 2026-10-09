@@ -21,7 +21,7 @@ defmodule ForgeWorker.Job.Conversation do
 
   alias ForgeCore.Job.Result
   alias ForgeWorker.Config
-  alias ForgeWorker.Job.{Dir, Runner, Session, Workspace}
+  alias ForgeWorker.Job.{Dir, Runner, Secrets, Session, Workspace}
   alias ForgeWorker.{Log, Slice, Store}
 
   require Logger
@@ -101,13 +101,20 @@ defmodule ForgeWorker.Job.Conversation do
   # the conversation is running, for ever, with a worker's slice held against it.
   @impl true
   def handle_continue(:start, state) do
-    case Slice.enter(state.job_id) do
-      {:ok, user} -> prepare(%{state | user: user})
+    # A conversation that names a secret it cannot read does not run without it (`Secrets.check/1`).
+    with :ok <- Secrets.check(secrets(state)),
+         {:ok, user} <- Slice.enter(state.job_id) do
+      prepare(%{state | user: user})
+    else
+      {:error, :secrets_unopened} -> fail(state, "the conversation's secrets would not open")
       {:error, reason} -> fail(state, "could not make the job's user: #{inspect(reason)}")
     end
   rescue
     error -> fail(state, Exception.format(:error, error, __STACKTRACE__))
   end
+
+  # Sealed, from the assignment, every time: the state keeps nothing it does not already keep.
+  defp secrets(state), do: Secrets.from_assignment(state.assignment)
 
   # Its own rescue, so that what raises here stops a conversation that has a user to remove —
   # `terminate/2` removes it — rather than one the clause above only knows without.
@@ -241,6 +248,7 @@ defmodule ForgeWorker.Job.Conversation do
   defp runner_opts(state) do
     me = self()
     assignment = state.assignment
+    secrets = secrets(state)
     slice = assignment["slice"] || %{}
     spec = ForgeCore.Job.Spec.from_map(assignment["spec"])
 
@@ -266,9 +274,12 @@ defmodule ForgeWorker.Job.Conversation do
       owner: me,
       # Events go through here rather than straight to the link, because a delivery has to be
       # matched to the message it delivers before the platform can be told which one it was.
-      sink: fn event -> send(me, {:harness_event, event}) end,
+      # Masked here, before the delivery is matched: the match is by the order messages were
+      # written, not by their text, so a masked echo is still the message it echoes.
+      sink: fn event -> send(me, {:harness_event, Secrets.mask_event(secrets, event)}) end,
       slice_opts: %{memory_max: slice["memory_max"], cpu_weight: slice["cpu_weight"]},
       harness_opts: harness_opts,
+      secrets: secrets,
       backlog: assignment["backlog"],
       session: session,
       hold_prompt: state.hold,
@@ -376,7 +387,7 @@ defmodule ForgeWorker.Job.Conversation do
     send(
       state.link,
       {:chat_turn, state.job_id, index,
-       %{
+       Secrets.mask(secrets(state), %{
          "job_id" => state.job_id,
          "turn" => index,
          "commit" => head,
@@ -389,7 +400,7 @@ defmodule ForgeWorker.Job.Conversation do
          "documents" => documents.documents,
          "invalid_documents" => documents.invalid_documents,
          "harness" => turn_summary(event, session, state.version)
-       }}
+       })}
     )
 
     {:noreply, %{state | turns: index}}
@@ -425,8 +436,11 @@ defmodule ForgeWorker.Job.Conversation do
 
     # The runner sends its result before it stops, so it is already here. A conversation whose
     # machine died mid-turn has none, and reports what it can rather than nothing.
-    result = upload_transcript(state.result || %Result{status: :finished}, state.assignment)
+    result = state.result || %Result{status: :finished}
+    Secrets.mask_file(secrets(state), result.transcript_path)
+    result = upload_transcript(result, state.assignment)
 
+    # Masked by the link, as every ending is (`ForgeWorker.Link`'s `report/4`).
     send(
       state.link,
       {:terminal, state.job_id, "hibernated",
@@ -482,7 +496,12 @@ defmodule ForgeWorker.Job.Conversation do
         Log.line(
           "turn.uncommitted",
           :error,
-          "could not commit turn #{index}; its work is on this machine only: #{inspect(reason)}",
+          # A hook's output, which can print what the agent wrote: the machine's log is read off
+          # the machine too (`docs/design/secrets.md` § Masking).
+          Secrets.mask(
+            secrets(state),
+            "could not commit turn #{index}; its work is on this machine only: #{inspect(reason)}"
+          ),
           job_id: state.job_id
         )
 

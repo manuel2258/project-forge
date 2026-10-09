@@ -568,8 +568,8 @@ parameter declaration to validate against, and the exact vector is recorded on t
 because it is no longer derivable from this file.
 
 **`invoke` makes a command state.** It lists commands to run on entry, and the state has no
-`prompt`, `inputs`, `produces`, `outcomes`, `budget`, `model`, `env` or `may_invoke` — each command
-brings its own environment. It may carry `resources`, which its commands fall back to (§ Resources).
+`prompt`, `inputs`, `produces`, `outcomes`, `budget`, `model`, `env`, `may_invoke` or `secrets` —
+each command brings its own environment, and its own secrets. It may carry `resources`, which its commands fall back to (§ Resources).
 Commands in the list run concurrently, at the ticket branch's head when the state was entered, and
 the state waits for all of them.
 
@@ -683,6 +683,34 @@ declared. The figure is chosen, not measured — a floor under which no agent is
 other place a size enters — the new-chat form, the templates page, the workers page, the job
 row, the worker itself — refuses below the same one.
 
+## Secrets
+
+```yaml
+commands:
+  publish:
+    run: .forge/commands/publish.sh
+    timeout: 10m
+    secrets: [CARGO_REGISTRY_TOKEN]
+
+states:
+  implementing:
+    prompt: agents/implement.md
+    secrets: [STRIPE_TEST_KEY]
+    ...
+```
+
+**`secrets` lists the project secrets a job state's agent or a command receives**, by name, in its
+environment; entering the state, or running the command, is the grant, and nothing else is
+(`docs/design/secrets.md` § The workflow is the access list). It is a list of names and nothing
+more: not on a command state, which runs commands that bring their own; not on a human state,
+which runs nothing; and not under `defaults`, because a default is a secret in every job. Nothing
+is inherited — an agent's secrets do not pass to the commands it invokes.
+
+**The validator checks the names, not the project.** Each is a secret's name and not a reserved
+one (`ForgeCore.Secret`, `secrets.md` § Names), and none is listed twice. Whether the project has
+set it is the platform's question, asked when the job is scheduled, because secrets change after a
+workflow is pinned: a job naming one the project lacks sticks its ticket until an admin sets it.
+
 ## Pinning
 
 At admission the engine reads `.forge/workflow.yml` — or the chosen type's file — at the ticket's
@@ -712,7 +740,7 @@ merges: re-pinning takes the default branch, never the ticket's own.
 - `version` is `1`; `initial` names a job state; every state name is unique.
 - A job state has `prompt` and `budget`, and neither `invoke` nor `exit`. A command state has
   `invoke` and `exit` and none of `prompt`, `inputs`, `produces`, `outcomes`, `budget`, `model`,
-  `env` or `may_invoke`. A human state has
+  `env`, `may_invoke` or `secrets`. A human state has
   none of those but `produces`, and no `invoke` either; `on_enter` and `produces` are the keys it
   may carry, and what it produces is documents — never `changeset`.
 - `model`, where present, is a non-empty string. Its value is not checked against anything.
@@ -737,6 +765,8 @@ is never produced; `answers.md` is platform-managed and never declared.
   Any other key is an error, and `disk` is rejected with a message saying it is *reserved* rather
   than unknown, so it does not read as a typo. `defaults`, where present, is a mapping whose only key is `resources`.
 - A command's `env`, where present, is subject to the same rule as a state's.
+- `secrets`, on a job state or a command, is a list of names, each matching
+  `^[A-Z][A-Z0-9_]{0,63}$`, none reserved (`ForgeCore.Secret`) and none listed twice.
 - `approve` entries are produced by `from` or an earlier state.
 - Prompt files exist at the pinned commit.
 - Artifact names are fixed, and a group `name/*` names its files, not them: `name` is an artifact

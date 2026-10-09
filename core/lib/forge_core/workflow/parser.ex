@@ -35,8 +35,8 @@ defmodule ForgeCore.Workflow.Parser do
 
   @top_keys ~w(version description initial states transitions limits defaults commands)
   @state_keys ~w(prompt env model inputs produces outcomes budget on_enter on_conflict resources
-                 invoke exit may_invoke)
-  @command_keys ~w(run env produces timeout resources)
+                 invoke exit may_invoke secrets)
+  @command_keys ~w(run env produces timeout resources secrets)
   @grant_keys ~w(max concurrent)
   @transition_keys ~w(from to when approve max)
   @budget_keys ~w(turns cost)
@@ -185,6 +185,7 @@ defmodule ForgeCore.Workflow.Parser do
     {{produces, outputs}, e3} = command_produces(definition, path)
     {timeout_ms, e4} = duration(definition, "timeout", path)
     {resources, e5} = resources(definition, path)
+    {secrets, e6} = string_list(definition, "secrets", path)
 
     command = %Command{
       name: name,
@@ -193,10 +194,11 @@ defmodule ForgeCore.Workflow.Parser do
       produces: produces,
       outputs: outputs,
       timeout_ms: timeout_ms,
-      resources: resources
+      resources: resources,
+      secrets: secrets || []
     }
 
-    {command, unknown_keys(definition, @command_keys, path) ++ e1 ++ e2 ++ e3 ++ e4 ++ e5}
+    {command, unknown_keys(definition, @command_keys, path) ++ e1 ++ e2 ++ e3 ++ e4 ++ e5 ++ e6}
   end
 
   defp command(name, _definition) do
@@ -305,6 +307,7 @@ defmodule ForgeCore.Workflow.Parser do
     {exit, e11} = exit_map(definition, path)
     {may_invoke, e12} = may_invoke(definition, path)
     {on_conflict, e13} = optional_string(definition, "on_conflict", path)
+    {secrets, e14} = string_list(definition, "secrets", path)
 
     state = %State{
       name: name,
@@ -320,12 +323,13 @@ defmodule ForgeCore.Workflow.Parser do
       invoke: invoke,
       exit: exit,
       may_invoke: may_invoke,
-      on_conflict: on_conflict
+      on_conflict: on_conflict,
+      secrets: secrets || []
     }
 
     {state,
      unknown_keys(definition, @state_keys, path) ++
-       e1 ++ e2 ++ e3 ++ e4 ++ e5 ++ e6 ++ e7 ++ e8 ++ e9 ++ e10 ++ e11 ++ e12 ++ e13}
+       e1 ++ e2 ++ e3 ++ e4 ++ e5 ++ e6 ++ e7 ++ e8 ++ e9 ++ e10 ++ e11 ++ e12 ++ e13 ++ e14}
   end
 
   defp state(name, _definition) do

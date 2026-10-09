@@ -1526,8 +1526,10 @@ defmodule Forge.FlowTest do
     sentence = Jobs.current_wait(Jobs.get!(chat.id)) |> Events.summary()
     assert sentence =~ "Waiting for a template"
     # The template here is too small, but the same answer covers one that refuses the kind — a
-    # chat on a builds-only template — so the sentence names both rather than size alone.
-    assert sentence =~ "both takes this kind of job and is big enough for it"
+    # chat on a builds-only template — and one too old for the job, so the sentence names all
+    # three rather than size alone.
+    assert sentence =~
+             "takes this kind of job, is big enough for it and runs a worker new enough for it"
   end
 
   # A job that cannot be placed says why, and says it once per reason: the scheduler asks every

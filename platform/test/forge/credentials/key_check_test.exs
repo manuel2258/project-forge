@@ -45,6 +45,19 @@ defmodule Forge.Credentials.KeyCheckTest do
       else: credential
   end
 
+  # A row as `Forge.Secrets` leaves it: live with a sealed value, or deleted with none.
+  defp project_secret(sealed) do
+    now = DateTime.utc_now(:second)
+
+    Repo.insert!(%Forge.Secrets.Secret{
+      project_id: project_fixture().id,
+      name: "KEY_#{System.unique_integer([:positive])}",
+      value: sealed,
+      set_at: now,
+      deleted_at: if(sealed, do: nil, else: now)
+    })
+  end
+
   test "a node with no credentials has nothing to check" do
     assert KeyCheck.check(false) == :ok
   end
@@ -105,6 +118,35 @@ defmodule Forge.Credentials.KeyCheckTest do
 
   test "a provider credential alone is opened as one", %{user: user} do
     provider_credential(user, nil)
+    assert KeyCheck.check(false) == :ok
+  end
+
+  # Project secrets are sealed under the same key, so a node holding only those still has a key to
+  # check — and opens them with their own label, which neither credential table's opening would.
+  test "a project secret alone is opened as one" do
+    project_secret(Forge.Secrets.Secret.seal("sk_test_value"))
+    assert KeyCheck.check(false) == :ok
+  end
+
+  test "a project secret this key cannot open refuses like a credential" do
+    project_secret(sealed_elsewhere("forge/secrets/v1"))
+    assert {:error, _message} = KeyCheck.check(false)
+  end
+
+  # A secret is replaced in place, so after a rotation the one that opens is the one set last.
+  test "the most recently set project secret is always in the sample" do
+    for _ <- 1..20, do: project_secret(sealed_elsewhere("forge/secrets/v1"))
+    newest = project_secret(Forge.Secrets.Secret.seal("sk_test_value"))
+
+    newest
+    |> Ecto.Changeset.change(set_at: DateTime.add(newest.set_at, 60))
+    |> Repo.update!()
+
+    assert KeyCheck.check(false) == :ok
+  end
+
+  test "a deleted project secret is not in the sample" do
+    project_secret(nil)
     assert KeyCheck.check(false) == :ok
   end
 

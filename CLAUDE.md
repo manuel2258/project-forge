@@ -44,6 +44,11 @@ which holds the grammar half. **It is built**, `resources` on a *command* includ
 driver has created and destroyed real Hetzner machines; none has yet connected to a platform and
 run a job.
 
+`docs/design/ticket-types.md` is the standard for ticket types: one workflow per type in
+`.forge/workflows/<type>.yml`, chosen at admission with no default, libraries of commands,
+defaults and state templates a type imports, and a proposal that may suggest a type a person
+confirms. **It is built**; nothing yet has run on a real project with types.
+
 `docs/design/commands.md` is the standard for commands: a fixed script a workflow declares once,
 run as a job of its own — by a command state on entry, its exit statuses mapped to an outcome, or
 by an agent that writes `$FORGE_JOB/invoke.json` and parks until its commands are done. **It is

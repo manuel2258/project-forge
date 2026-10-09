@@ -249,6 +249,31 @@ defmodule Forge.Git do
   defp count("-"), do: :binary
   defp count(value), do: String.to_integer(value)
 
+  @doc """
+  What is directly in `dir` at `sha`: each entry's name, its path from the repository's root and
+  its kind — `:blob`, `:link` (a symbolic link, which git stores as a blob of its own mode),
+  `:tree`, or `:commit` for a submodule. None when `dir` is not there.
+
+  NUL-separated, so a name git would quote arrives as it was written.
+  """
+  @spec ls_dir(repo(), sha(), String.t()) :: {:ok, [map()]} | {:error, term()}
+  def ls_dir(repo, sha, dir) do
+    with {:ok, out} <- run(repo, ["ls-tree", "-z", sha, "--", dir <> "/"], stderr: :separate) do
+      {:ok, out |> String.split(<<0>>, trim: true) |> Enum.map(&tree_entry/1)}
+    end
+  end
+
+  defp tree_entry(line) do
+    [meta, path] = String.split(line, "\t", parts: 2)
+    [mode, type, _object] = String.split(meta, " ")
+    %{name: Path.basename(path), path: path, kind: tree_kind(mode, type)}
+  end
+
+  defp tree_kind("120000", _type), do: :link
+  defp tree_kind(_mode, "tree"), do: :tree
+  defp tree_kind(_mode, "commit"), do: :commit
+  defp tree_kind(_mode, _blob), do: :blob
+
   @doc "The paths under `pathspec` that differ from `base` to `head`, unquoted."
   @spec changed_paths(repo(), sha(), sha(), [String.t()]) ::
           {:ok, [String.t()]} | {:error, term()}

@@ -131,7 +131,7 @@ defmodule Forge.ProposalsTest do
     end
   end
 
-  describe "accept/3" do
+  describe "accept/4" do
     test "admits a ticket from the proposal and records what it created" do
       user = user_fixture()
       project = registered_project()
@@ -456,7 +456,7 @@ defmodule Forge.ProposalsTest do
     end
 
     # An unreadable proposal is open, so a person can see it — and unacceptable, because
-    # `accept/3` parses the stored text rather than trusting it. Declining is what closes it.
+    # `accept/4` parses the stored text rather than trusting it. Declining is what closes it.
     test "an unreadable proposal can be declined but never accepted" do
       user = user_fixture()
       job = job_fixture()

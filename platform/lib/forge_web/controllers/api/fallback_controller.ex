@@ -3,6 +3,10 @@ defmodule ForgeWeb.Api.FallbackController do
 
   use ForgeWeb, :controller
 
+  alias ForgeWeb.Operator.Admission
+
+  require Admission
+
   require Logger
 
   def call(conn, {:error, %Ecto.Changeset{} = changeset}) do
@@ -33,6 +37,17 @@ defmodule ForgeWeb.Api.FallbackController do
 
   def call(conn, {:error, {:no_workflow_file, path}}),
     do: error(conn, :unprocessable_entity, "no_workflow_file", "#{path} is not in the repository")
+
+  # Ticket types (`docs/design/ticket-types.md` § Admission): the code says which, the detail is
+  # the sentence the ticket form says it in.
+  def call(conn, {:error, reason}) when Admission.type_reason(reason),
+    do:
+      error(
+        conn,
+        :unprocessable_entity,
+        Atom.to_string(elem(reason, 0)),
+        Admission.explain(reason)
+      )
 
   def call(conn, {:error, :document_requires_content}),
     do:

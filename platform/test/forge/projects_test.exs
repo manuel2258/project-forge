@@ -162,6 +162,18 @@ defmodule Forge.ProjectsTest do
       end
     end
 
+    # A project's name is its repository's directory and its URL; `$` let one end in a newline.
+    test "a name does not end in a newline" do
+      changeset =
+        Forge.Projects.Project.changeset(%Forge.Projects.Project{}, %{
+          name: "game\n",
+          repo_path: "/x",
+          default_branch: "main"
+        })
+
+      assert {"lowercase letters, digits, - or _", _} = changeset.errors[:name]
+    end
+
     for good <- ["main", "master", "release/1.0", "feature_x", "v2.3-rc1"] do
       test "is accepted: #{inspect(good)}" do
         changeset =

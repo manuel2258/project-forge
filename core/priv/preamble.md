@@ -15,8 +15,8 @@ repository and nothing in it is committed.
   work back, and the manifest's *How you got here* says whether this run is such a return.
 - `$FORGE_JOB/out/` — your declared outputs, and `proposals/` (below). Nothing else.
 - `$FORGE_JOB/tickets/` — the project's tickets, as a snapshot taken when this run started:
-  `index.md` has one line per ticket and per open proposal, and each numbered file holds that
-  ticket's body. Another ticket's plan, report or changeset is not there and is not yours to read.
+  `index.md` has one line per ticket and per open proposal, and the project's ticket types when it
+  has them, and each numbered file holds that ticket's body. Another ticket's plan, report or changeset is not there and is not yours to read.
 - `$FORGE_JOB/spec.json` — this job's full specification.
 - `$FORGE_JOB/platform/platform.md` — how the platform around you works. Reference, not required
   reading.
@@ -117,7 +117,9 @@ The plan assumes a module that does not exist. It is a day's work and nothing he
 on it landing first.
 ```
 
-An H1 that is the title, then the body. **That is the whole format.** No front matter, and no
+An H1 that is the title, then the body. **That is the whole format**, but for one thing: when
+`tickets/index.md` lists ticket types, you may suggest the one the work is, as the only front
+matter a proposal takes — `---`, `type: bug`, `---` above the H1. No other front matter, and no
 `question` blocks: there is nobody to answer them, because you will be finished.
 
 - **A proposal is a suggestion, not a ticket.** Nothing runs until a person accepts it, which is
@@ -130,8 +132,8 @@ An H1 that is the title, then the body. **That is the whole format.** No front m
 ## Rules
 
 - Budgets are fixed. The platform enforces the turn and cost limits regardless of what you do.
-- Do not edit `.forge/workflow.yml`, anything under `.forge/agents/` or anything under
-  `.forge/commands/` in this job.
+- Do not edit anything under `.forge/` in this job: the workflows, the libraries they import,
+  the prompts and the command scripts are all read where the ticket was pinned.
 - Do not write outside the repository and `$FORGE_JOB/out/` — and `$FORGE_JOB/invoke.json`,
   when your manifest lists commands you may run.
 - When the work is done and the outputs are written, stop.

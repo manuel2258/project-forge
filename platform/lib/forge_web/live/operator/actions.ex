@@ -7,8 +7,10 @@ defmodule ForgeWeb.Operator.Actions do
   import Phoenix.LiveView, only: [put_flash: 3]
 
   require Logger
+  require ForgeWeb.Operator.Admission
 
   alias Forge.{Operator, Tickets}
+  alias ForgeWeb.Operator.Admission
   alias ForgeWeb.Operator.QuestionForm
 
   @doc """
@@ -130,6 +132,14 @@ defmodule ForgeWeb.Operator.Actions do
 
   defp describe({:no_state, state}),
     do: "the default branch's workflow has no state #{state}; move the ticket first"
+
+  defp describe({:ticket_type_gone, _name, path}),
+    do: "#{path} is not on the default branch any more, so there is nothing to re-pin to"
+
+  defp describe(reason) when Admission.type_reason(reason), do: Admission.explain(reason)
+
+  defp describe(errors) when is_list(errors),
+    do: "the default branch's workflow does not parse: " <> ForgeCore.Error.format(errors)
 
   defp describe({:ambiguous, outcomes}),
     do: "ambiguous; pick an outcome: #{Enum.join(outcomes, ", ")}"

@@ -56,6 +56,8 @@ defmodule Forge.EventsTest do
     assert {:error, changeset} = Events.append("nodots", :system)
     assert %{type: [_]} = errors_on(changeset)
 
+    assert %{type: [_]} = errors_on(Event.changeset(%Event{}, %{type: "ticket.admitted\n"}))
+
     assert %{actor: [_]} =
              errors_on(Event.changeset(%Event{}, %{type: "a.b", actor: %{"kind" => "ghost"}}))
   end

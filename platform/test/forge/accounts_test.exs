@@ -59,6 +59,10 @@ defmodule Forge.AccountsTest do
       {:error, changeset} = Accounts.register_user(%{email: "not valid"})
 
       assert %{email: ["must have the @ sign and no spaces"]} = errors_on(changeset)
+
+      # `$` matched before a final newline, and the address went on to a magic link with it.
+      {:error, changeset} = Accounts.register_user(%{email: "a@example.com\n"})
+      assert %{email: ["must have the @ sign and no spaces"]} = errors_on(changeset)
     end
 
     test "validates maximum values for email for security" do

@@ -8,6 +8,13 @@ defmodule ForgeCore.Workflow.Parser do
 
     * `:prompt_exists` - a function from a prompt path to boolean. When given, every job
       state's prompt is checked with it (normally against the pinned commit).
+    * `:read_library` - a function from a path under `.forge/` to `{:ok, text}` or `:error`, at
+      the same commit. What `import` is resolved with (`ForgeCore.Workflow.Imports`); without it,
+      a definition that imports anything is refused.
+
+  `load/2` is what admission calls: it returns the flattened definition beside the workflow,
+  because that — with no `import` and no `extends` left in it — is what a ticket pins.
+  `from_map/2` reads a pinned one back, and resolves nothing.
   """
 
   alias ForgeCore.Error
@@ -17,6 +24,8 @@ defmodule ForgeCore.Workflow.Parser do
     Budget,
     Command,
     Defaults,
+    Imports,
+    Keys,
     Limits,
     Resources,
     State,
@@ -24,7 +33,7 @@ defmodule ForgeCore.Workflow.Parser do
     Validator
   }
 
-  @top_keys ~w(version initial states transitions limits defaults commands)
+  @top_keys ~w(version description initial states transitions limits defaults commands)
   @state_keys ~w(prompt env model inputs produces outcomes budget on_enter on_conflict resources
                  invoke exit may_invoke)
   @command_keys ~w(run env produces timeout resources)
@@ -44,8 +53,31 @@ defmodule ForgeCore.Workflow.Parser do
 
   @spec parse(String.t(), keyword()) :: result()
   def parse(yaml, opts \\ []) when is_binary(yaml) do
+    case load(yaml, opts) do
+      {:ok, workflow, _flat} -> {:ok, workflow}
+      {:error, errors} -> {:error, errors}
+    end
+  end
+
+  @doc """
+  Parses `yaml`, resolving its imports with `:read_library`, into the workflow and the flattened
+  definition it was built from — the map a ticket pins. An error about a part a library supplied
+  names that library.
+  """
+  @spec load(String.t(), keyword()) :: {:ok, Workflow.t(), map()} | {:error, [Error.t()]}
+  def load(yaml, opts \\ []) when is_binary(yaml) do
+    with {:ok, map} <- decode(yaml),
+         {:ok, flat, origins} <- Imports.resolve(map, Keyword.get(opts, :read_library)) do
+      case from_map(flat, opts) do
+        {:ok, workflow} -> {:ok, workflow, flat}
+        {:error, errors} -> {:error, Imports.attribute(errors, origins)}
+      end
+    end
+  end
+
+  defp decode(yaml) do
     case YamlElixir.read_from_string(yaml) do
-      {:ok, map} when is_map(map) -> from_map(map, opts)
+      {:ok, map} when is_map(map) -> no_complex_keys(map)
       {:ok, _other} -> {:error, [Error.new("", "expected a mapping at the top level")]}
       {:error, %{message: message}} -> {:error, [Error.new("", "invalid YAML: #{message}")]}
     end
@@ -62,9 +94,18 @@ defmodule ForgeCore.Workflow.Parser do
   @doc "Builds and validates a workflow from a decoded YAML map (string keys)."
   @spec from_map(map(), keyword()) :: result()
   def from_map(map, opts \\ []) when is_map(map) do
-    case build(map) do
-      {workflow, []} -> validate(workflow, opts)
-      {_workflow, errors} -> {:error, sort(errors)}
+    with {:ok, map} <- no_complex_keys(map) do
+      case build(map) do
+        {workflow, []} -> validate(workflow, opts)
+        {_workflow, errors} -> {:error, sort(errors)}
+      end
+    end
+  end
+
+  defp no_complex_keys(map) do
+    case Keys.errors(map) do
+      [] -> {:ok, map}
+      errors -> {:error, sort(errors)}
     end
   end
 
@@ -104,9 +145,11 @@ defmodule ForgeCore.Workflow.Parser do
     {limits, e5} = limits(map)
     {defaults, e6} = defaults(map)
     {commands, e7} = commands(map)
+    {description, e8} = optional_string(map, "description", "")
 
     workflow = %Workflow{
       version: version,
+      description: description,
       initial: initial,
       states: states,
       transitions: transitions,
@@ -115,7 +158,7 @@ defmodule ForgeCore.Workflow.Parser do
       commands: commands
     }
 
-    {workflow, unknown_keys(map, @top_keys, "") ++ e1 ++ e2 ++ e3 ++ e4 ++ e5 ++ e6 ++ e7}
+    {workflow, unknown_keys(map, @top_keys, "") ++ e1 ++ e2 ++ e3 ++ e4 ++ e5 ++ e6 ++ e7 ++ e8}
   end
 
   # `docs/design/workflow-grammar-v1.md` § Commands. A mapping of names, each a mapping of its own;
@@ -369,7 +412,7 @@ defmodule ForgeCore.Workflow.Parser do
   defp exit_key(key) when is_integer(key) and key >= 0, do: {:ok, key}
 
   defp exit_key(key) when is_binary(key) do
-    if Regex.match?(~r/^[0-9]+$/, key), do: {:ok, String.to_integer(key)}, else: :error
+    if Regex.match?(~r/\A[0-9]+\z/, key), do: {:ok, String.to_integer(key)}, else: :error
   end
 
   defp exit_key(_key), do: :error

@@ -31,7 +31,7 @@ defmodule Forge.Events.Event do
     event
     |> cast(attrs, [:project_id, :ticket_id, :job_id, :actor, :type, :payload])
     |> validate_required([:actor, :type, :payload])
-    |> validate_format(:type, ~r/^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/,
+    |> validate_format(:type, ~r/\A[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+\z/,
       message: "must be dotted, e.g. ticket.admitted"
     )
     |> validate_actor()

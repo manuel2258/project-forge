@@ -2,6 +2,8 @@ defmodule Forge.Tickets.Ticket do
   @moduledoc """
   A unit of work moving through its project's workflow. The workflow is pinned at admission:
   `workflow` holds the parsed definition and `workflow_commit` the commit it was read from.
+  `ticket_type` is the type it was admitted as, which names the file a re-pin reads; nil is the
+  single `.forge/workflow.yml` (`docs/design/ticket-types.md`).
   `state` is a state name from that definition; `status` is the engine's view of the ticket.
   """
 
@@ -31,6 +33,7 @@ defmodule Forge.Tickets.Ticket do
     field :branch, :string
     field :workflow, :map
     field :workflow_commit, :string
+    field :ticket_type, :string
     field :state, :string
     field :status, Ecto.Enum, values: [:active, :stuck, :done, :cancelled], default: :active
     field :cost_usd, :decimal, default: Decimal.new(0)
@@ -56,6 +59,7 @@ defmodule Forge.Tickets.Ticket do
       :branch,
       :workflow,
       :workflow_commit,
+      :ticket_type,
       :state
     ])
     |> validate_required([

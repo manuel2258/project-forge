@@ -33,7 +33,7 @@ defmodule ForgeWorker.Job.Dir do
 
   require Logger
 
-  @uuid ~r/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+  @uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/i
 
   @doc """
   Prepares the directory for `spec` under `root` and returns its path. On a first run it is
@@ -114,7 +114,7 @@ defmodule ForgeWorker.Job.Dir do
   end
 
   defp write_command_log(dir, {file, source}, job_id) do
-    if Regex.match?(~r/^(entered-)?[0-9]+-[A-Za-z0-9][A-Za-z0-9._-]*\.log$/, file) do
+    if Regex.match?(~r/\A(entered-)?[0-9]+-[A-Za-z0-9][A-Za-z0-9._-]*\.log\z/, file) do
       target = Path.join(dir, file)
       File.cp!(source, target)
       File.chmod!(target, 0o444)
@@ -462,7 +462,7 @@ defmodule ForgeWorker.Job.Dir do
   def project_dir(cwd), do: String.replace(cwd, ~r/[^A-Za-z0-9]/, "-")
 
   defp check_session_id(id) when is_binary(id) do
-    if Regex.match?(~r/^[A-Za-z0-9][A-Za-z0-9-]{0,127}$/, id), do: :ok, else: {:error, :bad_id}
+    if Regex.match?(~r/\A[A-Za-z0-9][A-Za-z0-9-]{0,127}\z/, id), do: :ok, else: {:error, :bad_id}
   end
 
   defp check_session_id(_id), do: {:error, :bad_id}

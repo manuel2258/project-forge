@@ -1,13 +1,15 @@
 defmodule ForgeWeb.ProjectLive do
   @moduledoc """
-  One project: what it is, what its workflow says, and its own board.
+  One project: what it is, what its workflows say — one per ticket type, or the one — and its
+  own board.
 
   The board here is `/board`'s, for one project and uncapped — the four-row cap exists so a
   column never grows its own scrollbar and hides its count, and with one project on the page
   there is room to let the page scroll instead. See `ForgeWeb.Operator.Board`.
 
   The workflow is shown and never edited. It lives in the project's repository at
-  `.forge/workflow.yml`, so this page carries the clone URL: the operator who wants to change a
+  `.forge/workflow.yml`, or `.forge/workflows/<type>.yml` per type, so this page carries the clone
+  URL: the operator who wants to change a
   workflow is standing exactly here, and git is the only way to do it.
   """
 
@@ -42,11 +44,11 @@ defmodule ForgeWeb.ProjectLive do
     assign(socket,
       project: project,
       tickets: tickets,
-      columns: Board.columns(tickets, Board.workflow(tickets)),
+      lanes: Board.lanes(tickets),
       # The repository's current workflow, which is what the *next* ticket will pin — not the
       # board's, which is the workflow the tickets on it were admitted with. On a project whose
       # workflow has just changed these are different, and saying so is the point.
-      current: Tickets.admissible(project),
+      current: Tickets.types(project),
       clone_url: Url.for(project),
       mirrors: Projects.list_mirrors(project),
       open: Enum.count(tickets, &(&1.status in Forge.Tickets.Ticket.open_statuses())),
@@ -84,10 +86,10 @@ defmodule ForgeWeb.ProjectLive do
     numbers = Map.new(Tickets.all(project), &{&1.id, &1.number})
 
     Enum.map(Proposals.open(project.id), fn found ->
-      {title, body, readable} =
+      {title, body, readable, suggested} =
         case ForgeCore.Proposal.parse(found.version.content || "") do
-          {:ok, proposal} -> {proposal.title, proposal.body, true}
-          {:error, errors} -> {nil, ForgeCore.Error.format(errors), false}
+          {:ok, proposal} -> {proposal.title, proposal.body, true, proposal.ticket_type}
+          {:error, errors} -> {nil, ForgeCore.Error.format(errors), false, nil}
         end
 
       %{
@@ -96,6 +98,7 @@ defmodule ForgeWeb.ProjectLive do
         title: title,
         body: body,
         readable: readable,
+        suggested: suggested,
         project: project.name,
         ticket_number: Map.get(numbers, found.job.ticket_id)
       }
@@ -113,7 +116,7 @@ defmodule ForgeWeb.ProjectLive do
 
     result =
       case decision do
-        "accepted" -> Operator.accept_proposal(id, user, comment)
+        "accepted" -> Operator.accept_proposal(id, user, comment, params["ticket_type"])
         "declined" -> Operator.decline_proposal(id, user, comment)
       end
 
@@ -131,7 +134,10 @@ defmodule ForgeWeb.ProjectLive do
 
   defp explain(:already_decided), do: "Someone has already decided that one."
   defp explain({:invalid_proposal, errors}), do: ForgeCore.Error.format(errors)
-  defp explain(reason), do: "Could not be recorded: #{inspect(reason)}"
+
+  # Anything else is why the project could not admit it, in the sentence the ticket form uses — a
+  # type not chosen on a project with several, most often, or a workflow that does not parse.
+  defp explain(reason), do: "Not admitted: " <> Admission.explain(reason) <> "."
 
   # Only this project's tickets. `load/1` shells out to git several times — the workflow, each
   # state's prompt, the mirror — so reloading on every ticket in the system would spend that on
@@ -152,6 +158,29 @@ defmodule ForgeWeb.ProjectLive do
       _other -> {:noreply, socket}
     end
   end
+
+  defp current_types({:ok, %{types: types}}), do: types
+  defp current_types(_error), do: []
+
+  defp multiple?(current), do: length(current_types(current)) > 1
+
+  # The types an Accept is asked to choose between, each marked when its workflow does not parse:
+  # only when there is more than one.
+  defp choosable(current) do
+    case current_types(current) do
+      [_, _ | _] = types ->
+        Enum.map(types, &%{name: &1.name, parses: Admission.ready?(&1.workflow)})
+
+      _none_or_one ->
+        []
+    end
+  end
+
+  defp not_types({:ok, %{not_types: not_types}}), do: not_types
+  defp not_types(_error), do: []
+
+  defp description(%{workflow: {:ok, workflow}}), do: workflow.description
+  defp description(_type), do: nil
 
   # In the order the workflow reaches them, which is the order the board above draws its columns
   # in. Alphabetical would put `merged` before `planning` on a page whose whole subject is what
@@ -227,24 +256,18 @@ defmodule ForgeWeb.ProjectLive do
             </.link>
           </p>
 
-          <div
-            :if={@tickets != []}
-            class="mt-3 flex flex-col gap-px bg-base-300 sm:flex-row sm:overflow-x-auto"
-          >
-            <Board.column
-              :for={column <- @columns}
-              column={column}
-              project={@project.name}
-              now={@now}
-            />
+          <div :if={@tickets != []} class="mt-3">
+            <Board.board lanes={@lanes} project={@project.name} now={@now} />
           </div>
 
           <h2 class="mt-8 font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
-            Workflow the next ticket will pin
+            {if multiple?(@current),
+              do: "Workflows the next tickets will pin",
+              else: "Workflow the next ticket will pin"}
           </h2>
 
           <div
-            :if={not Admission.ready?(@current)}
+            :if={match?({:error, _reason}, @current)}
             class="mt-3 rounded-box border border-warning/40 bg-warning/5 p-4"
           >
             <p class="text-sm/[1.55]">
@@ -255,50 +278,81 @@ defmodule ForgeWeb.ProjectLive do
             </p>
           </div>
 
-          <table
-            :if={Admission.ready?(@current)}
-            id="workflow"
-            class="reflow mt-3 w-full text-[12.5px]"
-          >
-            <tbody>
-              <tr
-                :for={row <- state_rows(elem(@current, 1))}
-                class="border-b border-base-300/60 align-top"
-              >
-                <td class="py-2 pr-3">
-                  <.state name={row.name} topology={row.topology} />
-                  <div
-                    :if={row.name == elem(@current, 1).initial}
-                    class="font-mono text-[11px] opacity-50"
-                  >
-                    initial
-                  </div>
-                </td>
-                <td data-label="Job" class="py-2 pr-3 font-mono opacity-70">
-                  <div :if={row.state.prompt}>{row.state.prompt}</div>
-                  <div :if={row.state.produces != []} class="opacity-60">
-                    → {Enum.join(row.state.produces, ", ")}
-                  </div>
-                  <div :if={is_nil(row.state.prompt)} class="opacity-50">no job</div>
-                </td>
-                <td data-label="Budget" class="py-2 pr-3 font-mono opacity-70">
-                  <div :if={row.state.budget}>
-                    {row.state.budget.turns} turns · {Format.windows(row.state.budget.cost) || "—"}
-                  </div>
-                </td>
-                <td data-label="Goes to" class="py-2 font-mono opacity-70">
-                  <div :for={t <- row.out}>
-                    {t.to}
-                    <span class="opacity-50">on {ForgeCore.Workflow.Transition.outcome(t)}</span>
-                    <span :if={t.approve != []} class="text-primary">
-                      · approves {Enum.join(t.approve, ", ")}
-                    </span>
-                  </div>
-                  <div :if={row.out == []} class="opacity-50">terminal</div>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+          <%!-- One per ticket type, each with its own states; a broken one says why, beside the
+                rest. See docs/design/ticket-types.md § The project page. --%>
+          <section :for={type <- current_types(@current)} id={"type-#{type.name || "workflow"}"}>
+            <div :if={type.name} class="mt-5 flex flex-wrap items-baseline gap-x-3">
+              <h3 class="font-mono text-[12.5px] font-medium">{type.name}</h3>
+              <span :if={description(type)} class="text-[12.5px] opacity-70">
+                {description(type)}
+              </span>
+            </div>
+
+            <div
+              :if={not Admission.ready?(type.workflow)}
+              class="mt-3 rounded-box border border-warning/40 bg-warning/5 p-4"
+            >
+              <p class="text-sm/[1.55]">
+                {if type.name, do: "This type", else: "This project"} cannot take a ticket: {Admission.explain(
+                  elem(type.workflow, 1)
+                )}.
+              </p>
+            </div>
+
+            <table
+              :if={Admission.ready?(type.workflow)}
+              id={if type.name, do: "workflow-#{type.name}", else: "workflow"}
+              class="reflow mt-3 w-full text-[12.5px]"
+            >
+              <tbody>
+                <tr
+                  :for={row <- state_rows(elem(type.workflow, 1))}
+                  class="border-b border-base-300/60 align-top"
+                >
+                  <td class="py-2 pr-3">
+                    <.state name={row.name} topology={row.topology} />
+                    <div
+                      :if={row.name == elem(type.workflow, 1).initial}
+                      class="font-mono text-[11px] opacity-50"
+                    >
+                      initial
+                    </div>
+                  </td>
+                  <td data-label="Job" class="py-2 pr-3 font-mono opacity-70">
+                    <div :if={row.state.prompt}>{row.state.prompt}</div>
+                    <div :if={row.state.produces != []} class="opacity-60">
+                      → {Enum.join(row.state.produces, ", ")}
+                    </div>
+                    <div :if={is_nil(row.state.prompt)} class="opacity-50">no job</div>
+                  </td>
+                  <td data-label="Budget" class="py-2 pr-3 font-mono opacity-70">
+                    <div :if={row.state.budget}>
+                      {row.state.budget.turns} turns · {Format.windows(row.state.budget.cost) || "—"}
+                    </div>
+                  </td>
+                  <td data-label="Goes to" class="py-2 font-mono opacity-70">
+                    <div :for={t <- row.out}>
+                      {t.to}
+                      <span class="opacity-50">on {ForgeCore.Workflow.Transition.outcome(t)}</span>
+                      <span :if={t.approve != []} class="text-primary">
+                        · approves {Enum.join(t.approve, ", ")}
+                      </span>
+                    </div>
+                    <div :if={row.out == []} class="opacity-50">terminal</div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+
+          <div :if={not_types(@current) != []} id="not-types" class="mt-5 text-[12.5px]">
+            <h3 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
+              In .forge/workflows/ but not a type
+            </h3>
+            <p :for={entry <- not_types(@current)} class="mt-1 font-mono opacity-70">
+              {entry.path} <span class="opacity-60">— {entry.why}</span>
+            </p>
+          </div>
 
           <section :if={@proposals != []} class="mt-10">
             <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
@@ -310,7 +364,7 @@ defmodule ForgeWeb.ProjectLive do
             </p>
 
             <div class="mt-3">
-              <.proposals proposals={@proposals} />
+              <.proposals proposals={@proposals} types={choosable(@current)} />
             </div>
           </section>
 

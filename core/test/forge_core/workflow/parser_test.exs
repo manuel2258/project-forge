@@ -393,7 +393,7 @@ defmodule ForgeCore.Workflow.ParserTest do
       map = put_in(map, ["states", "verifying", "produces"], ["report.md", "../up/*"])
 
       assert {"states.verifying",
-              "artifact name \"../up\" must be a single path segment: letters, digits, . _ -"} in messages(
+              "artifact name \"../up\" must be a single path segment: " <> Workflow.name_rule()} in messages(
                map
              )
     end
@@ -505,12 +505,13 @@ defmodule ForgeCore.Workflow.ParserTest do
         |> Map.update!("transitions", &(&1 ++ [%{"from" => "review_ready", "to" => "bad/name"}]))
 
       assert {"states.bad/name",
-              "state name must be a single path segment: letters, digits, . _ -"} in messages(map)
-
-      assert {"states.verifying",
-              "artifact name \"../report.md\" must be a single path segment: letters, digits, . _ -"} in messages(
+              "state name must be a single path segment: " <> Workflow.name_rule()} in messages(
                map
              )
+
+      assert {"states.verifying",
+              "artifact name \"../report.md\" must be a single path segment: " <>
+                Workflow.name_rule()} in messages(map)
     end
 
     # `.` and `..` are rejected because the format demands a leading alphanumeric, not because
@@ -523,9 +524,8 @@ defmodule ForgeCore.Workflow.ParserTest do
         map = put_in(map, ["states", "verifying", "produces"], [name])
 
         assert {"states.verifying",
-                "artifact name #{inspect(name)} must be a single path segment: letters, digits, . _ -"} in messages(
-                 map
-               ),
+                "artifact name #{inspect(name)} must be a single path segment: " <>
+                  Workflow.name_rule()} in messages(map),
                "#{inspect(name)} was accepted as an artifact name"
       end
     end

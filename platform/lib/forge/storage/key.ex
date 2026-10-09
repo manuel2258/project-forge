@@ -5,7 +5,7 @@ defmodule Forge.Storage.Key do
   """
 
   @max_bytes 512
-  @segment ~r/^[a-z0-9][a-z0-9._-]*$/
+  @segment ~r/\A[a-z0-9][a-z0-9._-]*\z/
 
   @doc "A per-job blob: transcripts and anything else tied to one run."
   @spec job(String.t(), String.t()) :: String.t()

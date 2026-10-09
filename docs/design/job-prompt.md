@@ -176,8 +176,9 @@ ticket's branch against its base, taken when the job was created.
   YAML. One rule an agent can follow without knowing YAML's indicator characters beats a list of
   them.
 - Propose a ticket for work that is real but not this ticket's, instead of doing it or losing
-  it: one file per proposal in `out/proposals/`, an H1 title and a body, with no front matter
-  and no `question` blocks. A proposal is a suggestion; nothing runs until a person accepts it,
+  it: one file per proposal in `out/proposals/`, an H1 title and a body, and no `question`
+  blocks. Its only front matter is the ticket type it suggests, `type: bug`, when the index lists
+  types (`ticket-types.md` § Proposals). A proposal is a suggestion; nothing runs until a person accepts it,
   and there is a limit per job (`ticket-proposals.md`).
 - Read `tickets/index.md` before proposing. It lists every ticket on the project and every open
   proposal, as a snapshot; each ticket's file holds its body and nothing else.
@@ -191,8 +192,8 @@ ticket's branch against its base, taken when the job was created.
   in both preambles, naming the variable rather than the size, because the preamble is one
   document for every job. What the agent can act on is the retry; what the platform does about a
   ceiling is not the agent's to know.
-- Do not edit `.forge/workflow.yml`, anything under `.forge/agents/` or anything under
-  `.forge/commands/` in this job.
+- Do not edit anything under `.forge/` in this job: workflows, the libraries they import, prompts
+  and command scripts are all read where the ticket was pinned.
 - Do not write outside the repository and `$FORGE_JOB/out/` — and `$FORGE_JOB/invoke.json`, when
   the manifest lists commands this job may run.
 

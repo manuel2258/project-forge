@@ -30,7 +30,7 @@ defmodule ForgeWeb.BoardLive do
 
         %{
           project: project,
-          columns: Board.columns(tickets, Board.workflow(tickets), cap: @rows),
+          lanes: Board.lanes(tickets, cap: @rows),
           open: Enum.count(tickets, &(&1.status in Forge.Tickets.Ticket.open_statuses())),
           waiting: Enum.count(tickets, &(&1.status == :stuck))
         }
@@ -76,14 +76,7 @@ defmodule ForgeWeb.BoardLive do
           </span>
         </header>
 
-        <div class="flex flex-col gap-px bg-base-300 sm:flex-row sm:overflow-x-auto">
-          <Board.column
-            :for={column <- board.columns}
-            column={column}
-            project={board.project.name}
-            now={@now}
-          />
-        </div>
+        <Board.board lanes={board.lanes} project={board.project.name} now={@now} />
       </section>
     </Layouts.app>
     """

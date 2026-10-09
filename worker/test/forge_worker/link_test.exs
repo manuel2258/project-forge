@@ -903,6 +903,21 @@ defmodule ForgeWorker.LinkTest do
       assert reason =~ "not_a_commit"
     end
 
+    # A sha is forty hex digits and then the end of the string: `$` let one more newline through.
+    test "a commit with a trailing newline is refused as not one", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = command_assignment(origin, "#!/bin/sh\necho ran\n")
+      job = update_in(job, ["spec", "command", "at"], &(&1 <> "\n"))
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      {%{"job_id" => ^job_id, "reason" => reason}, _before} = take_push("failed")
+      assert reason =~ "not_a_commit"
+    end
+
     # `docs/design/worker-channel.md` § Reconnection: a run the platform has given up on — no
     # longer this machine's, or its row retired — is stopped and its ending reported to nobody. It
     # used to be reported, and the report landed on the job as it then was: a re-queued job

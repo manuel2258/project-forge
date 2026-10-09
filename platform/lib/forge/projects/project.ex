@@ -26,7 +26,7 @@ defmodule Forge.Projects.Project do
     project
     |> cast(attrs, [:name, :repo_path, :default_branch, :seed_id, :model])
     |> validate_required([:name, :repo_path, :default_branch])
-    |> validate_format(:name, ~r/^[a-z0-9][a-z0-9_-]*$/,
+    |> validate_format(:name, ~r/\A[a-z0-9][a-z0-9_-]*\z/,
       message: "lowercase letters, digits, - or _"
     )
     # A branch name reaches `git config forge.defaultBranch`, `symbolic-ref HEAD` and the

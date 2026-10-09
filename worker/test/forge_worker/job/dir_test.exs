@@ -77,6 +77,11 @@ defmodule ForgeWorker.Job.DirTest do
     assert_raise ArgumentError, ~r/UUID/, fn ->
       Dir.prepare(root, %{spec | job_id: "../escape"})
     end
+
+    # `$` matched before a final newline, and the id is a directory name.
+    assert_raise ArgumentError, ~r/UUID/, fn ->
+      Dir.prepare(root, %{spec | job_id: "00000000-0000-0000-0000-000000000000\n"})
+    end
   end
 
   # The agent owns the job directory, so `out` itself is its to replace, and a path through a
@@ -679,7 +684,8 @@ defmodule ForgeWorker.Job.DirTest do
             {"1-../../escape.log", source},
             {"entered-../escape.log", source},
             {"other-1-build.log", source},
-            {"2-test.txt", source}
+            {"2-test.txt", source},
+            {"3-lint.log\n", source}
           ]
         )
 
@@ -770,6 +776,9 @@ defmodule ForgeWorker.Job.DirTest do
     test "is not found under another id, and an id that is a path is refused", context do
       assert {:error, :not_found} = Dir.stage_session(context.job_dir, "sess-43", context.target)
       assert {:error, :bad_id} = Dir.stage_session(context.job_dir, "../x", context.target)
+
+      # A session id becomes a path; `$` let one end in a newline.
+      assert {:error, :bad_id} = Dir.stage_session(context.job_dir, @sid <> "\n", context.target)
       refute File.exists?(context.target)
     end
 

@@ -84,7 +84,26 @@ defmodule ForgeCore.Job.ResultTest do
   test "sends proposals keyed as they will arrive" do
     assert %{"proposals" => %{"score-table.md" => proposal}} = Result.to_map(result())
 
-    assert Map.keys(proposal) |> Enum.sort() == ["body", "raw", "title"]
+    assert Map.keys(proposal) |> Enum.sort() == ["body", "raw", "ticket_type", "title"]
+  end
+
+  # The type a proposal suggests crosses the wire with it, and a worker built before there was one
+  # sends none, which is no suggestion rather than a failure.
+  test "carries the type a proposal suggests, and its absence" do
+    typed = %{
+      result()
+      | proposals: %{"a.md" => Proposal.parse!("---\ntype: bug\n---\n# A\n\nB.")}
+    }
+
+    round_tripped = typed |> Result.to_map() |> Jason.encode!() |> Jason.decode!()
+
+    assert %Result{proposals: %{"a.md" => %Proposal{ticket_type: "bug"}}} =
+             Result.from_map(round_tripped)
+
+    older = update_in(round_tripped, ["proposals", "a.md"], &Map.delete(&1, "ticket_type"))
+
+    assert %Result{proposals: %{"a.md" => %Proposal{ticket_type: nil, title: "A"}}} =
+             Result.from_map(older)
   end
 
   test "carries a waiting result's questions" do

@@ -134,7 +134,7 @@ defmodule ForgeCore.Job.SpecTest do
       %Spec{
         job_id: "cmd-1",
         kind: :command,
-        ticket: %{number: 7, title: "Persist the high score table"},
+        ticket: %{number: 7, title: "Persist the high score table", ticket_type: nil},
         state: "checking",
         attempt: 3,
         branch: "ticket/7",

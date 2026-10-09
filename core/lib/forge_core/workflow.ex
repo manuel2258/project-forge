@@ -57,6 +57,7 @@ defmodule ForgeCore.Workflow do
 
   @enforce_keys [:initial, :states, :transitions, :limits]
   defstruct version: 1,
+            description: nil,
             initial: nil,
             states: %{},
             transitions: [],
@@ -70,6 +71,7 @@ defmodule ForgeCore.Workflow do
 
   @type t :: %__MODULE__{
           version: 1,
+          description: String.t() | nil,
           initial: state_name(),
           states: %{state_name() => State.t()},
           transitions: [Transition.t()],
@@ -162,7 +164,11 @@ defmodule ForgeCore.Workflow do
   # not two. Widening this to allow a leading dot would therefore make `..` a legal artifact
   # name and a write to the job directory's parent; the names test in `parser_test.exs` is what
   # would notice.
-  @name_format ~r/^[A-Za-z0-9][A-Za-z0-9._-]*$/
+  #
+  # Anchored with `\A` and `\z`, not `^` and `$`: `$` also matches before a final newline, so
+  # `"feature\n"` was a name — a ticket type listed beside `feature` that read the same, and a
+  # row of the backlog's index broken across two lines.
+  @name_format ~r/\A[A-Za-z0-9][A-Za-z0-9._-]*\z/
 
   @doc """
   Whether `name` may be an artifact's or a state's: one path segment of letters, digits, `.`,
@@ -171,6 +177,13 @@ defmodule ForgeCore.Workflow do
   """
   @spec valid_name?(term()) :: boolean()
   def valid_name?(name), do: is_binary(name) and Regex.match?(@name_format, name)
+
+  @doc """
+  `valid_name?/1`'s rule in words, for every message that refuses a name by it: one wording, so a
+  state, an artifact, a command, a ticket type and a library path are refused in the same terms.
+  """
+  @spec name_rule() :: String.t()
+  def name_rule, do: "letters, digits, . _ -, starting with a letter or digit"
 
   @doc """
   Why an agent may not write `name` in `out/` as a document of its own accord, or nil if it may.
@@ -184,7 +197,7 @@ defmodule ForgeCore.Workflow do
   def document_name_error(name) do
     cond do
       not valid_name?(name) ->
-        "must be a single path segment: letters, digits, . _ -, starting with a letter or digit"
+        "must be a single path segment: " <> name_rule()
 
       name in [@ticket, @answers, @changeset] ->
         "#{inspect(name)} is reserved"

@@ -79,8 +79,9 @@ would. A state's own `invoke` may name arguments the same way.
 `.forge/workflow.yml` itself, not from the branch the agent is editing. Without that, "fixed
 script" means nothing: an agent that can rewrite `build.sh` can make `build` mean anything, and
 the `verifying` state would be running whatever the implementing agent left behind. The preamble
-already forbids editing `.forge/workflow.yml` and `.forge/agents/`; `.forge/commands/` joins that
-set, and the pinning enforces what the preamble asks.
+forbids editing anything under `.forge/` — it named `.forge/workflow.yml`, `.forge/agents/` and
+then `.forge/commands/`, and became the whole directory once types and their libraries could sit
+anywhere in it (`ticket-types.md`) — and the pinning enforces what the preamble asks.
 
 The consequence is the familiar one from every CI system and should be stated rather than
 discovered: **a ticket that changes a command script sees the change only after it merges.** That

@@ -653,7 +653,9 @@ defmodule Forge.Engine do
   @doc """
   Re-pins the ticket's workflow to the project's default branch as it is now: its definition, its
   prompts and its command scripts are read from the new commit for every job made after this one.
-  The branch, its base and everything already written stay as they were.
+  The branch, its base and everything already written stay as they were. What is read is the
+  ticket's own type's file, so a ticket never changes type by being re-pinned; a type whose file
+  is gone refuses (`docs/design/ticket-types.md` § Pinning and re-pinning).
 
   **What it is for** is a ticket that cannot pass a state because of a file no job on it may edit
   — a command script is read at the pin, never from the branch (`docs/design/commands.md` § The
@@ -667,7 +669,7 @@ defmodule Forge.Engine do
   """
   @spec repin(Ticket.t(), String.t()) :: {:ok, Ticket.t()} | {:error, term()}
   def repin(%Ticket{} = ticket, user_id) do
-    with {:ok, prepared} <- Tickets.prepare_admission(Forge.Projects.get!(ticket.project_id)) do
+    with {:ok, prepared} <- Tickets.prepare_repin(Forge.Projects.get!(ticket.project_id), ticket) do
       Multi.new()
       |> Multi.run(:open, fn repo, _changes -> lock_open(repo, ticket.id, :not_repinnable) end)
       |> Multi.run(:repinnable, fn _repo, %{open: open} -> repinnable(open, prepared) end)

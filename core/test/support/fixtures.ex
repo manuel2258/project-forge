@@ -8,7 +8,7 @@ defmodule ForgeCore.Fixtures do
   def spec do
     %Spec{
       job_id: "job-1",
-      ticket: %{number: 7, title: "Persist the high score table"},
+      ticket: %{number: 7, title: "Persist the high score table", ticket_type: nil},
       state: "planning",
       attempt: 1,
       prompt: "Write a plan.",

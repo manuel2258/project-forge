@@ -11,7 +11,7 @@ These decisions are settled. They are not to be reopened.
 ## Lifecycle
 
 - A ticket moves through a statechart, not a linear pipeline. Backward transitions are normal, not exceptional.
-- Every project defines its own lifecycle in a definition file committed to that repository. The engine has no built-in default lifecycle.
+- Every project defines its own lifecycle in a definition file committed to that repository. The engine has no built-in default lifecycle. *Widened to one or more: a project may declare ticket types, one workflow file per type under `.forge/workflows/`, and a ticket's type is chosen at admission and pinned with its workflow; there is no default type (`design/ticket-types.md`).*
 - The workflow definition is pinned per ticket at admission.
 - Approval requirements are declared per transition, and only on some transitions.
 - Sub-structure within a state (fan-out and join) is declared as named, reusable blocks.

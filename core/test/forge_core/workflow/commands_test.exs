@@ -350,6 +350,13 @@ defmodule ForgeCore.Workflow.CommandsTest do
              ]
     end
 
+    # `"0\n"` matched `^[0-9]+$`, whose `$` allows a final newline, and `String.to_integer/1` then
+    # raised on it: a parse that raised rather than reported.
+    test "a status with a trailing newline is not a status" do
+      map = put_in(base_map(), ["states", "checking", "exit"], %{"0\n" => "done", "*" => "x"})
+      assert {"states.checking.exit", ~s("0\\n" is not an exit status or "*")} in messages(map)
+    end
+
     # The pinned definition is stored as JSON, where every key is a string: a command state has to
     # read back the way it was written, or its ticket stops parsing the first time it is read.
     test "a status written as its digits is that status, so the pinning survives JSON" do
@@ -424,7 +431,7 @@ defmodule ForgeCore.Workflow.CommandsTest do
 
       assert messages(map) == [
                {"commands.bad name",
-                "command name must be a single path segment: letters, digits, . _ -"}
+                "command name must be a single path segment: " <> Workflow.name_rule()}
              ]
     end
 

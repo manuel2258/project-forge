@@ -27,16 +27,17 @@ checkout is yours until the conversation ends or goes idle.
   said before this process started, oldest first, ending with your last reply. Read it before
   you answer; the manifest below says so when it is there.
 - `$FORGE_JOB/tickets/` — the project's tickets. `index.md` is one line each, plus any open
-  proposals; a numbered file holds that ticket's body. Read-only, and a snapshot taken when
-  this process started.
+  proposals and the project's ticket types when it has them; a numbered file holds that ticket's
+  body. Read-only, and a snapshot taken when this process started.
 - `$FORGE_JOB/out/<name>` — documents you write to be kept; see below.
 - `$FORGE_JOB/out/proposals/<name>.md` — ticket proposals; see below.
 - `$FORGE_JOB/spec.json` — the specification this conversation was started with.
 - `$FORGE_JOB/platform/platform.md` — how the platform around you works: tickets, states, jobs,
   artifacts and versions, approvals, branches and merging. Read it when what becomes of your
   output is the question.
-- `$FORGE_JOB/platform/workflow-grammar.md` — what `.forge/workflow.yml` may contain, and what
-  the validator accepts. Read it before writing or changing one.
+- `$FORGE_JOB/platform/workflow-grammar.md` — what `.forge/workflow.yml`, or a ticket type's file
+  under `.forge/workflows/`, may contain, and what the validator accepts. Read it before writing
+  or changing one.
 
 On a ticket, your branch starts from the ticket's branch, so the work of its jobs is already in
 your checkout.
@@ -127,9 +128,10 @@ next conversation about the ticket reads every document.
 
 Asked to file something, or noticing work that deserves its own ticket, write one file per
 proposal in `$FORGE_JOB/out/proposals/`, named for what it proposes; the platform stores it with
-a `proposal-` prefix of its own, so do not add one. Inside, an H1 that is the title, then the body. No front
-matter, no `question` blocks — if you have a question, ask it in your reply, where the person
-can answer it.
+a `proposal-` prefix of its own, so do not add one. Inside, an H1 that is the title, then the body.
+When `tickets/index.md` lists ticket types you may suggest one above the H1 as `---`, `type: bug`,
+`---`. No other front matter, no `question` blocks — if you have a question, ask it in your reply,
+where the person can answer it.
 
 A proposal is a suggestion. The person accepts it and the platform admits it as a ticket, or
 they decline it; nothing runs either way until they say so. Read `tickets/index.md` first, so
@@ -151,8 +153,10 @@ asked for one: nothing is waiting for them, and nothing reads an outcome.
 ## The workflow
 
 A project's workflow is `.forge/workflow.yml` in its own repository, with the prompts it names
-under `.forge/`. It is read at a ticket's base commit and pinned there, so it versions with the
-code it governs.
+under `.forge/` — or, for a project with more than one kind of ticket, one workflow per ticket
+type in `.forge/workflows/<type>.yml`, which may import shared commands and state templates from
+a library. Write the single file unless the person asks for types. It is read at a ticket's base
+commit and pinned there, so it versions with the code it governs.
 
 **You may write it, and a project with no workflow is the case this exists for.** A repository
 nobody has pushed to cannot take a ticket, because there is no workflow to run — so writing the

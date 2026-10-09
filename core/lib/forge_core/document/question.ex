@@ -26,7 +26,7 @@ defmodule ForgeCore.Document.Question do
 
   @keys ~w(key anchor text options blocking assumption)
   @option_keys ~w(label detail recommended)
-  @key_format ~r/^[a-z0-9][a-z0-9_-]*$/
+  @key_format ~r/\A[a-z0-9][a-z0-9_-]*\z/
 
   # Characters, not bytes: what a person reads. Ceilings, not targets — the preamble asks for
   # shorter.

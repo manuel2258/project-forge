@@ -394,8 +394,9 @@ defmodule ForgeCore.PromptTest do
 
   # Both affordances are files, and a file an agent is never told about is a file it never
   # opens. These are the four things it has to know: where to read, where to write, that a
-  # proposal is a suggestion rather than a ticket, and that the format has no front matter —
-  # which the parser refuses, so an agent that guesses wrong loses the proposal.
+  # proposal is a suggestion rather than a ticket, and that the format's only front matter is the
+  # type it suggests — anything else the parser refuses, so an agent that guesses wrong loses the
+  # proposal.
   # A process the kernel killed at the job's ceiling exits 137 and says nothing else, and an agent
   # that does not know that runs the same build again into the same wall. Both preambles name the
   # variable that holds the ceiling, since the preamble is one document for every job.
@@ -409,6 +410,31 @@ defmodule ForgeCore.PromptTest do
         assert flat =~ "exit status 137"
         assert flat =~ "less parallelism"
       end
+    end
+  end
+
+  # A job is handed its ticket's type beside its number, and only when there is one.
+  describe "the manifest's ticket type" do
+    test "is named when the ticket has one, and absent when it does not" do
+      typed = %{spec() | ticket: %{spec().ticket | ticket_type: "bug"}}
+      assert Prompt.manifest(typed, "/j") =~ "- Type: `bug`\n- State:"
+
+      refute Prompt.manifest(%{spec() | ticket: %{spec().ticket | ticket_type: nil}}, "/j") =~
+               "Type:"
+    end
+
+    test "survives the spec's round trip, and a spec from before types has none" do
+      typed = %{spec() | ticket: %{number: 7, title: "x", ticket_type: "bug"}}
+      wire = typed |> ForgeCore.Job.Spec.to_json() |> Jason.decode!()
+      assert ForgeCore.Job.Spec.from_map(wire).ticket.ticket_type == "bug"
+
+      older = update_in(wire, ["ticket"], &Map.delete(&1, "ticket_type"))
+
+      assert ForgeCore.Job.Spec.from_map(older).ticket == %{
+               number: 7,
+               title: "x",
+               ticket_type: nil
+             }
     end
   end
 
@@ -426,7 +452,8 @@ defmodule ForgeCore.PromptTest do
       flat = Prompt.preamble() |> String.replace("\n", " ")
 
       assert flat =~ "$FORGE_JOB/out/proposals/"
-      assert flat =~ "No front matter"
+      assert flat =~ "No other front matter"
+      assert flat =~ "`type: bug`"
       assert flat =~ "suggestion, not a ticket"
     end
 
@@ -494,7 +521,8 @@ defmodule ForgeCore.PromptTest do
 
       assert preamble =~ "$FORGE_JOB/tickets/"
       assert preamble =~ "$FORGE_JOB/out/proposals/"
-      assert flat =~ "No front matter"
+      assert flat =~ "No other front matter"
+      assert flat =~ "`type: bug`"
 
       # It has a person in it, so a question belongs in the reply rather than in the file.
       assert flat =~ "ask it in your reply"

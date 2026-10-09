@@ -37,7 +37,7 @@ defmodule ForgeCore.Workflow.Validator do
         if valid_name?(name),
           do: [],
           else: [
-            Error.new(path, "state name must be a single path segment: letters, digits, . _ -")
+            Error.new(path, "state name must be a single path segment: " <> Workflow.name_rule())
           ]
 
       artifact_errors =
@@ -48,7 +48,7 @@ defmodule ForgeCore.Workflow.Validator do
         |> Enum.map(
           &Error.new(
             path,
-            "artifact name #{inspect(&1)} must be a single path segment: letters, digits, . _ -"
+            "artifact name #{inspect(&1)} must be a single path segment: " <> Workflow.name_rule()
           )
         )
 
@@ -464,7 +464,10 @@ defmodule ForgeCore.Workflow.Validator do
         if(valid_name?(name),
           do: [],
           else: [
-            Error.new(path, "command name must be a single path segment: letters, digits, . _ -")
+            Error.new(
+              path,
+              "command name must be a single path segment: " <> Workflow.name_rule()
+            )
           ]
         ),
         run_errors(Error.join(path, "run"), command.run, exists),
@@ -540,7 +543,7 @@ defmodule ForgeCore.Workflow.Validator do
 
     cond do
       not valid_name?(produces) ->
-        [Error.new(path, "artifact name must be a single path segment: letters, digits, . _ -")]
+        [Error.new(path, "artifact name must be a single path segment: " <> Workflow.name_rule())]
 
       produces in [
         Workflow.ticket_artifact(),

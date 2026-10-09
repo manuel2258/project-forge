@@ -238,6 +238,18 @@ defmodule ForgeCore.DocumentTest do
                Document.parse("```question\n- a\n```\n")
     end
 
+    test "a key does not end in a newline" do
+      yaml = """
+      ```question
+      key: "ok\\n"
+      text: t
+      options: [{label: a, detail: d}]
+      ```
+      """
+
+      assert {"question[0].key", "must be lowercase letters, digits, - or _"} in messages(yaml)
+    end
+
     test "every field is checked" do
       yaml = """
       ```question

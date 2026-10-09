@@ -26,9 +26,11 @@ defmodule Forge.Backlog do
 
   import Ecto.Query, only: [from: 2]
 
+  require Logger
+
   alias Forge.Artifacts.{Artifact, Version}
   alias Forge.Projects.Project
-  alias Forge.{Proposals, Repo}
+  alias Forge.{Proposals, Repo, Tickets}
   alias Forge.Tickets.Ticket
   alias ForgeCore.Workflow
 
@@ -50,7 +52,7 @@ defmodule Forge.Backlog do
       end)
 
     proposal_files = proposal_files(proposals)
-    index = index(project, tickets, proposal_files, now)
+    index = index(project, tickets, proposal_files, types(project), now)
 
     %{
       "index" => index,
@@ -74,6 +76,7 @@ defmodule Forge.Backlog do
           state: t.state,
           status: t.status,
           branch: t.branch,
+          ticket_type: t.ticket_type,
           id: t.id
         }
     )
@@ -135,13 +138,42 @@ defmodule Forge.Backlog do
   defp body(ticket, bodies) do
     text = Map.get(bodies, ticket.id) || "# #{ticket.title}\n\n#{ticket.body}"
 
+    fields =
+      Enum.reject([ticket.ticket_type, ticket.state, ticket.status, ticket.branch], &is_nil/1)
+
     """
-    <!-- ticket #{ticket.number} · #{ticket.state} · #{ticket.status} · #{ticket.branch} -->
+    <!-- ticket #{ticket.number} · #{Enum.join(fields, " · ")} -->
 
     """ <> text
   end
 
-  defp index(%Project{} = project, tickets, proposal_files, now) do
+  # The project's ticket types as the default branch declares them now, so a proposal can suggest
+  # one (`docs/design/ticket-types.md` § What a job is told). Read from the repository on every
+  # composition; a project with the single file, or whose repository cannot say, has none here.
+  #
+  # **A fault in reading them costs this section, never the job.** The backlog is composed inside
+  # every assignment, so anything that raises here failed every job of the project — chats
+  # included — over a file most of them never read: a library with an empty `commands:` did, until
+  # the parser learned to read one. The rescue is the defence against the next such case and an
+  # equivalent mutant today, since no input the parser is known to raise on remains to test it
+  # with; removing it changes nothing a test can see until one does. `single: false` is one too:
+  # the match below drops a single file's entry either way, and the option only spares its parse.
+  defp types(project) do
+    case Tickets.types(project, single: false) do
+      {:ok, %{form: :types, types: types}} -> types
+      _single_or_unreadable -> []
+    end
+  rescue
+    exception ->
+      Logger.error(
+        "could not read the ticket types of #{project.name} for a backlog: " <>
+          Exception.message(exception)
+      )
+
+      []
+  end
+
+  defp index(%Project{} = project, tickets, proposal_files, types, now) do
     """
     # Tickets on #{project.name}
 
@@ -154,19 +186,60 @@ defmodule Forge.Backlog do
     read: it is pinned to a job that is not this one.
 
     #{table(tickets)}
-    #{proposal_section(proposal_files)}
+    #{types_section(types)}#{proposal_section(proposal_files)}
     """
   end
 
   defp table([]), do: "No tickets yet.\n"
 
+  # A type column only where some ticket has a type: on a project with the single workflow file
+  # it would be a column of dashes in every job's context.
   defp table(tickets) do
+    typed? = Enum.any?(tickets, & &1.ticket_type)
+
+    columns =
+      if typed?,
+        do: ["#", "type", "state", "status", "title"],
+        else: ["#", "state", "status", "title"]
+
     rows =
-      Enum.map_join(tickets, "\n", fn t ->
-        "| #{t.number} | #{t.state} | #{t.status} | #{escape(t.title)} |"
+      Enum.map(tickets, fn t ->
+        type = if typed?, do: [t.ticket_type || "—"], else: []
+        [t.number | type] ++ [t.state, t.status, escape(t.title)]
       end)
 
-    "| # | state | status | title |\n|---|---|---|---|\n" <> rows <> "\n"
+    markdown_table(columns, rows)
+  end
+
+  # Every table in the index: a header, its rule, and a row per entry. One builder, so the three
+  # tables cannot drift into three dialects of the same markdown.
+  defp markdown_table(columns, rows) do
+    rule = "|" <> String.duplicate("---|", length(columns))
+    Enum.join([cells(columns), rule | Enum.map(rows, &cells/1)], "\n") <> "\n"
+  end
+
+  defp cells(row), do: "| " <> Enum.join(row, " | ") <> " |"
+
+  defp types_section([]), do: ""
+
+  defp types_section(types) do
+    rows =
+      Enum.map(types, fn
+        %{name: name, workflow: {:ok, workflow}} ->
+          [name, workflow.initial, escape(workflow.description)]
+
+        %{name: name} ->
+          [name, "—", "(its workflow does not parse)"]
+      end)
+
+    """
+
+    ## Ticket types
+
+    Each type is a different workflow. A proposal may suggest one as `type:` in its front
+    matter; a person confirms it when they accept.
+
+    """ <> markdown_table(["type", "starts in", "description"], rows)
   end
 
   defp proposal_section([]) do
@@ -179,10 +252,7 @@ defmodule Forge.Backlog do
   end
 
   defp proposal_section(proposal_files) do
-    rows =
-      Enum.map_join(proposal_files, "\n", fn p ->
-        "| #{p["file"]} | #{escape(p["title"])} |"
-      end)
+    rows = Enum.map(proposal_files, &[&1["file"], escape(&1["title"])])
 
     """
 
@@ -191,9 +261,7 @@ defmodule Forge.Backlog do
     Written by a job and not yet admitted, so they are not tickets and no one is working on
     them. **Do not propose these again.** Files are in the `proposals/` folder beside this one.
 
-    | file | title |
-    |---|---|
-    """ <> rows <> "\n"
+    """ <> markdown_table(["file", "title"], rows)
   end
 
   # The title is the proposal's H1, and a proposal that no longer parses still has to appear:

@@ -394,6 +394,13 @@ defmodule ForgeWeb.TicketLive do
             {@ticket.title}
           </h1>
           <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span
+              :if={@ticket.ticket_type}
+              id="ticket-type"
+              class="font-mono text-[12.5px] opacity-60"
+            >
+              {@ticket.ticket_type}
+            </span>
             <.state name={@ticket.state} topology={Board.topology(@workflow, @ticket.state)} />
             <.status_flag status={@ticket.status} age={Format.ago(@ticket.updated_at, @now)} />
             <.paused :if={@paused} reason="spend" until={@until_midnight} />

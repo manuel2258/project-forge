@@ -32,7 +32,17 @@ defmodule Forge.StorageTest do
     end
 
     test "reject traversal, absolutes, uppercase and single segments" do
-      for key <- ["job/../etc/passwd", "/job/x", "job//x", "Job/x", "job/x/", "artifact", ".."] do
+      for key <- [
+            "job/../etc/passwd",
+            "/job/x",
+            "job//x",
+            "Job/x",
+            "job/x/",
+            "artifact",
+            "..",
+            "job/x\n/y",
+            "job/x/y\n"
+          ] do
         assert {:error, :invalid_key} = Key.validate(key), "expected #{inspect(key)} to fail"
       end
 

@@ -336,8 +336,15 @@ defmodule ForgeWeb.Operator.Components do
 
   `Accept` carries the verb and the `›`, like every affordance that commits; `Decline` is the
   quiet one beside it, as `Reject` is on an approval.
+
+  `types` is the project's ticket types when there is a choice to make — `%{name, parses}` each —
+  and empty otherwise. The type a proposal suggests is preselected only if it is one of them now; a
+  suggestion that is not is said, and nothing is preselected (`docs/design/ticket-types.md`
+  § Proposals). A type whose workflow does not parse is offered marked as such, as on the ticket
+  form.
   """
   attr :proposals, :list, required: true
+  attr :types, :list, default: []
 
   def proposals(assigns) do
     ~H"""
@@ -348,6 +355,11 @@ defmodule ForgeWeb.Operator.Components do
       </div>
 
       <p class="mt-1 text-[12.5px]/[1.5] opacity-70 whitespace-pre-line">{p.body}</p>
+
+      <%!-- Only where there is a type to choose: a project without types mentions none. --%>
+      <p :if={p[:suggested] && @types != []} class="mt-1 font-mono text-[11px] opacity-60">
+        {suggestion(p.suggested, @types)}
+      </p>
 
       <p class="mt-1 font-mono text-[11px] opacity-50">
         proposed by
@@ -363,6 +375,17 @@ defmodule ForgeWeb.Operator.Components do
 
       <form phx-submit="decide_proposal" class="mt-3 flex flex-col gap-2">
         <input type="hidden" name="version_id" value={p.version_id} />
+        <select
+          :if={@types != [] and p.readable}
+          name="ticket_type"
+          aria-label="Ticket type"
+          class="select w-full"
+        >
+          <option value="">Choose a type</option>
+          <option :for={type <- @types} value={type.name} selected={type.name == p[:suggested]}>
+            {if type.parses, do: type.name, else: "#{type.name} — does not parse"}
+          </option>
+        </select>
         <%!-- Enter breaks a line: as a one-line input it submitted with the first button, which
               is Accept (`docs/design/ui.md` § The affordance rule). --%>
         <ForgeWeb.Conversations.message_box
@@ -613,5 +636,13 @@ defmodule ForgeWeb.Operator.Components do
       }
     </script>
     """
+  end
+
+  # What a proposal's suggested type is, against the types there are to choose between — drawn
+  # only when there are some.
+  defp suggestion(type, types) do
+    if type in Enum.map(types, & &1.name),
+      do: "suggests #{type}",
+      else: "suggests #{type}, which is not a type here"
   end
 end

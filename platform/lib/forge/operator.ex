@@ -340,11 +340,12 @@ defmodule Forge.Operator do
   ticket it *made*, which is a different one. A proposal belongs to the job that wrote it rather
   than to a ticket, and a project chat's proposal has no ticket anywhere near it.
   """
-  @spec accept_proposal(String.t(), User.t(), String.t() | nil) ::
+  @spec accept_proposal(String.t(), User.t(), String.t() | nil, String.t() | nil) ::
           {:ok, Ticket.t()} | {:error, term()}
-  def accept_proposal(version_id, %User{} = user, comment \\ nil) do
+  def accept_proposal(version_id, %User{} = user, comment \\ nil, ticket_type \\ nil) do
     with :ok <- allow_proposal(version_id, user),
-         {:ok, %Ticket{} = ticket} <- Proposals.accept(version_id, user.id, comment) do
+         {:ok, %Ticket{} = ticket} <-
+           Proposals.accept(version_id, user.id, comment, ticket_type) do
       # Both: the ticket the proposal came out of has a page that lists it, and the ticket it
       # became has one of its own that nobody is looking at yet.
       notify_origin(version_id)

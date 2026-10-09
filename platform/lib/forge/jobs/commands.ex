@@ -147,7 +147,7 @@ defmodule Forge.Jobs.Commands do
       spec = %Spec{
         job_id: job_id,
         kind: :command,
-        ticket: %{number: ticket.number, title: ticket.title},
+        ticket: %{number: ticket.number, title: ticket.title, ticket_type: ticket.ticket_type},
         state: invocation.state,
         attempt: attempt,
         env: command.env,

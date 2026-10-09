@@ -29,6 +29,27 @@ that reason — the build sandbox has no `docs/` unless a file is listed there.
 `.forge/` and are resolved relative to it. The file is read at the ticket's base commit and
 pinned (see below).
 
+**A project with more than one kind of ticket has a directory instead**: one complete workflow per
+**ticket type**, `.forge/workflows/<type>.yml` (`docs/design/ticket-types.md` is the note).
+
+- **A type is a `<name>.yml` directly in `.forge/workflows/`**, named by the file's stem, which
+  follows the rule for state and artifact names: letters, digits, `.`, `_` and `-`, starting with
+  a letter or a digit. Anything else there — another extension, a name that breaks the rule, a
+  subdirectory, a symbolic link — is not a type: it is never read, and it blocks nothing.
+- **Each type's file is a whole workflow.** Everything on this page holds for it exactly as for the
+  single file, and a ticket of a type reads that type's file wherever this page says
+  `.forge/workflow.yml`. Types share nothing but what they import (§ Imports) and the prompts and
+  scripts they name by path.
+- **A ticket's type is chosen when it is admitted, and pinned with its workflow.** With several
+  types a person chooses — there is no default type — and with one it is implied. A ticket keeps
+  its type for life.
+- **The single file and a type in the directory, together, are an error**: there is no rule for
+  which wins, and nothing is admitted until one form is gone.
+
+A file in either form may carry `description:`, one line saying what kind of work it is for. The
+ticket form shows it beside the type, and a job reads every type's in `tickets/index.md`, so it is
+what decides which type a proposal suggests.
+
 ## Shape
 
 ```yaml
@@ -576,6 +597,53 @@ many remain. `commands.md` § How an agent invokes has the mechanism.
 resumes when every command it invoked has finished. There is no inline form and nothing in the
 grammar selects between them.
 
+## Imports
+
+```yaml
+# .forge/common.yml — a library
+commands:
+  build: { run: .forge/commands/build.sh, env: build, produces: build.log, timeout: 20m }
+defaults:
+  resources: { memory: 2200MiB, cpu: 1 }
+states:
+  implementing:                       # a template, used only where a state extends it
+    prompt: agents/implement.md
+    env: implement
+    produces: [implementation.md, changeset]
+    budget: { turns: 200, cost: 10.00 }
+```
+
+```yaml
+# .forge/workflows/bug.yml
+version: 1
+import: [common.yml]
+initial: implementing
+states:
+  implementing:
+    extends: implementing             # the template's keys, then these replace its own
+    inputs: [ticket]
+  ...
+```
+
+A workflow may `import` **libraries**: files under `.forge/`, outside `workflows/`, named by their
+path relative to `.forge/`, read at the same commit as the workflow. A library holds `commands`,
+`defaults` and state templates under `states`, and nothing else — no `version`, `initial`,
+`transitions`, `limits` or `import`.
+
+- **Commands are imported whole.** A command name declared by two libraries, or by a library and
+  the workflow, is an error: a workflow that needs another build names it differently.
+- **Defaults are imported field by field, and the workflow's own win.** Two libraries setting the
+  same field is an error.
+- **A state template is used only by a state that names it**, `extends: <template>`, under any
+  name of its own. **The keys the state writes replace the template's whole**: a `budget` in the
+  state is the budget, not a patch to the template's.
+- **Imports are one level deep**: a library imports nothing and a template extends nothing.
+
+The imports are resolved when the ticket is admitted, and what the ticket pins is the result —
+the definition with no `import` and no `extends` left in it — so a later change to a library
+reaches a ticket only through a re-pin. An error about a part a library supplied names the
+library: `common.yml: states.implementing.budget.turns: must be a positive integer`.
+
 ## Resources
 
 ```yaml
@@ -617,14 +685,15 @@ row, the worker itself — refuses below the same one.
 
 ## Pinning
 
-At admission the engine reads `.forge/workflow.yml` at the ticket's base commit, validates
-it, and stores the parsed definition and the commit hash on the ticket. Later changes to the
+At admission the engine reads `.forge/workflow.yml` — or the chosen type's file — at the ticket's
+base commit, validates it, and stores the parsed definition, the commit hash and the type on the
+ticket. Later changes to the
 file do not affect that ticket, and neither do later changes to its prompts or command scripts,
 which are read at the same commit.
 
-**Re-pinning is a person's act** (`Forge.Engine.repin/2`). It reads the workflow at the default
-branch's head, validates it as admission does, and stores the definition and the commit in place
-of the old ones; every job made after it reads its prompt and its scripts from there. The branch,
+**Re-pinning is a person's act** (`Forge.Engine.repin/2`). It reads the workflow of the ticket's
+own type at the default branch's head — refusing when that type's file is gone — validates it as
+admission does, and stores the definition and the commit in place of the old ones; every job made after it reads its prompt and its scripts from there. The branch,
 its base and what the ticket has written stay. It is refused while a job for the ticket's state
 is live, since that job was made from the old pin; while an approval is pending, whose transition
 the new workflow may not have; when the new workflow has no state the ticket is in; and when the
@@ -685,6 +754,9 @@ is never produced; `answers.md` is platform-managed and never declared.
   edge out of the merging state, because the ticket can reach the target only by it. It is no
   transition: no `when` selects it and no person chooses it.
 - `merge_conflict` is neither a declared outcome nor a value of an `exit` map.
+- `description`, where present, is a non-empty string.
+- Every `import` entry is a path of names under `.forge/`, not in `workflows/`, that exists at the
+  pinned commit, and appears once; § Imports has the rest.
 - Keys outside this grammar (`blocks`, `use`, `can_spawn`, `fanout`, `spawn_depth`,
   `child_budget`, `experiments`) are errors in v1.
 

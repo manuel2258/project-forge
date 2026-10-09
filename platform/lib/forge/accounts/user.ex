@@ -53,7 +53,7 @@ defmodule Forge.Accounts.User do
     changeset =
       changeset
       |> validate_required([:email])
-      |> validate_format(:email, ~r/^[^@,;\s]+@[^@,;\s]+$/,
+      |> validate_format(:email, ~r/\A[^@,;\s]+@[^@,;\s]+\z/,
         message: "must have the @ sign and no spaces"
       )
       |> validate_length(:email, max: 160)

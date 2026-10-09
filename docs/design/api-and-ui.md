@@ -22,7 +22,8 @@ outside `Operator` altogether (§ Operations).
 - `cancel(ticket, user)`, `restore(ticket, user)` — cancels a ticket, hiding it everywhere, and
   brings it back (`design/workflow-grammar-v1.md` § Cancelling a ticket).
 - `edit(ticket, user, name, content)` — writes a new version of a document.
-- `accept_proposal(version_id, user, comment)` — admits a ticket proposal as a ticket.
+- `accept_proposal(version_id, user, comment, ticket_type)` — admits a ticket proposal as a
+  ticket, of the type the person chose or else the one it suggests (`ticket-types.md` § Proposals).
 - `decline_proposal(version_id, user, comment)` — records that it will not be.
 - `admit(project, user, attrs)` — admits a ticket.
 - `open_chat(project, user, text, opts)`, `send_chat(chat, user, text, opts)`,
@@ -37,7 +38,7 @@ of the ticket so open pages refresh.
 
 The two proposal operations break that shape, and it is worth saying exactly how rather than
 leaving it to be found. They take no ticket, because a proposal belongs to the job that wrote it
-and a project chat's has no ticket anywhere near it. `accept_proposal/3` returns the ticket it
+and a project chat's has no ticket anywhere near it. `accept_proposal/4` returns the ticket it
 *made* rather than one it was about, and notifies that ticket and the proposal's origin;
 `decline_proposal/3` returns `{:ok, %Forge.Proposals.Decision{}}`. Neither notifies anything for
 a project chat's proposal, which has no ticket to notify — an open project page does not refresh
@@ -79,7 +80,7 @@ and audited like any other.
 | `GET /queue` | The operator queue |
 | `GET /projects`, `POST /projects` | List; register `{name, default_branch}` (repository created under the platform's repos directory) |
 | `GET /tickets[?project=name]` | List tickets |
-| `POST /projects/:name/tickets` | Admit `{title, body}` |
+| `POST /projects/:name/tickets` | Admit `{title, body, ticket_type}`; `ticket_type` is required when the project has more than one (`ticket-types.md`) |
 | `GET /tickets/:project/:number` | Ticket with jobs, artifacts, open questions, pending transition |
 | `GET /tickets/:project/:number/events` | The event timeline |
 | `GET /tickets/:project/:number/review` | The merge decision: diff, documents, answers, cost |
@@ -91,8 +92,8 @@ and audited like any other.
 | `POST /tickets/:project/:number/transition` | `{to, outcome, comment}` |
 | `POST /tickets/:project/:number/retry` | Runs the state the ticket rests in again |
 | `POST /tickets/:project/:number/cancel`, `…/restore` | Cancels the ticket; brings a cancelled one back |
-| `GET /projects/:project/proposals` | Open ticket proposals on the project |
-| `POST /proposals/:version_id/accept` | `{comment}`; answers with the ticket it admitted |
+| `GET /projects/:project/proposals` | Open ticket proposals on the project, each with the `suggested_type` it names |
+| `POST /proposals/:version_id/accept` | `{comment, ticket_type}`; answers with the ticket it admitted |
 | `POST /proposals/:version_id/decline` | `{comment}` |
 
 A proposal is named by the **version** id, never the artifact's. A decision attaches to an exact

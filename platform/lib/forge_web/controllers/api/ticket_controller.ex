@@ -59,7 +59,11 @@ defmodule ForgeWeb.Api.TicketController do
   # the ticket is validated, so a malformed request into somebody else's project is not a 422
   # that says the project is there. `docs/design/api-and-ui.md` § Operations.
   def create(conn, %{"project" => name} = params) do
-    attrs = %{title: params["title"] || "", body: params["body"] || ""}
+    attrs = %{
+      title: params["title"] || "",
+      body: params["body"] || "",
+      ticket_type: params["ticket_type"]
+    }
 
     with %{} = project <- Projects.by_name(name) || {:error, :not_found},
          {:ok, ticket} <- admit(project, user(conn), attrs) do
@@ -210,7 +214,13 @@ defmodule ForgeWeb.Api.TicketController do
   end
 
   def accept_proposal(conn, %{"version_id" => version_id} = params) do
-    with {:ok, ticket} <- Operator.accept_proposal(version_id, user(conn), params["comment"]) do
+    with {:ok, ticket} <-
+           Operator.accept_proposal(
+             version_id,
+             user(conn),
+             params["comment"],
+             params["ticket_type"]
+           ) do
       json(conn, Render.ticket(ticket, project_name(ticket)))
     end
   end

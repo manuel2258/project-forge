@@ -32,6 +32,7 @@ defmodule ForgeWeb.Api.Render do
       branch: t.branch,
       base_commit: t.base_commit,
       workflow_commit: t.workflow_commit,
+      ticket_type: t.ticket_type,
       pending_transition: t.pending_transition,
       inserted_at: t.inserted_at,
       updated_at: t.updated_at
@@ -105,10 +106,10 @@ defmodule ForgeWeb.Api.Render do
   the artifact would let a client accept text nobody had looked at.
   """
   def proposal(%{artifact: artifact, version: version} = found) do
-    {title, body} =
+    {title, body, type} =
       case ForgeCore.Proposal.parse(version.content || "") do
-        {:ok, proposal} -> {proposal.title, proposal.body}
-        {:error, errors} -> {nil, ForgeCore.Error.format(errors)}
+        {:ok, proposal} -> {proposal.title, proposal.body, proposal.ticket_type}
+        {:error, errors} -> {nil, ForgeCore.Error.format(errors), nil}
       end
 
     %{
@@ -116,6 +117,7 @@ defmodule ForgeWeb.Api.Render do
       file: artifact.name,
       title: title,
       body: body,
+      suggested_type: type,
       readable: title != nil,
       job_id: artifact.job_id,
       ticket_number: found[:ticket_number],

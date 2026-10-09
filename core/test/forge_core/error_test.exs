@@ -37,6 +37,21 @@ defmodule ForgeCore.ErrorTest do
                "states.refining.budget.cost: must be a non-negative number"
     end
 
+    # An error about part of a definition a library supplied: the path is into the library, and a
+    # line that did not say so would send the reader to a file that does not contain it.
+    test "an error from a library names the library first" do
+      error = %{
+        Error.new("states.implementing.budget.turns", "must be positive")
+        | file: "common.yml"
+      }
+
+      assert Error.format([error]) ==
+               "common.yml: states.implementing.budget.turns: must be positive"
+
+      assert Error.format([%{Error.new("", "invalid YAML: x") | file: "common.yml"}]) ==
+               "common.yml: invalid YAML: x"
+    end
+
     test "one line per error, in the order given" do
       assert Error.format([Error.new("version", "is required"), Error.new("", "and one more")]) ==
                "version: is required\nand one more"

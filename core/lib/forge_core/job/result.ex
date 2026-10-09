@@ -214,13 +214,25 @@ defmodule ForgeCore.Job.Result do
   # payload before it has been encoded sees different keys from one reading it after, and only
   # one of the two has a test. `from_map/1` accepts either, so this is about what is *sent*.
   defp proposal_to_map(%Proposal{} = proposal) do
-    %{"title" => proposal.title, "body" => proposal.body, "raw" => proposal.raw}
+    %{
+      "title" => proposal.title,
+      "body" => proposal.body,
+      "raw" => proposal.raw,
+      "ticket_type" => proposal.ticket_type
+    }
   end
 
   defp proposal_from_map(map) do
     get = fn key -> Map.get(map, to_string(key), Map.get(map, key)) end
 
-    %Proposal{title: get.(:title), body: get.(:body), raw: get.(:raw)}
+    # `ticket_type` is absent from a worker built before proposals could suggest one: no
+    # suggestion.
+    %Proposal{
+      title: get.(:title),
+      body: get.(:body),
+      raw: get.(:raw),
+      ticket_type: get.(:ticket_type)
+    }
   end
 
   # Options are structs too, and a struct nested in `Map.from_struct/1` reaches the JSON encoder,

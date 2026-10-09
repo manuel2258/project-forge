@@ -94,6 +94,13 @@ defmodule ForgeCore.WorkflowTest do
       refute Workflow.valid_name?(nil)
       assert Workflow.valid_name?("plan.md")
     end
+
+    # `$` matches before a final newline; a name must end where the string does.
+    test "a name does not end in a newline" do
+      refute Workflow.valid_name?("plan.md\n")
+      refute Workflow.valid_name?("feature\n")
+      refute Workflow.valid_name?("\nfeature")
+    end
   end
 
   describe "the documents handed to an agent" do

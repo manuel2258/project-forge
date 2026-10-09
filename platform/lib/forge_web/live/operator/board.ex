@@ -1,6 +1,7 @@
 defmodule ForgeWeb.Operator.Board do
   @moduledoc """
-  A project's tickets arranged as the columns of its workflow.
+  A project's tickets arranged as the columns of its workflow — one lane of columns per ticket
+  type, since each type is a workflow of its own (`docs/design/ticket-types.md` § The board).
 
   Shared by `/board`, which draws every project at once, and `/projects/:name`, which draws one.
   The two differ in exactly one way — how many rows a column shows before it says how many
@@ -24,6 +25,37 @@ defmodule ForgeWeb.Operator.Board do
           shown: [Tickets.Ticket.t()],
           more: non_neg_integer()
         }
+
+  @type lane :: %{ticket_type: String.t() | nil, heading: String.t() | nil, columns: [column()]}
+
+  @doc """
+  The lanes of a project's board: one per ticket type, each with the columns of its own workflow,
+  the single file's tickets first and then the types by name.
+
+  A type's lane is always headed by its name — with several types and tickets of only one of
+  them on the board, the columns would otherwise not say whose they are. The single file's lane
+  is headed only beside others, as `workflow.yml`, which is what a project that has moved to types
+  still has tickets of; alone it is drawn exactly as before types. A type with no tickets has no
+  lane: a lane of empty columns is a workflow, and the project page already shows those.
+  """
+  @spec lanes([Tickets.Ticket.t()], keyword()) :: [lane()]
+  def lanes(tickets, opts \\ []) do
+    # `nil` sorts before every string, so the single file's lane comes first. The sort is an
+    # equivalent mutant up to 32 types — a map that small iterates in key order already, so taking
+    # it away changes nothing a test can build a board to see — and is kept for the 33rd.
+    groups =
+      tickets
+      |> Enum.group_by(& &1.ticket_type)
+      |> Enum.sort_by(fn {type, _tickets} -> type end)
+
+    for {type, lane_tickets} <- groups do
+      %{
+        ticket_type: type,
+        heading: type || if(length(groups) > 1, do: "workflow.yml"),
+        columns: columns(lane_tickets, workflow(lane_tickets), opts)
+      }
+    end
+  end
 
   @doc """
   Columns for `tickets`, in the order their workflow reaches the states.
@@ -54,7 +86,7 @@ defmodule ForgeWeb.Operator.Board do
 
   @doc """
   The workflow to arrange by: the first ticket's pinned copy, or `nil` when there is none or it
-  no longer parses.
+  no longer parses. Asked of one lane's tickets, which share a type.
 
   A ticket's own pinned workflow rather than the repository's current one, because the board is
   drawing tickets and a ticket's states are the ones it was admitted with.
@@ -134,10 +166,12 @@ defmodule ForgeWeb.Operator.Board do
   """
   attr :column, :map, required: true
   attr :project, :string, required: true
+  attr :ticket_type, :string, default: nil
   attr :now, :any, required: true
 
   def column(assigns) do
-    assigns = assign(assigns, id: column_id(assigns.project, assigns.column.name))
+    assigns =
+      assign(assigns, id: column_id(assigns.project, assigns.ticket_type, assigns.column.name))
 
     ~H"""
     <div
@@ -191,6 +225,43 @@ defmodule ForgeWeb.Operator.Board do
   @spec column_id(String.t(), String.t()) :: String.t()
   def column_id(project, state),
     do: "column-" <> Base.url_encode64(project <> "\0" <> state, padding: false)
+
+  @doc """
+  A column's id in a type's lane: `implementing` in two types is two columns. The single file's
+  lane keeps `column_id/2`'s, so a project without types addresses its columns as it always did.
+  """
+  @spec column_id(String.t(), String.t() | nil, String.t()) :: String.t()
+  def column_id(project, nil, state), do: column_id(project, state)
+
+  def column_id(project, type, state),
+    do: "column-" <> Base.url_encode64(project <> "\0" <> type <> "\0" <> state, padding: false)
+
+  @doc """
+  A board: its lanes, each under its heading when there is more than one, each a row of columns
+  that stacks below `sm`. Both boards draw this, so a lane looks the same on either.
+  """
+  attr :lanes, :list, required: true
+  attr :project, :string, required: true
+  attr :now, :any, required: true
+
+  def board(assigns) do
+    ~H"""
+    <div :for={lane <- @lanes} class="flex flex-col gap-2">
+      <h3 :if={lane.heading} data-lane class="mt-2 font-mono text-[12.5px] font-medium">
+        {lane.heading}
+      </h3>
+      <div class="flex flex-col gap-px bg-base-300 sm:flex-row sm:overflow-x-auto">
+        <.column
+          :for={column <- lane.columns}
+          column={column}
+          project={@project}
+          ticket_type={lane.ticket_type}
+          now={@now}
+        />
+      </div>
+    </div>
+    """
+  end
 
   attr :ticket, :map, required: true
   attr :project, :string, required: true

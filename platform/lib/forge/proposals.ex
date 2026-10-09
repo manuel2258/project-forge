@@ -4,11 +4,11 @@ defmodule Forge.Proposals do
 
   The standard is `docs/design/ticket-proposals.md`. In one paragraph: any job may propose and
   no job may write, a proposal is one document artifact at one version scoped to the job that
-  wrote it, and accepting it admits it — `Forge.Tickets.prepare_admission/1` and
-  `Forge.Tickets.put_admit/5` inside `accept/3`'s own transaction, so the ticket and the decision
+  wrote it, and accepting it admits it — `Forge.Tickets.prepare_admission/2` and
+  `Forge.Tickets.put_admit/5` inside `accept/4`'s own transaction, so the ticket and the decision
   are one write. A proposal is a `ticket` document that has not been admitted yet.
 
-  Nothing here creates a ticket on its own. `accept/3` takes the acting user because admission
+  Nothing here creates a ticket on its own. `accept/4` takes the acting user because admission
   is the human act that widens the envelope, which is the only reason an agent is allowed to
   propose freely in the first place.
   """
@@ -75,7 +75,7 @@ defmodule Forge.Proposals do
     # An unreadable proposal is written too, as the text the agent wrote. § Malformed degrades,
     # never drops promises it is "kept verbatim as a version"; recording a filename and an error
     # message in an event is not keeping it, and left nothing for a person to look at. It stays
-    # open and unacceptable — `accept/3` re-parses — so the operator sees what was written and
+    # open and unacceptable — `accept/4` re-parses — so the operator sees what was written and
     # declines it, which is the whole point of not dropping it.
     texts =
       Enum.map(named, fn {file, %Proposal{} = proposal} ->
@@ -295,13 +295,18 @@ defmodule Forge.Proposals do
   the opposite reading is plausible enough to be worth stating. A proposal is not work in
   flight and holds nothing; it should run against whatever the project declares when a person
   says go, which may be long after an agent thought of it.
+
+  The ticket type is the person's, `ticket_type`; failing that, the one the proposal suggests,
+  if it names a type the project has **now** — the same reason the workflow pins at accept;
+  failing that, none, which a project with several types refuses as no type chosen
+  (`docs/design/ticket-types.md` § Proposals).
   """
-  @spec accept(String.t(), String.t(), String.t()) ::
+  @spec accept(String.t(), String.t(), String.t() | nil, String.t() | nil) ::
           {:ok, Forge.Tickets.Ticket.t()} | {:error, term()}
-  def accept(version_id, user_id, comment \\ nil) do
+  def accept(version_id, user_id, comment \\ nil, ticket_type \\ nil) do
     with {:ok, found} <- fetch_open(version_id),
          {:ok, proposal} <- parse(found.version) do
-      admit(found, proposal, user_id, comment)
+      admit(found, proposal, user_id, comment, ticket_type)
     end
   end
 
@@ -318,11 +323,11 @@ defmodule Forge.Proposals do
   # `Git.create_branch`, which is a filesystem effect. A rolled-back accept leaves the branch
   # without the ticket that named it. That is the pre-existing shape of `admit/3` and it is the
   # right way round — a stray ref is collectable, a stray ticket spends money.
-  defp admit(found, proposal, user_id, comment) do
+  defp admit(found, proposal, user_id, comment, ticket_type) do
     project = Projects.get!(found.job.project_id)
     attrs = %{title: proposal.title, body: proposal.body}
 
-    with {:ok, prepared} <- Tickets.prepare_admission(project) do
+    with {:ok, prepared} <- prepare(project, ticket_type, proposal.ticket_type) do
       Multi.new()
       |> Tickets.put_admit(prepared, project, attrs, {:user, user_id})
       |> put_decision(found, user_id, :accepted, comment)
@@ -340,6 +345,22 @@ defmodule Forge.Proposals do
       end
     end
   end
+
+  # Only a type left unsaid falls back to the suggestion — the API's accept with no `ticket_type`.
+  # The project page's select sends the type it shows, the suggestion preselected; an empty string
+  # from it is a person choosing *no* type, and is admitted as none, which a project with several
+  # refuses as such. A suggestion that names no type the project has now — or names one on a
+  # project that has none — is no suggestion: admission goes on as though the agent had said
+  # nothing.
+  defp prepare(project, nil, suggested) when is_binary(suggested) do
+    case Tickets.prepare_admission(project, suggested) do
+      {:error, {:no_ticket_types, _name}} -> Tickets.prepare_admission(project, nil)
+      {:error, {:unknown_ticket_type, _name, _names}} -> Tickets.prepare_admission(project, nil)
+      prepared -> prepared
+    end
+  end
+
+  defp prepare(project, chosen, _suggested), do: Tickets.prepare_admission(project, chosen)
 
   # The unique index on `artifact_version_id` is what makes two concurrent accepts safe, so the
   # constraint it raises has to come back as the same `:already_decided` that `fetch_open/1`

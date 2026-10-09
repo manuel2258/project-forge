@@ -684,7 +684,8 @@ reads top to bottom as it reads left to right. A state with nothing in it is its
 muted 0, not a placeholder sentence. **"N more" expands its column in place**, at every width: it
 is a control, not a caption, and the tickets it reveals are already on the page. The four-row cap
 exists so a column never grows its own scrollbar; expanding one lets the page scroll instead,
-which is § The project page's reasoning applied to one column on request.
+which is § The project page's reasoning applied to one column on request. A project with ticket
+types stacks lane by lane, each type's heading above its states.
 
 **Tables reflow below `sm`.** A project's tokens and mirrors, and a project's workflow table,
 become one block per row: the row's identity on the first line, then label and value pairs. A
@@ -739,7 +740,8 @@ the branch would not merge cleanly, so its confirm says so — the same sentence
 the conversation's page, from one definition, so neither can understate it.
 
 A project and a ticket are made in the product. A **workflow is not**: it is
-`.forge/workflow.yml` in the project's own repository, read at the ticket's base commit and
+`.forge/workflow.yml` — or one file per ticket type under `.forge/workflows/` — in the project's
+own repository, read at the ticket's base commit and
 pinned at admission, so it versions with the code it governs and there is nothing for a form to
 edit. The two create views are pushed views with a back affordance. A project's is reached from
 the laptop top bar or the phone's More sheet, and from the board and the ticket form only when there are no projects at
@@ -765,6 +767,11 @@ the operator has never seen. Instead:
 - The ticket form resolves the chosen project's workflow *before* the operator types anything,
   and says plainly when there is none. A form that accepts a title and a body and then rejects
   them for a reason in a third place is the failure being avoided.
+- **A project with more than one ticket type is asked which, and nothing is preselected**
+  (`ticket-types.md` § Admission). The chosen type's description and the state it starts in are
+  said beneath the select; a type whose file does not parse is offered marked as such and says why
+  when chosen, beside the types that admit. One type is stated rather than asked, and the single
+  `.forge/workflow.yml` asks nothing about types at all.
 
 Both are checked again on submit — the repository is a shared surface and a check is a moment,
 not a guarantee — but the operator is never the one who finds out.
@@ -799,6 +806,10 @@ accent; nothing on it waits on a person. New project is in the header, as on the
 `/projects/:name` is the overview and the project's own board. It exists because `/board` answers
 "what is happening everywhere" and nothing answered "what is this project".
 
+**A project with ticket types draws a lane per type**, on both boards, each under its name and
+with its own workflow's columns, since a bug's states are not a feature's (`ticket-types.md`
+§ The board). One lane draws no heading, so a project without types is drawn as it always was.
+
 Its board is `/board`'s, uncapped. The four-row cap is there so a column never grows its own
 scrollbar and hides its own count; the objection is to a column that scrolls independently, not
 to a long one, and with a single project on the page there is room to let the page scroll. Both
@@ -810,6 +821,11 @@ versions with the code it governs. What the page shows is the *repository's curr
 the one the **next** ticket will pin — which is not necessarily the one the board is arranged by,
 because every ticket on that board pinned its own at admission. On a project whose workflow has
 just changed those differ, and saying which is which is the point rather than a detail.
+
+**A project with ticket types shows one workflow per type**, each under its name and description,
+and a type that does not parse as its reason beside the ones that do. What `.forge/workflows/`
+holds that is not a type is listed with why, since it blocks nothing and would otherwise be
+invisible (`ticket-types.md` § The project page).
 
 **It lists the project's conversations, live ones first.** The board is the workflow and a
 conversation is not on it — it has no state to be in — so without this a chat is a thing you can

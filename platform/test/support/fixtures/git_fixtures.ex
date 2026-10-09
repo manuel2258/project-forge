@@ -173,18 +173,24 @@ defmodule Forge.GitFixtures do
   @doc """
   Commits `files` (`%{path => content}`) onto `branch` of the repository at `repo`, pushed as the
   platform pushes — past the hooks that keep everyone else off a protected branch — and returns
-  the new head.
+  the new head. A path mapped to `nil` is removed.
   """
   def commit_to(repo, branch, files, message \\ "change") do
     work = Path.join(tmp_dir("commit"), "work")
     git!(Path.dirname(work), ["clone", "-q", "--branch", branch, repo, work])
 
     for {path, content} <- files do
-      File.mkdir_p!(Path.dirname(Path.join(work, path)))
-      File.write!(Path.join(work, path), content)
+      full = Path.join(work, path)
+
+      if is_nil(content) do
+        File.rm!(full)
+      else
+        File.mkdir_p!(Path.dirname(full))
+        File.write!(full, content)
+      end
     end
 
-    git!(work, ["add", "."])
+    git!(work, ["add", "-A"])
     git!(work, ["-c", "user.name=t", "-c", "user.email=t@forge", "commit", "-q", "-m", message])
 
     {_out, 0} =

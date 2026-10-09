@@ -50,11 +50,14 @@ in the bundled form — stable keys per block, a second block type in `ForgeCore
 per proposal, an open-ness rule parallel to the one questions already have — is a consequence of
 the bundling and disappears without it.
 
-**A proposal has no front matter.** It is an H1 and prose, written with `parse: false`, which
-makes it byte-identical to the `ticket` document admission already writes
-(`"# #{title}\n\n#{body}"`, also `parse: false`, in `Tickets.put_admit/5`). The title is the H1.
+**A proposal's only front matter is the ticket type it suggests.** It is an H1 and prose, written
+with `parse: false`, which makes it byte-identical to the `ticket` document admission already
+writes (`"# #{title}\n\n#{body}"`, also `parse: false`, in `Tickets.put_admit/5`) — preceded,
+when the agent suggests a type, by `---`, `type: <name>`, `---`, which `ForgeCore.Proposal` reads
+as one line of one key and never as YAML (`ticket-types.md` § Proposals). The title is the H1.
 Accepting splits it back off and admits it by the same steps `admit/3` runs (§ Accepting) — a
-proposal is a `ticket` document that has not been admitted yet, and that is the whole mechanism.
+proposal is a `ticket` document that has not been admitted yet, and that is the whole mechanism;
+the type it suggests chooses the workflow and never reaches the ticket's body.
 
 This is also the one thing that had to be got right rather than merely chosen, and the reason is
 not the one it first looks like. `Artifacts.put_version/7` parses every document unless
@@ -126,8 +129,8 @@ both shapes — the directory name and the `proposal-` prefix — as it already 
 ## Accepting
 
 Acceptance admits the proposal's title and body by the steps `Tickets.admit/3` is made of, not by
-calling it: `Tickets.prepare_admission/1` before the transaction, then `Tickets.put_admit/5`
-inside `Proposals.accept/3`'s own multi, beside the decision. Nothing about admission changes: it
+calling it: `Tickets.prepare_admission/2` before the transaction, then `Tickets.put_admit/5`
+inside `Proposals.accept/4`'s own multi, beside the decision. Nothing about admission changes: it
 pins the workflow, allocates the number under the lock on the project row, writes the `ticket`
 document, creates the first job and the branch.
 
@@ -201,7 +204,7 @@ each file, never dropped.
 
 A proposal the platform cannot use — no H1, an empty body — is kept verbatim as a version, with
 its reason recorded in the log, and shown as what it is: open, marked unreadable, declinable and
-never acceptable, because `accept/3` parses the stored text rather than trusting it. It does not
+never acceptable, because `accept/4` parses the stored text rather than trusting it. It does not
 fail the job.
 
 The text is what matters and it is the part that was missing: an earlier version of this recorded
@@ -305,8 +308,11 @@ into it and an entry cannot make a subdirectory to hide a symlink in. `Dir.write
 says so where it lives; a change that stops recreating the folder has to replace the check.
 
 **The index is what an agent reads; the files are what it opens.** A line carries the number,
-state, status and title — enough to decide whether the file is worth a read, and useless for
-anything else, which is the point. Without an index the agent greps blindly or opens everything.
+state, status and title — and the ticket's type, on a project that has types — enough to decide
+whether the file is worth a read, and useless for anything else, which is the point. On such a
+project the index also lists the types, each with the state it starts in and its description,
+read from the default branch at composition, so a proposal can suggest one
+(`ticket-types.md` § What a job is told). Without an index the agent greps blindly or opens everything.
 
 **Bodies only. No artifacts.** Another ticket's `plan.md` is its reasoning at versions this job
 did not pin, and handing it over is how "artifacts are the contract" quietly stops being true:

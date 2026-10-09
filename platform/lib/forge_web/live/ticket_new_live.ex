@@ -4,8 +4,12 @@ defmodule ForgeWeb.TicketNewLive do
 
   The project's workflow is resolved as soon as a project is chosen, and what is wrong with it
   is said there — not after a title and a body have been typed. See `docs/design/ui.md`
-  § Creating things. `Tickets.admissible/1` runs exactly the checks `admit/3` makes, and
-  `admit/3` makes them again: the repository is a shared surface.
+  § Creating things. `Tickets.types/2` runs the checks `admit/3` makes for every type at once,
+  and `admit/3` makes them again: the repository is a shared surface.
+
+  A project with more than one ticket type asks which, and preselects nothing
+  (`docs/design/ticket-types.md` § Admission): a default is how a bug runs the feature lifecycle.
+  A broken type is offered as broken, beside the ones that are not.
   """
 
   use ForgeWeb, :live_view
@@ -28,25 +32,61 @@ defmodule ForgeWeb.TicketNewLive do
        # Named in the address and real: then it is stated rather than asked.
        fixed: is_binary(named) and Enum.any?(projects, &(&1.name == named))
      )
-     |> assign(form: to_form(%{"project" => chosen, "title" => "", "body" => ""}, as: :ticket))
+     |> assign(
+       form:
+         to_form(%{"project" => chosen, "ticket_type" => "", "title" => "", "body" => ""},
+           as: :ticket
+         )
+     )
      |> assign_workflow(chosen)}
   end
 
-  defp assign_workflow(socket, nil), do: assign(socket, project: nil, workflow: nil)
+  defp assign_workflow(socket, nil), do: assign(socket, project: nil, types: nil, workflow: nil)
 
   defp assign_workflow(socket, name) do
     case Enum.find(socket.assigns.projects, &(&1.name == name)) do
-      nil -> assign(socket, project: nil, workflow: nil)
-      project -> assign(socket, project: project, workflow: Tickets.admissible(project))
+      nil ->
+        assign(socket, project: nil, types: nil, workflow: nil)
+
+      project ->
+        socket |> assign(project: project, types: Tickets.types(project)) |> assign_chosen()
     end
   end
+
+  # The workflow the chosen type would run: `{:ok, workflow}`, `{:error, reason}`, or nil while a
+  # project with several types has none chosen — which is not an error, and draws no warning.
+  defp assign_chosen(socket) do
+    chosen = socket.assigns.form.params["ticket_type"]
+    assign(socket, workflow: chosen_workflow(socket.assigns.types, chosen))
+  end
+
+  defp chosen_workflow({:error, reason}, _chosen), do: {:error, reason}
+  defp chosen_workflow({:ok, %{types: [only]}}, _chosen), do: only.workflow
+
+  defp chosen_workflow({:ok, %{types: types}}, chosen) do
+    case Enum.find(types, &(&1.name == chosen)) do
+      nil -> nil
+      type -> type.workflow
+    end
+  end
+
+  # The types offered as a choice: only when there is one to make.
+  defp choices({:ok, %{form: :types, types: [_, _ | _] = types}}), do: types
+  defp choices(_types), do: []
+
+  # The one type a directory holding one implies, said rather than asked.
+  defp implied({:ok, %{form: :types, types: [%{name: name}]}}), do: name
+  defp implied(_types), do: nil
+
+  defp option(%{name: name, workflow: {:ok, _workflow}}), do: {name, name}
+  defp option(%{name: name}), do: {"#{name} — does not parse", name}
 
   @impl true
   def handle_event("validate", %{"ticket" => params}, socket) do
     socket = assign(socket, form: to_form(params, as: :ticket), error: nil)
 
     if params["project"] == (socket.assigns.project && socket.assigns.project.name) do
-      {:noreply, socket}
+      {:noreply, assign_chosen(socket)}
     else
       {:noreply, assign_workflow(socket, params["project"])}
     end
@@ -70,7 +110,12 @@ defmodule ForgeWeb.TicketNewLive do
 
   defp admit(socket, params, title) do
     project = socket.assigns.project
-    attrs = %{title: title, body: String.trim(params["body"] || "")}
+
+    attrs = %{
+      title: title,
+      body: String.trim(params["body"] || ""),
+      ticket_type: params["ticket_type"]
+    }
 
     case Operator.admit(project, socket.assigns.current_scope.user, attrs) do
       {:ok, ticket} ->
@@ -143,16 +188,34 @@ defmodule ForgeWeb.TicketNewLive do
           options={Enum.map(@projects, &{&1.name, &1.name})}
         />
 
+        <%!-- Ticket types: asked only when there is a choice, and nothing preselected. See
+              docs/design/ticket-types.md § Admission. --%>
+        <.input
+          :if={choices(@types) != []}
+          field={@form[:ticket_type]}
+          type="select"
+          label="Type"
+          prompt="Choose a type"
+          options={Enum.map(choices(@types), &option/1)}
+        />
+        <div :if={implied(@types)} class="flex flex-wrap items-baseline gap-2">
+          <span class="font-mono text-[11px] tracking-[.14em] uppercase opacity-50">Type</span>
+          <span id="implied-type" class="font-mono text-[12.5px]">{implied(@types)}</span>
+        </div>
+
         <%!-- What is wrong with the repository, said here rather than after a body is typed. --%>
         <div
-          :if={@project && not Admission.ready?(@workflow)}
+          :if={@project && match?({:error, _reason}, @workflow)}
           class="rounded-box border border-warning/40 bg-warning/5 p-4"
         >
           <h2 class="font-mono text-[11px] tracking-[.14em] uppercase text-warning">
             Not ready for a ticket
           </h2>
-          <p class="mt-2 text-sm/[1.55]">
+          <p :if={choices(@types) == []} class="mt-2 text-sm/[1.55]">
             This project cannot take a ticket: {Admission.explain(elem(@workflow, 1))}.
+          </p>
+          <p :if={choices(@types) != []} class="mt-2 text-sm/[1.55]">
+            This type cannot take a ticket: {Admission.explain(elem(@workflow, 1))}.
           </p>
           <p class="mt-2 text-sm/[1.55] opacity-70">
             A workflow lives in the project's own repository, so it is pushed rather than edited
@@ -163,11 +226,11 @@ defmodule ForgeWeb.TicketNewLive do
           </p>
         </div>
 
-        <div
-          :if={@project && Admission.ready?(@workflow)}
-          class="font-mono text-[12.5px] opacity-60"
-        >
-          starts in {elem(@workflow, 1).initial}
+        <div :if={@project && Admission.ready?(@workflow)} class="text-[12.5px]">
+          <p :if={elem(@workflow, 1).description} class="text-sm/[1.55] opacity-80">
+            {elem(@workflow, 1).description}
+          </p>
+          <p class="font-mono opacity-60">starts in {elem(@workflow, 1).initial}</p>
         </div>
 
         <.input field={@form[:title]} type="text" label="Title" autocomplete="off" required />

@@ -188,7 +188,7 @@ defmodule Forge.Jobs do
       {:ok,
        %Spec{
          job_id: job_id,
-         ticket: %{number: ticket.number, title: ticket.title},
+         ticket: %{number: ticket.number, title: ticket.title, ticket_type: ticket.ticket_type},
          state: state_name,
          attempt: next_attempt(repo, ticket.id, state_name),
          prompt: prompt,

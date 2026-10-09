@@ -190,7 +190,7 @@ defmodule ForgeWorker.Checkout do
   """
   @spec detach(String.t(), String.t(), ForgeWorker.Slice.as()) :: :ok | {:error, term()}
   def detach(dir, sha, as) do
-    if Regex.match?(~r/^[0-9a-f]{40}$/, sha) do
+    if Regex.match?(~r/\A[0-9a-f]{40}\z/, sha) do
       with {:ok, _out} <- git(dir, ["checkout", "--quiet", "--detach", sha], as: as),
            {:ok, _out} <- git(dir, ["reset", "--quiet", "--hard", sha], as: as) do
         :ok

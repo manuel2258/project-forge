@@ -40,13 +40,58 @@ defmodule ForgeCore.ProposalTest do
       assert message =~ "level-one heading"
     end
 
-    # Front matter is what a *document* starts with, and a proposal is not one. Written as its
-    # own case because the failure it guards against is an agent reusing the document habit:
-    # `---` is not a heading, so the proposal is refused and shown rather than silently losing
-    # its title to a YAML key.
-    test "refuses front matter, because a proposal is not a document" do
-      assert {:error, [%Error{path: "title"}]} =
+    # Front matter is what a *document* starts with, and a proposal is not one: the one key it
+    # may hold is the ticket type it suggests. Written as its own case because the failure it
+    # guards against is an agent reusing the document habit — an `outcome` here would be read as
+    # nothing, and is refused and shown rather than silently ignored.
+    test "refuses front matter holding anything but the type" do
+      assert {:error, [%Error{path: "front_matter", message: message}]} =
                Proposal.parse("---\noutcome: done\n---\n\n# Title\n\nBody.")
+
+      assert message =~ "only the ticket type"
+
+      assert {:error, [%Error{path: "front_matter"}]} =
+               Proposal.parse("---\ntype: bug\noutcome: done\n---\n# Title\n\nBody.")
+    end
+
+    test "reads the ticket type it suggests from front matter" do
+      {:ok, proposal} = Proposal.parse("\n---\ntype: bug\n---\n\n# Title\n\nBody.")
+      assert {proposal.ticket_type, proposal.title, proposal.body} == {"bug", "Title", "Body."}
+
+      assert {:ok, %Proposal{ticket_type: "bug"}} =
+               Proposal.parse(~s(---\ntype: "bug"\n---\n# Title\n\nBody.))
+
+      assert {:ok, %Proposal{ticket_type: nil}} = Proposal.parse("---\n---\n# Title\n\nBody.")
+
+      # Blank lines inside the front matter, and an opening `---` with trailing spaces, are still
+      # front matter with a type in it.
+      assert {:ok, %Proposal{ticket_type: "bug"}} =
+               Proposal.parse("---\n\ntype: bug\n\n---\n# Title\n\nBody.")
+
+      assert {:ok, %Proposal{ticket_type: "bug", title: "Title"}} =
+               Proposal.parse("---  \ntype: bug\n---\n# Title\n\nBody.")
+
+      assert {:ok, %Proposal{ticket_type: nil}} = Proposal.parse("# Title\n\nBody.")
+    end
+
+    test "refuses a type that is not a name, and front matter that is not closed" do
+      assert {:error, [%Error{path: "type"}]} =
+               Proposal.parse("---\ntype: ../bug\n---\n# Title\n\nBody.")
+
+      assert {:error, [%Error{path: "type"}]} =
+               Proposal.parse("---\ntype:\n---\n# Title\n\nBody.")
+
+      assert {:error, [%Error{path: "front_matter", message: message}]} =
+               Proposal.parse("---\ntype: bug\n# Title\n\nBody.")
+
+      assert message =~ "not closed"
+    end
+
+    # A `---` further down is a thematic break in the body, not front matter.
+    test "only the first non-blank line opens front matter" do
+      {:ok, proposal} = Proposal.parse("# Title\n\nBefore.\n\n---\n\nAfter.")
+      assert proposal.ticket_type == nil
+      assert proposal.body =~ "After."
     end
 
     test "refuses a deeper heading" do
@@ -115,6 +160,17 @@ defmodule ForgeCore.ProposalTest do
 
       assert again.title == proposal.title
       assert again.body == proposal.body
+    end
+
+    # The suggestion is kept in the stored text, because the text is all that is stored; the
+    # ticket a proposal becomes is admitted from the title and body alone.
+    test "keeps a suggested type as front matter, and round-trips it" do
+      {:ok, proposal} = Proposal.parse("---\ntype: bug\n---\n# Title\n\nBody.")
+
+      assert Proposal.to_document(proposal) == "---\ntype: bug\n---\n# Title\n\nBody."
+
+      assert {:ok, %Proposal{ticket_type: "bug", title: "Title"}} =
+               proposal |> Proposal.to_document() |> Proposal.parse()
     end
   end
 end

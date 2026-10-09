@@ -104,7 +104,8 @@ defmodule ForgeCore.Job.Spec do
           entered_commands: [%{String.t() => term()}],
           previous_changeset: String.t() | nil,
           integration: %{String.t() => term()} | nil,
-          ticket: %{number: pos_integer(), title: String.t()} | nil,
+          ticket:
+            %{number: pos_integer(), title: String.t(), ticket_type: String.t() | nil} | nil,
           state: String.t() | nil,
           attempt: pos_integer() | nil,
           prompt: String.t() | nil,
@@ -227,7 +228,13 @@ defmodule ForgeCore.Job.Spec do
   # nil rather than a map of nils — `%{number: nil, title: nil}` is truthy, and every `if
   # spec.ticket` downstream would take the wrong branch.
   defp ticket_from_map(nil), do: nil
-  defp ticket_from_map(map), do: %{number: nested(map, :number), title: nested(map, :title)}
+  # `ticket_type` is absent from a spec made before ticket types: the single workflow file.
+  defp ticket_from_map(map),
+    do: %{
+      number: nested(map, :number),
+      title: nested(map, :title),
+      ticket_type: nested(map, :ticket_type)
+    }
 
   # String keys whichever way it arrived, because the manifest reads it by string and a spec built
   # in memory and one read back from the row must render the same.

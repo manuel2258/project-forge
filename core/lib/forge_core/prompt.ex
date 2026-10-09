@@ -288,6 +288,12 @@ defmodule ForgeCore.Prompt do
   defp about(%Spec{ticket: ticket}),
     do: "- About ticket #{ticket.number}: #{ticket.title}"
 
+  # The ticket's type, when the project has types: information, not a switch — a prompt shared by
+  # two types that behaves differently by type is a branch the workflow file cannot see
+  # (`docs/design/ticket-types.md` § What a job is told).
+  defp ticket_type(%{ticket_type: type}) when is_binary(type), do: "- Type: `#{type}`\n"
+  defp ticket_type(_ticket), do: ""
+
   @doc "The job manifest section: what this job is, its inputs, outputs, outcomes and budget."
   @spec manifest(Spec.t(), String.t()) :: String.t()
   def manifest(%Spec{} = spec, job_dir) do
@@ -295,7 +301,7 @@ defmodule ForgeCore.Prompt do
     # Job manifest
 
     - Ticket #{spec.ticket.number}: #{spec.ticket.title}
-    - State: `#{spec.state}` (attempt #{spec.attempt})
+    #{ticket_type(spec.ticket)}- State: `#{spec.state}` (attempt #{spec.attempt})
     - Job directory: `#{job_dir}`
     - Branch: `#{spec.branch}` (workflow pinned at commit `#{spec.commit}`)
 

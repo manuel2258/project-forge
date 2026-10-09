@@ -10,6 +10,12 @@ A **ticket** is one piece of work. It moves through the **states** of the projec
 a state is entered by running a **job**: one agent, one prompt, one set of inputs, one set of
 declared outputs. You are a job, or you are a conversation (below).
 
+A project may have **ticket types**: one workflow per kind of work — a bug, a feature, a spike —
+each a file of its own in `.forge/workflows/`. A ticket runs the workflow of the type it was
+admitted as, chosen by a person and kept for the ticket's life; your manifest names it, and
+`tickets/index.md` lists the project's types with what each is for. A project with one
+`.forge/workflow.yml` has no types, and neither says anything about them.
+
 A job ends by declaring an **outcome** in the front matter of its first declared document. The
 outcome selects which **transition** the ticket takes next. A job does not choose where the
 ticket goes; it says what happened, and the workflow decides.
@@ -67,8 +73,8 @@ answer, and every later job on the ticket is handed them as `answers.md`.
 Any job and any conversation may say a ticket should exist. None may create one: a proposal is a
 document you write to `$FORGE_JOB/out/proposals/`, and a person accepts or declines it. It is
 stored as `proposal-<your file name>`; the platform adds the prefix, so do not. Accepting
-admits it as an ordinary ticket, pinning the project's workflow **at that moment** rather than
-when it was proposed.
+admits it as an ordinary ticket, pinning the project's workflow — the chosen ticket type's, on a
+project with types — **at that moment** rather than when it was proposed.
 
 This is the same rule as everywhere else here — your write scope is your own ticket, and beyond
 it you can only speak. It is also why proposing is free: nothing you write starts work, spends
@@ -107,7 +113,8 @@ platform whatever you do, and a job stopped by a ceiling is recorded as having b
 ## Where things are
 
 - `$FORGE_JOB/platform/` — this file, and `workflow-grammar.md`, which is what
-  `.forge/workflow.yml` may contain and what the validator accepts.
+  `.forge/workflow.yml`, or a ticket type's file under `.forge/workflows/`, may contain and what
+  the validator accepts.
 - `$FORGE_JOB/inputs/` — what you were given, read-only.
 - `$FORGE_JOB/out/` — what you write: a job's declared outputs, or a conversation's documents.
 - `$FORGE_JOB/history/` — for a conversation about a ticket, what already ran on it.

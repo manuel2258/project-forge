@@ -154,10 +154,6 @@
                 # putting the worker image in a project means driving a rescue server through
                 # the CLI — see `docs/design/worker-tier.md` § Updating a worker.
                 pkgs.hcloud
-                # And talks to that rescue server over ssh, with the key a cloud session is given
-                # as HETZNER_PRIVATE_KEY; `ssh-keygen` picks the project's matching key. A cloud
-                # session's container has no ssh of its own.
-                pkgs.openssh
                 # `bin/release` copies the image tarball straight to the registry with it. No
                 # Docker daemon is involved, which is the whole reason it is this and not
                 # `docker load`.
@@ -169,6 +165,17 @@
                 pkgs.qemu
                 pkgs.cdrkit
               ];
+
+              # `bin/hetzner-image` talks to the rescue server over ssh, with the key a cloud
+              # session is given as HETZNER_PRIVATE_KEY; `ssh-keygen` picks the project's matching
+              # key. A cloud session's container has no ssh of its own, so openssh is here — but
+              # appended to PATH, not in `packages`, which would put it first. A host's own ssh
+              # reads the host's /etc/ssh/ssh_config, and Fedora's includes options only its own
+              # build knows (GSSAPIKexAlgorithms, mlkem1024nistp384-sha384): Nix's ssh refuses
+              # them as fatal, and with it every `git fetch` in the shell.
+              shellHook = ''
+                export PATH="$PATH:${pkgs.openssh}/bin"
+              '';
 
               env = {
                 MIX_ESBUILD_PATH = esbuildPath;

@@ -7,7 +7,7 @@ environment variables, same first-run commands.
 | | NixOS module | Container (§ In a container) |
 |---|---|---|
 | Postgres | on the host, Unix socket | yours, over `DATABASE_URL` |
-| Machines for jobs | none until a template is assigned; a `local` one needs the host set up by hand (§ Known limits) | none until a template is assigned; never a local VM |
+| Machines for jobs | none until a template is assigned or a minted machine joins; a `local` one needs the host set up by hand (§ Known limits) | none until a template is assigned or a minted machine joins; never a local VM |
 | Endpoint binding | loopback | every interface, behind a proxy-only network |
 | One-off commands | `forge-admin` | `docker exec … forge eval` |
 
@@ -161,6 +161,15 @@ act through — `approve_user(email)` for the first account on a node, `list_tok
 `revoke_token(email, name)` and `generate_vapid_keys()`. Changing a user's password revokes their API tokens along with
 their sessions. Projects registered through the API get their repository under
 `/var/lib/forge/repos/<name>.git`; only the command line may point a project at another path.
+
+A permanent machine — one you boot yourself, which the platform never destroys — is minted by
+its owner from *New machine* on `/workers`, or from the host with `new_worker(email)` or
+`new_worker(email, project)`, which prints the machine's environment once. The owner must be an
+approved account, and a member of a project it is minted into; without one it takes no work until
+they assign it on `/workers`. **It needs `FORGE_PLATFORM_URL`** — the address machines dial — and
+refuses without it: a command on the host starts the database and nothing else, so it cannot ask
+the running platform its address the way the page does. See `design/identity.md` § Minting a
+permanent machine.
 
 Push your project into the bare repository, with `.forge/workflow.yml` and the prompts under
 `.forge/agents/` on the default branch. **There is one route in, the platform's own smart HTTP
@@ -362,8 +371,8 @@ template, and it has now been removed rather than left looking like a switch.)
 
 Workers provisioned elsewhere still dial in and are still assigned — an assignable worker is
 found before creation is ever considered. They reach `/worker` over the network rather than over
-loopback, which is one more thing the proxy has to be willing to route; § Behind a proxy says why
-it should not be.
+loopback, which is one more thing the proxy has to be willing to route; § Behind a proxy says how
+narrowly, and § A machine you run yourself what such a machine needs.
 
 **Repositories are reached the same way as under the module**: the platform's own smart HTTP
 endpoint, with a credential from `Forge.Release.git_token/1,2`. Nothing about the container
@@ -418,7 +427,10 @@ to make that change, the network *is* the control.
 
 **Two of the seven routes are not public.** `/worker` and `/store` are for machines, and with the
 local-VM provider those machines are on this host. Routing them publicly adds attack surface and
-nothing else.
+nothing else. A machine anywhere else — one the Hetzner driver made, or one you run yourself
+(§ A machine you run yourself) — has to reach both, so route them to the network those machines
+are on rather than to everyone where you can; each is guarded by its own token either way, the
+worker's or a signed store token.
 
 | Route | Public | What it is |
 |---|---|---|
@@ -471,6 +483,80 @@ hostname, because it is what `check_origin` and every generated URL are built fr
 access log; the worker's is long lived and grants the channel for the life of the machine. If
 you add a provider whose workers dial in from outside, that property is what makes exposing
 `/worker` survivable.
+
+## A machine you run yourself
+
+A permanent machine is the worker image booted on hardware you control, with an identity minted
+for it: *New machine* on `/workers`, or `Forge.Release.new_worker/2` (§ First run). The platform
+never destroys it and it holds no template's ceiling; it makes the row and the token, and the
+machine is yours (`design/identity.md` § Minting a permanent machine).
+
+**What the host needs:**
+
+- **x86_64.** The image and the worker release are built for `x86_64-linux` and nothing else.
+- **A hypervisor, with KVM.** The image is a qcow2 disk with virtio drivers, and it boots under
+  UEFI (OVMF) and under legacy BIOS (SeaBIOS) — `checks.x86_64-linux.worker-image-boots` boots it
+  under both. Without KVM, QEMU can only emulate, which is far too slow to build in — the example
+  below asks for KVM and fails rather than falling back — and a host that is itself a VM needs
+  nested virtualisation from whoever runs it.
+- **Memory.** The machine offers jobs what it has less 2 GiB for the system and Nix
+  (`FORGE_MEMORY_BUDGET` in `worker.env` overrides that). A job that declares nothing is promised
+  2210 MiB and a chat 1 GiB, so about 4.5 GiB is the floor for one build. M4 measured 4 cores and
+  8 GiB — about 35 seconds from boot to a machine that can build (`measurements.md` § M4 worker
+  cold start) — and
+  the local driver's default is 16 GiB.
+- **Disk.** 40 GiB or more. The image is small and grows its root into whatever disk it is given
+  on the first boot; the Nix store, each project's seed and the build directories live there, and
+  nothing prunes them.
+- **Outbound network, and nothing inbound.** From inside the VM: the platform at the address in
+  `worker.env` — `/worker`, `/store` and `/git`, the first two routed to wherever the machine is
+  (§ Behind a proxy) — `cache.nixos.org`, the Anthropic API, and whatever a project's
+  `nix develop` and its builds fetch.
+
+**Booting one under QEMU** is what `Forge.Provider.LocalVm` and `bin/measure m4` do, by hand:
+
+```
+nix build .#worker-image                               # result/forge-worker.qcow2
+install -m 644 result/forge-worker.qcow2 worker.qcow2  # the store's copy is read-only
+qemu-img resize worker.qcow2 40G
+
+# worker.env as New machine showed it: a file with that name, on a disk with this label
+genisoimage -quiet -output config.iso -volid forge-config -joliet -rock worker.env
+
+ovmf=$(nix build --no-link --print-out-paths nixpkgs#OVMF.fd)/FV
+install -m 600 "$ovmf/OVMF_VARS.fd" vars.fd
+
+qemu-system-x86_64 -machine accel=kvm -cpu host -smp 4 -m 8192 -display none \
+  -drive if=pflash,format=raw,unit=0,readonly=on,file="$ovmf/OVMF_CODE.fd" \
+  -drive if=pflash,format=raw,unit=1,file=vars.fd \
+  -drive file=worker.qcow2,if=virtio,format=qcow2 \
+  -drive file=config.iso,if=virtio,format=raw,readonly=on \
+  -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
+  -serial file:console.log -daemonize
+```
+
+Any other hypervisor is the same two disks: the image as the boot disk, grown, and the ISO as a
+second, read-only one. On a bridged network nothing changes. The guest runs sshd, but it takes no
+password and only the key `worker.env` names, and with none, nobody.
+
+**Once it boots** it reads `worker.env` off the disk — on every boot, so a new ISO and a reboot
+change it — and dials the platform. `/workers` shows it connected, and its first report fills in
+whatever memory and cores you have not set and brings back the tickets stuck for want of a machine
+in the projects it serves. Minted with no project, it serves nothing until you assign it there. A
+machine that never appears: `no identity` on its serial console means it found no `forge-config`
+disk, and with the disk there, the next thing to check is that the VM can reach the address in
+`worker.env`.
+
+**Updating it is yours.** A permanent machine is never replaced, so a platform that stops
+accepting its protocol refuses it at the next join and its row says so (§ Upgrading).
+`bin/worker-update <ssh-target> [-p port] [-i key]` copies a new release over ssh and restarts the
+worker, keeping the machine's Nix store and seeds. It needs a line `FORGE_SSH_KEY=<public key>`
+in `worker.env`, a route to the guest's port 22 — under user-mode networking, add
+`,hostfwd=tcp:127.0.0.1:2222-:22` to `-netdev` and use `-p 2222 root@127.0.0.1` — and a checkout
+of this repository with Nix where you run it.
+
+**Ending it** is *Retire* on `/workers`, or `mix forge.worker.retire`: forge forgets the machine,
+its token stops working and its running jobs are requeued. The VM keeps running until you stop it.
 
 ## Upgrading
 

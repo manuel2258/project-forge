@@ -30,6 +30,14 @@ defmodule Forge.Accounts.User do
   def active?(%__MODULE__{approved_at: approved, suspended_at: suspended}),
     do: not is_nil(approved) and is_nil(suspended)
 
+  @doc """
+  Which of the two an account `active?/1` refuses is. Suspension outranks approval, as it does
+  there: a suspended account keeps `approved_at`, so reinstating is one field.
+  """
+  @spec standing(t()) :: :suspended | :not_approved
+  def standing(%__MODULE__{suspended_at: %DateTime{}}), do: :suspended
+  def standing(%__MODULE__{}), do: :not_approved
+
   @type t :: %__MODULE__{}
 
   @doc """

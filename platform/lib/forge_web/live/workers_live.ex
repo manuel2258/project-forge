@@ -17,13 +17,15 @@ defmodule ForgeWeb.WorkersLive do
 
   **One block per machine, not a table**, so the page works on a phone: a header line, three
   meters read from the machine's own live figures, and two columns that stack. And a third
-  decision beside the two it had: ending the machine, which is its owner's. See
-  `docs/design/ui.md` § The workers page.
+  decision beside the two it had: ending the machine, which is its owner's. A fourth sits in the
+  header: *New machine*, which mints a permanent machine for the viewer and shows its environment
+  once. See `docs/design/ui.md` § The workers page.
   """
 
   use ForgeWeb, :live_view
 
   import ForgeCore.Workflow.Resources, only: [gib: 1]
+  import ForgeWeb.Operator.Components, only: [copyable: 1, shown_once: 1]
 
   alias Forge.{Jobs, Projects, Provisioning, Workers}
   alias ForgeCore.WorkerProtocol
@@ -50,7 +52,14 @@ defmodule ForgeWeb.WorkersLive do
 
     {:ok,
      socket
-     |> assign(page_title: "Workers", show_destroyed: false, editing: nil, error: nil)
+     |> assign(
+       page_title: "Workers",
+       show_destroyed: false,
+       editing: nil,
+       error: nil,
+       minting: false,
+       minted: nil
+     )
      |> load()}
   end
 
@@ -268,6 +277,43 @@ defmodule ForgeWeb.WorkersLive do
          |> put_flash(:error, refused(Workers.owned(user, id)))
          |> load()}
     end
+  end
+
+  def handle_event("new-machine", _params, socket) do
+    {:noreply, assign(socket, minting: true, error: nil)}
+  end
+
+  def handle_event("cancel-new", _params, socket) do
+    {:noreply, assign(socket, minting: false, error: nil)}
+  end
+
+  # Mints a permanent machine for the viewer, and holds its environment for the one time it is
+  # shown. **The owner is the session's user and nothing else** — the form has no owner field, and
+  # no parameter is read for one — and a project, when one is chosen, is checked by
+  # `Workers.mint/2` for membership before the row exists (`docs/design/identity.md` § Minting a
+  # permanent machine). The project id is the client's, and a project the viewer is not in reads
+  # the same as one that is not there.
+  def handle_event("mint", params, socket) do
+    project_id = if params["project"] in [nil, ""], do: nil, else: params["project"]
+
+    case Workers.mint(socket.assigns.current_scope.user, project_id) do
+      {:ok, _worker, env} ->
+        {:noreply, socket |> assign(minting: false, minted: env, error: nil) |> load()}
+
+      {:error, :not_a_member} ->
+        {:noreply, assign(socket, error: "you are not in that project")}
+
+      {:error, standing} when standing in [:not_approved, :suspended] ->
+        {:noreply, assign(socket, error: "your account may not own a machine")}
+
+      {:error, %Ecto.Changeset{}} ->
+        {:noreply, assign(socket, error: "could not mint a machine")}
+    end
+  end
+
+  # Gone from the page once dismissed: only the token's hash is kept, so nothing can draw it again.
+  def handle_event("dismiss-minted", _params, socket) do
+    {:noreply, assign(socket, minted: nil)}
   end
 
   def handle_event("toggle-destroyed", _params, socket) do
@@ -756,8 +802,8 @@ defmodule ForgeWeb.WorkersLive do
     >
       <header class="flex flex-wrap items-baseline gap-x-4 gap-y-2">
         <h1 class="text-2xl font-semibold -tracking-[.025em]">Workers</h1>
-        <%!-- No node-wide ceiling any more: every machine comes from a template and every
-              ceiling is that template's, beside its price where the money is
+        <%!-- No node-wide ceiling any more: every machine the platform makes comes from a
+              template and every ceiling is that template's, beside its price where the money is
               (`provisioning.md` § Whose account). A number here would be one nothing
               enforces. --%>
         <span class="font-mono text-[12.5px] opacity-60">
@@ -769,6 +815,18 @@ defmodule ForgeWeb.WorkersLive do
           class="ml-auto flex min-h-[46px] items-center text-sm text-primary hover:underline"
         >
           {if @show_destroyed, do: "Hide destroyed", else: "Show destroyed"}
+        </button>
+        <%!-- Never filled: that is the Templates button's sentence, and one button saying it is
+              enough (docs/design/ui.md § The workers page). Gone while an environment is on
+              screen, which would otherwise be thrown away by one more click. --%>
+        <button
+          :if={not @minting and is_nil(@minted)}
+          id="new-machine"
+          type="button"
+          phx-click="new-machine"
+          class="flex min-h-[46px] items-center rounded-field border border-base-300 px-3 text-sm hover:border-base-content/30"
+        >
+          New machine
         </button>
         <%!-- Filled when there is none: the one state in which this page has nothing to show and
               nothing will appear by waiting. Primary, not accent — no person is waited on yet. --%>
@@ -788,8 +846,48 @@ defmodule ForgeWeb.WorkersLive do
       </header>
 
       <p :if={not @has_templates} id="no-templates" class="mt-2 text-sm/[1.55] text-error">
-        You have no templates, so no machine of yours can be made.
+        You have no templates, so the platform can make no machine for you.
       </p>
+
+      <%!-- One question, and no owner: the machine is the viewer's. --%>
+      <.form
+        :if={@minting}
+        for={to_form(%{}, as: :machine)}
+        id="mint-form"
+        phx-submit="mint"
+        class="mt-4 flex flex-wrap items-center gap-3"
+      >
+        <label for="mint-project" class="text-sm opacity-60">A machine you boot yourself, serving</label>
+        <select
+          id="mint-project"
+          name="project"
+          class="h-[46px] min-w-0 rounded-field border border-base-300 bg-base-100 px-2"
+        >
+          <option value="">no project yet</option>
+          <option :for={project <- @projects} value={project.id}>{project.name}</option>
+        </select>
+        <button type="submit" class="min-h-[46px] text-sm text-primary hover:underline">Mint</button>
+        <button
+          type="button"
+          phx-click="cancel-new"
+          class="min-h-[46px] text-sm opacity-60 hover:opacity-100"
+        >
+          Cancel
+        </button>
+      </.form>
+
+      <%!-- Once, and only here: the row keeps the token's hash and can never show it again. --%>
+      <.shown_once :if={@minted} id="minted" done="dismiss-minted">
+        <:note>
+          It is the whole of what the machine needs: put it in a file named
+          <code class="font-mono text-[12.5px]">worker.env</code>
+          on a disk labelled <code class="font-mono text-[12.5px]">forge-config</code>, or give it to
+          the provider as user data, and boot the worker image.
+        </:note>
+        <div class="mt-3">
+          <.copyable id="minted-env" value={@minted} label="worker.env" multiline />
+        </div>
+      </.shown_once>
 
       <p class="mt-2 text-sm/[1.55] opacity-60">
         A job is scheduled against what it asked for, in memory and in cores, and against the
@@ -799,7 +897,7 @@ defmodule ForgeWeb.WorkersLive do
       <p :if={@error} class="mt-4 text-sm text-error">{@error}</p>
 
       <p :if={@rows == []} class="mt-6 text-sm opacity-60">
-        You have no machines. One is created from your templates when a job needs it, or provisioned by hand with <code class="font-mono text-[12.5px]">mix forge.worker.new</code>.
+        You have no machines. One is created from your templates when a job needs it, or minted with New machine for a computer you boot yourself.
       </p>
 
       <ul :if={@rows != []} class="mt-4">

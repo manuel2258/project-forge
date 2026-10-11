@@ -126,9 +126,10 @@ platform made it and may destroy it — `design/worker-tier.md` § Managed and u
 and `reported` (what the machine said about its harness and about itself at `ready`, verbatim;
 recorded, not scheduled on), `last_error` (what the driver said about a create that never became a
 machine), `idle_since`, `last_seen_at`, `template_id` and `provider_credential_id` (provenance: the
-recipe and the account it was made from, both null for a machine the operator registered with `mix
-forge.worker.new`), `user_id` (its owner: the template's for a machine the platform made; for a
-permanent one, whoever minted it with `mix forge.worker.new --owner` or adopted it).
+recipe and the account it was made from, both null for a permanent machine, minted by
+`Forge.Workers.mint/2`), `user_id` (its owner: the template's for a machine the platform made; for
+a permanent one, whoever minted it from `/workers`, whoever the host named with `mix
+forge.worker.new --owner` or `Forge.Release.new_worker/2`, or whoever adopted it).
 
 **provider_credential** — `user_id`, `name` (unique per user), `provider`, `secret`. An account
 at a machine provider (e.g. Hetzner) that a user owns; `secret` is a driver-shaped map encrypted

@@ -166,25 +166,29 @@ defmodule Forge.Workers do
           | {:error, :not_found | :not_a_member | :made_by_the_platform | Ecto.Changeset.t()}
   def assign(%User{} = user, worker_id, project_id) do
     with {:ok, worker} <- owned_permanent(user, worker_id),
-         :ok <- member(user, project_id) do
-      Multi.new()
-      |> Multi.insert(
-        :assignment,
-        ProjectWorker.changeset(%ProjectWorker{}, %{project_id: project_id, worker_id: worker.id})
-      )
-      |> Events.log(:event, "worker.assigned", {:user, user.id}, %{
-        project_id: project_id,
-        payload: %{"worker_id" => worker.id, "project_id" => project_id}
-      })
-      |> Repo.transaction()
-      |> case do
-        {:ok, %{assignment: assignment}} ->
-          Engine.resume_placement(project_id, {:user, user.id})
-          {:ok, assignment}
+         :ok <- member(user, project_id),
+         {:ok, assignment} <- record_assignment(user, worker, project_id) do
+      Engine.resume_placement(project_id, {:user, user.id})
+      {:ok, assignment}
+    end
+  end
 
-        {:error, :assignment, changeset, _changes} ->
-          {:error, changeset}
-      end
+  # The assignment and its event, together. `assign/3` and `mint/2` both write it, after their own
+  # checks; only `assign/3` brings tickets back, because only a machine that has joined can take one.
+  defp record_assignment(user, worker, project_id) do
+    Multi.new()
+    |> Multi.insert(
+      :assignment,
+      ProjectWorker.changeset(%ProjectWorker{}, %{project_id: project_id, worker_id: worker.id})
+    )
+    |> Events.log(:event, "worker.assigned", {:user, user.id}, %{
+      project_id: project_id,
+      payload: %{"worker_id" => worker.id, "project_id" => project_id}
+    })
+    |> Repo.transaction()
+    |> case do
+      {:ok, %{assignment: assignment}} -> {:ok, assignment}
+      {:error, :assignment, changeset, _changes} -> {:error, changeset}
     end
   end
 
@@ -240,6 +244,80 @@ defmodule Forge.Workers do
         {:error, :not_a_member}
     end
   end
+
+  # -- minting --------------------------------------------------------------------------------
+
+  @doc """
+  Mints a permanent machine for `owner`: an unmanaged row, and the environment a machine needs to
+  become it, as the `worker.env` its image reads — one `NAME=value` per line: the worker's id and
+  token, the platform's address and the model, which is what a driver injects into a machine it
+  makes (`docs/design/identity.md` § Minting a permanent machine).
+
+  The workers page, `mix forge.worker.new` and `Forge.Release.new_worker/2` are all this, so a
+  machine minted on the page and one minted on the host cannot be told different things. **The
+  owner is whoever the caller says**: the page passes the session's user and takes no owner from
+  the form, and only the host names somebody else.
+
+  **The owner is an account that may act**, read again here rather than trusted from the caller:
+  a page holds the user it mounted with, and one suspended since would otherwise still mint. A
+  pending one is refused too, because a worker row is one `on_delete: :restrict` holds against
+  the one deletion a pending account may have — the rule `Forge.Projects.put_member/4` keeps.
+
+  **With a project, the owner must be a member of it**, checked before anything is written, and
+  the row and its assignment are written in one transaction, so a refusal leaves nothing behind
+  to retire. Nothing is brought back from being stuck: a minted machine has not joined, and its
+  first `ready` is what brings back the tickets it can take (`ready/2`). That also keeps this to
+  the database, which is all `Forge.Release` starts. The token is returned once; only its hash is
+  kept.
+
+  No agent credential, and no `FORGE_MANAGED`: a job brings its own credential, and only a driver
+  says it made a machine (`Forge.Provider.MachineConfig`).
+  """
+  @spec mint(User.t(), String.t() | nil) ::
+          {:ok, Worker.t(), String.t()}
+          | {:error, :not_approved | :suspended | :not_a_member | Ecto.Changeset.t()}
+  def mint(%User{} = owner, project_id \\ nil) do
+    with :ok <- active(owner),
+         :ok <- mint_into(owner, project_id),
+         {:ok, {worker, token}} <- Repo.transaction(fn -> mint_row(owner, project_id) end) do
+      env =
+        [
+          {"FORGE_WORKER_ID", worker.id},
+          {"FORGE_WORKER_TOKEN", token},
+          {"FORGE_PLATFORM_URL", platform_url()}
+        ] ++ harness_env()
+
+      {:ok, worker, Enum.map_join(env, "\n", fn {name, value} -> "#{name}=#{value}" end)}
+    end
+  end
+
+  defp active(%User{id: id}) do
+    case Repo.get(User, id) do
+      %User{} = user -> if User.active?(user), do: :ok, else: {:error, User.standing(user)}
+      nil -> {:error, :not_approved}
+    end
+  end
+
+  defp mint_into(_owner, nil), do: :ok
+  defp mint_into(owner, project_id), do: member(owner, project_id)
+
+  # A refusal here rolls the row back with the assignment. No test reaches it: a fresh row cannot
+  # already be assigned, so only a project deleted between the membership check and the insert —
+  # its foreign key — gets here, and nothing in the suite opens that window.
+  defp mint_row(owner, project_id) do
+    with {:ok, worker, token} <-
+           create(%{provider: Provider.default(), managed: false, user_id: owner.id}),
+         {:ok, _assignment} <- mint_assignment(owner, worker, project_id) do
+      {worker, token}
+    else
+      {:error, reason} -> Repo.rollback(reason)
+    end
+  end
+
+  defp mint_assignment(_owner, _worker, nil), do: {:ok, nil}
+
+  defp mint_assignment(owner, worker, project_id),
+    do: record_assignment(owner, worker, project_id)
 
   @doc """
   The worker this token belongs to, if it is one and the machine has not been destroyed. A
@@ -1004,9 +1082,16 @@ defmodule Forge.Workers do
   # the figures it was made with, since it has reported none of its own — the same figures the
   # template was chosen by. A row the driver refused is not booting; it carries `last_error`
   # and only holds its slot until `sweep_unreachable/0` retires it.
+  #
+  # **Only a machine the platform made.** A permanent row is `creating` from the moment it is
+  # minted until a machine first joins with it, and nothing says that machine is coming: any
+  # member can mint one into their project, give it figures and never boot it, and a job waiting
+  # for it would stop every template assigned to the project making a machine for as long as the
+  # row stood — and no sweep ends a permanent row (`docs/design/identity.md` § Minting a
+  # permanent machine).
   defp booting(demand, claims) do
     from(w in serving(demand[:project_id]),
-      where: w.status == :creating and is_nil(w.last_error),
+      where: w.managed and w.status == :creating and is_nil(w.last_error),
       order_by: [asc: w.inserted_at]
     )
     |> Repo.all()
@@ -1361,13 +1446,17 @@ defmodule Forge.Workers do
       provider: worker.provider,
       worker_id: worker.id,
       token: token,
-      platform_url: Forge.Jobs.config(:platform_url, nil) || ForgeWeb.Endpoint.url(),
+      platform_url: platform_url(),
       harness_env: harness_env(),
       size: Map.get(shape, :size),
       image: Map.get(shape, :image),
       credential: open_secret(credential)
     }
   end
+
+  # Where a machine dials: the configured address, or the endpoint's own. A worker is a different
+  # machine, and the endpoint's URL is localhost from where it is standing unless one is set.
+  defp platform_url, do: Forge.Jobs.config(:platform_url, nil) || ForgeWeb.Endpoint.url()
 
   # A worker's own credential, for asking its driver about the machine it made. A machine with
   # none is a local one, and the driver ignores it.
@@ -1395,22 +1484,17 @@ defmodule Forge.Workers do
     end
   end
 
-  @doc """
-  What the machine is given for its harness at creation, as `{name, value}` pairs: the model, when
-  the node names one, and nothing else.
-
-  **No credential, and that is the design rather than an omission.** A machine used to boot with
-  the node's `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` in its environment and spend it on
-  every job it ran; a job now brings its own credential in the assignment, sealed for that worker
-  (`docs/design/credentials.md` § The credential belongs to the job, not to the machine), and the
-  node's variables are not read at all. `executable` is not here either: it is a path on this
-  host, and the worker image has its own.
-
-  Public because `mix forge.worker.new` mints the environment for a machine the operator is
-  provisioning by hand, and that machine needs exactly what the driver would have given it.
-  """
-  @spec harness_env() :: [{String.t(), String.t()}]
-  def harness_env do
+  # What the machine is given for its harness at creation, as `{name, value}` pairs: the model,
+  # when the node names one, and nothing else. The driver injects it, and `mint/2` returns it for a
+  # machine its owner provisions by hand, which needs exactly what the driver would have given it.
+  #
+  # **No credential, and that is the design rather than an omission.** A machine used to boot with
+  # the node's `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` in its environment and spend it on
+  # every job it ran; a job now brings its own credential in the assignment, sealed for that worker
+  # (`docs/design/credentials.md` § The credential belongs to the job, not to the machine), and the
+  # node's variables are not read at all. `executable` is not here either: it is a path on this
+  # host, and the worker image has its own.
+  defp harness_env do
     case Keyword.get(Forge.Jobs.config(:harness_opts, []), :model) do
       model when is_binary(model) -> [{"FORGE_CLAUDE_MODEL", model}]
       _other -> []

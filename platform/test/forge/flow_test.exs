@@ -577,6 +577,27 @@ defmodule Forge.FlowTest do
     assert Tickets.get!(ticket.id).status == :active
   end
 
+  # Minting one into the project is not: nothing has joined with it yet, and its first `ready` is
+  # what brings the ticket back. Minting stays a write to the database and nothing else, which is
+  # all a release command on the host has (`Forge.Release.new_worker/2`).
+  test "a ticket stuck for want of a machine stays stuck while a minted one has not joined", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    Registry.unregister(Forge.Workers.Registry, worker.id)
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    start_supervised!(Forge.Jobs.Scheduler)
+
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert Tickets.get!(ticket.id).status == :stuck
+
+    {:ok, _minted, _env} = Forge.Workers.mint(user, project.id)
+
+    assert Tickets.get!(ticket.id).status == :stuck
+    refute "ticket.unstuck" in event_types(ticket)
+  end
+
   # **The credential before the machine** (`docs/design/credentials.md` § How a job picks). A job
   # nothing can pay for does not ask for capacity, so an empty pool makes no machine — here a
   # template is assigned and would otherwise make one — and the ticket sticks saying who can fix

@@ -77,8 +77,9 @@ alternative — workers reading through to a template — means an operator edit
 change a machine, a template edit silently re-sizes a running fleet, and a permanent machine
 needs a template invented for it that the platform must never create from.
 
-**A permanent worker is the same row with `template_id` null.** The operator provisions it with
-`mix forge.worker.new`, sets its `accepts`, memory and cores in the UI, and `managed: false` keeps
+**A permanent worker is the same row with `template_id` null.** Its owner mints it — from
+`/workers`, or on the host with `mix forge.worker.new` (`identity.md` § Minting a permanent
+machine) — sets its `accepts`, memory and cores in the UI, and `managed: false` keeps
 the platform from destroying it (`worker-tier.md` § Managed and unmanaged). There is no second
 concept for a machine the platform did not make, which is the same choice `managed` already
 represents: one row shape, one column saying who may end its life.
@@ -243,7 +244,11 @@ the jobs keep their queue order, so each pass arrives at the same division. Two 
 machine make one machine, and a third that does not fit makes a second. The harness is not asked
 of a booting machine, because it has not reported one — the same reason template selection does
 not ask it. A row the driver refused carries `last_error` and is not waited for: it is holding a
-slot against `max_workers`, not booting.
+slot against `max_workers`, not booting. **Nor is a permanent row**, which is `creating` from the
+moment it is minted until a machine first joins with it: nothing says that machine is coming, and
+waiting for it let any member stop their project's templates making anything by minting a
+machine, giving it figures and never booting it — a row no sweep ends (`identity.md` § Minting a
+permanent machine).
 
 **The skip is recorded, once per reason.** The alternative is a job that never runs and no surface
 saying why, which is what there was: `Scheduler` dropped the reason on the floor, with no event, log

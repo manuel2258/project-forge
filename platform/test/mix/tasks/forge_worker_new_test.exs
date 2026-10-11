@@ -118,6 +118,26 @@ defmodule Mix.Tasks.Forge.Worker.NewTest do
     assert Forge.Repo.aggregate(Forge.Workers.Worker, :count) == 0
   end
 
+  # The seed lines are this command's and not the machine's: the measurement harness fetches the
+  # seed with them (`measure/lib/m4.sh`), so the token has to be one the store will take for it.
+  test "a project with a published seed is minted with the key and a token for it", %{
+    admin: admin
+  } do
+    {:ok, project} =
+      Forge.Projects.register(
+        %{name: "seeded", repo_path: Path.join(Forge.GitFixtures.tmp_dir("wn"), "p.git")},
+        admin
+      )
+
+    Forge.Repo.update!(Ecto.Changeset.change(project, seed_id: "seed-1"))
+
+    env = mint(["seeded"])
+
+    assert env["FORGE_SEED_KEY"] == Forge.Storage.Key.seed("seeded", "seed-1")
+    assert Forge.Storage.Token.verify(env["FORGE_SEED_TOKEN"], :get, env["FORGE_SEED_KEY"]) == :ok
+    refute Map.has_key?(mint(), "FORGE_SEED_KEY")
+  end
+
   # With a project, the owner assigns it there — and only a member may, which is checked before
   # the row exists so a refusal leaves nothing behind to retire.
   test "a named project is assigned by the owner, who must be in it", %{admin: admin} do

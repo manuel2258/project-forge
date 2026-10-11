@@ -9,9 +9,10 @@ defmodule Mix.Tasks.Forge.Worker.List do
   the database knows, and it is the same figure the unreachable sweep judges on.
 
   `managed` says whether the platform created this machine and may destroy it. An unmanaged one
-  was provisioned by the operator with `mix forge.worker.new`, is skipped by both sweeps, and
-  goes away only when somebody runs `mix forge.worker.retire` — which is what makes it
-  permanent and is also the reason to look at this list now and then.
+  was minted by its owner — from *New machine* on `/workers`, or with `mix forge.worker.new` —
+  is skipped by both sweeps, and goes away only when somebody retires it, on that page or with
+  `mix forge.worker.retire` — which is what makes it permanent and is also the reason to look at
+  this list now and then.
 
       mix forge.worker.list
       mix forge.worker.list --all      # destroyed rows too

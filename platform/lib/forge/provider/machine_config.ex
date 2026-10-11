@@ -31,7 +31,7 @@ defmodule Forge.Provider.MachineConfig do
         "FORGE_PLATFORM_URL=#{opts.platform_url}",
         # **A driver made this machine**, and that is the machine's own key of the two a reboot
         # needs (`docs/design/worker-tier.md` § What happens then). Written here, where only a
-        # driver writes, and never by `mix forge.worker.new`: a machine somebody provisioned by
+        # driver writes, and never by `Forge.Workers.mint/2`: a machine somebody provisioned by
         # hand is their own computer, whatever the platform says.
         "FORGE_MANAGED=1"
       ] ++

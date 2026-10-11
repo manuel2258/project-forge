@@ -261,9 +261,9 @@ test that only asserts a hidden button passes against a broken platform.
 **Machines and templates are outside `Operator`, and guarded in their own contexts.** Provider
 credentials and worker templates are `Forge.Provisioning`'s, and every human write there takes the
 acting user and scopes itself to them — assigning a template to a project checks membership there,
-as `Forge.Projects` does for members. Workers are `Forge.Workers`'s, and its three human writes — a
-permanent machine's figures (`set_offer/3`) and the projects it serves (`assign/3`, `unassign/3`) —
-do the same.
+as `Forge.Projects` does for members. Workers are `Forge.Workers`'s, and its human writes —
+minting a permanent machine (`mint/2`), its figures (`set_offer/3`), the projects it serves
+(`assign/3`, `unassign/3`) and ending one (`retire_by_owner/2`) — do the same.
 
 Two of these were guarded only in the LiveView until a review listed them here as exceptions,
 and they are recorded because the shape is the one this section keeps finding:
@@ -427,6 +427,56 @@ not keep funding it.
 the credential it ran on in `job_runs`. That is what makes spend per credential a query rather
 than a running total somebody has to maintain (`credentials.md` § Spend).
 
+### Minting a permanent machine
+
+**Any approved user may mint a permanent machine of their own**, from *New machine* on
+`/workers`. It used to be the host's alone — `mix forge.worker.new` — so a person with a
+computer to give had to ask whoever held a shell for a token, and a deployed node could not
+mint one at all: a release has no Mix, and nothing in `Forge.Release` did it.
+
+**The owner is the caller, always.** The page's form has no owner field, so nothing on the wire
+can name somebody else; the host's two ways — `mix forge.worker.new --owner` and
+`Forge.Release.new_worker/2` — name an account, because a shell is past every gate there is. All
+three are `Forge.Workers.mint/2`, which takes the owner and an optional project and returns the
+row and the environment its machine needs — what a driver injects into a machine it makes: the
+worker's id and token, the platform's address and the model. The Mix task adds the project's seed
+and a token for it, which only the measurement harness reads.
+
+**The owner is an account that may act**, read again when the machine is minted rather than
+trusted from the caller. A page holds the user it mounted with, and an account suspended while
+`/workers` was open could otherwise go on minting machines whose tokens outlive the suspension.
+A pending one is refused as well, for the reason `put_member/4` refuses it (§ Projects and
+members): a worker row is one `on_delete: :restrict` holds against the one deletion a pending
+account may have.
+
+**A project, when one is named, is held to the rule `assign/3` holds** — the owner is a member of
+it — and that is checked before anything is written; the row and its assignment are then written
+in one transaction, so a refusal leaves nothing behind to retire. With none, the machine serves
+nothing until its owner assigns it, and its row says so. **Minting brings no stuck ticket back**,
+as assigning does: nothing has joined with the row, and its first `ready` is what brings back the
+tickets it can take. That keeps minting to the database, which is all a release command has.
+
+**This widens nothing a person could already do.** Any approved user may create a template on
+their own provider account (`provisioning.md` § Whose account) and choose its image from that
+account's snapshots (§ Where a machine comes from), so a member could already put a machine they
+control entirely in front of their project's jobs. A permanent machine is the same reach without
+the provider: it serves only the projects its owner is in and assigned it to, and it is handed
+what any machine serving those projects is handed — the job's sealed credential, the secrets its
+state names, a git token for its ticket's branch. **It did widen one thing, and that was fixed rather
+than accepted:** the scheduler waited for any `creating` row a project could use, so a minted
+machine given figures and never booted stopped the project's templates making anything for as
+long as it stood. Only a machine the platform made is waited for now (`provisioning.md` § The
+gate).
+
+**The environment is shown once.** Only the token's hash is kept, as for every token the product
+issues (`ui.md` § Project settings), so the page shows the machine's environment at the moment it
+is minted and never again. A lost one is a retired row and a fresh mint.
+
+**Nothing limits how many.** A minted row is a line on its owner's page and holds no ceiling
+(`worker-tier.md` § Managed and unmanaged); one that never became a machine reads *last seen
+never* until its owner retires it. A person may already make any number of templates and
+projects, and a cap on machines alone would be a number nothing else agrees with.
+
 **A worker template is owned and assigned the same way.** `docs/design/provisioning.md` adds a
 recipe the platform creates machines from, and it inherits this section whole: a template belongs
 to a user, carries their provider credential, and reaches a project through `project_templates` —
@@ -491,10 +541,12 @@ What that comes to:
   in. `/workers` lists the caller's own machines only, because a row names the projects its
   machine serves.
 - **`self`** is the caller's own account, and since machines, templates and credentials have
-  owners it is theirs too: editing a machine's figures, a template, a credential. Every one reads
-  the row scoped to the caller whatever id arrives. **Assigning any of them to a project is
+  owners it is theirs too: minting a machine, editing a machine's figures, a template, a
+  credential. Every one reads the row scoped to the caller whatever id arrives, and a mint names
+  no owner at all — it is the caller's. **Assigning any of them to a project is
   `member`**, and needs ownership as well — an admin of the project cannot reach for somebody
-  else's.
+  else's. Minting into a project is an assignment too, and holds the same membership rule; the
+  inventory records the action as `self` because without a project it reaches none.
 - **`node_admin`** is one page.
 - **`token`** is three: `/git`, `/store/*key` and the worker socket. None of them carries a
   person. The LiveView socket is not one of them: it carries the session, and every route behind

@@ -285,8 +285,8 @@ defmodule Forge.Provider do
   @doc """
   The provider a machine is made by when nothing names one.
 
-  A worker template names its own; this is what `mix forge.worker.new` records for a machine
-  the operator built by hand, and the driver for anything that names none. It is never a
+  A worker template names its own; this is what `Forge.Workers.mint/2` records for a machine
+  its owner built by hand, and the driver for anything that names none. It is never a
   reason to create a machine — there is no node fallback (`docs/design/provisioning.md`
   § Whose account).
   """

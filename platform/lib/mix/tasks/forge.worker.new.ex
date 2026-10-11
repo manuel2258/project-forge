@@ -13,7 +13,9 @@ defmodule Mix.Tasks.Forge.Worker.New do
 
   The worker token is returned once and only its hash is kept, exactly as it is when the provider
   driver asks for one. Nothing is created on any provider: the row exists and the machine does
-  not, and it is up to whoever ran this to make one.
+  not, and it is up to whoever ran this to make one. What it prints is `Forge.Workers.mint/2`'s,
+  the same as *New machine* on `/workers` shows a person minting their own
+  (`docs/design/identity.md` § Minting a permanent machine).
 
   **No agent credential is printed**, because a machine holds none: each job brings its own in its
   assignment (`docs/design/credentials.md`). The output is still a secret — the worker token is in
@@ -34,7 +36,7 @@ defmodule Mix.Tasks.Forge.Worker.New do
 
   use Mix.Task
 
-  alias Forge.{Accounts, CLI, Jobs, Projects, Storage, Workers}
+  alias Forge.{Accounts, CLI, Projects, Storage, Workers}
 
   @impl true
   def run(args) do
@@ -53,22 +55,35 @@ defmodule Mix.Tasks.Forge.Worker.New do
     project = name && (Projects.by_name(name) || CLI.fail("unknown project #{name}"))
     owner = owner(Keyword.get(opts, :owner))
 
-    # Checked before the row exists, so a refusal leaves nothing behind to retire.
-    if project && !Projects.role(project, owner),
-      do: CLI.fail("#{owner.email} is not a member of #{project.name}, so cannot assign it")
+    # Unmanaged, always, and the membership checked before the row exists, so a refusal leaves
+    # nothing behind to retire; see docs/design/worker-tier.md § Managed and unmanaged.
+    case Workers.mint(owner, project && project.id) do
+      {:ok, _worker, env} ->
+        emit(Enum.join([env | seed(project)], "\n"), Keyword.get(opts, :out))
 
-    # Unmanaged, always: this command exists because somebody is provisioning the machine
-    # themselves, and a machine the platform did not create is not the platform's to destroy.
-    # It is skipped by both sweeps; see docs/design/worker-tier.md § Managed and unmanaged.
-    case Workers.create(%{provider: Forge.Provider.default(), managed: false, user_id: owner.id}) do
-      {:ok, worker, token} ->
-        if project, do: {:ok, _assignment} = Workers.assign(owner, worker.id, project.id)
-        emit(Enum.join(assignments(worker, token, project), "\n"), Keyword.get(opts, :out))
+      {:error, :not_a_member} ->
+        CLI.fail("#{owner.email} is not a member of #{project.name}, so cannot assign it")
+
+      {:error, standing} when standing in [:not_approved, :suspended] ->
+        CLI.fail("#{owner.email} is #{standing_word(standing)}, so cannot own a machine")
 
       {:error, changeset} ->
         CLI.fail(inspect(changeset.errors))
     end
   end
+
+  defp standing_word(:not_approved), do: "not approved"
+  defp standing_word(:suspended), do: "suspended"
+
+  # The seed and a token to fetch it with, for the measurement harness, which fetches it itself and
+  # times that as a phase of the cold start (`measure/lib/m4.sh`). The worker reads neither and the
+  # token lasts minutes, so they are this command's and not part of what a machine is minted with.
+  defp seed(%{seed_id: seed_id, name: name}) when is_binary(seed_id) do
+    key = Storage.Key.seed(name, seed_id)
+    ["FORGE_SEED_KEY=#{key}", "FORGE_SEED_TOKEN=#{Storage.Token.sign(:get, key)}"]
+  end
+
+  defp seed(_project), do: []
 
   # Whose machine this is. The same resolution `register_project/2` uses: a named account, or the
   # node's only node admin — and never a guess between several.
@@ -91,29 +106,4 @@ defmodule Mix.Tasks.Forge.Worker.New do
 
     Mix.shell().info("wrote #{path} (mode 0600); it holds this machine's token")
   end
-
-  defp assignments(worker, token, project) do
-    [
-      ~s(FORGE_WORKER_ID=#{worker.id}),
-      ~s(FORGE_WORKER_TOKEN=#{token}),
-      ~s(FORGE_PLATFORM_URL=#{platform_url()})
-    ] ++ harness() ++ seed(project)
-  end
-
-  # The model, which the driver injects into a machine it creates; this command stands in for the
-  # driver, so it does the same. No credential: a job brings its own.
-  defp harness do
-    Enum.map(Workers.harness_env(), fn {name, value} -> ~s(#{name}=#{value}) end)
-  end
-
-  defp seed(%{seed_id: seed_id, name: name}) when is_binary(seed_id) do
-    key = Storage.Key.seed(name, seed_id)
-    [~s(FORGE_SEED_KEY=#{key}), ~s(FORGE_SEED_TOKEN=#{Storage.Token.sign(:get, key)})]
-  end
-
-  defp seed(_project), do: []
-
-  # The same address the driver injects, for the same reason: a worker is a different machine
-  # and the endpoint's own URL is localhost from where it is standing.
-  defp platform_url, do: Jobs.config(:platform_url, nil) || ForgeWeb.Endpoint.url()
 end

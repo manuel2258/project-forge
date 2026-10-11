@@ -46,7 +46,7 @@ defmodule ForgeWeb.WorkersLiveTest do
       assert has_element?(
                view,
                "#no-templates",
-               "You have no templates, so no machine of yours can be made"
+               "You have no templates, so the platform can make no machine for you"
              )
 
       assert has_element?(view, ~s(#templates-button[href="/templates"]))
@@ -82,7 +82,159 @@ defmodule ForgeWeb.WorkersLiveTest do
     {:ok, _view, html} = live(conn, ~p"/workers")
 
     assert html =~ "You have no machines"
-    assert html =~ "mix forge.worker.new"
+    assert html =~ "minted with New machine"
+  end
+
+  # Anybody approved may mint a machine of their own (`docs/design/identity.md` § Minting a
+  # permanent machine). The owner is the session's, the project is checked before the row exists,
+  # and the environment is on the page once.
+  describe "minting a permanent machine" do
+    defp minted_env(view) do
+      text = view |> element("#minted-env") |> render() |> Floki.parse_fragment!() |> Floki.text()
+
+      text
+      |> String.split("\n", trim: true)
+      |> Map.new(fn line ->
+        [name, value] = String.split(line, "=", parts: 2)
+        {name, value}
+      end)
+    end
+
+    test "mints one for the viewer and shows its environment once", %{conn: conn, user: user} do
+      {:ok, view, _html} = live(conn, ~p"/workers")
+
+      view |> element("#new-machine") |> render_click()
+      view |> element("#mint-form") |> render_submit(%{"project" => ""})
+
+      env = minted_env(view)
+      # Where it goes, said beside it: nothing on the page can show it again.
+      assert has_element?(view, "#minted", "forge-config")
+      refute has_element?(view, "#mint-form")
+      # One more click would throw the environment away, so there is nothing to click.
+      refute has_element?(view, "#new-machine")
+      assert [worker] = Workers.list(user)
+      refute worker.managed
+      assert env["FORGE_WORKER_ID"] == worker.id
+      assert {:ok, _worker} = Workers.authenticate(worker.id, env["FORGE_WORKER_TOKEN"])
+      assert has_element?(view, "#worker-#{worker.id}", "no project, so it takes no work")
+
+      view |> element("#minted button", "Done") |> render_click()
+
+      refute has_element?(view, "#minted")
+      refute render(view) =~ env["FORGE_WORKER_TOKEN"]
+      assert has_element?(view, "#new-machine")
+    end
+
+    # The page holds the user it mounted with; an account suspended since is refused anyway.
+    test "is refused once the viewer is suspended, though the page is still open", %{
+      conn: conn,
+      user: user
+    } do
+      {:ok, view, _html} = live(conn, ~p"/workers")
+      admin = Forge.AccountsFixtures.node_admin_fixture()
+      {:ok, _suspended} = Forge.Accounts.suspend_user(user, admin)
+
+      html = render_submit(view, "mint", %{"project" => ""})
+
+      assert html =~ "your account may not own a machine"
+      refute has_element?(view, "#minted")
+      assert Forge.Repo.aggregate(Forge.Workers.Worker, :count) == 0
+    end
+
+    test "serves the project chosen", %{conn: conn, user: user} do
+      {:ok, project} = Forge.Projects.register(%{name: "first", repo_path: repo_path()}, user)
+      {:ok, view, _html} = live(conn, ~p"/workers")
+
+      view |> element("#new-machine") |> render_click()
+      view |> element("#mint-form") |> render_submit(%{"project" => project.id})
+
+      assert [worker] = Workers.list(user)
+      assert [%{name: "first"}] = Workers.projects(worker)
+    end
+
+    # The form has no owner field; one sent by hand is not read.
+    test "is the viewer's whatever owner the request names", %{conn: conn, user: user} do
+      other = Forge.AccountsFixtures.user_fixture()
+      {:ok, view, _html} = live(conn, ~p"/workers")
+
+      render_submit(view, "mint", %{"project" => "", "owner" => other.id, "user_id" => other.id})
+
+      assert [_worker] = Workers.list(user)
+      assert Workers.list(other) == []
+    end
+
+    # The id is the client's: a project the viewer is not in is refused, and no row is left with a
+    # token nobody was shown.
+    test "into somebody else's project is refused, and nothing is made", %{conn: conn} do
+      outsider = Forge.AccountsFixtures.user_fixture()
+      {:ok, theirs} = Forge.Projects.register(%{name: "theirs", repo_path: repo_path()}, outsider)
+      {:ok, view, _html} = live(conn, ~p"/workers")
+
+      html = render_submit(view, "mint", %{"project" => theirs.id})
+
+      assert html =~ "you are not in that project"
+      refute has_element?(view, "#minted")
+      assert Forge.Repo.aggregate(Forge.Workers.Worker, :count) == 0
+    end
+
+    test "can be put away without minting anything", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/workers")
+
+      view |> element("#new-machine") |> render_click()
+      assert has_element?(view, "#mint-form")
+      refute has_element?(view, "#new-machine")
+
+      view |> element("#mint-form button", "Cancel") |> render_click()
+
+      refute has_element?(view, "#mint-form")
+      assert has_element?(view, "#new-machine")
+    end
+
+    # A refusal's sentence is about that attempt; the next one, or putting the form away, clears it.
+    test "a refusal is cleared by the next mint, and by cancelling", %{conn: conn} do
+      outsider = Forge.AccountsFixtures.user_fixture()
+
+      {:ok, theirs} =
+        Forge.Projects.register(%{name: "elsewhere", repo_path: repo_path()}, outsider)
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+
+      view |> element("#new-machine") |> render_click()
+
+      assert render_submit(view, "mint", %{"project" => theirs.id}) =~
+               "you are not in that project"
+
+      view |> element("#mint-form button", "Cancel") |> render_click()
+      refute render(view) =~ "you are not in that project"
+
+      view |> element("#new-machine") |> render_click()
+
+      assert render_submit(view, "mint", %{"project" => theirs.id}) =~
+               "you are not in that project"
+
+      refute render_submit(view, "mint", %{"project" => ""}) =~ "you are not in that project"
+    end
+
+    # A file, drawn as one: the lines stay lines on screen, not one run of text to pick apart.
+    test "the environment is drawn line for line", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/workers")
+
+      view |> element("#new-machine") |> render_click()
+      view |> element("#mint-form") |> render_submit(%{"project" => ""})
+
+      assert has_element?(view, "pre#minted-env.whitespace-pre-wrap")
+    end
+
+    # A node whose default provider is blank cannot make a row at all, and says so plainly.
+    test "a row the node cannot make is said as that", %{conn: conn} do
+      previous = Application.get_env(:forge, Forge.Provider, [])
+      on_exit(fn -> Application.put_env(:forge, Forge.Provider, previous) end)
+      Application.put_env(:forge, Forge.Provider, Keyword.put(previous, :default, ""))
+      {:ok, view, _html} = live(conn, ~p"/workers")
+
+      assert render_submit(view, "mint", %{"project" => ""}) =~ "could not mint a machine"
+      refute has_element?(view, "#minted")
+    end
   end
 
   test "a row that is up but holds no channel says both", %{conn: conn, user: user} do

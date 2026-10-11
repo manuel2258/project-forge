@@ -48,6 +48,8 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
     html = issue(view, %{"scope" => "read", "minutes" => "90"})
 
     assert html =~ "Copy this now"
+    # What the token may do, said beside it: the row below can only describe it from now on.
+    assert has_element?(view, "#issued", "It read, until")
 
     # The URL, with a button that copies it. The value stays visible: the clipboard API needs a
     # secure context and a LAN address over plain http is not one.

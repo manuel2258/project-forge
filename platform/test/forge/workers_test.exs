@@ -441,6 +441,115 @@ defmodule Forge.WorkersTest do
     end
   end
 
+  # The page, `mix forge.worker.new` and `Forge.Release.new_worker/2` are all `mint/2`
+  # (`docs/design/identity.md` § Minting a permanent machine), so what it promises is asserted here,
+  # and each caller's tests assert what that caller adds.
+  describe "minting a permanent machine" do
+    setup do
+      owner = Forge.AccountsFixtures.user_fixture()
+      {:ok, project} = Forge.Projects.register(project_attrs(), owner)
+      %{owner: owner, project: project}
+    end
+
+    defp env(text) do
+      Map.new(String.split(text, "\n"), fn line ->
+        [name, value] = String.split(line, "=", parts: 2)
+        {name, value}
+      end)
+    end
+
+    test "is an unmanaged row of the owner's, and its environment is its identity", context do
+      %{owner: owner} = context
+
+      assert {:ok, worker, text} = Workers.mint(owner)
+      env = env(text)
+
+      refute worker.managed
+      assert worker.user_id == owner.id
+      assert env["FORGE_WORKER_ID"] == worker.id
+      # The token printed is the one the socket will take, not merely one shaped like it.
+      assert {:ok, %{id: id}} =
+               Workers.authenticate(env["FORGE_WORKER_ID"], env["FORGE_WORKER_TOKEN"])
+
+      assert id == worker.id
+      assert Workers.projects(worker) == []
+    end
+
+    # What a driver injects into a machine it makes, and nothing else: no agent credential, whatever
+    # the node is configured with, and no `FORGE_MANAGED`, which only a driver writes.
+    test "is what a driver would have given the machine, and nothing more", context do
+      %{owner: owner} = context
+      jobs = Application.get_env(:forge, Forge.Jobs, [])
+      on_exit(fn -> Application.put_env(:forge, Forge.Jobs, jobs) end)
+
+      Application.put_env(
+        :forge,
+        Forge.Jobs,
+        Keyword.merge(jobs,
+          platform_url: "http://platform.example:4000",
+          harness_opts: [model: "claude-opus-5", credential: {:oauth, "sk-oauth-node"}]
+        )
+      )
+
+      assert {:ok, _worker, text} = Workers.mint(owner)
+      env = env(text)
+
+      assert Map.keys(env) |> Enum.sort() ==
+               ~w(FORGE_CLAUDE_MODEL FORGE_PLATFORM_URL FORGE_WORKER_ID FORGE_WORKER_TOKEN)
+
+      assert env["FORGE_PLATFORM_URL"] == "http://platform.example:4000"
+      assert env["FORGE_CLAUDE_MODEL"] == "claude-opus-5"
+      refute text =~ "sk-oauth-node"
+    end
+
+    test "into a project its owner is in, it serves that project", context do
+      %{owner: owner, project: project} = context
+
+      assert {:ok, worker, _env} = Workers.mint(owner, project.id)
+      assert [%{id: id}] = Workers.projects(worker)
+      assert id == project.id
+    end
+
+    # Checked before the row exists: `assign/3` would refuse it too, but only after there was a
+    # row with a token nobody was shown, for its owner to find and retire.
+    test "into a project its owner is not in, it is refused and nothing is made", context do
+      %{owner: owner} = context
+      {:ok, elsewhere} = register_owned!(project_attrs())
+
+      assert Workers.mint(owner, elsewhere.id) == {:error, :not_a_member}
+      assert Workers.mint(owner, Ecto.UUID.generate()) == {:error, :not_a_member}
+      assert Workers.mint(owner, "not-a-uuid") == {:error, :not_a_member}
+      assert Forge.Repo.aggregate(Forge.Workers.Worker, :count) == 0
+    end
+
+    # The seed lines are the measurement harness's, and `mix forge.worker.new` adds them: a
+    # machine reads neither, and the page would otherwise put a storage token in a browser.
+    test "carries no seed, even into a project that has one", context do
+      %{owner: owner, project: project} = context
+      project = Forge.Repo.update!(Ecto.Changeset.change(project, seed_id: "seed-1"))
+
+      assert {:ok, _worker, text} = Workers.mint(owner, project.id)
+      refute text =~ "SEED"
+    end
+
+    # Read again, not trusted from the caller: a page holds the user it mounted with. A pending
+    # account is refused too — a worker row would hold it against the one deletion it may have.
+    test "is refused to an account that may not act, and nothing is made", context do
+      %{owner: owner, project: project} = context
+      admin = Forge.AccountsFixtures.node_admin_fixture()
+      pending = Forge.AccountsFixtures.pending_user_fixture()
+
+      assert Workers.mint(pending) == {:error, :not_approved}
+
+      {:ok, _suspended} = Forge.Accounts.suspend_user(owner, admin)
+
+      # `owner` is the struct from before the suspension, as a mounted page would hold it.
+      assert Workers.mint(owner) == {:error, :suspended}
+      assert Workers.mint(owner, project.id) == {:error, :suspended}
+      assert Forge.Repo.aggregate(Forge.Workers.Worker, :count) == 0
+    end
+  end
+
   describe "leaving a project" do
     # Assignment is only allowed to a member; without this the rule held on the way in and not
     # afterwards, and a template kept making machines billed to someone who could no longer see
@@ -1212,6 +1321,20 @@ defmodule Forge.WorkersTest do
       Provider.Fake.allow()
       assert {:creating, %{id: made}} = Workers.provide(want)
       assert made != refused
+      assert_receive {:provider_create, %{worker_id: ^made}}
+    end
+
+    # A permanent row is `creating` until a machine first joins with it, and nothing says one is
+    # coming: waiting for it would stop the project's templates making anything while it stood.
+    test "a permanent machine that has never joined is not waited for" do
+      %{user: user, project: project} = with_template(%{max_workers: 4})
+      {:ok, minted, _env} = Workers.mint(user, project.id)
+      {:ok, _} = Workers.set_offer(user, minted.id, %{memory_budget: 64 * 1024 ** 3, cores: 64})
+
+      assert {:creating, %{id: made}} =
+               Workers.provide(demand(memory: 1_000, project_id: project.id))
+
+      assert made != minted.id
       assert_receive {:provider_create, %{worker_id: ^made}}
     end
 

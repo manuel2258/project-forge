@@ -401,26 +401,13 @@ defmodule ForgeWeb.ProjectSettingsLive do
       <h1 class="mt-4 text-2xl font-semibold -tracking-[.025em]">Settings</h1>
 
       <%!-- Once, and only here: the row below will never be able to show it again. --%>
-      <section :if={@issued} class="mt-6 rounded-box border border-success p-4" id="issued">
-        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase text-success">
-          Copy this now
-        </h2>
-        <p class="mt-2 text-sm/[1.55] opacity-80">
-          Only its hash is kept, so this is the one time it can be shown.
-          It {capability(@issued.token)}, until {@issued.token.expires_at}.
-        </p>
+      <.shown_once :if={@issued} id="issued" done="dismiss">
+        <:note>It {capability(@issued.token)}, until {@issued.token.expires_at}.</:note>
         <.copyable id="issued-url" value={@issued.url} label="Clone URL, token included" />
         <p class="mt-2 text-sm/[1.55] opacity-60">
           Usable as-is, or give the token alone as the password when git asks.
         </p>
-        <button
-          type="button"
-          phx-click="dismiss"
-          class="mt-3 flex min-h-[46px] items-center text-sm text-primary hover:underline"
-        >
-          Done
-        </button>
-      </section>
+      </.shown_once>
 
       <section :if={@manage} class="mt-8">
         <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Issue a token</h2>

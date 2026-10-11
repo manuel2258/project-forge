@@ -80,6 +80,7 @@ mix forge.edit game#1 plan.md plan.md             # a human edit is a new versio
 mix forge.chat open game "what is this repo?"     # a conversation; also show, and say/close --node
 mix forge.seed.publish game ~/seeds/game          # the warm clone workers start from
 mix forge.worker.new game --out worker.env        # a worker you boot yourself; never swept
+                        # (any approved user mints their own from New machine on /workers)
 mix forge.worker.list                             # and forge.worker.retire ID to end one
 ```
 

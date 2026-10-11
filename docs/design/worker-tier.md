@@ -41,10 +41,12 @@ for the sweeps that read it (§ A machine whose systemd stops answering).
 ### Managed and unmanaged
 
 A `managed` worker is one the platform created through the driver and may therefore destroy. An
-**unmanaged** worker is a machine the operator provisioned and told the platform about with
-`mix forge.worker.new` — long-lived, and not the platform's to power off. The column exists
-because the two differ in exactly one way, and it is the only way that matters: *who may end
-this machine's life.*
+**unmanaged** worker is a machine its owner provisioned and told the platform about by minting
+it — from *New machine* on `/workers`, or on the host with `mix forge.worker.new` or
+`Forge.Release.new_worker/2`, all three `Forge.Workers.mint/2` (`docs/design/identity.md`
+§ Minting a permanent machine) — long-lived, and not the platform's to power off. The column
+exists because the two differ in exactly one way, and it is the only way that matters: *who may
+end this machine's life.*
 
 Everything else is the same. An unmanaged worker joins the same channel with the same kind of
 token, is scheduled by the same gate and runs the same slices.
@@ -65,7 +67,7 @@ concept appears for a machine the platform did not make — which is the choice 
 represents.
 
 **"Everything else is the same" includes what the machine is given at creation**, and that is
-the part it is easy to get wrong. `mix forge.worker.new` prints the whole environment a machine
+the part it is easy to get wrong. `Forge.Workers.mint/2` returns the whole environment a machine
 needs, because it stands in for the driver and the driver injects it — see below. Anything that
 mints a machine's environment mints all of it. **That no longer includes an inference
 credential**: a machine holds none, and each job brings its own (`docs/design/credentials.md`),
@@ -314,8 +316,8 @@ jobs.
 What is still injected at creation is what is still the machine's: the worker token and the
 platform's address, and the model, which is an operator setting until the workflow grammar says
 otherwise. The executable is not: the platform's is a path on the platform's host, and the image
-has its own. `mix forge.worker.new` prints the same set for a machine the operator is provisioning
-by hand.
+has its own. `Forge.Workers.mint/2` returns the same set for a machine its owner is provisioning
+by hand, and the workers page and both host commands show what it returns.
 
 ## Scheduling
 
@@ -1228,7 +1230,7 @@ hour, so not again: destroy it, or wait for it to rejoin healthy*
 works again, and `/etc/forge-worker.env` is written again with the same worker id and token — the
 token is long lived and the row keeps its hash (`nix/worker-image.nix`). The local driver's config
 disk stays attached across a guest reboot. The rejoin authenticates the row it always had; rows
-are made only by a create and by `mix forge.worker.new`. On the image under QEMU the unit ran again
+are made only by a create and by minting one (`Forge.Workers.mint/2`). On the image under QEMU the unit ran again
 on the new boot and wrote `/etc/forge-worker.env` byte for byte as before, from the config disk;
 end to end, the rebooted machine joined as the same worker row, and the platform cleared its mark
 (`docs/measurements.md` § The unhealthy machine, end to end). **The metadata service's half — the

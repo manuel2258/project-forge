@@ -288,7 +288,7 @@ defmodule Forge.Projects do
       # `on_delete: :restrict` holds against `Accounts.delete_unapproved_user/2`, the one way a
       # squatted address is freed.
       not User.active?(user) ->
-        {:error, standing(user)}
+        {:error, User.standing(user)}
 
       # Demotion is removal by another name: a project whose last admin becomes a member has
       # nobody who can make one again, and `remove_member/3` refuses exactly this.
@@ -299,11 +299,6 @@ defmodule Forge.Projects do
         set_member(project, user, role, by)
     end
   end
-
-  # Which of the two an inactive account is. Suspension outranks approval, as it does in
-  # `User.active?/1`: a suspended account keeps `approved_at` so reinstating is one field.
-  defp standing(%User{suspended_at: %DateTime{}}), do: :suspended
-  defp standing(%User{}), do: :not_approved
 
   defp set_member(project, user, role, by) do
     changeset =

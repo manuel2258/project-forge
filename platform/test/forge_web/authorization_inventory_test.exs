@@ -180,6 +180,13 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"ticket_new_live.ex", "create"} => :member,
     {"ticket_new_live.ex", "validate"} => :local,
     {"workers_live.ex", "toggle-destroyed"} => :local,
+    {"workers_live.ex", "new-machine"} => :local,
+    {"workers_live.ex", "cancel-new"} => :local,
+    {"workers_live.ex", "dismiss-minted"} => :local,
+    # Mints a permanent machine whose owner is the session's user — no owner is read off the
+    # wire — and, when a project is chosen, `Workers.mint/2` checks membership as `assign/3` does,
+    # before the row exists (`docs/design/identity.md` § Minting a permanent machine).
+    {"workers_live.ex", "mint"} => :self,
     {"workers_live.ex", "edit"} => :local,
     {"workers_live.ex", "cancel-edit"} => :local,
     # Sets what a machine offers the gate: the caller's own machine only, read scoped to them by

@@ -4,9 +4,9 @@ defmodule Mix.Tasks.Forge.Worker.Retire do
   @moduledoc """
   Marks a worker destroyed, and destroys its machine if the platform made one.
 
-  This is the only way an unmanaged worker ends. Neither sweep will touch it — that is what
-  `mix forge.worker.new` buys — so a machine the operator has finished with needs saying so,
-  or its row stays for ever.
+  This and *Retire* on `/workers` are the only ways an unmanaged worker ends. Neither sweep will
+  touch it — that is what minting one buys — so a machine its owner has finished with needs
+  saying so, or its row stays for ever.
 
   Destruction is the platform's record that the machine is gone: the token stops working and a
   machine that disagrees is refused at the socket. So retire the row *after* the machine is

@@ -44,7 +44,12 @@ defmodule ForgeWeb.GitHttpTest do
       {out, code} = git(tmp_dir("anon"), ["clone", "--quiet", Url.for(project), "clone"])
 
       assert code != 0
-      assert out =~ "Authentication failed" or out =~ "could not read Username"
+
+      # What git says when challenged with prompts off depends on its version: git 2.55, the
+      # devshell's, says it could not get a password, where older ones said they could not read a
+      # username. A 403 or a 404 says neither, so each still means the challenge was there.
+      assert out =~ "Authentication failed" or out =~ "could not read Username" or
+               out =~ "unable to get password from user"
     end
 
     test "an unknown, a revoked and an expired token are all refused", %{project: project} do

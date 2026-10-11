@@ -62,7 +62,8 @@ that says the project is there.
 **Some human writes are not here.** Membership is guarded where it is changed, in
 `Forge.Projects` (`design/identity.md` § Where the guard lives), and so are mirrors
 (`put_mirror`, `delete_mirror`). Worker templates and provider credentials are one user's own
-and live in `Forge.Provisioning`; setting a permanent worker's figures is
+and live in `Forge.Provisioning`; minting a permanent worker is `Forge.Workers.mint/2`, whose owner
+the workers page takes from the session and never from the request, and setting its figures is
 `Forge.Workers.set_offer/3`, which reads the machine scoped to its owner; approving,
 suspending and promoting accounts is `Forge.Accounts`, which refuses anyone who is not a node
 admin.

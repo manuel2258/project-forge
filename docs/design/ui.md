@@ -968,11 +968,24 @@ is about what exists.
 
 **Templates is a button in the header**, not a link inside the explanation beneath it, where it
 used to be the only way there from a laptop. While the viewer has no template of their own it is
-drawn filled, and a line beneath the header says in error colour that no machine of theirs can be
-made: the machines on this page are the viewer's, and a machine is made from its owner's template.
+drawn filled, and a line beneath the header says in error colour that the platform can make no
+machine for them: the machines on this page are the viewer's, a machine the platform makes is made
+from its owner's template, and the only other kind is one the viewer mints and boots themselves.
 
-Nothing here is accent. It is a readout with three decisions in it: what a permanent machine
-offers (below), which projects it serves, and — on every row that is not destroyed — ending it.
+**New machine is beside it**, and mints a permanent machine for the viewer (`identity.md`
+§ Minting a permanent machine). It opens a form beneath the header that asks one thing — the
+project it serves first, or none yet, from the projects the viewer is in — and names no owner,
+because the machine is the viewer's. What it mints is drawn once, in the *Copy this now* block
+project settings uses for a token (§ Project settings) — one component, `shown_once`, for both: the machine's whole environment, one
+`NAME=value` per line, with a sentence saying where it goes — a file named `worker.env` on a disk
+labelled `forge-config`, or the provider's user data — and that only its hash is kept. *Done*
+dismisses it; the row it made is already in the list, *not connected* and *last seen never* until
+a machine boots with it. **It is never filled**: a filled button is the Templates button's way of
+saying nothing will appear here by waiting, and one button saying it is enough.
+
+Nothing here is accent. It is a readout with four decisions in it: minting a permanent machine
+(above), what one offers (below), which projects it serves, and — on every row that is not
+destroyed — ending it.
 
 **A machine is a block, not a table row.** Seven columns did not fit a phone and never would, so
 each machine is a block separated from the next by a row rule (`border-base-300/60`), with no
@@ -1020,7 +1033,7 @@ swept, destroyed and by what — newest first, with its time and where it came f
 machine's history and not a job's: what an agent did is on the job page. `worker-log.md` is the
 standard for it.
 
-**Ending a machine is the third decision, and it is the owner's.** A managed row offers
+**Ending a machine is the fourth decision, and it is the owner's.** A managed row offers
 **Destroy machine** and a permanent one **Retire**, each behind a confirm that says what will
 happen, from one definition each so the sentence cannot drift between uses: *the machine is
 deleted at the provider, and its N running jobs are requeued*, or *forge forgets the machine,

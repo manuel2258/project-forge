@@ -142,6 +142,57 @@ defmodule Forge.Release do
   end
 
   @doc """
+  Mints a permanent machine for the user, from the host, and prints its environment once.
+
+  What `mix forge.worker.new --owner` does where Mix does not exist — the owner always named, and
+  no seed lines or `--out` — and what *New machine* on `/workers` does for the person logged in:
+  all three are `Forge.Workers.mint/2`
+  (`docs/design/identity.md` § Minting a permanent machine). With a project, the user must be a
+  member of it and the machine is assigned there; without one it takes no work until they assign
+  it on `/workers`.
+
+  **It needs `FORGE_PLATFORM_URL`**, and refuses before writing anything without it. The page
+  and the Mix task ask the endpoint its address when it is unset, and this cannot: `with_app/1`
+  starts the repository and nothing else, because the endpoint is the running service's.
+
+  The output holds the machine's token, so send it somewhere with a sane umask rather than into
+  a terminal's scrollback.
+  """
+  def new_worker(email, project_name \\ nil) do
+    with_app(fn ->
+      user = Forge.Accounts.get_user_by_email(email)
+      project = project_name && Forge.Projects.by_name(project_name)
+
+      cond do
+        is_nil(Forge.Jobs.config(:platform_url, nil)) ->
+          fail(
+            "FORGE_PLATFORM_URL is not set, and a command on the host cannot ask the running " <>
+              "platform its address: set it to the address machines dial, or mint from /workers"
+          )
+
+        is_nil(user) ->
+          fail("unknown user #{email}")
+
+        project_name && is_nil(project) ->
+          fail("unknown project #{project_name}")
+
+        true ->
+          mint(user, project)
+      end
+    end)
+  end
+
+  defp mint(user, project) do
+    case Forge.Workers.mint(user, project && project.id) do
+      {:ok, _worker, env} -> IO.puts(env)
+      {:error, :not_a_member} -> fail("#{user.email} is not a member of #{project.name}")
+      {:error, :not_approved} -> fail("#{user.email} is not approved")
+      {:error, :suspended} -> fail("#{user.email} is suspended")
+      {:error, changeset} -> fail(inspect(changeset.errors))
+    end
+  end
+
+  @doc """
   Gives a machine with no owner one, from the host.
 
   The repair path for a permanent machine the move to owned machines could not place: on a node

@@ -569,16 +569,56 @@ defmodule ForgeWeb.Operator.Components do
   end
 
   @doc """
+  A secret shown the one time it can be: only its hash is kept, so nothing can draw it again. A
+  freshly issued git token on project settings, and a freshly minted machine's environment on the
+  workers page (`docs/design/ui.md` § Project settings, § The workers page) — one block, so the
+  two cannot come to say different things about what happens once it is dismissed.
+
+  `note` follows the sentence every one of them says; the inner block is the value and whatever
+  goes after it; *Done* sends `done`, whose handler drops the value from the page.
+  """
+  attr :id, :string, required: true
+  attr :done, :string, required: true, doc: "the event Done sends"
+  slot :note
+  slot :inner_block, required: true
+
+  def shown_once(assigns) do
+    ~H"""
+    <section id={@id} class="mt-6 rounded-box border border-success p-4">
+      <h2 class="font-mono text-[11px] tracking-[.14em] uppercase text-success">
+        Copy this now
+      </h2>
+      <p class="mt-2 text-sm/[1.55] opacity-80">
+        Only its hash is kept, so this is the one time it can be shown. {render_slot(@note)}
+      </p>
+      {render_slot(@inner_block)}
+      <button
+        type="button"
+        phx-click={@done}
+        class="mt-3 flex min-h-[46px] items-center text-sm text-primary hover:underline"
+      >
+        Done
+      </button>
+    </section>
+    """
+  end
+
+  @doc """
   A value worth copying, with a button that copies it.
 
-  Used wherever the product hands the operator something to paste elsewhere: a clone URL, and the
-  one-time URL carrying a freshly issued token. The value stays visible and selectable — the
-  button is a convenience over it, never the only way to get at it, because the clipboard API
-  needs a secure context and a LAN address over plain http is not one.
+  Used wherever the product hands the operator something to paste elsewhere: a clone URL, the
+  one-time URL carrying a freshly issued token, and a freshly minted machine's environment. The
+  value stays visible and selectable — the button is a convenience over it, never the only way to
+  get at it, because the clipboard API needs a secure context and a LAN address over plain http is
+  not one.
+
+  `multiline` keeps the value's line breaks on screen, for a value that is a file: what is copied
+  is its text either way.
   """
   attr :id, :string, required: true
   attr :value, :string, required: true
   attr :label, :string, default: nil
+  attr :multiline, :boolean, default: false
 
   def copyable(assigns) do
     ~H"""
@@ -588,7 +628,10 @@ defmodule ForgeWeb.Operator.Components do
       </p>
       <div class={["flex items-stretch gap-2", @label && "mt-2"]}>
         <div class="min-w-0 flex-1 rounded-box bg-base-200 px-4 py-3">
-          <p id={@id} class="font-mono text-[12.5px] break-all">{@value}</p>
+          <%!-- A `pre`, because the formatter leaves its content alone: a value laid out on lines
+                of its own would be drawn with the template's indentation in front of it. --%>
+          <pre :if={@multiline} id={@id} class="font-mono text-[12.5px] whitespace-pre-wrap break-all">{@value}</pre>
+          <p :if={not @multiline} id={@id} class="font-mono text-[12.5px] break-all">{@value}</p>
         </div>
         <button
           type="button"

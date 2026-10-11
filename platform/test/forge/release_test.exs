@@ -91,6 +91,47 @@ defmodule Forge.ReleaseTest do
     assert Forge.Workers.get(worker.id).user_id == owner.id
   end
 
+  # A deployed node has no Mix, so this is the only way its host mints a permanent machine
+  # (`docs/design/identity.md` § Minting a permanent machine).
+  test "new_worker mints a machine for the named user, into a project they are in" do
+    put_platform_url("https://forge.example")
+    owner = Forge.AccountsFixtures.user_fixture()
+    name = "rel-#{System.unique_integer([:positive])}"
+    repo_path = Path.join(tmp_dir("rel-worker"), "p.git")
+    {:ok, project} = Forge.Projects.register(%{name: name, repo_path: repo_path}, owner)
+
+    output = capture_io(fn -> Release.new_worker(owner.email, name) end)
+
+    [_, id] = Regex.run(~r/^FORGE_WORKER_ID=(\S+)$/m, output)
+    [_, token] = Regex.run(~r/^FORGE_WORKER_TOKEN=(\S+)$/m, output)
+    assert {:ok, worker} = Forge.Workers.authenticate(id, token)
+    assert worker.user_id == owner.id
+    refute worker.managed
+    assert [%{id: project_id}] = Forge.Workers.projects(worker)
+    assert project_id == project.id
+    assert output =~ ~r/^FORGE_PLATFORM_URL=https:\/\/forge.example$/m
+  end
+
+  test "new_worker with no project mints one that serves nothing until its owner assigns it" do
+    put_platform_url("https://forge.example")
+    owner = Forge.AccountsFixtures.user_fixture()
+
+    output = capture_io(fn -> Release.new_worker(owner.email) end)
+
+    [_, id] = Regex.run(~r/^FORGE_WORKER_ID=(\S+)$/m, output)
+    worker = Forge.Workers.get(id)
+    assert worker.user_id == owner.id
+    assert Forge.Workers.projects(worker) == []
+  end
+
+  # The command asks the configured address and never the endpoint, which belongs to the running
+  # service and is not started here.
+  defp put_platform_url(url) do
+    previous = Application.get_env(:forge, Forge.Jobs, [])
+    Application.put_env(:forge, Forge.Jobs, Keyword.put(previous, :platform_url, url))
+    on_exit(fn -> Application.put_env(:forge, Forge.Jobs, previous) end)
+  end
+
   test "approve_user lets the first account in, with no node admin to approve it" do
     pending = Forge.AccountsFixtures.pending_user_fixture()
 

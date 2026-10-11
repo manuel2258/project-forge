@@ -52,7 +52,7 @@ preflight_units() {
   fi
 
   if ! preflight_probe_unit; then
-    fail_add "a probe unit could not read its own memory.peak; the kernel or the slice does not account memory"
+    fail_add "a probe unit could not read its own memory.peak; the kernel or the slice does not account memory, or systemd-run predates --expand-environment (254)"
   fi
 
   if [ "$(slice_mode)" = user ]; then
@@ -73,7 +73,7 @@ preflight_probe_unit() {
   fi
   # The $cg inside the probe belongs to the probe's own shell, not to this one.
   # shellcheck disable=SC2016
-  "${argv[@]}" --quiet --unit="forge-measure-probe-$$" --service-type=exec --wait --pipe \
+  "${argv[@]}" --quiet --unit="forge-measure-probe-$$" --service-type=exec --expand-environment=no --wait --pipe \
     --property=MemoryAccounting=yes --property=MemoryMax=infinity \
     -- bash -c 'cg=$(sed -n "s|^0::||p" /proc/self/cgroup); test -r "/sys/fs/cgroup$cg/memory.peak"' \
     > /dev/null 2>&1

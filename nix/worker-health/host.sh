@@ -107,6 +107,7 @@ first_env=$(grep '^env-sha256 ' "$report" | tail -1)
 item oom-child
 item oom-main
 item readings
+item secrets
 item forgery
 item wedge
 item health

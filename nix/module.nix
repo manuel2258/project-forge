@@ -46,7 +46,9 @@ let
       echo "usage: forge-admin <bin/forge arguments>, e.g. forge-admin eval 'Forge.Release.list_tokens(\"you@example.org\")'" >&2
       exit 64
     fi
-    exec ${pkgs.systemd}/bin/systemd-run --quiet --pty --wait --collect \
+    # --expand-environment=no: the arguments are code to eval, and systemd would otherwise
+    # substitute any ''${NAME} in them from the unit's environment before the release saw them.
+    exec ${pkgs.systemd}/bin/systemd-run --quiet --pty --wait --collect --expand-environment=no \
       --uid=forge --gid=forge --working-directory=${cfg.dataDir} \
       ${lib.optionalString (cfg.environmentFile != null) "--property=EnvironmentFile=${cfg.environmentFile}"} \
       --setenv=PATH=${lib.makeBinPath servicePath} \

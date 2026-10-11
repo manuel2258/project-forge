@@ -261,7 +261,10 @@ an assignment's unknown keys as nothing, and would run the job without them.
 them when the runner or a command spawns its process and writes them, shell-quoted, to a file in
 the worker's own directory, which only root can enter; the unit is handed the file with
 `LoadCredential=`, so systemd gives a copy to the unit's user alone, and a shell inside the
-process loads it and `exec`s (`ForgeWorker.Job.Exec`, `worker-tier.md` § The job slice). Never
+process loads it and `exec`s (`ForgeWorker.Job.Exec`, `worker-tier.md` § The job slice) — from
+`$CREDENTIALS_DIRECTORY`, which is why the unit's command line is not expanded by systemd: the
+first build let systemd rewrite the loader's test for that variable to nothing, and on the image
+every run holding a secret died reading the root-only path. Never
 `--setenv`: a unit's environment is a property systemd shows every user on the machine, so any
 other job there — another project's on a shared template — could read it. Never an argument:
 `env -i NAME="$NAME"` puts the value in `env`'s argv, readable in `/proc` by anyone. The first

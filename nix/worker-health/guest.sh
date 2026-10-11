@@ -5,7 +5,7 @@
 # notes rely on. Units are started with the worker's own code (slice.exs), never with flags
 # written here.
 #
-#     guest.sh identity | oom-child | oom-main | readings | forgery | wedge | health | reboot
+#     guest.sh identity | oom-child | oom-main | readings | secrets | forgery | wedge | health | reboot
 set -uo pipefail
 
 here=$(dirname "$(readlink -f "$0")")
@@ -23,7 +23,7 @@ fail() {
 
 # fw ACTION ID [MEM] — ForgeWorker.Slice.Systemd, through the release in the image.
 fw() {
-  FJ_ACTION=$1 FJ_ID=$2 FJ_MEM=${3:-536870912} FJ_FILE=${FJ_FILE:-} \
+  FJ_ACTION=$1 FJ_ID=$2 FJ_MEM=${3:-536870912} FJ_FILE=${FJ_FILE:-} FJ_SECRET=${FJ_SECRET:-} \
     "$root/release/bin/forge_worker" eval "Code.eval_file(\"$here/slice.exs\")"
 }
 
@@ -140,6 +140,26 @@ readings() {
     fail "memory/1 read no pressure, for a job stalled at its ceiling"
 }
 
+# A job given a secret holds it, and reads it from systemd's copy: the worker writes the file in
+# its own directory, which the job's user cannot enter, hands the unit the file with
+# `LoadCredential=`, and the loader inside the unit reads `$CREDENTIALS_DIRECTORY`
+# (docs/design/secrets.md § Delivery). The first version on the image never got that far: systemd
+# substituted the loader's `${CREDENTIALS_DIRECTORY-}` to nothing, the loader read the worker's own
+# path instead, and every job given a secret died "Permission denied".
+secrets() {
+  local value="it's \${HOME} and \$1"
+  FJ_SECRET=$value run_job c1c1c1c1-0000-4000-8000-000000000000 536870912 secret.sh
+  echo "systemd-run exited $status after ${wall_ms}ms"
+  verbatim stdout "$worker_dir/stdout.log"
+  verbatim stderr "$stderr"
+  rm -f "$worker_dir/secrets.env"
+  [ "$status" = 0 ] || fail "systemd-run exited $status; the job could not load its secret"
+  grep -qxF "secret: $value" "$worker_dir/stdout.log" ||
+    fail "the job did not hold the secret as it was given"
+  grep -qxF "credentials: /run/credentials/$unit.service" "$worker_dir/stdout.log" ||
+    fail "the loader did not read the unit's credential"
+}
+
 # Recorded, not asserted, apart from PID 1 answering afterwards: whether a forgery should be believed
 # is the operator's open question (docs/design/worker-tier.md § Open), and a check that failed on
 # either answer would be deciding it.
@@ -232,6 +252,7 @@ case ${1:-} in
   oom-child) oom_child ;;
   oom-main) oom_main ;;
   readings) readings ;;
+  secrets) secrets ;;
   forgery) forgery ;;
   wedge) wedge ;;
   wedge-run) wedge_run ;;

@@ -250,8 +250,9 @@ defmodule ForgeWorker.Slice.Systemd do
   `nix build .#checks.x86_64-linux.worker-health` (`nix/worker-health.nix`), which needs KVM: the
   release in the image makes the user, the unit and its stop step with this module and reads what
   came back with it — a child and a main process killed at a 512 MiB ceiling, the cgroup under
-  pressure, a forged bus error, and a PID 1 wedged by a 2-byte ceiling
-  (`docs/measurements.md` § The worker at its ceiling, on the image).
+  pressure, a forged bus error, and a PID 1 wedged by a 2-byte ceiling (`docs/measurements.md`
+  § The worker at its ceiling, on the image). Its `secrets` item, a value read from the unit's
+  credential, is written and has not yet run.
 
   **The user is, where the suite runs as root.** `enter/1`, `own/2`, `run_as/3` and `leave/2` need
   only `useradd`, `chown`, `setpriv` and `userdel`, and `ForgeWorker.JobUserTest` uses them to show
@@ -653,6 +654,13 @@ defmodule ForgeWorker.Slice.Systemd do
       "--pipe",
       "--wait",
       "--collect",
+      # The command reaches the process as it was written. By default systemd substitutes `${NAME}`
+      # anywhere in an argument, and a whole `$NAME` argument, before anything runs — a variable it
+      # does not know as nothing. It turned the secrets' loader's `${CREDENTIALS_DIRECTORY-}` into
+      # `""` (no variable is named `CREDENTIALS_DIRECTORY-`), so every job given a secret read the
+      # root-only path instead and stopped at "Permission denied"; a command's argument holding
+      # `${...}` or a whole `$NAME` was rewritten the same way. systemd 254 and later.
+      "--expand-environment=no",
       "--unit=" <> unit_name(context.job_id),
       "--uid=" <> context.user,
       "--property=WorkingDirectory=" <> context.worktree,

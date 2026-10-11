@@ -374,12 +374,14 @@ project's numbers. It is a configured default precisely so replacing it is a con
 One transient systemd unit per job, started by the worker:
 
 ```
-systemd-run --pipe --wait --collect --unit=forge-job-<short id>
+systemd-run --pipe --wait --collect --expand-environment=no --unit=forge-job-<short id>
             --uid=<per-job user> --property=WorkingDirectory=<worktree>
             --property=MemorySwapMax=0 --property=OOMPolicy=continue
             --property=ExecStopPost=-+<the job's worker directory>/at-exit
             --property=MemoryMax=<slice> --property=CPUWeight=100
-            -- <nix develop .#env --command> <harness>
+            --setenv=<name>=<value> ...
+            --property=LoadCredential=forge-secrets:<the job's worker directory>/secrets.env
+            -- <nix develop .#env --command> <the loader> <harness>
 ```
 
 - **`MemorySwapMax=0`.** A slice allowed to swap does not die at its ceiling, it drags the machine
@@ -496,6 +498,17 @@ systemd-run --pipe --wait --collect --unit=forge-job-<short id>
   (`ForgeWorker.Job.Exec`). The bus carries the path; no argv carries a value; the worker removes
   the file when the process has ended. `Slice.Direct` has no unit, and its process reads the file
   where it is.
+- **The command line reaches the process as written: `--expand-environment=no`.** By default
+  systemd substitutes `${NAME}` anywhere in a unit's arguments, and an argument that is a whole
+  `$NAME`, from the unit's environment before the process runs, and a name it does not know
+  becomes nothing. The loader's `${CREDENTIALS_DIRECTORY-}` is one — systemd looks up a variable
+  named `CREDENTIALS_DIRECTORY-` — so on the image the loader always fell back to the path in the
+  worker's own directory, which the job's user cannot read, and every run holding a secret ended
+  `Permission denied` before it started: every agent job and every chat, the credential being
+  one. A command's argument holding `${...}` or a whole `$NAME` was rewritten the same way; a
+  prompt never was, since it reaches the harness through stdin. The suite holds the flag
+  (`Slice.Systemd.flags/1`); `nix/worker-health.nix`'s `secrets` item is written to show a value
+  arriving through a real unit, and has not yet run. systemd 254 and later.
 
 This is behind `ForgeWorker.Slice`, with two implementations: `Slice.Systemd` as above, and
 `Slice.Direct`, which is what the runner does today — spawn the process with no unit and no limit.

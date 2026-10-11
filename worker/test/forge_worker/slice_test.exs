@@ -57,6 +57,20 @@ defmodule ForgeWorker.SliceTest do
       assert Enum.at(args, Enum.find_index(args, &(&1 == "--")) + 1) == "claude"
     end
 
+    # systemd substitutes `${NAME}` in a unit's command line before the process runs, and one it
+    # does not know becomes nothing: the secrets' loader's `${CREDENTIALS_DIRECTORY-}` came out as
+    # `""`, so every job given a secret read the root-only file and died "Permission denied". A
+    # command's own arguments are the same line, so a unit with no secret asks for it too.
+    test "asks systemd not to substitute variables in the command line, secret or none" do
+      for opts <- [%{secrets_file: "/s"}, %{}] do
+        {:ok, context} = prepared(Map.merge(%{job_id: @job, worktree: "/w"}, opts))
+        {"systemd-run", args} = Systemd.wrap("/bin/sh", ["-c", "true"], context)
+
+        {flags, ["--" | _command]} = Enum.split_while(args, &(&1 != "--"))
+        assert "--expand-environment=no" in flags
+      end
+    end
+
     test "the unit and the user are the same short name, so a stuck one is findable" do
       assert Systemd.unit_name(@job) == Systemd.user_name(@job)
       assert Systemd.unit_name(@job) == "forge-job-d7cf49460e0d177c"

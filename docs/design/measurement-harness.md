@@ -113,7 +113,7 @@ fewer keys and pass a smaller set.
 
 ```
 sudo systemd-run --unit=forge-measure-<run>-<label> \
-  --service-type=exec --wait --pipe \
+  --service-type=exec --expand-environment=no --wait --pipe \
   --uid=<operator> --gid=<operator> --working-directory=<worktree> \
   --property=MemoryAccounting=yes --property=MemoryMax=<max> \
   --property=MemorySwapMax=0 --property=CPUAccounting=yes \
@@ -129,7 +129,7 @@ the build's output. The `nix develop .#<env> --command <exe> <args>` form is the
 `ForgeWorker.Job.Runner.maybe_nix/4` already builds, so the environment is entered exactly as
 the worker will enter it.
 
-Four choices worth stating, because each has a wrong-looking alternative:
+Five choices worth stating, because each has a wrong-looking alternative:
 
 - **No `--collect`.** It unloads the unit the moment it exits, which destroys the post-hoc
   `systemctl show` and, worse, the journal record of an OOM kill that the M3 sweep depends on.
@@ -147,6 +147,11 @@ Four choices worth stating, because each has a wrong-looking alternative:
 - **An explicit environment**, mirroring the inherited list in `Runner`. A variable the worker
   forgets is then a variable the measurement also forgets, which is the failure mode that
   surfaces the problem rather than hiding it.
+- **`--expand-environment=no`.** By default systemd substitutes `${NAME}` in a unit's command line
+  before the shell sees it, and a name it does not know becomes nothing, so a workload command
+  holding `${...}` would run as a different command, silently. The worker's units say the same
+  (`worker-tier.md` § The job slice), where it broke every job given a secret. systemd 254 and
+  later; the preflight probe asks for it, so an older one fails there.
 
 ### Reading the peak
 

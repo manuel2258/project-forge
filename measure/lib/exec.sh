@@ -74,6 +74,7 @@ measure_exec() {
   argv+=(
     --unit="$unit"
     --service-type=exec
+    --expand-environment=no
     --wait
     --pipe
     --working-directory="$workdir"
@@ -154,6 +155,7 @@ measure_exec_ssh() {
     systemd-run
     --unit="$unit"
     --service-type=exec
+    --expand-environment=no
     --wait
     --pipe
     --working-directory="$workdir"

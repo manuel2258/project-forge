@@ -40,14 +40,14 @@ defmodule ForgeWeb.AccountsLiveTest do
   test "an account an issuer let through is shown by its issuer", %{conn: conn} do
     {:ok, _user} =
       Accounts.log_in_with_identity(%{
-        issuer: "https://id.oecis.io",
+        issuer: "https://id.acme.example",
         subject: "sub-1",
         email: "person@example.org"
       })
 
     {:ok, _lv, html} = live(conn, ~p"/accounts")
 
-    assert "https://id.oecis.io" in origins(html)
+    assert "https://id.acme.example" in origins(html)
   end
 
   # The two together, because each alone passes against a column that prints one constant.
@@ -56,7 +56,7 @@ defmodule ForgeWeb.AccountsLiveTest do
 
     {:ok, _user} =
       Accounts.log_in_with_identity(%{
-        issuer: "https://id.oecis.io",
+        issuer: "https://id.acme.example",
         subject: "sub-1",
         email: "person@example.org"
       })
@@ -66,7 +66,7 @@ defmodule ForgeWeb.AccountsLiveTest do
     shown = origins(html)
 
     assert "local" in shown
-    assert "https://id.oecis.io" in shown
+    assert "https://id.acme.example" in shown
   end
 
   describe "deleting a squatted address" do
@@ -113,7 +113,7 @@ defmodule ForgeWeb.AccountsLiveTest do
   test "an account with two issuers shows both", %{conn: conn} do
     {:ok, user} =
       Accounts.log_in_with_identity(%{
-        issuer: "https://id.oecis.io",
+        issuer: "https://id.acme.example",
         subject: "sub-1",
         email: "person@example.org"
       })
@@ -122,6 +122,6 @@ defmodule ForgeWeb.AccountsLiveTest do
 
     {:ok, _lv, html} = live(conn, ~p"/accounts")
 
-    assert Enum.any?(origins(html), &(&1 =~ "id.oecis.io" and &1 =~ "other.example.test"))
+    assert Enum.any?(origins(html), &(&1 =~ "id.acme.example" and &1 =~ "other.example.test"))
   end
 end

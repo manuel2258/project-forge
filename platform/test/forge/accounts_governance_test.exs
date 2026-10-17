@@ -155,13 +155,13 @@ defmodule Forge.AccountsGovernanceTest do
 
       {:ok, squatter} =
         Accounts.log_in_with_identity(%{
-          issuer: "https://id.oecis.io",
+          issuer: "https://id.acme.example",
           subject: "sub-1",
           email: "colleague@corp.com"
         })
 
       assert {:ok, _deleted} = Accounts.delete_unapproved_user(squatter, admin)
-      refute Accounts.get_user_by_identity("https://id.oecis.io", "sub-1")
+      refute Accounts.get_user_by_identity("https://id.acme.example", "sub-1")
     end
 
     # The perimeter, stated as a refusal: this is irreversible, so the page hiding the button is

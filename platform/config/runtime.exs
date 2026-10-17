@@ -165,9 +165,9 @@ end
 
 # ## OIDC
 #
-# Zero or more issuers, named by a list of ids: FORGE_OIDC_PROVIDERS=oecis,google. Each one then
+# Zero or more issuers, named by a list of ids: FORGE_OIDC_PROVIDERS=acme,google. Each one then
 # reads its own variables under the id, upper-cased with anything that is not a letter or a digit
-# turned into an underscore — FORGE_OIDC_OECIS_ISSUER and so on.
+# turned into an underscore — FORGE_OIDC_ACME_ISSUER and so on.
 #
 # **Unset means no providers and no change to anything**, which is what development and every
 # node that does not want SSO get. `docs/design/identity.md` § Authentication.

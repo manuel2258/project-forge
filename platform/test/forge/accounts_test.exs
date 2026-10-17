@@ -450,11 +450,11 @@ defmodule Forge.AccountsTest do
     test "the sender is what configuration says, not a literal in the notifier", %{user: user} do
       previous = Application.get_env(:forge, :mail_from)
       on_exit(fn -> Application.put_env(:forge, :mail_from, previous) end)
-      Application.put_env(:forge, :mail_from, {"oecis forge", "forge@example.org"})
+      Application.put_env(:forge, :mail_from, {"acme forge", "forge@example.org"})
 
       {:ok, email} = Forge.Accounts.UserNotifier.deliver_login_instructions(user, "http://x/y")
 
-      assert email.from == {"oecis forge", "forge@example.org"}
+      assert email.from == {"acme forge", "forge@example.org"}
     end
   end
 

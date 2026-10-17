@@ -91,13 +91,13 @@ relay on the same host and nothing else: it sends the password in the clear.
 its id; with none named nothing changes and the login page offers only what it did before.
 
 ```
-FORGE_OIDC_PROVIDERS=oecis            # comma separated; the id is the URL segment
-FORGE_OIDC_OECIS_ISSUER=https://id.oecis.io
-FORGE_OIDC_OECIS_CLIENT_ID=forge
-FORGE_OIDC_OECIS_CLIENT_SECRET=<secret>
-FORGE_OIDC_OECIS_NAME=oecis           # optional; the button's label, the id otherwise
-FORGE_OIDC_OECIS_SCOPE=email profile  # optional; `openid` is always added
-FORGE_OIDC_OECIS_ID_TOKEN_ALG=RS256   # optional; what the issuer signs ID tokens with
+FORGE_OIDC_PROVIDERS=acme            # comma separated; the id is the URL segment
+FORGE_OIDC_ACME_ISSUER=https://id.acme.example
+FORGE_OIDC_ACME_CLIENT_ID=forge
+FORGE_OIDC_ACME_CLIENT_SECRET=<secret>
+FORGE_OIDC_ACME_NAME=acme            # optional; the button's label, the id otherwise
+FORGE_OIDC_ACME_SCOPE=email profile  # optional; `openid` is always added
+FORGE_OIDC_ACME_ID_TOKEN_ALG=RS256   # optional; what the issuer signs ID tokens with
 ```
 
 `ID_TOKEN_ALG` is worth checking before the first login rather than after. The client compares
@@ -127,7 +127,7 @@ usual case being your own local account and your own SSO identity — do it from
 the `sub` comes from the provider's console:
 
 ```
-forge-admin eval 'Forge.Release.link_identity("you@example.org", "https://id.oecis.io", "SUBJECT")'
+forge-admin eval 'Forge.Release.link_identity("you@example.org", "https://id.acme.example", "SUBJECT")'
 ```
 
 ## First run

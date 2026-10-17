@@ -37,10 +37,10 @@ defmodule Forge.RuntimeConfigTest do
               FORGE_SMTP_HOST FORGE_SMTP_PORT FORGE_SMTP_TLS FORGE_SMTP_CACERTFILE
               FORGE_SMTP_USERNAME FORGE_SMTP_PASSWORD
               FORGE_OIDC_PROVIDERS
-              FORGE_OIDC_OECIS_NAME FORGE_OIDC_OECIS_ISSUER FORGE_OIDC_OECIS_CLIENT_ID
-              FORGE_OIDC_OECIS_CLIENT_SECRET FORGE_OIDC_OECIS_SCOPE
+              FORGE_OIDC_ACME_NAME FORGE_OIDC_ACME_ISSUER FORGE_OIDC_ACME_CLIENT_ID
+              FORGE_OIDC_ACME_CLIENT_SECRET FORGE_OIDC_ACME_SCOPE
               FORGE_OIDC_MY_IDP_ISSUER FORGE_OIDC_MY_IDP_CLIENT_ID
-              FORGE_OIDC_MY_IDP_CLIENT_SECRET FORGE_OIDC_OECIS_ID_TOKEN_ALG)
+              FORGE_OIDC_MY_IDP_CLIENT_SECRET FORGE_OIDC_ACME_ID_TOKEN_ALG)
 
   setup do
     names = @cleared ++ Map.keys(@required)
@@ -237,8 +237,8 @@ defmodule Forge.RuntimeConfigTest do
 
       assert get_in(release(), [:forge, :mail_from]) == {"Forge", "forge@example.org"}
 
-      System.put_env("FORGE_MAIL_FROM_NAME", "oecis forge")
-      assert get_in(release(), [:forge, :mail_from]) == {"oecis forge", "forge@example.org"}
+      System.put_env("FORGE_MAIL_FROM_NAME", "acme forge")
+      assert get_in(release(), [:forge, :mail_from]) == {"acme forge", "forge@example.org"}
     end
   end
 
@@ -250,20 +250,20 @@ defmodule Forge.RuntimeConfigTest do
     end
 
     test "a named provider is built from its own prefixed variables" do
-      System.put_env("FORGE_OIDC_PROVIDERS", "oecis")
-      System.put_env("FORGE_OIDC_OECIS_ISSUER", "https://id.oecis.io")
-      System.put_env("FORGE_OIDC_OECIS_CLIENT_ID", "forge")
-      System.put_env("FORGE_OIDC_OECIS_CLIENT_SECRET", "sh!")
+      System.put_env("FORGE_OIDC_PROVIDERS", "acme")
+      System.put_env("FORGE_OIDC_ACME_ISSUER", "https://id.acme.example")
+      System.put_env("FORGE_OIDC_ACME_CLIENT_ID", "forge")
+      System.put_env("FORGE_OIDC_ACME_CLIENT_SECRET", "sh!")
 
       assert [provider] = oidc()[:providers]
-      assert provider.id == "oecis"
-      assert provider.issuer == "https://id.oecis.io"
+      assert provider.id == "acme"
+      assert provider.issuer == "https://id.acme.example"
       assert provider.client_id == "forge"
       assert provider.client_secret == "sh!"
 
       # The two defaults: the id stands in for a display name, and the scope is the one that
       # actually yields an address. `openid` is added by assent and is not named here.
-      assert provider.name == "oecis"
+      assert provider.name == "acme"
       assert provider.scope == "email profile"
 
       # Almost every issuer, and what `assent` would assume anyway.
@@ -274,26 +274,26 @@ defmodule Forge.RuntimeConfigTest do
     # the token's `alg` against one expected value, so the node refused every login and said only
     # what it says when an issuer is unreachable.
     test "an issuer that signs with something other than RS256 can be named" do
-      System.put_env("FORGE_OIDC_PROVIDERS", "oecis")
-      System.put_env("FORGE_OIDC_OECIS_ISSUER", "https://id.oecis.io")
-      System.put_env("FORGE_OIDC_OECIS_CLIENT_ID", "forge")
-      System.put_env("FORGE_OIDC_OECIS_CLIENT_SECRET", "sh!")
-      System.put_env("FORGE_OIDC_OECIS_ID_TOKEN_ALG", "ES256")
+      System.put_env("FORGE_OIDC_PROVIDERS", "acme")
+      System.put_env("FORGE_OIDC_ACME_ISSUER", "https://id.acme.example")
+      System.put_env("FORGE_OIDC_ACME_CLIENT_ID", "forge")
+      System.put_env("FORGE_OIDC_ACME_CLIENT_SECRET", "sh!")
+      System.put_env("FORGE_OIDC_ACME_ID_TOKEN_ALG", "ES256")
 
       assert [provider] = oidc()[:providers]
       assert provider.id_token_alg == "ES256"
     end
 
     test "the display name and the scope can each be set" do
-      System.put_env("FORGE_OIDC_PROVIDERS", "oecis")
-      System.put_env("FORGE_OIDC_OECIS_ISSUER", "https://id.oecis.io")
-      System.put_env("FORGE_OIDC_OECIS_CLIENT_ID", "forge")
-      System.put_env("FORGE_OIDC_OECIS_CLIENT_SECRET", "sh!")
-      System.put_env("FORGE_OIDC_OECIS_NAME", "Oecis SSO")
-      System.put_env("FORGE_OIDC_OECIS_SCOPE", "email profile groups")
+      System.put_env("FORGE_OIDC_PROVIDERS", "acme")
+      System.put_env("FORGE_OIDC_ACME_ISSUER", "https://id.acme.example")
+      System.put_env("FORGE_OIDC_ACME_CLIENT_ID", "forge")
+      System.put_env("FORGE_OIDC_ACME_CLIENT_SECRET", "sh!")
+      System.put_env("FORGE_OIDC_ACME_NAME", "Acme SSO")
+      System.put_env("FORGE_OIDC_ACME_SCOPE", "email profile groups")
 
       assert [provider] = oidc()[:providers]
-      assert provider.name == "Oecis SSO"
+      assert provider.name == "Acme SSO"
       assert provider.scope == "email profile groups"
     end
 
@@ -301,20 +301,20 @@ defmodule Forge.RuntimeConfigTest do
     # login with a crash, instead of refusing to start where an operator can see it. `@enforce_keys`
     # does not catch it: it wants the key present, not the value non-nil.
     test "a provider named but not configured stops the release booting" do
-      System.put_env("FORGE_OIDC_PROVIDERS", "oecis")
-      System.put_env("FORGE_OIDC_OECIS_ISSUER", "https://id.oecis.io")
-      System.put_env("FORGE_OIDC_OECIS_CLIENT_ID", "forge")
+      System.put_env("FORGE_OIDC_PROVIDERS", "acme")
+      System.put_env("FORGE_OIDC_ACME_ISSUER", "https://id.acme.example")
+      System.put_env("FORGE_OIDC_ACME_CLIENT_ID", "forge")
 
-      assert_raise RuntimeError, ~r/FORGE_OIDC_OECIS_CLIENT_SECRET is missing/, &oidc/0
+      assert_raise RuntimeError, ~r/FORGE_OIDC_ACME_CLIENT_SECRET is missing/, &oidc/0
     end
 
     test "each of the three required variables is required" do
-      System.put_env("FORGE_OIDC_PROVIDERS", "oecis")
+      System.put_env("FORGE_OIDC_PROVIDERS", "acme")
 
-      assert_raise RuntimeError, ~r/FORGE_OIDC_OECIS_ISSUER is missing/, &oidc/0
+      assert_raise RuntimeError, ~r/FORGE_OIDC_ACME_ISSUER is missing/, &oidc/0
 
-      System.put_env("FORGE_OIDC_OECIS_ISSUER", "https://id.oecis.io")
-      assert_raise RuntimeError, ~r/FORGE_OIDC_OECIS_CLIENT_ID is missing/, &oidc/0
+      System.put_env("FORGE_OIDC_ACME_ISSUER", "https://id.acme.example")
+      assert_raise RuntimeError, ~r/FORGE_OIDC_ACME_CLIENT_ID is missing/, &oidc/0
     end
 
     # An id is a URL segment and a variable-name fragment, and those disagree about punctuation.
@@ -331,15 +331,15 @@ defmodule Forge.RuntimeConfigTest do
     end
 
     test "the list is split on commas and tolerates the spaces around them" do
-      System.put_env("FORGE_OIDC_PROVIDERS", " oecis , my-idp ,")
-      System.put_env("FORGE_OIDC_OECIS_ISSUER", "https://id.oecis.io")
-      System.put_env("FORGE_OIDC_OECIS_CLIENT_ID", "forge")
-      System.put_env("FORGE_OIDC_OECIS_CLIENT_SECRET", "sh!")
+      System.put_env("FORGE_OIDC_PROVIDERS", " acme , my-idp ,")
+      System.put_env("FORGE_OIDC_ACME_ISSUER", "https://id.acme.example")
+      System.put_env("FORGE_OIDC_ACME_CLIENT_ID", "forge")
+      System.put_env("FORGE_OIDC_ACME_CLIENT_SECRET", "sh!")
       System.put_env("FORGE_OIDC_MY_IDP_ISSUER", "https://id.example.org")
       System.put_env("FORGE_OIDC_MY_IDP_CLIENT_ID", "forge")
       System.put_env("FORGE_OIDC_MY_IDP_CLIENT_SECRET", "sh!")
 
-      assert ["oecis", "my-idp"] = Enum.map(oidc()[:providers], & &1.id)
+      assert ["acme", "my-idp"] = Enum.map(oidc()[:providers], & &1.id)
     end
   end
 end

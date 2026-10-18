@@ -1,21 +1,13 @@
 # Decide the release
 
-Nothing is committed in this state — this is the decision `publishing` then carries out, not the
-release itself. Check credentials before deciding anything, so a human approves release-notes.md
-knowing whether it can actually be carried out:
+Nothing is committed in this state — this is the decision `publishing` carries out, not the
+release itself.
 
-```
-auth=$(mktemp); printf '{}' > "$auth"
-printf '%s' "$GHCR_TOKEN" | skopeo login --authfile "$auth" -u manuel2258 --password-stdin ghcr.io
-rm -f "$auth"
-bin/hetzner-image --check
-```
-
-Neither secret has a fallback here — unlike a human running the `release` skill by hand, this job
-has exactly `GHCR_TOKEN`, `HCLOUD_TOKEN` and `HETZNER_PRIVATE_KEY` from the project's secrets, and
-nothing from `gh auth token` or an ssh agent. A failed GHCR login is fatal — end with
-`did_not_converge` and say why, writing no `release-notes.md`. `bin/hetzner-image --check` failing
-is only fatal if the verdict below would be Required.
+Before deciding anything, invoke `ghcr-check` and `hetzner-check` together, in one batch, so a
+human approves `release-notes.md` already knowing whether it can actually be carried out. Read
+their logs on resume. A failed `ghcr-check` is fatal — end with `did_not_converge` and say why,
+writing no `release-notes.md`. A failed `hetzner-check` is only fatal if the verdict below would
+be Required.
 
 **What is being released.** The last release is the last `Version` commit:
 

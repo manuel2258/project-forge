@@ -5,11 +5,44 @@ initial: refining
 defaults:
   resources: { memory: 2200MiB, cpu: 1 }
 
+commands:
+  ghcr-check:
+    run: .forge/commands/ghcr-check.sh
+    env: default
+    secrets: [GHCR_TOKEN]
+    produces: ghcr-check.log
+    timeout: 2m
+
+  hetzner-check:
+    run: .forge/commands/hetzner-check.sh
+    env: default
+    secrets: [HCLOUD_TOKEN, HETZNER_PRIVATE_KEY]
+    produces: hetzner-check.log
+    timeout: 5m
+
+  release-build:
+    run: .forge/commands/release-build.sh
+    env: default
+    secrets: [GHCR_TOKEN]
+    produces: release-build.log
+    timeout: 30m
+    resources: { memory: 8GiB, cpu: 6 }
+
+  hetzner-snapshot:
+    run: .forge/commands/hetzner-snapshot.sh
+    env: default
+    secrets: [HCLOUD_TOKEN, HETZNER_PRIVATE_KEY]
+    produces: hetzner-snapshot.log
+    timeout: 30m
+    resources: { memory: 6GiB, cpu: 4 }
+
 states:
   refining:
     prompt: agents/release-plan.md
     env: default
-    secrets: [GHCR_TOKEN, HCLOUD_TOKEN, HETZNER_PRIVATE_KEY]
+    may_invoke:
+      ghcr-check: { max: 3 }
+      hetzner-check: { max: 3 }
     inputs: [ticket]
     produces: [release-notes.md]
     budget: { turns: 30, cost: 2.00 }
@@ -17,10 +50,11 @@ states:
   publishing:
     prompt: agents/publish.md
     env: default
-    secrets: [GHCR_TOKEN, HCLOUD_TOKEN, HETZNER_PRIVATE_KEY]
+    may_invoke:
+      release-build: { max: 3 }
+      hetzner-snapshot: { max: 2 }
     inputs: [release-notes.md]
     produces: [publish-report.md, changeset]
-    resources: { memory: 8GiB, cpu: 6 }
     budget: { turns: 25, cost: 2.00 }
 
   release_ready: {}

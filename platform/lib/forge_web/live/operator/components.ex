@@ -12,6 +12,8 @@ defmodule ForgeWeb.Operator.Components do
 
   import ForgeWeb.Indicators
 
+  alias ForgeWeb.Operator.Drafts
+
   @doc """
   The field that picks a model, wherever one is picked.
 
@@ -223,6 +225,7 @@ defmodule ForgeWeb.Operator.Components do
   attr :ticket, :map, required: true
   attr :pending, :map, required: true
   attr :approve, :list, default: [], doc: "what the approval pins, each built by `pinned/4`"
+  attr :drafts, :map, required: true, doc: "the page's `:drafts` assign"
 
   def approval_card(assigns) do
     ~H"""
@@ -259,11 +262,21 @@ defmodule ForgeWeb.Operator.Components do
         </div>
       </section>
 
-      <form phx-submit="decide" class="flex flex-col gap-2">
+      <%!-- `id` and `phx-change` are what make the comment survive a reconnect: without both of
+            them the client has no form to copy and replay, and the new mount draws the box
+            empty (`ForgeWeb.Operator.Drafts`). --%>
+      <form
+        id={"approve-#{@ticket.id}"}
+        phx-change="draft:change"
+        phx-submit="decide"
+        class="flex flex-col gap-2"
+      >
+        <input type="hidden" name="draft" value={"approve-#{@ticket.id}"} />
         <input type="hidden" name="ticket" value={@ticket.id} />
         <ForgeWeb.Conversations.message_box
           id={"approval-comment-#{@ticket.id}"}
           name="comment"
+          value={Drafts.field(@drafts, "approve-#{@ticket.id}", "comment")}
           enter={:newline}
           placeholder="comment (optional)"
           aria-label="Comment on this approval"
@@ -345,6 +358,7 @@ defmodule ForgeWeb.Operator.Components do
   """
   attr :proposals, :list, required: true
   attr :types, :list, default: []
+  attr :drafts, :map, required: true, doc: "the page's `:drafts` assign"
 
   def proposals(assigns) do
     ~H"""
@@ -373,8 +387,16 @@ defmodule ForgeWeb.Operator.Components do
         <span :if={is_nil(p.ticket_number)}>a conversation</span>
       </p>
 
-      <form phx-submit="decide_proposal" class="mt-3 flex flex-col gap-2">
+      <form
+        id={"propose-#{p.version_id}"}
+        phx-change="draft:change"
+        phx-submit="decide_proposal"
+        class="mt-3 flex flex-col gap-2"
+      >
+        <input type="hidden" name="draft" value={"propose-#{p.version_id}"} />
         <input type="hidden" name="version_id" value={p.version_id} />
+        <%!-- The chosen type is part of the draft too: a reconnect that put the comment back and
+              not the choice would still have taken something nobody was told about. --%>
         <select
           :if={@types != [] and p.readable}
           name="ticket_type"
@@ -382,7 +404,11 @@ defmodule ForgeWeb.Operator.Components do
           class="select w-full"
         >
           <option value="">Choose a type</option>
-          <option :for={type <- @types} value={type.name} selected={type.name == p[:suggested]}>
+          <option
+            :for={type <- @types}
+            value={type.name}
+            selected={type.name == chosen(@drafts, p)}
+          >
             {if type.parses, do: type.name, else: "#{type.name} — does not parse"}
           </option>
         </select>
@@ -391,6 +417,7 @@ defmodule ForgeWeb.Operator.Components do
         <ForgeWeb.Conversations.message_box
           id={"proposal-comment-#{p.version_id}"}
           name="comment"
+          value={Drafts.field(@drafts, "propose-#{p.version_id}", "comment")}
           enter={:newline}
           placeholder="comment (optional)"
           aria-label="Comment on this proposal"
@@ -473,14 +500,17 @@ defmodule ForgeWeb.Operator.Components do
   attr :ticket, :map, required: true
   attr :name, :string, required: true
   attr :latest, :map, default: nil
+  attr :drafts, :map, required: true, doc: "the page's `:drafts` assign"
 
   def document_editor(assigns) do
     ~H"""
     <form
       phx-submit="write_document"
+      phx-change="draft:change"
       id={"write-#{@name}"}
       class="flex flex-col gap-2"
     >
+      <input type="hidden" name="draft" value={"write-#{@name}"} />
       <input type="hidden" name="ticket" value={@ticket.id} />
       <input type="hidden" name="name" value={@name} />
       <label for={"write-#{@name}-content"} class="font-mono text-[12.5px]">
@@ -493,8 +523,9 @@ defmodule ForgeWeb.Operator.Components do
         name="content"
         rows="6"
         required
+        phx-debounce="200"
         class="w-full rounded-field border border-base-300 bg-transparent px-3 py-2 text-sm placeholder:opacity-40 focus:outline-none focus:border-base-content/40"
-      >{@latest && @latest.content}</textarea>
+      >{Drafts.field(@drafts, "write-#{@name}", "content", @latest && @latest.content)}</textarea>
       <button
         type="submit"
         phx-disable-with="Saving…"
@@ -687,5 +718,16 @@ defmodule ForgeWeb.Operator.Components do
     if type in Enum.map(types, & &1.name),
       do: "suggests #{type}",
       else: "suggests #{type}, which is not a type here"
+  end
+
+  # The type a proposal's select is drawn on: what the person chose if they chose, and the
+  # suggestion until they do. `Drafts.field/4` cannot carry the fallback here, because choosing
+  # the empty option is a choice — *Choose a type*, deliberately back to nothing — and a draft
+  # holding `""` must beat the suggestion rather than fall through to it.
+  defp chosen(drafts, proposal) do
+    case Drafts.field(drafts, "propose-#{proposal.version_id}", "ticket_type", nil) do
+      nil -> proposal[:suggested]
+      type -> type
+    end
   end
 end

@@ -219,7 +219,8 @@ defmodule ForgeWeb.OperatorLiveTest do
       render_component(&ForgeWeb.Operator.Components.approval_card/1,
         ticket: %{id: "t1"},
         pending: %{"to" => "shipping"},
-        approve: [pin]
+        approve: [pin],
+        drafts: %{}
       )
 
     assert html =~ ~s(href="/tickets/game/7/artifacts/build.tar/3")
@@ -243,7 +244,8 @@ defmodule ForgeWeb.OperatorLiveTest do
       render_component(&ForgeWeb.Operator.Components.approval_card/1,
         ticket: %{id: "t1"},
         pending: %{"to" => "shipping"},
-        approve: [pin]
+        approve: [pin],
+        drafts: %{}
       )
 
     assert [pre] =

@@ -304,6 +304,27 @@ Getting these wrong makes the UI lie. They are acceptance criteria, not preferen
   something; a link that looked like one would make "read this" and "approve this" the same
   gesture.
 
+## A reconnect is not a reload
+
+A socket that drops while the page sits idle is not something the operator did, and it must not
+cost them what a reload deliberately costs. Three cases start a form over and are meant to —
+reloading, navigating away, opening the item on another device. A fourth, a dropped socket
+rejoining the same page, is in none of them: nothing on the page says it happened beyond the
+framework's reconnect banner, so anything taken then is taken silently.
+
+**Every box a person types into sits in a form with an `id` and a `phx-change`.** That is not a
+style rule, it is the whole mechanism. On a rejoin the client copies each such form out of the
+live DOM and re-pushes its change event with what was typed, before the new mount's render is
+applied; a form missing either attribute is not copied, is not replayed, and is drawn empty by
+that render. So the page's handler for the change holds what arrives, and the box is drawn from
+what it holds — see `ForgeWeb.Operator.Drafts` for the cards and
+`ForgeWeb.Operator.QuestionForm` for the question form, which hold it the same way for the same
+reason.
+
+What this does not reach is a reconnect the framework answers with a hard page refresh, which it
+does when a push times out: there is no DOM left to copy from. That is a reload, and the three
+deliberate cases' rule applies.
+
 ## The queue item
 
 One shape, N kinds, so the list never becomes soup as kinds are added. An item is **one
@@ -383,7 +404,9 @@ answers arrive together (`job-prompt.md` § Answering a document's questions at 
   and the word would tell nothing apart.
 - **The page holds the draft, and only the page.** Reloading, navigating away or opening the item
   on another device starts from the recommendations again. Nobody else ever sees a half-answered
-  form, and there is no draft to expire.
+  form, and there is no draft to expire. A dropped socket is not one of those three and does not
+  start it over: the form carries an `id` and a `phx-change`, so the client gives the draft back
+  on the rejoin (§ A reconnect is not a reload).
 - **A stale form sends nothing.** When the document has a newer version, or another person answered
   one of its questions, Send is refused whole and the page says so; it reloads with the current
   questions.

@@ -1,7 +1,8 @@
 # Decide the release
 
-Check credentials before writing anything — a version bumped and then unable to publish is worse
-than not starting:
+Nothing is committed in this state — this is the decision `publishing` then carries out, not the
+release itself. Check credentials before deciding anything, so a human approves release-notes.md
+knowing whether it can actually be carried out:
 
 ```
 auth=$(mktemp); printf '{}' > "$auth"
@@ -12,9 +13,9 @@ bin/hetzner-image --check
 
 Neither secret has a fallback here — unlike a human running the `release` skill by hand, this job
 has exactly `GHCR_TOKEN`, `HCLOUD_TOKEN` and `HETZNER_PRIVATE_KEY` from the project's secrets, and
-nothing from `gh auth token` or an ssh agent. A failed login ends this job with no changeset: say
-why in `release-notes.md` and leave `VERSION` untouched. `bin/hetzner-image --check` failing is
-only fatal if its own verdict (next) would be Required.
+nothing from `gh auth token` or an ssh agent. A failed GHCR login is fatal — end with
+`did_not_converge` and say why, writing no `release-notes.md`. `bin/hetzner-image --check` failing
+is only fatal if the verdict below would be Required.
 
 **What is being released.** The last release is the last `Version` commit:
 
@@ -24,13 +25,13 @@ git log --format='%h %s%n%b' "$last"..HEAD
 git diff --stat "$last"..HEAD
 ```
 
-Nothing after `$last`: end with no changeset and say so in `release-notes.md` — there is nothing
-to release, not a failure.
+Nothing after `$last`: there is nothing to release. End with `did_not_converge` and say so — not
+a failure, just nothing for this ticket to do.
 
 **Decide the bump.** minor (`0.5.0` → `0.6.0`) for anything the operator or a job can see do
 something new or different — a feature, a changed behaviour, a migration, a worker protocol
-bump. patch (`0.2.0` → `0.2.1`) only when the release fixes what the last one meant to do and adds
-nothing. When in doubt, minor.
+bump. patch (`0.2.0` → `0.2.1`) only when the release fixes what the last one meant to do and
+adds nothing. When in doubt, minor.
 
 ```
 git diff --name-only "$last"..HEAD -- platform/priv/repo/migrations
@@ -45,10 +46,9 @@ git diff --stat "$last"..HEAD -- worker core nix/worker-image.nix flake.nix flak
 ```
 
 Required (the protocol moved or its minimum rose), Recommended (worker-side code changed but the
-protocol did not), or Not needed (only `platform/`, docs, `bin/` or `measure/` changed). Record it
-plainly in `release-notes.md` — `publishing` acts on exactly this word and does not re-derive it.
+protocol did not), or Not needed (only `platform/`, docs, `bin/` or `measure/` changed).
 
-**Write and commit.** `VERSION` gets the new number; the commit message follows `git log --grep
-'^Version' -3` — subject `Version X.Y.Z`, body `Since v<last>: …` in prose, the worker protocol
-line, and migrations if any. Produce `release-notes.md` (the bump, why, and the Hetzner verdict
-with its reason) and the changeset.
+Write `release-notes.md`: the target version and why that bump, the Hetzner verdict and its
+reason, and the commit message `publishing` should use (subject `Version X.Y.Z`, body
+`Since v<last>: …` in prose, the worker protocol line, migrations if any — following
+`git log --grep '^Version' -3`). A human approves this document before anything is built.

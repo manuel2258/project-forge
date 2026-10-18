@@ -1,0 +1,82 @@
+version: 1
+description: Code changes to forge itself — refine, plan, implement, check, review, merge.
+initial: refining
+
+defaults:
+  resources: { memory: 2200MiB, cpu: 1 }
+
+commands:
+  check:
+    run: .forge/commands/check.sh
+    env: default
+    produces: check.log
+    timeout: 20m
+    resources: { memory: 4GiB, cpu: 4 }
+
+states:
+  refining:
+    prompt: agents/refine.md
+    env: default
+    inputs: [ticket]
+    produces: [refinement.md]
+    budget: { turns: 20, cost: 1.00 }
+
+  planning:
+    prompt: agents/plan.md
+    env: default
+    inputs: [ticket, refinement.md]
+    produces: [plan.md]
+    budget: { turns: 25, cost: 1.50 }
+
+  implementing:
+    prompt: agents/implement.md
+    env: default
+    model: opus
+    may_invoke:
+      check: { max: 10 }
+    inputs: [ticket, refinement.md, plan.md, report.md]
+    produces: [implementation.md, changeset]
+    outcomes: [done, plan_invalid]
+    budget: { turns: 150, cost: 8.00 }
+
+  checking:
+    invoke: [check]
+    exit: { 0: done, "*": checks_failed }
+
+  reviewing:
+    prompt: agents/review.md
+    env: default
+    model: opus
+    inputs: [refinement.md, plan.md, implementation.md, changeset]
+    produces: [report.md]
+    outcomes: [done, issues_found]
+    budget: { turns: 60, cost: 5.00 }
+
+  review_ready: {}
+
+  merged:
+    on_enter: merge
+    on_conflict: integrating
+
+  integrating:
+    prompt: agents/integrate.md
+    env: default
+    model: opus
+    inputs: [plan.md, changeset]
+    produces: [integration.md, changeset]
+    budget: { turns: 60, cost: 4.00 }
+
+transitions:
+  - { from: refining,     to: planning,     approve: [refinement.md] }
+  - { from: planning,     to: implementing }
+  - { from: implementing, to: checking }
+  - { from: implementing, to: planning,     when: plan_invalid }
+  - { from: checking,     to: reviewing }
+  - { from: checking,     to: implementing, when: checks_failed, max: 3 }
+  - { from: reviewing,    to: review_ready }
+  - { from: reviewing,    to: implementing, when: issues_found,  max: 3 }
+  - { from: review_ready, to: merged,       approve: [changeset] }
+  - { from: integrating,  to: checking }
+
+limits:
+  ticket_cost: 45.00

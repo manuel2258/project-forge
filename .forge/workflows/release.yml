@@ -1,0 +1,37 @@
+version: 1
+description: Cut and publish a forge release — version bump, platform image, Hetzner snapshot.
+initial: releasing
+
+defaults:
+  resources: { memory: 2200MiB, cpu: 1 }
+
+states:
+  releasing:
+    prompt: agents/release-plan.md
+    env: default
+    secrets: [GHCR_TOKEN, HCLOUD_TOKEN, HETZNER_PRIVATE_KEY]
+    inputs: [ticket]
+    produces: [release-notes.md, changeset]
+    budget: { turns: 30, cost: 2.00 }
+
+  release_ready: {}
+
+  merged:
+    on_enter: merge
+
+  publishing:
+    prompt: agents/publish.md
+    env: default
+    secrets: [GHCR_TOKEN, HCLOUD_TOKEN, HETZNER_PRIVATE_KEY]
+    inputs: [release-notes.md]
+    produces: [publish-report.md]
+    resources: { memory: 8GiB, cpu: 6 }
+    budget: { turns: 20, cost: 1.50 }
+
+transitions:
+  - { from: releasing,     to: release_ready }
+  - { from: release_ready, to: merged,     approve: [changeset] }
+  - { from: merged,        to: publishing }
+
+limits:
+  ticket_cost: 10.00

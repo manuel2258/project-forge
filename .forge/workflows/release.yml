@@ -45,7 +45,7 @@ states:
       hetzner-check: { max: 3 }
     inputs: [ticket]
     produces: [release-notes.md]
-    budget: { turns: 30, cost: 2.00 }
+    budget: { turns: 50, cost: 4.00 }
 
   publishing:
     prompt: agents/publish.md
@@ -55,17 +55,26 @@ states:
       hetzner-snapshot: { max: 2 }
     inputs: [release-notes.md]
     produces: [publish-report.md, changeset]
-    budget: { turns: 25, cost: 2.00 }
+    budget: { turns: 50, cost: 4.00 }
 
   release_ready: {}
 
   merged:
     on_enter: merge
 
+# `refining` gets one more attempt when it runs out of budget or stops without an answer, as
+# every job state in `bug.yml` and `dev.yml` does. **`publishing` deliberately does not.** It
+# pushes an image and builds a snapshot; a run that stopped halfway has already written to
+# somewhere outside this repository, and what to do about that is a person's to decide from the
+# log rather than the engine's to guess by running it again. So it still sticks, which is what
+# sticking is for.
 transitions:
   - { from: refining,      to: publishing,    approve: [release-notes.md] }
   - { from: publishing,    to: release_ready }
   - { from: release_ready, to: merged,        approve: [changeset] }
 
+  - { from: refining,      to: refining,      when: budget_exhausted, max: 1 }
+  - { from: refining,      to: refining,      when: did_not_converge, max: 1 }
+
 limits:
-  ticket_cost: 10.00
+  ticket_cost: 25.00

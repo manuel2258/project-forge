@@ -10,10 +10,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 echo "==> shell"
+# `.forge/commands/` is in the list because it is shell in this repository that the gate runs:
+# a command state invokes those scripts, and one of them decides whether the gate itself is
+# judged to have run (`.forge/commands/check.sh`). It was the only shell here nothing linted.
 shellcheck -x bin/check bin/measure bin/release bin/worker-update bin/e2e-chat bin/hetzner-image \
-  measure/lib/*.sh measure/workloads/*.sh \
+  measure/lib/*.sh measure/workloads/*.sh .forge/commands/*.sh \
   platform/priv/git-hooks/* worker/test/support/*.sh nix/worker-health/*.sh nix/worker-health/jobs/*.sh
-shfmt -d -i 2 -ci -sr bin measure platform/priv/git-hooks worker/test/support nix/worker-health
+shfmt -d -i 2 -ci -sr bin measure .forge/commands platform/priv/git-hooks worker/test/support nix/worker-health
 
 # A machine that has never run this — a command pool's, not an operator's — has an empty
 # MIX_HOME, and `mix check` goes straight to compiling: no alias in any project installs Hex or

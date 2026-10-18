@@ -9,6 +9,6 @@ ticket already had approved — and resolve every conflict by keeping both sides
 discarding one silently. Where both sides changed the same logic and keeping either would lose
 behaviour, say so in `integration.md` rather than guessing.
 
-Re-run whichever part of `plan.md` the resolution touches, so the result is still what the plan
-describes and not just what merged cleanly. Produce `integration.md` — what conflicted and how it
-was resolved — and the changeset.
+Re-run whichever part of the implementation the resolution touches, so the result still satisfies
+`refinement.md`'s acceptance criteria and not just what merged cleanly. Produce `integration.md` —
+what conflicted and how it was resolved — and the changeset.

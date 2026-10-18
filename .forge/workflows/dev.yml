@@ -1,17 +1,7 @@
 version: 1
 description: Code changes to forge itself — refine, plan, implement, check, review, merge.
 initial: refining
-
-defaults:
-  resources: { memory: 2200MiB, cpu: 1 }
-
-commands:
-  check:
-    run: .forge/commands/check.sh
-    env: default
-    produces: check.log
-    timeout: 20m
-    resources: { memory: 4GiB, cpu: 4 }
+import: [common.yml]
 
 states:
   refining:
@@ -40,31 +30,20 @@ states:
     budget: { turns: 150, cost: 8.00 }
 
   checking:
-    invoke: [check]
-    exit: { 0: done, "*": checks_failed }
+    extends: checking
 
   reviewing:
-    prompt: agents/review.md
-    env: default
-    model: opus
+    extends: reviewing
     inputs: [refinement.md, plan.md, implementation.md, changeset]
-    produces: [report.md]
-    outcomes: [done, issues_found]
-    budget: { turns: 60, cost: 5.00 }
 
   review_ready: {}
 
   merged:
-    on_enter: merge
-    on_conflict: integrating
+    extends: merged
 
   integrating:
-    prompt: agents/integrate.md
-    env: default
-    model: opus
+    extends: integrating
     inputs: [plan.md, changeset]
-    produces: [integration.md, changeset]
-    budget: { turns: 60, cost: 4.00 }
 
 transitions:
   - { from: refining,     to: planning,     approve: [refinement.md] }

@@ -1,0 +1,34 @@
+defaults:
+  resources: { memory: 2200MiB, cpu: 1 }
+
+commands:
+  check:
+    run: .forge/commands/check.sh
+    env: default
+    produces: check.log
+    timeout: 20m
+    resources: { memory: 4GiB, cpu: 4 }
+
+states:
+  checking:
+    invoke: [check]
+    exit: { 0: done, "*": checks_failed }
+
+  reviewing:
+    prompt: agents/review.md
+    env: default
+    model: opus
+    produces: [report.md]
+    outcomes: [done, issues_found]
+    budget: { turns: 60, cost: 5.00 }
+
+  merged:
+    on_enter: merge
+    on_conflict: integrating
+
+  integrating:
+    prompt: agents/integrate.md
+    env: default
+    model: opus
+    produces: [integration.md, changeset]
+    budget: { turns: 60, cost: 4.00 }

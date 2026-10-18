@@ -24,6 +24,7 @@ defmodule ForgeWeb.ProjectLive do
   alias ForgeWeb.Format
   alias ForgeWeb.Operator.Admission
   alias ForgeWeb.Operator.Board
+  alias ForgeWeb.Operator.Drafts
 
   @impl true
   def mount(%{"name" => name}, _session, socket) do
@@ -32,7 +33,7 @@ defmodule ForgeWeb.ProjectLive do
 
     {:ok,
      socket
-     |> assign(project_id: project.id, page_title: project.name)
+     |> assign(project_id: project.id, page_title: project.name, drafts: Drafts.init())
      |> ForgeWeb.Capacity.project(project)
      |> load()}
   end
@@ -105,7 +106,16 @@ defmodule ForgeWeb.ProjectLive do
     end)
   end
 
+  # Typing into a proposal's comment or choosing its type (`ForgeWeb.Operator.Drafts`). This page
+  # does not route through `ForgeWeb.Operator.Actions`, so it carries the clause itself.
   @impl true
+  def handle_event("draft:change", params, socket) do
+    case Drafts.handle("draft:change", params, socket) do
+      {:state, socket} -> {:noreply, socket}
+      :unknown -> {:noreply, socket}
+    end
+  end
+
   def handle_event(
         "decide_proposal",
         %{"version_id" => id, "decision" => decision} = params,
@@ -120,17 +130,21 @@ defmodule ForgeWeb.ProjectLive do
         "declined" -> Operator.decline_proposal(id, user, comment)
       end
 
+    # Decided, so the draft goes; refused, so what was typed stays to be sent again.
     case result do
       {:ok, %Forge.Tickets.Ticket{number: number}} ->
-        {:noreply, socket |> put_flash(:info, "Admitted as ticket #{number}.") |> load()}
+        {:noreply, socket |> decided(params, "Admitted as ticket #{number}.") |> load()}
 
       {:ok, _decision} ->
-        {:noreply, socket |> put_flash(:info, "Declined.") |> load()}
+        {:noreply, socket |> decided(params, "Declined.") |> load()}
 
       {:error, reason} ->
         {:noreply, socket |> put_flash(:error, explain(reason)) |> load()}
     end
   end
+
+  defp decided(socket, params, message),
+    do: socket |> Drafts.forget(params["draft"]) |> put_flash(:info, message)
 
   defp explain(:already_decided), do: "Someone has already decided that one."
   defp explain({:invalid_proposal, errors}), do: ForgeCore.Error.format(errors)
@@ -364,7 +378,7 @@ defmodule ForgeWeb.ProjectLive do
             </p>
 
             <div class="mt-3">
-              <.proposals proposals={@proposals} types={choosable(@current)} />
+              <.proposals proposals={@proposals} types={choosable(@current)} drafts={@drafts} />
             </div>
           </section>
 

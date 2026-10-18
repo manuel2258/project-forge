@@ -27,6 +27,7 @@ defmodule ForgeWeb.TicketLive do
   alias ForgeWeb.{Diff, FileType, Format, Indicators, JobStream, WorkScreen}
   alias ForgeWeb.Operator.Actions
   alias ForgeWeb.Operator.Board
+  alias ForgeWeb.Operator.Drafts
   alias ForgeWeb.Operator.QuestionForm
 
   @tabs ~w(decide timeline changes docs activity)
@@ -48,7 +49,8 @@ defmodule ForgeWeb.TicketLive do
        ticket_id: ticket.id,
        tab: nil,
        following: nil,
-       forms: QuestionForm.init()
+       forms: QuestionForm.init(),
+       drafts: Drafts.init()
      )
      |> JobStream.init()
      |> ForgeWeb.Capacity.project(project)
@@ -456,6 +458,7 @@ defmodule ForgeWeb.TicketLive do
           ticket={@ticket}
           pending={@ticket.pending_transition}
           approve={@approve}
+          drafts={@drafts}
         />
 
         <.link
@@ -484,6 +487,7 @@ defmodule ForgeWeb.TicketLive do
             ticket={@ticket}
             name={name}
             latest={latest}
+            drafts={@drafts}
           />
         </div>
         <.transition_card
@@ -729,6 +733,7 @@ defmodule ForgeWeb.TicketLive do
           ticket={@ticket}
           pending={@ticket.pending_transition}
           approve={@approve}
+          drafts={@drafts}
         />
       </div>
     </section>

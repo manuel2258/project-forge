@@ -27,6 +27,7 @@ defmodule ForgeWeb.QueueLive do
   alias ForgeWeb.Format
   alias ForgeWeb.Operator.Actions
   alias ForgeWeb.Operator.Board
+  alias ForgeWeb.Operator.Drafts
   alias ForgeWeb.Operator.QuestionForm
 
   @impl true
@@ -38,7 +39,8 @@ defmodule ForgeWeb.QueueLive do
      |> assign(
        page_title: "Queue",
        push_key: Push.enabled?() && Push.public_key(),
-       forms: QuestionForm.init()
+       forms: QuestionForm.init(),
+       drafts: Drafts.init()
      )
      |> load()}
   end
@@ -243,6 +245,7 @@ defmodule ForgeWeb.QueueLive do
             ticket={item.ticket}
             pending={item.detail}
             approve={item.approve}
+            drafts={@drafts}
           />
 
           <%!-- A link, never an answer row: answering never navigates, and the answer row and the

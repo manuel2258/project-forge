@@ -21,6 +21,7 @@ defmodule ForgeWeb.ReviewLive do
   alias ForgeWeb.{Diff, FileType, Format}
   alias ForgeWeb.Operator.Actions
   alias ForgeWeb.Operator.Board
+  alias ForgeWeb.Operator.Drafts
 
   # Beyond this the patch is offered per file instead. A page nobody can read is not a review.
   @impl true
@@ -31,7 +32,7 @@ defmodule ForgeWeb.ReviewLive do
 
     {:ok,
      socket
-     |> assign(project: project, ticket_id: ticket.id)
+     |> assign(project: project, ticket_id: ticket.id, drafts: Drafts.init())
      |> ForgeWeb.Capacity.project(project)
      |> load()}
   end
@@ -131,7 +132,7 @@ defmodule ForgeWeb.ReviewLive do
       >
         <h2 class="font-mono text-[11px] tracking-[.14em] uppercase text-accent">Waiting on you</h2>
         <div class="mt-3">
-          <.approval_card ticket={@ticket} pending={@pending} approve={@approve} />
+          <.approval_card ticket={@ticket} pending={@pending} approve={@approve} drafts={@drafts} />
         </div>
       </section>
 

@@ -364,7 +364,13 @@ defmodule Forge.Merge do
   # this is the same rule at the other site that makes commits.
   @committer [{"GIT_COMMITTER_NAME", "forge"}, {"GIT_COMMITTER_EMAIL", "forge@localhost"}]
 
-  defp author(nil), do: @committer
+  # Nobody approved it, so the engine is the author as well as the committer. Stating the
+  # committer alone left the *author* to the same passwd-entry fallback the rule above exists to
+  # avoid, so the engine's own merge was the one merge that failed wherever there is no global
+  # identity — a container, or a worker machine with a private HOME
+  # (`docs/design/git-hosting.md` § The per-job token).
+  defp author(nil),
+    do: [{"GIT_AUTHOR_NAME", "forge"}, {"GIT_AUTHOR_EMAIL", "forge@localhost"}] ++ @committer
 
   defp author(%User{email: email}) do
     [{"GIT_AUTHOR_NAME", email}, {"GIT_AUTHOR_EMAIL", email}] ++ @committer

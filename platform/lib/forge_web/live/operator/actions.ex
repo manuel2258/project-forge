@@ -11,27 +11,37 @@ defmodule ForgeWeb.Operator.Actions do
 
   alias Forge.{Operator, Tickets}
   alias ForgeWeb.Operator.Admission
+  alias ForgeWeb.Operator.Drafts
   alias ForgeWeb.Operator.QuestionForm
 
   @doc """
   Handles an operator event: `{:handled, socket}` after something was committed, so the page
-  reloads; `{:state, socket}` for a change to a question form's draft, which needs no reload
-  (`ForgeWeb.Operator.QuestionForm`); `:unknown` for anything else.
+  reloads; `{:state, socket}` for a change to a question form's draft
+  (`ForgeWeb.Operator.QuestionForm`) or a card's (`ForgeWeb.Operator.Drafts`), which needs no
+  reload; `:unknown` for anything else.
   """
   def handle(event, params, socket) do
-    case QuestionForm.handle(event, params, socket) do
-      :unknown -> act_on(event, params, socket)
-      result -> result
+    with :unknown <- QuestionForm.handle(event, params, socket),
+         :unknown <- Drafts.handle(event, params, socket) do
+      act_on(event, params, socket)
     end
   rescue
     Ecto.NoResultsError -> {:handled, put_flash(socket, :error, "That ticket no longer exists.")}
   end
 
+  # A submit that committed forgets the draft its own form named, so the comment on an approval
+  # does not come back on the next one and a saved document is drawn from the version just
+  # written (`ForgeWeb.Operator.Drafts`). Only on success: a refusal leaves what was typed.
   defp act_on(event, params, socket) do
     case act(event, params, socket) do
-      :unknown -> :unknown
-      {:ok, message} -> {:handled, put_flash(socket, :info, message)}
-      {:error, reason} -> {:handled, put_flash(socket, :error, "Failed: #{describe(reason)}")}
+      :unknown ->
+        :unknown
+
+      {:ok, message} ->
+        {:handled, socket |> Drafts.forget(params["draft"]) |> put_flash(:info, message)}
+
+      {:error, reason} ->
+        {:handled, put_flash(socket, :error, "Failed: #{describe(reason)}")}
     end
   end
 

@@ -9,14 +9,17 @@ states:
     env: default
     inputs: [ticket]
     produces: [refinement.md]
-    budget: { turns: 20, cost: 1.00 }
+    budget: { turns: 40, cost: 3.00 }
 
+  # `implementation.md` is here for the same reason `bug.yml`'s `diagnosing` reads it: the ticket
+  # comes back on `plan_invalid`, and a re-plan that cannot read why re-derives the same plan. It
+  # is optional — the way in from `refining` has written no implementation.
   planning:
     prompt: agents/plan.md
     env: default
-    inputs: [ticket, refinement.md]
+    inputs: [ticket, refinement.md, implementation.md]
     produces: [plan.md]
-    budget: { turns: 25, cost: 1.50 }
+    budget: { turns: 50, cost: 4.00 }
 
   implementing:
     prompt: agents/implement.md
@@ -27,7 +30,7 @@ states:
     inputs: [ticket, refinement.md, plan.md, report.md]
     produces: [implementation.md, changeset]
     outcomes: [done, plan_invalid]
-    budget: { turns: 150, cost: 8.00 }
+    budget: { turns: 200, cost: 15.00 }
 
   checking:
     extends: checking
@@ -45,17 +48,29 @@ states:
     extends: integrating
     inputs: [plan.md, changeset]
 
+# The work of the ticket, then the edges for the engine's own outcomes. `bug.yml`'s transitions
+# carry the reasoning; it is the same here, for the same states.
 transitions:
   - { from: refining,     to: planning,     approve: [refinement.md] }
   - { from: planning,     to: implementing }
   - { from: implementing, to: checking }
   - { from: implementing, to: planning,     when: plan_invalid }
   - { from: checking,     to: reviewing }
-  - { from: checking,     to: implementing, when: checks_failed, max: 3 }
+  - { from: checking,     to: implementing, when: checks_failed,     max: 3 }
   - { from: reviewing,    to: review_ready }
-  - { from: reviewing,    to: implementing, when: issues_found,  max: 3 }
+  - { from: reviewing,    to: implementing, when: issues_found,      max: 3 }
   - { from: review_ready, to: merged,       approve: [changeset] }
   - { from: integrating,  to: checking }
 
+  - { from: checking,     to: checking,     when: gate_unavailable,  max: 2 }
+  - { from: refining,     to: refining,     when: budget_exhausted,  max: 1 }
+  - { from: refining,     to: refining,     when: did_not_converge,  max: 1 }
+  - { from: planning,     to: planning,     when: budget_exhausted,  max: 1 }
+  - { from: planning,     to: planning,     when: did_not_converge,  max: 1 }
+  - { from: implementing, to: implementing, when: budget_exhausted,  max: 1 }
+  - { from: implementing, to: implementing, when: did_not_converge,  max: 1 }
+  - { from: reviewing,    to: reviewing,    when: budget_exhausted,  max: 1 }
+  - { from: reviewing,    to: reviewing,    when: did_not_converge,  max: 1 }
+
 limits:
-  ticket_cost: 45.00
+  ticket_cost: 120.00

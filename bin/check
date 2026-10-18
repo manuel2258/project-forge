@@ -10,12 +10,46 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 echo "==> shell"
+# `.forge/commands/` is in the list because it is shell in this repository that the gate runs:
+# a command state invokes those scripts, and one of them decides whether the gate itself is
+# judged to have run (`.forge/commands/check.sh`). It was the only shell here nothing linted.
 shellcheck -x bin/check bin/measure bin/release bin/worker-update bin/e2e-chat bin/hetzner-image \
-  measure/lib/*.sh measure/workloads/*.sh \
+  measure/lib/*.sh measure/workloads/*.sh .forge/commands/*.sh \
   platform/priv/git-hooks/* worker/test/support/*.sh nix/worker-health/*.sh nix/worker-health/jobs/*.sh
-shfmt -d -i 2 -ci -sr bin measure platform/priv/git-hooks worker/test/support nix/worker-health
+shfmt -d -i 2 -ci -sr bin measure .forge/commands platform/priv/git-hooks worker/test/support nix/worker-health
+
+# A machine that has never run this — a command pool's, not an operator's — has an empty
+# MIX_HOME, and `mix check` goes straight to compiling: no alias in any project installs Hex or
+# fetches deps, so Mix dies asking for Hex before a single check runs. Install and fetch when
+# they are absent. Nothing here relaxes a check; it only gets Mix to where it can run them, and
+# on a machine that already has both it is a no-op.
+if ! mix hex.info > /dev/null 2>&1; then
+  echo "==> hex"
+  mix local.hex --force > /dev/null
+  mix local.rebar --force > /dev/null
+fi
+
+# The platform's tests need a postgres on localhost:5432 (`platform/config/test.exs`), and a
+# command pool's machine has the binaries from the devshell and no server, so `mix check` in
+# `platform` died at "The database for Forge.Repo couldn't be created" on every machine that is
+# not an operator's. Start one for the length of the run when nothing answers, and leave an
+# operator's own alone — `pg_isready` asks in the protocol Ecto will use rather than guessing
+# from an open port.
+#
+# This does make the gate start infrastructure it does not otherwise own, which is a deliberate
+# choice between the three in `proposal-test-database-for-command-machines.md` and the only one
+# that needs nothing outside this repository. It relaxes no check: the suite runs against a real
+# postgres either way, and against the operator's where there is one.
+if ! pg_isready -h localhost -p 5432 -q; then
+  echo "==> postgres"
+  pgroot="$(mktemp -d)"
+  trap 'pg_ctl -D "$pgroot/data" -m immediate stop > /dev/null 2>&1 || true; rm -rf "$pgroot"' EXIT
+  initdb -U postgres -A trust -D "$pgroot/data" > /dev/null
+  pg_ctl -D "$pgroot/data" -l "$pgroot/server.log" -w \
+    -o "-p 5432 -c listen_addresses=localhost -c unix_socket_directories=$pgroot" start > /dev/null
+fi
 
 for project in core worker platform; do
   echo "==> $project"
-  (cd "$project" && mix check)
+  (cd "$project" && mix deps.get > /dev/null && mix check)
 done

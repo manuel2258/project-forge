@@ -287,6 +287,33 @@ defmodule Forge.MergeConflictTest do
       assert %{"changeset" => ^integrated} = latest_payload(ticket, "ticket.merged")
     end
 
+    # Nobody approved this one, so the engine is the author as well as the committer. Asserting
+    # the names rather than only that the merge happened: with the author left unset, git falls
+    # back to the host's passwd entry, which is a different commit on every host and no commit
+    # at all where there is no global identity — the merge then fails outright, which is what
+    # the three tests around this one were catching only on a machine that happens to have none.
+    # This one fails wherever the author is not stated, including a machine that has an identity
+    # of its own to fall back to.
+    test "names the engine as the author of its own merge, not the host", context do
+      %{ticket: ticket, bare: bare, user: user} = context
+      conflicting!(context)
+      {:ok, ticket} = Operator.decide(pend_merge(ticket), user, :approved, nil)
+
+      integrated = integrate!(context.bare, context.ticket)
+      [job] = jobs_in(ticket, "integrating")
+      changeset!(ticket, integrated, job)
+
+      assert {:ok, ticket} = Engine.after_job(ticket, job, "done")
+      assert ticket.status == :done
+
+      {:ok, main} = Git.resolve(bare, "refs/heads/main")
+
+      assert {:ok, who} =
+               Git.run(bare, ["log", "-1", "--format=%an <%ae> / %cn <%ce>", main])
+
+      assert String.trim(who) == "forge <forge@localhost> / forge <forge@localhost>"
+    end
+
     test "still conflicting goes back round, and past the bound sticks saying why", context do
       %{ticket: ticket, bare: bare, user: user} = context
       conflicting!(context)

@@ -93,6 +93,12 @@ It lints the shell (shellcheck, shfmt) and runs `mix check` in every project: co
 warnings as errors, format check, Credo strict, tests with coverage. A commit that does not pass
 the gate is not made.
 
+It installs Hex and starts a throwaway postgres on `localhost:5432` first, when the machine has
+neither — a command pool's machine has the devshell and nothing else, and without both the gate
+died before compiling anything and again at "The database for Forge.Repo couldn't be created".
+An operator's own Hex and postgres are left alone. Neither step relaxes a check: the suite runs
+against a real database either way.
+
 `platform/priv/git-hooks/` holds the generated git hooks; the gate lints them with the rest of the
 shell.
 

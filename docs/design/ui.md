@@ -325,6 +325,20 @@ What this does not reach is a reconnect the framework answers with a hard page r
 does when a push times out: there is no DOM left to copy from. That is a reload, and the three
 deliberate cases' rule applies.
 
+**Where the rule holds today.** On every surface a person's unsent work sits on: the
+conversation's composer and the question form docked under it, a document's question form, an
+approval's comment, a proposal's comment and its type, and a human state's document.
+`ForgeWeb.ReconnectTest` walks those pages and fails on a box drawn outside a form carrying
+both attributes, so a new one cannot quietly miss it.
+
+It does **not** hold yet on six forms, counted: a project's members, its secrets and its
+mirrors, a worker's resources, and the two log-in forms. Each carries no `phx-change`, so each
+loses what was typed on a rejoin. That is a gap with a proposal open on it rather than a case
+the rule excuses — and two of them are why a person settles it and not the next agent: a
+secret's value or a password coming back means holding it in page state, which is a decision of
+its own (`docs/design/secrets.md`).
+
+
 ## The queue item
 
 One shape, N kinds, so the list never becomes soup as kinds are added. An item is **one

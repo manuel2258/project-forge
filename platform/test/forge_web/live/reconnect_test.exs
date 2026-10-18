@@ -24,7 +24,7 @@ defmodule ForgeWeb.ReconnectTest do
   import Phoenix.LiveViewTest
   import Forge.GitFixtures
 
-  alias Forge.{Jobs, Projects, Tickets}
+  alias Forge.{Conversations, Jobs, Projects, Tickets}
 
   setup :register_and_log_in_user
 
@@ -119,6 +119,22 @@ defmodule ForgeWeb.ReconnectTest do
       assert_recoverable(html, "a ticket's Decide")
     end
 
+    # The ticket's own two surfaces, both drawn by `ForgeWeb.Operator.QuestionForm`: a question
+    # waiting on a document is answered on the page that holds the document, not from the queue,
+    # which links to it (`docs/design/ui.md` § Answering questions).
+    test "holds on a ticket's Decide with a question open", %{
+      conn: conn,
+      user: user,
+      project: project
+    } do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Ask me"}, {:user, user.id})
+      run_pending(ticket.id, "blocking", "refinement.md")
+
+      {:ok, _view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=decide")
+      assert html =~ "Which backend?"
+      assert_recoverable(html, "a ticket's question")
+    end
+
     test "holds on a project's proposals", %{conn: conn, user: user, project: project} do
       {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
       [job | _] = Jobs.for_ticket(ticket.id)
@@ -173,6 +189,87 @@ defmodule ForgeWeb.ReconnectTest do
 
       assert view |> element("#proposal-comment-#{version.id}") |> render() =~
                "worth doing after the release"
+    end
+  end
+
+  # The two surfaces the ticket named — a reply being typed, and a question being answered
+  # (`answers.md`, `loss-surface`). Both are on the conversation page, and both are drawn from
+  # state the rejoin's `mount/3` does not have: `@draft` for the composer, `@forms` for the
+  # question. The fresh `live/2` below is the rejoin — `mount/3` cannot tell one from a reload —
+  # and the change pushed against it is the one the client replays.
+  describe "a conversation's reply" do
+    setup %{project: project} do
+      {:ok, chat} = Conversations.open(project, "what is this repository?")
+      %{chat: chat}
+    end
+
+    defp asked(chat) do
+      :ok =
+        Jobs.record_harness_event(chat.id, %{
+          type: "job.harness.text",
+          payload: %{
+            text: """
+            One thing.
+
+            ```question
+            key: backend
+            text: Which backend should it use?
+            options:
+              - {label: postgres, detail: About postgres, recommended: true}
+              - {label: sqlite, detail: About sqlite}
+            ```
+            """
+          }
+        })
+
+      {:ok, _chat} =
+        Conversations.record_turn(chat, %{
+          "turn" => 1,
+          "harness" => %{"turns" => 1, "cost_usd" => 0.01, "subtype" => "success"}
+        })
+    end
+
+    test "holds the shape, with a question docked under the composer", %{conn: conn, chat: chat} do
+      asked(chat)
+
+      {:ok, _view, html} = live(conn, ~p"/chats/#{chat.id}")
+      assert html =~ "Which backend should it use?"
+      assert_recoverable(html, "a conversation")
+    end
+
+    test "puts the composer's draft back", %{conn: conn, chat: chat} do
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+      view |> element("#say") |> render_change(%{"text" => "half of a sentence"})
+
+      assert view |> element("#draft") |> render() =~ "half of a sentence"
+    end
+
+    test "puts an open question's answer back", %{conn: conn, chat: chat} do
+      asked(chat)
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+      # The recommendation is what the box is drawn on until somebody chooses, so a test that
+      # only looked at the choice would pass on a form that had lost the answer and fallen back.
+      assert checked(view) == ["postgres"]
+
+      view
+      |> element("#answer-rows form")
+      |> render_change(%{
+        "answers" => %{"backend" => %{"choice" => "sqlite", "text" => "a note"}}
+      })
+
+      assert checked(view) == ["sqlite"]
+      assert view |> element("#answer-rows form") |> render() =~ "a note"
+    end
+
+    defp checked(view) do
+      view
+      |> element("#answer-rows form")
+      |> render()
+      |> Floki.parse_fragment!()
+      |> Floki.find(~s(input[type=radio][checked]))
+      |> Floki.attribute("value")
     end
   end
 

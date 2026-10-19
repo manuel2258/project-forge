@@ -840,9 +840,10 @@ defmodule ForgeWorker.Link do
   # by the time it gets there; reporting `failed` threw the run's result away, and with it the
   # cost the platform settles from a cancelled run's `hibernated` (`Jobs.hibernate/4`). The work
   # is the cancelled ticket's, and nobody is waiting for it. Any other run whose push failed has
-  # lost its work, and fails.
-  defp unpushed(%Result{killed: :operator} = result, reason, _changeset?) do
-    Logger.warning("a cancelled run's push was refused: #{inspect(reason)}")
+  # lost its work, and fails. A no-`changeset` run reaches this having attempted no push at all,
+  # so the line says which of the two it was rather than naming a push that never happened.
+  defp unpushed(%Result{killed: :operator} = result, reason, changeset?) do
+    Logger.warning("a cancelled run's #{attempted(changeset?)} failed: #{inspect(reason)}")
 
     {:ok,
      {"hibernated",
@@ -853,8 +854,18 @@ defmodule ForgeWorker.Link do
   # `keep/4` fails for one is `Workspace.base/3` not resolving the branch head — and reporting
   # that as `:push` sends the first person to debug it to the credential and the hook, which were
   # not involved.
+  #
+  # **Swapping these two tags is an uncatchable mutation here, and no test should claim it is
+  # not.** Reaching the `false` clause through `Link` needs `rev-parse origin/<branch>` to fail
+  # in a worktree whose checkout already resolved that same ref, so a branch the clone could not
+  # fetch fails in `Workspace.prepare/3` long before a run ends. What is tested is the error
+  # itself, one level down, where it can be provoked: `Job.WorkspaceTest`, "the base errors when
+  # the branch has no fetched head".
   defp unpushed(_result, reason, true), do: {:error, {:push, reason}}
   defp unpushed(_result, reason, false), do: {:error, {:branch_head, reason}}
+
+  defp attempted(true), do: "push"
+  defp attempted(false), do: "read of the branch head"
 
   defp finish(assignment, root, worktree, result, head, changeset?, user) do
     job_id = assignment["job_id"]

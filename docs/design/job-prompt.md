@@ -305,8 +305,9 @@ because it is the thing an agent asking for a build needs: a state that declares
 committed and pushed on the way to parking and the commands run at that commit; a state that
 declares none pushes nothing, so they run against the branch as the run found it, without its
 edits (`commands.md` § The ensured commit). `Prompt.may_invoke/2` composes the sentence either
-way. No shipped workflow combines `may_invoke` with a `produces` that omits `changeset`; the
-grammar allows it, so the prompt has to be right about it.
+way, and the second branch is live rather than hypothetical: `.forge/workflows/release.yml`'s
+`refining` has `may_invoke` of `ghcr-check` and `hetzner-check` and `produces:
+[release-notes.md]`, so its commands already run against the branch as the run found them.
 
 **The results come back in the manifest, under *Commands you ran*.** Each invocation of the batch
 that parked it: the command and its arguments, the commit it ran at, its exit status or why it has

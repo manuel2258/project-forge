@@ -415,6 +415,10 @@ case "${FAKE_SCENARIO:-success}" in
   dirties_then_hangs)
     printf 'mutated by the reviewer\n' >> README.md
     printf 'scratch\n' > SCRATCH.md
+    # Written last, and the only thing that says the tree is now dirty. A test that cancels on
+    # a channel event instead is racing a timer: this scenario emits nothing, so the first event
+    # to arrive is the runner's own and says nothing about what this script has done.
+    printf 'yes\n' > "$FORGE_JOB/fake-dirtied.txt"
     sleep 60
     ;;
   # And the third ending the criteria name: the tree broken and the run then failing on its own.

@@ -885,7 +885,7 @@ defmodule ForgeWorker.LinkTest do
     # restoring it. `terminal(%Result{killed: :operator}, head)` now reports the base for such a
     # state, and its only other test uses the default changeset spec.
     test "a cancelled run hibernates at the head it started from, committing nothing", context do
-      %{client: client, origin: origin} = context
+      %{client: client, origin: origin, root: root} = context
       connect_and_assert_join(client, @topic, %{}, :ok)
       assert_push(@topic, "ready", %{})
 
@@ -894,8 +894,17 @@ defmodule ForgeWorker.LinkTest do
       job_id = job["job_id"]
       push(client, @topic, "assign", job)
 
-      # Not before the harness is really running: the tree is dirtied by its first lines.
-      {_payload, _seen} = take_push("event")
+      # **Not on a channel event: the scenario emits none, so the first event to arrive is the
+      # runner's own, on a timer, and says nothing about what the harness has done.** Cancelling
+      # on one left this test passing against the unconditional-commit mutation whenever the
+      # timer won, which is a test that cannot be relied on to fail. The marker is written after
+      # the two files are dirtied, so waiting for it is the ordering the assertion needs.
+      dirtied = Path.join([root, "jobs", job["spec"]["job_id"], "fake-dirtied.txt"])
+      wait_until(fn -> File.exists?(dirtied) end, 500)
+
+      assert git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"]) |> String.trim() ==
+               before
+
       push(client, @topic, "cancel", %{"job_id" => job_id, "reason" => "ticket_cancelled"})
 
       {%{"job_id" => ^job_id, "commit" => commit}, _events} = take_push("hibernated")

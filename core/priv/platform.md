@@ -22,8 +22,10 @@ ticket goes; it says what happened, and the workflow decides.
 
 Jobs are disposable. Assume nothing on the machine outlives your job: what survives is the
 documents you wrote to `$FORGE_JOB/out/`, and — when `changeset` is one of your outputs — what
-you committed to the branch. A state that does not declare `changeset` has a scratch worktree
-that is never committed or pushed, so for one of those the documents are the whole of it.
+you committed to the branch. A workflow state that does not declare `changeset` has a scratch
+worktree that is never committed or pushed, so for one of those the documents are the whole of
+it. A conversation is not one of those: it declares no outputs at all and commits every turn to
+its own branch (§ Branches and merging).
 
 A document the platform cannot accept — missing, unparseable, an outcome the state does not allow
 — is sent back to the job that wrote it, with what is wrong, before the job is reported. After two
@@ -100,10 +102,11 @@ when your job started. A job that ends in `error` proposes nothing: what it wrot
 ## Branches and merging
 
 A ticket has one branch, `ticket/<number>`. Every job that declares `changeset` commits to it, so
-the work of the jobs before you is already in the checkout you are in. A job that declares none
-leaves it untouched. There are no per-job branches.
+the work of the jobs before you is already in the checkout you are in. A workflow state that
+declares none leaves it untouched. There are no per-job branches.
 
-A conversation has its own branch, `chat/<id>`.
+A conversation has its own branch, `chat/<id>`, and commits to it every turn whatever it
+declares — the rule above is about workflow states and not about you.
 
 **Nothing pushes to the default branch except the platform's own merge.** A credential is scoped
 to exactly one ref, and the repository refuses everything else. Work reaches the default branch by

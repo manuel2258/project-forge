@@ -67,6 +67,32 @@ defmodule ForgeWorker.Job.WorkspaceTest do
     assert File.read!(Path.join(dir, "README.md")) == "# Game\n"
   end
 
+  # The other side of the same `git clean`, and the flag the whole carry rests on: `-fd` and not
+  # `-fdx`. The test above says untracked debris goes; this says an *ignored* directory stays,
+  # because that is what `deps/`, `_build/`, `.mix-home/` and `.hex-home/` are. Add `-x` to
+  # `Checkout.maybe_clean/3` and a run resuming onto its own worktree wipes every one of them.
+  test "a cold start onto an existing worktree keeps the ignored build output", context do
+    %{origin: origin, root: root} = context
+    job = assignment(origin)
+    {:ok, dir} = Workspace.prepare(job, root, @direct)
+
+    # Tracked on the branch, so the second checkout has the rules before it cleans.
+    File.write!(Path.join(dir, ".gitignore"), ".mix-home/\nbuild/\n")
+    {:ok, _head} = Workspace.commit_and_push(job, dir, "planning: attempt 1", @direct)
+
+    File.mkdir_p!(Path.join(dir, ".mix-home/archives"))
+    File.write!(Path.join(dir, ".mix-home/archives/hex.app"), "installed once")
+    File.mkdir_p!(Path.join(dir, "build"))
+    File.write!(Path.join(dir, "build/warm.o"), "compiled once")
+    File.write!(Path.join(dir, "debris.txt"), "from the run that was killed")
+
+    assert {:ok, ^dir} = Workspace.prepare(job, root, @direct)
+
+    assert File.read!(Path.join(dir, ".mix-home/archives/hex.app")) == "installed once"
+    assert File.read!(Path.join(dir, "build/warm.o")) == "compiled once"
+    refute File.exists?(Path.join(dir, "debris.txt"))
+  end
+
   test "a resume keeps the work in progress", %{origin: origin, root: root} do
     job = assignment(origin)
     {:ok, dir} = Workspace.prepare(job, root, @direct)

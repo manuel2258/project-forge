@@ -18,14 +18,23 @@ shellcheck -x bin/check bin/measure bin/release bin/worker-update bin/e2e-chat b
   platform/priv/git-hooks/* worker/test/support/*.sh nix/worker-health/*.sh nix/worker-health/jobs/*.sh
 shfmt -d -i 2 -ci -sr bin measure .forge/commands platform/priv/git-hooks worker/test/support nix/worker-health
 
-# **Mix's own caches live in the checkout, so a ticket's next job inherits them.**
+# **Mix's own caches live in the checkout, so a ticket's next agent job inherits them.**
+# An *agent* job, because only an agent job's worktree is promoted to the ticket's volume: this
+# script's automatic caller is the `check` command job, which snapshots that volume and discards
+# its tree, so it reads a warm cache and never leaves one (`ForgeWorker.Link`).
+#
 # `mix local.hex` installs into MIX_HOME and Hex caches the package registry and the tarballs it
 # downloads in HEX_HOME; both default under $HOME, and a job's HOME is a fresh directory made per
-# job, thrown away with it. So however warm the checkout was — and `deps/` and `_build/` are
-# carried, being ignored directories inside it — every single job reinstalled Hex and refetched
-# the registry. Pointed at ignored directories inside the checkout they are carried exactly as
-# the build directories beside them, which is the pattern `docs/design/worker-tier.md` § The
-# ticket volume prescribes for a tool's dependency cache.
+# job, thrown away with it. So however warm the checkout was — and `deps/` is carried, being an
+# ignored directory inside it — every single job reinstalled Hex and refetched the registry.
+# Pointed at ignored directories inside the checkout they are carried like `deps/` is, which is
+# the pattern `docs/design/worker-tier.md` § The ticket volume prescribes for a tool's dependency
+# cache.
+#
+# `_build/` is carried by the same mechanism and is not this script's to arrange. It keeps every
+# dependency compiled and rebuilds the three projects' own sources, because Mix puts the working
+# directory in its compile cache key and a job's worktree is a new path every job — nothing here
+# changes that either way, and `docs/design/worker-tier.md` § The ticket volume has the figures.
 #
 # An operator's own `~/.mix` and `~/.hex` are not read and not written: these are exported for
 # this script's own processes and nothing else, so the first run after this change builds

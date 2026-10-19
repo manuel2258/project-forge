@@ -667,10 +667,27 @@ outside the checkout and the Nix store survives a job.
 
 Forge itself is the worked example, in `bin/check`: Mix installs Hex into `MIX_HOME` and Hex
 caches the registry and every tarball it downloads in `HEX_HOME`, both under `$HOME` by default,
-so each job reinstalled Hex and refetched the registry however warm its `deps/` and `_build/`
-were. The gate exports both into the checkout — `.mix-home/` and `.hex-home/`, ignored beside the
-build directories — for its own processes only, so an operator's `~/.mix` is neither read nor
-written.
+so each job reinstalled Hex and refetched the registry however warm its `deps/` was. The gate
+exports both into the checkout — `.mix-home/` and `.hex-home/`, ignored beside the build
+directories — for its own processes only, so an operator's `~/.mix` is neither read nor written.
+`bin/e2e-chat` reads the same two when the gate has built them, so the two scripts do not disagree
+about where Mix's home is.
+
+**What a carried `_build` does and does not save**, since the path changes every job and § Volumes
+and the seed's 1.34× is the only figure this note had. `Mix.Tasks.Compile.Elixir` puts
+`File.cwd!()` into its manifest's `cache_key` and `Mix.Compilers.Elixir` recompiles the app when
+that key differs, and a job's worktree is `worktrees/<job_id>` — a new absolute path every job. So
+**every dependency survives and the project's own sources do not**: at a new path with the volume's
+`_build` in place, `platform` recompiles `forge_core`'s 29 files and its own 182 and leaves all
+sixty-odd Hex dependencies alone, 13 seconds against 122 to build the same thing from fetched deps;
+`core` and `worker` together, 3 seconds against 23. Measured here, and the tests pass on the result.
+
+The residue is real but small — of the order of fifteen seconds a job across the three projects —
+and nothing a build script can reach: the key is the working directory, not the build path, so
+`MIX_BUILD_PATH` and `MIX_BUILD_ROOT` miss it, and a symlink misses it too because `File.cwd!()`
+resolves to the physical path. Closing it means *giving* the job a stable absolute path — a bind
+mount, or a worktree keyed on the ticket rather than the job — which changes the job slice rather
+than a cache. Worth knowing before anyone reads a per-job recompile as the volume having failed.
 
 What this deliberately does not do is move warmth *between* tickets. When a ticket merges, its
 volume is the best possible starting point for the next ticket on that machine, and promoting it

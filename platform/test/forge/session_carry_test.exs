@@ -218,11 +218,13 @@ defmodule Forge.SessionCarryTest do
       assert again["fork_session"] == false
     end
 
-    # The retry lap: the state's own `budget_exhausted` self-loop — which every state in
-    # `.forge/workflows/dev.yml` has — sends the ticket back into the state it just ran out of
-    # budget in, and the second attempt starts with the first's conversation instead of paying
-    # again for the reading that produced it. The three outcomes that still start fresh are the
-    # tests below and after.
+    # The retry lap: a state's own `budget_exhausted` self-loop sends the ticket back into the
+    # state it just ran out of budget in, and the second attempt starts with the first's
+    # conversation instead of paying again for the reading that produced it. `dev.yml` declares
+    # one for `refining`, `planning`, `implementing` and `reviewing` — not for every prompted
+    # state: `integrating` has a budget of its own and no self-loop, so a budget stop there
+    # sticks the ticket and reaches none of this. The three outcomes that still start fresh are
+    # the tests below and after.
     test "after one that ran out of budget forks its session", context do
       assignment = context.ticket |> pending() |> FakeWorker.assign(context.worker)
 

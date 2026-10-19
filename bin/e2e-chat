@@ -17,6 +17,19 @@ cd "$(dirname "$0")/.."
 # exported before it is sourced, which is how `bin/measure` calls it too.
 FORGE_M_ROOT=$(pwd)
 export FORGE_M_ROOT
+
+# This runs `mix` in the repository too (`mix forge.e2e.chat`), so it agrees with `bin/check`
+# about where Mix's home is — on a machine where only the gate has ever run, Hex is in
+# `.mix-home/` and `~/.mix` is empty. **Only when the gate has built them**, which is the
+# difference from `bin/check`: that script creates them, this one only borrows them, and
+# exporting a path that does not exist would take an operator who has never run the gate from
+# a warm `~/.mix` to no Hex at all. `$PWD` is the repository root, from the `cd` above.
+#
+# An `if` and not `[ ... ] && export`: under `set -e` that form is only safe because something
+# follows it, and this is not a line to make load-bearing.
+if [ -d .mix-home ]; then export MIX_HOME="$PWD/.mix-home"; fi
+if [ -d .hex-home ]; then export HEX_HOME="$PWD/.hex-home"; fi
+
 # shellcheck source=measure/lib/common.sh
 . measure/lib/common.sh
 

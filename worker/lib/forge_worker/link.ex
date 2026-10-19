@@ -864,6 +864,9 @@ defmodule ForgeWorker.Link do
   defp unpushed(_result, reason, true), do: {:error, {:push, reason}}
   defp unpushed(_result, reason, false), do: {:error, {:branch_head, reason}}
 
+  # `attempted(false)` is on the same unreachable path as the clause above and is uncovered for
+  # the same reason: a cancelled run whose `Workspace.base/3` failed. Labelled here too so the
+  # next reader does not write a test for it that could only pass.
   defp attempted(true), do: "push"
   defp attempted(false), do: "read of the branch head"
 

@@ -163,6 +163,16 @@ defmodule ForgeCore.Job.Spec do
   def outcome_document(%__MODULE__{produces: produces}),
     do: Enum.find(produces, &Workflow.document?/1)
 
+  @doc """
+  Whether this state promises the diff of its branch, i.e. whether its run's tree is an output
+  at all. A state that declares no `changeset` has a scratch tree: nothing it leaves there is
+  anyone's work, and nothing of it is committed (`docs/design/git-hosting.md` § Non-fast-forward
+  on a ticket branch).
+  """
+  @spec changeset?(t()) :: boolean()
+  def changeset?(%__MODULE__{produces: produces}),
+    do: Workflow.changeset_artifact() in produces
+
   @doc "Declared outputs that are documents, i.e. files the agent must write."
   @spec document_outputs(t()) :: [String.t()]
   def document_outputs(%__MODULE__{produces: produces}),

@@ -810,30 +810,71 @@ defmodule ForgeWorker.Link do
       # branch head as the changeset artifact the moment it hears from us, and a job that is
       # stopping must not lose what it did (`docs/decisions.md`). A platform that is not there
       # is waited for (`Workspace.commit_and_push/4`).
-      case Workspace.commit_and_push(assignment, worktree, commit_message(assignment), user) do
-        {:ok, head} -> finish(assignment, root, worktree, result, head, user)
-        {:error, reason} -> unpushed(result, reason)
+      changeset? = ForgeCore.Job.Spec.changeset?(ForgeCore.Job.Spec.from_map(assignment["spec"]))
+
+      case keep(changeset?, assignment, worktree, user) do
+        {:ok, head} -> finish(assignment, root, worktree, result, head, changeset?, user)
+        {:error, reason} -> unpushed(result, reason, changeset?)
       end
     end
   end
+
+  # **Only a state that declares `changeset` commits anything.** `changeset` is reserved and
+  # means the diff of the job's branch, so a state that does not declare it has promised its
+  # documents and its log and nothing else: its tree is scratch, and `Checkout.squash/5`'s
+  # `add -A` would sweep whatever the run happened to leave there onto the branch a later
+  # `merged` transition fast-forwards from. That is ticket 3 — a review killed mid-mutation,
+  # its broken tree committed as `eaf0a5d` and nothing to catch it. The guard is here because
+  # this is the only place that knows both that the run has ended and what the state promised;
+  # `Workspace` and `Checkout` know neither. A scratch tree is discarded, not kept anywhere.
+  #
+  # The head such a run reports is the one it started from, which is all it can honestly claim.
+  defp keep(true, assignment, worktree, user),
+    do: Workspace.commit_and_push(assignment, worktree, commit_message(assignment), user)
+
+  defp keep(false, assignment, worktree, user),
+    do: Workspace.base(assignment, worktree, user)
 
   # **A cancelled run whose push is refused still says what it spent.** Cancelling a ticket
   # revokes its jobs' credentials as it sends the `cancel`, so a run with work to push is refused
   # by the time it gets there; reporting `failed` threw the run's result away, and with it the
   # cost the platform settles from a cancelled run's `hibernated` (`Jobs.hibernate/4`). The work
   # is the cancelled ticket's, and nobody is waiting for it. Any other run whose push failed has
-  # lost its work, and fails.
-  defp unpushed(%Result{killed: :operator} = result, reason) do
-    Logger.warning("a cancelled run's push was refused: #{inspect(reason)}")
+  # lost its work, and fails. A no-`changeset` run reaches this having attempted no push at all,
+  # so the line says which of the two it was rather than naming a push that never happened.
+  defp unpushed(%Result{killed: :operator} = result, reason, changeset?) do
+    Logger.warning("a cancelled run's #{attempted(changeset?)} failed: #{inspect(reason)}")
 
     {:ok,
      {"hibernated",
       %{"commit" => nil, "reason" => "cancelled", "result" => Result.to_map(result)}}}
   end
 
-  defp unpushed(_result, reason), do: {:error, {:push, reason}}
+  # **Named for what was actually attempted.** A no-`changeset` run never pushes, so the only way
+  # `keep/4` fails for one is `Workspace.base/3` not resolving the branch head — and reporting
+  # that as `:push` sends the first person to debug it to the credential and the hook, which were
+  # not involved.
+  #
+  # **Only the `false` clause's tag is uncatchable here.** Reaching it through `Link` needs
+  # `rev-parse origin/<branch>` to fail in a worktree whose checkout already resolved that same
+  # ref, so a branch the clone could not fetch fails in `Workspace.prepare/3` long before a run
+  # ends. What is tested is the error itself, one level down, where it can be provoked:
+  # `Job.WorkspaceTest`, "the base errors when the branch has no fetched head".
+  #
+  # The `true` clause's tag **is** pinned, by `ForgeWorker.LinkTest`'s "a run whose push is
+  # refused fails, naming the push" — it asserts the reason carries `:push`, so swapping the two
+  # tags fails it. Said here because the previous wording claimed the swap was uncatchable
+  # outright, which would send the next person looking for a test that was already there.
+  defp unpushed(_result, reason, true), do: {:error, {:push, reason}}
+  defp unpushed(_result, reason, false), do: {:error, {:branch_head, reason}}
 
-  defp finish(assignment, root, worktree, result, head, user) do
+  # `attempted(false)` is on the same unreachable path as the clause above and is uncovered for
+  # the same reason: a cancelled run whose `Workspace.base/3` failed. Labelled here too so the
+  # next reader does not write a test for it that could only pass.
+  defp attempted(true), do: "push"
+  defp attempted(false), do: "read of the branch head"
+
+  defp finish(assignment, root, worktree, result, head, changeset?, user) do
     job_id = assignment["job_id"]
 
     # That was the last git command in the tree, so the files come back to root and the user
@@ -855,7 +896,13 @@ defmodule ForgeWorker.Link do
     # rather than at the project's seed. After the push, never before: that is what leaves the
     # tree holding nothing but the checkout and its ignored build output. See
     # docs/design/worker-tier.md § The ticket volume.
-    Workspace.promote(assignment, root, worktree)
+    #
+    # And only when there was a push. A state that produces no changeset left its tree uncommitted
+    # on purpose (`keep/4`), so promoting it would hand the next job a tree holding work nobody
+    # accepted — which that job's own `add -A` would then commit, putting on the branch by the
+    # long way exactly what the guard above refused by the short one. The template is a cache: the
+    # ticket keeps the one it had, and the next job starts colder.
+    if changeset?, do: Workspace.promote(assignment, root, worktree)
 
     # Only once everything that had to leave the machine has left it. A worktree is a
     # snapshot of the seed and the next attempt takes a fresh one; keeping this one would
@@ -876,16 +923,22 @@ defmodule ForgeWorker.Link do
     terminal
   end
 
-  # A job the platform stopped hibernates: it has committed, and it resumes from the branch
-  # and the manifest. A job the wall clock stopped is over, and reports a result like any
-  # other ending — the difference is whether anyone intends to continue it.
+  # A job the platform stopped hibernates and resumes from the branch and the manifest. For a
+  # state that declares `changeset` that branch holds what it did, because it committed; for a
+  # state that declares none the head is the one the run started from and its tree is gone, which
+  # is what such a state promised (`docs/design/git-hosting.md` § Non-fast-forward on a ticket
+  # branch) and what its continuation prompt tells it. A job the wall clock stopped is over, and
+  # reports a result like any other ending — the difference is whether anyone intends to
+  # continue it.
   defp terminal(%Result{killed: :operator} = result, head),
     do:
       {"hibernated",
        %{"commit" => head, "reason" => "cancelled", "result" => Result.to_map(result)}}
 
-  # A parked run pushed before it said so, and the commands it asked for run at that push
-  # (`docs/design/commands.md` § The ensured commit).
+  # A parked run that declares `changeset` pushed before it said so, and the commands it asked for
+  # run at that push. One that declares none pushed nothing, so they run at the head it started
+  # from — both halves of `docs/design/commands.md` § The ensured commit, and the prompt says
+  # which one the agent is getting (`ForgeCore.Prompt.may_invoke/2`).
   defp terminal(%Result{status: :parked} = result, head),
     do: {"result", Result.to_map(%{result | commit: head})}
 

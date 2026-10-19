@@ -313,7 +313,7 @@ defmodule Forge.Jobs do
   defp forkable(repo, ticket_id, state_name, %Spec{attempt: attempt} = spec) do
     from(j in previous_attempt(ticket_id, state_name, attempt),
       where:
-        j.status == :finished and j.outcome in [:converged, :budget_exhausted] and
+        j.status == :finished and j.outcome == :converged and
           not is_nil(j.harness_session_id) and not is_nil(j.session_blob),
       select: j.id
     )

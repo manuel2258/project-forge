@@ -75,6 +75,15 @@ Three orthogonal axes must never render as three colours of one badge. They get 
 | job outcome | bare mono, coloured, at type scale | The **declared** outcome is the largest thing on the job page. The engine outcome is demoted to smaller mono beside it, with a caption naming which is which. |
 | worker reachability | a dot and a word, beside the status | Whether the platform is holding a channel to the machine *now*. Orthogonal to `status`, which is what the database last recorded — a `ready` row that is not connected is the interesting case, not a contradiction. |
 
+**`budget_exhausted` is followed by what ran out**: `· turns`, `· cost` or `· wall clock`,
+beside the outcome and nowhere else, because the three want different responses from whoever
+reads the row (`capacity.md` § Four exhaustions, three treatments). Not a second badge — two
+marks of equal weight read as two outcomes — so it is mono at a lower opacity than any outcome
+is drawn at, which also means **every row that draws a ceiling draws its outcome through
+`outcome/1`**: on a row that wrote the outcome out as plain demoted text the two came out
+level. Nothing at all for a job whose ceiling was not recorded. The same section says why a
+job's turns are no longer drawn against its turn budget.
+
 Outcome colour maps by bucket, not by string match: success → `success`, non-completion
 (`did_not_converge`, `budget_exhausted`) → `warning`, failure (`error`, declared failures) →
 `error`, anything unrecognised → neutral. **`did_not_converge` is not an error** — it is the

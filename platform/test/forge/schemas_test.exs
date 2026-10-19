@@ -93,6 +93,41 @@ defmodule Forge.SchemasTest do
                Repo.update(Job.progress_changeset(job, %{status: :finished, outcome: :converged}))
     end
 
+    # A ceiling is what `budget_exhausted` ran out of, so no other outcome may carry one: a
+    # converged job saying it ran out of turns would be a row that lies
+    # (`docs/design/capacity.md` § Four exhaustions, three treatments). The other direction is
+    # deliberately allowed — a worker too old to send one reports none, and refusing its result
+    # would lose the whole run over a word.
+    test "only a budget_exhausted job names the ceiling it ran out of" do
+      job = job_fixture()
+
+      assert %{exhausted: ["only a budget_exhausted job ran out of a ceiling"]} =
+               errors_on(
+                 Job.progress_changeset(job, %{
+                   status: :finished,
+                   outcome: :converged,
+                   exhausted: :turns
+                 })
+               )
+
+      assert {:ok, %Job{exhausted: :cost}} =
+               Repo.update(
+                 Job.progress_changeset(job, %{
+                   status: :finished,
+                   outcome: :budget_exhausted,
+                   exhausted: :cost
+                 })
+               )
+
+      assert {:ok, %Job{exhausted: nil}} =
+               Repo.update(
+                 Job.progress_changeset(job_fixture(), %{
+                   status: :finished,
+                   outcome: :budget_exhausted
+                 })
+               )
+    end
+
     test "the spec is not castable after creation" do
       job = job_fixture()
       changeset = Job.progress_changeset(job, %{status: :running, spec: %{"prompt" => "other"}})

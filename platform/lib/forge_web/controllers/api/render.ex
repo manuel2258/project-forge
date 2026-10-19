@@ -47,6 +47,11 @@ defmodule ForgeWeb.Api.Render do
       status: j.status,
       outcome: j.outcome,
       declared_outcome: j.declared_outcome,
+      # Which ceiling stopped a `budget_exhausted` job, null for every other. The UI is a client
+      # of this (`docs/design/api-and-ui.md`), so a fact only the LiveViews carried would be a
+      # fact no other client can read — and telling "ran out of money" from "ran out of turns"
+      # is the whole of it (`docs/design/capacity.md` § Four exhaustions, three treatments).
+      exhausted: j.exhausted,
       turns: j.turns,
       cost_usd: Decimal.to_string(j.cost_usd),
       harness_session_id: j.harness_session_id,

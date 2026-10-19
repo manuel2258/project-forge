@@ -25,6 +25,11 @@ defmodule ForgeCore.Job.Result do
     :outcome,
     :declared_outcome,
     :reason,
+    # Which ceiling stopped a run that ended `:budget_exhausted` — `:turns`, `:cost` or
+    # `:wall_clock` — and nil for every other run. The outcome atom says a job ran out; this
+    # says out of what, which is the half a reader of the job row needs and the reason text
+    # was the only record of (`docs/design/capacity.md` § Four exhaustions, three treatments).
+    :exhausted,
     :killed,
     :exit_status,
     :transcript_path,
@@ -79,6 +84,7 @@ defmodule ForgeCore.Job.Result do
           outcome: ForgeCore.Job.Outcome.outcome() | nil,
           declared_outcome: String.t() | nil,
           reason: String.t() | nil,
+          exhausted: ForgeCore.Job.Outcome.ceiling() | nil,
           killed: nil | :operator | :wall_clock,
           exit_status: integer() | nil,
           transcript_path: String.t() | nil,
@@ -102,6 +108,7 @@ defmodule ForgeCore.Job.Result do
       "outcome" => result.outcome && to_string(result.outcome),
       "declared_outcome" => result.declared_outcome,
       "reason" => result.reason,
+      "exhausted" => result.exhausted && to_string(result.exhausted),
       "killed" => result.killed && to_string(result.killed),
       "exit_status" => result.exit_status,
       "transcript" => result.transcript,
@@ -136,6 +143,7 @@ defmodule ForgeCore.Job.Result do
       outcome: outcome(get.(:outcome)),
       declared_outcome: get.(:declared_outcome),
       reason: get.(:reason),
+      exhausted: exhausted(get.(:exhausted)),
       killed: killed(get.(:killed)),
       exit_status: get.(:exit_status),
       transcript: get.(:transcript),
@@ -176,9 +184,13 @@ defmodule ForgeCore.Job.Result do
   # the receiving node happens to have loaded, which is not a property of the wire.
   @outcomes ~w(converged did_not_converge budget_exhausted error cancelled)a
   @killed ~w(operator wall_clock)a
+  @ceilings ~w(turns cost wall_clock)a
 
   defp outcome(value), do: known(value, @outcomes)
   defp killed(value), do: known(value, @killed)
+  # Absent from a worker built before the ceiling was carried: nil, which the job row reads as
+  # "nothing here can say" rather than guessing one of the three.
+  defp exhausted(value), do: known(value, @ceilings)
 
   defp known(nil, _allowed), do: nil
 

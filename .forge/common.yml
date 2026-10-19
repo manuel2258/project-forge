@@ -10,9 +10,13 @@ commands:
     resources: { memory: 4GiB, cpu: 4 }
 
 states:
+  # `2` is the gate saying it could not run at all, which is not the gate saying no: the machine
+  # is missing the devshell or a database it cannot start (`.forge/commands/check.sh`). It gets
+  # its own outcome so that an environment failure does not spend the bound that exists for a fix
+  # which keeps failing — three of ticket 1's three `checks_failed` were the machine's.
   checking:
     invoke: [check]
-    exit: { 0: done, "*": checks_failed }
+    exit: { 0: done, 2: gate_unavailable, "*": checks_failed }
 
   reviewing:
     prompt: agents/review.md
@@ -20,7 +24,7 @@ states:
     model: opus
     produces: [report.md]
     outcomes: [done, issues_found]
-    budget: { turns: 60, cost: 5.00 }
+    budget: { turns: 120, cost: 15.00 }
 
   merged:
     on_enter: merge
@@ -31,4 +35,4 @@ states:
     env: default
     model: opus
     produces: [integration.md, changeset]
-    budget: { turns: 60, cost: 4.00 }
+    budget: { turns: 100, cost: 8.00 }

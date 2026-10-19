@@ -1,5 +1,5 @@
 version: 1
-description: Bug fixes to forge itself — reproduce, diagnose, fix the class, check, review, merge.
+description: Bug fixes to forge itself — reproduce, diagnose, fix the class, review, merge.
 initial: refining
 import: [common.yml]
 
@@ -9,14 +9,18 @@ states:
     env: default
     inputs: [ticket]
     produces: [refinement.md]
-    budget: { turns: 20, cost: 1.00 }
+    budget: { turns: 40, cost: 3.00 }
 
+  # `implementation.md` is here because `implementing` sends the ticket back on
+  # `diagnosis_invalid`, and a re-diagnosis that cannot read why it was sent back re-derives the
+  # same diagnosis. It is optional — the way in from `refining` has written no implementation —
+  # so the first diagnosis is handed nothing and told so.
   diagnosing:
     prompt: agents/diagnose.md
     env: default
-    inputs: [ticket, refinement.md]
+    inputs: [ticket, refinement.md, implementation.md]
     produces: [diagnosis.md]
-    budget: { turns: 30, cost: 2.00 }
+    budget: { turns: 60, cost: 4.00 }
 
   implementing:
     prompt: agents/implement-bug.md
@@ -27,7 +31,7 @@ states:
     inputs: [ticket, refinement.md, diagnosis.md, report.md]
     produces: [implementation.md, changeset]
     outcomes: [done, diagnosis_invalid]
-    budget: { turns: 150, cost: 8.00 }
+    budget: { turns: 200, cost: 15.00 }
 
   checking:
     extends: checking
@@ -45,17 +49,41 @@ states:
     extends: integrating
     inputs: [diagnosis.md, changeset]
 
+# The work of the ticket, first. Then the edges for the engine's own outcomes, which exist
+# because a job that runs out of budget or stops without an answer used to leave the ticket
+# stuck for a person to re-point at the state it had just left — three of ticket 1's four human
+# interventions were exactly that, one of them for ninety minutes.
+#
+# One extra attempt each and no more: `max` is what keeps a retry from becoming a loop that
+# spends the cost cap. `error` and `cancelled` are deliberately unhandled — `error` is something
+# broken rather than something unfinished, and a cancelled ticket takes no transition at all —
+# so both still stick, which is the right default for a fault nobody has read.
+#
+# `integrating` gets none of these, and cannot: it is `merged`'s `on_conflict`, and the validator
+# refuses a state reached by a conflict that any transition also leads into. The rule is right —
+# an integration is a route out of a conflict, not a step anything else may jump into — and it
+# was found by running the parser over this file rather than by reading it.
 transitions:
   - { from: refining,     to: diagnosing,   approve: [refinement.md] }
   - { from: diagnosing,   to: implementing }
   - { from: implementing, to: checking }
   - { from: implementing, to: diagnosing,   when: diagnosis_invalid }
   - { from: checking,     to: reviewing }
-  - { from: checking,     to: implementing, when: checks_failed, max: 3 }
+  - { from: checking,     to: implementing, when: checks_failed,     max: 3 }
   - { from: reviewing,    to: review_ready }
-  - { from: reviewing,    to: implementing, when: issues_found,  max: 3 }
+  - { from: reviewing,    to: implementing, when: issues_found,      max: 3 }
   - { from: review_ready, to: merged,       approve: [changeset] }
   - { from: integrating,  to: checking }
 
+  - { from: checking,     to: checking,     when: gate_unavailable,  max: 2 }
+  - { from: refining,     to: refining,     when: budget_exhausted,  max: 1 }
+  - { from: refining,     to: refining,     when: did_not_converge,  max: 1 }
+  - { from: diagnosing,   to: diagnosing,   when: budget_exhausted,  max: 1 }
+  - { from: diagnosing,   to: diagnosing,   when: did_not_converge,  max: 1 }
+  - { from: implementing, to: implementing, when: budget_exhausted,  max: 1 }
+  - { from: implementing, to: implementing, when: did_not_converge,  max: 1 }
+  - { from: reviewing,    to: reviewing,    when: budget_exhausted,  max: 1 }
+  - { from: reviewing,    to: reviewing,    when: did_not_converge,  max: 1 }
+
 limits:
-  ticket_cost: 45.00
+  ticket_cost: 120.00

@@ -12,6 +12,8 @@ defmodule ForgeWeb.Indicators do
       is not `active`. It never replaces the state.
     * `outcome/1` — bare coloured mono at type scale. The declared outcome is the loud one; the
       engine outcome is demoted beside it.
+    * `ceiling/1` — what a `budget_exhausted` job ran out of, demoted beside its outcome. The
+      outcome alone says a job ran out; only this says out of what.
   """
   use ForgeWeb, :html
 
@@ -116,6 +118,37 @@ defmodule ForgeWeb.Indicators do
     </span>
     """
   end
+
+  @doc """
+  What a `budget_exhausted` job ran out of, demoted beside its outcome: `turns`, `cost` or
+  `wall clock`.
+
+  Drawn nowhere else and for no other outcome, and nothing at all for a job whose ceiling was
+  not recorded — a row from before the column, or from a worker too old to send it — because an
+  absent fact is not one of the three (`docs/design/capacity.md` § Four exhaustions, three
+  treatments). Bare demoted mono rather than a second badge: it qualifies the outcome, and two
+  marks of equal weight would read as two outcomes.
+  """
+  attr :job, :map, required: true
+
+  def ceiling(assigns) do
+    assigns = assign(assigns, :word, ceiling_word(assigns.job))
+
+    ~H"""
+    <span
+      :if={@word}
+      data-ceiling={@word}
+      class="font-mono text-[12.5px] whitespace-nowrap opacity-60"
+    >
+      · {@word}
+    </span>
+    """
+  end
+
+  defp ceiling_word(%{outcome: :budget_exhausted, exhausted: :turns}), do: "turns"
+  defp ceiling_word(%{outcome: :budget_exhausted, exhausted: :cost}), do: "cost"
+  defp ceiling_word(%{outcome: :budget_exhausted, exhausted: :wall_clock}), do: "wall clock"
+  defp ceiling_word(_job), do: nil
 
   @doc """
   The bucket an engine outcome falls in. Anything unrecognised is neutral, never a guess.

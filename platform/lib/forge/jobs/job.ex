@@ -14,6 +14,10 @@ defmodule Forge.Jobs.Job do
   # is live for its ticket (`docs/design/commands.md` § Always park).
   @statuses [:pending, :running, :waiting, :parked, :hibernated, :finished]
   @outcomes [:converged, :did_not_converge, :budget_exhausted, :error, :cancelled]
+  # Which ceiling a `budget_exhausted` job ran out of. Not an outcome of its own: the engine
+  # routes on the outcome, and a workflow naming `budget_exhausted` must keep working whichever
+  # ceiling bound (`docs/design/capacity.md` § Four exhaustions, three treatments).
+  @ceilings [:turns, :cost, :wall_clock]
   @kinds [:workflow, :chat, :command]
 
   @primary_key {:id, :binary_id, autogenerate: true}
@@ -40,6 +44,10 @@ defmodule Forge.Jobs.Job do
     field :status, Ecto.Enum, values: @statuses, default: :pending
     field :outcome, Ecto.Enum, values: @outcomes
     field :declared_outcome, :string
+    # What a `budget_exhausted` job ran out of: its turn ceiling, its cost ceiling, or the
+    # driver's wall clock. Null for every other job — and for one recorded before the column
+    # existed, or by a worker too old to send it, where nothing on the row can say.
+    field :exhausted, Ecto.Enum, values: @ceilings
     # A command's exit status; nil for every other kind, and for a command that ended without one.
     field :exit_status, :integer
     field :turns, :integer, default: 0
@@ -144,6 +152,7 @@ defmodule Forge.Jobs.Job do
       :status,
       :outcome,
       :declared_outcome,
+      :exhausted,
       :turns,
       :cost_usd,
       :harness_session_id,
@@ -159,6 +168,21 @@ defmodule Forge.Jobs.Job do
     |> validate_number(:turns, greater_than_or_equal_to: 0)
     |> validate_number(:cost_usd, greater_than_or_equal_to: 0)
     |> validate_outcome_only_when_finished()
+    |> validate_ceiling_only_when_exhausted()
+  end
+
+  # A ceiling is what `budget_exhausted` ran out of, so a job with any other outcome carrying one
+  # would be a row saying it ran out of something it never ran out of. The other direction is not
+  # required: a worker built before the ceiling crossed the wire reports none, and refusing its
+  # result would lose the whole run over a word.
+  defp validate_ceiling_only_when_exhausted(changeset) do
+    case {get_field(changeset, :outcome), get_field(changeset, :exhausted)} do
+      {outcome, ceiling} when outcome != :budget_exhausted and ceiling != nil ->
+        add_error(changeset, :exhausted, "only a budget_exhausted job ran out of a ceiling")
+
+      _ok ->
+        changeset
+    end
   end
 
   # A conversation is over when a person is done with it, and that is not an outcome: there is no

@@ -248,6 +248,10 @@ defmodule ForgeWeb.JobLive do
                 class="text-3xl"
               />
               <.outcome :if={@job.declared_outcome && @job.outcome} value={to_string(@job.outcome)} />
+              <%!-- Which ceiling stopped it, where one did. Only a `budget_exhausted` job has
+                    one, and such a job declared nothing, so this qualifies the badge above it
+                    and never the agent's own word. --%>
+              <.ceiling job={@job} />
               <.job_status :if={is_nil(@job.outcome)} status={@job.status} />
             </div>
 
@@ -267,11 +271,15 @@ defmodule ForgeWeb.JobLive do
           </header>
 
           <dl class="mt-6 grid grid-cols-3 gap-4 border-y border-base-300 py-4">
+            <%!-- **The turns a job used, not a ratio.** `job.turns` is the harness's `num_turns`
+                  summed over every invocation this job has had — a run the engine resumed after
+                  a rate limit adds to it — while `spec.budget.turns` is the `--max-turns` ceiling
+                  each single invocation gets. Drawn as `37/30` the pair claimed a cap had been
+                  breached by seven that was never breached at all. The ceiling is in the pinned
+                  manifest, which says what it bounds; what ended the job is beside its outcome. --%>
             <div class="min-w-0">
               <dt class="font-mono text-[11px] tracking-[.14em] uppercase opacity-50">Turns</dt>
-              <dd class="mt-1 font-mono text-[17px]">
-                {@job.turns}<span class="opacity-50">/{@spec.budget.turns}</span>
-              </dd>
+              <dd id="job-turns" class="mt-1 font-mono text-[17px]">{@job.turns}</dd>
             </div>
             <div class="min-w-0">
               <dt class="font-mono text-[11px] tracking-[.14em] uppercase opacity-50">Usage</dt>
@@ -324,7 +332,7 @@ defmodule ForgeWeb.JobLive do
             <div class="flex min-w-0 justify-between gap-3">
               <dt class="opacity-50">budget</dt>
               <dd class="font-mono">
-                {@spec.budget.turns} turns · {Format.windows(@spec.budget.cost) || "—"}
+                {@spec.budget.turns} turns per run · {Format.windows(@spec.budget.cost) || "—"}
               </dd>
             </div>
             <div :if={@job.harness_session_id} class="flex min-w-0 justify-between gap-3">

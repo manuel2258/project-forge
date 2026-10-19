@@ -190,6 +190,32 @@ defmodule ForgeCore.Job.ResultTest do
     assert %Result{blobs: %{}, invalid_blobs: %{}} = Result.from_map(%{"status" => "finished"})
   end
 
+  # Which ceiling stopped a `budget_exhausted` run crosses the wire as a word, because the job row
+  # is where it is read (`docs/design/capacity.md` § Four exhaustions, three treatments). A worker
+  # built before it sends none: nil, which the row draws as nothing rather than guessing one of
+  # the three — and not a bump, because an addition the other side may ignore is not a breaking
+  # change (`ForgeCore.WorkerProtocol`).
+  test "carries which ceiling stopped the run, and its absence from an older worker" do
+    for ceiling <- [:turns, :cost, :wall_clock] do
+      stopped = %Result{status: :finished, outcome: :budget_exhausted, exhausted: ceiling}
+
+      assert ^stopped =
+               stopped
+               |> Result.to_map()
+               |> Jason.encode!()
+               |> Jason.decode!()
+               |> Result.from_map()
+    end
+
+    older =
+      %Result{status: :finished, outcome: :budget_exhausted}
+      |> Result.to_map()
+      |> Map.delete("exhausted")
+
+    assert %Result{exhausted: nil} =
+             older |> Jason.encode!() |> Jason.decode!() |> Result.from_map()
+  end
+
   test "carries a command's exit status, log and duration" do
     command = %Result{
       status: :finished,

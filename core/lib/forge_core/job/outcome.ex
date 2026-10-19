@@ -33,6 +33,13 @@ defmodule ForgeCore.Job.Outcome do
 
   @type outcome :: :converged | :did_not_converge | :budget_exhausted | :error | :cancelled
 
+  @typedoc """
+  Which ceiling stopped a run: the harness's turn ceiling, its cost ceiling, or the driver's
+  wall clock. The one thing `:budget_exhausted` alone cannot say, and the three want different
+  responses from whoever reads the job row (`docs/design/capacity.md` § Four exhaustions).
+  """
+  @type ceiling :: :turns | :cost | :wall_clock
+
   @type decision ::
           {:waiting, [Question.t()]}
           | {:finished, outcome(), String.t() | nil, String.t()}
@@ -72,7 +79,7 @@ defmodule ForgeCore.Job.Outcome do
 
   defp finished(spec, %{result: result} = run) do
     cond do
-      budget_stop?(result, run.exit_status) ->
+      exhausted(run) != nil ->
         {:budget_exhausted, nil, "harness stopped: #{result.subtype}"}
 
       result.subtype != "success" or result.is_error ->
@@ -138,11 +145,31 @@ defmodule ForgeCore.Job.Outcome do
     end)
   end
 
+  @doc """
+  Which ceiling stopped `run`, or nil when none did.
+
+  **The same question `decide/2` asks**, kept as one function because it is the only place in
+  the codebase holding both facts at once — and asked separately because its answer is the half
+  the outcome atom throws away. A run this names a ceiling for is a run `decide/2` finishes
+  `:budget_exhausted`, and the reverse; `ForgeCore.Job.OutcomeTest` holds the two together.
+  (A run that also left a blocking question open waits instead of finishing, and is asked again
+  when it ends for good.)
+  """
+  @spec exhausted(run()) :: ceiling() | nil
+  def exhausted(%{killed: :wall_clock}), do: :wall_clock
+  def exhausted(%{killed: killed}) when killed != nil, do: nil
+  def exhausted(%{result: nil}), do: nil
+  def exhausted(%{result: result} = run), do: ceiling(result, run.exit_status)
+
   # Exit status 2 is documented as the cost ceiling. It does not also cover an authentication
   # failure: that exits 1 and does produce a result message, so it never reaches here.
-  defp budget_stop?(%{subtype: subtype, is_error: is_error}, exit_status) do
-    subtype == "error_max_turns" or String.starts_with?(subtype || "", "error_max_budget") or
-      (exit_status == 2 and is_error)
+  defp ceiling(%{subtype: subtype, is_error: is_error}, exit_status) do
+    cond do
+      subtype == "error_max_turns" -> :turns
+      String.starts_with?(subtype || "", "error_max_budget") -> :cost
+      exit_status == 2 and is_error -> :cost
+      true -> nil
+    end
   end
 
   defp declared(%Spec{} = spec, documents) do

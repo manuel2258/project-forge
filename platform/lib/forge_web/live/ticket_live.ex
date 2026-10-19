@@ -607,6 +607,7 @@ defmodule ForgeWeb.TicketLive do
                     bucket={job.declared_outcome && Indicators.bucket(job.outcome)}
                   />
                   <.job_status :if={is_nil(job.outcome)} status={job.status} />
+                  <.ceiling job={job} />
                   <%!-- Language, not an identifier: sans at body size, and never accent — a
                         machine is being waited on, not the operator. --%>
                   <span
@@ -768,6 +769,7 @@ defmodule ForgeWeb.TicketLive do
             >
               <span class="min-w-0 flex-1 truncate">{job.state} #{job.attempt}</span>
               <span class="shrink-0 opacity-60">{job.outcome || job.status}</span>
+              <.ceiling job={job} />
               <span class="shrink-0 opacity-40" aria-hidden="true">›</span>
             </.link>
           </li>

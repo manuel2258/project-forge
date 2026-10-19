@@ -349,6 +349,23 @@ defmodule ForgeWorker.Job.RunnerTest do
     assert result.harness["cost_usd"] == 1.5
   end
 
+  # **And the result says which ceiling it was**, because the outcome cannot
+  # (`docs/design/capacity.md` § Four exhaustions, three treatments). The two scenarios end in
+  # the same outcome from the same code path, so without this the whole distinction could be
+  # dropped between the runner and the wire and the suite would stay green.
+  test "a budget stop reports which ceiling stopped it, and nothing else does", context do
+    {:ok, turns} = context |> run("max_turns") |> Runner.await(5_000)
+    assert turns.exhausted == :turns
+
+    {:ok, cost} = context |> run("max_budget") |> Runner.await(5_000)
+    assert cost.outcome == :budget_exhausted
+    assert cost.exhausted == :cost
+
+    {:ok, converged} = context |> run("success") |> Runner.await(5_000)
+    assert converged.outcome == :converged
+    assert converged.exhausted == nil
+  end
+
   # A job re-queued after its node died runs again under the same job id, and so in the same
   # job directory. It starts the harness cold, so anything the dead run left in out/ belongs
   # to no run that produced a result, and must not be collected as this run's output.
@@ -1122,6 +1139,7 @@ defmodule ForgeWorker.Job.RunnerTest do
 
     assert result.killed == :wall_clock
     assert result.outcome == :budget_exhausted
+    assert result.exhausted == :wall_clock
     assert System.monotonic_time(:millisecond) - started < 3_000
   end
 

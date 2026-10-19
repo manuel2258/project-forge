@@ -16,6 +16,7 @@ defmodule Forge.SpendTest do
   alias Forge.Jobs.Job
 
   @workflow Path.expand("../../../core/test/fixtures/workflow_example.yml", __DIR__)
+  @grammar Path.expand("../../../docs/design/workflow-grammar-v1.md", __DIR__)
 
   setup do
     data_dir = tmp_dir("spend-data")
@@ -104,6 +105,60 @@ defmodule Forge.SpendTest do
       assignment = ticket |> only_pending() |> FakeWorker.assign(worker)
 
       assert %{"ticket_left" => 21.0, "ticket_limit" => 25.0} = assignment["spec"]["budget"]
+    end
+  end
+
+  # **A conversation has no ticket allowance** (`docs/design/capacity.md` § Spend caps,
+  # `docs/design/conversations.md` § Spend, and `workflow-grammar-v1.md` § Budget, which now says
+  # so where a reader of the budget grammar looks). The allowance exists to stop a runaway
+  # workflow, and a person asking why a ticket is stuck is not one — a cap that locked them out
+  # of their own ticket would work against its own purpose. The figures stay honest because a
+  # chat's spend is its own and never folded into the ticket's.
+  describe "a conversation about a ticket" do
+    test "runs where the ticket's own job is refused, and spends none of its allowance", %{
+      user: user,
+      worker: worker
+    } do
+      ticket = admit(user, ticket_cost: 0.50)
+      spend!(ticket, "0.60")
+      project = Projects.get!(ticket.project_id)
+      serve!(worker, project)
+      funded!(project)
+
+      # The ticket is over its allowance, so its own next job cannot start.
+      assert {:error, {:spend_exhausted, :ticket}} =
+               Jobs.assign(only_pending(ticket), worker)
+
+      {:ok, chat} = Forge.Conversations.open(project, "why is this stuck?", ticket: ticket)
+      assert {:ok, _assigned} = Jobs.assign(Jobs.get!(chat.id), worker)
+
+      # And what it spends lands on the conversation, not on the ticket it is about.
+      {:ok, chat} =
+        Forge.Conversations.record_turn(Jobs.get!(chat.id), %{
+          "turn" => 1,
+          "harness" => %{"session_id" => "sess-42", "turns" => 2, "cost_usd" => 0.30}
+        })
+
+      assert Decimal.equal?(chat.cost_usd, Decimal.new("0.30"))
+      assert Decimal.equal?(Tickets.get!(ticket.id).cost_usd, Decimal.new("0.60"))
+    end
+
+    # § Budget is where a reader of the budget grammar looks for what `limits.ticket_cost` counts,
+    # and it said "the sum over all jobs of a ticket" without saying a conversation is not one of
+    # them — while the two notes above said so plainly. A ticket was filed on the gap. This is the
+    # check that it stays closed: the behaviour above and the sentence that documents it, together,
+    # so neither can move without the other.
+    test "the budget grammar says the allowance is not a conversation's" do
+      budget =
+        @grammar
+        |> File.read!()
+        |> String.split("**Budget.**")
+        |> Enum.at(1)
+        |> String.split("**Environment.**")
+        |> hd()
+
+      assert budget =~ "conversation"
+      assert budget =~ "daily cap"
     end
   end
 

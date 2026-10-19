@@ -2005,6 +2005,7 @@ defmodule Forge.Jobs do
           status: :finished,
           outcome: result.outcome,
           declared_outcome: result.declared_outcome,
+          exhausted: result.exhausted,
           finished_at: DateTime.utc_now(:second)
         })
     end
@@ -2015,6 +2016,7 @@ defmodule Forge.Jobs do
       "outcome" => result.outcome,
       "declared_outcome" => result.declared_outcome,
       "reason" => result.reason,
+      "exhausted" => result.exhausted,
       "killed" => result.killed,
       "exit_status" => result.exit_status,
       "questions" => Enum.map(result.questions, & &1.key),

@@ -324,9 +324,18 @@ What a conflict does is the state's to say, with that key — § Merging.
 **Budget.** `turns` and `cost` (USD) are per job and required on every job state. A command state
 has neither — there is no inference to bound — and is bounded by each command's `timeout` instead;
 declaring `budget` on one is an error. Reaching
-either ends the job with `budget_exhausted`. `limits.ticket_cost` is required and caps the sum
-over all jobs of a ticket; reaching it sticks the ticket. Budgets are never modifiable by a
+either ends the job with `budget_exhausted`, and the job row says which of the two it was —
+`capacity.md` § Four exhaustions, three treatments. `limits.ticket_cost` is required and caps the
+sum over all jobs of a ticket; reaching it sticks the ticket. Budgets are never modifiable by a
 job.
+
+**`limits.ticket_cost` caps the jobs the engine starts, and not a conversation.** The workflow
+and command jobs of a ticket are what it sums; a conversation opened on that ticket has no
+ticket allowance and meets the daily cap alone, as `capacity.md` § Spend caps and
+`conversations.md` § Spend already say. The allowance exists to stop a runaway workflow, and a
+person asking why a ticket is stuck is not one — a cap that stopped them investigating would
+work against its own purpose. A chat's spend is still recorded, on the conversation and its own
+runs rather than on `ticket.cost_usd`.
 
 **Environment.** `env` is a devShell name in the project's `flake.nix`; the job runs inside
 `nix develop .#<env>`. Absent `env` means no toolchain beyond the harness.

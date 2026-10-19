@@ -214,10 +214,14 @@ is never rendered live; it exists for debugging after the fact.
 
 ## Accounting
 
-`total_cost_usd` and `num_turns` from the `result` message are written to the job. The
-documentation calls the cost a client-side estimate; it is stored as such and reconciled
-against provider billing later if that ever matters. `--max-turns` and `--max-budget-usd`
-are the harness-side enforcement; the driver additionally enforces a wall-clock limit
+`total_cost_usd` and `num_turns` from the `result` message are written to the job — **added to
+what is already there**, so `jobs.turns` and `jobs.cost_usd` are the job's running totals over
+every invocation it has had, and a job the engine resumed after a rate limit has more than one.
+This is why the two are not the same quantity as `spec.budget.turns`, which is one invocation's
+ceiling, and why nothing draws them as a ratio (`capacity.md` § Four exhaustions, three
+treatments). The documentation calls the cost a client-side estimate; it is stored as such and
+reconciled against provider billing later if that ever matters. `--max-turns` and
+`--max-budget-usd` are the harness-side enforcement; the driver additionally enforces a wall-clock limit
 (engine default, not in the workflow grammar) and kills the process with SIGTERM, then SIGKILL
 after a grace period. No `finished` event is emitted for that; the run's result records why it
 was killed, and § Outcome mapping reads it as `cancelled` or `budget_exhausted`.
@@ -245,9 +249,16 @@ Decided in this order, first match wins:
 
 ### Naming the failure
 
-The outcome says a job failed; the reason stored beside it is the only thing that says why, and
-it is what the timeline and the queue have to work with. **The reason comes from the result
-message's `result` field — the harness's own last words — in preference to its `subtype`.**
+The outcome says a job failed; the reason stored beside it is what says why, and it is what the
+timeline and the queue have to work with. **The reason comes from the result message's `result`
+field — the harness's own last words — in preference to its `subtype`.**
+
+One thing is no longer only in the reason: a `budget_exhausted` job also carries **which ceiling
+stopped it** — `:turns`, `:cost` or `:wall_clock` — structurally, on the job row
+(`ForgeCore.Job.Outcome.exhausted/1`, `jobs.exhausted`, `capacity.md` § Four exhaustions, three
+treatments). `exhausted/1` and § Outcome mapping's rules 1 and 3 read the same facts, so a run
+one calls a budget stop is a run the other names a ceiling for; `ForgeCore.Job.OutcomeTest` holds
+the two together. Everything else about a failure is still the reason's alone.
 
 `subtype` is not a diagnosis and sometimes not even a fact. A machine with no usable credential
 returns `subtype: "success"` with `is_error: true`, exit status 1, one turn and zero tokens, and

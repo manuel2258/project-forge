@@ -855,12 +855,16 @@ defmodule ForgeWorker.Link do
   # that as `:push` sends the first person to debug it to the credential and the hook, which were
   # not involved.
   #
-  # **Swapping these two tags is an uncatchable mutation here, and no test should claim it is
-  # not.** Reaching the `false` clause through `Link` needs `rev-parse origin/<branch>` to fail
-  # in a worktree whose checkout already resolved that same ref, so a branch the clone could not
-  # fetch fails in `Workspace.prepare/3` long before a run ends. What is tested is the error
-  # itself, one level down, where it can be provoked: `Job.WorkspaceTest`, "the base errors when
-  # the branch has no fetched head".
+  # **Only the `false` clause's tag is uncatchable here.** Reaching it through `Link` needs
+  # `rev-parse origin/<branch>` to fail in a worktree whose checkout already resolved that same
+  # ref, so a branch the clone could not fetch fails in `Workspace.prepare/3` long before a run
+  # ends. What is tested is the error itself, one level down, where it can be provoked:
+  # `Job.WorkspaceTest`, "the base errors when the branch has no fetched head".
+  #
+  # The `true` clause's tag **is** pinned, by `ForgeWorker.LinkTest`'s "a run whose push is
+  # refused fails, naming the push" — it asserts the reason carries `:push`, so swapping the two
+  # tags fails it. Said here because the previous wording claimed the swap was uncatchable
+  # outright, which would send the next person looking for a test that was already there.
   defp unpushed(_result, reason, true), do: {:error, {:push, reason}}
   defp unpushed(_result, reason, false), do: {:error, {:branch_head, reason}}
 

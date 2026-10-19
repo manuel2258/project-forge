@@ -27,6 +27,17 @@ defmodule ForgeCore.Job.SpecTest do
     assert Spec.group_outputs(%{command | command: nil}) == []
   end
 
+  # The predicate the worker commits on and the platform records a changeset on. A state that
+  # produces documents and no `changeset` has a scratch tree (`docs/design/git-hosting.md`
+  # § Non-fast-forward on a ticket branch), and a conversation, which declares nothing at all,
+  # is on the same side of it — its commits come from somewhere else.
+  test "knows whether it promises the diff of its branch" do
+    assert Spec.changeset?(spec())
+    refute Spec.changeset?(%{spec() | produces: ["report.md"]})
+    refute Spec.changeset?(%{spec() | produces: []})
+    assert Spec.changeset?(%{spec() | produces: ["changeset"]})
+  end
+
   test "knows its outcome document and document outputs" do
     assert Spec.outcome_document(spec()) == "plan.md"
     assert Spec.document_outputs(spec()) == ["plan.md"]

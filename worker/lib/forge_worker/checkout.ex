@@ -202,8 +202,13 @@ defmodule ForgeWorker.Checkout do
 
   @doc "The commit the checkout is on."
   @spec head(String.t(), ForgeWorker.Slice.as()) :: {:ok, String.t()} | {:error, term()}
-  def head(dir, as) do
-    with {:ok, out} <- git(dir, ["rev-parse", "HEAD"], as: as), do: {:ok, String.trim(out)}
+  def head(dir, as), do: rev(dir, "HEAD", as)
+
+  @doc "The commit `ref` names in this checkout."
+  @spec rev(String.t(), String.t(), ForgeWorker.Slice.as()) ::
+          {:ok, String.t()} | {:error, term()}
+  def rev(dir, ref, as) do
+    with {:ok, out} <- git(dir, ["rev-parse", ref], as: as), do: {:ok, String.trim(out)}
   end
 
   # The worker's own, and the only git that is: `dir` does not exist yet, so there is no hook or

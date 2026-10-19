@@ -270,7 +270,8 @@ defmodule ForgeWorker.LinkTest do
     if scenario = Keyword.get(opts, :scenario) do
       harness = Application.get_env(:forge_worker, :harness_opts, [])
       Application.put_env(:forge_worker, :harness_opts, harness)
-      Application.put_env(:forge_worker, :extra_env, [{"FAKE_SCENARIO", scenario}])
+      env = [{"FAKE_SCENARIO", scenario} | Keyword.get(opts, :env, [])]
+      Application.put_env(:forge_worker, :extra_env, env)
     end
 
     %{
@@ -806,6 +807,88 @@ defmodule ForgeWorker.LinkTest do
 
     # The agent's work reached the branch before the result was sent.
     assert git!(nil, ["-C", origin, "show", "refs/heads/ticket/1:CHANGED.md"]) =~ "by the agent"
+  end
+
+  # `docs/design/git-hosting.md` § Non-fast-forward on a ticket branch: the squash belongs to a
+  # state that declares `changeset`. A state that declares none — `reviewing`, whose output is its
+  # report — works in a scratch tree, and whatever is left in it when the run ends is nobody's
+  # work. Ticket 3: a review killed mid-mutation had its broken tree committed and pushed, and
+  # the branch is what merges.
+  describe "a state whose produces holds no changeset" do
+    defp reviewing(origin, opts) do
+      origin
+      |> assignment(Keyword.merge([env: [{"FAKE_DOC", "report.md"}]], opts))
+      |> put_in(["spec", "produces"], ["report.md"])
+    end
+
+    test "leaves the ticket branch where it found it, whatever the run left in the tree",
+         context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      before = git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"])
+      job = reviewing(origin, scenario: "leaves_dirty")
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      {%{"job_id" => ^job_id, "result" => result}, _events} = take_push("result")
+
+      # The run itself converged: its document is its output, and it was accepted.
+      assert %{"status" => "finished", "outcome" => "converged"} = result
+
+      # And nothing of its tree reached the branch — not the tracked file it modified, not the
+      # untracked one it wrote, and no commit at all.
+      assert git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"]) == before
+    end
+
+    # The template is the other way the same tree reaches the branch: the ticket's next job
+    # starts from it and, if it declares a changeset, commits what it inherited. Promoting a
+    # scratch tree would launder a mutation into the next run's `add -A`.
+    test "does not keep its scratch tree as the ticket's template", context do
+      %{client: client, origin: origin, root: root} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = reviewing(origin, scenario: "leaves_dirty")
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      {%{"job_id" => ^job_id}, _events} = take_push("result")
+
+      refute File.dir?(Path.join([root, "volumes", "ticket", "1"]))
+    end
+
+    # Criterion 3 of the refinement: the head a run reports is the one it started from, and a
+    # state that never calls the push still has to name it. A parked run is where that head is
+    # read — the commands it asked for run at it.
+    #
+    # The agent commits one of its own, which is what makes this the branch head and not the
+    # worktree's: reporting `HEAD` here would name a commit that is on no ref anybody else can
+    # fetch, and the commands would be asked to run at it.
+    test "a parked run reports the head it started from", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      before = git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"]) |> String.trim()
+
+      job =
+        origin
+        |> reviewing(
+          scenario: "invokes",
+          env: [{"FAKE_DOC", "report.md"}, {"FAKE_COMMIT", "NOTES.md"}]
+        )
+        |> put_in(["spec", "may_invoke"], %{"build" => %{"max" => 2}, "test" => %{"max" => 2}})
+
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      {%{"job_id" => ^job_id, "result" => result}, _events} = take_push("result")
+
+      assert result["status"] == "parked"
+      assert result["commit"] == before
+    end
   end
 
   # `docs/design/commands.md`: a command is checked out at its commit, runs the script its spec

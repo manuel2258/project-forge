@@ -250,6 +250,15 @@ case "${FAKE_SCENARIO:-success}" in
     printf 'edited by the agent\n' > CHANGED.md
     emit "$result_success"
     ;;
+  # A run that ends with work in the tree it never committed: the mutation lens of ticket 1,
+  # killed between breaking the code and restoring it. A tracked file modified and an untracked
+  # one written, which is both halves of what `git add -A` would sweep into a commit.
+  leaves_dirty)
+    printf -- '---\noutcome: done\n---\n# Report\n\nReviewed.\n' > "$doc"
+    printf 'mutated by the reviewer\n' >> README.md
+    printf 'scratch\n' > SCRATCH.md
+    emit "$result_success"
+    ;;
   plan_invalid)
     printf -- '---\noutcome: plan_invalid\n---\n# Plan\n\nThe plan cannot work.\n' > "$doc"
     emit "$result_success"

@@ -131,6 +131,18 @@ defmodule ForgeWorker.Job.Workspace do
     end
   end
 
+  @doc """
+  The ticket branch head this run started from: the `origin/<branch>` its checkout fetched, read
+  as `user`.
+
+  Not the worktree's own `HEAD`, which an agent that used git itself has already moved past —
+  onto commits that were never pushed and, for a state that produces no changeset, never will
+  be. This is what such a run reports instead of a push (`ForgeWorker.Link`).
+  """
+  @spec base(assignment(), String.t(), Slice.user()) :: {:ok, String.t()} | {:error, term()}
+  def base(assignment, dir, user),
+    do: Checkout.rev(dir, remote(assignment["git"]), Slice.as_user(user))
+
   @doc "The commit the worktree is on, read as `user`."
   @spec head(String.t(), Slice.user()) :: {:ok, String.t()} | {:error, term()}
   def head(dir, user), do: Checkout.head(dir, Slice.as_user(user))

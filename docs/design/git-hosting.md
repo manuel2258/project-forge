@@ -197,10 +197,10 @@ operator sees a mirror that stopped working rather than a mirror that was never 
 ### Non-fast-forward on a ticket branch: allowed, recorded, and pinned
 
 `decisions.md` says a job commits freely and history is squashed. The squash happens on the
-worker, once per run: `ForgeWorker.Checkout.squash/5` resets softly to the fetched branch head and
-commits everything the run did as one commit, so the ticket branch gains one commit per run
-rather than the agent's keystrokes. The merge does not squash again — it keeps both parents
-(§ The merge). So the common case is append-only — but a resumed job amending its last commit, or
+worker, once per run of a state that declares `changeset`: `ForgeWorker.Checkout.squash/5` resets
+softly to the fetched branch head and commits everything the run did as one commit, so the ticket
+branch gains one commit per run rather than the agent's keystrokes. The merge does not squash
+again — it keeps both parents (§ The merge). So the common case is append-only — but a resumed job amending its last commit, or
 a rebase onto a moved base, is a rewrite, and refusing those would fail the job's own recovery
 path with a git error the agent cannot act on.
 
@@ -208,6 +208,17 @@ path with a git error the agent cannot act on.
 scratch space with exactly one writer, and the record that matters is not the ref: it is the
 `changeset` artifact version, which pins `git:<sha>` in the database and is what an approval
 attaches to. A ref moving does not move an approval.
+
+**A state that declares no `changeset` reaches none of this.** `changeset` is reserved and means
+the diff of the job's branch, so a state that does not declare it has promised its documents and
+its log: its worktree is scratch, and `ForgeWorker.Link` never calls the squash for it — nothing
+is staged, nothing committed, nothing pushed, whatever the run left in the tree when it ended,
+and however it ended. The run reports the branch head it started from. The tree is discarded with
+the worktree and is not kept as the ticket's warm template either, because the ticket's next job
+would inherit it and commit it with its own `add -A`. This is the guard, and it has to be here:
+a run killed for budget gets a SIGKILL, so nothing the run itself registered to clean up runs
+(ticket 3, where a review's mutation pass was killed between breaking the code and restoring it
+and the broken tree was committed to the branch).
 
 The residual risk is that a rewrite makes an approved commit unreachable and therefore
 collectable, and the merge would then act on an object that has gone. Two things close it:

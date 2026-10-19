@@ -1924,7 +1924,9 @@ defmodule Forge.Jobs do
   defp put_changeset(multi, ticket, job, %Result{status: :finished}) do
     spec = spec(job)
 
-    if Workflow.changeset_artifact() in spec.produces do
+    # The same predicate the worker decides to commit on (`ForgeWorker.Link`): a state that does
+    # not promise the diff of its branch neither pushes one nor has one recorded.
+    if Spec.changeset?(spec) do
       repo_path = ticket |> Tickets.project_of() |> Projects.repo_path()
 
       case Git.resolve(repo_path, "refs/heads/" <> ticket.branch) do

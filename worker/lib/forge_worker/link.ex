@@ -810,12 +810,30 @@ defmodule ForgeWorker.Link do
       # branch head as the changeset artifact the moment it hears from us, and a job that is
       # stopping must not lose what it did (`docs/decisions.md`). A platform that is not there
       # is waited for (`Workspace.commit_and_push/4`).
-      case Workspace.commit_and_push(assignment, worktree, commit_message(assignment), user) do
-        {:ok, head} -> finish(assignment, root, worktree, result, head, user)
+      changeset? = ForgeCore.Job.Spec.changeset?(ForgeCore.Job.Spec.from_map(assignment["spec"]))
+
+      case keep(changeset?, assignment, worktree, user) do
+        {:ok, head} -> finish(assignment, root, worktree, result, head, changeset?, user)
         {:error, reason} -> unpushed(result, reason)
       end
     end
   end
+
+  # **Only a state that declares `changeset` commits anything.** `changeset` is reserved and
+  # means the diff of the job's branch, so a state that does not declare it has promised its
+  # documents and its log and nothing else: its tree is scratch, and `Checkout.squash/5`'s
+  # `add -A` would sweep whatever the run happened to leave there onto the branch a later
+  # `merged` transition fast-forwards from. That is ticket 3 — a review killed mid-mutation,
+  # its broken tree committed as `eaf0a5d` and nothing to catch it. The guard is here because
+  # this is the only place that knows both that the run has ended and what the state promised;
+  # `Workspace` and `Checkout` know neither. A scratch tree is discarded, not kept anywhere.
+  #
+  # The head such a run reports is the one it started from, which is all it can honestly claim.
+  defp keep(true, assignment, worktree, user),
+    do: Workspace.commit_and_push(assignment, worktree, commit_message(assignment), user)
+
+  defp keep(false, assignment, worktree, user),
+    do: Workspace.base(assignment, worktree, user)
 
   # **A cancelled run whose push is refused still says what it spent.** Cancelling a ticket
   # revokes its jobs' credentials as it sends the `cancel`, so a run with work to push is refused
@@ -833,7 +851,7 @@ defmodule ForgeWorker.Link do
 
   defp unpushed(_result, reason), do: {:error, {:push, reason}}
 
-  defp finish(assignment, root, worktree, result, head, user) do
+  defp finish(assignment, root, worktree, result, head, changeset?, user) do
     job_id = assignment["job_id"]
 
     # That was the last git command in the tree, so the files come back to root and the user
@@ -855,7 +873,13 @@ defmodule ForgeWorker.Link do
     # rather than at the project's seed. After the push, never before: that is what leaves the
     # tree holding nothing but the checkout and its ignored build output. See
     # docs/design/worker-tier.md § The ticket volume.
-    Workspace.promote(assignment, root, worktree)
+    #
+    # And only when there was a push. A state that produces no changeset left its tree uncommitted
+    # on purpose (`keep/4`), so promoting it would hand the next job a tree holding work nobody
+    # accepted — which that job's own `add -A` would then commit, putting on the branch by the
+    # long way exactly what the guard above refused by the short one. The template is a cache: the
+    # ticket keeps the one it had, and the next job starts colder.
+    if changeset?, do: Workspace.promote(assignment, root, worktree)
 
     # Only once everything that had to leave the machine has left it. A worktree is a
     # snapshot of the seed and the next attempt takes a fresh one; keeping this one would

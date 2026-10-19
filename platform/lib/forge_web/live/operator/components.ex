@@ -506,6 +506,7 @@ defmodule ForgeWeb.Operator.Components do
     ~H"""
     <form
       phx-submit="write_document"
+      phx-change="draft:change"
       id={"write-#{@name}"}
       class="flex flex-col gap-2"
     >

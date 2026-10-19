@@ -328,15 +328,18 @@ deliberate cases' rule applies.
 **Where the rule holds today.** On every surface a person's unsent work sits on: the
 conversation's composer and the question form docked under it, a document's question form, an
 approval's comment, a proposal's comment and its type, and a human state's document.
-`ForgeWeb.ReconnectTest` walks those pages and fails on a box drawn outside a form carrying
-both attributes, so a new one cannot quietly miss it.
+`ForgeWeb.ReconnectTest` holds the rule two ways: it walks those pages and fails on a box drawn
+outside a form carrying both attributes, and it inventories every form in the web layer that
+holds a box, so a new one that cannot be replayed fails until somebody records why — the way
+`authorization_inventory_test.exs` does for events. What neither reaches is a box drawn in no
+form at all on a page nothing walks.
 
-It does **not** hold yet on six forms, counted: a project's members, its secrets and its
-mirrors, a worker's resources, and the two log-in forms. Each carries no `phx-change`, so each
-loses what was typed on a rejoin. That is a gap with a proposal open on it rather than a case
-the rule excuses — and two of them are why a person settles it and not the next agent: a
-secret's value or a password coming back means holding it in page state, which is a decision of
-its own (`docs/design/secrets.md`).
+It does **not** hold yet on six forms, which that inventory is where to read and why the count
+cannot drift: a project's members, its secrets and its mirrors, a worker's resources, and the
+two log-in forms. Each carries no `phx-change`, so each loses what was typed on a rejoin. That
+is a gap the inventory records rather than one the rule excuses — and two of them are why a
+person settles it and not the next agent: a secret's value or a password coming back means
+holding it in page state, which is a decision of its own (`docs/design/secrets.md`).
 
 
 ## The queue item

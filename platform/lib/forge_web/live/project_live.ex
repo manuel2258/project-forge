@@ -143,6 +143,13 @@ defmodule ForgeWeb.ProjectLive do
     end
   end
 
+  # Forgetting here is an equivalent mutant, kept for the assign rather than for the page: a
+  # decided proposal is not in `Proposals.open/1` any more, so `propose-<version_id>` is never
+  # drawn again and keeping it changes nothing anybody could see. There is no test for it on
+  # purpose (`CLAUDE.md` § Testing); what it buys is a `:drafts` map that does not grow for the
+  # life of the page. The approval card's own `forget` is not this — `approve-<ticket_id>` comes
+  # round again, because the same ticket is approved more than once — and it shares the one line
+  # in `ForgeWeb.Operator.Actions` that a document's save covers.
   defp decided(socket, params, message),
     do: socket |> Drafts.forget(params["draft"]) |> put_flash(:info, message)
 

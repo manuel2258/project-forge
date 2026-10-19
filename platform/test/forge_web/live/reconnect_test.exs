@@ -387,5 +387,190 @@ defmodule ForgeWeb.ReconnectTest do
       assert editor =~ "the whole thing"
       refute editor =~ "half of a sentence"
     end
+
+    # The other half of the same line: `ForgeWeb.Operator.Actions.act_on/3` forgets a draft on
+    # success and deliberately not on a refusal, so a send that was turned down leaves what was
+    # typed to send again. Only a comment defended that, and forgetting on both branches passed
+    # the whole suite — a refused save or a refused approval losing the text is this ticket's own
+    # defect, on the surface this ticket added.
+    #
+    # The document editor is where the rule is observable and the approval card is not: the
+    # refusal easiest to arrange there — somebody else decided it first — takes the pending
+    # transition away, so the card the comment sits in is not drawn at all afterwards. One
+    # `act_on` serves both.
+    test "keeps the draft when the save is refused", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      path = ~p"/tickets/#{project.name}/#{ticket.number}?tab=decide"
+      {:ok, view, _html} = live(conn, path)
+
+      # An unclosed question block: `ForgeCore.Document.parse/1` refuses it, so nothing is
+      # written and there is no saved version for the box to fall back to.
+      refused = "```question\nkey: a\n"
+      editor = ~s(form[id="write-test-report.md"])
+
+      # The change the client debounces out while it is typed, then the Save it was typed for.
+      view |> form(editor, %{"content" => refused}) |> render_change()
+      html = view |> form(editor, %{"content" => refused}) |> render_submit()
+
+      assert html =~ "Failed:"
+      assert Forge.Artifacts.latest(ticket.id, "test-report.md") == nil
+      assert view |> element(~s([id="write-test-report.md"])) |> render() =~ "key: a"
+    end
+  end
+
+  # Every form in the web layer that holds a box a person types into, and whether a rejoin can
+  # put what was typed back. The page walks above cover the five surfaces this ticket is about;
+  # this covers the ones nobody walks, a page that does not exist yet included — a new form with
+  # a box and no replay fails here until somebody records it. Same shape as
+  # `authorization_inventory_test.exs`: a claim in a note with a way to fail.
+  #
+  # Two things it does not reach, both covered by the walks above and only on the pages they
+  # visit: a box drawn outside a form altogether, and a form whose boxes come from another
+  # component in the same module rather than inline. The question form is the one of those — its
+  # fields live in `open_question/1` — so the three walks that draw a question hold its shape.
+  describe "every form that holds a box" do
+    # The forms that still lose what was typed, and why none is fixed here: giving back a
+    # secret's value or a password means holding it in page state, which is a decision for a
+    # person (`docs/design/secrets.md`), and the other two are that same decision about a page
+    # holding what was typed into it.
+    @unrecoverable %{
+      {"live/project_settings_live.ex", "add-member"} => "an email, on a project's members",
+      {"live/project_settings_live.ex", "set-secret"} => "a secret's name and its value",
+      {"live/project_settings_live.ex", "add-mirror"} => "a mirror's url, user and token",
+      {"live/workers_live.ex", "save"} => "a worker's memory and cores",
+      {"live/user_live/login.ex", "submit_magic"} => "an email, to be sent a link",
+      {"live/user_live/login.ex", "submit_password"} => "an email and a password"
+    }
+
+    test "either recovers on a rejoin, or is recorded as not" do
+      {recovers, loses} = Enum.split_with(forms_with_boxes(), &elem(&1, 1))
+      keys = Enum.map(loses, &elem(&1, 0))
+      recorded = MapSet.new(Map.keys(@unrecoverable))
+
+      assert keys == Enum.uniq(keys),
+             "two forms in one file under one name, so one hides the other: #{inspect(keys)}"
+
+      unrecorded = MapSet.difference(MapSet.new(keys), recorded)
+
+      assert MapSet.to_list(unrecorded) == [],
+             "form(s) holding a box that a rejoin cannot replay, with nothing recording why: " <>
+               inspect(MapSet.to_list(unrecorded))
+
+      stale = MapSet.difference(recorded, MapSet.new(keys))
+
+      assert MapSet.to_list(stale) == [],
+             "recorded as losing what was typed, but it does not any more — drop the entry: " <>
+               inspect(MapSet.to_list(stale))
+
+      # The surfaces this ticket is about, by name. A scan that stopped seeing one of them would
+      # pass everything above, and the first version of this one did exactly that: `message_box`
+      # is a component, so none of the forms holding the operator's own unsent work matched a
+      # `<textarea>`.
+      recovering = Enum.map(recovers, &elem(&1, 0))
+
+      for site <- [
+            {"live/chat_live.ex", "send"},
+            {"live/operator/components.ex", "decide"},
+            {"live/operator/components.ex", "decide_proposal"},
+            {"live/operator/components.ex", "write_document"}
+          ] do
+        assert site in recovering, "#{inspect(site)} is not in the scan at all"
+      end
+    end
+
+    # One entry per form that holds a box: `{{file, the event it submits}, whether a rejoin can
+    # replay it}`. A rejoin replays a form carrying both an `id` and a `phx-change`, and nothing
+    # else (this file's moduledoc).
+    defp forms_with_boxes do
+      "lib/forge_web/**/*.{ex,heex}"
+      |> Path.wildcard()
+      |> Enum.flat_map(fn path ->
+        file = Path.relative_to(path, "lib/forge_web")
+
+        for {tag, body} <- forms(markup(path)), holds_a_box?(body) do
+          {{file, attribute(tag, "phx-submit")}, tag =~ "id=" and tag =~ "phx-change"}
+        end
+      end)
+    end
+
+    # The markup a file holds and not its prose: `core_components.ex`'s moduledoc names
+    # `<.form>` in a sentence, and reading that as a form made every `<.input>` after it part of
+    # its body. A template is markup whole; in Elixir, markup is what sits inside `~H"""`.
+    defp markup(path) do
+      source = File.read!(path)
+      if Path.extname(path) == ".heex", do: source, else: heex_sigils(source)
+    end
+
+    defp heex_sigils(source) do
+      source
+      |> String.split(~s(~H"""))
+      |> Enum.drop(1)
+      |> Enum.map_join("\n", fn chunk -> chunk |> String.split(~s(""")) |> hd() end)
+    end
+
+    # Each form's opening tag and the markup inside it. HTML forms do not nest, so the first
+    # close after a form is that form's; `<form>` and `<.form>` are both counted.
+    defp forms(markup) do
+      markup
+      |> String.split(~r/<\.?form(?=[\s>])/)
+      |> Enum.drop(1)
+      |> Enum.map(fn chunk ->
+        [form | _rest] = String.split(chunk, ~r/<\/\.?form>/, parts: 2)
+        tag_and_body(form)
+      end)
+    end
+
+    # A box is a textarea or an input a person types into. A `<.input>` with no `type` is a text
+    # field, which is why the absent case counts; a select, a radio and a hidden field do not,
+    # because there is nothing typed in them to lose.
+    defp holds_a_box?(body) do
+      Enum.any?(fields(body), fn
+        {"textarea", _attrs} -> true
+        {"message_box", _attrs} -> true
+        {"select", _attrs} -> false
+        {"input", attrs} -> attribute(attrs, "type") in [nil | ~w(text email password url number)]
+      end)
+    end
+
+    defp fields(body) do
+      ~r/<(?:\.|[A-Z][\w.]*\.)?(input|textarea|select|message_box)(?=[\s\/>])/
+      |> Regex.scan(body, return: :index)
+      |> Enum.map(fn [{at, len}, {name_at, name_len}] ->
+        rest = binary_part(body, at + len, byte_size(body) - at - len)
+        {binary_part(body, name_at, name_len), rest |> tag_and_body() |> elem(0)}
+      end)
+    end
+
+    defp attribute(tag, name) do
+      case Regex.run(~r/#{name}="([^"]*)"/, tag) do
+        nil -> nil
+        [_whole, value] -> value
+      end
+    end
+
+    # A tag ends at the first `>` outside a HEEx `{…}`, which is where `value={"write-#{@name}"}`
+    # and `phx-change={JS.push(…)}` would otherwise cut it short.
+    defp tag_and_body(chunk), do: tag_and_body(chunk, 0, 0)
+
+    defp tag_and_body(chunk, _depth, index) when index >= byte_size(chunk), do: {chunk, ""}
+
+    defp tag_and_body(chunk, depth, index) do
+      case {binary_part(chunk, index, 1), depth} do
+        {"{", _} ->
+          tag_and_body(chunk, depth + 1, index + 1)
+
+        {"}", _} ->
+          tag_and_body(chunk, depth - 1, index + 1)
+
+        {">", 0} ->
+          {binary_part(chunk, 0, index), binary_part(chunk, index, byte_size(chunk) - index)}
+
+        _other ->
+          tag_and_body(chunk, depth, index + 1)
+      end
+    end
   end
 end

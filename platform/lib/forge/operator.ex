@@ -203,15 +203,42 @@ defmodule Forge.Operator do
     end
   end
 
-  @doc "Writes a new version of a document, authored by the user."
-  @spec edit(Ticket.t(), User.t(), String.t(), String.t()) :: {:ok, Ticket.t()} | {:error, term()}
-  def edit(%Ticket{} = ticket, %User{} = user, name, content) do
+  @doc """
+  Writes a new version of a document, authored by the user.
+
+  `base` is the version the writer had in front of them, as a string — `"0"` for a document with
+  no version yet, and `nil` from a caller with no page that could have gone stale, which is the
+  API and the mix task. A write whose base is not the latest version any more is refused whole
+  rather than landing on top of whatever arrived in between (`docs/design/ui.md` § A reconnect is
+  not a reload). It guards an accident, not a member who means it: anybody who may write here may
+  reload and write the same content again.
+  """
+  @spec edit(Ticket.t(), User.t(), String.t(), String.t(), String.t() | nil) ::
+          {:ok, Ticket.t()} | {:error, term()}
+  def edit(%Ticket{} = ticket, %User{} = user, name, content, base \\ nil) do
     with :ok <- allow(ticket, user, :use),
          {:ok, _version} <-
-           Artifacts.record_version(ticket.id, name, :document, {:user, user.id}, %{
-             content: content
-           }) do
+           Forge.Repo.transact(fn -> write_version(ticket, user, name, content, base) end) do
       notify(ticket)
+    end
+  end
+
+  # Read inside the transaction that writes, so what is checked is what is overwritten.
+  defp write_version(ticket, user, name, content, base) do
+    with :ok <- current?(ticket, name, base) do
+      Artifacts.record_version(ticket.id, name, :document, {:user, user.id}, %{content: content})
+    end
+  end
+
+  defp current?(_ticket, _name, nil), do: :ok
+
+  defp current?(ticket, name, base) do
+    case Artifacts.latest(ticket.id, name) do
+      nil ->
+        if base in ["0", ""], do: :ok, else: {:error, {:stale_document, name, 0}}
+
+      %{version: v} ->
+        if to_string(v) == base, do: :ok, else: {:error, {:stale_document, name, v}}
     end
   end
 

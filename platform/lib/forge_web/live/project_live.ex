@@ -109,6 +109,10 @@ defmodule ForgeWeb.ProjectLive do
   # Typing into a proposal's comment or choosing its type (`ForgeWeb.Operator.Drafts`). This page
   # does not route through `ForgeWeb.Operator.Actions`, so it carries the clause itself.
   @impl true
+  # Both answers are the same answer here — the draft is held, or the payload named no form and
+  # there was nothing to hold — and neither needs a reload. The `:unknown` arm is answered
+  # rather than matched on purpose: the payload is off the wire, and a crafted one naming no
+  # form would otherwise take the page down with a match error.
   def handle_event("draft:change", params, socket) do
     case Drafts.handle("draft:change", params, socket) do
       {:state, socket} -> {:noreply, socket}

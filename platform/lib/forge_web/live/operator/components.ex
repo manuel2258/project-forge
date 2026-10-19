@@ -228,6 +228,11 @@ defmodule ForgeWeb.Operator.Components do
   attr :drafts, :map, required: true, doc: "the page's `:drafts` assign"
 
   def approval_card(assigns) do
+    # One name for the draft, because three places have to agree on it: the form's `id`, the
+    # hidden field the change event carries it in, and the lookup the box is drawn from. Three
+    # interpolated literals is three chances for the draft to stop coming back, silently.
+    assigns = assign(assigns, :draft, "approve-#{assigns.ticket.id}")
+
     ~H"""
     <div class="flex flex-col gap-[11px]" id={"approval-#{@ticket.id}"}>
       <p class="text-sm/[1.55] opacity-70">
@@ -266,17 +271,17 @@ defmodule ForgeWeb.Operator.Components do
             them the client has no form to copy and replay, and the new mount draws the box
             empty (`ForgeWeb.Operator.Drafts`). --%>
       <form
-        id={"approve-#{@ticket.id}"}
+        id={@draft}
         phx-change="draft:change"
         phx-submit="decide"
         class="flex flex-col gap-2"
       >
-        <input type="hidden" name="draft" value={"approve-#{@ticket.id}"} />
+        <input type="hidden" name="draft" value={@draft} />
         <input type="hidden" name="ticket" value={@ticket.id} />
         <ForgeWeb.Conversations.message_box
           id={"approval-comment-#{@ticket.id}"}
           name="comment"
-          value={Drafts.field(@drafts, "approve-#{@ticket.id}", "comment")}
+          value={Drafts.field(@drafts, @draft, "comment")}
           enter={:newline}
           placeholder="comment (optional)"
           aria-label="Comment on this approval"
@@ -502,17 +507,31 @@ defmodule ForgeWeb.Operator.Components do
   attr :latest, :map, default: nil
   attr :drafts, :map, required: true, doc: "the page's `:drafts` assign"
 
+  # `phx-debounce` here is an equivalent mutant: it decides how often the client pushes while
+  # somebody is typing, and no ExUnit test can press a key. It matches `message_box/1`, which
+  # every other box in the operator's surfaces is drawn with.
   def document_editor(assigns) do
+    assigns = assign(assigns, :draft, "write-#{assigns.name}")
+
     ~H"""
     <form
       phx-submit="write_document"
       phx-change="draft:change"
-      id={"write-#{@name}"}
+      id={@draft}
       class="flex flex-col gap-2"
     >
-      <input type="hidden" name="draft" value={"write-#{@name}"} />
+      <input type="hidden" name="draft" value={@draft} />
       <input type="hidden" name="ticket" value={@ticket.id} />
       <input type="hidden" name="name" value={@name} />
+      <%!-- The version this box was drawn from, read back out of the draft once anything is
+            typed: the draft holds every field of the form, so this stays the version the text
+            was written against even after a later one arrives and the page reloads. The save is
+            refused when it is no longer the latest (`ForgeWeb.Operator.Actions`). --%>
+      <input
+        type="hidden"
+        name="base"
+        value={Drafts.field(@drafts, @draft, "base", version_of(@latest))}
+      />
       <label for={"write-#{@name}-content"} class="font-mono text-[12.5px]">
         {@name}
         <span :if={@latest} class="opacity-60">v{@latest.version}</span>
@@ -525,7 +544,7 @@ defmodule ForgeWeb.Operator.Components do
         required
         phx-debounce="200"
         class="w-full rounded-field border border-base-300 bg-transparent px-3 py-2 text-sm placeholder:opacity-40 focus:outline-none focus:border-base-content/40"
-      >{Drafts.field(@drafts, "write-#{@name}", "content", @latest && @latest.content)}</textarea>
+      >{Drafts.field(@drafts, @draft, "content", @latest && @latest.content)}</textarea>
       <button
         type="submit"
         phx-disable-with="Saving…"
@@ -724,6 +743,11 @@ defmodule ForgeWeb.Operator.Components do
   # suggestion until they do. `Drafts.field/4` cannot carry the fallback here, because choosing
   # the empty option is a choice — *Choose a type*, deliberately back to nothing — and a draft
   # holding `""` must beat the suggestion rather than fall through to it.
+  # The version a document editor was drawn from, as its hidden field carries it: `"0"` when
+  # there is none, so a first write and a write over somebody else's first write are told apart.
+  defp version_of(nil), do: "0"
+  defp version_of(%{version: version}), do: to_string(version)
+
   defp chosen(drafts, proposal) do
     case Drafts.field(drafts, "propose-#{proposal.version_id}", "ticket_type", nil) do
       nil -> proposal[:suggested]

@@ -94,8 +94,12 @@ defmodule ForgeWeb.Operator.Actions do
 
   # A document a human state declares, written from the ticket's Decide tab. The same write the
   # API's `POST …/artifacts/:name` makes (`docs/design/workflow-grammar-v1.md` § Semantics).
-  defp act("write_document", %{"ticket" => id, "name" => name, "content" => content}, socket) do
-    with {:ok, ticket} <- Operator.edit(ticket(id), user(socket), name, content) do
+  # `base` is the version the draft in the box was typed against, which the form carries in a
+  # hidden field and the draft therefore holds from the moment anything is typed. Without it a
+  # draft typed against v3 would land as v5 over somebody else's v4, silently
+  # (`docs/design/ui.md` § A reconnect is not a reload).
+  defp act("write_document", %{"ticket" => id, "name" => name, "content" => content} = p, socket) do
+    with {:ok, ticket} <- Operator.edit(ticket(id), user(socket), name, content, p["base"]) do
       {:ok, "Saved #{name}; #{ticket.state} is where it waits"}
     end
   end
@@ -125,6 +129,12 @@ defmodule ForgeWeb.Operator.Actions do
   defp describe({:job_live, state}), do: "a job for #{state} is still live"
   defp describe({:invalid_document, errors}), do: ForgeCore.Error.format(errors)
   defp describe(:nothing_pending), do: "nothing awaits approval"
+
+  defp describe({:stale_document, name, version}),
+    do:
+      "#{name} is at v#{version} now, written since this page was drawn; nothing was saved, " <>
+        "and the box still holds what you typed"
+
   defp describe(:no_such_transition), do: "no such transition"
   defp describe({:no_version, name}), do: "#{name} has no version to approve"
   defp describe({:no_job_in, state}), do: "no job runs in #{state}"

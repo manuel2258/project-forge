@@ -73,9 +73,9 @@ defmodule Forge.Jobs do
   `came_back: true` says a transition is creating the job, as opposed to a person asking for the
   state again. The engine passes it on every transition, a state's first entry included, and
   whether there is anything to come back to is `forkable/4`'s: a new attempt forks its
-  predecessor's harness session when that one finished with an outcome it declared, left a
-  session to fork, and was given the same instructions (`docs/design/claude-code-events.md`
-  § Resume).
+  predecessor's harness session when that one finished with an outcome it declared or by running
+  out of budget, left a session to fork, and was given the same instructions
+  (`docs/design/claude-code-events.md` § Resume).
   """
   @spec put_create(
           Multi.t(),
@@ -292,8 +292,17 @@ defmodule Forge.Jobs do
   end
 
   # The previous attempt of the state, if it is one a new attempt may fork: it finished having
-  # converged — its agent declared an outcome — and left a session and the file to restore it
-  # from. An attempt that ended any other way is not carried on from.
+  # converged — its agent declared an outcome — or having run out of budget, and left a session
+  # and the file to restore it from. An attempt that ended any other way is not carried on from.
+  #
+  # **A budget stop is carried on from; `error`, `did_not_converge` and `cancelled` are not.**
+  # Each of those three says something about the work — the run broke, the agent could not reach
+  # an outcome, a person stopped it — and forking one carries that into the attempt meant to
+  # escape it. A budget stop says nothing about the work: the instructions were the same and the
+  # agent concluded nothing, it only ran out of room, so the fork's rule below still holds and
+  # the context the first attempt paid for is the thing worth keeping
+  # (`docs/design/claude-code-events.md` § Resume). What bounds a second attempt spending a
+  # second budget the same way is `max: 1` on the `budget_exhausted` self-loop, not this.
   #
   # **And it was given the same instructions.** A fork remembers the prompt its session began
   # with and is told its instructions are the ones it was given, so a re-pin that moved the
@@ -304,7 +313,7 @@ defmodule Forge.Jobs do
   defp forkable(repo, ticket_id, state_name, %Spec{attempt: attempt} = spec) do
     from(j in previous_attempt(ticket_id, state_name, attempt),
       where:
-        j.status == :finished and j.outcome == :converged and
+        j.status == :finished and j.outcome in [:converged, :budget_exhausted] and
           not is_nil(j.harness_session_id) and not is_nil(j.session_blob),
       select: j.id
     )

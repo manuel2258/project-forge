@@ -156,19 +156,38 @@ defmodule ForgeCore.Prompt do
   # A fork: the session is the previous attempt's, and the job is a new one. The one thing it
   # must not carry over is the belief that its outputs are written — they were the last
   # attempt's, and this attempt's `out/` is empty.
-  defp opening(%Spec{state: state, attempt: attempt}, true) do
+  #
+  # **A budget stop did not go anywhere**, so it gets its own first paragraph: a state's
+  # `budget_exhausted` self-loop sends the ticket from itself to itself, and telling that attempt
+  # the ticket "went on from here and has come back" is false. What it is told instead is the
+  # thing the fork is for and the thing it risks (`docs/design/claude-code-events.md` § Resume):
+  # the reading is already done, and spending a second budget the way the first went spends the
+  # ticket's money twice for nothing. The outputs paragraph is the same either way — a run that
+  # wrote a document before the harness stopped it had that document kept as a version like any
+  # other (`Forge.Jobs.put_documents/4` records them whatever the outcome).
+  defp opening(%Spec{state: state, attempt: attempt, entered: entered}, true) do
     """
     # A new attempt of `#{state}`
 
     This is attempt #{attempt} of `#{state}`, and the session you are in is attempt
-    #{attempt - 1}'s: what you remember is what you did then. The ticket went on from here and
-    has come back — *How you got here* in the manifest below says from where and why — and your
-    instructions are the ones you were given.
+    #{attempt - 1}'s: what you remember is what you did then. #{back_again(state, entered)}
 
     **Nothing you wrote last time counts for this attempt.** Its outputs were kept as versions of
     their own; this attempt's output directory is empty, and every output the manifest declares
     is written again. Where the manifest differs from what you remember, the manifest is right.
     """
+  end
+
+  defp back_again(state, %{"from" => state, "outcome" => "budget_exhausted"}) do
+    "That attempt ran out of budget before it reached an outcome, so you are here again with " <>
+      "the same instructions and its work in front of you. The budget below is a fresh one, " <>
+      "and a workflow allows only so many: **reach a declared outcome inside it.** Nothing is " <>
+      "gained by reading again what you already remember reading."
+  end
+
+  defp back_again(_state, _entered) do
+    "The ticket went on from here and has come back — *How you got here* in the manifest below " <>
+      "says from where and why — and your instructions are the ones you were given."
   end
 
   # Every turn of a conversation is committed as it ends, so the tree is what the last turn left;

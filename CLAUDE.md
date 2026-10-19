@@ -99,6 +99,18 @@ died before compiling anything and again at "The database for Forge.Repo couldn'
 An operator's own Hex and postgres are left alone. Neither step relaxes a check: the suite runs
 against a real database either way.
 
+It also points `MIX_HOME` and `HEX_HOME` at `.mix-home/` and `.hex-home/` inside the checkout,
+ignored like `_build/` and so carried from one of a ticket's jobs to the next instead of
+reinstalled per job (`docs/design/worker-tier.md` § The ticket volume). Exported for the gate's
+own processes only; your `~/.mix` is not read and not written, and the first run after this
+builds `.mix-home/` once. **Export the same two before running `mix` by hand** — a job's `HOME`
+is its own and goes with the job, so `mix` outside the gate installs Hex again into a directory
+nothing will keep:
+
+```
+export MIX_HOME="$PWD/.mix-home" HEX_HOME="$PWD/.hex-home"
+```
+
 `platform/priv/git-hooks/` holds the generated git hooks; the gate lints them with the rest of the
 shell.
 

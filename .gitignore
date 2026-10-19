@@ -22,6 +22,11 @@ result-*
 erl_crash.dump
 *.ez
 
+# Mix's and Hex's own caches, which `bin/check` points here rather than under $HOME so that a
+# ticket's next job inherits them (docs/design/worker-tier.md § The ticket volume).
+/.mix-home/
+/.hex-home/
+
 # Measurement harness scratch and results (docs/design/measurement-harness.md)
 .measure/
 

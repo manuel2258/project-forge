@@ -665,6 +665,13 @@ this measured 343 MB fetched per job. Pointing the cache at a
 directory outside the checkout, which is the obvious fix, is the one that loses it — nothing
 outside the checkout and the Nix store survives a job.
 
+Forge itself is the worked example, in `bin/check`: Mix installs Hex into `MIX_HOME` and Hex
+caches the registry and every tarball it downloads in `HEX_HOME`, both under `$HOME` by default,
+so each job reinstalled Hex and refetched the registry however warm its `deps/` and `_build/`
+were. The gate exports both into the checkout — `.mix-home/` and `.hex-home/`, ignored beside the
+build directories — for its own processes only, so an operator's `~/.mix` is neither read nor
+written.
+
 What this deliberately does not do is move warmth *between* tickets. When a ticket merges, its
 volume is the best possible starting point for the next ticket on that machine, and promoting it
 to be the project's local base is the obvious next step — and a separate one, because it needs a

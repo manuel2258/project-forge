@@ -34,6 +34,8 @@ defmodule Forge.SessionCarryTest do
     - { from: implementing,  to: reviewing }
     - { from: reviewing,     to: review_ready }
     - { from: reviewing,     to: implementing, when: changes_requested, max: 3 }
+    - { from: implementing,  to: implementing, when: budget_exhausted,   max: 1 }
+    - { from: implementing,  to: implementing, when: did_not_converge,   max: 1 }
   limits:
     ticket_cost: 25.00
   """
@@ -214,6 +216,84 @@ defmodule Forge.SessionCarryTest do
       again = FakeWorker.assign(Jobs.get!(second.id), context.worker)
       assert again["resume_session"] == "sess-impl-2"
       assert again["fork_session"] == false
+    end
+
+    # The retry lap: the state's own `budget_exhausted` self-loop — which every state in
+    # `.forge/workflows/dev.yml` has — sends the ticket back into the state it just ran out of
+    # budget in, and the second attempt starts with the first's conversation instead of paying
+    # again for the reading that produced it. The three outcomes that still start fresh are the
+    # tests below and after.
+    test "after one that ran out of budget forks its session", context do
+      assignment = context.ticket |> pending() |> FakeWorker.assign(context.worker)
+
+      {:ok, first} =
+        FakeWorker.finish(assignment, "max_budget", harness: uploaded(assignment, "sess-impl"))
+
+      assert first.outcome == :budget_exhausted
+
+      ticket = Tickets.get!(context.ticket.id)
+      assert %{state: "implementing", status: :active} = ticket
+
+      second = pending(ticket)
+      assert second.attempt == 2
+      assert second.resume_from_id == first.id
+
+      resumed = FakeWorker.assign(second, context.worker)
+      assert resumed["resume_session"] == "sess-impl"
+      assert resumed["fork_session"] == true
+      assert resumed["session"]["key"] == assignment["store"]["session_prefix"] <> "1.jsonl"
+    end
+
+    # The self-loop's `max: 1` is what bounds a budget stop that repeats, and it is the bound the
+    # fork rule leans on rather than replacing: the second attempt running out too is stuck, not
+    # a third fork.
+    test "that ran out of budget twice is not given a third", context do
+      assignment = context.ticket |> pending() |> FakeWorker.assign(context.worker)
+      {:ok, _first} = FakeWorker.finish(assignment, "max_budget", harness: uploaded(assignment))
+
+      second = Tickets.get!(context.ticket.id) |> pending() |> FakeWorker.assign(context.worker)
+      {:ok, _second} = FakeWorker.finish(second, "max_budget", harness: uploaded(second))
+
+      assert %{state: "implementing", status: :stuck} = Tickets.get!(context.ticket.id)
+    end
+
+    # The sibling self-loop, and the line budget stops are on the other side of: `dev.yml` sends a
+    # state back into itself on `did_not_converge` too, and that attempt starts cold. The agent
+    # reached no outcome, so whatever stopped it reaching one is in the session a fork would
+    # carry.
+    test "after one that reported it did not converge starts fresh", context do
+      assignment = context.ticket |> pending() |> FakeWorker.assign(context.worker)
+      written = %{"implementation.md" => "---\noutcome: did_not_converge\n---\n# I\n"}
+
+      {:ok, first} =
+        FakeWorker.finish(assignment, "success",
+          written: written,
+          harness: uploaded(assignment, "sess-impl")
+        )
+
+      assert first.outcome == :did_not_converge
+      assert Jobs.get!(first.id).session_blob, "there was a session to fork, and it was not"
+
+      ticket = Tickets.get!(context.ticket.id)
+      assert %{state: "implementing", status: :active} = ticket
+      assert pending(ticket).resume_from_id == nil
+    end
+
+    # Criterion-for-criterion, the rest of what stays out. The predecessor is written to the
+    # outcome under test rather than driven to it — `cancelled` has no came_back path of its own
+    # (a cancelled ticket is restored `stuck`, and *Run again* does not fork), so the row is the
+    # only way to put `forkable/4` in front of one. Add any of these three to its `in` list and
+    # the case for it fails.
+    for outcome <- [:did_not_converge, :error, :cancelled] do
+      test "after one recorded #{outcome} starts fresh", context do
+        {ticket, first, _} = run(context.ticket, context.worker, "implementation.md", "done")
+        first |> Ecto.Changeset.change(outcome: unquote(outcome)) |> Repo.update!()
+
+        {ticket, _review, _} = run(ticket, context.worker, "review.md", "changes_requested")
+
+        assert ticket.state == "implementing"
+        assert pending(ticket).resume_from_id == nil
+      end
     end
 
     # A fork remembers the instructions its session began with, and is told they are its own. A

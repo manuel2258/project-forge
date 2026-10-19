@@ -86,16 +86,29 @@ defmodule Forge.Git do
       {"GIT_COMMITTER_EMAIL", "forge@localhost"}
     ]
 
-    # `hash-object -w -t tree /dev/null` writes the empty tree and prints its id. `mktree` would
-    # want it on stdin, and `run/3` has no stdin to give — nor should it grow one for this. The
-    # empty tree's id is also a well-known constant, and is deliberately not hard-coded here:
-    # it is only constant for SHA-1, and a repository can be SHA-256.
-    with {:ok, tree} <- run(repo, ["hash-object", "-w", "-t", "tree", "/dev/null"], env: env),
-         {:ok, sha} <-
-           run(repo, ["commit-tree", String.trim(tree), "-m", @root_message], env: env),
+    with {:ok, tree} <- empty_tree(repo),
+         {:ok, sha} <- run(repo, ["commit-tree", tree, "-m", @root_message], env: env),
          {:ok, _out} <-
            run(repo, ["update-ref", "refs/heads/" <> branch, String.trim(sha)], env: env) do
       :ok
+    end
+  end
+
+  @doc """
+  The empty tree, written into `repo` and named.
+
+  `hash-object -w -t tree /dev/null` writes it and prints its id. `mktree` would want it on
+  stdin, and `run/3` has no stdin to give — nor should it grow one for this. The empty tree's id
+  is also a well-known constant, and is deliberately not hard-coded here: it is only constant for
+  SHA-1, and a repository can be SHA-256.
+
+  Written rather than only named because both callers need the object to exist: a root commit is
+  made of it, and a root commit's diff is read against it.
+  """
+  @spec empty_tree(repo()) :: {:ok, sha()} | {:error, term()}
+  def empty_tree(repo) do
+    with {:ok, out} <- run(repo, ["hash-object", "-w", "-t", "tree", "/dev/null"]) do
+      {:ok, String.trim(out)}
     end
   end
 
@@ -258,7 +271,11 @@ defmodule Forge.Git do
   """
   @spec ls_dir(repo(), sha(), String.t()) :: {:ok, [map()]} | {:error, term()}
   def ls_dir(repo, sha, dir) do
-    with {:ok, out} <- run(repo, ["ls-tree", "-z", sha, "--", dir <> "/"], stderr: :separate) do
+    # The repository's root is no pathspec at all: `ls-tree -z <sha> -- "/"` is a path that
+    # matches nothing, not "everything at the top", so a root asked for with one came back empty.
+    pathspec = if dir == "", do: [], else: ["--", dir <> "/"]
+
+    with {:ok, out} <- run(repo, ["ls-tree", "-z", sha] ++ pathspec, stderr: :separate) do
       {:ok, out |> String.split(<<0>>, trim: true) |> Enum.map(&tree_entry/1)}
     end
   end
@@ -273,6 +290,36 @@ defmodule Forge.Git do
   defp tree_kind(_mode, "tree"), do: :tree
   defp tree_kind(_mode, "commit"), do: :commit
   defp tree_kind(_mode, _blob), do: :blob
+
+  @doc """
+  The repository's branches, by their short names, sorted.
+
+  `refs/heads/` only: this is what a person is offered to look at, and the platform's own
+  bookkeeping refs — `refs/forge/approved/*` and anything else outside `refs/heads/` — are not
+  branches anybody chooses.
+  """
+  @spec branches(repo()) :: {:ok, [String.t()]} | {:error, term()}
+  def branches(repo) do
+    args = ["for-each-ref", "--format=%(refname:short)", "refs/heads/"]
+
+    with {:ok, out} <- run(repo, args, stderr: :separate) do
+      {:ok, out |> String.split("\n", trim: true) |> Enum.sort()}
+    end
+  end
+
+  @doc """
+  How many bytes `path` holds at `sha`.
+
+  Asked before the content ever is, so a file past a caller's limit is never read into memory:
+  the cheapest guarantee that nothing is partially loaded is not to run `show/3` at all.
+  """
+  @spec blob_size(repo(), sha(), String.t()) :: {:ok, non_neg_integer()} | {:error, :not_found}
+  def blob_size(repo, sha, path) do
+    case run(repo, ["cat-file", "-s", "#{sha}:#{path}"], stderr: :separate) do
+      {:ok, out} -> {:ok, out |> String.trim() |> String.to_integer()}
+      {:error, _reason} -> {:error, :not_found}
+    end
+  end
 
   @doc "The paths under `pathspec` that differ from `base` to `head`, unquoted."
   @spec changed_paths(repo(), sha(), sha(), [String.t()]) ::
@@ -313,23 +360,63 @@ defmodule Forge.Git do
     with {:ok, out} <- run(repo, ["merge-base", a, b]), do: {:ok, String.trim(out)}
   end
 
+  # Sha, committer time and subject, unit-separated: a subject may hold anything but a newline,
+  # so the separator cannot be one of the characters it may hold.
+  @log_format "--format=%H%x1f%ct%x1f%s"
+
   @doc """
   The commits on `head` since `base`, newest first: sha, subject, and when each was committed.
   The same range as `commits_since/3`, with what a list of commits shows a person.
   """
   @spec log(repo(), String.t(), String.t(), keyword()) ::
-          {:ok, [%{sha: sha(), subject: String.t(), at: DateTime.t()}]} | {:error, term()}
+          {:ok, [commit()]} | {:error, term()}
   def log(repo, base, head, opts \\ []) do
     # `first_parent: true` is the line a branch's own merges make, and not what each brought in.
     first = if Keyword.get(opts, :first_parent, false), do: ["--first-parent"], else: []
 
     with {:ok, out} <-
-           run(repo, ["log", "--format=%H%x1f%ct%x1f%s"] ++ first ++ ["#{base}..#{head}"],
-             stderr: :separate
-           ) do
-      {:ok, out |> String.split("\n", trim: true) |> Enum.flat_map(&log_line/1)}
+           run(repo, ["log", @log_format] ++ first ++ ["#{base}..#{head}"], stderr: :separate) do
+      {:ok, commits(out)}
     end
   end
+
+  @typedoc "A commit as a list of them shows it."
+  @type commit :: %{sha: sha(), subject: String.t(), at: DateTime.t()}
+
+  @doc """
+  One page of `ref`'s own history, newest first: `limit` commits from `skip`, and whether there
+  are more behind them.
+
+  A single ref rather than a range — this is the whole branch, not what one branch added — and
+  one row more than `limit` is asked of git so that `more` is known without a second counting
+  pass over every commit in the repository. The extra row is trimmed before it is returned.
+  """
+  @spec history(repo(), String.t(), non_neg_integer(), pos_integer()) ::
+          {:ok, %{commits: [commit()], more: boolean()}} | {:error, term()}
+  def history(repo, ref, skip, limit) do
+    args = ["log", @log_format, "--skip=#{skip}", "--max-count=#{limit + 1}", ref]
+
+    with {:ok, out} <- run(repo, args, stderr: :separate) do
+      commits = commits(out)
+      {:ok, %{commits: Enum.take(commits, limit), more: length(commits) > limit}}
+    end
+  end
+
+  @doc """
+  The first parent of `sha`, or `{:error, :no_parent}` for a root commit.
+
+  First parent only, which is what a merge commit's own diff is read against — the same reading
+  `log/4`'s `first_parent: true` takes of a branch.
+  """
+  @spec parent(repo(), sha()) :: {:ok, sha()} | {:error, :no_parent}
+  def parent(repo, sha) do
+    case run(repo, ["rev-parse", "--verify", "--quiet", sha <> "^"]) do
+      {:ok, out} -> {:ok, String.trim(out)}
+      {:error, _reason} -> {:error, :no_parent}
+    end
+  end
+
+  defp commits(out), do: out |> String.split("\n", trim: true) |> Enum.flat_map(&log_line/1)
 
   # A line that is not one of ours is skipped rather than raised on: the list is for reading,
   # and a page that shows it should not be the thing a surprise from git takes down.

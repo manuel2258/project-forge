@@ -165,6 +165,8 @@ measure; each route sets its own:
 | `/workers/:id` | 74rem | One machine: its header line and its log, newest first. The workers page's measure, because it is that page's row, looked at alone. |
 | `/templates` | 60rem | Two lists with a form each — provider credentials, then templates. Not one wide table, so narrower than `/workers`; a template row carries its shape, figures, count and actions, and wraps where they do not fit. |
 | `/projects/:name/settings` | 48rem | Forms and tables — tokens, people, mirrors. Narrower loses the row; wider is a rail with nothing to put in it. |
+| `/projects/:name/repo` | 74rem | The repository the project holds: a branch picker, then either its commit list or its file tree, a file's content opened in place. The same reasoning as `…/review` — content needs the width, and there is no rail with anything to put in it, so no second column. |
+| `/projects/:name/repo/commits/:sha` | 74rem | One commit, drawn by the same diff component the review page draws. Its page's measure, for its reason. |
 | `/tickets/:project/:number` | 74rem | A work screen (§ The work screen): 53rem tabbed column plus a 21rem facts rail, divided by a 1px rule. Below `lg` the rail is the details sheet, opened from the context strip. |
 | `…/review` | 74rem | Not a work screen: a page that scrolls, its column beside a 21rem rail at `lg` and above it below. The diff needs the width; the rail carries the evidence. |
 | `…/jobs/:job_id` | 96rem | Laid out as the review page is, wider: its column is the harness stream, whose lines are an agent's paragraphs and commands, and at 74rem the column beside the 21rem rail left them a ribbon. A command's page is the same route and takes the same width, its script in the column. Manifest in the rail, the harness stream in the column — a bounded pane, since no tab body bounds it here — tailed while the job runs (§ Motion and structure). Under the outcome, and only when memory was the trouble, the `warning` line `capacity.md` § Memory describes. A job whose runs held project secrets has a *secrets* row in the manifest, a line per run — *`STRIPE_TEST_KEY` v2, `SENTRY_TOKEN` v1* — by name and version, never a value. |
@@ -874,6 +876,10 @@ and a type that does not parse as its reason beside the ones that do. What `.for
 holds that is not a type is listed with why, since it blocks nothing and would otherwise be
 invisible (`ticket-types.md` § The project page).
 
+**It links to the repository it holds** — `Repository ›` in the header, beside Settings. The
+page says what the repository means to the platform; what is actually in it is
+§ The project's repository.
+
 **It lists the project's conversations, live ones first.** The board is the workflow and a
 conversation is not on it — it has no state to be in — so without this a chat is a thing you can
 start from the page and then cannot find from the page. Live first because that is the one that
@@ -1258,6 +1264,66 @@ name.
 Serving raw bytes is what the route does *today*, not what the path means. When the
 margin-questions view lands it takes this route's HTML representation and raw moves behind a
 parameter; the address of a version does not change.
+
+## The project's repository
+
+`/projects/:name/repo` is the repository itself, reached from `Repository ›` in the project
+page's header beside Settings. The project page says what the repository *contains* for the
+platform — the clone URL, the default branch, the workflow it holds — and answered nothing about
+the code: what landed last week, and what the tree looks like now. Reading either meant cloning.
+
+It is membership-scoped like every other project read, through the same
+`ForgeWeb.Access.project_by_name!/2` guard the project page uses, and a non-member gets the miss
+a project that does not exist gets (`design/identity.md` § Projects and members). There is no
+admin distinction: a member may already clone the whole repository with a read token, so a page
+that shows them less would be a lock on the window beside an open door.
+
+**A branch picker chooses what is being looked at**, from `refs/heads/` and nothing else — the
+platform's own refs under `refs/forge/*` are bookkeeping, not somewhere to look. The project's
+default branch is selected on first load. An unknown branch in the address falls back to the
+default rather than failing, so a stale link lands somewhere real. Choosing a branch is all the
+picker does: nothing here creates, moves, deletes or merges one.
+
+**Two tabs, both in the address: Commits and Files.** The branch, the tab and the page are the
+only state the view holds that is not read from the repository, so all three are in the query
+string and every control patches it — the page is bookmarkable at any depth and survives a
+reload.
+
+- **Commits** is the branch's own history, newest first, thirty to a page, with `Older ›` and
+  `‹ Newer`. Thirty because a repository with thousands of commits must never load them all, and
+  paging because every commit still has to be reachable. The page is by position (`--skip`), not
+  by a cursor: a commit landing between two loads shifts what a page points at by one, which is
+  the cost of not holding a cursor the ticket did not ask for.
+- **Files** is the selected branch's head as a tree. A directory is read when it is opened and
+  not before, so a repository with ten thousand files costs the same as one with ten until
+  somebody goes looking; reopening one already read draws it from what the page holds rather than
+  asking git again. It is **plain identifier text** — mono, no colour, no icons — the way the
+  rest of the product draws a path, and a folder is told from a file by the `▸` it carries and
+  nothing else.
+
+**A file opens in place, as plain text, and only when it is small enough.** Its size is asked of
+git before its content ever is, so a file at or over **512 KB** says so instead and is never
+partially loaded. A **binary** file is listed by name and its content is never rendered — not
+garbled, not previewed, not offered as a download. Neither limit is a failure the page reports:
+both are the row saying what the file is.
+
+**No syntax colouring, by language or by anything else.** Settled on this ticket by the person who
+answered it, and consistent with § Colour: colour in this product carries one of three meanings,
+and none of them is "this word is a keyword".
+
+**Opening a commit is its own page**, `/projects/:name/repo/commits/:sha`: the commit's identifier
+line, then the files it changed and the patch in each, drawn by `ForgeWeb.Diff.section/1` — the
+same component the review page draws, so a binary file in a commit already reads *binary* with no
+attempted content. A commit is shown against its first parent, and a root commit against the
+empty tree, so the first commit in a repository opens like any other. Two arbitrary commits are
+not diffed against each other; only a commit's own change. The back link carries the branch and
+the page it was opened from, so returning lands where the reader was rather than at the top.
+
+**Nothing here writes to the repository.** Every read is `for-each-ref`, `log`, `ls-tree`,
+`cat-file` or `rev-parse` against a bare repository — no worktree, no checkout, no ref ever moved.
+A path or a branch name from the address is resolved by git against its own trees and refs, never
+against the filesystem, so `..` in either does not escape anything: it matches nothing and the
+page reads it as not found, like any other typo.
 
 ## Not built yet
 

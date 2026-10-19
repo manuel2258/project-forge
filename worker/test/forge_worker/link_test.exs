@@ -859,6 +859,26 @@ defmodule ForgeWorker.LinkTest do
       refute File.dir?(Path.join([root, "volumes", "ticket", "1"]))
     end
 
+    # The second of criterion 1's three endings: the run fails on its own, with the tree dirty.
+    # It reaches `keep/4` through the same join as a converged one, so this is cover by
+    # construction rather than a separate path — but the criterion names the ending, and an
+    # argument is not a test.
+    test "a failed run leaves the ticket branch where it found it too", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      before = git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"])
+      job = reviewing(origin, scenario: "dirties_then_fails")
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      {%{"job_id" => ^job_id, "result" => result}, _events} = take_push("result")
+
+      refute result["outcome"] == "converged"
+      assert git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"]) == before
+    end
+
     # Criterion 1 names three endings — converged, failed, and killed partway through with the
     # tree left dirty. The test above drives the first; this drives the third, which is the
     # ticket's own reproduction: a review stopped from outside between breaking the code and

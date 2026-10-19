@@ -417,4 +417,12 @@ case "${FAKE_SCENARIO:-success}" in
     printf 'scratch\n' > SCRATCH.md
     sleep 60
     ;;
+  # And the third ending the criteria name: the tree broken and the run then failing on its own.
+  # No document, so the job cannot converge however the commit went.
+  dirties_then_fails)
+    printf 'mutated by the reviewer\n' >> README.md
+    printf 'scratch\n' > SCRATCH.md
+    emit '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":2,"duration_ms":9,"total_cost_usd":0.02,"session_id":"sess-42"}'
+    exit 1
+    ;;
 esac

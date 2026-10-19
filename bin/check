@@ -43,14 +43,18 @@ if ! pg_isready -h localhost -p 5432 -q; then
   echo "==> postgres"
   pgroot="$(mktemp -d)"
   trap 'pg_ctl -D "$pgroot/data" -m immediate stop > /dev/null 2>&1 || true; rm -rf "$pgroot"' EXIT
-  # Scram over the loopback with the password `config/test.exs` already sends, and `trust` only
-  # on the unix socket, which lives in this private directory. A trusting superuser on 5432 is a
-  # shell for every other process on the machine — `COPY … FROM PROGRAM` runs as whoever runs
-  # the gate — and a shared command-pool machine is the case this whole block exists for.
+  # Scram over the loopback on a password made for this run, and `trust` only on the unix
+  # socket, which lives in this private directory. A trusting superuser on 5432 is a shell for
+  # every other process on the machine — `COPY … FROM PROGRAM` runs as whoever runs the gate —
+  # and a shared command-pool machine is the case this whole block exists for. A password out of
+  # `config/test.exs` would not help there: every job on such a machine has a checkout and could
+  # read it. This one exists only in this process and the directory that goes with the run.
   (
     umask 077
-    printf 'postgres\n' > "$pgroot/pw"
+    head -c 24 /dev/urandom | base64 | tr -d '\n=+/' > "$pgroot/pw"
   )
+  FORGE_TEST_DB_PASSWORD="$(cat "$pgroot/pw")"
+  export FORGE_TEST_DB_PASSWORD
   initdb -U postgres --auth-local=trust --auth-host=scram-sha-256 --pwfile="$pgroot/pw" \
     -D "$pgroot/data" > /dev/null
   rm -f "$pgroot/pw"

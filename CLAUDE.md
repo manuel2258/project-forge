@@ -96,8 +96,10 @@ the gate is not made.
 It installs Hex and starts a throwaway postgres on `localhost:5432` first, when the machine has
 neither — a command pool's machine has the devshell and nothing else, and without both the gate
 died before compiling anything and again at "The database for Forge.Repo couldn't be created".
-An operator's own Hex and postgres are left alone; the postgres it starts takes the password
-`config/test.exs` already sends rather than trusting the loopback, and goes when the run does.
+An operator's own Hex and postgres are left alone; the postgres it starts makes a password for
+that run and hands it to the suite in the environment, so that nothing else on a shared machine
+can authenticate — a committed password would be readable by every job with a checkout — and it
+goes when the run does.
 `mix deps.get` runs every time, in every project, which is the one of the three steps that
 writes to a checkout: it can rewrite `mix.lock` where `mix.exs` has moved on. None of them
 relaxes a check — the suite runs against a real database either way.

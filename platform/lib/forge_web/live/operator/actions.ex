@@ -41,9 +41,21 @@ defmodule ForgeWeb.Operator.Actions do
         {:handled, socket |> Drafts.forget(params["draft"]) |> put_flash(:info, message)}
 
       {:error, reason} ->
-        {:handled, put_flash(socket, :error, "Failed: #{describe(reason)}")}
+        {:handled,
+         socket |> refused(params, reason) |> put_flash(:error, "Failed: #{describe(reason)}")}
     end
   end
+
+  # A refusal leaves what was typed, and a stale document's base moves to the version that
+  # overtook it — so the Save that was refused once goes through when it is made again. Without
+  # that the base stayed the overtaken version and every later Save was refused in the same
+  # words: the text safe in the box, and no gesture that would send it. The refusal is the
+  # warning; repeating the gesture is the decision to write over what arrived
+  # (`docs/design/ui.md` § A reconnect is not a reload).
+  defp refused(socket, params, {:stale_document, _name, version}),
+    do: Drafts.put(socket, params["draft"], "base", to_string(version))
+
+  defp refused(socket, _params, _reason), do: socket
 
   defp act("decide", %{"ticket" => id, "decision" => decision} = params, socket) do
     decision = if decision == "rejected", do: :rejected, else: :approved
@@ -132,8 +144,8 @@ defmodule ForgeWeb.Operator.Actions do
 
   defp describe({:stale_document, name, version}),
     do:
-      "#{name} is at v#{version} now, written since this page was drawn; nothing was saved, " <>
-        "and the box still holds what you typed"
+      "#{name} is at v#{version} now, written since this page was drawn; nothing was saved. " <>
+        "What you typed is still in the box — save again to write it over v#{version}"
 
   defp describe(:no_such_transition), do: "no such transition"
   defp describe({:no_version, name}), do: "#{name} has no version to approve"

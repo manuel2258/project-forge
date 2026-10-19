@@ -81,6 +81,32 @@ defmodule ForgeWeb.Operator.Drafts do
   defp dispatch(_event, _params, _socket), do: :unknown
 
   @doc """
+  Puts one field of a held draft, leaving the rest of it alone.
+
+  For a field the page knows better than the form does after a refused submit — the version a
+  document was written against, once the refusal has said which version it is now. A form with
+  no draft held gets none: there is nothing to correct, and the form's own value is already
+  right.
+  """
+  @spec put(Phoenix.LiveView.Socket.t(), String.t() | nil, String.t(), String.t()) ::
+          Phoenix.LiveView.Socket.t()
+  def put(socket, form, name, value) when is_binary(form) do
+    case Map.fetch(drafts(socket), form) do
+      {:ok, held} ->
+        Component.assign(
+          socket,
+          :drafts,
+          Map.put(drafts(socket), form, Map.put(held, name, value))
+        )
+
+      :error ->
+        socket
+    end
+  end
+
+  def put(socket, _form, _name, _value), do: socket
+
+  @doc """
   Drops what a form held, after a submit that committed it. A `nil` form is every submit that
   came from no form of ours, which drops nothing.
   """

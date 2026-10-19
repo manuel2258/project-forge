@@ -346,13 +346,16 @@ gap the inventory records rather than one the rule excuses — and two of them a
 settles it and not the next agent: a secret's value or a password coming back means holding it
 in page state, which is a decision of its own (`docs/design/secrets.md`).
 
-**A draft the document moved under is refused, not merged.** The box keeps what was typed even
-across a reload, so a Save from it could land on top of a version somebody else wrote while it
-sat there — v5 from text written against v3, with v4's work gone from what the workflow reads.
-The editor sends the version its draft was written against and the write is refused whole when
-that is not the latest any more, which is the stale form's rule (§ Answering questions) applied
-to a document. Neither person loses anything silently: theirs is in the document, the operator's
-is still in the box, and the refusal says which version it is now.
+**A draft the document moved under is refused once, then saved on purpose.** The box keeps what
+was typed even across a reload, so a Save from it could land on top of a version somebody else
+wrote while it sat there — v5 from text written against v3, with v4's work gone from what the
+workflow reads. The editor sends the version its draft was written against, and the first Save
+after a newer version arrives is refused whole: the flash says which version it is now and that
+the text is still in the box. **Saving again writes it.** The refusal is the warning, and
+repeating the gesture is the decision to write over what arrived — a refusal with no way
+forward would leave the operator told their text was safe and holding no gesture that could
+send it, which is the same dead end as losing it. Nothing goes silently either way: the other
+version is in the document and named in the refusal, and the typed text never leaves the box.
 
 ## The queue item
 

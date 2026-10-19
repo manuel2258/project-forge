@@ -739,15 +739,15 @@ defmodule ForgeWeb.Operator.Components do
       else: "suggests #{type}, which is not a type here"
   end
 
-  # The type a proposal's select is drawn on: what the person chose if they chose, and the
-  # suggestion until they do. `Drafts.field/4` cannot carry the fallback here, because choosing
-  # the empty option is a choice — *Choose a type*, deliberately back to nothing — and a draft
-  # holding `""` must beat the suggestion rather than fall through to it.
   # The version a document editor was drawn from, as its hidden field carries it: `"0"` when
   # there is none, so a first write and a write over somebody else's first write are told apart.
   defp version_of(nil), do: "0"
   defp version_of(%{version: version}), do: to_string(version)
 
+  # The type a proposal's select is drawn on: what the person chose if they chose, and the
+  # suggestion until they do. `Drafts.field/4` cannot carry the fallback here, because choosing
+  # the empty option is a choice — *Choose a type*, deliberately back to nothing — and a draft
+  # holding `""` must beat the suggestion rather than fall through to it.
   defp chosen(drafts, proposal) do
     case Drafts.field(drafts, "propose-#{proposal.version_id}", "ticket_type", nil) do
       nil -> proposal[:suggested]

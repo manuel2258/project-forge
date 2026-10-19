@@ -487,6 +487,36 @@ defmodule ForgeWeb.ReconnectTest do
       assert view |> element(~s([id="write-test-report.md"])) |> render() =~ "typed against v1"
     end
 
+    # The refusal has to have a way out of it, or the operator is told their text is safe and
+    # holds no gesture that would send it: the base is drawn from the draft, so without this the
+    # second Save and every Save after it is refused in the same words, and the only thing that
+    # moves the base — a reload — is also the thing that empties the box.
+    test "writes the draft when the same Save is made again", %{
+      conn: conn,
+      project: project,
+      user: user,
+      ticket: ticket
+    } do
+      {:ok, _ticket} = Forge.Operator.edit(ticket, user, "test-report.md", "mine, v1\n")
+
+      path = ~p"/tickets/#{project.name}/#{ticket.number}?tab=decide"
+      {:ok, view, _html} = live(conn, path)
+      editor = ~s(form[id="write-test-report.md"])
+
+      view |> form(editor, %{"content" => "typed against v1\n"}) |> render_change()
+      {:ok, _ticket} = Forge.Operator.edit(ticket, user, "test-report.md", "theirs, v2\n")
+
+      assert view |> form(editor, %{"content" => "typed against v1\n"}) |> render_submit() =~
+               "save again to write it over v2"
+
+      # The same gesture, now a decision rather than an accident.
+      assert view |> form(editor, %{"content" => "typed against v1\n"}) |> render_submit() =~
+               "Saved test-report.md"
+
+      assert %{version: 3, content: "typed against v1\n"} =
+               Forge.Artifacts.latest(ticket.id, "test-report.md")
+    end
+
     # `Drafts.forget/2` is handed `params["draft"]`, and six events on this page carry no such
     # param: Repin, Retry, Integrate, Cancel, Restore and a hand-taken transition are all
     # `phx-click` buttons. A `forget/2` that cleared the map instead of nothing would wipe a
@@ -595,11 +625,33 @@ defmodule ForgeWeb.ReconnectTest do
 
     # Which components draw a box, to a fixpoint: one with box markup of its own, or one that
     # calls another that has. `message_box/1` is the first kind, `open_question/1` the second.
+    #
+    # Kept as a list of `{{file, name}, markup}` and not a map keyed by name: names are shared
+    # across modules — `render/1` is in twenty-one — and a map keeps whichever file the wildcard
+    # read last, dropping the box another module's definition of that name draws. A *call* is
+    # still matched by name alone, because resolving which module `<.name>` means would take the
+    # import graph, so the scan is deliberately generous: a name any module draws a box with
+    # counts as a box everywhere it is called. Generous shows up as an entry nobody can explain;
+    # the other direction hides a form, which is how `#model-form` sat unrecorded.
+    #
+    # **Keying it by name again is an equivalent mutant today, and kept anyway.** Run it: every
+    # test here still passes, because no shared name has a box-drawing definition sitting behind
+    # a non-box one — of the six shared names that are called, none draws a box at all, and the
+    # `render/1` that is read last draws one. It is written this way so that the next shared
+    # name cannot hide a form, which is the failure one level up from the one this attempt
+    # fixed. Do not write a test for it: the only one possible asserts by name, and a name is
+    # exactly what the mutation does not change.
     defp box_components(sources) do
-      bodies = Map.new(Enum.flat_map(sources, fn {_path, source} -> components(source) end))
+      bodies =
+        for {path, source} <- sources,
+            {name, body} <- components(source),
+            do: {{path, name}, body}
 
       Stream.iterate(MapSet.new(), fn known ->
-        for {name, body} <- bodies, holds_a_box?(body, known), into: MapSet.new(), do: name
+        for {{_path, name}, body} <- bodies,
+            holds_a_box?(body, known),
+            into: MapSet.new(),
+            do: name
       end)
       |> Stream.chunk_every(2, 1)
       |> Enum.find_value(fn [known, next] -> if MapSet.equal?(known, next), do: known end)

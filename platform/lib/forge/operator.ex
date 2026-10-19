@@ -235,7 +235,7 @@ defmodule Forge.Operator do
   defp current?(ticket, name, base) do
     case Artifacts.latest(ticket.id, name) do
       nil ->
-        if base in ["0", ""], do: :ok, else: {:error, {:stale_document, name, 0}}
+        if base == "0", do: :ok, else: {:error, {:stale_document, name, 0}}
 
       %{version: v} ->
         if to_string(v) == base, do: :ok, else: {:error, {:stale_document, name, v}}

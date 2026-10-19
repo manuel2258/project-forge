@@ -204,15 +204,37 @@ defmodule ForgeCore.Prompt do
     String.duplicate("`", max(3, longest + 1))
   end
 
-  defp branch_state(%Spec{branch: branch}, head) do
+  # **What a resume says about the tree depends on whether the state kept one.** A state that
+  # declares `changeset` had its tree committed and squashed when the run stopped, so the files
+  # are the ones it left. A state that declares none had its tree discarded — never committed,
+  # never pushed, never promoted as the ticket's template (`docs/design/git-hosting.md`
+  # § Non-fast-forward on a ticket branch) — so the worktree is the branch as it stands, and
+  # telling such an agent its files are as it left them is telling it something false about the
+  # one thing it is about to act on.
+  defp branch_state(%Spec{branch: branch} = spec, head) do
     at = if head, do: ", at `#{head}`", else: ""
+    where = "`#{branch}`#{at}, checked out in the worktree you are running in."
+
+    body =
+      if Spec.changeset?(spec) do
+        """
+        #{where} What the earlier run had
+        not committed was committed when it stopped, and a run's commits are squashed into one, so
+        the history may not be the one you remember; the files are what you left.
+        """
+      else
+        """
+        #{where} `changeset` is not one of
+        your outputs, so nothing of the earlier run's tree was kept: it was not committed and not
+        pushed, and this worktree is the branch as it stands rather than the files you left. Your
+        documents, and any command logs that came back with you, are what carried over.
+        """
+      end
 
     """
     ## Your branch
 
-    `#{branch}`#{at}, checked out in the worktree you are running in. What the earlier run had
-    not committed was committed when it stopped, and a run's commits are squashed into one, so
-    the history may not be the one you remember; the files are what you left.
+    #{body}
     """
   end
 
@@ -547,7 +569,7 @@ defmodule ForgeCore.Prompt do
 
   defp may_invoke(%Spec{may_invoke: grants}, _job_dir) when map_size(grants) == 0, do: ""
 
-  defp may_invoke(%Spec{may_invoke: grants}, job_dir) do
+  defp may_invoke(%Spec{may_invoke: grants} = spec, job_dir) do
     lines =
       grants
       |> Enum.sort_by(&elem(&1, 0))
@@ -565,11 +587,25 @@ defmodule ForgeCore.Prompt do
 
     To run them, write `#{Path.join(job_dir, "invoke.json")}` — a JSON array such as
     `[{"command": "build", "args": ["--release"]}, {"command": "test"}]` — and end your run
-    without writing your outputs. Your work is committed and pushed, the commands run against
-    that commit on another machine, and you are resumed with their exit statuses and logs. Ask
+    without writing your outputs. #{at_what(spec)} Ask
     for everything you need at once: every round is a resume. Run quick checks yourself; commands
     are for what is expensive, shared or decides whether the work is done.
     """
+  end
+
+  # The commit a command runs at is the push the run just made — but only a state that declares
+  # `changeset` makes one (`docs/design/commands.md` § The ensured commit). For any other state
+  # the commands run at the branch as the run found it, which is the one thing an agent deciding
+  # whether a command will see its edits needs to know.
+  defp at_what(%Spec{} = spec) do
+    if Spec.changeset?(spec) do
+      "Your work is committed and pushed, the commands run against " <>
+        "that commit on another machine, and you are resumed with their exit statuses and logs."
+    else
+      "`changeset` is not one of your outputs, so nothing of your tree is committed or pushed: " <>
+        "the commands run on another machine against `#{spec.branch}` as this run found it, " <>
+        "without your edits, and you are resumed with their exit statuses and logs."
+    end
   end
 
   defp command_results(%Spec{command_results: []}, _job_dir), do: ""

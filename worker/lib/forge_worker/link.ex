@@ -814,7 +814,7 @@ defmodule ForgeWorker.Link do
 
       case keep(changeset?, assignment, worktree, user) do
         {:ok, head} -> finish(assignment, root, worktree, result, head, changeset?, user)
-        {:error, reason} -> unpushed(result, reason)
+        {:error, reason} -> unpushed(result, reason, changeset?)
       end
     end
   end
@@ -841,7 +841,7 @@ defmodule ForgeWorker.Link do
   # cost the platform settles from a cancelled run's `hibernated` (`Jobs.hibernate/4`). The work
   # is the cancelled ticket's, and nobody is waiting for it. Any other run whose push failed has
   # lost its work, and fails.
-  defp unpushed(%Result{killed: :operator} = result, reason) do
+  defp unpushed(%Result{killed: :operator} = result, reason, _changeset?) do
     Logger.warning("a cancelled run's push was refused: #{inspect(reason)}")
 
     {:ok,
@@ -849,7 +849,12 @@ defmodule ForgeWorker.Link do
       %{"commit" => nil, "reason" => "cancelled", "result" => Result.to_map(result)}}}
   end
 
-  defp unpushed(_result, reason), do: {:error, {:push, reason}}
+  # **Named for what was actually attempted.** A no-`changeset` run never pushes, so the only way
+  # `keep/4` fails for one is `Workspace.base/3` not resolving the branch head — and reporting
+  # that as `:push` sends the first person to debug it to the credential and the hook, which were
+  # not involved.
+  defp unpushed(_result, reason, true), do: {:error, {:push, reason}}
+  defp unpushed(_result, reason, false), do: {:error, {:branch_head, reason}}
 
   defp finish(assignment, root, worktree, result, head, changeset?, user) do
     job_id = assignment["job_id"]
@@ -900,16 +905,22 @@ defmodule ForgeWorker.Link do
     terminal
   end
 
-  # A job the platform stopped hibernates: it has committed, and it resumes from the branch
-  # and the manifest. A job the wall clock stopped is over, and reports a result like any
-  # other ending — the difference is whether anyone intends to continue it.
+  # A job the platform stopped hibernates and resumes from the branch and the manifest. For a
+  # state that declares `changeset` that branch holds what it did, because it committed; for a
+  # state that declares none the head is the one the run started from and its tree is gone, which
+  # is what such a state promised (`docs/design/git-hosting.md` § Non-fast-forward on a ticket
+  # branch) and what its continuation prompt tells it. A job the wall clock stopped is over, and
+  # reports a result like any other ending — the difference is whether anyone intends to
+  # continue it.
   defp terminal(%Result{killed: :operator} = result, head),
     do:
       {"hibernated",
        %{"commit" => head, "reason" => "cancelled", "result" => Result.to_map(result)}}
 
-  # A parked run pushed before it said so, and the commands it asked for run at that push
-  # (`docs/design/commands.md` § The ensured commit).
+  # A parked run that declares `changeset` pushed before it said so, and the commands it asked for
+  # run at that push. One that declares none pushed nothing, so they run at the head it started
+  # from — both halves of `docs/design/commands.md` § The ensured commit, and the prompt says
+  # which one the agent is getting (`ForgeCore.Prompt.may_invoke/2`).
   defp terminal(%Result{status: :parked} = result, head),
     do: {"result", Result.to_map(%{result | commit: head})}
 

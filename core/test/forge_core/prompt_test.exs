@@ -131,6 +131,21 @@ defmodule ForgeCore.PromptTest do
 
       assert manifest =~ "write `/j/invoke.json`"
       assert manifest =~ ~s([{"command": "build", "args": ["--release"]}, {"command": "test"}])
+      assert manifest =~ "Your work is committed and pushed, the commands run against that commit"
+    end
+
+    # The commit a command runs at is the push the run makes on its way to parking — and only a
+    # state that declares `changeset` makes one (`docs/design/commands.md` § The ensured commit).
+    # Telling a `reviewing` agent its edits are in the tree the command sees would have it read
+    # a build of code that was never there.
+    test "a state that produces no changeset is told its commands run without its edits" do
+      spec = %{spec() | produces: ["report.md"], may_invoke: %{"test" => %{"max" => 2}}}
+
+      manifest = Prompt.manifest(spec, "/j")
+
+      assert manifest =~ "`changeset` is not one of your outputs, so nothing of your tree is"
+      assert manifest =~ "against `ticket/7` as this run found it, without your edits"
+      refute manifest =~ "Your work is committed and pushed"
     end
 
     test "a group of files is told where its files go and what they are kept as" do
@@ -823,6 +838,25 @@ defmodule ForgeCore.PromptTest do
       prompt = Prompt.continuation(resumed_spec(), "/var/forge/jobs/job-1", nil)
 
       assert prompt =~ "## Your branch\n\n`ticket/7`, checked out"
+    end
+
+    test "tells a state that kept a changeset that the files are the ones it left" do
+      prompt = Prompt.continuation(resumed_spec(), "/var/forge/jobs/job-1", "c0ffee")
+
+      assert prompt =~ "the files are what you left"
+    end
+
+    # A state that declares no `changeset` had its tree discarded rather than committed, and the
+    # resume snapshots the template or the seed and resets to the branch head — so its files are
+    # *not* the ones it left. This is the one thing the agent is about to act on.
+    test "tells a state that kept none that the worktree is the branch, not its files" do
+      spec = %{resumed_spec() | produces: ["report.md"]}
+
+      prompt = Prompt.continuation(spec, "/var/forge/jobs/job-1", "c0ffee")
+
+      assert prompt =~ "nothing of the earlier run's tree was kept"
+      assert prompt =~ "the branch as it stands rather than the files you left"
+      refute prompt =~ "the files are what you left"
     end
 
     # The manifest is whole and last, because it is what may have moved: the answers are now an

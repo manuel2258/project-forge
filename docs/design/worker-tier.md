@@ -866,9 +866,12 @@ state that declares no `changeset` there is nothing that must survive: its tree 
 never committed or pushed however the run ended, and it is discarded with the worktree
 (`docs/design/git-hosting.md` § Non-fast-forward on a ticket branch).
 
-The sequence: SIGTERM the harness, wait the grace period, `git add -A` and commit in the worktree,
-push to the ticket branch with the job's token, upload the transcript to the store, send
-`hibernated` with the commit sha. The platform records the sha and puts a workflow job back to
+The sequence, for a state that declares `changeset`: SIGTERM the harness, wait the grace period,
+`git add -A` and commit in the worktree, push to the ticket branch with the job's token, upload
+the transcript to the store, send `hibernated` with the commit sha. **For a state that declares
+none the three git steps do not happen**: the transcript still goes to the store and `hibernated`
+still carries a sha, but it is the branch head the run started from rather than one the run
+made. The platform records the sha and puts a workflow job back to
 `pending`, to resume from that commit wherever it is placed next; a conversation goes
 `hibernated` — dormant — until a person reopens it. A workflow job used to be set `hibernated`
 too, and nothing ever moved one on: the scheduler places only `pending` jobs, so the ticket sat

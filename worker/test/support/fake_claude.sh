@@ -409,4 +409,12 @@ case "${FAKE_SCENARIO:-success}" in
   hang)
     sleep 60
     ;;
+  # The mutation lens of ticket 1 as it really ended: the tree broken, and then the process
+  # stopped from outside before anything restored it. `leaves_dirty` proves the converged
+  # ending; this one proves the killed-partway ending the acceptance criteria also name.
+  dirties_then_hangs)
+    printf 'mutated by the reviewer\n' >> README.md
+    printf 'scratch\n' > SCRATCH.md
+    sleep 60
+    ;;
 esac

@@ -211,14 +211,27 @@ attaches to. A ref moving does not move an approval.
 
 **A state that declares no `changeset` reaches none of this.** `changeset` is reserved and means
 the diff of the job's branch, so a state that does not declare it has promised its documents and
-its log: its worktree is scratch, and `ForgeWorker.Link` never calls the squash for it — nothing
-is staged, nothing committed, nothing pushed, whatever the run left in the tree when it ended,
-and however it ended. The run reports the branch head it started from. The tree is discarded with
-the worktree and is not kept as the ticket's warm template either, because the ticket's next job
-would inherit it and commit it with its own `add -A`. This is the guard, and it has to be here:
-a run killed for budget gets a SIGKILL, so nothing the run itself registered to clean up runs
-(ticket 3, where a review's mutation pass was killed between breaking the code and restoring it
-and the broken tree was committed to the branch).
+its log: its worktree is scratch, and `ForgeWorker.Link` never calls the squash for it — **the
+platform stages nothing, commits nothing and pushes nothing** for such a run, whatever it left
+in the tree when it ended, and however it ended. The run reports the branch head it started
+from. The tree is discarded with the worktree and is not kept as the ticket's warm template
+either, because the ticket's next job would inherit it and commit it with its own `add -A`. This
+is the guard, and it has to be here: a run killed for budget gets a SIGKILL, so nothing the run
+itself registered to clean up runs (ticket 3, where a review's mutation pass was killed between
+breaking the code and restoring it and the broken tree was committed to the branch).
+
+**What it does not stop is the agent pushing for itself.** Every workflow job is handed
+`FORGE_GIT_URL` and `FORGE_GIT_TOKEN` (`ForgeWorker.Link`), scoped by the pre-receive hook to
+its own ticket branch and nothing else, because a job works in a real clone and may fetch and
+push. So the guarantee above is the platform's and not the run's, and two things follow from
+saying it that way rather than the other. A no-`changeset` state's prompt tells it plainly that
+its tree is scratch and that what must survive goes in a document (`job-prompt.md` § The
+contract), which is the only lever there is on an agent that has a credential. And the head such
+a run reports is the `origin/<branch>` its checkout fetched, so an agent that pushed behind the
+platform's back leaves that head stale rather than wrong-by-construction — a parked run's
+commands would then run a commit behind. Closing that would mean taking the credential away from
+the states that do not need it, which is a larger change than this guard and not one this note
+has decided.
 
 The residual risk is that a rewrite makes an approved commit unreachable and therefore
 collectable, and the merge would then act on an object that has gone. Two things close it:

@@ -20,8 +20,10 @@ A job ends by declaring an **outcome** in the front matter of its first declared
 outcome selects which **transition** the ticket takes next. A job does not choose where the
 ticket goes; it says what happened, and the workflow decides.
 
-Jobs are disposable. Assume nothing on the machine outlives your job: what survives is what you
-committed to the branch, and the documents you wrote to `$FORGE_JOB/out/`.
+Jobs are disposable. Assume nothing on the machine outlives your job: what survives is the
+documents you wrote to `$FORGE_JOB/out/`, and — when `changeset` is one of your outputs — what
+you committed to the branch. A state that does not declare `changeset` has a scratch worktree
+that is never committed or pushed, so for one of those the documents are the whole of it.
 
 A document the platform cannot accept — missing, unparseable, an outcome the state does not allow
 — is sent back to the job that wrote it, with what is wrong, before the job is reported. After two
@@ -97,8 +99,9 @@ when your job started. A job that ends in `error` proposes nothing: what it wrot
 
 ## Branches and merging
 
-A ticket has one branch, `ticket/<number>`. Every job of that ticket commits to it, so the work of
-the jobs before you is already in the checkout you are in. There are no per-job branches.
+A ticket has one branch, `ticket/<number>`. Every job that declares `changeset` commits to it, so
+the work of the jobs before you is already in the checkout you are in. A job that declares none
+leaves it untouched. There are no per-job branches.
 
 A conversation has its own branch, `chat/<id>`.
 

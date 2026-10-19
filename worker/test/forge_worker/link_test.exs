@@ -859,6 +859,35 @@ defmodule ForgeWorker.LinkTest do
       refute File.dir?(Path.join([root, "volumes", "ticket", "1"]))
     end
 
+    # Criterion 1 names three endings — converged, failed, and killed partway through with the
+    # tree left dirty. The test above drives the first; this drives the third, which is the
+    # ticket's own reproduction: a review stopped from outside between breaking the code and
+    # restoring it. `terminal(%Result{killed: :operator}, head)` now reports the base for such a
+    # state, and its only other test uses the default changeset spec.
+    test "a cancelled run hibernates at the head it started from, committing nothing", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      before = git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"]) |> String.trim()
+      job = reviewing(origin, scenario: "dirties_then_hangs")
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      # Not before the harness is really running: the tree is dirtied by its first lines.
+      {_payload, _seen} = take_push("event")
+      push(client, @topic, "cancel", %{"job_id" => job_id, "reason" => "ticket_cancelled"})
+
+      {%{"job_id" => ^job_id, "commit" => commit}, _events} = take_push("hibernated")
+
+      # It still says what it spent, and it names the head it started from rather than one of
+      # its own — because it made none.
+      assert commit == before
+
+      assert git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"]) |> String.trim() ==
+               before
+    end
+
     # Criterion 3 of the refinement: the head a run reports is the one it started from, and a
     # state that never calls the push still has to name it. A parked run is where that head is
     # read — the commands it asked for run at it.

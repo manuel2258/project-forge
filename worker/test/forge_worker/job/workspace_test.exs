@@ -67,6 +67,38 @@ defmodule ForgeWorker.Job.WorkspaceTest do
     assert File.read!(Path.join(dir, "README.md")) == "# Game\n"
   end
 
+  # What a state that produces no `changeset` reports instead of a push. `head/2` would name the
+  # agent's own commit, which is on no ref anybody else can fetch; a parked run's commands would
+  # then be dispatched at it.
+  test "the base is the fetched branch head, not the agent's own commits", context do
+    %{origin: origin, root: root} = context
+    job = assignment(origin)
+    {:ok, dir} = Workspace.prepare(job, root, @direct)
+    fetched = git!(dir, ["rev-parse", "origin/ticket/1"]) |> String.trim()
+
+    git!(dir, ["config", "user.name", "agent"])
+    git!(dir, ["config", "user.email", "agent@forge"])
+    File.write!(Path.join(dir, "NOTES.md"), "the agent's own\n")
+    git!(dir, ["add", "NOTES.md"])
+    git!(dir, ["commit", "--quiet", "-m", "the agent's own commit"])
+
+    assert {:ok, ^fetched} = Workspace.base(job, dir, @direct)
+    assert {:ok, own} = Workspace.head(dir, @direct)
+    refute own == fetched
+  end
+
+  # The one way `base/3` can fail, and what makes `ForgeWorker.Link`'s `{:branch_head, _}` tag
+  # worth keeping apart from `{:push, _}`: nothing was pushed, so nothing about a push went
+  # wrong. Reachable here and not through `Link`, where a branch the clone could not fetch fails
+  # in `prepare/3` long before a run ends.
+  test "the base errors when the branch has no fetched head", context do
+    %{origin: origin, root: root} = context
+    {:ok, dir} = Workspace.prepare(assignment(origin), root, @direct)
+    elsewhere = put_in(assignment(origin), ["git", "branch"], "ticket/404")
+
+    assert {:error, _reason} = Workspace.base(elsewhere, dir, @direct)
+  end
+
   test "a resume keeps the work in progress", %{origin: origin, root: root} do
     job = assignment(origin)
     {:ok, dir} = Workspace.prepare(job, root, @direct)

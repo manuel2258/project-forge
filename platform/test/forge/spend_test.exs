@@ -146,8 +146,12 @@ defmodule Forge.SpendTest do
     # § Budget is where a reader of the budget grammar looks for what `limits.ticket_cost` counts,
     # and it said "the sum over all jobs of a ticket" without saying a conversation is not one of
     # them — while the two notes above said so plainly. A ticket was filed on the gap. This is the
-    # check that it stays closed: the behaviour above and the sentence that documents it, together,
-    # so neither can move without the other.
+    # check that it stays closed, beside the behaviour it documents.
+    #
+    # **The phrases carry the rule, not the words in it.** The first version of this asserted only
+    # that § Budget mentioned "conversation" and "daily cap", which a paragraph stating the exact
+    # inverse — a conversation counted, bound by the allowance *and* the day — satisfies while
+    # using both. A test that passes against the defect it names is worse than none.
     test "the budget grammar says the allowance is not a conversation's" do
       budget =
         @grammar
@@ -156,9 +160,11 @@ defmodule Forge.SpendTest do
         |> Enum.at(1)
         |> String.split("**Environment.**")
         |> hd()
+        # Wrapped prose: the sentence a reader sees is not the line the file holds.
+        |> String.replace(~r/\s+/, " ")
 
-      assert budget =~ "conversation"
-      assert budget =~ "daily cap"
+      assert budget =~ "caps the jobs the engine starts, and not a conversation"
+      assert budget =~ "has no ticket allowance and meets the daily cap alone"
     end
   end
 

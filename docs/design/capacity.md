@@ -92,17 +92,18 @@ Only one of them is the operator's.
 
 | Exhausted | Resolved by | Treatment |
 |---|---|---|
-| Job turn budget | the engine retries | outcome `budget_exhausted` on the job row, with `· turns` beside it |
+| Job turn budget | the engine retries | outcome `budget_exhausted` on the job row with `· turns` beside it, nowhere else |
 | Ticket allowance | **a human** — raise it or reroute | sticks the ticket, enters the queue, drawn in accent |
 | Daily spend cap | **time**, or the operator raising it | `PAUSED · SPEND 6h 12m`, neutral, on the ticket; the board and the project page draw `PAUSED · SPEND` without the countdown. **Never in the queue** |
 | Window capacity | **time** | `PAUSED · CAPACITY 1h 12m`, neutral, on the board and the ticket, **never in the queue**. Not built (§ Engine support) |
 
 **`budget_exhausted` names its ceiling.** The outcome says a job ran out; which of the three
 ceilings it ran out of — its turn budget, its cost budget, or the driver's wall clock — is a word
-beside it on every job row (`jobs.exhausted`, demoted mono, `ForgeWeb.Indicators.ceiling/1`).
-Before it, "ran out of money" and "ran out of turns" were one atom and the distinction survived
-only in the free text of a `job.finished` event, which is the wrong place for it: the two want
-different responses from whoever reads the row. Nothing is drawn for a job whose ceiling was not
+beside it on every job row (`jobs.exhausted`, `ForgeWeb.Indicators.ceiling/1`, drawn fainter
+than the outcome it qualifies) and on the job in the API, which the UI is a client of. Before it,
+"ran out of money" and "ran out of turns" were one atom and the distinction survived only in the
+free text of a `job.finished` event, which is the wrong place for it: they want different
+responses from whoever reads the row. Nothing is drawn for a job whose ceiling was not
 recorded — a row from before the column, or from a worker too old to send it — because an absent
 fact is not one of the three.
 

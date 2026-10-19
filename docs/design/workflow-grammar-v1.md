@@ -324,8 +324,10 @@ What a conflict does is the state's to say, with that key — § Merging.
 **Budget.** `turns` and `cost` (USD) are per job and required on every job state. A command state
 has neither — there is no inference to bound — and is bounded by each command's `timeout` instead;
 declaring `budget` on one is an error. Reaching
-either ends the job with `budget_exhausted`, and the job row says which of the two it was —
-`capacity.md` § Four exhaustions, three treatments. `limits.ticket_cost` is required and caps the
+either ends the job with `budget_exhausted`, and the job row names which ceiling stopped it.
+There are three, not two: the turn budget, the cost budget, and the engine's wall-clock limit,
+which is a default of the engine's and has no key here at all
+(`capacity.md` § Four exhaustions, three treatments). `limits.ticket_cost` is required and caps the
 sum over all jobs of a ticket; reaching it sticks the ticket. Budgets are never modifiable by a
 job.
 

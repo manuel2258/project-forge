@@ -175,6 +175,14 @@ defmodule Forge.Jobs.Job do
   # would be a row saying it ran out of something it never ran out of. The other direction is not
   # required: a worker built before the ceiling crossed the wire reports none, and refusing its
   # result would lose the whole run over a word.
+  #
+  # **Refusing is not free either**, and the comment above used to imply it was: an error here
+  # fails `Forge.Jobs.complete/2` with `not_recorded`, which the worker re-sends forever. No
+  # worker built from this `forge_core` can send that pair — every clause of
+  # `ForgeCore.Job.Outcome.finished/2` that names a ceiling returns `:budget_exhausted` — so the
+  # only window is a worker from a revision where that stopped being true, and the protocol is
+  # deliberately not bumped for an addition. Kept as a refusal rather than a silent drop because
+  # the pair means one of the two facts is wrong, and guessing which would be the worse answer.
   defp validate_ceiling_only_when_exhausted(changeset) do
     case {get_field(changeset, :outcome), get_field(changeset, :exhausted)} do
       {outcome, ceiling} when outcome != :budget_exhausted and ceiling != nil ->

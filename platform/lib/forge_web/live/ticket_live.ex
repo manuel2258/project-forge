@@ -768,7 +768,13 @@ defmodule ForgeWeb.TicketLive do
               class="flex min-h-[46px] items-center gap-3 border-b border-base-300/60 font-mono text-[12.5px] hover:bg-base-200"
             >
               <span class="min-w-0 flex-1 truncate">{job.state} #{job.attempt}</span>
-              <span class="shrink-0 opacity-60">{job.outcome || job.status}</span>
+              <%!-- Through `Indicators`, like every other row: `ui.md` § The three axes says
+                    nothing else may draw a job outcome, and this row drew it as plain demoted
+                    text — which left the ceiling beside it at exactly the same weight. --%>
+              <span class="shrink-0">
+                <.outcome :if={job.outcome} value={to_string(job.outcome)} />
+                <.job_status :if={is_nil(job.outcome)} status={job.status} />
+              </span>
               <.ceiling job={job} />
               <span class="shrink-0 opacity-40" aria-hidden="true">›</span>
             </.link>

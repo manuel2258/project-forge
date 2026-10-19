@@ -891,11 +891,21 @@ defmodule ForgeWeb.OperatorLiveTest do
 
       assert %{outcome: :budget_exhausted} = Jobs.get!(job.id)
 
-      # The job page's header badge and the ticket timeline's row for the same job: both read
-      # only `outcome` before, so a turn-exhausted and a cost-exhausted job were one word.
+      # **A second attempt, so the exhausted job is an earlier one.** The "Earlier jobs" list
+      # drops the latest and is drawn only for a ticket with more than one job, so the first
+      # version of this test — one job, one attempt — could not reach that row at all, and
+      # deleting the ceiling from it left the whole suite green.
+      {:ok, _retried} = Forge.Engine.retry(Tickets.get!(ticket.id), user.id)
+      assert length(Jobs.for_ticket(ticket.id)) == 2
+
+      # Every row that draws a job's outcome, by the address a person reaches it at: the job
+      # page's header badge, the ticket timeline's row, and the activity tab's earlier jobs.
+      # All three read only `outcome` before, so a turn-exhausted and a cost-exhausted job were
+      # one word.
       for page <- [
             ~p"/tickets/#{project.name}/#{ticket.number}/jobs/#{job.id}",
-            ~p"/tickets/#{project.name}/#{ticket.number}?tab=timeline"
+            ~p"/tickets/#{project.name}/#{ticket.number}?tab=timeline",
+            ~p"/tickets/#{project.name}/#{ticket.number}?tab=activity"
           ] do
         {:ok, _view, html} = live(conn, page)
 
@@ -908,7 +918,43 @@ defmodule ForgeWeb.OperatorLiveTest do
         assert unquote(word) in ceilings, "#{page} drew #{inspect(ceilings)}"
         refute unquote(other) in ceilings
       end
+
+      # And the event stream's own record of it, beside the free text it used to be buried in.
+      assert %{"outcome" => "budget_exhausted", "exhausted" => unquote(word)} =
+               job.id
+               |> Forge.Events.for_job()
+               |> Enum.find(&(&1.type == "job.finished"))
+               |> Map.fetch!(:payload)
     end
+  end
+
+  # **The third of the three words, and the only one no harness result produces**: the engine's
+  # wall clock kills the process and the worker reports `killed: :wall_clock` with no subtype to
+  # read. Written to the row directly, which also proves the column's enum accepts it — the two
+  # scenarios above exercise `:turns` and `:cost` and would pass with `:wall_clock` unstorable
+  # and undrawn.
+  test "a job the wall clock stopped says so too", %{conn: conn, user: user, project: project} do
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    scenario("max_turns", "refinement.md")
+    job = run_pending(ticket.id)
+
+    {:ok, job} =
+      Forge.Repo.update(
+        Forge.Jobs.Job.progress_changeset(Jobs.get!(job.id), %{
+          status: :finished,
+          outcome: :budget_exhausted,
+          exhausted: :wall_clock
+        })
+      )
+
+    assert job.exhausted == :wall_clock
+
+    {:ok, _view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/jobs/#{job.id}")
+
+    assert html
+           |> Floki.parse_document!()
+           |> Floki.find("[data-ceiling]")
+           |> Floki.attribute("data-ceiling") == ["wall clock"]
   end
 
   test "the job page shows the pinned manifest and harness events", %{

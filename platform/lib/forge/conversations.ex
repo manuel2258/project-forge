@@ -475,6 +475,12 @@ defmodule Forge.Conversations do
   defp opener(%Job{id: id}) do
     case Events.earliest_for_job(id, "chat.opened") do
       %Event{actor: %{"kind" => "user", "id" => user_id}} ->
+        # **An equivalent mutant: nothing can delete an account.** `Forge.Accounts` has no
+        # `delete_user`, so no test can make `get_user/1` answer nil here and no mutation of
+        # this clause can be watched failing. It stays because `get_user/1` is the non-bang
+        # form on purpose — the bang would turn a row gone for any reason outside the
+        # application into a crash that costs the turn its cost and its commit, and a refusal
+        # the agent can read is the cheaper wrong answer.
         case Forge.Accounts.get_user(user_id) do
           nil -> {:error, "the person who opened this conversation no longer has an account"}
           user -> {:ok, user}

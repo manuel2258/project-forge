@@ -1434,6 +1434,12 @@ defmodule Forge.ConversationsTest do
       assert spec["moving"]["transitions"] == [
                %{"to" => "planning", "approve" => ["refinement.md"]}
              ]
+
+      # And `job_live` is the state's own answer rather than a constant: with the admission's
+      # job put to rest, a conversation starting now is told nothing is in its way.
+      finish_jobs(Tickets.get!(ticket.id))
+      spec = Jobs.assignment(chat, Tickets.get!(ticket.id), project, "token")["spec"]
+      assert spec["moving"]["job_live"] == false
     end
 
     test "a project chat's spec carries no transitions and no decision", %{project: project} do
@@ -2052,6 +2058,22 @@ defmodule Forge.ConversationsTest do
       assert reason =~ "already pending"
     end
 
+    # Well-formed and still wrong: the agent names a state the workflow does not go to from
+    # here. Refused by the engine's own grammar, not by anything copied into the chat.
+    test "a transition the workflow does not declare is refused", %{
+      ticket: ticket,
+      chat: chat,
+      opener: opener
+    } do
+      refinement!(ticket, opener)
+
+      {:ok, _chat} = Conversations.record_turn(chat, turn_asking(1, %{"to" => "shipping"}))
+
+      assert Tickets.get!(ticket.id).state == "refining"
+      assert [reason] = refusals(chat)
+      assert reason =~ "no such transition"
+    end
+
     test "a decision with nothing pending is refused", %{ticket: ticket, chat: chat} do
       {:ok, _chat} = Conversations.record_turn(chat, turn_asking(1, %{"decision" => "approved"}))
 
@@ -2061,14 +2083,54 @@ defmodule Forge.ConversationsTest do
     end
 
     # A project chat has no ticket, which is the refinement's own out-of-scope list made
-    # concrete: refused here, before the engine is asked anything at all.
-    test "a project chat's request is refused and reaches no ticket", %{project: project} do
-      {:ok, chat} = Conversations.open(project, "about the repository")
+    # concrete: refused here, before the engine is asked anything at all. Opened by a person,
+    # so that this guard is the only thing in the way — with no opener the request would be
+    # refused for *that* instead, and the test would pass with the ticket check gone.
+    test "a project chat's request is refused and reaches no ticket", %{
+      project: project,
+      opener: opener
+    } do
+      {:ok, chat} =
+        Conversations.open(project, "about the repository", actor: {:user, opener.id})
 
       {:ok, _chat} = Conversations.record_turn(chat, turn_asking(1, %{"to" => "planning"}))
 
       assert [reason] = refusals(chat)
       assert reason =~ "no ticket"
+    end
+
+    # The membership guard is `Forge.Operator`'s, and a chat reaching the engine directly would
+    # walk straight past it: the opener's standing is checked when the request is applied, not
+    # when the conversation was opened, so a person removed from the project since cannot still
+    # move its tickets through a conversation they left behind
+    # (`docs/design/identity.md` § Where the guard lives).
+    test "the opener who has since left the project cannot move anything", %{
+      project: project,
+      ticket: ticket,
+      chat: chat,
+      opener: opener
+    } do
+      refinement!(ticket, opener)
+
+      Repo.delete_all(
+        from m in Projects.Member, where: m.project_id == ^project.id and m.user_id == ^opener.id
+      )
+
+      {:ok, _chat} = Conversations.record_turn(chat, turn_asking(1, %{"to" => "planning"}))
+
+      assert Tickets.get!(ticket.id).state == "refining"
+      assert [reason] = refusals(chat)
+      assert reason =~ "no longer a member"
+
+      # Deciding is guarded the same way and at a call site of its own, so it is asked
+      # separately: both go through `Forge.Operator`, and neither reaches `Forge.Engine` direct.
+      pending!(ticket)
+
+      {:ok, _chat} = Conversations.record_turn(chat, turn_asking(2, %{"decision" => "approved"}))
+
+      assert Tickets.get!(ticket.id).state == "refining"
+      assert Tickets.get!(ticket.id).pending_transition["to"] == "planning"
+      assert List.last(refusals(chat)) =~ "no longer a member"
     end
 
     # Attribution has nowhere to point: a conversation a Mix task opened would make a

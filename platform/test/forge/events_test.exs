@@ -87,6 +87,33 @@ defmodule Forge.EventsTest do
     end
   end
 
+  # A conversation's request that moved nothing is drawn in the job's Activity stream like any
+  # other event, through `detail/1` (`work_screen.ex`). Rendered as the reason and not as the
+  # payload, or the person reads a JSON blob where a sentence should be
+  # (`docs/design/conversations.md` § Taking a transition).
+  describe "summary/1 of a refused transition" do
+    test "reads as the reason, not the request" do
+      event = %Event{
+        type: "chat.transition_refused",
+        payload: %{
+          "request" => %{"to" => "planning"},
+          "reason" => "`refinement.md` has no version yet, so nothing can approve it"
+        }
+      }
+
+      assert Events.summary(event) ==
+               "`refinement.md` has no version yet, so nothing can approve it"
+    end
+
+    test "is cut short in a list and whole in the stream" do
+      long = String.duplicate("word ", 200)
+      event = %Event{type: "chat.transition_refused", payload: %{"reason" => long}}
+
+      assert Events.summary(event) == String.slice(long, 0, 160)
+      assert Events.detail(event) == long
+    end
+  end
+
   describe "summary/1 of commands" do
     test "reads as what ran and how it ended" do
       sha = String.duplicate("a", 40)

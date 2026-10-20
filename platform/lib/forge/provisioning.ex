@@ -87,6 +87,11 @@ defmodule Forge.Provisioning do
   # What `holds?/2` reads of a template, and so what an edit has to change for `for_demand/2` or
   # `could_ever_hold?/2` to answer differently. The image beside its protocol, because choosing
   # another image is how what is known of it changes (`Template.changeset/2`).
+  #
+  # `image_protocol` is in the list for a template naming a snapshot, which is the only kind the
+  # gate reads it for: `speaks?/2` ignores it for a template on the mark, so a resolution writing
+  # it cannot change what the gate answers and has nothing to bring back
+  # (`docs/design/provisioning.md` § Editing a template).
   @holds [:memory, :cores, :accepts, :image, :image_protocol]
 
   @doc """
@@ -300,9 +305,21 @@ defmodule Forge.Provisioning do
   # A labelled image older than the job needs makes a machine that joins and cannot take it — and
   # then another, every pass, up to `max_workers`. An unlabelled one is asked once: its first
   # machine's join says what it speaks (`Workers` holds the rest back while that one probes).
+  #
+  # **A template on the mark is not filtered on its protocol at all**, and that is the fix for the
+  # one case where it stopped following the mark. What such a template stores is a fact about the
+  # snapshot it was last resolved onto, not about the one it would be made from now, and the gate
+  # cannot ask the driver — so a template whose old snapshot spoke 5 was filtered out of every
+  # demand for 6, and the create attempt that would have resolved it onto the newly marked
+  # protocol-6 snapshot never happened. Raising the protocol is *why* an operator builds an image.
+  # Let through, it reaches `Forge.Workers`' resolution, and a snapshot that really is too old is
+  # refused there with its own label — the same refusal, the same counter, one pass later
+  # (`docs/design/provisioning.md` § Where a machine comes from).
   defp speaks?(_template, need) when need in [nil, 0], do: true
   defp speaks?(%Template{image_protocol: nil}, _need), do: true
-  defp speaks?(%Template{image_protocol: protocol}, need), do: protocol >= need
+
+  defp speaks?(%Template{image_protocol: protocol} = template, need),
+    do: Template.latest?(template) or protocol >= need
 
   defp accepts?(%Template{accepts: nil}, _kind), do: true
   defp accepts?(%Template{accepts: []}, _kind), do: true
@@ -448,11 +465,9 @@ defmodule Forge.Provisioning do
   no "only if the template still names that image" guard: the listing is authoritative about what
   `latest` means, and this *is* the template changing what it names.
 
-  **Resolving onto the snapshot already resolved keeps what was learnt about it**, the same rule
-  `Template.changeset/2` keeps for a save: a listing says nothing about an unlabelled snapshot,
-  and forgetting the protocol a refused machine taught would earn that snapshot another machine on
-  every pass — the loop § A snapshot that speaks the wrong protocol exists to stop. A *different*
-  snapshot takes its own labels, nothing included.
+  **What is known of the snapshot it lands on is `Template.learnt/4`'s to say**, which a save asks
+  too: staying on the same snapshot keeps what was learnt about it, and moving to a different one
+  takes that one's labels, nothing included.
 
   Returns the template as it now stands. Nothing is written when the three fields already say
   this, which is the common case: the mark moves when an image is built, not between two
@@ -460,7 +475,15 @@ defmodule Forge.Provisioning do
   """
   @spec resolve_latest(Template.t(), Forge.Provider.image()) :: Template.t()
   def resolve_latest(%Template{} = template, %{id: id} = current) do
-    resolved = Map.put(labels(template, current), :resolved_image, id)
+    {build, protocol} =
+      Template.learnt(
+        template.resolved_image,
+        id,
+        {current[:build], current[:protocol]},
+        {template.image_build, template.image_protocol}
+      )
+
+    resolved = %{resolved_image: id, image_build: build, image_protocol: protocol}
 
     if Map.take(template, Map.keys(resolved)) == resolved do
       template
@@ -474,15 +497,6 @@ defmodule Forge.Provisioning do
       struct!(template, resolved)
     end
   end
-
-  defp labels(%Template{resolved_image: same} = template, %{id: same} = current),
-    do: %{
-      image_build: current[:build] || template.image_build,
-      image_protocol: current[:protocol] || template.image_protocol
-    }
-
-  defp labels(_template, current),
-    do: %{image_build: current[:build], image_protocol: current[:protocol]}
 
   @doc """
   Why no machine may be made from this template's image, or nil when one may: its known protocol

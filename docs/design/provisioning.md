@@ -444,17 +444,34 @@ it.
   working machine is taken out of service, § A snapshot that speaks the wrong protocol).
 
   **Resolving onto the snapshot already resolved keeps what was learnt about it**, by the same
-  rule a save keeps it (§ A snapshot that speaks the wrong protocol): a listing says nothing
-  about an unlabelled snapshot, and forgetting the protocol a refused machine taught would earn
-  that snapshot another machine on every pass. Resolving onto a *different* snapshot takes that
-  one's labels, nothing included.
+  rule a save keeps it — one function, `Template.learnt/4`, asked by both, because two copies of
+  it were two places to disagree and did (§ A snapshot that speaks the wrong protocol). A listing
+  says nothing about an unlabelled snapshot, and forgetting the protocol a refused machine taught
+  would earn that snapshot another machine on every pass. Resolving onto a *different* snapshot
+  takes that one's labels, nothing included.
 
-  **The gate reads the stored answer, deliberately.** `for_demand/2` and `could_ever_hold?/2` are
-  a cheap in-process check run on every scheduling pass, so they read `resolved_image` and
-  `image_protocol` as stored rather than calling the driver — a `latest` template's compatibility
-  answer can lag a build that has just happened, until the next real create attempt re-resolves
-  it. The same staleness this note already accepts for a catalogue read when a template was
-  saved, and it costs at most one pass.
+  **The gate does not filter a template on the mark by its protocol at all**, and that is the
+  one thing about `latest` that could not be left to staleness. `for_demand/2` and
+  `could_ever_hold?/2` are a cheap in-process check run on every scheduling pass and may not call
+  the driver, so the only protocol they could read is the one the *last* resolution stored — a
+  fact about a snapshot the template may no longer be on. Filtering on it stopped a template
+  following the mark in exactly the case the mark is built for: raising the protocol. A template
+  whose old snapshot spoke 5 was filtered out of every demand for 6, so the create attempt that
+  would have resolved it onto the newly marked protocol-6 snapshot never ran, and the row stayed
+  on the old snapshot for ever. So `speaks?/2` lets it through, the create attempt resolves, and
+  `speaks/1` refuses there on the resolved snapshot's own label — the same refusal, the same
+  failure counter, one pass later. A template naming a snapshot id is filtered as it always was:
+  what it stores is about the snapshot it is on.
+
+  **And so a resolution brings nothing back, because it cannot change what the gate answered.**
+  `image_protocol` is in `@holds` for a template naming an id, which an edit is the only way to
+  move; for one on the mark the gate does not read it, so writing it during a create attempt
+  changes no gate answer and there is no stuck ticket to resume (§ Editing a template).
+
+  **What is stale is the probe and the labels the page draws**, and both cost at most one pass:
+  a template on the mark shows the build and protocol of the snapshot it was last resolved onto
+  until the next create attempt, and the pre-resolution probe can hold one create back while a
+  machine from that older snapshot is still booting. Delays, not wrong machines.
 - **The catalogue offers only what the node's location will sell.** `shapes/1` keeps a server
   type only when its own `locations` list has an entry for the node's location that is neither
   deprecated nor unavailable, because a size that cannot be ordered where the platform creates
@@ -814,10 +831,16 @@ host's own, and every Hetzner template names one.
   copy of the machine's token — who could otherwise teach the template a protocol that stops it
   making anything. First is a row that has recorded no protocol and has never been seen.
 - **A permanent machine teaches nothing.** It came from no template.
-- **Editing does not forget what was learnt.** Saving re-reads the labels, but an unchanged image
-  whose listing has no label keeps the protocol it has, or a rename would earn a known-bad
-  snapshot another machine. Choosing a different image takes that image's labels, and what was
-  learnt about the old one goes with it.
+- **Editing does not forget what was learnt, and does not carry it onto another snapshot.**
+  Saving re-reads the labels, but staying on the same snapshot whose listing has no label keeps
+  the protocol it has, or a rename would earn a known-bad snapshot another machine. Moving to a
+  different one takes that one's labels, and what was learnt about the old one goes with it.
+  **Same snapshot, not same `image`**: a template on the mark holds the word there and it never
+  changes, so deciding by `image` meant a rename after the mark had moved wrote the old
+  snapshot's build and protocol onto the new one — a machine made from an unprobed snapshot on a
+  protocol nobody had verified, or a brand-new snapshot refused and the template disabled without
+  one machine tried. `Template.learnt/4` is the rule and the one place it lives; a resolution asks
+  it too (§ Where a machine comes from).
 
 ## Editing a template
 
@@ -842,10 +865,11 @@ placement in every project the template is assigned to, as `Enable` does. The re
   that places a job; `name` only orders templates of equal size, which picks between two that both
   fit and never finds one where none did. A rename is not a fix, here any more than for the failure
   counter.
-- `resolved_image` is not in the list either, and does not need to be: an edit moves it only by
-  moving `image`, which is (§ Where a machine comes from). A resolution moves it outside an edit,
-  during the create attempt that asked for it — the pass that wrote it is the pass acting on it,
-  so there is nothing to bring back.
+- `resolved_image` is not in the list either, and does not need to be. Nothing that places a job
+  reads it: `holds?/2` reads `memory`, `cores`, `accepts` and `image_protocol`, and no more. An
+  edit moves it only by moving `image`, which *is* in the list; a resolution moves it during the
+  create attempt that asked for it, where the pass that wrote it is the pass acting on it
+  (§ Where a machine comes from).
 - `max_workers`, `idle_ms`, `provider`, `provider_credential_id` and `size` decide whether a
   create succeeds and when there is room for one — `idle_ms` through a full template's idle
   machine giving its slot up — not whether the template could hold the job. A template wrong in

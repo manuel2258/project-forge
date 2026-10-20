@@ -497,10 +497,6 @@ defmodule ForgeWeb.TemplatesLive do
       if image[:current], do: " · carries latest", else: ""
   end
 
-  # The mark itself, offered beside the snapshots: a template naming it is made from whichever
-  # one carries it at the time, so the option says which that is today. *None marked yet* rather
-  # than no option at all, because a provider whose account has never been built for is exactly
-  # where a person needs to be told what the word would mean.
   # A row's identifiers: the provider, the size and the image it names. A template naming `latest`
   # names no snapshot, so the one it is resolved to goes after it — the row would otherwise say
   # nothing about which build its next machine comes from.
@@ -516,6 +512,10 @@ defmodule ForgeWeb.TemplatesLive do
 
   defp followed(_template), do: nil
 
+  # The mark itself, offered beside the snapshots: a template naming it is made from whichever
+  # one carries it at the time, so the option says which that is today. *None marked yet* rather
+  # than no option at all, because a provider whose account has never been built for is exactly
+  # where a person needs to be told what the word would mean.
   defp latest_label(nil), do: "#{Template.latest()} · none marked yet"
   defp latest_label(current), do: "#{Template.latest()} · #{current.name || current.id}"
 

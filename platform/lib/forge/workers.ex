@@ -491,9 +491,9 @@ defmodule Forge.Workers do
 
     # The recipe works: a machine from it booted and called home. Consecutive failures reset
     # here and nowhere else, because this is the only event that proves anything — and only at a
-    # machine's first `ready`, from the image its template still names: a reconnect of a machine
-    # made from an older snapshot put a template that the new one had taken out of service back
-    # in, at every restart of the platform (`docs/design/provisioning.md` § A template that cannot
+    # machine's first `ready`, from the image its template still resolves to: a reconnect of a
+    # machine made from an older snapshot put a template that the new one had taken out of service
+    # back in, at every restart of the platform (`docs/design/provisioning.md` § A template that cannot
     # make a working machine is taken out of service). First is never seen, as the sweep that
     # counts a machine that never called home reads it.
     template_back? =
@@ -1206,14 +1206,25 @@ defmodule Forge.Workers do
       (is_nil(worker.cores) or worker.cores >= demand.cores)
   end
 
-  # **The credential comes before the image, because reading the catalogue needs it.** A template
-  # naming `latest` names no snapshot, so what it resolves to is asked of the driver here — once
-  # per create attempt, before the checks below, which read what the resolution wrote
-  # (`docs/design/provisioning.md` § Where a machine comes from). Room is still asked first: a
-  # pass that has nowhere to put a machine should not spend an API call finding out which image
-  # it would have used.
+  # **Every cheap refusal is asked before the catalogue call, and the ones resolution can change
+  # are asked again after it.** Resolving the mark is a request to the provider
+  # (`docs/design/provisioning.md` § Where a machine comes from), and a pass that was never going
+  # to make a machine must not spend one: room first, then the probe, which is the refusal that
+  # holds for *minutes* while a machine from an unheard-of snapshot boots. Asked only after
+  # resolution, it let a template on the mark send up to `max_workers` listings every scheduling
+  # pass for the whole of that boot, each discarded two lines later — and a rate limit from the
+  # provider comes back as this template's failure and takes it out of service.
+  #
+  # The pre-resolution probe reads the snapshot the template was last resolved onto, so a mark
+  # that has just moved can hold one create back for as long as the old snapshot's probe is
+  # booting. It only ever delays, and the pass after the probe joins or goes resolves as normal.
+  #
+  # `speaks/1` is asked only after, and that is not an oversight: what a template on the mark
+  # stores is its *old* snapshot's protocol, and refusing on that is how it stopped following the
+  # mark (`Provisioning.speaks?/2`). The resolved snapshot's own label is what decides.
   defp create_from(template, demand) do
     with {:ok, slot} <- room(template, demand),
+         :ok <- probed(template),
          {:ok, credential} <- spendable(template),
          {:ok, template} <- resolve(template, credential),
          :ok <- speaks(template),

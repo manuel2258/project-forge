@@ -3447,6 +3447,109 @@ defmodule Forge.WorkersTest do
       assert message =~ "protocol #{ForgeCore.WorkerProtocol.current() + 1}"
       assert reloaded(template).resolved_image == "snap-99"
     end
+
+    # **The whole point of the mark, and the one case it did not work in.** A template whose last
+    # resolution landed on a snapshot speaking an older protocol was filtered out of every demand
+    # needing the newer one, so the create attempt that would have resolved it onto the newly
+    # marked snapshot never ran, and the row stayed on the old snapshot for ever. Raising the
+    # protocol is *why* an operator builds an image.
+    test "a build that raises the protocol is followed without an edit", context do
+      %{user: user, project: project} = context
+      current = ForgeCore.WorkerProtocol.current()
+
+      template =
+        assigned(user, project, %{
+          image: "latest",
+          resolved_image: "snap-old",
+          image_protocol: current - 1
+        })
+
+      marking("snap-new", %{protocol: current})
+
+      assert {:error, :creating} =
+               Workers.create_machine(
+                 demand(project_id: project.id)
+                 |> Map.put(:protocol, current)
+               )
+
+      assert_receive {:provider_create, %{image: "snap-new"}}
+      assert reloaded(template).resolved_image == "snap-new"
+      assert reloaded(template).image_protocol == current
+    end
+
+    # And a resolution that lands on a snapshot which really is too old is refused there, on that
+    # snapshot's own label rather than on whatever the row happened to hold.
+    test "the refusal is on the resolved snapshot's protocol, not the stored one", context do
+      %{user: user, project: project} = context
+      too_new = ForgeCore.WorkerProtocol.current() + 1
+
+      template =
+        assigned(user, project, %{
+          image: "latest",
+          resolved_image: "snap-old",
+          image_protocol: too_new
+        })
+
+      marking("snap-new", %{protocol: ForgeCore.WorkerProtocol.current()})
+
+      assert {:error, :creating} = Workers.create_machine(demand(project_id: project.id))
+      assert_receive {:provider_create, %{image: "snap-new"}}
+      assert reloaded(template).failures == 0
+    end
+
+    # **A catalogue call is a request to the provider, and the probe is what holds for minutes.**
+    # Asked only after resolution, a template on the mark sent up to `max_workers` listings every
+    # scheduling pass for the whole of a machine's boot, each discarded two lines later — and a
+    # rate limit comes back as this template's failure and takes it out of service.
+    test "a pass the probe will refuse spends no catalogue call", context do
+      %{user: user, project: project} = context
+      assigned(user, project, %{image: "latest", max_workers: 5})
+      marking("snap-99")
+
+      assert {:error, :creating} = Workers.create_machine(demand(project_id: project.id))
+      assert_receive {:provider_images, _credential}
+      assert_receive {:provider_create, _opts}
+
+      assert {:error, :at_capacity} = Workers.create_machine(demand(project_id: project.id))
+      refute_receive {:provider_images, _credential}
+    end
+
+    # **The probe is asked again on what resolution wrote**, which is the half the pre-resolution
+    # ask cannot answer: the mark moving onto a snapshot this template still has an unjoined
+    # machine from. The template below is resolved to `snap-3`, which nothing is booting, so the
+    # cheap ask passes — and the mark has moved back to `snap-2`, which one of its machines is
+    # still booting from. Without the second ask that snapshot gets a second machine, which is the
+    # thing the probe exists to prevent.
+    test "a mark that moves back onto a snapshot still being probed is refused", context do
+      %{user: user, project: project} = context
+
+      following =
+        assigned(user, project, %{image: "latest", resolved_image: "snap-3", max_workers: 5})
+
+      _booting = managed_from(following, image: "snap-2")
+      marking("snap-2")
+
+      assert {:error, :at_capacity} = Workers.create_machine(demand(project_id: project.id))
+      refute_receive {:provider_create, _opts}
+      assert reloaded(following).resolved_image == "snap-2"
+    end
+
+    # The warning names the snapshot it is about, which for a template on the mark is not what the
+    # template names: logging the word `latest` tells the operator nothing about which image the
+    # machine they are about to pay for came from.
+    test "the unlabelled warning names the resolved snapshot", context do
+      %{user: user, project: project} = context
+      assigned(user, project, %{image: "latest"})
+      marking("snap-99")
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, :creating} = Workers.create_machine(demand(project_id: project.id))
+        end)
+
+      assert log =~ "whose image snap-99 carries no protocol label"
+      refute log =~ "whose image latest"
+    end
   end
 
   describe "a machine's live figures" do

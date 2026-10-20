@@ -244,21 +244,52 @@ defmodule Forge.Provisioning.Template do
     end
   end
 
-  # **A save does not forget what the platform knows about the image it already names.** The
-  # labels are read from the provider's listing on every save, and an unlabelled snapshot reads
-  # as nothing there — so a rename of a template whose protocol was learnt from a refused machine
-  # would reset it to unknown, and earn the snapshot one more machine to refuse. With the image
-  # unchanged, only a label that is actually there replaces what is stored; choosing another
-  # image takes that image's labels, nothing included.
+  @doc """
+  What is known of a template's snapshot once it is on `now`, having been on `was`: `offered` is
+  what the provider's listing says about `now`, `stored` is what the row already holds, and the
+  answer is the `{build, protocol}` to keep.
+
+  **One rule, asked at both ends of the two ways a template moves between snapshots.**
+  `changeset/2` asks it when a row is saved and `Forge.Provisioning.resolve_latest/2` when a
+  create attempt resolves the mark, because both are handed a new concrete snapshot and whatever
+  the catalogue says about it. Two copies of it were two places to disagree, and they did: the
+  save decided by whether `image` changed, which for a template on the mark never does, so a
+  rename after the mark had moved wrote the *old* snapshot's build and protocol onto the new one —
+  and the next machine was made from an unprobed snapshot on a protocol nobody had verified.
+
+  A listing says nothing about an unlabelled snapshot, so staying on the same one keeps what was
+  learnt: forgetting the protocol a refused machine taught would earn that snapshot one more
+  machine to refuse. Moving to a different one takes that one's labels, nothing included — a
+  template moved off an image the platform refuses would otherwise go on refusing, and one moved
+  onto a bad unlabelled image would keep the good one's protocol.
+  """
+  @type labels :: {String.t() | nil, non_neg_integer() | nil}
+  @spec learnt(String.t() | nil, String.t() | nil, labels(), labels()) :: labels()
+  def learnt(same, same, {build, protocol}, {was_build, was_protocol}),
+    do: {build || was_build, protocol || was_protocol}
+
+  def learnt(_was, _now, offered, _stored), do: offered
+
+  # **A save does not forget what the platform knows about the snapshot it is already on**, and
+  # does not carry what it knows onto a different one. `learnt/4` above is the rule and why; this
+  # is where a save asks it, against the concrete snapshot rather than the template's `image` —
+  # which for a template on the mark is the word and never moves.
   #
-  # `resolved_image` is kept the same way and for the same reason: a rename of a template naming
-  # `latest` carries no answer about what the mark points at, and reading its own column as that
-  # answer would unresolve it. `Forge.Provisioning.resolve_latest/2` keeps the rule for a
-  # resolution, which is the other way the three fields move.
+  # `resolved_image` itself is kept first, and only when the page said nothing: it cannot say
+  # which snapshot carries the mark when none does, and reading that silence as *on no snapshot*
+  # would unresolve a row that is on one.
   defp keep_what_was_learnt(changeset) do
-    if Map.has_key?(changeset.changes, :image),
-      do: changeset,
-      else: Enum.reduce([:resolved_image, :image_build, :image_protocol], changeset, &keep/2)
+    changeset = keep(:resolved_image, changeset)
+
+    {build, protocol} =
+      learnt(
+        changeset.data.resolved_image,
+        get_field(changeset, :resolved_image),
+        {get_change(changeset, :image_build), get_change(changeset, :image_protocol)},
+        {changeset.data.image_build, changeset.data.image_protocol}
+      )
+
+    changeset |> put_change(:image_build, build) |> put_change(:image_protocol, protocol)
   end
 
   defp keep(field, changeset) do

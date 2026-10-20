@@ -778,6 +778,57 @@ defmodule ForgeWeb.TemplatesLiveTest do
               template.image_protocol} == {"latest", "snap-b", "bbbbbbbbbbbb", 2}
     end
 
+    # **The save path the two halves of the rule meet on.** The page seeds `resolved_image` from
+    # whichever snapshot is marked now; the changeset decides what is known of it. Keyed on
+    # `image` — the word, which never changes for such a template — a rename after the mark had
+    # moved wrote the old snapshot's build and protocol onto the new one, and the next machine was
+    # made from an unprobed snapshot on a protocol nobody had verified.
+    test "a rename after the mark moved takes the new snapshot's labels", %{
+      conn: conn,
+      user: user
+    } do
+      marking("snap-a")
+
+      template =
+        template_for(user, %{
+          name: "following",
+          image: "latest",
+          resolved_image: "snap-a",
+          image_build: "aaaaaaaaaaaa",
+          image_protocol: 1
+        })
+
+      # A build happens: the mark moves to a snapshot the catalogue has no labels for.
+      Forge.Provider.Fake.listing([
+        %{id: "snap-a", name: "a", build: "aaaaaaaaaaaa", protocol: 1},
+        %{id: "snap-fresh", name: "fresh", build: nil, protocol: nil, current: true}
+      ])
+
+      {:ok, view, _html} = live(conn, ~p"/templates")
+
+      view
+      |> element(~s(button[phx-click=edit-template][phx-value-id="#{template.id}"]))
+      |> render_click()
+
+      view
+      |> form("#edit-template-#{template.id}",
+        template: %{
+          name: "renamed",
+          provider: "fake",
+          image: "latest",
+          memory: "8GiB",
+          cores: "4",
+          max_workers: "2"
+        }
+      )
+      |> render_submit()
+
+      saved = Forge.Repo.get!(Forge.Provisioning.Template, template.id)
+
+      assert {saved.resolved_image, saved.image_build, saved.image_protocol} ==
+               {"snap-fresh", nil, nil}
+    end
+
     # A row naming the mark names no snapshot, so it says which one it is resolved to — the row
     # would otherwise say nothing about which build its next machine comes from.
     test "a row on the mark says which snapshot it is on", %{conn: conn, user: user} do

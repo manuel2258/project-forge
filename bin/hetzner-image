@@ -22,10 +22,10 @@
 # this run makes takes the mark and the one before it loses it, so a template naming `latest`
 # makes its next machine from this build without anybody repointing it
 # (docs/design/provisioning.md § Where a machine comes from). The new one is marked in the same
-# call that creates it and the old ones are unmarked after, deliberately: interrupted between the
-# two, an account has two marked snapshots for a few seconds — which the platform reads as the
-# newer — where the other order would leave a window with none marked and every create from such
-# a template failing until somebody reran this.
+# call that creates it and every other marked snapshot is unmarked after, deliberately: the other
+# order would leave a window with none marked, and every create from such a template failing until
+# somebody reran this. Interrupted between the two, an account holds two marked snapshots — which
+# the platform reads as the newer — until the next build, which unmarks whatever is not its own.
 set -euo pipefail
 
 usage() {
@@ -320,19 +320,36 @@ echo "powering off"
 hcloud server poweroff "$server"
 until [ "$(hcloud server describe "$server" -o format='{{.Status}}')" = "off" ]; do sleep 3; done
 
-# Read before the new snapshot exists, so unmarking cannot reach it whatever it ends up called.
-marked="$(hcloud image list --type snapshot -l forge-worker-current -o noheader -o columns=id)"
-
 echo "snapshotting as $name"
 hcloud server create-image --type snapshot --description "$name" \
   --label "forge-worker-build=$build" --label "forge-worker-protocol=$protocol" \
   --label "forge-worker-current=1" \
   "$server" > /dev/null
 
-for id in $marked; do
-  echo "taking the latest mark off snapshot $id"
-  hcloud image remove-label "$id" forge-worker-current
-done
+# **Everything marked but this run's own snapshot, decided from what the account holds now.**
+# This read the marked set *before* creating and unmarked exactly those ids, which left two
+# snapshots marked for good in cases a real account will reach: two builds started close together
+# both read the old one, both marked their own and both unmarked the old, so neither cleaned up
+# after the other — and a run killed between the two steps left the same with nothing to fix it.
+# Asking the account afterwards and keeping only what this run made converges on one however many
+# runs overlap or die, and cleans up whatever an earlier one left behind.
+#
+# The description is what identifies this run's snapshot; the default `--name` carries a
+# second-resolution timestamp, so two runs collide only if an operator passes the same `--name`
+# to both, and then they leave two marked exactly as before. A `remove-label` that fails stops
+# the script under `set -e` with the new snapshot already marked, so the account is never left
+# with none — which would fail every create from a template on the mark — and the next build
+# finishes the job.
+echo "taking the latest mark off every other snapshot"
+hcloud image list --type snapshot -l forge-worker-current -o noheader -o columns=id,description |
+  while read -r id description; do
+    # An `if`, not `[ ... ] && continue`: a test that fails is the last command of the loop body,
+    # and under `set -e` that is a way to end the script having unmarked nothing.
+    if [ "$description" != "$name" ]; then
+      echo "  unmarking snapshot $id ($description)"
+      hcloud image remove-label "$id" forge-worker-current
+    fi
+  done
 
 echo
 echo "done. The snapshot is listed on /templates as $name, build $build, protocol $protocol,"

@@ -32,6 +32,12 @@ workers, `-j2`, one test partition at a time) rather than the same command again
 Code changes go into the repository you are running in, on the current branch, as ordinary
 commits. Commit before you finish; history is squashed later, so commit freely.
 
+**That holds when `changeset` is one of your outputs, and only then.** Read the manifest's
+*Outputs to write*. A state that does not declare `changeset` promises its documents and its
+log: its worktree is scratch, nothing in it is committed or pushed for you, and it goes when
+the job does — so anything you want to survive has to be in a document you write, not in the
+tree or in a commit message.
+
 ## Output documents
 
 Write each declared output to the path the manifest gives. An undeclared file in `out/` —

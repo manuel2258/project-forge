@@ -154,7 +154,12 @@ ticket's branch against its base, taken when the job was created.
 ## The contract, as the preamble states it
 
 - Read the inputs. Do the work described by the state prompt. Commit code to the current
-  branch with ordinary commits; history is squashed later.
+  branch with ordinary commits; history is squashed later — **when `changeset` is one of the
+  state's outputs**. A state that declares none has a scratch worktree that is never committed
+  or pushed (`git-hosting.md` § Non-fast-forward on a ticket branch), so the preamble sends the
+  agent to the manifest's *Outputs to write* and says anything that must survive belongs in a
+  document. The preamble is one text for every job, so it cannot know which kind this is; the
+  manifest, which is composed per job, already lists `changeset` when the state declares it.
 - Write each declared output to the path the manifest gives. Nothing else goes in `out/` but
   `proposals/`, which `Dir.collect/2` subtracts before it counts what is undeclared.
 - The document the manifest marks as carrying the outcome begins with YAML front matter holding
@@ -295,6 +300,15 @@ unless the manifest lists commands, and `platform.md` says what commands are wit
 One it writes anyway is removed and ignored, so a stray file cannot turn a finished run into an
 endless round of refusals.
 
+**What the commands will see depends on whether the state declares `changeset`.** It is told,
+because it is the thing an agent asking for a build needs: a state that declares one has its work
+committed and pushed on the way to parking and the commands run at that commit; a state that
+declares none pushes nothing, so they run against the branch as the run found it, without its
+edits (`commands.md` § The ensured commit). `Prompt.may_invoke/2` composes the sentence either
+way, and the second branch is live rather than hypothetical: `.forge/workflows/release.yml`'s
+`refining` has `may_invoke` of `ghcr-check` and `hetzner-check` and `produces:
+[release-notes.md]`, so its commands already run against the branch as the run found them.
+
 **The results come back in the manifest, under *Commands you ran*.** Each invocation of the batch
 that parked it: the command and its arguments, the commit it ran at, its exit status or why it has
 none, how long it took, and where its log is — `$FORGE_JOB/commands/<n>-<command>.log`, fetched
@@ -312,9 +326,14 @@ what it lacks is what happened while it was stopped:
    inline, fenced verbatim. That is every answer on the ticket, oldest first, so the ones this
    job stopped for are among the newest. Absent when the spec carries no answers input.
 2. **The branch** — its name and the commit the worktree is at, which the worker reads from the
-   checkout it has just made, as the job's user (`ForgeWorker.Job.Workspace.head/2`). The earlier
-   run's work was committed and squashed when it stopped (`worker-tier.md` § Git), so the history
-   is not the one the session remembers even though the files are, and the prompt says so.
+   checkout it has just made, as the job's user (`ForgeWorker.Job.Workspace.head/2`). For a state
+   that declares `changeset` the earlier run's work was committed and squashed when it stopped
+   (`worker-tier.md` § Git), so the history is not the one the session remembers even though the
+   files are, and the prompt says so. **For a state that declares none the files are not the
+   ones it left either**: its tree was discarded rather than committed and its template was not
+   promoted, so the resume snapshots the ticket's older template or the seed and resets to the
+   branch head. `Prompt.branch_state/2` says that instead — the session is resumed with
+   `--resume` and would otherwise come back believing edits exist that do not.
 3. **The manifest**, whole: it is short, it lists `answers.md` among the inputs, and it carries
    the budget as assigned, which the platform may have lowered since the session last saw it.
 

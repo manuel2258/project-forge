@@ -635,6 +635,13 @@ that failed before it pushed keeps its worktree's untracked debris, and promotin
 the next job exactly the inheritance the clean rule exists to prevent. So a failed run promotes
 nothing and the ticket keeps the template it had.
 
+**And a state that declares no `changeset` promotes nothing either**, for the same reason read
+the other way: it never commits, deliberately, so its tree is scratch to the end
+(`docs/design/git-hosting.md` § Non-fast-forward on a ticket branch). Promoting it would let the
+ticket's next job inherit work nobody accepted and commit it with its own `add -A` — the branch
+reached by the long way, after the short one was closed. The ticket keeps the template it had and
+the next job starts colder, which is what a cache is allowed to cost.
+
 **Only ticket branches.** A conversation holds one worktree for the whole of its life
 (`ForgeWorker.Job.Conversation` prepares once and discards at close), so it already keeps its own
 warmth and a template would be a second copy of it. The branch name becomes a path here, so it is
@@ -853,12 +860,18 @@ or throw away the warm start the seed exists to provide.
 ## Hibernation and resume
 
 A job that is interrupted — cancelled, out of budget, a worker being destroyed — commits before
-it stops. `docs/decisions.md`: jobs are disposable, anything that must survive is committed
-to the branch or written to the store, history is squashed.
+it stops, when its state declares `changeset`. `docs/decisions.md`: jobs are disposable, anything
+that must survive is committed to the branch or written to the store, history is squashed. For a
+state that declares no `changeset` there is nothing that must survive: its tree is scratch, it is
+never committed or pushed however the run ended, and it is discarded with the worktree
+(`docs/design/git-hosting.md` § Non-fast-forward on a ticket branch).
 
-The sequence: SIGTERM the harness, wait the grace period, `git add -A` and commit in the worktree,
-push to the ticket branch with the job's token, upload the transcript to the store, send
-`hibernated` with the commit sha. The platform records the sha and puts a workflow job back to
+The sequence, for a state that declares `changeset`: SIGTERM the harness, wait the grace period,
+`git add -A` and commit in the worktree, push to the ticket branch with the job's token, upload
+the transcript to the store, send `hibernated` with the commit sha. **For a state that declares
+none the three git steps do not happen**: the transcript still goes to the store and `hibernated`
+still carries a sha, but it is the branch head the run started from rather than one the run
+made. The platform records the sha and puts a workflow job back to
 `pending`, to resume from that commit wherever it is placed next; a conversation goes
 `hibernated` — dormant — until a person reopens it. A workflow job used to be set `hibernated`
 too, and nothing ever moved one on: the scheduler places only `pending` jobs, so the ticket sat

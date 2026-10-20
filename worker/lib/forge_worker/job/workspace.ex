@@ -41,6 +41,13 @@ defmodule ForgeWorker.Job.Workspace do
   progress is the point of resuming. A tree made for the resume — a snapshot, a clone — has no
   work in progress, and is the branch as the platform has it like any other.
 
+  **A state that produces no `changeset` is always the second case.** Its run's tree is never
+  committed and `promote/3` is skipped for it (`ForgeWorker.Link`), and the worktree is discarded
+  at the end of every run, so a resume finds nothing of its own here and falls through to the
+  ticket's older template or the seed. That is what such a state promised — its documents are its
+  output and its tree is scratch — and its continuation prompt says so rather than telling it the
+  files are the ones it left (`ForgeCore.Prompt.branch_state/2`).
+
   **The tree is `user`'s before any git runs in it, and git runs as `user`**
   (`docs/design/worker-tier.md` § The job slice). A snapshot of a ticket's template carries the
   last job's `.git`, hooks and all; a tree left by an earlier attempt carries this job's. Only a
@@ -130,6 +137,18 @@ defmodule ForgeWorker.Job.Workspace do
       Checkout.head(dir, as)
     end
   end
+
+  @doc """
+  The ticket branch head this run started from: the `origin/<branch>` its checkout fetched, read
+  as `user`.
+
+  Not the worktree's own `HEAD`, which an agent that used git itself has already moved past —
+  onto commits that were never pushed and, for a state that produces no changeset, never will
+  be. This is what such a run reports instead of a push (`ForgeWorker.Link`).
+  """
+  @spec base(assignment(), String.t(), Slice.user()) :: {:ok, String.t()} | {:error, term()}
+  def base(assignment, dir, user),
+    do: Checkout.rev(dir, remote(assignment["git"]), Slice.as_user(user))
 
   @doc "The commit the worktree is on, read as `user`."
   @spec head(String.t(), Slice.user()) :: {:ok, String.t()} | {:error, term()}

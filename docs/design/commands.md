@@ -260,6 +260,10 @@ disk"; it runs against a sha that is on the branch and in the record.
 - **Nothing to commit means no commit.** The invocation records the current head. An empty commit
   to force a rebuild is not a thing this platform does — a command re-run is a new invocation of
   the same sha, which is more honest and shows up correctly on the timeline.
+- **A state that produces no `changeset` commits nothing here either**, whatever is in its tree:
+  its invocations record the branch head it started from, and the commands run against the branch
+  as the ticket left it (`git-hosting.md` § Non-fast-forward on a ticket branch). A state that
+  wants its commands to see its own edits declares a `changeset`.
 - **Commit noise is already paid for.** The contract in `job-prompt.md` has the agent making
   ordinary commits and says history is squashed later, so forty auto-commits cost nothing at
   merge.

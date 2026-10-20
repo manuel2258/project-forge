@@ -127,6 +127,24 @@ defmodule ForgeWeb.DiffTest do
     end
   end
 
+  # A name git has to quote even with `core.quotePath=false`, in a patch that is otherwise
+  # perfectly good text. This is what makes the printable form load-bearing in two places at
+  # once: `--numstat` names the row and the `+++` line keys the patch, and if only one of them
+  # is made printable the row stops finding its own patch and silently never expands.
+  test "a row whose name git quotes still finds its own patch" do
+    {repo, base, head} = change(%{"nl\nhere.ex" => "def ok, do: :ok\n"})
+
+    diff = Diff.build(repo, base, head)
+
+    # Quoted on both sides and the patch is still text, so unlike the latin-1 case it is drawn.
+    assert diff.text
+    assert diff.inline
+    assert [{~s("nl\\nhere.ex"), 1, 0}] = diff.files
+
+    assert [%{path: ~s("nl\\nhere.ex"), lines: lines}] = Diff.files(diff)
+    assert {:line, "+def ok, do: :ok"} in lines
+  end
+
   # And the other way round: one file, well under the file limit, whose patch is past the byte
   # limit. A bound that only counted files would put six hundred kilobytes on the page.
   test "one enormous file is too much to read, however few there are" do

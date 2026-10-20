@@ -326,15 +326,38 @@ defmodule Forge.GitTest do
             ~s(we"ird.md),
             "a b/c",
             ~s("quoted"),
+            "back\\slash",
             "caf" <> <<0xE9>> <> ".txt",
             "dir/" <> <<0xFF, 0xFE>> <> "x",
             "tab\there",
-            "nl\nhere"
+            "nl\nhere",
+            # A byte whose octal is one digit, and one whose octal is two: without the padding
+            # to three, `unquote_path/1` reads the digits that follow as part of the escape.
+            <<1>> <> "one",
+            <<9, 1, 55>> <> "seven",
+            <<0x7F>> <> "del"
           ] do
         printed = Git.printable_path(raw)
         assert String.valid?(printed), inspect(raw)
         assert Git.unquote_path(printed) == raw, inspect(raw)
       end
+    end
+
+    # The escaped form itself, byte class by byte class, because the round trip above holds for
+    # several wrong encoders: printable ASCII left alone, the escapes git has names for, and
+    # everything else as exactly three octal digits.
+    test "printable_path/1 escapes each byte the way git prints it" do
+      assert Git.printable_path("plain-AZ_09.md") == "plain-AZ_09.md"
+
+      assert Git.printable_path("a\tb\nc\rd\ae\bf") == ~s("a\\tb\\nc\\rd\\ae\\bf")
+      assert Git.printable_path(<<1, 9, 0xE9, 0x7F>>) == ~s("\\001\\t\\351\\177")
+
+      # A quote or a backslash inside printable ASCII needs no encoding here, though git itself
+      # would quote it: the name is already safe to draw and already its own inverse, since
+      # `unquote_path/1` only unwraps a name that *begins* with a quote. One that does is
+      # encoded, which is what keeps the pair injective.
+      assert Git.printable_path(~s(a"b\\c)) == ~s(a"b\\c)
+      assert Git.printable_path(~s("lead)) == ~s("\\"lead")
     end
 
     # `skip` and `limit` are the caller's and are interpolated into flags rather than marked,

@@ -336,14 +336,21 @@ defmodule Forge.Merge do
 
   # The third producer of paths in this product, after `Forge.Git`'s `--numstat` and `ls-tree`:
   # these go into an event payload and into a ticket's stuck reason, so JSON and Postgres carry
-  # them. `printable_path/1` for the same reason it is applied there — a repository may hold a
-  # file whose name is not valid UTF-8, and nothing downstream can encode one.
+  # them. Unlike those two, **this one is about reading and not about safety**: `merge_tree/3`
+  # does not pass `core.quotePath=false`, so git has already quoted anything it cannot print and
+  # what arrives is ASCII either way. What the pair does is put the name back in the form the
+  # rest of the product uses — `résumé.md` rather than `"r\303\251sum\303\251.md"`, and the
+  # escaped form kept only where there is no readable one.
+  #
+  # Unquoting first is what makes it a normalisation rather than a second encoding: without it
+  # a name git had already quoted came out as `"\"caf\\351.md\""`, which is safe and is not
+  # the file's.
   defp conflicted_paths(out) do
     out
     |> String.split("\n")
     |> Enum.flat_map(fn line ->
       case String.split(line, "\t", parts: 2) do
-        [_info, path] -> [Git.printable_path(path)]
+        [_info, path] -> [path |> Git.unquote_path() |> Git.printable_path()]
         _other -> []
       end
     end)

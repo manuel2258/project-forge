@@ -415,6 +415,46 @@ it.
   rather than *the node's default* or *custom* for a field its provider requires. The token
   keeps a node fallback, `Provider.config(:token)`; nothing in `runtime.exs` sets it, and no
   other driver reads the key.
+
+  **`latest` is the second thing that field may hold.** A snapshot id names one build for ever,
+  so every image built meant opening every template and repointing it by hand. A template may
+  instead name the literal `latest`, and then the snapshot a machine is made from is whichever
+  one the account's catalogue marks *current* at the moment of creation. `bin/hetzner-image`
+  moves that mark onto each snapshot it builds — one more label, `forge-worker-current`, set in
+  the same call as the build and the protocol — and `images/1` reports it as a third field on
+  each entry, so there is no new callback and no driver that has to learn what the word means:
+  one that marks nothing simply never has a current snapshot, and a template naming `latest` on
+  it fails with *no snapshot carries the latest mark* the way one naming no image at all fails.
+  **It is a choice and never a default.** A template naming a concrete id goes on naming it
+  until a person changes it, and nothing migrates one.
+
+  **The mark moves onto the new snapshot before it comes off the old one**, which is the order
+  `bin/hetzner-image` does it in and not an accident: a build interrupted between the two leaves
+  two snapshots marked for a few seconds, and `Provisioning.current_image/1` reads the newest of
+  them. The other order risks a window with *none* marked, where every create from a template
+  naming `latest` fails until somebody reruns the build.
+
+  **The concrete snapshot is resolved per create and written down**, on
+  `worker_templates.resolved_image`: for a template naming an id it is that same id, put there by
+  `Template.changeset/2` whenever `image` is, so the two cannot drift; for one naming `latest` it
+  is whatever the last resolution found, refreshed from the driver's listing on every create
+  attempt. **`workers.image` is the resolved id and never the word `latest`**, so a machine's own
+  row says which snapshot it actually booted — which is what the provider's console shows, and
+  what the two mechanisms below compare a machine against (§ A template that cannot make a
+  working machine is taken out of service, § A snapshot that speaks the wrong protocol).
+
+  **Resolving onto the snapshot already resolved keeps what was learnt about it**, by the same
+  rule a save keeps it (§ A snapshot that speaks the wrong protocol): a listing says nothing
+  about an unlabelled snapshot, and forgetting the protocol a refused machine taught would earn
+  that snapshot another machine on every pass. Resolving onto a *different* snapshot takes that
+  one's labels, nothing included.
+
+  **The gate reads the stored answer, deliberately.** `for_demand/2` and `could_ever_hold?/2` are
+  a cheap in-process check run on every scheduling pass, so they read `resolved_image` and
+  `image_protocol` as stored rather than calling the driver — a `latest` template's compatibility
+  answer can lag a build that has just happened, until the next real create attempt re-resolves
+  it. The same staleness this note already accepts for a catalogue read when a template was
+  saved, and it costs at most one pass.
 - **The catalogue offers only what the node's location will sell.** `shapes/1` keeps a server
   type only when its own `locations` list has an entry for the node's location that is neither
   deprecated nor unavailable, because a size that cannot be ordered where the platform creates
@@ -667,17 +707,24 @@ the way a driver's is — which is the point: a template spending somebody else'
 of service after three scheduling passes rather than three sweeps, with *its provider credential
 belongs to another user* as the last error.
 
+**A `latest` that resolves to nothing is a member of that third kind and not a new one.** No
+snapshot carries the mark, or the account's listing cannot be read at all: no machine is made,
+the template's failure records *no snapshot carries the latest mark* or the driver's words, and
+three passes take it out of service like any other recipe that cannot work
+(§ Where a machine comes from).
+
 A machine reaching `ready` sets the counter to zero: the recipe demonstrably works, and a template
 that has made a hundred good machines should not be disabled by three bad ones spread across a
 year. Consecutive, not cumulative.
 
-**Only a machine's first `ready`, and only from the image the template still names.** It used to be
+**Only a machine's first `ready`, and only from the image the template still resolves to.** It used to be
 every `ready`, and a reconnect says nothing about the recipe: every machine reconnects when the
 platform restarts, so a machine made from last month's image, still busy with a long job, put a
 template disabled by this month's image back in service at every deploy — and the loop this
 section exists to stop ran again, three billed machines at a time. The same two conditions as
 learning a protocol (§ A snapshot that speaks the wrong protocol): first is a row that has never
-been seen, and the image is the one copied onto the row at creation, null matching null.
+been seen, and the image is the concrete one copied onto the row at creation, compared against
+the template's `resolved_image`, null matching null.
 
 **A worker that connected and later went away is not a template's failure.** The machine worked;
 something else happened to it. `last_seen_at` being null is what separates the two, and it is the
@@ -754,10 +801,14 @@ snapshot costs one machine — not one per sweep, and not one per job waiting. A
 image is not probed, and not warned about either: it boots the driver's default, which is the
 host's own, and every Hetzner template names one.
 
-- **It learns only if it still names the image the machine was made from.** `workers.image` is
-  copied from the template at creation, beside the size and the figures, and the learning is
-  a conditional update on the template's current image: a template edited onto a new snapshot
-  while the old one's machine was booting is not the one that was refused.
+- **It learns only if it still resolves to the image the machine was made from.** `workers.image`
+  is the concrete snapshot copied onto the row at creation, beside the size and the figures, and
+  the learning is a conditional update on the template's `resolved_image`: a template edited onto
+  a new snapshot while the old one's machine was booting is not the one that was refused. It is
+  `resolved_image` and not `image` because a template naming `latest` never holds a concrete id
+  in `image`, so the comparison could never hold for one again — and this and the failure counter
+  above would both have gone silently dead rather than wrong: a counter that never resets, and a
+  protocol never learnt (§ Where a machine comes from).
 - **Only a machine's first join teaches anything.** A later one may be running a release
   `bin/worker-update` put there, which says nothing about the snapshot, or be somebody holding a
   copy of the machine's token — who could otherwise teach the template a protocol that stops it
@@ -791,6 +842,10 @@ placement in every project the template is assigned to, as `Enable` does. The re
   that places a job; `name` only orders templates of equal size, which picks between two that both
   fit and never finds one where none did. A rename is not a fix, here any more than for the failure
   counter.
+- `resolved_image` is not in the list either, and does not need to be: an edit moves it only by
+  moving `image`, which is (§ Where a machine comes from). A resolution moves it outside an edit,
+  during the create attempt that asked for it — the pass that wrote it is the pass acting on it,
+  so there is nothing to bring back.
 - `max_workers`, `idle_ms`, `provider`, `provider_credential_id` and `size` decide whether a
   create succeeds and when there is room for one — `idle_ms` through a full template's idle
   machine giving its slot up — not whether the template could hold the job. A template wrong in

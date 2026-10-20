@@ -1206,14 +1206,51 @@ defmodule Forge.Workers do
       (is_nil(worker.cores) or worker.cores >= demand.cores)
   end
 
+  # **The credential comes before the image, because reading the catalogue needs it.** A template
+  # naming `latest` names no snapshot, so what it resolves to is asked of the driver here — once
+  # per create attempt, before the checks below, which read what the resolution wrote
+  # (`docs/design/provisioning.md` § Where a machine comes from). Room is still asked first: a
+  # pass that has nowhere to put a machine should not spend an API call finding out which image
+  # it would have used.
   defp create_from(template, demand) do
     with {:ok, slot} <- room(template, demand),
+         {:ok, credential} <- spendable(template),
+         {:ok, template} <- resolve(template, credential),
          :ok <- speaks(template),
-         :ok <- probed(template),
-         {:ok, credential} <- spendable(template) do
+         :ok <- probed(template) do
       make_in(slot, template, credential)
     end
   end
+
+  # **Resolved fresh at every create, and never cached across one.** The mark moves when an image
+  # is built, which is outside the platform entirely, so the only moment the answer is certainly
+  # current is the moment a machine is about to be made. A template naming a snapshot is not asked
+  # about: it already knows.
+  #
+  # Nothing marked, or a listing that cannot be read, is the template's failure the way a
+  # credential it may not spend is — no row, no create request, and out of service after three
+  # passes (§ A template that cannot make a working machine is taken out of service).
+  defp resolve(template, credential) do
+    if Provisioning.Template.latest?(template) do
+      case Provider.images(template.provider, open_secret(credential)) do
+        {:ok, images} ->
+          marked(template, Provisioning.current_image(images))
+
+        {:error, reason} ->
+          refuse_image(template, "its images could not be read: #{message(reason)}")
+      end
+    else
+      {:ok, template}
+    end
+  end
+
+  # **The stored answer is not a fallback.** A template that resolved to a snapshot last pass and
+  # finds nothing marked this one is refused rather than made from the old one: `latest` means
+  # whichever snapshot carries the mark *now*, and a mark somebody removed is not an answer the
+  # platform may invent.
+  defp marked(template, nil), do: refuse_image(template, "no snapshot carries the latest mark")
+
+  defp marked(template, current), do: {:ok, Provisioning.resolve_latest(template, current)}
 
   # **A slot that has to be freed first is not made in, it is named.** The machine giving it up is
   # destroyed at the end of the pass (`sweep_idle/1`), not here, for two reasons the review of this
@@ -1228,7 +1265,7 @@ defmodule Forge.Workers do
 
     do_create(
       Provisioning.Template.worker_attrs(template),
-      %{size: template.size, image: template.image},
+      %{size: template.size, image: template.resolved_image},
       credential,
       template.name
     )
@@ -1243,14 +1280,17 @@ defmodule Forge.Workers do
   # it takes to create from it again.
   defp speaks(template) do
     case Provisioning.image_refusal(template) do
-      nil ->
-        :ok
-
-      message ->
-        Logger.warning("not making a machine from template #{template.id}: #{message}")
-        Provisioning.failed(template.id, message)
-        {:error, {:create_failed, {:image, message}}}
+      nil -> :ok
+      message -> refuse_image(template, message)
     end
+  end
+
+  # One refusal for every reason the image is the thing that stopped this: the words go on the
+  # template, where the page reads them, and the counter takes it out of service.
+  defp refuse_image(template, message) do
+    Logger.warning("not making a machine from template #{template.id}: #{message}")
+    Provisioning.failed(template.id, message)
+    {:error, {:create_failed, {:image, message}}}
   end
 
   # **An image nobody has heard speak is probed by one machine, not several.** Its protocol is
@@ -1265,7 +1305,12 @@ defmodule Forge.Workers do
   #
   # A template naming no image is not probed, for the reason `unlabelled/1` does not warn about
   # one: it boots the driver's default, this host's own. Every Hetzner template names one.
-  defp probed(%{image: image, image_protocol: nil} = template) when is_binary(image) do
+  #
+  # **The probe is of the resolved snapshot, not of whatever the template names.** For one naming
+  # `latest` the two differ, and a word is not something a machine can be made from: a build that
+  # moved the mark between two passes is a different image and gets its own probe
+  # (`docs/design/provisioning.md` § Where a machine comes from).
+  defp probed(%{resolved_image: image, image_protocol: nil} = template) when is_binary(image) do
     probing =
       Repo.exists?(
         from w in Worker,
@@ -1280,8 +1325,10 @@ defmodule Forge.Workers do
   # **Unlabelled is unknown, not compatible**, and it is still made: the join decides, and a
   # refusal teaches the template, so an unlabelled snapshot that cannot work costs one machine.
   # A template naming no image boots the driver's default, which is the node's own and was built
-  # with this platform.
-  defp unlabelled(%{image: image, image_protocol: nil} = template) when is_binary(image) do
+  # with this platform. The snapshot named is the resolved one, as in `probed/1`, so the warning
+  # says which image it is about rather than the word `latest`.
+  defp unlabelled(%{resolved_image: image, image_protocol: nil} = template)
+       when is_binary(image) do
     Logger.warning(
       "making a machine from template #{template.id}, whose image #{image} carries no protocol " <>
         "label; the machine's join will say whether this platform can use it"

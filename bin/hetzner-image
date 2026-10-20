@@ -17,6 +17,15 @@
 # another's build. Never typed. The platform reads them back to say
 # which snapshots are current and to refuse one it cannot talk to before it pays for a machine
 # (docs/design/provisioning.md § A snapshot that speaks the wrong protocol).
+#
+# **And with `forge-worker-current`, the mark a template naming `latest` follows.** The snapshot
+# this run makes takes the mark and the one before it loses it, so a template naming `latest`
+# makes its next machine from this build without anybody repointing it
+# (docs/design/provisioning.md § Where a machine comes from). The new one is marked in the same
+# call that creates it and the old ones are unmarked after, deliberately: interrupted between the
+# two, an account has two marked snapshots for a few seconds — which the platform reads as the
+# newer — where the other order would leave a window with none marked and every create from such
+# a template failing until somebody reran this.
 set -euo pipefail
 
 usage() {
@@ -311,11 +320,21 @@ echo "powering off"
 hcloud server poweroff "$server"
 until [ "$(hcloud server describe "$server" -o format='{{.Status}}')" = "off" ]; do sleep 3; done
 
+# Read before the new snapshot exists, so unmarking cannot reach it whatever it ends up called.
+marked="$(hcloud image list --type snapshot -l forge-worker-current -o noheader -o columns=id)"
+
 echo "snapshotting as $name"
 hcloud server create-image --type snapshot --description "$name" \
   --label "forge-worker-build=$build" --label "forge-worker-protocol=$protocol" \
+  --label "forge-worker-current=1" \
   "$server" > /dev/null
 
+for id in $marked; do
+  echo "taking the latest mark off snapshot $id"
+  hcloud image remove-label "$id" forge-worker-current
+done
+
 echo
-echo "done. The snapshot is listed on /templates as $name, build $build, protocol $protocol."
+echo "done. The snapshot is listed on /templates as $name, build $build, protocol $protocol,"
+echo "and carries the latest mark: a template naming 'latest' makes its next machine from it."
 echo "Password for the rescue session, had you needed it: ${password:-<none captured>}"

@@ -19,6 +19,11 @@ defmodule Forge.Provisioning.Template do
   alias Forge.Jobs.Job
   alias Forge.Provisioning.Credential
 
+  # **The one spelling of the sentinel.** Everything that has to recognise it —
+  # `Forge.Workers`, the templates page — asks `latest?/1` rather than writing the string again,
+  # so the day it changes there is one place to change it.
+  @latest "latest"
+
   @primary_key {:id, :binary_id, autogenerate: true}
   @foreign_key_type :binary_id
   schema "worker_templates" do
@@ -32,7 +37,16 @@ defmodule Forge.Provisioning.Template do
     # this host's image whatever a template says, and one that lists `:image` in
     # `Forge.Provider.required_template_fields/1` — Hetzner — refuses a template without one,
     # here on save and at create for a row saved before that rule.
+    #
+    # **Or the literal `latest`**, which names no snapshot and follows the mark instead
+    # (`docs/design/provisioning.md` § Where a machine comes from).
     field :image, :string
+    # The concrete snapshot this template is currently made from: the same value as `image` for
+    # one naming a snapshot id, and the last resolution's answer for one naming `latest`. It is
+    # what reaches the driver and what is written onto a machine's own row, so `workers.image` is
+    # never the word `latest` — and it is what the failure counter and the protocol learning
+    # compare a machine against.
+    field :resolved_image, :string
     field :memory, :integer
     field :cores, :integer
     field :accepts, {:array, Ecto.Enum}, values: Job.kinds()
@@ -63,6 +77,23 @@ defmodule Forge.Provisioning.Template do
 
   @type t :: %__MODULE__{}
 
+  @doc """
+  What a template's `image` holds to follow the mark rather than name a snapshot
+  (`docs/design/provisioning.md` § Where a machine comes from).
+  """
+  @spec latest() :: String.t()
+  def latest, do: @latest
+
+  @doc """
+  Whether this template follows the mark instead of naming one snapshot.
+
+  Takes anything with an `image` — a row, or the attributes about to become one — because the
+  page has to answer the question before a row exists.
+  """
+  @spec latest?(%{image: String.t() | nil}) :: boolean()
+  def latest?(%{image: @latest}), do: true
+  def latest?(%{image: _other}), do: false
+
   @spec changeset(t(), map()) :: Ecto.Changeset.t()
   def changeset(template, attrs) do
     template
@@ -73,6 +104,7 @@ defmodule Forge.Provisioning.Template do
       :provider,
       :size,
       :image,
+      :resolved_image,
       :memory,
       :cores,
       :accepts,
@@ -99,6 +131,7 @@ defmodule Forge.Provisioning.Template do
     # `docs/design/worker-tier.md` § Managed and unmanaged, one template at a time.
     |> validate_number(:max_workers, greater_than_or_equal_to: 0)
     |> validate_number(:idle_ms, greater_than: 0)
+    |> resolve_concrete_image()
     |> validate_provider()
     |> validate_required_by_driver()
     |> validate_credential_provider()
@@ -196,16 +229,36 @@ defmodule Forge.Provisioning.Template do
     end
   end
 
+  # **A snapshot id resolves to itself, by construction rather than by care.** `resolved_image` is
+  # what reaches the driver and what is written onto a machine, so a template naming an id whose
+  # `resolved_image` had drifted from it would make machines from the wrong snapshot — and the
+  # only thing that keeps the two together is that one save cannot change `image` without
+  # changing this. A template naming `latest` names no snapshot, so what it resolves to is the
+  # caller's: the catalogue's marked entry at save time, and `Forge.Workers`' fresh resolution at
+  # every create (`docs/design/provisioning.md` § Where a machine comes from).
+  defp resolve_concrete_image(changeset) do
+    case fetch_change(changeset, :image) do
+      {:ok, @latest} -> changeset
+      {:ok, image} -> put_change(changeset, :resolved_image, image)
+      :error -> changeset
+    end
+  end
+
   # **A save does not forget what the platform knows about the image it already names.** The
   # labels are read from the provider's listing on every save, and an unlabelled snapshot reads
   # as nothing there — so a rename of a template whose protocol was learnt from a refused machine
   # would reset it to unknown, and earn the snapshot one more machine to refuse. With the image
   # unchanged, only a label that is actually there replaces what is stored; choosing another
   # image takes that image's labels, nothing included.
+  #
+  # `resolved_image` is kept the same way and for the same reason: a rename of a template naming
+  # `latest` carries no answer about what the mark points at, and reading its own column as that
+  # answer would unresolve it. `Forge.Provisioning.resolve_latest/2` keeps the rule for a
+  # resolution, which is the other way the three fields move.
   defp keep_what_was_learnt(changeset) do
     if Map.has_key?(changeset.changes, :image),
       do: changeset,
-      else: Enum.reduce([:image_build, :image_protocol], changeset, &keep/2)
+      else: Enum.reduce([:resolved_image, :image_build, :image_protocol], changeset, &keep/2)
   end
 
   defp keep(field, changeset) do
@@ -231,7 +284,11 @@ defmodule Forge.Provisioning.Template do
       memory_budget: template.memory,
       cores: template.cores,
       accepts: template.accepts,
-      image: template.image
+      # **The concrete snapshot, never the word `latest`.** By the time a worker row is written
+      # the template has been through `Forge.Workers`' resolution, so this is the id of the
+      # snapshot the machine is actually made from (`provisioning.md` § Where a machine comes
+      # from).
+      image: template.resolved_image
     }
   end
 end

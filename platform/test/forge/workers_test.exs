@@ -859,7 +859,7 @@ defmodule Forge.WorkersTest do
       {1, _} =
         Forge.Repo.update_all(
           Ecto.Query.from(t in Provisioning.Template, where: t.id == ^template.id),
-          set: [image: nil]
+          set: [image: nil, resolved_image: nil]
         )
 
       assert {:error, {:create_failed, {:hetzner, "the template names no image"}}} =
@@ -3301,6 +3301,151 @@ defmodule Forge.WorkersTest do
       refute_receive {:provider_create, _opts}
       assert [%{status: :destroyed}] = Workers.list()
       assert Provisioning.disabled?(reloaded(template))
+    end
+  end
+
+  # A template naming the mark instead of a snapshot: what it is made from is resolved against the
+  # driver's listing at every create (`docs/design/provisioning.md` § Where a machine comes from).
+  describe "a template that follows the latest mark" do
+    setup do
+      user = Forge.AccountsFixtures.user_fixture()
+      {:ok, project} = Forge.Projects.register(project_attrs(), user)
+      on_exit(&Provider.Fake.allow/0)
+      %{user: user, project: project}
+    end
+
+    defp marking(id, attrs \\ %{}) do
+      Provider.Fake.listing([
+        %{id: "snap-other", name: "other", build: nil, protocol: nil},
+        Enum.into(attrs, %{id: id, name: id, current: true})
+      ])
+    end
+
+    # **The acceptance criterion the resolution exists for.** A machine is made from the snapshot
+    # that carries the mark, and its own row records that concrete id — never the word, which is
+    # not something a provider can boot and not what its console shows.
+    test "a machine is made from the snapshot that carries the mark", context do
+      %{user: user, project: project} = context
+      template = assigned(user, project, %{image: "latest"})
+      marking("snap-99")
+
+      assert {:error, :creating} = Workers.create_machine(demand(project_id: project.id))
+      assert_receive {:provider_create, %{image: "snap-99"}}
+      assert [%{image: "snap-99"}] = Workers.list()
+      assert reloaded(template).resolved_image == "snap-99"
+    end
+
+    # Resolved fresh each time: a build between two passes moves the mark, and the next machine
+    # comes from the new snapshot with no edit to the template.
+    test "a build between two passes moves what the next machine comes from", context do
+      %{user: user, project: project} = context
+      template = assigned(user, project, %{image: "latest", max_workers: 2})
+
+      marking("snap-1")
+      assert {:error, :creating} = Workers.create_machine(demand(project_id: project.id))
+      assert_receive {:provider_create, %{worker_id: first, image: "snap-1"}}
+      assert reloaded(template).resolved_image == "snap-1"
+
+      # The first machine joins, so the second is not held back as a probe of an unknown image.
+      :ok = Workers.admit(first, %{"protocol" => ForgeCore.WorkerProtocol.current()})
+
+      marking("snap-2")
+      assert {:error, :creating} = Workers.create_machine(demand(project_id: project.id))
+      assert_receive {:provider_create, %{image: "snap-2"}}
+      assert reloaded(template).resolved_image == "snap-2"
+
+      assert Workers.list() |> Enum.map(& &1.image) |> Enum.sort() == ["snap-1", "snap-2"]
+    end
+
+    # Nothing marked is the template's failure the way a credential it may not spend is: no
+    # request, no row, the words on the page, and out of service after three passes. **The last
+    # snapshot it resolved to is not a fallback** — the mark means whichever snapshot carries it
+    # now, and one somebody removed is not an answer the platform may invent.
+    test "nothing marked makes nothing and says why", context do
+      %{user: user, project: project} = context
+      template = assigned(user, project, %{image: "latest", resolved_image: "snap-stale"})
+      Provider.Fake.listing([%{id: "snap-1", name: "one", build: nil, protocol: nil}])
+
+      assert {:error, {:create_failed, {:image, "no snapshot carries the latest mark"}}} =
+               Workers.create_machine(demand(project_id: project.id))
+
+      refute_receive {:provider_create, _opts}
+      assert Workers.list() == []
+      assert reloaded(template).failures == 1
+      assert reloaded(template).last_error == "no snapshot carries the latest mark"
+    end
+
+    test "a listing that cannot be read makes nothing and says why", context do
+      %{user: user, project: project} = context
+      template = assigned(user, project, %{image: "latest"})
+      Provider.Fake.refuse_images("token revoked")
+
+      assert {:error, {:create_failed, {:image, message}}} =
+               Workers.create_machine(demand(project_id: project.id))
+
+      refute_receive {:provider_create, _opts}
+      assert message == "its images could not be read: token revoked"
+      assert reloaded(template).failures == 1
+    end
+
+    # A template naming a snapshot is not asked about: it already knows, and a catalogue call per
+    # create for every template would be a request per scheduling pass per template.
+    test "a template naming a snapshot asks the driver nothing", context do
+      %{user: user, project: project} = context
+      assigned(user, project, %{image: "snap-1"})
+
+      assert {:error, :creating} = Workers.create_machine(demand(project_id: project.id))
+      refute_receive {:provider_images, _credential}
+    end
+
+    # **The two mechanisms the resolved column exists to keep alive.** A machine from a template
+    # naming the mark teaches it the protocol of the snapshot it was made from, and its reaching
+    # `ready` clears the failure counter — both keyed on `resolved_image`, because `workers.image`
+    # is concrete and `image` is the word.
+    test "its machine teaches it and clears its failures", context do
+      %{user: user, project: project} = context
+      template = assigned(user, project, %{image: "latest"})
+      marking("snap-99")
+
+      for _ <- 1..(Provisioning.failure_limit() - 1),
+          do: Provisioning.failed(template.id, "an earlier pass")
+
+      assert {:error, :creating} = Workers.create_machine(demand(project_id: project.id))
+      assert_receive {:provider_create, %{worker_id: id}}
+
+      :ok = Workers.admit(id, %{"protocol" => ForgeCore.WorkerProtocol.current()})
+      assert reloaded(template).image_protocol == ForgeCore.WorkerProtocol.current()
+
+      {:ok, _ready} = Workers.ready(Workers.get!(id), %{})
+      assert reloaded(template).failures == 0
+    end
+
+    # The probe is of the resolved snapshot: a known-bad one costs one machine, as it does for a
+    # template naming an id.
+    test "the first machine from a newly marked snapshot is its probe", context do
+      %{user: user, project: project} = context
+      assigned(user, project, %{image: "latest", max_workers: 5})
+      marking("snap-99")
+
+      assert {:error, :creating} = Workers.create_machine(demand(project_id: project.id))
+      assert_receive {:provider_create, _opts}
+      assert {:error, :at_capacity} = Workers.create_machine(demand(project_id: project.id))
+      refute_receive {:provider_create, _opts}
+    end
+
+    # A snapshot the catalogue says speaks a protocol this platform refuses is refused before
+    # anything is paid for, the resolution having just read the label off it.
+    test "a marked snapshot this platform cannot talk to is refused", context do
+      %{user: user, project: project} = context
+      template = assigned(user, project, %{image: "latest"})
+      marking("snap-99", %{protocol: ForgeCore.WorkerProtocol.current() + 1})
+
+      assert {:error, {:create_failed, {:image, message}}} =
+               Workers.create_machine(demand(project_id: project.id))
+
+      refute_receive {:provider_create, _opts}
+      assert message =~ "protocol #{ForgeCore.WorkerProtocol.current() + 1}"
+      assert reloaded(template).resolved_image == "snap-99"
     end
   end
 

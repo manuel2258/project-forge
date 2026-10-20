@@ -382,14 +382,20 @@ defmodule Forge.Provisioning do
     back == 1
   end
 
-  # The template, while it still names the image a machine was made from. Null matches null: a
-  # template naming no image boots the driver's default, and a machine made from it was made from
-  # that.
+  # The template, while it still resolves to the image a machine was made from. Null matches
+  # null: a template naming no image boots the driver's default, and a machine made from it was
+  # made from that.
+  #
+  # **`resolved_image` and not `image`**, because a template naming `latest` never holds a
+  # concrete id in `image` while `workers.image` always does — so the comparison could never hold
+  # for one, and both this and `learn_protocol/4` would have gone silently dead for it: a counter
+  # that never resets and a protocol never learnt
+  # (`docs/design/provisioning.md` § Where a machine comes from).
   defp naming(template_id, nil),
-    do: from(t in Template, where: t.id == ^template_id and is_nil(t.image))
+    do: from(t in Template, where: t.id == ^template_id and is_nil(t.resolved_image))
 
   defp naming(template_id, image),
-    do: from(t in Template, where: t.id == ^template_id and t.image == ^image)
+    do: from(t in Template, where: t.id == ^template_id and t.resolved_image == ^image)
 
   @doc """
   Records that the image a machine was made from speaks `protocol`, learnt from the machine being
@@ -414,6 +420,69 @@ defmodule Forge.Provisioning do
 
     :ok
   end
+
+  @doc """
+  The snapshot a template naming `latest` would be made from, out of a driver's listing, or nil
+  when none carries the mark.
+
+  **The newest of them when more than one does.** `bin/hetzner-image` marks the snapshot it built
+  before it unmarks the one before — that order, so a build interrupted between the two leaves two
+  marked rather than none, which would fail every create until somebody reran it — and the window
+  is seconds. Either is a real worker image, but the newest is the one the operator just asked
+  for. A listing with no `created` on its entries falls back to the driver's own order.
+  """
+  @spec current_image([Forge.Provider.image()]) :: Forge.Provider.image() | nil
+  def current_image(images) do
+    case Enum.filter(images, & &1[:current]) do
+      [] -> nil
+      marked -> Enum.max_by(marked, &(&1[:created] || ""))
+    end
+  end
+
+  @doc """
+  Points a template naming `latest` at `current`, the snapshot that carries the mark now.
+
+  Called once per create attempt, before anything is asked of the driver, so that what reaches it
+  and what is written onto the machine's row is the concrete snapshot and never the word
+  (`docs/design/provisioning.md` § Where a machine comes from). Unlike `learn_protocol/4` there is
+  no "only if the template still names that image" guard: the listing is authoritative about what
+  `latest` means, and this *is* the template changing what it names.
+
+  **Resolving onto the snapshot already resolved keeps what was learnt about it**, the same rule
+  `Template.changeset/2` keeps for a save: a listing says nothing about an unlabelled snapshot,
+  and forgetting the protocol a refused machine taught would earn that snapshot another machine on
+  every pass — the loop § A snapshot that speaks the wrong protocol exists to stop. A *different*
+  snapshot takes its own labels, nothing included.
+
+  Returns the template as it now stands. Nothing is written when the three fields already say
+  this, which is the common case: the mark moves when an image is built, not between two
+  scheduling passes.
+  """
+  @spec resolve_latest(Template.t(), Forge.Provider.image()) :: Template.t()
+  def resolve_latest(%Template{} = template, %{id: id} = current) do
+    resolved = Map.put(labels(template, current), :resolved_image, id)
+
+    if Map.take(template, Map.keys(resolved)) == resolved do
+      template
+    else
+      {_count, _} =
+        Repo.update_all(
+          from(t in Template, where: t.id == ^template.id),
+          set: Map.to_list(resolved) ++ [updated_at: DateTime.utc_now(:second)]
+        )
+
+      struct!(template, resolved)
+    end
+  end
+
+  defp labels(%Template{resolved_image: same} = template, %{id: same} = current),
+    do: %{
+      image_build: current[:build] || template.image_build,
+      image_protocol: current[:protocol] || template.image_protocol
+    }
+
+  defp labels(_template, current),
+    do: %{image_build: current[:build], image_protocol: current[:protocol]}
 
   @doc """
   Why no machine may be made from this template's image, or nil when one may: its known protocol

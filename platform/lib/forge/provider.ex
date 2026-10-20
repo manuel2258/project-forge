@@ -144,7 +144,12 @@ defmodule Forge.Provider do
           # build and the channel protocol it speaks. Nil is unlabelled — unknown, not compatible
           # (`docs/design/provisioning.md` § A snapshot that speaks the wrong protocol).
           optional(:build) => String.t() | nil,
-          optional(:protocol) => non_neg_integer() | nil
+          optional(:protocol) => non_neg_integer() | nil,
+          # Whether this is the snapshot a template naming `latest` resolves to. At most one of
+          # an account's snapshots carries the mark; absent reads as false, so a driver that
+          # marks nothing never offers one (`docs/design/provisioning.md` § Where a machine
+          # comes from).
+          optional(:current) => boolean()
         }
 
   @doc """

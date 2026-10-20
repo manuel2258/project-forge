@@ -182,7 +182,8 @@ and pushes. No pull requests, no merge commits.
 `GITHUB_TOKEN`, and builds the Hetzner worker snapshot with `HCLOUD_TOKEN` and the ssh key in
 `HETZNER_PRIVATE_KEY` when the worker changed — checking every credential before it writes
 anything (`bin/hetzner-image --check` for the Hetzner ones), and stopping to report only when
-something fails. Pointing a template at a new snapshot stays the operator's.
+something fails. Pointing a template at a new snapshot stays the operator's, unless it names
+`latest` — each build marks the snapshot it made, and a template naming the mark follows it.
 
 ## Rules
 

@@ -264,9 +264,14 @@ defmodule Forge.Provider.Hetzner do
       status: image["status"],
       created: image["created"],
       build: build_label(labels["forge-worker-build"]),
-      protocol: protocol_label(labels["forge-worker-protocol"])
+      protocol: protocol_label(labels["forge-worker-protocol"]),
+      current: Map.has_key?(labels, "forge-worker-current")
     }
   end
+
+  # **Presence is the whole label**, value and all: `bin/hetzner-image` writes `=1` and nothing
+  # reads the 1, so a snapshot marked by hand with `=yes` or with nothing after the `=` is marked.
+  # Unlike the build and the protocol there is no value here to misread, and so nothing to refuse.
 
   # What `bin/hetzner-image` labels a snapshot with, from the flake that built it
   # (`docs/design/provisioning.md` § A snapshot that speaks the wrong protocol). **A label that

@@ -7,7 +7,14 @@ commands:
     env: default
     produces: check.log
     timeout: 20m
-    resources: { memory: 4GiB, cpu: 4 }
+    # **Two cores and not four: that is what the machines here have.** `cpu` is a reservation and
+    # never a quota — the slice gets `CPUWeight` and nothing sets `CPUQuota` — so the gate is the
+    # only thing the number talks to, and `mix check` on an idle machine still uses all of it.
+    # What two gives up is exclusivity, not speed. The memory stays 4 GiB because that one is a
+    # hard ceiling: too small is a SIGKILL rather than a slow run.
+    # `.forge/workflows/release.yml` carries the longer form, found when `release-build` asked for
+    # six cores and stuck ticket 8 before a machine.
+    resources: { memory: 4GiB, cpu: 2 }
 
 states:
   # `2` is the gate saying it could not run at all, which is not the gate saying no: the machine

@@ -20,13 +20,32 @@ commands:
     produces: hetzner-check.log
     timeout: 5m
 
+  # **`4GiB, cpu: 4` because that is what the fleet has, and the first attempt at this ticket
+  # proved it.** `release-build` asked for `8GiB, cpu: 6` and `hetzner-snapshot` for `6GiB, cpu: 4`,
+  # numbers nobody had checked against a machine: the invocation stuck ticket 8 before anything was
+  # built, because no machine serving the project can hold that even when empty and the scheduler
+  # refuses such a demand rather than queueing it (`docs/design/commands.md` § Resources,
+  # `{:no_template, :none_fit}`). `check` in `common.yml` asks `4GiB, cpu: 4` and has run on every
+  # dev and bug ticket, so it is the heaviest declaration this fleet is known to satisfy. Raising
+  # either number again means first giving the project a machine that offers it.
+  #
+  # The two dimensions do not fail alike, which is why only one of them was cut hard. `cpu` is a
+  # reservation and never a quota, so four instead of six costs a weaker claim on a busy machine
+  # and nothing at all on an idle one — `nix build` still gets the shares it is given. `memory` is
+  # the slice's hard ceiling: too small is SIGKILL (status 137) in the middle of a publish, which
+  # `publishing` has no retry transition to recover. So 4 GiB is a ceiling to raise with a bigger
+  # machine, never a number to shave.
+  #
+  # Neither script's binding constraint is modelled here: both spool a whole image through
+  # `$TMPDIR` — a ~1.25 GB platform archive, a ~1.8 GiB qcow2 converted to raw — and there is no
+  # `disk` key in the grammar. A failure for want of room says so in the log and is not the gate.
   release-build:
     run: .forge/commands/release-build.sh
     env: default
     secrets: [GHCR_TOKEN]
     produces: release-build.log
     timeout: 30m
-    resources: { memory: 8GiB, cpu: 6 }
+    resources: { memory: 4GiB, cpu: 4 }
 
   hetzner-snapshot:
     run: .forge/commands/hetzner-snapshot.sh
@@ -34,7 +53,7 @@ commands:
     secrets: [HCLOUD_TOKEN, HETZNER_PRIVATE_KEY]
     produces: hetzner-snapshot.log
     timeout: 30m
-    resources: { memory: 6GiB, cpu: 4 }
+    resources: { memory: 4GiB, cpu: 4 }
 
 states:
   refining:

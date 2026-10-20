@@ -207,7 +207,9 @@ optional one exists only once its producer has run: `review.md` read by `impleme
 and again after one. An optional input that exists is pinned like any other; one that does not is
 left out, and the manifest names it as not yet written, so the agent knows what may appear on a
 later attempt. A document a human state produces (below) is always optional, because nothing makes
-a person write it. Which kind an input is follows from the transitions and needs no mark.
+a person write it, and so is one its producer declares `optional` (below), for the same reason in
+the producer's own words. Which kind an input is follows from the transitions and the declarations
+and needs no mark.
 
 **A command's log is an input too** — the name in a command's `produces` (§ Commands), never one
 of its groups. It is always optional, since no job state produces it and whether the command has
@@ -254,8 +256,24 @@ lost). **It is never an input and cannot be approved**: nothing downstream consu
 presentation, by decision, and the validator says so rather than accept a declaration nothing
 honours. **Only a job state may declare one**, because neither other shape fits: a human state
 writes nothing itself, and a command's output is captured stdout, not composed prose. A name may
-not be produced as a document by one state and a presentation by another — it is one artifact
-with one kind.
+not be produced as a document or a group of files by one state and a presentation by another — it
+is one artifact with one kind. Like any other produced document it may be declared `optional`
+(below), which is how a workflow says whether a ticket must have one.
+
+**`optional` names what the job may finish without writing.** Everything in `produces` is
+required by default: a job that ends having not written a document it declared has outcome
+`error`, which is what makes a document a contract. A name in a job state's `optional` is excused
+from that one rule and nothing else — the file's absence is not a failure, and when the absent
+document is the one that carries the outcome the job is `done`, by the same rule as a state that
+produces no document at all. The names are the artifacts' own, with no marker:
+`produces: [presentation.md!]` is excused by `optional: [presentation.md]`, the spelling `inputs`
+and `approve` use. Only a document may be optional — `changeset` is the branch the job's commits
+made, and a group of files already has no minimum — and only a job state may say so, since nothing
+obliges a person to write a human state's documents in the first place.
+
+**This is how a workflow says whether an artifact is required**: the same state, with or without
+the line. The cost is that nothing then distinguishes an agent with nothing to say from an agent
+that forgot, so a document worth checking should stay required.
 
 **Outcomes.** A job ends with exactly one outcome. Engine outcomes always exist and cannot be
 declared: `did_not_converge`, `budget_exhausted`, `error`, `cancelled`. Declared outcomes are
@@ -766,11 +784,11 @@ merges: re-pinning takes the default branch, never the ticket's own.
 
 - `version` is `1`; `initial` names a job state; every state name is unique.
 - A job state has `prompt` and `budget`, and neither `invoke` nor `exit`. A command state has
-  `invoke` and `exit` and none of `prompt`, `inputs`, `produces`, `outcomes`, `budget`, `model`,
-  `env`, `may_invoke` or `secrets`. A human state has
+  `invoke` and `exit` and none of `prompt`, `inputs`, `produces`, `optional`, `outcomes`,
+  `budget`, `model`, `env`, `may_invoke` or `secrets`. A human state has
   none of those but `produces`, and no `invoke` either; `on_enter` and `produces` are the keys it
   may carry, and what it produces is documents — never `changeset`, a group of files or a
-  presentation.
+  presentation, and never `optional`, which is a job state's.
 - `model`, where present, is a non-empty string. Its value is not checked against anything.
 - State and artifact names are single path segments: letters, digits, `.`, `_`, `-`.
 - Every `inputs` entry is `ticket`, a command's log, or produced by a state that can run before the
@@ -803,7 +821,11 @@ is never produced; `answers.md` is platform-managed and never declared.
   approved.
 - A presentation `name!` names one artifact: `name` is an artifact name, and the presentation is
   produced by exactly one job state — never by a human state or a command — and never under a
-  name something produces as a document. A presentation is neither an input nor approved.
+  name something produces as a document or as a group of files. A presentation is neither an input
+  nor approved.
+- `optional`, where present, is on a job state and lists names, each the artifact name of one of
+  that state's own produced documents, none twice. `changeset` and a group of files are refused by
+  that rule and refused by name, so the message says which it is rather than "not produced here".
 - Every `on_enter` entry is a known action (`merge` alone in v1); `on_enter` is absent from every
   job state and every command state; at most one state in a workflow merges; `initial` does not merge; and a workflow that
   merges has a state producing `changeset`.

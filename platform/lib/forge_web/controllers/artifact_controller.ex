@@ -84,7 +84,7 @@ defmodule ForgeWeb.ArtifactController do
   defp version(scope, name, requested) do
     with {n, ""} when n > 0 <- Integer.parse(requested),
          %{} = version <- Enum.find(Artifacts.versions(scope, name), &(&1.version == n)) do
-      if match?("git:" <> _sha, version.blob_uri), do: {:error, :not_a_file}, else: {:ok, version}
+      if Artifacts.commit(version), do: {:error, :not_a_file}, else: {:ok, version}
     else
       _other -> {:error, :not_found}
     end

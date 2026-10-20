@@ -484,5 +484,13 @@ document the state produces, and the line says that too, the same way any other 
 The manifest also gives it the one convention the page depends on: a file and a line or line
 range quoted in backticks — `` `lib/scores.ex:42` `` or `` `lib/scores.ex:42-58` `` — has that
 source drawn beneath the paragraph that quoted it, from the changeset's own commit
-(`ui.md` § Changes). It is prose either way; the convention buys the reader the lines without
-leaving the page, and an agent that quotes nothing loses nothing.
+(`ui.md` § Changes). The path is the repository's own, from its root, because that is what the
+commit is read by. It is prose either way; the convention buys the reader the lines without
+leaving the page, and an agent that quotes nothing loses nothing. The manifest says the page draws
+a bounded number of quotes and a bounded range each, so an agent that quotes a whole file learns
+here rather than from a page that silently will not draw it.
+
+A state may declare its presentation `optional` (`workflow-grammar-v1.md` § Semantics), and then
+the manifest says so on the same line: the job may finish without writing it, and nothing
+downstream is waiting for one. Every other output is required, and the line says nothing, because
+required is what a declared output has always meant.

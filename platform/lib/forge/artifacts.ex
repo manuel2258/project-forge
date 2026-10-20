@@ -52,7 +52,7 @@ defmodule Forge.Artifacts do
       get_or_create_artifact(repo, scope, name, kind)
     end)
     |> Multi.run({key, :parsed}, fn _repo, _ ->
-      if Map.get(attrs, :parse, true), do: parse_if_document(kind, attrs), else: {:ok, nil}
+      if Map.get(attrs, :parse, true), do: parse_if_prose(kind, attrs), else: {:ok, nil}
     end)
     |> Multi.run({key, :version}, fn repo, changes ->
       artifact = changes[{key, :artifact}]
@@ -113,6 +113,20 @@ defmodule Forge.Artifacts do
   defp scope_attrs({:ticket, id}), do: %{ticket_id: id, job_id: nil}
   defp scope_attrs({:job, id}), do: %{ticket_id: nil, job_id: id}
 
+  @git_prefix "git:"
+
+  @doc """
+  The commit a version points at, or nil when it does not point at one.
+
+  `changeset` is a blob whose `blob_uri` is the commit it was taken at, and before this the
+  prefix was spelled out at six call sites across `platform/lib` — three of them reading the sha
+  back out, each with its own fallback for a `blob_uri` that is not one. One definition, read
+  here and written by `put_changeset/5`.
+  """
+  @spec commit(Version.t() | nil) :: String.t() | nil
+  def commit(%Version{blob_uri: @git_prefix <> sha}), do: sha
+  def commit(_version), do: nil
+
   @doc "Records one version in its own transaction."
   @spec record_version(scope(), String.t(), :document | :blob | :presentation, author(), map()) ::
           {:ok, Version.t()} | {:error, term()}
@@ -140,15 +154,24 @@ defmodule Forge.Artifacts do
     end
   end
 
-  defp parse_if_document(:document, %{content: content}) when is_binary(content) do
+  # A presentation is parsed exactly as a document is, and for the whole of the reason the
+  # grammar gives: it differs only in the kind it is recorded under
+  # (`docs/design/workflow-grammar-v1.md` § Semantics). Without it the front matter would not
+  # reach `meta` and — the part that matters — `insert_questions/3` is the only writer of question
+  # rows anywhere, so a blocking question in a presentation would park its job with nothing on any
+  # surface to answer, and no transition out while the job is live.
+  defp parse_if_prose(kind, %{content: content})
+       when kind in [:document, :presentation] and is_binary(content) do
     case Document.parse(content) do
       {:ok, document} -> {:ok, document}
       {:error, errors} -> {:error, {:invalid_document, errors}}
     end
   end
 
-  defp parse_if_document(:document, _attrs), do: {:error, :document_requires_content}
-  defp parse_if_document(_kind, _attrs), do: {:ok, nil}
+  defp parse_if_prose(kind, _attrs) when kind in [:document, :presentation],
+    do: {:error, :document_requires_content}
+
+  defp parse_if_prose(_kind, _attrs), do: {:ok, nil}
 
   defp next_version(repo, artifact_id) do
     (repo.one(from v in Version, where: v.artifact_id == ^artifact_id, select: max(v.version)) ||
@@ -300,7 +323,7 @@ defmodule Forge.Artifacts do
   end
 
   def content(%Version{blob_uri: "file://" <> path}), do: read_inside_data_dir(path)
-  def content(%Version{blob_uri: "git:" <> _sha}), do: {:error, :not_a_file}
+  def content(%Version{blob_uri: @git_prefix <> _sha}), do: {:error, :not_a_file}
   def content(%Version{}), do: {:error, :not_found}
 
   @doc """
@@ -753,8 +776,8 @@ defmodule Forge.Artifacts do
   @spec put_changeset(Multi.t(), term(), String.t(), author(), String.t()) :: Multi.t()
   def put_changeset(multi, key, ticket_id, author, head_sha) do
     put_version(multi, key, ticket_id, ForgeCore.Workflow.changeset_artifact(), :blob, author, %{
-      blob_uri: "git:" <> head_sha,
-      content_hash: "git:" <> head_sha
+      blob_uri: @git_prefix <> head_sha,
+      content_hash: @git_prefix <> head_sha
     })
   end
 

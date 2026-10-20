@@ -32,6 +32,19 @@ defmodule ForgeWeb.ReviewLive do
   # the screen, which is the one thing this section exists to keep readable.
   @max_quoted_lines 60
 
+  # And a long enough line is a file too, whatever the line count says — one minified line is a
+  # megabyte. Both caps are on the slice, so neither depends on how the file is formatted.
+  @max_quoted_bytes 16 * 1024
+
+  # **How many quotes are drawn at all.** The prose is an agent's and bounded only by a document's
+  # megabyte, in which `` `a:1` `a:2` … `` fits a hundred thousand distinct quotes; drawing them
+  # would be a hundred thousand `git show` calls and hundreds of megabytes of HTML, inside
+  # `mount/3`, per viewer, and again on every patch of the page. The cap is applied before
+  # anything is read from git, so what a presentation can cost to open does not depend on what it
+  # says. A page nobody can read is not a review, which is the same standard the patch is bounded
+  # to.
+  @max_quotes 12
+
   # Beyond this the patch is offered per file instead. A page nobody can read is not a review.
   @impl true
   def mount(%{"project" => name, "number" => number}, _session, socket) do
@@ -59,7 +72,7 @@ defmodule ForgeWeb.ReviewLive do
       merged: Merge.merged?(ticket),
       diff: diff(project, ticket, changeset),
       documents: documents(ticket),
-      presentations: presentations(ticket, project, head(changeset)),
+      presentations: presentations(ticket, project, Artifacts.commit(changeset)),
       answers: Artifacts.answered(ticket.id),
       pending: ticket.pending_transition,
       approve: approve_pins(project, ticket, changeset),
@@ -70,10 +83,12 @@ defmodule ForgeWeb.ReviewLive do
   # The map of the change is never truncated; the patch under it may be.
   defp diff(_project, _ticket, nil), do: nil
 
-  defp diff(project, ticket, %{blob_uri: "git:" <> head}),
-    do: Diff.build(Projects.repo_path(project), ticket.base_commit, head)
-
-  defp diff(_project, _ticket, %{blob_uri: other}), do: %{error: {:not_a_commit, other}}
+  defp diff(project, ticket, changeset) do
+    case Artifacts.commit(changeset) do
+      nil -> %{error: {:not_a_commit, changeset.blob_uri}}
+      head -> Diff.build(Projects.repo_path(project), ticket.base_commit, head)
+    end
+  end
 
   # The chain the change was built from, in the order it was written. The last document is the
   # verification report in every workflow that has one; naming it by convention would hard-code a
@@ -93,9 +108,6 @@ defmodule ForgeWeb.ReviewLive do
     |> Enum.sort_by(& &1.version.inserted_at, DateTime)
   end
 
-  defp head(%{blob_uri: "git:" <> head}), do: head
-  defp head(_none), do: nil
-
   # What an agent wrote for the person deciding, newest material last, drawn before the diff: a
   # presentation is the reasoning the patch cannot carry (`docs/design/ui.md` § Changes). Loaded by
   # kind and not by name, for the reason `documents/1` gives: the name is the project's.
@@ -106,73 +118,130 @@ defmodule ForgeWeb.ReviewLive do
         artifact.kind == :presentation,
         version = Artifacts.latest(ticket.id, artifact.name),
         version != nil do
-      %{
-        name: artifact.name,
-        version: version,
-        blocks: blocks(version.content, repo, head)
-      }
+      %{name: artifact.name, version: version}
+      |> Map.merge(blocks(version.content, repo, head))
     end
     |> Enum.sort_by(& &1.version.inserted_at, DateTime)
   end
 
-  # Paragraphs, each with the source it quotes beneath it. Splitting on blank lines is the whole
-  # of the parsing, and it is meant to be: a quote inside a fenced block or a list item spanning
-  # paragraphs is drawn under the block it sits in rather than beside its own line, which costs
-  # placement and never the page. A bigger parser would buy very little prose this simple.
+  # Paragraphs, each with the source it quotes beneath it, and how many quotes the cap left out.
+  #
+  # Splitting on blank lines is the whole of the parsing, and it is meant to be: a quote inside a
+  # list item spanning paragraphs is drawn under the part it sits in rather than beside its own
+  # line, and a fenced block with a blank line in it is cut in two and its second half read as
+  # prose. Both cost legibility in one paragraph and neither can fail the page. A bigger parser
+  # would buy very little for prose this simple.
   defp blocks(content, repo, head) do
-    content
-    |> ForgeWeb.Markdown.strip_front_matter()
-    |> String.split(~r/\r?\n[ \t]*\r?\n/)
-    |> Enum.reject(&(String.trim(&1) == ""))
-    |> Enum.map(&%{html: ForgeWeb.Markdown.to_html(&1), quotes: quotes(&1, repo, head)})
+    paragraphs =
+      content
+      |> ForgeWeb.Markdown.strip_front_matter()
+      |> String.split(~r/\r?\n[ \t]*\r?\n/)
+      |> Enum.reject(&(String.trim(&1) == ""))
+
+    tokens = paragraphs |> Enum.flat_map(&tokens/1) |> Enum.uniq()
+    drawn = Enum.take(tokens, @max_quotes)
+    resolved = resolve(drawn, repo, head)
+
+    blocks =
+      Enum.map(paragraphs, fn paragraph ->
+        quotes = for token <- Enum.uniq(tokens(paragraph)), token in drawn, do: resolved[token]
+        %{html: ForgeWeb.Markdown.to_html(paragraph), quotes: quotes}
+      end)
+
+    %{blocks: blocks, dropped: length(tokens) - length(drawn)}
   end
 
-  defp quotes(paragraph, repo, head) do
+  # Every quote the prose makes, in the order it makes them: `{path, from, to}`.
+  defp tokens(paragraph) do
     @quoted
     |> Regex.scan(paragraph)
-    |> Enum.uniq()
-    |> Enum.map(&quoted(&1, repo, head))
+    |> Enum.map(fn
+      [_all, path, line] -> {path, to_line(line), to_line(line)}
+      [_all, path, from, to] -> {path, to_line(from), to_line(to)}
+    end)
   end
 
-  defp quoted([all, path, line], repo, head), do: quoted([all, path, line, line], repo, head)
+  defp to_line(digits), do: String.to_integer(digits)
 
-  defp quoted([_all, path, from, to], repo, head) do
-    from = String.to_integer(from)
-    to = String.to_integer(to)
-    label = if from == to, do: "#{path}:#{from}", else: "#{path}:#{from}-#{to}"
+  # Each quote with its source, reading each path from git at most once however many quotes name
+  # it: a presentation quoting one file three times used to run three `git show`es.
+  defp resolve(tokens, repo, head) do
+    {resolved, _files} =
+      Enum.map_reduce(tokens, %{}, fn {path, from, to} = token, files ->
+        {lines, files} = lines(files, repo, head, path, from, to)
+        {{token, %{label: label(path, from, to), lines: lines}}, files}
+      end)
 
-    %{label: label, lines: lines(repo, head, path, from, to)}
+    Map.new(resolved)
   end
+
+  defp label(path, from, to),
+    do: if(from == to, do: "#{path}:#{from}", else: "#{path}:#{from}-#{to}")
 
   # The changeset's own commit and no other: a presentation quotes the change it is about
   # (`docs/design/ui.md` § Changes). Anything that does not resolve there — no changeset yet, a
-  # path that is not in that tree, a range the file does not reach, a range the wrong way round —
-  # is a note and never a raised page, because the prose is an agent's and unbounded.
-  defp lines(_repo, nil, _path, _from, _to), do: :unresolved
+  # path that is not in that tree, a line before the first or after the last, a range the wrong
+  # way round — is a note and never a raised page, because the prose is an agent's and unbounded.
+  defp lines(files, _repo, nil, _path, _from, _to), do: {:unresolved, files}
 
-  defp lines(repo, head, path, from, to) when from >= 1 and to >= from do
+  defp lines(files, repo, head, path, from, to) when from >= 1 and to >= from do
     if to - from + 1 > @max_quoted_lines do
-      :too_long
+      {:too_long, files}
     else
-      case Git.show(repo, head, path) do
-        {:ok, content} -> slice(content, from, to)
-        {:error, _reason} -> :unresolved
-      end
+      {content, files} = file(files, repo, head, path)
+      {slice(content, from, to), files}
     end
   end
 
-  defp lines(_repo, _head, _path, _from, _to), do: :unresolved
+  defp lines(files, _repo, _head, _path, _from, _to), do: {:unresolved, files}
 
-  defp slice(content, from, to) do
-    all = String.split(content, ~r/\r?\n/)
+  defp file(files, repo, head, path) do
+    case Map.fetch(files, path) do
+      {:ok, cached} ->
+        {cached, files}
 
-    if to <= length(all),
-      do: {:ok, all |> Enum.slice(from - 1, to - from + 1) |> Enum.join("\n")},
-      else: :unresolved
+      :error ->
+        read =
+          case Git.show(repo, head, path) do
+            {:ok, content} -> source_lines(content)
+            {:error, _reason} -> :missing
+          end
+
+        {read, Map.put(files, path, read)}
+    end
   end
 
+  # A file's lines, counted the way an editor counts them. `String.split/2` on text ending in a
+  # newline leaves a trailing `""`, so the last line used to be one past the end: an 18-line file
+  # quoted as `:19` drew an empty `pre` under the label, indistinguishable from a blank line.
+  defp source_lines(content) do
+    case String.split(content, ~r/\r?\n/) do
+      [_ | _] = lines -> if List.last(lines) == "", do: Enum.drop(lines, -1), else: lines
+      [] -> []
+    end
+  end
+
+  defp slice(:missing, _from, _to), do: :unresolved
+
+  defp slice(all, from, to) when is_list(all) do
+    if to <= length(all) do
+      text = all |> Enum.slice(from - 1, to - from + 1) |> Enum.join("\n")
+      if byte_size(text) > @max_quoted_bytes, do: :too_long, else: {:ok, text}
+    else
+      :unresolved
+    end
+  end
+
+  # One sentence rather than interpolation around the markup's own whitespace: what it says is
+  # read, and a page that quietly drew a dozen of thirty would be read as having drawn them all.
+  defp dropped_note(1),
+    do: "1 further quote is not drawn: a presentation draws at most #{@max_quotes}."
+
+  defp dropped_note(dropped),
+    do: "#{dropped} further quotes are not drawn: a presentation draws at most #{@max_quotes}."
+
   defp note(%{label: label, lines: :too_long}),
-    do: "#{label} is more than #{@max_quoted_lines} lines; read it in the diff"
+    do: "#{label} is too much to draw here; read it in the diff"
 
   defp note(%{label: label}), do: "#{label} is not in this changeset's commit"
 
@@ -260,6 +329,10 @@ defmodule ForgeWeb.ReviewLive do
               </p>
             </div>
           </div>
+
+          <p :if={shown.dropped > 0} class="mt-2 text-[12.5px] opacity-60">
+            {dropped_note(shown.dropped)}
+          </p>
 
           <.link
             href={

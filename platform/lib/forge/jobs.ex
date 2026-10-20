@@ -207,6 +207,7 @@ defmodule Forge.Jobs do
          entered: entered,
          may_invoke: grants(state),
          produces: state.produces,
+         optional: state.optional,
          outcomes: state.outcomes,
          permitted_children: [],
          integration: integration(workflow, state_name, project)

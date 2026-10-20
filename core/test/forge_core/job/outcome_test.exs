@@ -163,6 +163,36 @@ defmodule ForgeCore.Job.OutcomeTest do
     end
   end
 
+  # `docs/design/workflow-grammar-v1.md` § Semantics: `optional` excuses a document from the one
+  # rule that a declared output must be written, and from nothing else. Without this a workflow
+  # could not say that a presentation is a nicety — the job would end `error` for not writing it,
+  # and the ticket would never reach the state after it.
+  test "an optional output may be absent, and a required one beside it may not" do
+    spec = %{spec() | produces: ["plan.md", "deck.md!"], optional: ["deck.md"]}
+
+    assert {:finished, :converged, "done", _} =
+             Outcome.decide(
+               spec,
+               run(%{documents: %{"plan.md" => plan("done")}, missing: ["deck.md"]})
+             )
+
+    assert {:finished, :error, nil, "missing outputs: plan.md"} =
+             Outcome.decide(spec, run(%{missing: ["plan.md", "deck.md"]}))
+  end
+
+  # The state whose only document is optional: absent, there is no front matter to read an outcome
+  # from, and the answer is the one a state producing no document at all gets. Fetching it would
+  # raise, which on the platform is a job whose result can never be recorded.
+  test "a job whose optional outcome document is absent is done" do
+    spec = %{spec() | produces: ["deck.md!", "changeset"], optional: ["deck.md"]}
+
+    assert {:finished, :converged, "done", "deck.md was not written, and is optional"} =
+             Outcome.decide(spec, run(%{missing: ["deck.md"]}))
+
+    assert {:finished, :converged, "done", "agent declared done"} =
+             Outcome.decide(spec, run(%{documents: %{"deck.md" => plan("done")}}))
+  end
+
   test "outputs must be complete, declared and parseable" do
     assert {:finished, :error, nil, "missing outputs: plan.md"} =
              Outcome.decide(spec(), run(%{missing: ["plan.md"]}))

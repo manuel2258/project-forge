@@ -256,6 +256,10 @@ defmodule ForgeCore.Workflow do
 
   For callers that hold an entry without knowing which kind it is. A caller that already knows it
   has a group calls `group_name/1`, which says so at the call site.
+
+  The order of the two branches is an equivalent mutant: `/*` and `!` cannot both end one name —
+  the validator refuses `x!/*` and `x/*!` because neither strips to an artifact name — so no test
+  can tell them apart, and none should be written that claims to.
   """
   @spec produced_name(artifact_name()) :: String.t()
   def produced_name(name) do
@@ -263,6 +267,20 @@ defmodule ForgeCore.Workflow do
       group?(name) -> group_name(name)
       presentation?(name) -> presentation_name(name)
       true -> name
+    end
+  end
+
+  @doc """
+  The document whose front matter carries the outcome of a job producing `produces`, or nil.
+
+  The first document declared, by the name it is written under — one definition, because the state
+  and the job's spec answer the same question about the same list and used to answer it twice.
+  """
+  @spec outcome_document([artifact_name()]) :: String.t() | nil
+  def outcome_document(produces) when is_list(produces) do
+    case Enum.find(produces, &document?/1) do
+      nil -> nil
+      name -> produced_name(name)
     end
   end
 
@@ -386,6 +404,12 @@ defmodule ForgeCore.Workflow do
   `error`, `did_not_converge`, `budget_exhausted`, `cancelled` — is how a job ends when it may
   not have: a missing document is itself `error`. So an edge out of a producer on one of those
   is walked through, and a state it reaches reads the input as optional.
+
+  **A producer that declares the input `optional` is no producer for this purpose**, for the same
+  reason a human state is not: it may end `done` having written nothing, so no walk through it
+  guarantees the input exists. Without that, a workflow could declare an output optional and read
+  it as a required input, and the job that read it could not be created at all — which undoes the
+  transition into it and sticks the ticket.
   """
   @spec required_input?(t(), state_name(), artifact_name()) :: boolean()
   def required_input?(%__MODULE__{}, _state_name, @ticket), do: true
@@ -395,8 +419,10 @@ defmodule ForgeCore.Workflow do
     producers =
       workflow
       |> producers(input)
-      |> Enum.filter(&State.job?(state(workflow, &1)))
-      |> MapSet.new()
+      |> Enum.map(&state(workflow, &1))
+      |> Enum.filter(&State.job?/1)
+      |> Enum.reject(&State.optional?(&1, input))
+      |> MapSet.new(& &1.name)
 
     not reaches_avoiding?(workflow, [initial], state_name, producers, MapSet.new())
   end

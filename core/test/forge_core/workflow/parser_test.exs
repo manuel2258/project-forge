@@ -444,6 +444,34 @@ defmodule ForgeCore.Workflow.ParserTest do
              ]
     end
 
+    # A group and a presentation under one name would be `out/deck.md` as a file and a directory
+    # at once, which is refused for a document and must be refused here for the same reason.
+    test "a presentation may not share its name with a group of files", %{map: map} do
+      map = put_in(map, ["states", "verifying", "produces"], ["deck.md!", "deck.md/*"])
+
+      assert messages(map) == [
+               {"states.verifying.produces[0]",
+                "\"deck.md\" is also produced as a group of files"}
+             ]
+    end
+
+    # A reserved name is refused for being reserved, whatever someone declared under it: the
+    # presentation branch answering first made `answers.md` read as a presentation's problem.
+    test "a reserved input name is refused for being reserved, not for a presentation", %{
+      map: map
+    } do
+      map =
+        map
+        |> put_in(["states", "planning", "produces"], ["plan.md", "answers.md!"])
+        |> put_in(["states", "implementing", "inputs"], ["plan.md", "answers.md"])
+
+      assert messages(map) == [
+               {"states.implementing.inputs[1]",
+                "answers.md is platform-managed and never declared"},
+               {"states.planning.produces[1]", "\"answers.md\" is reserved"}
+             ]
+    end
+
     test "a presentation is one state's, under a name nothing else produces or keeps", %{map: map} do
       map =
         map
@@ -461,6 +489,88 @@ defmodule ForgeCore.Workflow.ParserTest do
                {"states.verifying.produces[1]",
                 "\"deck.md!\" is produced by more than one state: planning, verifying"}
              ]
+    end
+
+    # `docs/design/workflow-grammar-v1.md` § Semantics: `optional` is how a workflow says an
+    # artifact is not required. The names are the artifacts' own, so a presentation is excused by
+    # the name it is recorded under and not by its declaration.
+    test "optional names the state's own produced documents", %{map: map} do
+      map =
+        map
+        |> put_in(["states", "verifying", "produces"], ["report.md", "deck.md!"])
+        |> put_in(["states", "verifying", "optional"], ["deck.md"])
+
+      assert {:ok, workflow} = Parser.from_map(map)
+      assert workflow.states["verifying"].optional == ["deck.md"]
+      assert State.optional?(workflow.states["verifying"], "deck.md")
+      refute State.optional?(workflow.states["verifying"], "report.md")
+    end
+
+    test "optional refuses what the state does not produce as a document", %{map: map} do
+      map =
+        map
+        |> put_in(["states", "verifying", "produces"], ["report.md", "shots/*", "changeset"])
+        |> put_in(
+          ["states", "verifying", "optional"],
+          ["report.md", "report.md", "plan.md", "shots", "changeset", "../up"]
+        )
+
+      assert messages(map) == [
+               {"states.verifying.optional[0]", "\"report.md\" is listed twice"},
+               {"states.verifying.optional[1]", "\"report.md\" is listed twice"},
+               {"states.verifying.optional[2]",
+                "\"plan.md\" is not a document this state produces"},
+               {"states.verifying.optional[3]",
+                "\"shots\" is a group of files, which has no minimum and cannot be optional"},
+               {"states.verifying.optional[4]",
+                "changeset is the diff of the job's commits and cannot be optional"},
+               {"states.verifying.optional[5]",
+                "must be a single path segment: " <> Workflow.name_rule()}
+             ]
+    end
+
+    # A presentation's declaration is not its artifact name, and `optional` takes the name.
+    test "optional refuses a presentation under its declared spelling", %{map: map} do
+      map =
+        map
+        |> put_in(["states", "verifying", "produces"], ["report.md", "deck.md!"])
+        |> put_in(["states", "verifying", "optional"], ["deck.md!"])
+
+      assert messages(map) == [
+               {"states.verifying.optional[0]",
+                "must be a single path segment: " <> Workflow.name_rule()}
+             ]
+    end
+
+    test "optional is a job state's alone", %{map: map} do
+      human =
+        map
+        |> put_in(["states", "review_ready", "produces"], ["test-report.md"])
+        |> put_in(["states", "review_ready", "optional"], ["test-report.md"])
+        |> update_in(
+          ["transitions"],
+          &(&1 ++ [%{"from" => "review_ready", "to" => "implementing"}])
+        )
+
+      assert {"states.review_ready.optional", "not allowed on a human state (no prompt)"} in messages(
+               human
+             )
+    end
+
+    # An input whose only producer may finish without writing it is not required, or the job that
+    # reads it could not be created at all — which undoes the transition into it and sticks the
+    # ticket (`ForgeCore.Workflow.required_input?/3`).
+    test "an optional output never makes an input required", %{map: map} do
+      map = put_in(map, ["states", "verifying", "inputs"], ["plan.md", "implementation.md"])
+
+      assert {:ok, required} = Parser.from_map(map)
+      assert Workflow.required_input?(required, "verifying", "implementation.md")
+
+      optional = put_in(map, ["states", "implementing", "optional"], ["implementation.md"])
+
+      assert {:ok, workflow} = Parser.from_map(optional)
+      refute Workflow.required_input?(workflow, "verifying", "implementation.md")
+      assert Workflow.required_input?(workflow, "verifying", "plan.md")
     end
 
     test "a presentation is named as an artifact is", %{map: map} do

@@ -89,11 +89,12 @@ beyond the data model, second factor, the analysis agent, a native client, offli
 repository mirroring beyond a single push hook. Environment proposals fall out for free: an
 agent editing the flake in its worktree is already part of the changeset.
 
-*Three of these were built after all: multi-user and roles — account approval, `node_admin`,
-per-project membership and OIDC (`design/identity.md`) — mirroring, which is several named
-http(s) mirrors per project, each showing its last attempt (`design/git-hosting.md`) — and
-presentations, which a state declares as `name!` and the review page draws above the diff with the
-source it quotes inline (`design/workflow-grammar-v1.md`, `design/ui.md` § Changes).*
+*Two of these were built after all: multi-user and roles — account approval, `node_admin`,
+per-project membership and OIDC (`design/identity.md`) — and mirroring, which is several named
+http(s) mirrors per project, each showing its last attempt (`design/git-hosting.md`). A third was
+cut from this list once it was built: presentations, which a state declares as `name!` and the
+review page draws above the diff with the source it quotes inline
+(`design/workflow-grammar-v1.md`, `design/ui.md` § Changes).*
 
 ## Phase 0: measurements
 

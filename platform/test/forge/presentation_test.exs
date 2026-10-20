@@ -26,7 +26,10 @@ defmodule Forge.PresentationTest do
     workflow =
       @example
       |> File.read!()
-      |> String.replace("produces: [refinement.md]", "produces: [refinement.md, deck.md!]")
+      |> String.replace(
+        "produces: [refinement.md]",
+        "produces: [refinement.md, deck.md!]\n    optional: [deck.md]"
+      )
 
     bare = seeded_repo(%{".forge/workflow.yml" => workflow})
 
@@ -58,6 +61,30 @@ defmodule Forge.PresentationTest do
     %{project: project, ticket: ticket, worker: FakeWorker.connect()}
   end
 
+  # `optional` is how a workflow says an artifact is not required (the answered
+  # `presentation-required`). The whole of it: the job ends `done` having written nothing, the
+  # ticket moves on, and no artifact exists.
+  test "a state may finish without writing an optional presentation", context do
+    %{ticket: ticket, worker: worker} = context
+    [job] = Jobs.for_ticket(ticket.id)
+
+    assert ForgeCore.Job.Spec.optional_outputs(Jobs.spec(job)) == ["deck.md"]
+
+    {:ok, job} =
+      FakeWorker.run(job, worker, "success",
+        written: %{"refinement.md" => "---\noutcome: done\n---\nRefined.\n"}
+      )
+
+    assert job.outcome == :converged
+    assert job.declared_outcome == "done"
+    assert Artifacts.latest(ticket.id, "deck.md") == nil
+
+    # Nothing is stuck and nothing is missing: the ticket is on its way out of the state, waiting
+    # only on the approval this transition has always asked for.
+    assert %{pending_transition: %{"to" => "planning"}, status: :active} =
+             Tickets.get!(ticket.id)
+  end
+
   test "the state's declaration decides each document's kind", context do
     %{ticket: ticket, worker: worker} = context
     [job] = Jobs.for_ticket(ticket.id)
@@ -82,6 +109,43 @@ defmodule Forge.PresentationTest do
 
     assert %{content: "---\noutcome: done\n---\nWhat I did and why.\n", version: 1} =
              Artifacts.latest(ticket.id, "deck.md")
+  end
+
+  # A presentation is parsed exactly as a document is, and this is the half of that which is not
+  # cosmetic: `insert_questions/3` is the only writer of question rows anywhere, so without it a
+  # blocking question in a presentation parks its job with nothing on any surface to answer and no
+  # transition out while the job is live — the ticket stuck one state short, silently.
+  test "a blocking question in a presentation can be answered", context do
+    %{ticket: ticket, worker: worker} = context
+    [job] = Jobs.for_ticket(ticket.id)
+
+    {:ok, job} =
+      FakeWorker.run(job, worker, "blocking",
+        written: %{
+          "refinement.md" => "---\noutcome: done\n---\nRefined.\n",
+          "deck.md" => """
+          ---
+          outcome: done
+          ---
+          # Deck
+
+          ```question
+          key: shape
+          text: Which shape?
+          options: [{label: a, detail: About a, recommended: true}]
+          blocking: true
+          ```
+          """
+        }
+      )
+
+    assert job.status == :waiting
+
+    assert [%{key: "shape"}] =
+             ticket.id |> Artifacts.open_blocking_questions() |> Enum.filter(&(&1.key == "shape"))
+
+    # And the front matter reached the version, which is the other half of "only the kind differs".
+    assert %{meta: %{"outcome" => "done"}} = Artifacts.latest(ticket.id, "deck.md")
   end
 
   # The job page draws `produces` as the workflow declared it and looks each entry up by the name

@@ -169,6 +169,34 @@ defmodule ForgeCore.PromptTest do
       refute manifest =~ "- `deck.md` -> `/j/out/deck.md`\n"
     end
 
+    # An agent told nothing about `optional` assumes what a declared output has always meant, and
+    # pads rather than finishing without one.
+    test "an optional output is named as one, and a required one is not" do
+      spec = %{spec() | produces: ["plan.md", "deck.md!"], optional: ["deck.md"]}
+      manifest = Prompt.manifest(spec, "/j")
+
+      assert manifest =~ "Optional: you may finish without writing it"
+      assert manifest =~ "`deck.md` -> `/j/out/deck.md`: a presentation."
+
+      [plan_line, deck_line] =
+        manifest |> String.split("\n") |> Enum.filter(&String.contains?(&1, "/j/out/"))
+
+      assert plan_line =~ "plan.md"
+      refute plan_line =~ "Optional"
+      assert deck_line =~ "Optional"
+    end
+
+    test "a required document says nothing about being optional" do
+      refute Prompt.manifest(spec(), "/j") =~ "Optional"
+    end
+
+    test "a presentation says where the path is from, and that the page draws a few" do
+      manifest = Prompt.manifest(%{spec() | produces: ["deck.md!"]}, "/j")
+
+      assert manifest =~ "the path from the repository root"
+      assert manifest =~ "A handful of quotes are drawn"
+    end
+
     test "a presentation that is the only document says it carries the outcome" do
       manifest = Prompt.manifest(%{spec() | produces: ["deck.md!", "changeset"]}, "/j")
 

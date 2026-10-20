@@ -592,9 +592,13 @@ What the branch holds against its base, bounded per § Semantics that must not b
   everywhere (§ Semantics that must not be lost). Where a paragraph quotes `` `path:line` `` or
   `` `path:start-end` `` in backticks, the matching source from the changeset's head commit is
   drawn directly beneath that paragraph, so the operator reads the lines the prose is about without
-  going into the diff for them. A path or a range that does not resolve at that commit degrades to
-  a small muted note naming what was asked for; it never fails the page. A ticket with no
-  presentation reviews exactly as it did before: the section is absent, not empty.
+  going into the diff for them. **What is drawn is bounded, the way the patch beneath it is**: a
+  fixed number of quotes per presentation and a fixed size each, counted before anything is read
+  from git, so a presentation cannot make this page expensive to open — one over the count says how
+  many it left, and one over the size says to read it in the diff. A path or a range that does not
+  resolve at that commit degrades to the same kind of muted note naming what was asked for; it
+  never fails the page. A ticket with no presentation reviews exactly as it did before: the section
+  is absent, not empty.
 
 ### Docs
 

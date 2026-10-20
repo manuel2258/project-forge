@@ -18,7 +18,8 @@ defmodule ForgeCore.Job.Outcome do
       `text` (its own closing words, which are the only field that ever names a cause).
     * `documents` - declared documents that parsed, by name.
     * `invalid` - declared documents that did not parse, by name.
-    * `missing` - declared documents not written.
+    * `missing` - declared documents not written, optional ones included: which of those is a
+      failure is the spec's to say, not the worker's.
     * `undeclared` - files written that were not declared.
   """
   @type run :: %{
@@ -85,8 +86,8 @@ defmodule ForgeCore.Job.Outcome do
       result.subtype != "success" or result.is_error ->
         {:error, nil, "harness error: #{detail(result)}"}
 
-      run.missing != [] ->
-        {:error, nil, "missing outputs: #{Enum.join(run.missing, ", ")}"}
+      missing = required_missing(spec, run) ->
+        {:error, nil, "missing outputs: #{Enum.join(missing, ", ")}"}
 
       run.undeclared != [] ->
         {:error, nil, "undeclared outputs: #{Enum.join(run.undeclared, ", ")}"}
@@ -172,10 +173,28 @@ defmodule ForgeCore.Job.Outcome do
     end
   end
 
+  # Nil when every declared document that had to be written was. A state's `optional` excuses its
+  # documents from this one rule and nothing else (`docs/design/workflow-grammar-v1.md`
+  # § Semantics); without it, a workflow could not say that a presentation is a nicety.
+  defp required_missing(spec, run) do
+    case run.missing -- Spec.optional_outputs(spec) do
+      [] -> nil
+      missing -> missing
+    end
+  end
+
   defp declared(%Spec{} = spec, documents) do
     case Spec.outcome_document(spec) do
-      nil -> {:converged, "done", "no outcome document; done by definition"}
-      name -> declared_in(spec, Map.fetch!(documents, name), name)
+      nil ->
+        {:converged, "done", "no outcome document; done by definition"}
+
+      name ->
+        # Absent here only when it is optional: a required one that was not written was already
+        # `error` above, so this is the state that declared its outcome document a nicety.
+        case Map.fetch(documents, name) do
+          {:ok, document} -> declared_in(spec, document, name)
+          :error -> {:converged, "done", "#{name} was not written, and is optional"}
+        end
     end
   end
 

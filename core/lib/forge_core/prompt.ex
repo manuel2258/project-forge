@@ -503,6 +503,7 @@ defmodule ForgeCore.Prompt do
 
   defp outputs(%Spec{produces: produces} = spec, job_dir) do
     outcome_document = Spec.outcome_document(spec)
+    optional = Spec.optional_outputs(spec)
 
     Enum.map_join(produces, "\n", fn name ->
       cond do
@@ -518,29 +519,40 @@ defmodule ForgeCore.Prompt do
         # Before the two branches below, because `name` here still carries its `!` and so can
         # never equal `outcome_document`, which is already the name on disk.
         Workflow.presentation?(name) ->
-          presentation(name, job_dir, outcome_document)
+          presentation(name, job_dir, outcome_document, optional)
 
         name == outcome_document ->
-          "- `#{name}` -> `#{Path.join([job_dir, "out", name])}` (carries the outcome)"
+          "- `#{name}` -> `#{Path.join([job_dir, "out", name])}` (carries the outcome)" <>
+            optional_note(name, optional)
 
         true ->
-          "- `#{name}` -> `#{Path.join([job_dir, "out", name])}`"
+          "- `#{name}` -> `#{Path.join([job_dir, "out", name])}`" <> optional_note(name, optional)
       end
     end)
+  end
+
+  # Said only where it is true: every other output is required, which is what a declared output
+  # has always meant (`docs/design/job-prompt.md` § Presentations).
+  defp optional_note(name, optional) do
+    if name in optional,
+      do: ". Optional: you may finish without writing it, and nothing downstream waits for it",
+      else: ""
   end
 
   # What a `name!` entry is, in the manifest's own terms (`docs/design/job-prompt.md`
   # § Presentations): the real path, that nothing downstream reads it, and the one convention the
   # review page needs from the prose.
-  defp presentation(name, job_dir, outcome_document) do
+  defp presentation(name, job_dir, outcome_document, optional) do
     real = Workflow.presentation_name(name)
     carries = if real == outcome_document, do: " (carries the outcome)", else: ""
 
     "- `#{real}` -> `#{Path.join([job_dir, "out", real])}`#{carries}: a presentation. " <>
       "Write what you would say to the person deciding whether to merge; it is shown on " <>
       "the ticket's merge page and read by no later job. Quote a file and line range in " <>
-      "backticks — `path:42` or `path:42-58` — and those lines are drawn beneath the " <>
-      "paragraph that quotes them."
+      "backticks — `path:42` or `path:42-58`, the path from the repository root — and those " <>
+      "lines are drawn beneath the paragraph that quotes them. A handful of quotes are drawn, " <>
+      "each a bounded range, so quote what matters rather than whole files" <>
+      optional_note(real, optional) <> "."
   end
 
   # Named, never valued: the values are in the environment and nowhere in this prompt. What it asks

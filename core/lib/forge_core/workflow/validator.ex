@@ -14,6 +14,7 @@ defmodule ForgeCore.Workflow.Validator do
       names(workflow),
       initial(workflow),
       state_shapes(workflow),
+      optional_outputs(workflow),
       entry_actions(workflow),
       conflict_targets(workflow),
       artifact_names(workflow),
@@ -101,6 +102,7 @@ defmodule ForgeCore.Workflow.Validator do
         model: command.model,
         inputs: command.inputs,
         produces: command.produces,
+        optional: command.optional,
         outcomes: command.outcomes,
         budget: command.budget,
         may_invoke: command.may_invoke,
@@ -140,6 +142,9 @@ defmodule ForgeCore.Workflow.Validator do
         env: human.env,
         model: human.model,
         inputs: human.inputs,
+        # Nothing obliges a person to write a human state's documents, so every one of them is
+        # already optional and saying so declares nothing.
+        optional: human.optional,
         outcomes: human.outcomes,
         budget: human.budget,
         # Nothing runs, so there is nothing to size — and a declaration nothing reads is one the
@@ -364,17 +369,19 @@ defmodule ForgeCore.Workflow.Validator do
       Workflow.group?(name) ->
         Error.new(Error.join(path, index), "a group of files is not an input yet")
 
-      presents?(workflow, name) ->
-        Error.new(
-          Error.join(path, index),
-          "#{inspect(Workflow.produced_name(name))} is a presentation and cannot be an input"
-        )
-
       name == Workflow.answers_artifact() ->
         Error.new(Error.join(path, index), "answers.md is platform-managed and never declared")
 
       reserved = Workflow.reserved_name_error(name) ->
         Error.new(Error.join(path, index), reserved)
+
+      # After the two above, so a reserved name is refused for being reserved rather than for a
+      # presentation someone declared under it: `produce_error/4` orders them the same way.
+      presents?(workflow, name) ->
+        Error.new(
+          Error.join(path, index),
+          "#{inspect(Workflow.produced_name(name))} is a presentation and cannot be an input"
+        )
 
       name == Workflow.ticket_artifact() ->
         nil
@@ -482,6 +489,9 @@ defmodule ForgeCore.Workflow.Validator do
       Workflow.producers(workflow, name) != [] ->
         Error.new(path, "#{inspect(name)} is also produced as a document")
 
+      Workflow.producers(workflow, name <> "/*") != [] ->
+        Error.new(path, "#{inspect(name)} is also produced as a group of files")
+
       command = Workflow.log_producer(workflow, name) ->
         Error.new(path, "#{inspect(name)} is also produced by command #{inspect(command)}")
 
@@ -498,6 +508,55 @@ defmodule ForgeCore.Workflow.Validator do
 
   defp command_producing(%Workflow{commands: commands}, group) do
     for {name, command} <- commands, group in command.outputs, do: name
+  end
+
+  # -- optional outputs ---------------------------------------------------------------------
+
+  # `docs/design/workflow-grammar-v1.md` § Semantics: a job state's `optional` names its own
+  # produced documents, by the artifact's name and not the declaration's. Checked here rather
+  # than in `produce_error/4` because the entry is not a `produces` entry: it points at one.
+  defp optional_outputs(%Workflow{states: states}) do
+    Enum.flat_map(states, fn {name, state} ->
+      path = Error.join(Error.join("states", name), "optional")
+
+      documents =
+        for entry <- state.produces, Workflow.document?(entry), do: Workflow.produced_name(entry)
+
+      repeated = state.optional -- Enum.uniq(state.optional)
+
+      state.optional
+      |> Enum.with_index()
+      |> Enum.flat_map(&optional_entry(&1, path, state, documents, repeated))
+    end)
+  end
+
+  defp optional_entry({entry, index}, path, state, documents, repeated) do
+    case optional_error(state, entry, documents, repeated) do
+      nil -> []
+      message -> [Error.new(Error.join(path, index), message)]
+    end
+  end
+
+  defp optional_error(state, entry, documents, repeated) do
+    cond do
+      not valid_name?(entry) ->
+        "must be a single path segment: " <> Workflow.name_rule()
+
+      entry in repeated ->
+        "#{inspect(entry)} is listed twice"
+
+      entry in documents ->
+        nil
+
+      entry == Workflow.changeset_artifact() and entry in state.produces ->
+        "#{Workflow.changeset_artifact()} is the diff of the job's commits and cannot be optional"
+
+      Enum.any?(state.produces, &(Workflow.group?(&1) and Workflow.group_name(&1) == entry)) ->
+        "#{inspect(entry)} is a group of files, which has no minimum and cannot be optional"
+
+      true ->
+        "#{inspect(entry)} is not a document this state produces"
+    end
   end
 
   # -- secrets ------------------------------------------------------------------------------

@@ -218,13 +218,17 @@ defmodule ForgeWeb.ReviewLiveTest do
   # the page. A raise here would take down the surface merges are approved on.
   test "a quote that does not resolve degrades to a note", context do
     %{conn: conn, project: project, ticket: ticket} = context
-    sha = commit_on_branch(context, "score.ex", "one\ntwo\n")
+    sha = commit_on_branch(context, "score.ex", "one\ntwo")
     changeset!(ticket, sha)
 
     present!(ticket, """
     Gone: `missing.ex:1`.
 
     Past the end: `score.ex:9`.
+
+    One past the last line: `score.ex:3`.
+
+    Before the first: `score.ex:0`.
 
     Backwards: `score.ex:3-1`.
 
@@ -236,9 +240,119 @@ defmodule ForgeWeb.ReviewLiveTest do
 
     assert html =~ "missing.ex:1 is not in this changeset&#39;s commit"
     assert html =~ "score.ex:9 is not in this changeset&#39;s commit"
+    # `score.ex` has two lines and ends in a newline. Splitting on newlines leaves a trailing
+    # empty string, so line 3 used to resolve to it: a label over an empty `pre`, which reads as
+    # a blank line in the source rather than as a range that is not there.
+    assert html =~ "score.ex:3 is not in this changeset&#39;s commit"
+    # `@quoted` matches a zero, and `Enum.slice(lines, 0 - 1, 1)` is the *last* line of the file.
+    assert html =~ "score.ex:0 is not in this changeset&#39;s commit"
     assert html =~ "score.ex:3-1 is not in this changeset&#39;s commit"
-    assert html =~ "score.ex:1-400 is more than 60 lines"
+    assert html =~ "score.ex:1-400 is too much to draw here"
     refute has_element?(view, ~s([id="review-presentation-presentation.md"] pre))
+  end
+
+  # The last line of a file is drawn, and the cap is drawn right up to its boundary: a test that
+  # only ever asks for the middle of a file, or for a range far past the cap, says nothing about
+  # either edge.
+  test "the last line and a range of exactly the cap are drawn", context do
+    %{conn: conn, project: project, ticket: ticket} = context
+    sha = commit_on_branch(context, "score.ex", Enum.map_join(1..61, "\n", &"line #{&1}"))
+    changeset!(ticket, sha)
+
+    present!(ticket, """
+    The last line is `score.ex:61`.
+
+    Exactly the cap: `score.ex:1-60`.
+
+    One more than the cap: `score.ex:1-61`.
+    """)
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+    drawn = view |> element(~s([id="review-presentation-presentation.md"])) |> render()
+
+    assert drawn =~ "line 61"
+    assert drawn =~ "score.ex:1-60"
+    refute drawn =~ "score.ex:1-60 is too much"
+    assert drawn =~ "score.ex:1-61 is too much to draw here"
+  end
+
+  # The file is read once per path however many quotes name it, so the cache must be keyed by the
+  # path and never by the quote: keyed by the quote it would serve one range's lines for another.
+  # That it reads once rather than three times is not observable from here and no test claims it.
+  test "two ranges of one file each draw their own lines", context do
+    %{conn: conn, project: project, ticket: ticket} = context
+    sha = commit_on_branch(context, "score.ex", "one\ntwo\nthree\nfour")
+    changeset!(ticket, sha)
+    present!(ticket, "First `score.ex:1`, then `score.ex:3-4`.\n")
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+
+    [first, second] =
+      view
+      |> element(~s([id="review-presentation-presentation.md"]))
+      |> render()
+      |> Floki.parse_fragment!()
+      |> Floki.find("pre")
+      |> Enum.map(&Floki.text/1)
+
+    assert first == "one"
+    assert second == "three\nfour"
+  end
+
+  # The prose is an agent's and bounded only by a document's megabyte, in which a hundred thousand
+  # distinct quotes fit. Every one of them would be a `git show` inside `mount/3`, per viewer, and
+  # again on every patch of the page.
+  test "only a bounded number of quotes is drawn, and the rest are counted", context do
+    %{conn: conn, project: project, ticket: ticket} = context
+    sha = commit_on_branch(context, "score.ex", Enum.map_join(1..40, "\n", &"line #{&1}"))
+    changeset!(ticket, sha)
+    present!(ticket, Enum.map_join(1..20, " ", &"`score.ex:#{&1}`") <> "\n")
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+    drawn = view |> element(~s([id="review-presentation-presentation.md"])) |> render()
+
+    assert drawn |> Floki.parse_fragment!() |> Floki.find("pre") |> length() == 12
+    assert drawn =~ "8 further quotes are not drawn: a presentation draws at most 12."
+  end
+
+  # "Newest material last" is the comment's claim and every other test records one presentation,
+  # which says nothing about the order of two.
+  test "presentations are drawn oldest first", context do
+    %{conn: conn, project: project, ticket: ticket} = context
+    sha = commit_on_branch(context, "score.ex", "def persist, do: :ok")
+    changeset!(ticket, sha)
+
+    # Named against the order they are written in, because `Artifacts.list/1` returns them by
+    # name: alphabetical order would otherwise pass whichever way the page sorted. `inserted_at`
+    # is to the second and `artifact_versions` is append-only, so the second has to really be
+    # later — there is no way to backdate one.
+    {:ok, _first} =
+      Artifacts.record_version(ticket.id, "zebra.md", :presentation, :system, %{
+        content: "The earlier one.\n"
+      })
+
+    Process.sleep(1_100)
+
+    {:ok, _second} =
+      Artifacts.record_version(ticket.id, "alpha.md", :presentation, :system, %{
+        content: "The later one.\n"
+      })
+
+    {:ok, _view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+
+    assert [%{name: "zebra.md"}, %{name: "alpha.md"}] =
+             html
+             |> Floki.parse_document!()
+             |> Floki.find(~s([id^="review-presentation-"]))
+             |> Enum.map(
+               &%{
+                 name:
+                   &1
+                   |> Floki.attribute("id")
+                   |> hd()
+                   |> String.trim_leading("review-presentation-")
+               }
+             )
   end
 
   # The section sits above the diff, so it is drawn on a ticket that has no changeset at all —

@@ -58,6 +58,9 @@ defmodule ForgeCore.Job.Spec do
     # (`docs/design/workflow-grammar-v1.md` § Inputs).
     absent_inputs: [],
     produces: [],
+    # Which of `produces`'s documents this job may finish without writing, by artifact name
+    # (`docs/design/workflow-grammar-v1.md` § Semantics). Everything else is a contract.
+    optional: [],
     outcomes: ["done"],
     permitted_children: [],
     answered_keys: [],
@@ -137,6 +140,7 @@ defmodule ForgeCore.Job.Spec do
           inputs: [Input.t()],
           absent_inputs: [String.t()],
           produces: [String.t()],
+          optional: [String.t()],
           outcomes: [String.t()],
           permitted_children: [String.t()],
           answered_keys: [String.t()]
@@ -165,12 +169,8 @@ defmodule ForgeCore.Job.Spec do
   back from `out/deck.md` and keyed under that name everywhere downstream.
   """
   @spec outcome_document(t()) :: String.t() | nil
-  def outcome_document(%__MODULE__{produces: produces}) do
-    case Enum.find(produces, &Workflow.document?/1) do
-      nil -> nil
-      name -> Workflow.produced_name(name)
-    end
-  end
+  def outcome_document(%__MODULE__{produces: produces}),
+    do: Workflow.outcome_document(produces)
 
   @doc """
   Whether this state promises the diff of its branch, i.e. whether its run's tree is an output
@@ -215,6 +215,15 @@ defmodule ForgeCore.Job.Spec do
   @spec presentation_outputs(t()) :: [String.t()]
   def presentation_outputs(%__MODULE__{produces: produces}),
     do: for(name <- produces, Workflow.presentation?(name), do: Workflow.presentation_name(name))
+
+  @doc """
+  Declared documents this job may finish without writing, by the name on disk.
+
+  Everything else in `produces` is a contract: a job that ends without writing it has outcome
+  `error`. Empty for a chat and for a command, neither of which may declare one.
+  """
+  @spec optional_outputs(t()) :: [String.t()]
+  def optional_outputs(%__MODULE__{optional: optional}), do: optional
 
   @spec to_json(t()) :: String.t()
   def to_json(%__MODULE__{} = spec) do
@@ -261,6 +270,7 @@ defmodule ForgeCore.Job.Spec do
       previous_changeset: get.(:previous_changeset),
       integration: get.(:integration),
       produces: or_default(get, :produces, []),
+      optional: or_default(get, :optional, []),
       outcomes: or_default(get, :outcomes, ["done"]),
       permitted_children: or_default(get, :permitted_children, []),
       answered_keys: or_default(get, :answered_keys, []),

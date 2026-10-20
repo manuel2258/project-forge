@@ -187,15 +187,15 @@ defmodule ForgeWeb.Api.Render do
   """
   def review(%Ticket{} = ticket, %Project{} = project, %Version{} = changeset) do
     repo = Forge.Projects.repo_path(project)
-    head = String.replace_prefix(changeset.blob_uri || "", "git:", "")
+    head = Forge.Artifacts.commit(changeset)
 
     %{
       ticket: ticket(ticket, project.name),
       changeset: %{version: changeset.version, commit: head, base: ticket.base_commit},
       merged: Forge.Merge.merged?(ticket),
       diff: diff(repo, ticket.base_commit, head),
-      documents: review_documents(ticket),
-      presentations: review_presentations(ticket),
+      documents: review_artifacts(ticket, :document),
+      presentations: review_artifacts(ticket, :presentation),
       answers: review_answers(ticket),
       cost_usd: Decimal.to_string(ticket.cost_usd)
     }
@@ -215,21 +215,13 @@ defmodule ForgeWeb.Api.Render do
     end
   end
 
-  defp review_documents(%Ticket{} = ticket) do
+  # Documents and presentations are two keys of the payload and one comprehension: the kind is the
+  # whole difference between them — a presentation is nothing's input and carries no approval — and
+  # a client handed one among the documents would have no way to tell. Content as written; the
+  # inline quoting is the page's rendering, not the payload's.
+  defp review_artifacts(%Ticket{} = ticket, kind) do
     for artifact <- Forge.Artifacts.list(ticket.id),
-        artifact.kind == :document,
-        version = Forge.Artifacts.latest(ticket.id, artifact.name),
-        version != nil do
-      %{name: artifact.name, version: version.version, content: version.content}
-    end
-  end
-
-  # Separate from the documents, because the kind is the whole difference: a presentation is
-  # nothing's input and carries no approval, and a client that was handed one in `documents`
-  # would have no way to tell. Content as written; the inline quoting is the page's rendering.
-  defp review_presentations(%Ticket{} = ticket) do
-    for artifact <- Forge.Artifacts.list(ticket.id),
-        artifact.kind == :presentation,
+        artifact.kind == kind,
         version = Forge.Artifacts.latest(ticket.id, artifact.name),
         version != nil do
       %{name: artifact.name, version: version.version, content: version.content}

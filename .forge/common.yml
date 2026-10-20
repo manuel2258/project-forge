@@ -29,10 +29,15 @@ states:
   # A presentation (`produces: [presentation.md!]`): prose for the person deciding, drawn above
   # the diff on the review page with the source it quotes inline, read by no later state and
   # approved by nobody (`docs/design/workflow-grammar-v1.md` § Semantics).
+  #
+  # `optional`, so a ticket may reach review with no presentation: an agent with nothing worth
+  # saying about a one-line fix should say nothing rather than pad. A project that wants one on
+  # every ticket imports this template and drops the line.
   presenting:
     prompt: agents/present.md
     env: default
     produces: [presentation.md!]
+    optional: [presentation.md]
     budget: { turns: 40, cost: 3.00 }
 
   merged:

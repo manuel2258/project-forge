@@ -34,8 +34,8 @@ defmodule ForgeCore.Workflow.Parser do
   }
 
   @top_keys ~w(version description initial states transitions limits defaults commands)
-  @state_keys ~w(prompt env model inputs produces outcomes budget on_enter on_conflict resources
-                 invoke exit may_invoke secrets)
+  @state_keys ~w(prompt env model inputs produces optional outcomes budget on_enter on_conflict
+                 resources invoke exit may_invoke secrets)
   @command_keys ~w(run env produces timeout resources secrets)
   @grant_keys ~w(max concurrent)
   @transition_keys ~w(from to when approve max)
@@ -308,6 +308,7 @@ defmodule ForgeCore.Workflow.Parser do
     {may_invoke, e12} = may_invoke(definition, path)
     {on_conflict, e13} = optional_string(definition, "on_conflict", path)
     {secrets, e14} = string_list(definition, "secrets", path)
+    {optional, e15} = string_list(definition, "optional", path)
 
     state = %State{
       name: name,
@@ -316,6 +317,7 @@ defmodule ForgeCore.Workflow.Parser do
       model: model,
       inputs: inputs || [],
       produces: produces || [],
+      optional: optional || [],
       outcomes: outcomes,
       budget: budget,
       resources: resources,
@@ -329,7 +331,9 @@ defmodule ForgeCore.Workflow.Parser do
 
     {state,
      unknown_keys(definition, @state_keys, path) ++
-       e1 ++ e2 ++ e3 ++ e4 ++ e5 ++ e6 ++ e7 ++ e8 ++ e9 ++ e10 ++ e11 ++ e12 ++ e13 ++ e14}
+       e1 ++
+       e2 ++
+       e3 ++ e4 ++ e5 ++ e6 ++ e7 ++ e8 ++ e9 ++ e10 ++ e11 ++ e12 ++ e13 ++ e14 ++ e15}
   end
 
   defp state(name, _definition) do

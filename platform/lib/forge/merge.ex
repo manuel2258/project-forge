@@ -56,9 +56,14 @@ defmodule Forge.Merge do
           | {:error, term()}
   def changeset(%Ticket{} = ticket) do
     case Artifacts.latest(ticket.id, Workflow.changeset_artifact()) do
-      nil -> {:error, :no_changeset}
-      %{blob_uri: "git:" <> sha} = row -> {:ok, %{sha: sha, version: row.version, row: row}}
-      %{blob_uri: other} -> {:error, {:not_a_commit, other}}
+      nil ->
+        {:error, :no_changeset}
+
+      row ->
+        case Artifacts.commit(row) do
+          nil -> {:error, {:not_a_commit, row.blob_uri}}
+          sha -> {:ok, %{sha: sha, version: row.version, row: row}}
+        end
     end
   end
 

@@ -57,6 +57,14 @@ defmodule ForgeCore.Job.SpecTest do
     assert Spec.group_outputs(spec) == []
   end
 
+  test "knows which of its documents it may finish without writing" do
+    assert Spec.optional_outputs(spec()) == []
+
+    spec = %{spec() | produces: ["plan.md", "deck.md!"], optional: ["deck.md"]}
+    assert Spec.optional_outputs(spec) == ["deck.md"]
+    assert Spec.document_outputs(spec) == ["plan.md", "deck.md"]
+  end
+
   test "an ordinary document is not a presentation" do
     spec = %{spec() | produces: ["plan.md", "shots/*", "deck.md!", "changeset"]}
 

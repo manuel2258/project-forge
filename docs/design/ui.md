@@ -298,8 +298,15 @@ Getting these wrong makes the UI lie. They are acceptance criteria, not preferen
 - **Presentations carry no approval slot at all**, so they cannot be misread as approvable.
   Experimental results are advisory and must never read as verified.
 - **The diff is bounded and says where.** Past the page's limit it offers the `git diff` command
-  for the exact range instead of trailing off. The file table above it is never truncated: it is
-  the map of the change. Dollars do not appear here either — the review page is the surface where
+  for the exact range instead of trailing off. **So does a patch that is not valid UTF-8** — a
+  latin-1 source file is diffed in full by git, and those bytes in a rendered page are a response
+  body that is not UTF-8 and, through the socket, a serializer that raises in the transport
+  process and takes every LiveView on the connection down. One rule, two reasons, and the same
+  `git diff` line either way; it holds wherever a change is drawn, which is the review page, both
+  Changes tabs and a repository commit. A *path* that is not UTF-8 is a different answer — it is
+  made printable rather than withheld, because a change whose file list is missing is not a map
+  (`Forge.Git.printable_path/1`). The file table above the patch is never truncated: it is the
+  map of the change. Dollars do not appear here either — the review page is the surface where
   they are most tempting and least useful.
 - A **merge decision** is reached from the queue by a link, never by an answer row. Answering
   never navigates, and the answer row and the Send are the shapes in the queue that commit
@@ -1319,10 +1326,11 @@ down. The product already wrote this rule down, for this reason, where a documen
 where one is served.
 
 **No syntax colouring, by language or by anything else.** Settled on this ticket by the person who
-answered it, and consistent with § Colour, whose every entry assigns a hue to something about
+answered it, and consistent with § Colour. Five of its six bullets give a hue to something about
 the *work* — a wait, a link or a decision, a job's state, an outcome, an artifact's type — and
-to nothing about the text it draws. "This word is a keyword" is not a meaning colour carries
-here, and giving it one would spend the only scarce thing § Colour has.
+the sixth is about surfaces rather than meaning. None of them is about the text a page draws.
+"This word is a keyword" would be a seventh meaning, spending the only scarce thing § Colour
+has on something that is not a state of anything.
 
 **Opening a commit is its own page**, `/projects/:name/repo/commits/:sha`: the commit's identifier
 line, then the files it changed and the patch in each, drawn by `ForgeWeb.Diff.section/1` — the
@@ -1332,15 +1340,16 @@ empty tree, so the first commit in a repository opens like any other. Two arbitr
 not diffed against each other; only a commit's own change. The back link carries the branch and
 the page it was opened from, so returning lands where the reader was rather than at the top.
 
-**No branch is created, moved or deleted here, and no commit is made.** The reads are
-`for-each-ref`, `log`, `rev-parse`, `ls-tree`, `cat-file` and `show` on the branch page, and
-`log`, `rev-parse` and `diff` on a commit's: no worktree, no checkout, no ref touched. The one
-object that is written is the empty tree, which `Forge.Git.empty_tree/1` writes with
-`hash-object -w` the first time a root commit's page reads a diff against it —
-the same idempotent zero-byte object a root commit is made of, naming no ref and changing nothing
-anybody can observe. The test that holds this records the repository *directory* and not its
-refs, because the first version of this page could write a file into it while every ref stayed
-exactly where it was.
+**Nothing here writes to the repository at all.** The reads are `for-each-ref`, `log`,
+`rev-parse`, `ls-tree`, `cat-file` and `show` on the branch page, and `log`, `rev-parse`,
+`hash-object` and `diff` on a commit's: no worktree, no checkout, no ref touched and no object
+written. `hash-object` is in that list without `-w`: a root commit's diff is read against the
+empty tree, which git carries whether or not the repository holds it, so the tree is *named*
+rather than written. (`Forge.Git.empty_tree/1` still writes it for `create_root_commit/2`, where
+a commit will reference it and `git fsck` would otherwise report it missing for ever.)
+
+The test that holds this records the repository *directory* and not its refs, because the first
+version of this page could write a file into it while every ref stayed exactly where it was.
 
 A path or a branch name from the address is resolved by git against its own trees and refs,
 never against the filesystem, so `..` in either does not escape anything: it matches nothing and
@@ -1350,10 +1359,26 @@ beginning with `-` as an option wherever it sits, and `log --output=<file>` writ
 `/projects/:name/repo/commits/--output=config` truncated the project's own `HEAD` with one GET
 and `--output=../../x` wrote outside the repositories directory. Two guards answer it now. The
 general one is `Forge.Git.run/3`, which refuses a value the caller was handed when it begins
-with a dash — marked `{:data, value}` at every site in `Forge.Git` that passes one, so the next
-caller inherits the rule rather than the hole. The particular one is this page: the address
-names a commit, so only a hex object name is read out of it, and anything else is the ordinary
-miss before git is reached at all.
+with a dash, marked `{:data, value}` wherever one is passed as a whole argument. **The mark is
+fail-open and that is a known trade-off, not a claim about safety**: a future caller who forgets
+it gets a hole and no error. The alternative — `run/3` refusing *any* dashed argument unless it
+is in a module-level allowlist of the flags this module uses — replaces an obligation at every
+call site with one list, and is the better shape if a third site of this ever appears. What
+keeps the current rule honest is that it is greppable: a value in `Forge.Git` that is not a
+literal and is not marked is visible in review, and the two that are flags' own values
+(`--skip=`, `--max-count=`) are guarded as integers instead, because a flag's value is not a
+position git reads an option in. The particular guard is this page: the address names a commit,
+so only a hex object name is read out of it, and anything else is the ordinary miss before git
+is reached at all.
+
+**A name that is not text is drawn in git's own escaped form.** A repository may hold a file
+called `caf\xE9.txt`, and the platform asks git for paths exactly as they were written — which
+is what makes `résumé.md` readable instead of `"r\303\251sum\303\251.md"`. Those raw bytes in a
+page are the same crash as a non-UTF-8 patch, one layer down and reachable from a *filename*, so
+every path leaves `Forge.Git` through `printable_path/1`: as git printed it when that is text,
+and C-escaped in quotes when it is not. `unquote_path/1` is its exact inverse, so such a file
+still opens and such a directory still expands — the escaped form is what the browser holds, and
+it is read back before git sees it.
 
 ## Not built yet
 

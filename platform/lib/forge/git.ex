@@ -86,7 +86,7 @@ defmodule Forge.Git do
       {"GIT_COMMITTER_EMAIL", "forge@localhost"}
     ]
 
-    with {:ok, tree} <- empty_tree(repo),
+    with {:ok, tree} <- empty_tree(repo, write: true),
          {:ok, sha} <- run(repo, ["commit-tree", {:data, tree}, "-m", @root_message], env: env),
          {:ok, _out} <-
            run(repo, ["update-ref", {:data, "refs/heads/" <> branch}, {:data, String.trim(sha)}],
@@ -104,15 +104,21 @@ defmodule Forge.Git do
   is also a well-known constant, and is deliberately not hard-coded here: it is only constant for
   SHA-1, and a repository can be SHA-256.
 
-  **Dropping `-w` is an equivalent mutant.** Git treats the empty tree as present whether or not
-  the repository holds it — `cat-file`, `commit-tree` and `diff` all accept its id in a
-  repository with no objects at all — so neither caller can tell the two apart and no test here
-  can. It is written anyway because that is what `create_root_commit/2` has always done, and a
-  repository whose root commit's tree is a real object is the less surprising of the two.
+  **`write: true` only when a commit will reference it.** Git carries the empty tree as a cached
+  object, so `cat-file`, `commit-tree` and `diff` all accept its id in a repository holding no
+  objects at all — which is why a page reading a root commit's diff against it needs nothing
+  written, and why browsing a repository writes nothing whatsoever.
+
+  A commit that *references* it is the other case, and the difference is observable:
+  `commit-tree` accepts the unwritten id happily and `git clone` of the result checks out fine,
+  but `git fsck` on that repository then reports `missing tree 4b825dc…` for ever. So
+  `create_root_commit/2` writes it and nothing else does.
   """
-  @spec empty_tree(repo()) :: {:ok, sha()} | {:error, term()}
-  def empty_tree(repo) do
-    with {:ok, out} <- run(repo, ["hash-object", "-w", "-t", "tree", "/dev/null"]) do
+  @spec empty_tree(repo(), keyword()) :: {:ok, sha()} | {:error, term()}
+  def empty_tree(repo, opts \\ []) do
+    write = if Keyword.get(opts, :write, false), do: ["-w"], else: []
+
+    with {:ok, out} <- run(repo, ["hash-object"] ++ write ++ ["-t", "tree", "/dev/null"]) do
       {:ok, String.trim(out)}
     end
   end
@@ -218,7 +224,10 @@ defmodule Forge.Git do
   """
   @spec unquote_path(String.t()) :: String.t()
   def unquote_path("\"" <> quoted) do
-    quoted |> String.trim_trailing("\"") |> unescape(<<>>)
+    # One closing quote, not every trailing one: `String.trim_trailing/2` took them all, so a
+    # path that is itself quoted — `"quoted"`, which git prints as `"\"quoted\""` — came back
+    # with its last escape eaten and did not round-trip through `printable_path/1`.
+    quoted |> String.replace_suffix("\"", "") |> unescape(<<>>)
   end
 
   def unquote_path(path), do: path
@@ -233,6 +242,66 @@ defmodule Forge.Git do
     do: unescape(rest, <<acc::binary, escaped(char)>>)
 
   defp unescape(<<char, rest::binary>>, acc), do: unescape(rest, <<acc::binary, char>>)
+
+  @doc """
+  A path as a page may draw it and as JSON may carry it: as git printed it when that is text, and
+  C-escaped in double quotes — git's own form for a path it cannot print — when it is not.
+
+  **Every path this module returns has been through it.** A repository may hold a file whose name
+  is not valid UTF-8 (`caf\xE9.txt`), and `@paths_as_written` plus `ls-tree -z` are exactly what
+  make git hand those bytes over raw rather than quoted. Drawn into a page they make the rendered
+  HTML invalid UTF-8, and `Phoenix.Socket.V2.JSONSerializer.encode!/1` then raises on it in the
+  socket's own transport process — taking every LiveView on that connection down, not just the
+  page that drew the name. The same byte in a JSON response is a 500 from `Jason`.
+
+  It is applied here rather than at each place a path is drawn so that the rule cannot be
+  forgotten by the next caller: nothing downstream has to remember anything, because there is
+  nothing left to remember it about.
+
+  `unquote_path/1` is its exact inverse, which is what lets a path make the round trip out to a
+  browser and back into a git argument. A path that is already quoted-looking — one that begins
+  with a `"` — is escaped too, so that the inverse has only one reading.
+  """
+  @spec printable_path(String.t()) :: String.t()
+  def printable_path(path) do
+    if String.valid?(path) and not String.starts_with?(path, "\"") and not control?(path),
+      do: path,
+      else: escape(path)
+  end
+
+  defp control?(path), do: String.to_charlist(path) |> Enum.any?(&(&1 < 0x20))
+
+  # The form `unquote_path/1` reads: double quotes around it, `\\` and `\"` escaped, the escapes
+  # git itself prints for a tab or a newline, and every other byte outside printable ASCII as
+  # three octal digits.
+  defp escape(path), do: "\"" <> escape(path, <<>>) <> "\""
+
+  defp escape(<<>>, acc), do: acc
+
+  defp escape(<<byte, rest::binary>>, acc) when byte in [?\\, ?"],
+    do: escape(rest, <<acc::binary, ?\\, byte>>)
+
+  defp escape(<<byte, rest::binary>>, acc) when byte in 0x20..0x7E,
+    do: escape(rest, <<acc::binary, byte>>)
+
+  defp escape(<<byte, rest::binary>>, acc) do
+    case escape_char(byte) do
+      nil -> escape(rest, <<acc::binary, octal(byte)::binary>>)
+      char -> escape(rest, <<acc::binary, ?\\, char>>)
+    end
+  end
+
+  defp escape_char(?\t), do: ?t
+  defp escape_char(?\n), do: ?n
+  defp escape_char(?\r), do: ?r
+  defp escape_char(7), do: ?a
+  defp escape_char(?\b), do: ?b
+  defp escape_char(?\f), do: ?f
+  defp escape_char(?\v), do: ?v
+  defp escape_char(_byte), do: nil
+
+  defp octal(byte),
+    do: "\\" <> (byte |> Integer.to_string(8) |> String.pad_leading(3, "0"))
 
   defp escaped(?t), do: ?\t
   defp escaped(?n), do: ?\n
@@ -260,8 +329,11 @@ defmodule Forge.Git do
 
   defp numstat_line(line) do
     case String.split(line, "\t", parts: 3) do
-      [added, removed, path] -> {unquote_path(path), count(added), count(removed)}
-      _other -> {line, :binary, :binary}
+      [added, removed, path] ->
+        {path |> unquote_path() |> printable_path(), count(added), count(removed)}
+
+      _other ->
+        {line, :binary, :binary}
     end
   end
 
@@ -289,7 +361,12 @@ defmodule Forge.Git do
   defp tree_entry(line) do
     [meta, path] = String.split(line, "\t", parts: 2)
     [mode, type, _object] = String.split(meta, " ")
-    %{name: Path.basename(path), path: path, kind: tree_kind(mode, type)}
+
+    %{
+      name: path |> Path.basename() |> printable_path(),
+      path: printable_path(path),
+      kind: tree_kind(mode, type)
+    }
   end
 
   defp tree_kind("120000", _type), do: :link
@@ -337,7 +414,10 @@ defmodule Forge.Git do
       @paths_as_written ++ ["diff", "--name-only", {:data, "#{base}..#{head}"}, "--" | pathspec]
 
     with {:ok, out} <- run(repo, args, stderr: :separate) do
-      {:ok, out |> String.split("\n", trim: true) |> Enum.map(&unquote_path/1)}
+      {:ok,
+       out
+       |> String.split("\n", trim: true)
+       |> Enum.map(&(&1 |> unquote_path() |> printable_path()))}
     end
   end
 
@@ -409,7 +489,12 @@ defmodule Forge.Git do
   """
   @spec history(repo(), String.t(), non_neg_integer(), pos_integer()) ::
           {:ok, %{commits: [commit()], more: boolean()}} | {:error, term()}
-  def history(repo, ref, skip, limit) do
+  def history(repo, ref, skip, limit)
+      when is_integer(skip) and skip >= 0 and is_integer(limit) and limit > 0 do
+    # `skip` and `limit` are the caller's too, and they are interpolated into flags rather than
+    # marked `{:data, …}` — a flag's own value is not a position git reads an option in. The
+    # guard is what makes that safe rather than lucky: a binary here would put whatever it held
+    # inside `--skip=`, and the mark cannot be used on something that is not a whole argument.
     args = ["log", @log_format, "--skip=#{skip}", "--max-count=#{limit + 1}", {:data, ref}]
 
     with {:ok, out} <- run(repo, args, stderr: :separate) do

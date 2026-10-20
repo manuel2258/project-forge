@@ -313,6 +313,55 @@ defmodule ForgeWeb.RepoLiveTest do
       refute closed =~ "SECONDFILE"
     end
 
+    # The crash the patch guard did not reach: a *filename* that is not valid UTF-8. The only
+    # link to this page is a `<.link navigate>`, so the first render of the files tab already
+    # goes through the socket's serializer, which raises on such bytes in its own transport
+    # process and takes every LiveView on the connection with it.
+    test "a file whose name is not text is drawn, escaped, and still opens", %{
+      conn: conn,
+      project: project,
+      repo: repo
+    } do
+      raw = "caf" <> <<0xE9>> <> ".txt"
+      commit_to(repo, "main", %{raw => "LATINCONTENT\n"})
+
+      {:ok, view, html} = live(conn, ~p"/projects/#{project.name}/repo?tab=files")
+
+      # Valid UTF-8, which is what the socket can carry at all.
+      assert String.valid?(html)
+      assert html =~ ~s(caf\\351.txt)
+      refute html =~ raw
+
+      # And the escaped name still names the file. The browser holds exactly what is in the
+      # attribute above, so sending that back is the round trip: the page reads it into the
+      # bytes git wants before git sees it.
+      escaped = ~s("caf\\351.txt")
+      assert escaped in paths(html)
+
+      opened = render_click(view, "open", %{"path" => escaped})
+      assert String.valid?(opened)
+      assert opened =~ "LATINCONTENT"
+    end
+
+    test "a directory whose name is not text still expands", %{
+      conn: conn,
+      project: project,
+      repo: repo
+    } do
+      commit_to(repo, "main", %{("d" <> <<0xE9>> <> "r/inside.txt") => "in\n"})
+
+      {:ok, view, html} = live(conn, ~p"/projects/#{project.name}/repo?tab=files")
+      assert String.valid?(html)
+
+      escaped = ~s("d\\351r")
+      assert escaped in paths(html)
+
+      expanded = render_click(view, "expand", %{"path" => escaped})
+
+      assert String.valid?(expanded)
+      assert expanded =~ "inside.txt"
+    end
+
     test "directories come before files, each in name order", %{
       conn: conn,
       project: project,
@@ -322,13 +371,7 @@ defmodule ForgeWeb.RepoLiveTest do
 
       {:ok, _view, html} = live(conn, ~p"/projects/#{project.name}/repo?tab=files")
 
-      paths =
-        html
-        |> Floki.parse_document!()
-        |> Floki.find(~s|#files > div > ul > li|)
-        |> Floki.attribute("data-path")
-
-      assert paths == [".forge", "zzz", "README.md", "aaa.txt"]
+      assert paths(html) == [".forge", "zzz", "README.md", "aaa.txt"]
     end
   end
 
@@ -403,6 +446,15 @@ defmodule ForgeWeb.RepoLiveTest do
       # And a tab nothing names is the Commits tab, not a blank page under the nav.
       {:ok, _view, html} = live(conn, ~p"/projects/#{project.name}/repo?tab=bogus")
       assert html =~ "seed"
+
+      # A query parameter can be a list as easily as a string, and `Integer.parse/1` wants a
+      # binary: `?page[]=2` raised `FunctionClauseError` in `handle_params` for any member.
+      # `tab` and `branch` need no clause of their own — `in @tabs` and `in branches` are both
+      # false for a list — which is why this is the one guard here.
+      for query <- ["page[]=2", "page[]=2&page[]=3", "tab[]=files", "branch[]=main"] do
+        {:ok, _view, html} = live(conn, "/projects/#{project.name}/repo?#{query}")
+        assert html =~ "seed"
+      end
     end
   end
 
@@ -452,21 +504,19 @@ defmodule ForgeWeb.RepoLiveTest do
     assert {:ok, _sha} = Git.resolve(repo, "refs/heads/" <> project.default_branch)
   end
 
+  # What the browser holds for each row of the tree's top level — the value a click sends back.
+  defp paths(html) do
+    html
+    |> Floki.parse_document!()
+    |> Floki.find(~s|#files > div > ul > li|)
+    |> Floki.attribute("data-path")
+  end
+
   # The subject of each commit row, in the order the page drew them.
   defp subjects(html) do
     html
     |> Floki.parse_document!()
     |> Floki.find("#commits li span.flex-1")
     |> Enum.map(&(&1 |> Floki.text() |> String.trim()))
-  end
-
-  # Every file under `repo`, by path and content hash. `for-each-ref` sees refs; this sees the
-  # repository.
-  defp tree_of(repo) do
-    repo
-    |> Path.join("**")
-    |> Path.wildcard(match_dot: true)
-    |> Enum.filter(&File.regular?/1)
-    |> Map.new(&{Path.relative_to(&1, repo), :crypto.hash(:sha256, File.read!(&1))})
   end
 end

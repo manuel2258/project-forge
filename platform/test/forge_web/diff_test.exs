@@ -98,6 +98,35 @@ defmodule ForgeWeb.DiffTest do
     assert drawn =~ "latin1.ex"
   end
 
+  # A *name* that is not text, which the patch guard does not reach: the file table is drawn
+  # from `--numstat` whether or not the patch is, so withholding the patch left the filename
+  # going out raw on all four surfaces that draw a change. A path is made printable rather than
+  # withheld, because a change whose file list is missing is not a map of anything.
+  # A patch naming such a file is never text, since the name is in it — so this is the one case
+  # where both guards fire, and the path's is what keeps the file list readable.
+  test "a path that is not valid UTF-8 is drawn escaped, on both drawings" do
+    {repo, base, head} = change(%{("caf" <> <<0xE9>> <> ".ex") => "def ok, do: :ok\n"})
+
+    diff = Diff.build(repo, base, head)
+
+    escaped = ~s("caf\\351.ex")
+
+    assert diff.files == [{escaped, 1, 0}]
+    # The patch carries the raw name too, so it is not text either and is not drawn — but the
+    # file table is drawn from `--numstat` regardless, which is why the path needed its own
+    # answer rather than the patch guard's.
+    refute diff.text
+    assert [%{path: ^escaped, lines: nil}] = Diff.files(diff)
+
+    for drawn <- [
+          render_component(&Diff.section/1, diff: diff),
+          render_component(&Diff.file_table/1, diff: diff)
+        ] do
+      assert String.valid?(drawn)
+      assert drawn =~ ~s(caf\\351.ex)
+    end
+  end
+
   # And the other way round: one file, well under the file limit, whose patch is past the byte
   # limit. A bound that only counted files would put six hundred kilobytes on the page.
   test "one enormous file is too much to read, however few there are" do

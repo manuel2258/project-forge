@@ -110,6 +110,23 @@ defmodule ForgeWeb.RepoCommitLiveTest do
     assert html =~ "not valid UTF-8"
   end
 
+  # The same bytes through the commit page, where the patch guard fires correctly and the
+  # filename went out anyway.
+  test "a commit touching a file whose name is not text is served as valid UTF-8", %{
+    conn: conn,
+    project: project,
+    repo: repo
+  } do
+    raw = "caf" <> <<0xE9>> <> ".txt"
+    head = commit_to(repo, "main", %{raw => "latin\n"})
+
+    {:ok, _view, html} = live(conn, ~p"/projects/#{project.name}/repo/commits/#{head}")
+
+    assert String.valid?(html)
+    assert html =~ ~s(caf\\351.txt)
+    refute html =~ raw
+  end
+
   test "the header names the commit short, as every other sha in the product is named", %{
     conn: conn,
     project: project,

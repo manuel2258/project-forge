@@ -9,6 +9,12 @@ defmodule ForgeWeb.RepoLive do
   Nothing here writes. Every read is `for-each-ref`, `log`, `rev-parse`, `ls-tree`, `cat-file` or
   `show` against the bare repository: no worktree, no checkout, and no ref touched.
 
+  **A path travels out and back in git's own printed form.** `Forge.Git` hands over every path
+  through `printable_path/1`, so a file named `caf\xE9.txt` is drawn — and sent to the browser —
+  as `"caf\351.txt"`, which is valid UTF-8 and therefore something the socket can carry. What
+  comes back on a click is put through `unquote_path/1`, its exact inverse, before git sees it,
+  so such a file still opens and such a directory still expands.
+
   **What the page holds is bounded.** The tree holds names, one directory per click, and the
   content of exactly one file — opening another replaces it, and opening the open one closes it.
   A file is bounded at 512 KB, so that is the whole of it; keeping every file a reader had opened
@@ -95,8 +101,10 @@ defmodule ForgeWeb.RepoLive do
   # made `git log` answer `fatal: not an integer`, which `load_commits/1` then drew as the same
   # empty page a reader gets past the end of a real history. The bound is thirty million commits
   # deep, which no repository this will ever serve has.
+  defp page(asked) when not is_binary(asked), do: 1
+
   defp page(asked) do
-    case Integer.parse(asked || "") do
+    case Integer.parse(asked) do
       {number, ""} when number > 0 and number <= @max_page -> number
       _other -> 1
     end
@@ -132,7 +140,7 @@ defmodule ForgeWeb.RepoLive do
   defp children(_repo, nil, _dir), do: []
 
   defp children(repo, head, dir) do
-    case Git.ls_dir(repo, head, dir) do
+    case Git.ls_dir(repo, head, Git.unquote_path(dir)) do
       {:ok, entries} -> Enum.sort_by(entries, &{&1.kind != :tree, &1.name})
       {:error, _reason} -> []
     end
@@ -196,6 +204,8 @@ defmodule ForgeWeb.RepoLive do
   # property and not an assertion; `Forge.GitTest`'s `blob_size/3` tests are where the order
   # has anything to stand on.
   defp read(%{repo: repo, head: head}, path) do
+    path = Git.unquote_path(path)
+
     case Git.blob_size(repo, head, path) do
       {:ok, bytes} when bytes >= @max_file_bytes -> {:too_large, bytes}
       {:ok, _bytes} -> content(Git.show(repo, head, path))

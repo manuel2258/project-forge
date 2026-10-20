@@ -5,7 +5,8 @@ defmodule ForgeWeb.RepoCommitLive do
   The same `ForgeWeb.Diff.section/1` the review page draws, so a binary file already reads
   *binary* with no attempted content and an oversized change already says where to read it. A
   root commit is shown against the empty tree, so the first commit in a repository opens like
-  any other. See `docs/design/ui.md` § The project's repository.
+  any other — named rather than written, so nothing on this page touches the repository at all.
+  See `docs/design/ui.md` § The project's repository.
   """
 
   use ForgeWeb, :live_view
@@ -65,9 +66,9 @@ defmodule ForgeWeb.RepoCommitLive do
         parent
 
       # A root commit's change is against the empty tree, which `Diff` then reads as any other
-      # base rather than being given a special case of its own. A repository that cannot write
-      # the empty tree has stopped existing between two reads, and crashes here rather than
-      # drawing a commit against nothing.
+      # base rather than being given a special case of its own. Named and not written: git
+      # carries the empty tree whether or not the repository holds it, so this page — like every
+      # other read here — leaves the repository exactly as it found it.
       {:error, :no_parent} ->
         {:ok, tree} = Git.empty_tree(repo)
         tree

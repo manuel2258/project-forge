@@ -177,6 +177,45 @@ defmodule ForgeWeb.ReviewLiveTest do
     assert body["merged"] == false
     assert [%{"path" => "score.ex"}] = body["diff"]["files"]
     assert body["diff"]["patch"] =~ "def persist"
+    assert body["diff"]["text"] == true
+  end
+
+  # `Jason` raises on a binary that is not valid UTF-8, so a latin-1 commit made this endpoint
+  # 500 — the same root cause the pages answer with `ForgeWeb.Diff`, one layer earlier. The map
+  # of the change still arrives; only the patch is withheld, and `text` says why.
+  test "the API withholds a patch it cannot encode rather than failing whole", context do
+    %{project: project, ticket: ticket} = context
+    sha = commit_on_branch(context, "latin1.ex", "def caf" <> <<0xE9>> <> ", do: :ok")
+    changeset!(ticket, sha)
+
+    token = Forge.Accounts.create_api_token(context.scope.user, "test")
+
+    body =
+      build_conn()
+      |> put_req_header("authorization", "Bearer " <> token)
+      |> get(~p"/api/v1/tickets/#{project.name}/#{ticket.number}/review")
+      |> json_response(200)
+
+    assert [%{"path" => "latin1.ex"}] = body["diff"]["files"]
+    assert body["diff"]["text"] == false
+    assert body["diff"]["patch"] == nil
+  end
+
+  # And a *name* that is not text, which reaches the same response through `--numstat`.
+  test "the API names a file whose name is not text in a form JSON can carry", context do
+    %{project: project, ticket: ticket} = context
+    sha = commit_on_branch(context, "caf" <> <<0xE9>> <> ".ex", "def ok, do: :ok")
+    changeset!(ticket, sha)
+
+    token = Forge.Accounts.create_api_token(context.scope.user, "test")
+
+    body =
+      build_conn()
+      |> put_req_header("authorization", "Bearer " <> token)
+      |> get(~p"/api/v1/tickets/#{project.name}/#{ticket.number}/review")
+      |> json_response(200)
+
+    assert [%{"path" => ~s("caf\\351.ex")}] = body["diff"]["files"]
   end
 
   # -- helpers ---------------------------------------------------------------------------------

@@ -154,16 +154,6 @@ defmodule Forge.GitTest do
     end
   end
 
-  # Every file under `repo`, by path and content hash: what a write of any kind changes and what
-  # `for-each-ref` alone cannot see.
-  defp tree_of(repo) do
-    repo
-    |> Path.join("**")
-    |> Path.wildcard(match_dot: true)
-    |> Enum.filter(&File.regular?/1)
-    |> Map.new(&{Path.relative_to(&1, repo), :crypto.hash(:sha256, File.read!(&1))})
-  end
-
   describe "reading a repository for a person" do
     # **`Enum.sort` in `branches/1` is an equivalent mutant.** `for-each-ref` sorts by refname
     # already, and a short name orders the same way as its `refs/heads/` form, so no repository
@@ -232,6 +222,30 @@ defmodule Forge.GitTest do
       assert {:ok, ""} = Git.run(repo, ["cat-file", "-p", tree])
     end
 
+    # Naming it writes nothing — git carries the empty tree whether a repository holds it or
+    # not — which is what lets a commit page read a root commit's diff against it without
+    # writing to the repository it is only looking at.
+    test "empty_tree/1 writes nothing unless asked to", %{repo: repo} do
+      before = tree_of(repo)
+
+      assert {:ok, tree} = Git.empty_tree(repo)
+      assert tree_of(repo) == before
+
+      assert {:ok, ^tree} = Git.empty_tree(repo, write: true)
+      assert tree_of(repo) != before
+    end
+
+    # And why the writing half is kept for the one caller that makes a commit of it: an
+    # unwritten tree a commit references is a repository that fails `fsck` for ever.
+    test "a root commit's own empty tree is written, so the repository stays whole" do
+      repo = Path.join(tmp_dir("fsck"), "new.git")
+      :ok = Git.init_bare(repo)
+      :ok = Git.ensure_initial_commit(repo, "main")
+
+      assert {:ok, out} = Git.run(repo, ["fsck"])
+      refute out =~ "missing tree"
+    end
+
     test "blob_size/3 is the bytes a path holds, or not found", %{repo: repo} do
       {:ok, sha} = Git.resolve(repo, "main")
 
@@ -274,6 +288,61 @@ defmodule Forge.GitTest do
       # The point of the whole test: not one of those left anything behind.
       assert tree_of(repo) == before
       refute File.exists?(Path.join(repo, "pwned"))
+    end
+
+    # The crash this closes, one layer below the patch guard: a repository may hold a file whose
+    # name is not valid UTF-8, and the platform asks git for paths as they were written, so those
+    # bytes arrive raw. Rendered into a page they are a response body that is not UTF-8, and
+    # through the socket the serializer raises on them in the transport process.
+    test "a path that is not text leaves this module in a form a page can draw", %{repo: repo} do
+      {:ok, head} = Git.resolve(repo, "main")
+      :ok = Git.create_branch(repo, "ticket/3", head)
+      raw = "caf" <> <<0xE9>> <> ".txt"
+      commit_to(repo, "ticket/3", %{raw => "latin\n", ("dir" <> <<0xFF>> <> "/in.txt") => "x\n"})
+      {:ok, sha} = Git.resolve(repo, "refs/heads/ticket/3")
+
+      # `ls-tree -z` never quotes, and `--numstat` does not either under `core.quotePath=false`.
+      {:ok, entries} = Git.ls_dir(repo, sha, "")
+      {:ok, stat} = Git.diff_stat(repo, head, sha)
+      {:ok, changed} = Git.changed_paths(repo, head, sha, [])
+
+      for path <- Enum.map(entries, & &1.path) ++ Enum.map(entries, & &1.name) do
+        assert String.valid?(path), inspect(path)
+      end
+
+      assert Enum.all?(Enum.map(stat, &elem(&1, 0)), &String.valid?/1)
+      assert Enum.all?(changed, &String.valid?/1)
+      assert ~s("caf\\351.txt") in Enum.map(entries, & &1.name)
+
+      # And the escaped form reads back to the bytes git wants, so a page can round-trip it.
+      assert Git.unquote_path(~s("caf\\351.txt")) == raw
+      assert {:ok, "latin\n"} = Git.show(repo, sha, Git.unquote_path(~s("caf\\351.txt")))
+    end
+
+    test "printable_path/1 and unquote_path/1 are inverses", %{repo: _repo} do
+      for raw <- [
+            "README.md",
+            "résumé.md",
+            ~s(we"ird.md),
+            "a b/c",
+            ~s("quoted"),
+            "caf" <> <<0xE9>> <> ".txt",
+            "dir/" <> <<0xFF, 0xFE>> <> "x",
+            "tab\there",
+            "nl\nhere"
+          ] do
+        printed = Git.printable_path(raw)
+        assert String.valid?(printed), inspect(raw)
+        assert Git.unquote_path(printed) == raw, inspect(raw)
+      end
+    end
+
+    # `skip` and `limit` are the caller's and are interpolated into flags rather than marked,
+    # so the guard is what stands in for the mark.
+    test "history/4 refuses a skip or a limit that is not a number", %{repo: repo} do
+      assert_raise FunctionClauseError, fn -> Git.history(repo, "main", "0; rm -rf /", 30) end
+      assert_raise FunctionClauseError, fn -> Git.history(repo, "main", -1, 30) end
+      assert_raise FunctionClauseError, fn -> Git.history(repo, "main", 0, 0) end
     end
 
     # A literal is still a literal. Without this the refusal could be "no argument may begin

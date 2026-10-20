@@ -274,6 +274,21 @@ defmodule Forge.GitFixtures do
   end
 
   @doc """
+  Every file under the bare repository at `repo`, by path and content hash.
+
+  What a write of *any* kind changes, and what `for-each-ref` cannot see: a page that wrote a
+  file into a bare repository left every ref exactly where it had been, so the test that was
+  supposed to hold "browsing never writes" walked straight past it.
+  """
+  def tree_of(repo) do
+    repo
+    |> Path.join("**")
+    |> Path.wildcard(match_dot: true)
+    |> Enum.filter(&File.regular?/1)
+    |> Map.new(&{Path.relative_to(&1, repo), :crypto.hash(:sha256, File.read!(&1))})
+  end
+
+  @doc """
   `count` commits on `branch` of the bare repository at `repo`, numbered `commit 1` upwards and
   pushed once, returning the branch's new head.
 

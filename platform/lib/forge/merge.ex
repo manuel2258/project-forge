@@ -334,12 +334,16 @@ defmodule Forge.Merge do
     end
   end
 
+  # The third producer of paths in this product, after `Forge.Git`'s `--numstat` and `ls-tree`:
+  # these go into an event payload and into a ticket's stuck reason, so JSON and Postgres carry
+  # them. `printable_path/1` for the same reason it is applied there — a repository may hold a
+  # file whose name is not valid UTF-8, and nothing downstream can encode one.
   defp conflicted_paths(out) do
     out
     |> String.split("\n")
     |> Enum.flat_map(fn line ->
       case String.split(line, "\t", parts: 2) do
-        [_info, path] -> [path]
+        [_info, path] -> [Git.printable_path(path)]
         _other -> []
       end
     end)

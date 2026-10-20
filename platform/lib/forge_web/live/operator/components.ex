@@ -514,10 +514,14 @@ defmodule ForgeWeb.Operator.Components do
     assigns = assign(assigns, :draft, "write-#{assigns.name}")
 
     ~H"""
+    <%!-- The `id` is written out rather than drawn from `@draft`, which holds the same string:
+          `main` writes it this way, and a form whose `id` line differs from `main`'s conflicts
+          with any change `main` makes beside it — which is how this one line came to be
+          resolved by hand on four separate turns. --%>
     <form
       phx-submit="write_document"
       phx-change="draft:change"
-      id={@draft}
+      id={"write-#{@name}"}
       class="flex flex-col gap-2"
     >
       <input type="hidden" name="draft" value={@draft} />

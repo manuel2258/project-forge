@@ -7,7 +7,13 @@ defmodule ForgeWeb.RepoLive do
   `docs/design/ui.md` § The project's repository.
 
   Nothing here writes. Every read is `for-each-ref`, `log`, `ls-tree` or `cat-file` against the
-  bare repository: no worktree, no checkout, and no ref ever moved.
+  bare repository: no worktree, no checkout, and no ref touched.
+
+  A directory is a directory and everything else is a file, the symlinks and the submodules
+  included: a symlink's content is the path it names, which is what git stores and what reading
+  it plainly says, and a submodule has no content here at all, so it reads as a file this commit
+  does not hold. Neither is worth a kind of its own on a page whose subject is the project's own
+  code.
   """
 
   use ForgeWeb, :live_view
@@ -117,7 +123,7 @@ defmodule ForgeWeb.RepoLive do
 
   @impl true
   def handle_event("branch", %{"branch" => branch}, socket) do
-    {:noreply, push_patch(socket, to: path(socket.assigns, branch: branch, page: 1))}
+    {:noreply, push_patch(socket, to: address(socket.assigns, branch: branch, page: 1))}
   end
 
   # Read once, then held: collapsing and reopening a directory draws it from the page rather
@@ -131,14 +137,20 @@ defmodule ForgeWeb.RepoLive do
     end
   end
 
+  # A path arrives off the wire, so it is not only one the tree offered. One the commit does not
+  # hold opens nothing and says nothing — `..` in it is matched against git's own tree and
+  # matches there as little as any other typo does, which is why no path guard is needed in
+  # front of this.
   def handle_event("open", %{"path" => path}, %{assigns: assigns} = socket) do
-    if Map.has_key?(assigns.open_files, path) do
-      {:noreply, socket}
-    else
-      {:noreply,
-       assign(socket, open_files: Map.put(assigns.open_files, path, read(assigns, path)))}
+    cond do
+      Map.has_key?(assigns.open_files, path) -> {:noreply, socket}
+      file = read(assigns, path) -> {:noreply, opened(socket, path, file)}
+      true -> {:noreply, socket}
     end
   end
+
+  defp opened(socket, path, file),
+    do: assign(socket, open_files: Map.put(socket.assigns.open_files, path, file))
 
   # The size first, and the content only when the size allows it: the guarantee that nothing
   # past the limit is partially loaded is that `show/3` is not run at all.
@@ -146,12 +158,17 @@ defmodule ForgeWeb.RepoLive do
     case Git.blob_size(repo, head, path) do
       {:ok, bytes} when bytes >= @max_file_bytes -> {:too_large, bytes}
       {:ok, _bytes} -> content(Git.show(repo, head, path))
-      {:error, :not_found} -> :missing
+      {:error, :not_found} -> nil
     end
   end
 
   defp content({:ok, text}), do: if(binary?(text), do: :binary, else: {:text, text})
-  defp content({:error, :not_found}), do: :missing
+
+  # **No test reaches this and none can usefully.** `blob_size/3` has already answered for this
+  # exact path at this exact commit, so a `show/3` that then cannot find it is a repository
+  # rewritten between two reads. It is here rather than left to crash the page, and its
+  # removal is an equivalent mutant.
+  defp content({:error, :not_found}), do: nil
 
   defp binary?(text), do: text |> binary_part(0, min(byte_size(text), @sniff_bytes)) |> nul?()
 
@@ -160,7 +177,7 @@ defmodule ForgeWeb.RepoLive do
   # The page's own address with some of its three parameters replaced. Everything the view holds
   # beyond the tree and the files opened out of it is here, which is why every control patches
   # rather than navigating.
-  defp path(assigns, overrides) do
+  defp address(assigns, overrides) do
     query =
       [branch: assigns.branch, tab: assigns.tab, page: assigns.page]
       |> Keyword.merge(overrides)
@@ -182,7 +199,7 @@ defmodule ForgeWeb.RepoLive do
 
       <header class="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2">
         <h1 class="text-2xl font-semibold -tracking-[.025em]">Repository</h1>
-        <form phx-change="branch" class="ml-auto flex items-center gap-2">
+        <form id="branch-form" phx-change="branch" class="ml-auto flex items-center gap-2">
           <label for="branch" class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
             branch
           </label>
@@ -199,7 +216,7 @@ defmodule ForgeWeb.RepoLive do
       <nav class="mt-5 flex gap-5 border-b border-base-300">
         <.link
           :for={{key, label} <- [{"commits", "Commits"}, {"files", "Files"}]}
-          patch={path(assigns, tab: key, page: 1)}
+          patch={address(assigns, tab: key, page: 1)}
           class={[
             "flex min-h-[46px] items-center border-b-2 font-mono text-[12.5px]",
             if(@tab == key, do: "border-primary", else: "border-transparent opacity-60")
@@ -234,14 +251,14 @@ defmodule ForgeWeb.RepoLive do
         <div :if={@more or @page > 1} class="mt-4 flex items-center gap-5">
           <.link
             :if={@page > 1}
-            patch={path(assigns, page: @page - 1)}
+            patch={address(assigns, page: @page - 1)}
             class="flex min-h-[46px] items-center font-mono text-[12.5px] text-primary hover:underline"
           >
             ‹ Newer
           </.link>
           <.link
             :if={@more}
-            patch={path(assigns, page: @page + 1)}
+            patch={address(assigns, page: @page + 1)}
             class="flex min-h-[46px] items-center font-mono text-[12.5px] text-primary hover:underline"
           >
             Older ›
@@ -302,7 +319,6 @@ defmodule ForgeWeb.RepoLive do
           >
             <span aria-hidden="true" class="opacity-0">▸</span>
             <span class="min-w-0 break-all">{entry.name}</span>
-            <span :if={entry.kind == :link} class="opacity-50">symlink</span>
           </button>
           <.file :if={@open_files[entry.path]} path={entry.path} file={@open_files[entry.path]} />
         </div>
@@ -314,8 +330,8 @@ defmodule ForgeWeb.RepoLive do
   attr :path, :string, required: true
   attr :file, :any, required: true
 
-  # What was read, or why nothing was. Both limits are the row saying what the file is, not a
-  # failure the page reports.
+  # What was read, or which bound stopped it. Both are the row saying what the file is, not a
+  # failure the page reports — and a path with nothing behind it is never in this map at all.
   defp file(assigns) do
     ~H"""
     <div data-file={@path} class="mb-3 ml-6">
@@ -330,8 +346,6 @@ defmodule ForgeWeb.RepoLive do
           <p class="opacity-70">
             This file is {div(bytes, 1024)} KB, too large to show. Read it with git.
           </p>
-        <% :missing -> %>
-          <p class="opacity-70">This file is no longer in the repository at this commit.</p>
       <% end %>
     </div>
     """

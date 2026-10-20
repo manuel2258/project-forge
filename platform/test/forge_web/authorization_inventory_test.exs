@@ -46,6 +46,10 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     "/projects/new" => :approved,
     "/projects/:name" => :member,
     "/projects/:name/settings" => :member,
+    # The repository a project holds, read-only. Every member reads the whole of it, which is
+    # the scope a read token already gives them (`docs/design/git-hosting.md`).
+    "/projects/:name/repo" => :member,
+    "/projects/:name/repo/commits/:sha" => :member,
     "/tickets/new" => :member,
     "/tickets/:project/:number" => :member,
     "/tickets/:project/:number/review" => :member,
@@ -174,6 +178,12 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"project_settings_live.ex", "dismiss"} => :local,
     {"project_settings_live.ex", "toggle-spent"} => :local,
     {"project_settings_live.ex", "validate"} => :local,
+    # The repository view holds three things: which branch, which directory has been read, and
+    # which file has been opened. Each is the page's own state, read out of the repository the
+    # mount already allowed, and reaches no context and no database.
+    {"repo_live.ex", "branch"} => :local,
+    {"repo_live.ex", "expand"} => :local,
+    {"repo_live.ex", "open"} => :local,
     {"queue_live.ex", "push:subscribe"} => :self,
     {"queue_live.ex", "push:unsubscribe"} => :self,
     {"queue_live.ex", "push:error"} => :local,

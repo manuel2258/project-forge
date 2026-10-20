@@ -1319,8 +1319,12 @@ empty tree, so the first commit in a repository opens like any other. Two arbitr
 not diffed against each other; only a commit's own change. The back link carries the branch and
 the page it was opened from, so returning lands where the reader was rather than at the top.
 
-**Nothing here writes to the repository.** Every read is `for-each-ref`, `log`, `ls-tree`,
-`cat-file` or `rev-parse` against a bare repository — no worktree, no checkout, no ref ever moved.
+**No branch is created, moved or deleted here, and no commit is made.** Every read is
+`for-each-ref`, `log`, `ls-tree`, `cat-file` or `rev-parse` against the bare repository: no
+worktree, no checkout, no ref touched. The one byte that is written is the empty tree, which
+`Forge.Git.empty_tree/1` writes the first time a root commit's page reads a diff against it —
+the same idempotent zero-byte object a root commit is made of, naming no ref and changing nothing
+anybody can observe.
 A path or a branch name from the address is resolved by git against its own trees and refs, never
 against the filesystem, so `..` in either does not escape anything: it matches nothing and the
 page reads it as not found, like any other typo.

@@ -2,11 +2,11 @@ defmodule ForgeWeb.Diff do
   @moduledoc """
   A change between two commits: how it is read out of the repository, and how it is drawn.
 
-  Three pages show one, read the same way, in two drawings. A ticket's review page draws
-  `section/1` — the file table and the whole patch beneath it, which is what an approval is given
-  on — and the Changes tab of a ticket and of a conversation draws `file_table/1`, whose rows each
-  expand to their own patch. What each says when there is no change to draw is the same sentence,
-  from one place.
+  Four pages show one, read the same way, in two drawings. A ticket's review page and a
+  repository commit's page both draw `section/1` — the file table and the whole patch beneath it,
+  which is what an approval is given on — and the Changes tab of a ticket and of a conversation
+  draws `file_table/1`, whose rows each expand to their own patch. What each says when there is
+  no change to draw is the same sentence, from one place.
 
   **A diff is bounded.** Past a size it is not rendered inline: a page nobody can read is not a
   review, and the change is still named file by file with its counts. See `docs/design/ui.md`

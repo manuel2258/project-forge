@@ -102,8 +102,11 @@ defmodule Forge.Git do
   is also a well-known constant, and is deliberately not hard-coded here: it is only constant for
   SHA-1, and a repository can be SHA-256.
 
-  Written rather than only named because both callers need the object to exist: a root commit is
-  made of it, and a root commit's diff is read against it.
+  **Dropping `-w` is an equivalent mutant.** Git treats the empty tree as present whether or not
+  the repository holds it — `cat-file`, `commit-tree` and `diff` all accept its id in a
+  repository with no objects at all — so neither caller can tell the two apart and no test here
+  can. It is written anyway because that is what `create_root_commit/2` has always done, and a
+  repository whose root commit's tree is a real object is the less surprising of the two.
   """
   @spec empty_tree(repo()) :: {:ok, sha()} | {:error, term()}
   def empty_tree(repo) do

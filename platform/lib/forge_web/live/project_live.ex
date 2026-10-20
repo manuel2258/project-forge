@@ -243,6 +243,12 @@ defmodule ForgeWeb.ProjectLive do
           Settings ›
         </.link>
         <.link
+          navigate={~p"/projects/#{@project.name}/repo"}
+          class="flex min-h-[46px] items-center text-sm text-primary hover:underline"
+        >
+          Repository ›
+        </.link>
+        <.link
           navigate={~p"/tickets/new?project=#{@project.name}"}
           class="flex min-h-[46px] items-center text-sm text-primary hover:underline"
         >

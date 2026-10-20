@@ -69,7 +69,7 @@ transitions:
   - { from: planning,     to: planning,     when: did_not_converge,  max: 1 }
   - { from: implementing, to: implementing, when: budget_exhausted,  max: 1 }
   - { from: implementing, to: implementing, when: did_not_converge,  max: 1 }
-  - { from: reviewing,    to: reviewing,    when: budget_exhausted,  max: 1 }
+  - { from: reviewing,    to: review_ready, when: budget_exhausted }
   - { from: reviewing,    to: reviewing,    when: did_not_converge,  max: 1 }
 
 limits:

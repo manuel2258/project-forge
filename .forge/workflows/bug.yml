@@ -59,6 +59,15 @@ states:
 # broken rather than something unfinished, and a cancelled ticket takes no transition at all —
 # so both still stick, which is the right default for a fault nobody has read.
 #
+# **`reviewing` is the one state whose exhaustion is not retried**, and it goes to `review_ready`
+# instead. A review that runs out of money has spent it on subagents whose work a fresh retry
+# throws away, so the second attempt reaches the same wall at the same price: on 2026-10-20
+# forge#6 and forge#7 together burnt five $15 reviews that way and stuck anyway, one of them on
+# top of a `report.md` nobody ever read. `review_ready` is where a person already reads
+# `report.md` beside the diff, so the partial report arrives in front of someone who can decide
+# instead of behind a stuck ticket. `did_not_converge` keeps its retry: that is a review that had
+# the budget and no answer, which another attempt can change.
+#
 # `integrating` gets none of these, and cannot: it is `merged`'s `on_conflict`, and the validator
 # refuses a state reached by a conflict that any transition also leads into. The rule is right —
 # an integration is a route out of a conflict, not a step anything else may jump into — and it
@@ -82,7 +91,7 @@ transitions:
   - { from: diagnosing,   to: diagnosing,   when: did_not_converge,  max: 1 }
   - { from: implementing, to: implementing, when: budget_exhausted,  max: 1 }
   - { from: implementing, to: implementing, when: did_not_converge,  max: 1 }
-  - { from: reviewing,    to: reviewing,    when: budget_exhausted,  max: 1 }
+  - { from: reviewing,    to: review_ready, when: budget_exhausted }
   - { from: reviewing,    to: reviewing,    when: did_not_converge,  max: 1 }
 
 limits:

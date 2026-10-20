@@ -18,7 +18,7 @@ defmodule ForgeWeb.WorkScreen do
   import ForgeWeb.Actions, only: [clip: 1, keep_open: 0, line: 1]
 
   alias Forge.Artifacts
-  alias ForgeWeb.{FileType, Format, Layouts, Sheet}
+  alias ForgeWeb.{FileType, Layouts, Sheet}
 
   attr :tabs, :list, required: true, doc: "`{key, label, count | nil}`, in order"
   attr :tab, :string, required: true, doc: "the key of the tab being shown"
@@ -266,13 +266,8 @@ defmodule ForgeWeb.WorkScreen do
         {length(@commits)} {if length(@commits) == 1, do: "commit", else: "commits"} on its branch
       </h2>
       <ol class="mt-3 flex flex-col">
-        <li
-          :for={commit <- @commits}
-          class="flex min-h-[46px] items-center gap-3 border-b border-base-300/60 py-1.5 text-[12.5px]"
-        >
-          <span class="shrink-0 font-mono opacity-60">{String.slice(commit.sha, 0, 7)}</span>
-          <span class="min-w-0 flex-1 break-words text-sm/[1.4]">{commit.subject}</span>
-          <span class="shrink-0 font-mono opacity-50">{Format.ago(commit.at, @now)}</span>
+        <li :for={commit <- @commits} class="border-b border-base-300/60">
+          <ForgeWeb.Diff.commit_row commit={commit} now={@now} />
         </li>
       </ol>
     </section>

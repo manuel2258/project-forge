@@ -200,6 +200,11 @@ defmodule ForgeWeb.Api.Render do
     }
   end
 
+  # The same bound the pages draw a change under (`ForgeWeb.Diff`), for the same reason and one
+  # layer earlier: `Jason` raises on a binary that is not valid UTF-8, so a patch touching a
+  # latin-1 file turned this endpoint into a 500. The map of the change is still every file —
+  # the paths are safe because `Forge.Git` makes them so — and `patch` is null with `text:
+  # false` beside it, which is a client's cue to read it with git rather than a silent truncation.
   defp diff(repo, base, head) do
     with {:ok, stat} <- Forge.Git.diff_stat(repo, base, head),
          {:ok, patch} <- Forge.Git.diff(repo, base, head) do
@@ -208,7 +213,8 @@ defmodule ForgeWeb.Api.Render do
           %{path: path, added: added, removed: removed}
         end)
 
-      %{files: files, patch: patch}
+      text? = ForgeCore.Document.text?(patch)
+      %{files: files, patch: if(text?, do: patch), text: text?}
     else
       {:error, reason} -> %{error: inspect(reason)}
     end

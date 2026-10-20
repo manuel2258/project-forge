@@ -308,11 +308,15 @@ defmodule Forge.TicketTypesTest do
                Tickets.types(project)
     end
 
-    test "a file whose name ends in a newline is not a type" do
+    # The project page names what is in the directory and is not a type, so the name has to be
+    # something a page can draw: `Forge.Git.printable_path/1` escapes the newline the way git
+    # itself would, which is why this is reported quoted rather than with a line break in it.
+    test "a file whose name ends in a newline is not a type, and is named escaped" do
       project = typed_project(%{".forge/workflows/feature\n.yml" => @feature})
 
-      assert {:ok, %{types: types, not_types: [%{path: ".forge/workflows/feature\n.yml"}]}} =
-               Tickets.types(project)
+      assert {:ok, %{types: types, not_types: [%{path: escaped}]}} = Tickets.types(project)
+      assert escaped == ~s(".forge/workflows/feature\\n.yml")
+      refute escaped =~ "\n"
 
       assert Enum.map(types, & &1.name) == ["bug", "feature"]
 

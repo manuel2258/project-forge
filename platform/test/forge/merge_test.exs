@@ -178,6 +178,30 @@ defmodule Forge.MergeTest do
       assert {:conflict, ["README.md"], ^main} = Merge.perform(ticket, sha, user)
       assert {:ok, ^main} = Git.resolve(bare, "refs/heads/main")
     end
+
+    # A conflicted path goes into an event payload and a ticket's stuck reason, so JSON and
+    # Postgres carry it. `merge-tree` quotes anything it cannot print, so what arrives is
+    # already safe — what the path pair in `conflicted_paths/1` does is normalise it to the
+    # form the rest of the product shows, which is readable where there is a readable form and
+    # escaped where there is not.
+    test "a conflicted path is named the way the rest of the product names one", context do
+      %{ticket: ticket, user: user} = context
+      readable = "résumé.md"
+      unreadable = "caf" <> <<0xE9>> <> ".md"
+
+      commit_on_branch(context, readable, "the branch's version")
+      sha = commit_on_branch(context, unreadable, "the branch's version")
+      changeset!(ticket, sha)
+      diverge_default_branch(context, readable, "the trunk's version")
+      diverge_default_branch(context, unreadable, "the trunk's version")
+
+      assert {:conflict, paths, _main} = Merge.perform(ticket, sha, user)
+      # Readable where there is a readable form, escaped where there is not — and never the
+      # `"r\303\251sum\303\251.md"` git itself prints, which is neither.
+      assert Enum.sort(paths) == Enum.sort([readable, ~s("caf\\351.md")])
+      assert Enum.all?(paths, &String.valid?/1)
+      assert {:ok, _json} = Jason.encode(%{"paths" => paths})
+    end
   end
 
   describe "entering a state that merges" do

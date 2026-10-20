@@ -27,3 +27,8 @@ erl_crash.dump
 
 # Subagent-driven-development scratch: ledgers, briefs and review packages.
 .superpowers/
+
+# Worktrees a review's subagents check out. One of these was committed as a gitlink — mode
+# 160000, no `.gitmodules` beside it — which breaks `git clone --recurse-submodules` and shows
+# as a permanently dirty entry in every checkout.
+.claude/worktrees/

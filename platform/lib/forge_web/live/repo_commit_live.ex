@@ -1,0 +1,119 @@
+defmodule ForgeWeb.RepoCommitLive do
+  @moduledoc """
+  One commit of a project's repository: what it changed, against its own parent.
+
+  The same `ForgeWeb.Diff.section/1` the review page draws, so a binary file already reads
+  *binary* with no attempted content and an oversized change already says where to read it. A
+  root commit is shown against the empty tree, so the first commit in a repository opens like
+  any other — named rather than written, so nothing on this page touches the repository at all.
+  See `docs/design/ui.md` § The project's repository.
+  """
+
+  use ForgeWeb, :live_view
+
+  alias Forge.{Git, Projects}
+  alias Forge.Projects.Project
+  alias ForgeWeb.{Diff, Format}
+
+  @impl true
+  def mount(%{"name" => name, "sha" => sha}, _session, socket) do
+    {project, _scope} = ForgeWeb.Access.project_by_name!(socket.assigns.current_scope, name)
+    repo = Projects.repo_path(project)
+    commit = commit!(repo, sha)
+
+    {:ok,
+     socket
+     |> assign(
+       project: project,
+       commit: commit,
+       diff: Diff.build(repo, base(repo, commit.sha), commit.sha),
+       page_title: "#{project.name} #{Diff.short(commit.sha)}",
+       now: DateTime.utc_now()
+     )
+     |> ForgeWeb.Capacity.project(project)}
+  end
+
+  # The address names an object, so only an object name is read out of it: hex, as long as the
+  # repository's hash makes them. Anything else is the same miss a sha the repository does not
+  # hold gets, and never reaches git at all.
+  #
+  # This is the second guard, not the first. `Forge.Git.run/3` refuses a caller's value that
+  # begins with a dash wherever git would read one as an option, which is what closed
+  # `/repo/commits/--output=config` — a single GET that truncated the project's `HEAD`. This one
+  # is here because the page knows something `Forge.Git` cannot: the segment is a commit's name,
+  # and nothing that is not one has any business being tried.
+  @object_name ~r/\A[0-9a-f]{4,64}\z/
+
+  # One page of history, one commit long: the sha the address names, with the subject and the
+  # time a header draws.
+  #
+  # A sha that names no commit here is a miss, not an error — there is no reason to tell a typo
+  # apart from a repository that does not hold it, and none to tell either apart from a project
+  # that is not the viewer's, which `ForgeWeb.Access` has already answered the same way.
+  defp commit!(repo, sha) do
+    with true <- Regex.match?(@object_name, sha),
+         {:ok, %{commits: [commit]}} <- Git.history(repo, sha, 0, 1) do
+      commit
+    else
+      _miss -> raise Ecto.NoResultsError, queryable: Project
+    end
+  end
+
+  # Against the first parent, which is what a merge commit's own change is.
+  defp base(repo, sha) do
+    case Git.parent(repo, sha) do
+      {:ok, parent} ->
+        parent
+
+      # A root commit's change is against the empty tree, which `Diff` then reads as any other
+      # base rather than being given a special case of its own. Named and not written: git
+      # carries the empty tree whether or not the repository holds it, so this page — like every
+      # other read here — leaves the repository exactly as it found it.
+      {:error, :no_parent} ->
+        {:ok, tree} = Git.empty_tree(repo)
+        tree
+    end
+  end
+
+  @impl true
+  def handle_params(params, _uri, socket) do
+    {:noreply, assign(socket, back: back(socket.assigns.project, params))}
+  end
+
+  # Where the reader came from, off this page's own query string: the branch they were looking
+  # at and how far back they had paged.
+  defp back(project, params) do
+    query =
+      [branch: params["branch"], tab: "commits", page: params["page"]]
+      |> Enum.reject(fn {_key, value} -> value in [nil, "", "1"] end)
+
+    ~p"/projects/#{project.name}/repo?#{query}"
+  end
+
+  @impl true
+  def render(assigns) do
+    ~H"""
+    <Layouts.app flash={@flash} current_scope={@current_scope} capacity={@capacity} measure="74rem">
+      <.link
+        navigate={@back}
+        class="flex min-h-[46px] items-center font-mono text-[12.5px] opacity-60 hover:opacity-100"
+      >
+        ‹ {@project.name} repository
+      </.link>
+
+      <header class="mt-4 flex flex-col gap-2">
+        <div class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">The commit</div>
+        <h1 class="text-[23px] font-semibold -tracking-[.03em] sm:text-2xl">{@commit.subject}</h1>
+        <div class="flex flex-wrap items-center gap-3 font-mono text-[12.5px] opacity-60">
+          <span class="break-all">{Diff.short(@commit.sha)}</span>
+          <span>{Format.ago(@commit.at, @now)}</span>
+        </div>
+      </header>
+
+      <div class="mt-8">
+        <Diff.section diff={@diff} id="commit-diff" title="What it changed" />
+      </div>
+    </Layouts.app>
+    """
+  end
+end

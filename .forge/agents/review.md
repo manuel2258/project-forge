@@ -5,39 +5,42 @@ Run the `review` skill (`.claude/skills/review/SKILL.md`) against this ticket's 
 
 ## The lenses, and the model each runs on
 
-Dispatch exactly four reviewers, in parallel, one message. The skill's three, plus a fourth this
-state adds so that a change which passes all three and still misses what it was asked for is a
-finding:
+Four lenses: the skill's three — correctness and security; whether the new tests can fail, proven
+by mutating the code and re-running them; DRY, KISS and design-note fidelity — and
+`refinement.md`'s acceptance criteria, which this state adds so that a change passing all three
+and still missing what it was asked for is a finding.
 
-| Lens | Model |
-| --- | --- |
-| Correctness and security | the job's own (`opus`) |
-| DRY, KISS and design-note fidelity | the job's own (`opus`) |
-| `refinement.md`'s acceptance criteria, one by one | the job's own (`opus`) |
-| Test correctness, by mutation | `sonnet` |
-
-Every per-finding verifier of the skill's step 4 runs on `sonnet` too.
-
-**Why those two are not on the job's model.** Breaking a line, re-running the tests it covers and
-confirming another reviewer's claim are mechanical: there is a right answer and the evidence is in
-the output. The other three lenses are the readings where judgement is the whole value — the
-skill calls design-note fidelity the highest-yield lens for that reason. The mutation lens and the
-verifiers are also what the fan-out multiplies, a verifier per finding, so they are where the
-budget goes if nothing says otherwise.
+How many reviewers that is, the skill's step 1 decides from the size of the diff, and it still
+does. Below a few hundred lines, one reviewer carries correctness, DRY/design-fidelity and the
+criteria together; past that, split them. **The mutation lens is always its own reviewer, and runs
+on `sonnet`** — breaking a line, re-running the tests it covers and reporting which noticed is
+mechanical, with a right answer the output shows. The other three are the readings where
+judgement is the whole value, and they stay on this job's model.
 
 **The mutation lens reads the changeset's guards, not the suite.** Point it at the authorisation,
 scoping, ordering, redaction and "must never" checks *this diff adds or touches*, and at the tests
-this diff adds — not at the project's existing coverage, which is not this ticket's claim to
+this diff adds — not at the project's existing coverage, which is not this changeset's claim to
 defend. Name the files. A mutation that cannot be caught is a finding only if the code has no
 comment already saying so (`CLAUDE.md` § Testing).
 
+**Reproducing a finding is yours and stays yours.** The skill's step 4 says to re-run the sharpest
+findings before repeating them, and it means by hand, a command each — not by dispatching a
+reviewer per finding. A verifier per finding is both the thing that eats this state's budget and a
+delegation of the one judgement step 4 exists to keep.
+
 ## Write `report.md` as you go
 
-Create `report.md` with the first finding you have confirmed, and update it as each later lens and
-verifier reports in. Do not hold everything for one write at the end: this state can stop on its
-cost budget inside a single turn of yours, and what is on disk then is the whole of what a person
-gets. A report listing two confirmed findings and saying which lenses had not yet reported is
-worth a great deal; an empty `out/` is worth nothing.
+Create `report.md` as soon as you have confirmed a finding, and write it again as each later lens
+reports in. Do not hold everything for one write at the end: this state can stop on its cost
+budget inside a single turn of yours, and what is on disk then is the whole of what a person gets.
+A report listing two confirmed findings and saying which lenses had not reported yet is worth a
+great deal; an empty `out/` is worth nothing.
+
+**Every write leaves a whole document** — the front matter opened and closed, the prose finished.
+A half-written file is not a shorter report, it is no report: a `report.md` whose `---` block is
+open does not parse, so it is refused rather than stored and the person reaches `review_ready`
+with nothing. Compose the new version and write it in one go, rather than appending to the file on
+disk.
 
 Set `outcome: issues_found` if anything survived verification. Set `outcome: done` only when
 nothing did, or when something was found and held up under scrutiny as acceptable — say which, and

@@ -26,15 +26,16 @@ states:
     exit: { 0: done, 2: gate_unavailable, "*": checks_failed }
 
   # **The cost is sized for a review that fans out, not for one top-level agent.**
-  # `agents/review.md` runs the `review` skill, which dispatches a subagent per lens and a
-  # verifier per finding, and the budget is checked between the top-level agent's turns — so a
-  # whole fan-out lands inside one turn and the cap is seen only after it. At $15 that cap was
-  # crossed by five reviews on 2026-10-20 (forge#6 ×2, forge#7 ×3) between one and eight
-  # top-level turns in, each having spent its $15 almost exactly, while the two that did report
-  # cost $9.70 and $19.53 — one of them over the cap and allowed through only because nothing
-  # looks until the turn ends. $35 is above the one measured converging run that exceeded $15,
-  # with room for the mutation lens. Turns stay at 120: not one of the five exhausted runs came
-  # near them, so they were never the binding limit.
+  # `agents/review.md` runs the `review` skill, which dispatches a subagent per lens, and the
+  # budget is checked between the top-level agent's turns — so a whole fan-out lands inside one
+  # turn and the cap is seen only after it. At $15 that cap was crossed by five reviews on
+  # 2026-10-20 (forge#6 ×2, forge#7 ×3) between one and eight top-level turns in, each having
+  # spent its $15 almost exactly, while the two that did report cost $9.70 and $19.53 — one of
+  # them over the cap and allowed through only because nothing looks until the turn ends. $35 is
+  # above the one measured converging run that exceeded $15, with room for the mutation lens.
+  # Turns stay at 120: not one of the five exhausted runs came near them, so they were never the
+  # binding limit. Raising this means raising `limits.ticket_cost` in each workflow that has a
+  # `reviewing` state, which is where the arithmetic for it is.
   reviewing:
     prompt: agents/review.md
     env: default

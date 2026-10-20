@@ -1,20 +1,21 @@
 defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
   @moduledoc """
-  The parser run over this repository's own `.forge/` workflows, which nothing else in the gate
-  reads. Forge runs its own tickets through these files, and the platform parses them only when a
-  ticket is admitted or moved — so until this file existed, a definition the validator refuses was
-  found by a ticket stuck before a job rather than by a commit.
+  The parser and the engine run over this repository's own `.forge/` workflows, which nothing else
+  in the gate reads. Forge runs its own tickets through these files, and the platform parses them
+  only when a ticket is admitted or moved — so until this file existed, a definition the validator
+  refuses was found by a ticket stuck before a job rather than by a commit.
 
-  The three shape assertions are ticket 13's: a reviewing run that exhausts its budget must land
-  where a person reads its report rather than back in `reviewing` to spend the same money on the
-  same fan-out, its budget must be above the dearest review measured reaching a report at all, and
-  its `did_not_converge` retry must survive both edits. Each is config, which is where that
-  failure lived and which nothing here read before.
+  What it asserts beyond "it parses" is the behaviour of `reviewing`, whose budget and edges are
+  ticket 13's: an exhausted review goes to `review_ready` and not round again, its
+  `did_not_converge` retry survives that edit, its budget is the figure the comment in
+  `common.yml` derives, the loops the transitions allow fit inside `limits.ticket_cost`, and every
+  state a person may be offered can actually be moved to by hand. Each of those is config, which
+  is where ticket 13's failure lived and which nothing here read before.
   """
 
   use ExUnit.Case, async: true
 
-  alias ForgeCore.Workflow
+  alias ForgeCore.{Engine, Workflow}
   alias ForgeCore.Workflow.{Parser, Transition}
 
   @root Path.expand("../../../..", __DIR__)
@@ -77,6 +78,9 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
     assert workflow_files() != []
 
     for path <- workflow_files() do
+      # An equivalent mutant: no change to a workflow file can make this assertion fail, because
+      # `load!/1` has already flunked by then. The test is `load!/1` being reached for every file
+      # the wildcard finds; the match is here to say what it returns.
       assert %Workflow{} = load!(path)
     end
   end
@@ -95,14 +99,92 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
     end
   end
 
-  # $19.53 is the most expensive review observed reporting at all (forge#10 attempt 1, 2026-10-20),
-  # and it got there only because the cap is read between top-level turns and a subagent fan-out
-  # runs inside one. A budget at or under that figure is a budget the measured work does not fit.
-  test "reviewing's cost budget is above the dearest review measured reaching a report" do
+  # Pinned to the figure a person chose, not to a floor: `common.yml`'s comment derives $35 from
+  # the production runs, and a floor of "above the $19.53 that did report" would let a regression
+  # to $20 through while that comment still said $35. Changing it means changing both, and the
+  # ticket cap below.
+  test "reviewing's cost budget is the figure common.yml derives" do
     for {name, workflow} <- reviewing_workflows() do
       budget = Workflow.state(workflow, "reviewing").budget
 
-      assert budget.cost > 19.53, "#{name}: reviewing has #{budget.cost}"
+      assert budget.cost == 35.00, "#{name}: reviewing has #{budget.cost}"
+      assert budget.turns == 120, "#{name}: reviewing has #{budget.turns} turns"
+    end
+  end
+
+  # The check ticket 13 was asked for and a plan got wrong by doing it on end totals.
+  # `within_ticket_budget?/2` is asked *before* a job starts, against what the ticket has spent
+  # already, so a journey fits only if every one of its running totals is under the cap — and the
+  # journey is priced out of the workflow itself, so the cap and the budgets cannot drift apart.
+  test "the review round-trips the transitions allow fit inside the ticket cost cap" do
+    for {name, workflow} <- reviewing_workflows() do
+      loop =
+        Enum.find(Workflow.transitions_from(workflow, "reviewing"), &(&1.when == "issues_found"))
+
+      jobs = journey(workflow, loop)
+      costs = Enum.map(jobs, &cost(workflow, &1))
+
+      spent_before = [0.0 | Enum.drop(Enum.scan(costs, &(&1 + &2)), -1)]
+
+      stopped =
+        for {state, spent} <- Enum.zip(jobs, spent_before),
+            not Engine.within_ticket_budget?(workflow, spent),
+            do: "#{state} at $#{spent}"
+
+      assert stopped == [], "#{name}: the cap stops the journey at #{Enum.join(stopped, ", ")}"
+    end
+  end
+
+  # Every job the worst journey runs, in order: the way in on nothing but each state's ordinary
+  # outcome, then the `issues_found` round-trip as many times as its `max` allows.
+  defp journey(workflow, loop) do
+    List.flatten([
+      default_path(workflow, workflow.initial),
+      List.duplicate(default_path(workflow, loop.to), loop.max)
+    ])
+  end
+
+  # The states a ticket passes through going forward from `from` on each one's default outcome,
+  # ending at `reviewing`. Raises rather than loops if a state on the way has no default edge,
+  # which would mean the workflow no longer has the shape this test prices.
+  defp default_path(workflow, from) do
+    Enum.to_list(
+      Stream.unfold(from, fn
+        nil -> nil
+        "reviewing" -> {"reviewing", nil}
+        state -> {state, default_edge(workflow, state).to}
+      end)
+    )
+  end
+
+  defp default_edge(workflow, from),
+    do: workflow |> Workflow.transitions_from(from) |> Enum.find(&(&1.when == nil))
+
+  # A command state and a human state both cost no inference, and declare no budget to read.
+  defp cost(workflow, state) do
+    case Workflow.state(workflow, state).budget do
+      nil -> 0.0
+      %{cost: cost} -> cost
+    end
+  end
+
+  # `Engine.choose/4` is what a person's move goes through, and the operator surface offers each
+  # target once and sends no outcome with it (`Forge.Engine.offered_transitions/2`). So a target
+  # reached by two edges is one a person cannot move to unless the engine resolves it — which is
+  # what `reviewing → review_ready` became when the budget edge was added beside the bare one.
+  test "a person can move a ticket to any state it has an edge to, bar a state's own retry" do
+    for {name, workflow} <- reviewing_workflows() do
+      refusals =
+        for state <- Enum.sort(Map.keys(workflow.states)),
+            to <- Enum.uniq(Enum.map(Workflow.transitions_from(workflow, state), & &1.to)),
+            match?({:error, {:ambiguous, _}}, Engine.choose(workflow, state, to, nil)),
+            do: {state, to}
+
+      assert Enum.all?(refusals, fn {from, to} -> from == to end),
+             "#{name}: cannot be moved by hand: #{inspect(refusals)}"
+
+      assert {:ok, %Transition{when: nil}} = Engine.choose(workflow, "reviewing", "review_ready"),
+             "#{name}: a person's move to review_ready takes the bare edge"
     end
   end
 end

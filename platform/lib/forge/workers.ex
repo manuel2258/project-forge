@@ -1219,18 +1219,46 @@ defmodule Forge.Workers do
   # that has just moved can hold one create back for as long as the old snapshot's probe is
   # booting. It only ever delays, and the pass after the probe joins or goes resolves as normal.
   #
-  # `speaks/1` is asked only after, and that is not an oversight: what a template on the mark
-  # stores is its *old* snapshot's protocol, and refusing on that is how it stopped following the
-  # mark (`Provisioning.speaks?/2`). The resolved snapshot's own label is what decides.
+  # **Both protocol questions are asked only after resolution**, and that is not an oversight:
+  # what a template on the mark stores is its *old* snapshot's protocol, so refusing on it before
+  # resolving is how it stopped following the mark. `speaks/1` asks whether this platform can talk
+  # to the resolved snapshot at all and `serves/2` whether it is new enough for the job in hand —
+  # two different questions, and the second was missing, which is why machines were made that
+  # could not take the job they were made for.
   defp create_from(template, demand) do
     with {:ok, slot} <- room(template, demand),
          :ok <- probed(template),
          {:ok, credential} <- spendable(template),
          {:ok, template} <- resolve(template, credential),
          :ok <- speaks(template),
+         :ok <- serves(template, demand),
          :ok <- probed(template) do
       make_in(slot, template, credential)
     end
+  end
+
+  # **The job's own protocol, asked of the snapshot that was just resolved.** `speaks/1` above asks
+  # whether this platform can talk to the snapshot at all, which is a different question and not a
+  # substitute: `image_refusal/1` compares it against this platform's accepted range, so a
+  # snapshot speaking 5 is perfectly acceptable to a platform that accepts 4–6 and nothing refused
+  # it for a job needing 6. That made a machine which could not take the job it was made for, then
+  # another, up to `max_workers`, and then answered `at_capacity` — *busy or still starting* — for
+  # ever (`docs/design/provisioning.md` § Where a machine comes from).
+  #
+  # The gate asks this of every template before `create_from/2` is reached; it is asked again here
+  # because for a template on the mark the row's answer was about the snapshot before, and
+  # resolution has just replaced it. `Provisioning.speaks?/2` is the one definition of *new
+  # enough*, so the two cannot disagree.
+  #
+  # **The gate's answer, not the template's failure.** The recipe is not broken: the account has no
+  # new enough snapshot marked yet, and the sentence `{:no_template, :none_fit}` already carries —
+  # *runs a worker new enough for it* — is the one that tells the operator to build or mark one.
+  # Counting it would disable the template three passes before they did, and then the build they
+  # made would not be followed until somebody pressed Enable.
+  defp serves(template, demand) do
+    if Provisioning.speaks?(template, demand[:protocol]),
+      do: :ok,
+      else: {:error, {:no_template, :none_fit}}
   end
 
   # **Resolved fresh at every create, and never cached across one.** The mark moves when an image

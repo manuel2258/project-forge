@@ -278,6 +278,21 @@ defmodule Forge.Provisioning.Template do
   # `resolved_image` itself is kept first, and only when the page said nothing: it cannot say
   # which snapshot carries the mark when none does, and reading that silence as *on no snapshot*
   # would unresolve a row that is on one.
+  #
+  # **`get_field/2` and not `get_change/2` for what the listing offered**, which is the difference
+  # between reading a snapshot's labels and losing them. `cast/3` registers a change only when the
+  # value differs from the row, so `get_change/2` reads nil both when the caller said nothing and
+  # when it said exactly what the row already held — and the second is the *ordinary* case, since
+  # every snapshot built from one release carries the same protocol. Repointing a template at a
+  # new snapshot of the same protocol therefore wiped the protocol: the page said *unlabelled*, the
+  # next create was spent as a probe, and a snapshot the platform would have refused before paying
+  # cost a machine instead.
+  #
+  # `get_field/2` reads the cast value where there is one and the row's where there is not, so the
+  # two readings it cannot tell apart — *the listing said nothing* and *the listing said what we
+  # already knew* — have the same answer, which is why it is the right accessor rather than the
+  # other guess. Both callers always pass both keys (`ForgeWeb.TemplatesLive.labelled/2` merges
+  # them whether or not the listing had the snapshot), so *said nothing at all* does not arise.
   defp keep_what_was_learnt(changeset) do
     changeset = keep(:resolved_image, changeset)
 
@@ -285,7 +300,7 @@ defmodule Forge.Provisioning.Template do
       learnt(
         changeset.data.resolved_image,
         get_field(changeset, :resolved_image),
-        {get_change(changeset, :image_build), get_change(changeset, :image_protocol)},
+        {get_field(changeset, :image_build), get_field(changeset, :image_protocol)},
         {changeset.data.image_build, changeset.data.image_protocol}
       )
 

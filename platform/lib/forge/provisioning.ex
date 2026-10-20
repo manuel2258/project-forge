@@ -267,10 +267,22 @@ defmodule Forge.Provisioning do
 
   Smallest rather than first-assigned: creating a thirty-two core machine for a job that
   declared one is how a fleet gets expensive without anybody deciding that it should.
+
+  **A template on the mark that does not fit on what it stores comes last, and only when nothing
+  fits.** Its stored protocol is its *last* resolution's, so whether it can serve a job needing a
+  newer one is unknown until a create attempt re-resolves it — and both guesses were wrong. Read
+  as *no*, the mark was never followed past a protocol bump, which is the case it exists for; read
+  as *yes* and taken in order, a template on the mark was handed jobs ahead of a concrete template
+  in the same project that would have served them, because order is by size and the protocol
+  filter was what used to remove it. Preferring what is known keeps the second from happening and
+  the fallback keeps the first from happening; `Forge.Workers` asks the job's protocol again of
+  what it actually resolved (`docs/design/provisioning.md` § Where a machine comes from).
   """
   @spec for_demand(String.t(), map()) :: Template.t() | nil
   def for_demand(project_id, demand) do
-    project_id |> usable() |> Enum.find(&holds?(&1, demand))
+    usable = usable(project_id)
+
+    Enum.find(usable, &holds?(&1, demand)) || Enum.find(usable, &might_hold?(&1, demand))
   end
 
   @doc """
@@ -282,7 +294,7 @@ defmodule Forge.Provisioning do
   """
   @spec could_ever_hold?(String.t(), map()) :: boolean()
   def could_ever_hold?(project_id, demand) do
-    project_id |> usable() |> Enum.any?(&holds?(&1, demand))
+    project_id |> usable() |> Enum.any?(&(holds?(&1, demand) or might_hold?(&1, demand)))
   end
 
   # **The gate skips a disabled template; the page does not.** The filter is here and not in
@@ -298,28 +310,39 @@ defmodule Forge.Provisioning do
   # nothing must not mean different things.
   defp holds?(%Template{} = template, demand) do
     accepts?(template, demand.kind) and speaks?(template, demand[:protocol]) and
-      template.memory >= demand.memory and
-      template.cores >= demand.cores
+      sized?(template, demand)
   end
 
+  # Every dimension but the protocol, for a template on the mark: the one dimension whose stored
+  # answer is about a snapshot it may no longer be on, and the one the create attempt re-asks of
+  # what it resolved. `for_demand/2` says why this is a fallback and not the rule.
+  defp might_hold?(%Template{} = template, demand) do
+    Template.latest?(template) and accepts?(template, demand.kind) and sized?(template, demand)
+  end
+
+  defp sized?(%Template{} = template, demand),
+    do: template.memory >= demand.memory and template.cores >= demand.cores
+
+  @doc """
+  Whether what is known of this template's image is new enough for a job needing `protocol`.
+
+  **Asked of the same template at two moments, so one definition.** The gate asks it of what the
+  row stores (`for_demand/2`); `Forge.Workers` asks it again of what a create attempt has just
+  resolved, because for a template on the mark the row's answer was about the snapshot before.
+  Two copies would be two places for *new enough* to disagree, and a template let through one and
+  refused by the other would be a machine billed for nothing or a job stuck for no reason.
+
+  Nil is unlabelled — unknown, not compatible — and is let through to be probed by one machine,
+  whose join says what the snapshot speaks (`docs/design/provisioning.md` § A snapshot that
+  speaks the wrong protocol).
+  """
+  @spec speaks?(Template.t(), non_neg_integer() | nil) :: boolean()
   # A labelled image older than the job needs makes a machine that joins and cannot take it — and
   # then another, every pass, up to `max_workers`. An unlabelled one is asked once: its first
   # machine's join says what it speaks (`Workers` holds the rest back while that one probes).
-  #
-  # **A template on the mark is not filtered on its protocol at all**, and that is the fix for the
-  # one case where it stopped following the mark. What such a template stores is a fact about the
-  # snapshot it was last resolved onto, not about the one it would be made from now, and the gate
-  # cannot ask the driver — so a template whose old snapshot spoke 5 was filtered out of every
-  # demand for 6, and the create attempt that would have resolved it onto the newly marked
-  # protocol-6 snapshot never happened. Raising the protocol is *why* an operator builds an image.
-  # Let through, it reaches `Forge.Workers`' resolution, and a snapshot that really is too old is
-  # refused there with its own label — the same refusal, the same counter, one pass later
-  # (`docs/design/provisioning.md` § Where a machine comes from).
-  defp speaks?(_template, need) when need in [nil, 0], do: true
-  defp speaks?(%Template{image_protocol: nil}, _need), do: true
-
-  defp speaks?(%Template{image_protocol: protocol} = template, need),
-    do: Template.latest?(template) or protocol >= need
+  def speaks?(_template, need) when need in [nil, 0], do: true
+  def speaks?(%Template{image_protocol: nil}, _need), do: true
+  def speaks?(%Template{image_protocol: protocol}, need), do: protocol >= need
 
   defp accepts?(%Template{accepts: nil}, _kind), do: true
   defp accepts?(%Template{accepts: []}, _kind), do: true

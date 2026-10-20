@@ -3477,9 +3477,9 @@ defmodule Forge.WorkersTest do
       assert reloaded(template).image_protocol == current
     end
 
-    # And a resolution that lands on a snapshot which really is too old is refused there, on that
-    # snapshot's own label rather than on whatever the row happened to hold.
-    test "the refusal is on the resolved snapshot's protocol, not the stored one", context do
+    # The stored protocol does not refuse the create either: a row saying `current + 1` is about the
+    # snapshot before, and the one just resolved speaks something this platform accepts.
+    test "a stale stored protocol does not refuse the create", context do
       %{user: user, project: project} = context
       too_new = ForgeCore.WorkerProtocol.current() + 1
 
@@ -3495,6 +3495,60 @@ defmodule Forge.WorkersTest do
       assert {:error, :creating} = Workers.create_machine(demand(project_id: project.id))
       assert_receive {:provider_create, %{image: "snap-new"}}
       assert reloaded(template).failures == 0
+    end
+
+    # **A machine that could not take the job it was made for.** `speaks/1` asks whether this
+    # platform can talk to the resolved snapshot at all, and a snapshot speaking one less than
+    # current is perfectly acceptable to it — so nothing refused it for a job needing current, and
+    # the pass made a machine, then another up to `max_workers`, then answered `at_capacity` for
+    # ever. The job's own protocol has to be asked of what was resolved.
+    test "a marked snapshot too old for the job makes nothing and bills nothing", context do
+      %{user: user, project: project} = context
+      current = ForgeCore.WorkerProtocol.current()
+      needs_current = demand(project_id: project.id) |> Map.put(:protocol, current)
+
+      # Stored protocol passes the gate; the snapshot the mark has moved to does not serve the job.
+      template =
+        assigned(user, project, %{
+          image: "latest",
+          resolved_image: "snap-old",
+          image_protocol: current,
+          max_workers: 2
+        })
+
+      marking("snap-older", %{protocol: current - 1})
+
+      for _pass <- 1..2 do
+        assert {:error, {:no_template, :none_fit}} = Workers.create_machine(needs_current)
+      end
+
+      refute_receive {:provider_create, _opts}
+      assert Workers.list() == []
+
+      # **Not the template's failure.** The recipe is not broken: the account has no new enough
+      # snapshot marked yet, and a disabled template would not follow the build that fixes it.
+      assert reloaded(template).failures == 0
+      assert reloaded(template).last_error == nil
+
+      # It did resolve, so the next build is followed with no edit.
+      assert reloaded(template).resolved_image == "snap-older"
+    end
+
+    # The same snapshot serves a job that asks for nothing newer, which is what keeps the refusal
+    # about the job in hand rather than about the snapshot in general.
+    test "the same snapshot still serves a job that asks for less", context do
+      %{user: user, project: project} = context
+      current = ForgeCore.WorkerProtocol.current()
+      assigned(user, project, %{image: "latest"})
+      marking("snap-older", %{protocol: current - 1})
+
+      assert {:error, :creating} =
+               Workers.create_machine(
+                 demand(project_id: project.id)
+                 |> Map.put(:protocol, current - 1)
+               )
+
+      assert_receive {:provider_create, %{image: "snap-older"}}
     end
 
     # **A catalogue call is a request to the provider, and the probe is what holds for minutes.**

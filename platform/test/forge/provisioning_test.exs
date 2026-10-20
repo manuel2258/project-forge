@@ -599,6 +599,33 @@ defmodule Forge.ProvisioningTest do
       assert {saved.image_build, saved.image_protocol} == {"aaaaaaaaaaaa", 6}
     end
 
+    # **The most ordinary thing an operator does here: point a template at a new snapshot.** Every
+    # snapshot built from one release carries the same protocol, so the new one's protocol usually
+    # equals the stored one — and `cast/3` registers no change for a value equal to the row, so
+    # reading what the listing offered with `get_change/2` read it as *nothing offered* and wiped
+    # the protocol. The page then said *unlabelled*, the next create was spent as a probe, and a
+    # snapshot the platform would have refused before paying cost a machine instead.
+    test "a repoint onto a snapshot of the same protocol keeps the protocol", %{user: user} do
+      current = ForgeCore.WorkerProtocol.current()
+
+      {:ok, template} =
+        create_template(user, %{
+          image: "snap-a",
+          image_build: "aaaaaaaaaaaa",
+          image_protocol: current
+        })
+
+      {:ok, saved} =
+        Provisioning.update_template(user, template.id, %{
+          image: "snap-b",
+          image_build: "bbbbbbbbbbbb",
+          image_protocol: current
+        })
+
+      assert {saved.resolved_image, saved.image_build, saved.image_protocol} ==
+               {"snap-b", "bbbbbbbbbbbb", current}
+    end
+
     # **The dead comparison this column exists to prevent.** `workers.image` is always a concrete
     # snapshot and a template naming the mark never holds one in `image`, so a counter keyed on
     # `image` could never reset for one and a protocol could never be learnt — silently, for ever.
@@ -751,6 +778,30 @@ defmodule Forge.ProvisioningTest do
 
       assigned(user, project, %{memory: 9_000, cores: 16, image: "snap-2", image_protocol: nil})
       assert %{image: "snap-2"} = Provisioning.for_demand(project.id, needs_two)
+    end
+
+    # **And it comes last.** Read as *yes* and taken in size order, a template on the mark was
+    # handed jobs ahead of a concrete template in the same project that would have served them —
+    # the protocol filter was what used to remove it, and order is by size. Both templates here
+    # are the same size, and the one on the mark is created first so that name order would pick it.
+    test "a template that fits is never passed over for one on the mark", context do
+      %{user: user, project: project} = context
+      needs_two = Map.put(demand(), :protocol, 2)
+
+      _stale =
+        assigned(user, project, %{
+          memory: 9_000,
+          cores: 16,
+          image: "latest",
+          resolved_image: "snap-1",
+          image_protocol: 1
+        })
+
+      fits =
+        assigned(user, project, %{memory: 9_000, cores: 16, image: "snap-2", image_protocol: 2})
+
+      assert %{id: id} = Provisioning.for_demand(project.id, needs_two)
+      assert id == fits.id
     end
 
     # **A template on the mark is the exception, and it is the mark's one dead case otherwise.**

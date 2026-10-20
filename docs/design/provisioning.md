@@ -450,23 +450,40 @@ it.
   would earn that snapshot another machine on every pass. Resolving onto a *different* snapshot
   takes that one's labels, nothing included.
 
-  **The gate does not filter a template on the mark by its protocol at all**, and that is the
-  one thing about `latest` that could not be left to staleness. `for_demand/2` and
+  **Whether a template on the mark is new enough for a job is a question the gate cannot answer**,
+  and this is the one thing about `latest` that could not be left to staleness. `for_demand/2` and
   `could_ever_hold?/2` are a cheap in-process check run on every scheduling pass and may not call
   the driver, so the only protocol they could read is the one the *last* resolution stored — a
-  fact about a snapshot the template may no longer be on. Filtering on it stopped a template
-  following the mark in exactly the case the mark is built for: raising the protocol. A template
-  whose old snapshot spoke 5 was filtered out of every demand for 6, so the create attempt that
-  would have resolved it onto the newly marked protocol-6 snapshot never ran, and the row stayed
-  on the old snapshot for ever. So `speaks?/2` lets it through, the create attempt resolves, and
-  `speaks/1` refuses there on the resolved snapshot's own label — the same refusal, the same
-  failure counter, one pass later. A template naming a snapshot id is filtered as it always was:
-  what it stores is about the snapshot it is on.
+  fact about a snapshot the template may no longer be on. Guessing either way was wrong:
+
+  - **Read as *no*, the mark was never followed past a protocol bump**, which is the case the mark
+    exists for. A template whose old snapshot spoke 5 was filtered out of every demand for 6, so
+    the create attempt that would have resolved it onto the newly marked protocol-6 snapshot never
+    ran, and the row stayed on the old snapshot for ever.
+  - **Read as *yes*, machines were made that could serve nothing.** Nothing refused them:
+    `image_refusal/1` compares the snapshot against this platform's accepted range, not against
+    the job's demand, and a snapshot speaking 5 is perfectly acceptable to a platform that
+    accepts 4–6. So a protocol-6 job made a machine speaking 5, then another, up to `max_workers`,
+    then waited for ever on `at_capacity`'s *busy or still starting* — when neither machine could
+    ever take it. A template on the mark could also be picked ahead of a concrete one in the same
+    project that *would* have served the job, because order is by size and the protocol filter was
+    what used to remove it.
+
+  So it is neither guess. **`for_demand/2` prefers a template that fits on what is known, and
+  falls back to one on the mark that might fit once re-resolved** — so a template that certainly
+  works is never passed over — and **the create attempt asks the job's own protocol of the
+  snapshot it has just resolved**, which is where the demand is in hand. Too old, and the answer
+  is the one the gate gives for a template that cannot hold the job: `{:no_template, :none_fit}`,
+  whose sentence already says *runs a worker new enough for it*. Nothing is billed, the ticket
+  sticks with something a person can act on, and **the template is not failed for it** — the
+  recipe is not broken, the account simply has no new enough snapshot marked yet, and counting it
+  would disable the template three passes before the operator built the image that fixes it.
 
   **And so a resolution brings nothing back, because it cannot change what the gate answered.**
   `image_protocol` is in `@holds` for a template naming an id, which an edit is the only way to
-  move; for one on the mark the gate does not read it, so writing it during a create attempt
-  changes no gate answer and there is no stuck ticket to resume (§ Editing a template).
+  move; for one on the mark the gate reads it only to *prefer* another template, never to refuse
+  this one, so writing it during a create attempt changes no gate answer and there is no stuck
+  ticket to resume (§ Editing a template).
 
   **What is stale is the probe and the labels the page draws**, and both cost at most one pass:
   a template on the mark shows the build and protocol of the snapshot it was last resolved onto
@@ -866,10 +883,11 @@ placement in every project the template is assigned to, as `Enable` does. The re
   fit and never finds one where none did. A rename is not a fix, here any more than for the failure
   counter.
 - `resolved_image` is not in the list either, and does not need to be. Nothing that places a job
-  reads it: `holds?/2` reads `memory`, `cores`, `accepts` and `image_protocol`, and no more. An
-  edit moves it only by moving `image`, which *is* in the list; a resolution moves it during the
-  create attempt that asked for it, where the pass that wrote it is the pass acting on it
-  (§ Where a machine comes from).
+  reads it: of a template's columns, placement reads `memory`, `cores`, `accepts`,
+  `image_protocol` and — only to tell a template on the mark from one naming a snapshot — `image`.
+  An edit moves `resolved_image` only by moving `image`, which *is* in the list; a resolution
+  moves it during the create attempt that asked for it, where the pass that wrote it is the pass
+  acting on it (§ Where a machine comes from).
 - `max_workers`, `idle_ms`, `provider`, `provider_credential_id` and `size` decide whether a
   create succeeds and when there is room for one — `idle_ms` through a full template's idle
   machine giving its slot up — not whether the template could hold the job. A template wrong in

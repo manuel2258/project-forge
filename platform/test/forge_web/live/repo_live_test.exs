@@ -106,6 +106,47 @@ defmodule ForgeWeb.RepoLiveTest do
       assert view |> element("a", "Files") |> render_click() =~ "only-on-seven.txt"
     end
 
+    test "a file opened on one branch is not still open under another's name", %{
+      conn: conn,
+      project: project,
+      repo: repo
+    } do
+      # The tree half of this was asserted and the opened file's was not, which is the half
+      # that would show one branch's bytes under another branch's name — wrong rather than
+      # stale-looking-fine, which is why `reset_tree/1` drops both.
+      {:ok, head} = Git.resolve(repo, "refs/heads/main")
+      :ok = Git.create_branch(repo, "ticket/7", head)
+      commit_to(repo, "ticket/7", %{"README.md" => "# Seven\n"})
+
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo?tab=files")
+      assert view |> element(~s|li[data-path="README.md"] button|) |> render_click() =~ "# Game"
+
+      after_switch =
+        view |> element("form[phx-change=branch]") |> render_change(%{"branch" => "ticket/7"})
+
+      refute after_switch =~ "# Game"
+      refute after_switch =~ "data-file"
+    end
+
+    test "the default branch being gone does not split the picker from the page", %{
+      conn: conn,
+      project: project,
+      repo: repo
+    } do
+      # With no `selected` option the browser shows the first one, so a page that fell back to
+      # the deleted default drew `ticket/9` in the picker and the missing branch's empty state
+      # underneath it.
+      {:ok, head} = Git.resolve(repo, "refs/heads/main")
+      :ok = Git.create_branch(repo, "ticket/9", head)
+      :ok = Git.delete_branch(repo, project.default_branch)
+
+      {:ok, view, html} = live(conn, ~p"/projects/#{project.name}/repo")
+
+      assert has_element?(view, ~s|option[selected][value="ticket/9"]|)
+      assert html =~ "seed"
+      refute html =~ "No commits on this branch at this page."
+    end
+
     test "an unknown branch in the address falls back to the default", %{
       conn: conn,
       project: project
@@ -127,10 +168,9 @@ defmodule ForgeWeb.RepoLiveTest do
     test "thirty newest first, with a way further back", %{conn: conn, project: project} do
       {:ok, view, html} = live(conn, ~p"/projects/#{project.name}/repo")
 
-      assert html =~ "commit 30"
-      assert html =~ "commit 1"
-      refute html =~ ">seed<"
-      assert length(html |> Floki.parse_document!() |> Floki.find("#commits li")) == 30
+      # The subjects themselves, in the order drawn: thirty, newest first, and the seed — the
+      # thirty-first — behind rather than merely absent from the markup.
+      assert subjects(html) == Enum.map(30..1//-1, &"commit #{&1}")
       assert has_element?(view, "a", "Older ›")
       refute has_element?(view, "a", "‹ Newer")
     end
@@ -143,10 +183,24 @@ defmodule ForgeWeb.RepoLiveTest do
 
       html = view |> element("a", "Older ›") |> render_click()
 
-      assert html =~ "seed"
-      assert length(html |> Floki.parse_document!() |> Floki.find("#commits li")) == 1
+      assert subjects(html) == ["seed"]
       assert has_element?(view, "a", "‹ Newer")
       refute has_element?(view, "a", "Older ›")
+    end
+
+    test "a commit opened from a page comes back to that page", %{conn: conn, project: project} do
+      # `commit_path/2` is what writes the origin into the link; the commit page's own test
+      # only ever proved that `back/2` reads one out of an address a test hand-wrote.
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo")
+      view |> element("a", "Older ›") |> render_click()
+
+      {:error, {:live_redirect, %{to: to}}} =
+        view |> element(~s|#commits li:first-child a|) |> render_click()
+
+      {:ok, commit_view, _html} = live(conn, to)
+      back = ~p"/projects/#{project.name}/repo?#{[branch: "main", tab: "commits", page: 2]}"
+
+      assert has_element?(commit_view, ~s|a[href="#{back}"]|)
     end
 
     test "a page beyond the history is empty rather than an error", %{
@@ -217,17 +271,64 @@ defmodule ForgeWeb.RepoLiveTest do
       project: project,
       repo: repo
     } do
-      # NULs around something recognisable, so "never rendered" is an assertion and not a hope.
-      commit_to(repo, "main", %{"logo.bin" => <<0, 1>> <> "NOTTEXT" <> <<0, 2>>})
+      # Three shapes, because the sniff this replaced caught only the first. A PNG-like header
+      # has its NUL at byte 0; a real archive can run thousands of bytes before one; and a
+      # latin-1 source file has no NUL at all and is still not text this page can carry.
+      commit_to(repo, "main", %{
+        "logo.bin" => <<0, 1>> <> "NOTTEXT" <> <<0, 2>>,
+        "late.bin" => String.duplicate("a", 9000) <> <<0>> <> "LATENUL",
+        "latin1.txt" => "caf" <> <<0xE9>> <> "LATIN\n"
+      })
 
       {:ok, view, html} = live(conn, ~p"/projects/#{project.name}/repo?tab=files")
 
-      assert html =~ "logo.bin"
+      for name <- ~w(logo.bin late.bin latin1.txt) do
+        assert html =~ name
+        drawn = view |> element(~s|li[data-path="#{name}"] button|) |> render_click()
+        assert drawn =~ "This file is binary."
+        # Closed again, so the next one is opened rather than added beside it.
+        view |> element(~s|li[data-path="#{name}"] button|) |> render_click()
+      end
 
-      html = view |> element(~s|li[data-path="logo.bin"] button|) |> render_click()
+      refute render(view) =~ "NOTTEXT"
+      refute render(view) =~ "LATENUL"
+      refute render(view) =~ "LATIN"
+    end
 
-      assert html =~ "This file is binary."
-      refute html =~ "NOTTEXT"
+    # The whole of it, not a window: the review's own probe was a file whose first bytes were
+    # fine. `String.valid?` reads every byte, so there is no window left to get wrong.
+    test "only one file is open at a time", %{conn: conn, project: project, repo: repo} do
+      commit_to(repo, "main", %{"one.txt" => "FIRSTFILE\n", "two.txt" => "SECONDFILE\n"})
+
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo?tab=files")
+
+      assert view |> element(~s|li[data-path="one.txt"] button|) |> render_click() =~ "FIRSTFILE"
+
+      second = view |> element(~s|li[data-path="two.txt"] button|) |> render_click()
+      assert second =~ "SECONDFILE"
+      refute second =~ "FIRSTFILE"
+
+      # And the open one closes.
+      closed = view |> element(~s|li[data-path="two.txt"] button|) |> render_click()
+      refute closed =~ "SECONDFILE"
+    end
+
+    test "directories come before files, each in name order", %{
+      conn: conn,
+      project: project,
+      repo: repo
+    } do
+      commit_to(repo, "main", %{"aaa.txt" => "a\n", "zzz/inside.txt" => "z\n"})
+
+      {:ok, _view, html} = live(conn, ~p"/projects/#{project.name}/repo?tab=files")
+
+      paths =
+        html
+        |> Floki.parse_document!()
+        |> Floki.find(~s|#files > div > ul > li|)
+        |> Floki.attribute("data-path")
+
+      assert paths == [".forge", "zzz", "README.md", "aaa.txt"]
     end
   end
 
@@ -258,23 +359,62 @@ defmodule ForgeWeb.RepoLiveTest do
       # The path arrives off the wire, so it is not only what the tree offered.
       {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo?tab=files")
 
-      html = render_click(view, "open", %{"path" => "../../etc/passwd"})
+      # A real file first, so `data-file` is known to appear when something *is* open — the
+      # first version of this asserted on `README.md`, which the seeded root draws either way.
+      assert view |> element(~s|li[data-path="README.md"] button|) |> render_click() =~
+               "data-file"
 
-      # Nothing opened and nothing raised: `..` is matched against git's own tree, where it
-      # matches as little as any other typo, so no path guard is needed in front of it.
-      refute html =~ "data-file"
-      assert html =~ "README.md"
+      for path <- ["../../etc/passwd", "../config", "/etc/passwd", "./README.md", ".forge"] do
+        refute render_click(view, "open", %{"path" => path}) =~ ~s|data-file="#{path}"|
+      end
+    end
+
+    # The moduledoc reasons about a path's *value* arriving off the wire; these are its type.
+    # Both took the LiveView down before they were guarded — one in `dir <> "/"`, one in git's
+    # own argument list.
+    test "a payload that is not this page's changes nothing and raises nothing", %{
+      conn: conn,
+      project: project
+    } do
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo?tab=files")
+      before = render(view)
+
+      render_click(view, "expand", %{"path" => ["a", "b"]})
+      render_click(view, "open", %{"path" => %{"a" => "b"}})
+      render_change(view, "branch", %{"branch" => ["main"]})
+
+      # Still alive, and showing exactly what it showed.
+      assert render(view) == before
+    end
+
+    test "a page or a tab the address invents lands somewhere real", %{
+      conn: conn,
+      project: project
+    } do
+      # `?page=0` sent git `--skip=-30` and `?page=99999999999999999999` sent it a number it
+      # refuses outright; both then drew the same empty page a reader gets past the end of a
+      # real history, which is a failure wearing a correct answer's clothes.
+      for page <- ["0", "-5", "1.5", "0x10", "99999999999999999999", "nonsense"] do
+        {:ok, _view, html} = live(conn, ~p"/projects/#{project.name}/repo?page=#{page}")
+        assert html =~ "seed"
+        refute html =~ "No commits on this branch at this page."
+      end
+
+      # And a tab nothing names is the Commits tab, not a blank page under the nav.
+      {:ok, _view, html} = live(conn, ~p"/projects/#{project.name}/repo?tab=bogus")
+      assert html =~ "seed"
     end
   end
 
-  # The ticket's last criterion, and the one nothing else would catch: a stray `checkout`,
-  # `branch` or `commit` anywhere in this view would move a ref, and every other test here would
-  # still pass.
+  # The ticket's last criterion. The first version of this test compared `for-each-ref` output,
+  # which a page that writes a *file* into the bare repository walks straight past: one GET of
+  # `/repo/commits/--output=HEAD` emptied the project's `HEAD` with every ref exactly where it
+  # had been. What is compared now is the repository as a directory.
   test "browsing writes nothing to the repository", %{conn: conn, project: project, repo: repo} do
     {:ok, main} = Git.resolve(repo, "refs/heads/main")
     :ok = Git.create_branch(repo, "ticket/8", main)
     commit_to(repo, "ticket/8", %{"nested/deep/file.txt" => "deep\n"})
-    before = state(repo)
+    before = tree_of(repo)
 
     {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/repo")
 
@@ -284,48 +424,49 @@ defmodule ForgeWeb.RepoLiveTest do
     view |> element(~s|li[data-path="nested/deep"] summary|) |> render_click()
     view |> element(~s|li[data-path="nested/deep/file.txt"] button|) |> render_click()
     view |> element("a", "Commits") |> render_click()
+    view |> element(~s|#commits li:first-child a|) |> render_click()
 
-    {:ok, head} = Git.resolve(repo, "refs/heads/ticket/8")
-    {:ok, _commit_view, _html} = live(conn, ~p"/projects/#{project.name}/repo/commits/#{head}")
-
-    assert state(repo) == before
+    assert tree_of(repo) == before
   end
 
-  # Every ref the repository holds and what each points at. A branch created, moved or deleted,
-  # or a commit made, changes this.
-  defp state(repo) do
-    {:ok, refs} = Git.run(repo, ["for-each-ref", "--format=%(refname) %(objectname)"])
-    refs
-  end
+  # The address names a commit, and git reads any argument beginning with a dash as an option
+  # wherever it sits: `log --output=<file>` writes a file, relative to the repository. Each of
+  # these was an arbitrary create-or-truncate as the platform's own user, to any member of any
+  # one project.
+  test "a sha that git would read as an option writes nothing", %{
+    conn: conn,
+    project: project,
+    repo: repo
+  } do
+    before = tree_of(repo)
 
-  # `count` commits on `branch`, made in one clone and pushed once: a clone per commit is most
-  # of this file's runtime for nothing.
-  defp seed_commits(repo, branch, count) do
-    work = Path.join(tmp_dir("history"), "work")
-    {:ok, _out} = Git.run(tmp_dir("history-parent"), ["clone", "-q", "-b", branch, repo, work])
-
-    for n <- 1..count do
-      File.write!(Path.join(work, "n.txt"), "#{n}\n")
-      {:ok, _out} = Git.run(work, ["add", "n.txt"])
-
-      {:ok, _out} =
-        Git.run(work, [
-          "-c",
-          "user.name=t",
-          "-c",
-          "user.email=t@forge",
-          "commit",
-          "-q",
-          "-m",
-          "commit #{n}"
-        ])
+    for sha <- ["--output=config", "--output=HEAD", "--output=../../forge-escaped", "-h"] do
+      assert_raise Ecto.NoResultsError, fn ->
+        live(conn, ~p"/projects/#{project.name}/repo/commits/#{sha}")
+      end
     end
 
-    {:ok, _out} =
-      Git.run(work, ["push", "-q", "origin", "HEAD:refs/heads/" <> branch],
-        env: [{"FORGE_INTERNAL", "1"}]
-      )
+    assert tree_of(repo) == before
+    refute File.exists?(Path.join(repo, "../forge-escaped"))
+    # And the repository still works, which `--output=HEAD` is what it is for.
+    assert {:ok, _sha} = Git.resolve(repo, "refs/heads/" <> project.default_branch)
+  end
 
-    :ok
+  # The subject of each commit row, in the order the page drew them.
+  defp subjects(html) do
+    html
+    |> Floki.parse_document!()
+    |> Floki.find("#commits li span.flex-1")
+    |> Enum.map(&(&1 |> Floki.text() |> String.trim()))
+  end
+
+  # Every file under `repo`, by path and content hash. `for-each-ref` sees refs; this sees the
+  # repository.
+  defp tree_of(repo) do
+    repo
+    |> Path.join("**")
+    |> Path.wildcard(match_dot: true)
+    |> Enum.filter(&File.regular?/1)
+    |> Map.new(&{Path.relative_to(&1, repo), :crypto.hash(:sha256, File.read!(&1))})
   end
 end

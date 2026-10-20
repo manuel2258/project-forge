@@ -318,7 +318,9 @@ defmodule Forge.Merge do
   # `merge-tree --write-tree` prints the merged tree, then — on a conflict, exit 1 — a block of
   # `<mode> <oid> <stage>\t<path>` lines, then its messages.
   defp merge_tree(repo, head, approved) do
-    case Git.run(repo, ["merge-tree", "--write-tree", "--messages", head, approved],
+    case Git.run(
+           repo,
+           ["merge-tree", "--write-tree", "--messages", {:data, head}, {:data, approved}],
            stderr: :separate
          ) do
       {:ok, out} ->
@@ -348,7 +350,19 @@ defmodule Forge.Merge do
   # and `git log <branch>` says where the change came from. One parent would put the merged
   # content on the branch while losing every commit that produced it.
   defp commit_tree(repo, tree, head, source, message, user) do
-    args = ["commit-tree", tree, "-p", head, "-p", source, "-m", message]
+    # Every standalone argument is marked; `message` is not, because `-m` consumes the argument
+    # after it whatever it begins with, and a merge message may legitimately start with a dash
+    # (`Forge.Git.run/3`).
+    args = [
+      "commit-tree",
+      {:data, tree},
+      "-p",
+      {:data, head},
+      "-p",
+      {:data, source},
+      "-m",
+      message
+    ]
 
     case Git.run(repo, args, env: author(user), stderr: :separate) do
       {:ok, sha} -> {:ok, String.trim(sha)}
@@ -403,7 +417,9 @@ defmodule Forge.Merge do
   defp push(repo, %Project{default_branch: default}, sha) do
     env = [{"FORGE_INTERNAL", "1"}]
 
-    case Git.run(repo, ["push", "--quiet", ".", "#{sha}:refs/heads/#{default}"], env: env) do
+    case Git.run(repo, ["push", "--quiet", ".", {:data, "#{sha}:refs/heads/#{default}"}],
+           env: env
+         ) do
       {:ok, _out} -> :ok
       {:error, reason} -> {:error, {:push_refused, reason}}
     end

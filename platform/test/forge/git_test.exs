@@ -154,8 +154,22 @@ defmodule Forge.GitTest do
     end
   end
 
+  # Every file under `repo`, by path and content hash: what a write of any kind changes and what
+  # `for-each-ref` alone cannot see.
+  defp tree_of(repo) do
+    repo
+    |> Path.join("**")
+    |> Path.wildcard(match_dot: true)
+    |> Enum.filter(&File.regular?/1)
+    |> Map.new(&{Path.relative_to(&1, repo), :crypto.hash(:sha256, File.read!(&1))})
+  end
+
   describe "reading a repository for a person" do
-    test "branches/1 lists refs/heads only, sorted", %{repo: repo} do
+    # **`Enum.sort` in `branches/1` is an equivalent mutant.** `for-each-ref` sorts by refname
+    # already, and a short name orders the same way as its `refs/heads/` form, so no repository
+    # can tell the two apart. The sort is kept because the order is this function's promise and
+    # not git's to change; this test is for the pattern, which is not equivalent to anything.
+    test "branches/1 lists refs/heads only", %{repo: repo} do
       {:ok, head} = Git.resolve(repo, "main")
       :ok = Git.create_branch(repo, "ticket/9", head)
       :ok = Git.create_branch(repo, "chat/abc", head)
@@ -209,10 +223,13 @@ defmodule Forge.GitTest do
       assert {:error, :no_parent} = Git.parent(repo, root)
     end
 
-    test "empty_tree/1 names the same object twice", %{repo: repo} do
+    test "empty_tree/1 names a tree, the same one twice", %{repo: repo} do
       assert {:ok, tree} = Git.empty_tree(repo)
       assert {:ok, ^tree} = Git.empty_tree(repo)
-      assert String.length(tree) >= 40
+      # What the object *is* rather than only that two calls agreed: without this the test
+      # passes against `-t blob`, against a different input file, and against a dropped trim.
+      assert {:ok, "tree\n"} = Git.run(repo, ["cat-file", "-t", tree])
+      assert {:ok, ""} = Git.run(repo, ["cat-file", "-p", tree])
     end
 
     test "blob_size/3 is the bytes a path holds, or not found", %{repo: repo} do
@@ -221,6 +238,49 @@ defmodule Forge.GitTest do
       assert {:ok, size} = Git.blob_size(repo, sha, "README.md")
       assert size == byte_size("# Game\n")
       assert {:error, :not_found} = Git.blob_size(repo, sha, "nothing-here.md")
+    end
+
+    # The hole this closed: `git log` takes `--output=<file>`, relative to its working
+    # directory, and `history/4` put the caller's ref in git's option position. One `GET` of
+    # `/repo/commits/--output=HEAD` emptied a project's `HEAD`, and `--output=../../x` wrote
+    # outside the repositories directory — an arbitrary create-or-truncate as the platform's own
+    # user, to anybody who is a member of one project.
+    test "a value that git would read as an option is refused, and writes nothing", %{
+      repo: repo
+    } do
+      {:ok, head} = Git.resolve(repo, "main")
+      before = tree_of(repo)
+
+      for call <- [
+            fn -> Git.history(repo, "--output=pwned", 0, 1) end,
+            fn -> Git.log(repo, "--output=pwned", "HEAD") end,
+            fn -> Git.resolve(repo, "--output=pwned") end,
+            fn -> Git.parent(repo, "--output=pwned") end,
+            fn -> Git.diff(repo, "--output=pwned", head) end,
+            fn -> Git.diff_stat(repo, "--output=pwned", head) end,
+            fn -> Git.ls_dir(repo, "--output=pwned", "") end,
+            fn -> Git.blob_size(repo, "--output=pwned", "README.md") end,
+            fn -> Git.show(repo, "--output=pwned", "README.md") end,
+            fn -> Git.commits_since(repo, "--output=pwned", head) end,
+            fn -> Git.merge_base(repo, "--output=pwned", head) end,
+            fn -> Git.create_branch(repo, "--output=pwned", head) end,
+            fn -> Git.pin(repo, "--output=pwned", head) end
+          ] do
+        # Each refuses in its own vocabulary — `:not_a_rev` from `run/3`, or the miss the
+        # function already answers a bad ref with. None of them succeeds.
+        assert {:error, _reason} = call.()
+      end
+
+      # The point of the whole test: not one of those left anything behind.
+      assert tree_of(repo) == before
+      refute File.exists?(Path.join(repo, "pwned"))
+    end
+
+    # A literal is still a literal. Without this the refusal could be "no argument may begin
+    # with a dash", which would take every flag in the module with it.
+    test "a flag written at the call site is not refused", %{repo: repo} do
+      assert {:ok, out} = Git.run(repo, ["log", "--max-count=1", "--format=%s", {:data, "main"}])
+      assert String.trim(out) == "seed"
     end
 
     # The fix this needed: `ls-tree -z <sha> -- "/"` is a pathspec matching nothing, not the
@@ -240,32 +300,5 @@ defmodule Forge.GitTest do
       assert %{name: "workflow.yml", path: ".forge/workflow.yml", kind: :blob} in entries
       assert %{name: "agents", path: ".forge/agents", kind: :tree} in entries
     end
-  end
-
-  # `count` commits on `branch`, each in the same clone and pushed once: thirty-one clones to
-  # seed thirty-one commits is most of this file's runtime for nothing.
-  defp seed_commits(repo, branch, count) do
-    work = Path.join(tmp_dir("history"), "work")
-    {:ok, _out} = Git.run(tmp_dir("history-parent"), ["clone", "-q", "-b", branch, repo, work])
-
-    for n <- 1..count do
-      File.write!(Path.join(work, "n.txt"), "#{n}\n")
-      {:ok, _out} = Git.run(work, ["add", "n.txt"])
-
-      {:ok, _out} =
-        Git.run(work, [
-          "-c",
-          "user.name=t",
-          "-c",
-          "user.email=t@forge",
-          "commit",
-          "-q",
-          "-m",
-          "commit #{n}"
-        ])
-    end
-
-    {:ok, _out} = Git.run(work, ["push", "-q", "origin", "HEAD:refs/heads/" <> branch])
-    :ok
   end
 end

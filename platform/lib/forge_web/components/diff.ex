@@ -9,8 +9,10 @@ defmodule ForgeWeb.Diff do
   no change to draw is the same sentence, from one place.
 
   **A diff is bounded.** Past a size it is not rendered inline: a page nobody can read is not a
-  review, and the change is still named file by file with its counts. See `docs/design/ui.md`
-  § Semantics that must not be lost.
+  review, and the change is still named file by file with its counts. The same is true of a
+  patch that is not valid UTF-8, for a harder reason than readability — see `inline?/2`. In
+  both cases the map of the change survives and the patch gives way to the `git diff` that
+  reads it. See `docs/design/ui.md` § Semantics that must not be lost.
   """
 
   use Phoenix.Component
@@ -39,12 +41,25 @@ defmodule ForgeWeb.Diff do
         added: total(stat, 1),
         removed: total(stat, 2),
         patch: patch,
-        inline: byte_size(patch) <= @max_patch_bytes and length(stat) <= @max_patch_files,
+        inline: inline?(patch, stat),
+        text: ForgeCore.Document.text?(patch),
         bytes: byte_size(patch)
       }
     else
       {:error, reason} -> %{error: reason}
     end
+  end
+
+  # A patch is drawn when it is small enough to read *and* is text the page can carry. git diffs
+  # a file it thinks is binary as one line, but a file that is merely not UTF-8 — `caf\xE9`, a
+  # latin-1 source file — it diffs in full, and those bytes then go out in the HTML. On the
+  # response of a page that is a plain GET it is a body that is not valid UTF-8; through the
+  # socket, `Phoenix.Socket.V2.JSONSerializer.encode!/1` raises on them in the socket's own
+  # process and takes every LiveView on the connection with it. `ForgeCore.Document.text?/1` is
+  # the rule the rest of the product already uses for exactly this question.
+  defp inline?(patch, stat) do
+    byte_size(patch) <= @max_patch_bytes and length(stat) <= @max_patch_files and
+      ForgeCore.Document.text?(patch)
   end
 
   defp total(stat, index) do
@@ -245,12 +260,19 @@ defmodule ForgeWeb.Diff do
 
   attr :diff, :map, required: true
 
-  # Past the bound, the patch gives way to where it can be read.
+  # Past the bound, the patch gives way to where it can be read — and the bound is the page's
+  # size as well as what it can carry as text.
   defp too_large(assigns) do
     ~H"""
     <p :if={@diff[:files] not in [nil, []] and @diff[:inline] == false} class="mt-4 text-sm/[1.55]">
-      This change is {bytes(@diff.bytes)} across {length(@diff.files)} files, too much to read on
-      one page. Read it with <span class="font-mono text-[12.5px]">git diff {short(@diff.base)}..{short(@diff.head)}</span>.
+      <span :if={@diff[:text] == false}>
+        This change is not text this page can draw: some of it is not valid UTF-8.
+      </span>
+      <span :if={@diff[:text] != false}>
+        This change is {bytes(@diff.bytes)} across {length(@diff.files)} files, too much to read on
+        one page.
+      </span>
+      Read it with <span class="font-mono text-[12.5px]">git diff {short(@diff.base)}..{short(@diff.head)}</span>.
     </p>
     """
   end
@@ -311,6 +333,48 @@ defmodule ForgeWeb.Diff do
 
   defp count(:binary, _sign), do: "binary"
   defp count(number, sign), do: "#{sign}#{number}"
+
+  @doc """
+  One commit as every list of them draws it: its sha, its subject, and how long ago it was
+  committed. A whole row when `navigate` is given, and the row's contents otherwise.
+
+  Here rather than beside either of its two callers — a branch's commits on a work screen, and a
+  repository's own history — because the two had drawn the same row with the same four class
+  strings and two different sha lengths, and `short/1` exists so that there is one answer.
+  """
+  attr :commit, :map, required: true
+  attr :now, :any, required: true, doc: "the moment ages are measured from"
+  attr :navigate, :string, default: nil, doc: "where the row leads, when it leads anywhere"
+
+  def commit_row(assigns) do
+    ~H"""
+    <.link
+      :if={@navigate}
+      navigate={@navigate}
+      class="flex min-h-[46px] items-center gap-3 py-1.5 text-[12.5px] hover:bg-base-200"
+    >
+      <.commit_fields commit={@commit} now={@now} />
+    </.link>
+
+    <div
+      :if={is_nil(@navigate)}
+      class="flex min-h-[46px] items-center gap-3 py-1.5 text-[12.5px]"
+    >
+      <.commit_fields commit={@commit} now={@now} />
+    </div>
+    """
+  end
+
+  attr :commit, :map, required: true
+  attr :now, :any, required: true
+
+  defp commit_fields(assigns) do
+    ~H"""
+    <span class="shrink-0 font-mono opacity-60">{short(@commit.sha)}</span>
+    <span class="min-w-0 flex-1 break-words text-sm/[1.4]">{@commit.subject}</span>
+    <span class="shrink-0 font-mono opacity-50">{ForgeWeb.Format.ago(@commit.at, @now)}</span>
+    """
+  end
 
   @doc "The first twelve characters of a sha, for reading rather than for resolving."
   @spec short(String.t() | nil) :: String.t()

@@ -84,14 +84,43 @@ defmodule ForgeWeb.RepoCommitLiveTest do
   end
 
   test "a sha the repository does not hold is a miss", %{conn: conn, project: project} do
-    # Valid hex, nothing behind it: `Git.history/4`'s error path, not an exception of its own.
-    assert_raise Ecto.NoResultsError, fn ->
-      live(conn, ~p"/projects/#{project.name}/repo/commits/#{String.duplicate("b", 40)}")
+    # Valid hex with nothing behind it reaches git and misses; everything else is refused by
+    # the shape of the address before git is reached at all.
+    for sha <- [String.duplicate("b", 40), "not-a-sha", "main", "HEAD", "abc", "ABCDEF12"] do
+      assert_raise Ecto.NoResultsError, fn ->
+        live(conn, ~p"/projects/#{project.name}/repo/commits/#{sha}")
+      end
     end
+  end
 
-    assert_raise Ecto.NoResultsError, fn ->
-      live(conn, ~p"/projects/#{project.name}/repo/commits/not-a-sha")
-    end
+  # Every commit on every branch of every project is reachable from this page, so a commit
+  # touching a latin-1 source file is a 200 whose body is not valid UTF-8 — and the first patch
+  # pushed over the socket after it raises inside the socket's own process.
+  test "a commit whose patch is not UTF-8 is served as valid UTF-8", %{
+    conn: conn,
+    project: project,
+    repo: repo
+  } do
+    head = commit_to(repo, "main", %{"latin1.ex" => "def caf" <> <<0xE9>> <> ", do: :ok\n"})
+
+    {:ok, _view, html} = live(conn, ~p"/projects/#{project.name}/repo/commits/#{head}")
+
+    assert String.valid?(html)
+    assert html =~ "latin1.ex"
+    assert html =~ "not valid UTF-8"
+  end
+
+  test "the header names the commit short, as every other sha in the product is named", %{
+    conn: conn,
+    project: project,
+    repo: repo
+  } do
+    {:ok, head} = Git.resolve(repo, "refs/heads/main")
+
+    {:ok, _view, html} = live(conn, ~p"/projects/#{project.name}/repo/commits/#{head}")
+
+    assert html =~ String.slice(head, 0, 12)
+    refute html =~ head
   end
 
   test "the back link carries the branch and the page it was opened from", %{

@@ -6,8 +6,13 @@ defmodule ForgeWeb.RepoLive do
   branch, the workflow it carries. This says what is in it, which until now meant cloning. See
   `docs/design/ui.md` § The project's repository.
 
-  Nothing here writes. Every read is `for-each-ref`, `log`, `ls-tree` or `cat-file` against the
-  bare repository: no worktree, no checkout, and no ref touched.
+  Nothing here writes. Every read is `for-each-ref`, `log`, `rev-parse`, `ls-tree`, `cat-file` or
+  `show` against the bare repository: no worktree, no checkout, and no ref touched.
+
+  **What the page holds is bounded.** The tree holds names, one directory per click, and the
+  content of exactly one file — opening another replaces it, and opening the open one closes it.
+  A file is bounded at 512 KB, so that is the whole of it; keeping every file a reader had opened
+  would have put two hundred of them, near 100 MB, in the socket's own process.
 
   A directory is a directory and everything else is a file, the symlinks and the submodules
   included: a symlink's content is the path it names, which is what git stores and what reading
@@ -19,19 +24,17 @@ defmodule ForgeWeb.RepoLive do
   use ForgeWeb, :live_view
 
   alias Forge.{Git, Projects}
-  alias ForgeWeb.{Diff, Format}
+  alias ForgeCore.Document
+  alias ForgeWeb.Diff
 
   # A page of history. Thirty because a repository with thousands of commits must never load
   # them all, and paging because every commit still has to be reachable.
   @per_page 30
+  @max_page 1_000_000
 
   # A file at or over this says so instead of being drawn. Asked of `blob_size/3` before the
   # content is ever read, so nothing past it is partially loaded.
   @max_file_bytes 512 * 1024
-
-  # How much of a file is looked at to decide it is binary: the same heuristic git itself uses
-  # to decide whether to diff a file as text.
-  @sniff_bytes 8000
 
   @tabs ~w(commits files)
 
@@ -71,16 +74,30 @@ defmodule ForgeWeb.RepoLive do
     {:noreply, socket}
   end
 
-  # The branch in the address, when the repository has it; otherwise the project's default. A
-  # stale link lands somewhere real rather than failing, and a name nothing matches is a typo,
-  # not an error page.
+  # The branch in the address, when the repository has it; otherwise the project's default, and
+  # otherwise the first branch there is. A stale link lands somewhere real rather than failing,
+  # and a name nothing matches is a typo, not an error page.
+  #
+  # The third step is not decoration. A project whose default branch has been deleted still has
+  # branches, and falling back to the name of one that is gone drew the picker on a real branch
+  # — the browser shows the first option when none is selected — while the page beneath it showed
+  # the missing one's empty state. The only name with no branch behind it is the one a repository
+  # with no branches at all gets.
   defp chosen(%{branches: branches, project: project}, asked) do
-    if asked in branches, do: asked, else: project.default_branch
+    Enum.find(
+      [asked, project.default_branch | branches],
+      project.default_branch,
+      &(&1 in branches)
+    )
   end
 
+  # A page out of range is the first page, not a `--skip` git refuses: `?page=9999999999999999`
+  # made `git log` answer `fatal: not an integer`, which `load_commits/1` then drew as the same
+  # empty page a reader gets past the end of a real history. The bound is thirty million commits
+  # deep, which no repository this will ever serve has.
   defp page(asked) do
     case Integer.parse(asked || "") do
-      {number, ""} when number > 0 -> number
+      {number, ""} when number > 0 and number <= @max_page -> number
       _other -> 1
     end
   end
@@ -102,7 +119,7 @@ defmodule ForgeWeb.RepoLive do
         {:error, _gone} -> nil
       end
 
-    assign(socket, head: head, tree: %{"" => children(repo, head, "")}, open_files: %{})
+    assign(socket, head: head, tree: %{"" => children(repo, head, "")}, open: nil)
   end
 
   defp load_commits(%{assigns: %{repo: repo, branch: branch, page: page}} = socket) do
@@ -122,13 +139,18 @@ defmodule ForgeWeb.RepoLive do
   end
 
   @impl true
-  def handle_event("branch", %{"branch" => branch}, socket) do
+  def handle_event("branch", %{"branch" => branch}, socket) when is_binary(branch) do
     {:noreply, push_patch(socket, to: address(socket.assigns, branch: branch, page: 1))}
   end
 
   # Read once, then held: collapsing and reopening a directory draws it from the page rather
   # than asking git again.
-  def handle_event("expand", %{"path" => dir}, %{assigns: assigns} = socket) do
+  #
+  # **Dropping the memo is an equivalent mutant.** Re-reading a directory already in the map
+  # produces the same entries from the same commit, so nothing a test can see changes; what it
+  # costs is a `ls-tree` per toggle, which is a figure and not an assertion.
+  def handle_event("expand", %{"path" => dir}, %{assigns: assigns} = socket)
+      when is_binary(dir) do
     if Map.has_key?(assigns.tree, dir) do
       {:noreply, socket}
     else
@@ -141,19 +163,38 @@ defmodule ForgeWeb.RepoLive do
   # hold opens nothing and says nothing — `..` in it is matched against git's own tree and
   # matches there as little as any other typo does, which is why no path guard is needed in
   # front of this.
-  def handle_event("open", %{"path" => path}, %{assigns: assigns} = socket) do
-    cond do
-      Map.has_key?(assigns.open_files, path) -> {:noreply, socket}
-      file = read(assigns, path) -> {:noreply, opened(socket, path, file)}
-      true -> {:noreply, socket}
+  #
+  # One file at a time: opening the open one closes it, and opening another replaces it, so what
+  # the page holds is one file's content and never a reader's whole afternoon of them.
+  def handle_event("open", %{"path" => path}, %{assigns: assigns} = socket)
+      when is_binary(path) do
+    case assigns.open do
+      {^path, _file} -> {:noreply, assign(socket, open: nil)}
+      _other -> {:noreply, assign(socket, open: opened(assigns, path))}
     end
   end
 
-  defp opened(socket, path, file),
-    do: assign(socket, open_files: Map.put(socket.assigns.open_files, path, file))
+  # A payload whose `path` or `branch` is not a string is a client that is not this page's.
+  # Without this, a frame of `%{"path" => ["a", "b"]}` reached `dir <> "/"` and took the
+  # LiveView down with an `ArgumentError`.
+  def handle_event(event, _params, socket) when event in ~w(branch expand open),
+    do: {:noreply, socket}
+
+  defp opened(assigns, path) do
+    case read(assigns, path) do
+      nil -> nil
+      file -> {path, file}
+    end
+  end
 
   # The size first, and the content only when the size allows it: the guarantee that nothing
   # past the limit is partially loaded is that `show/3` is not run at all.
+  #
+  # **Reading the content first and checking the size after is an equivalent mutant** as far as
+  # the page goes — the same words are drawn either way. What it changes is whether a 400 MB
+  # file passes through this process's heap on the way to being refused, which is a memory
+  # property and not an assertion; `Forge.GitTest`'s `blob_size/3` tests are where the order
+  # has anything to stand on.
   defp read(%{repo: repo, head: head}, path) do
     case Git.blob_size(repo, head, path) do
       {:ok, bytes} when bytes >= @max_file_bytes -> {:too_large, bytes}
@@ -162,17 +203,19 @@ defmodule ForgeWeb.RepoLive do
     end
   end
 
-  defp content({:ok, text}), do: if(binary?(text), do: :binary, else: {:text, text})
+  # `ForgeCore.Document.text?/1` and not git's own NUL sniff: a page is not git's output path,
+  # and what it draws goes out as JSON over the socket. A file that is valid UTF-8 but for a byte
+  # — `caf\xE9` — has no NUL at all, so the sniff drew it garbled, and a file whose invalid byte
+  # survived into the rendered HTML made `Phoenix.Socket.V2.JSONSerializer.encode!/1` raise in
+  # the socket's own process, taking every LiveView on that connection with it. The whole content
+  # is checked, not a window of it: a NUL at byte 9000 is as binary as one at byte 0.
+  defp content({:ok, text}), do: if(Document.text?(text), do: {:text, text}, else: :binary)
 
   # **No test reaches this and none can usefully.** `blob_size/3` has already answered for this
   # exact path at this exact commit, so a `show/3` that then cannot find it is a repository
   # rewritten between two reads. It is here rather than left to crash the page, and its
   # removal is an equivalent mutant.
   defp content({:error, :not_found}), do: nil
-
-  defp binary?(text), do: text |> binary_part(0, min(byte_size(text), @sniff_bytes)) |> nul?()
-
-  defp nul?(head), do: String.contains?(head, <<0>>)
 
   # The page's own address with some of its three parameters replaced. Everything the view holds
   # beyond the tree and the files opened out of it is here, which is why every control patches
@@ -233,14 +276,11 @@ defmodule ForgeWeb.RepoLive do
       <section :if={@tab == "commits"} id="commits" class="mt-6">
         <ol class="flex flex-col">
           <li :for={commit <- @commits} class="border-b border-base-300/60">
-            <.link
+            <Diff.commit_row
+              commit={commit}
+              now={@now}
               navigate={commit_path(assigns, commit.sha)}
-              class="flex min-h-[46px] items-center gap-3 py-1.5 text-[12.5px] hover:bg-base-200"
-            >
-              <span class="shrink-0 font-mono opacity-60">{Diff.short(commit.sha)}</span>
-              <span class="min-w-0 flex-1 break-words text-sm/[1.4]">{commit.subject}</span>
-              <span class="shrink-0 font-mono opacity-50">{Format.ago(commit.at, @now)}</span>
-            </.link>
+            />
           </li>
         </ol>
 
@@ -271,7 +311,7 @@ defmodule ForgeWeb.RepoLive do
           {@branch} at {Diff.short(@head)}
         </p>
         <div class="mt-3">
-          <.tree_entries tree={@tree} open_files={@open_files} dir="" />
+          <.tree_entries tree={@tree} open={@open} dir="" />
         </div>
       </section>
     </Layouts.app>
@@ -286,7 +326,7 @@ defmodule ForgeWeb.RepoLive do
   end
 
   attr :tree, :map, required: true
-  attr :open_files, :map, required: true
+  attr :open, :any, required: true, doc: "`{path, file}` for the one file open, or nil"
   attr :dir, :string, required: true
 
   # One directory's children, each folder recursing into its own. Plain identifier text — mono,
@@ -306,7 +346,7 @@ defmodule ForgeWeb.RepoLive do
             <span class="min-w-0 break-all">{entry.name}</span>
           </summary>
           <div class="pl-4">
-            <.tree_entries tree={@tree} open_files={@open_files} dir={entry.path} />
+            <.tree_entries tree={@tree} open={@open} dir={entry.path} />
           </div>
         </details>
 
@@ -320,12 +360,15 @@ defmodule ForgeWeb.RepoLive do
             <span aria-hidden="true" class="opacity-0">▸</span>
             <span class="min-w-0 break-all">{entry.name}</span>
           </button>
-          <.file :if={@open_files[entry.path]} path={entry.path} file={@open_files[entry.path]} />
+          <.file :if={open?(@open, entry.path)} path={entry.path} file={elem(@open, 1)} />
         </div>
       </li>
     </ul>
     """
   end
+
+  defp open?({path, _file}, path), do: true
+  defp open?(_open, _path), do: false
 
   attr :path, :string, required: true
   attr :file, :any, required: true

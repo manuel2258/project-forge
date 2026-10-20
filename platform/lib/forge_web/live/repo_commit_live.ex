@@ -32,6 +32,17 @@ defmodule ForgeWeb.RepoCommitLive do
      |> ForgeWeb.Capacity.project(project)}
   end
 
+  # The address names an object, so only an object name is read out of it: hex, as long as the
+  # repository's hash makes them. Anything else is the same miss a sha the repository does not
+  # hold gets, and never reaches git at all.
+  #
+  # This is the second guard, not the first. `Forge.Git.run/3` refuses a caller's value that
+  # begins with a dash wherever git would read one as an option, which is what closed
+  # `/repo/commits/--output=config` — a single GET that truncated the project's `HEAD`. This one
+  # is here because the page knows something `Forge.Git` cannot: the segment is a commit's name,
+  # and nothing that is not one has any business being tried.
+  @object_name ~r/\A[0-9a-f]{4,64}\z/
+
   # One page of history, one commit long: the sha the address names, with the subject and the
   # time a header draws.
   #
@@ -39,8 +50,10 @@ defmodule ForgeWeb.RepoCommitLive do
   # apart from a repository that does not hold it, and none to tell either apart from a project
   # that is not the viewer's, which `ForgeWeb.Access` has already answered the same way.
   defp commit!(repo, sha) do
-    case Git.history(repo, sha, 0, 1) do
-      {:ok, %{commits: [commit]}} -> commit
+    with true <- Regex.match?(@object_name, sha),
+         {:ok, %{commits: [commit]}} <- Git.history(repo, sha, 0, 1) do
+      commit
+    else
       _miss -> raise Ecto.NoResultsError, queryable: Project
     end
   end
@@ -91,7 +104,7 @@ defmodule ForgeWeb.RepoCommitLive do
         <div class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">The commit</div>
         <h1 class="text-[23px] font-semibold -tracking-[.03em] sm:text-2xl">{@commit.subject}</h1>
         <div class="flex flex-wrap items-center gap-3 font-mono text-[12.5px] opacity-60">
-          <span class="break-all">{@commit.sha}</span>
+          <span class="break-all">{Diff.short(@commit.sha)}</span>
           <span>{Format.ago(@commit.at, @now)}</span>
         </div>
       </header>

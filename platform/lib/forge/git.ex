@@ -41,7 +41,7 @@ defmodule Forge.Git do
     with {:ok, current} <- run(repo, ["symbolic-ref", "--quiet", "HEAD"]),
          false <-
            branch_exists?(repo, current |> String.trim() |> String.replace("refs/heads/", "")) do
-      run(repo, ["symbolic-ref", "HEAD", "refs/heads/" <> branch])
+      run(repo, ["symbolic-ref", "HEAD", {:data, "refs/heads/" <> branch}])
     end
 
     :ok
@@ -87,9 +87,11 @@ defmodule Forge.Git do
     ]
 
     with {:ok, tree} <- empty_tree(repo),
-         {:ok, sha} <- run(repo, ["commit-tree", tree, "-m", @root_message], env: env),
+         {:ok, sha} <- run(repo, ["commit-tree", {:data, tree}, "-m", @root_message], env: env),
          {:ok, _out} <-
-           run(repo, ["update-ref", "refs/heads/" <> branch, String.trim(sha)], env: env) do
+           run(repo, ["update-ref", {:data, "refs/heads/" <> branch}, {:data, String.trim(sha)}],
+             env: env
+           ) do
       :ok
     end
   end
@@ -118,7 +120,7 @@ defmodule Forge.Git do
   @doc "Resolves a ref to a commit sha."
   @spec resolve(repo(), String.t()) :: {:ok, sha()} | {:error, {:unknown_ref, String.t()}}
   def resolve(repo, ref) do
-    case run(repo, ["rev-parse", "--verify", "--quiet", ref <> "^{commit}"]) do
+    case run(repo, ["rev-parse", "--verify", "--quiet", {:data, ref <> "^{commit}"}]) do
       {:ok, sha} -> {:ok, String.trim(sha)}
       # The ref travels with the error: this is called with a project's default branch and
       # with a ticket's own branch, and a caller reporting the failure cannot tell which.
@@ -129,7 +131,7 @@ defmodule Forge.Git do
   @doc "The content of `path` at `sha`."
   @spec show(repo(), sha(), String.t()) :: {:ok, String.t()} | {:error, :not_found}
   def show(repo, sha, path) do
-    case run(repo, ["show", "#{sha}:#{path}"]) do
+    case run(repo, ["show", {:data, "#{sha}:#{path}"}]) do
       {:ok, content} -> {:ok, content}
       {:error, _} -> {:error, :not_found}
     end
@@ -141,7 +143,7 @@ defmodule Forge.Git do
   @doc "Creates `branch` at `sha`. Fails if the branch exists."
   @spec create_branch(repo(), String.t(), sha()) :: :ok | {:error, term()}
   def create_branch(repo, branch, sha) do
-    with {:ok, _} <- run(repo, ["branch", branch, sha]) do
+    with {:ok, _} <- run(repo, ["branch", {:data, branch}, {:data, sha}]) do
       :ok
     end
   end
@@ -159,7 +161,7 @@ defmodule Forge.Git do
   @spec delete_branch(repo(), String.t()) :: :ok | {:error, term()}
   def delete_branch(repo, branch) do
     if branch_exists?(repo, branch) do
-      with {:ok, _out} <- run(repo, ["branch", "-D", branch]), do: :ok
+      with {:ok, _out} <- run(repo, ["branch", "-D", {:data, branch}]), do: :ok
     else
       :ok
     end
@@ -170,7 +172,7 @@ defmodule Forge.Git do
   def worktree_add(repo, dir, branch) do
     File.mkdir_p!(Path.dirname(dir))
 
-    with {:ok, _} <- run(repo, ["worktree", "add", "--quiet", dir, branch]) do
+    with {:ok, _} <- run(repo, ["worktree", "add", "--quiet", {:data, dir}, {:data, branch}]) do
       :ok
     end
   end
@@ -181,7 +183,7 @@ defmodule Forge.Git do
   """
   @spec worktree_reset(String.t(), String.t()) :: :ok | {:error, term()}
   def worktree_reset(dir, branch) do
-    with {:ok, _} <- run(dir, ["reset", "--quiet", "--hard", "refs/heads/" <> branch]),
+    with {:ok, _} <- run(dir, ["reset", "--quiet", "--hard", {:data, "refs/heads/" <> branch}]),
          {:ok, _} <- run(dir, ["clean", "--quiet", "-fd"]) do
       :ok
     end
@@ -190,7 +192,7 @@ defmodule Forge.Git do
   @doc "Removes the worktree at `dir`, discarding uncommitted changes."
   @spec worktree_remove(repo(), String.t()) :: :ok | {:error, term()}
   def worktree_remove(repo, dir) do
-    with {:ok, _} <- run(repo, ["worktree", "remove", "--force", dir]) do
+    with {:ok, _} <- run(repo, ["worktree", "remove", "--force", {:data, dir}]) do
       :ok
     end
   end
@@ -204,7 +206,8 @@ defmodule Forge.Git do
   @doc "The diff from `base` to `head`, as a patch. `paths` narrows it to those files."
   @spec diff(repo(), sha(), String.t(), [String.t()]) :: {:ok, String.t()} | {:error, term()}
   def diff(repo, base, head, paths \\ []) do
-    args = @paths_as_written ++ ["diff", "#{base}..#{head}"]
+    args = @paths_as_written ++ ["diff", {:data, "#{base}..#{head}"}]
+    paths = Enum.map(paths, &{:data, &1})
     run(repo, if(paths == [], do: args, else: args ++ ["--"] ++ paths), stderr: :separate)
   end
 
@@ -248,7 +251,7 @@ defmodule Forge.Git do
           | {:error, term()}
   def diff_stat(repo, base, head) do
     with {:ok, out} <-
-           run(repo, @paths_as_written ++ ["diff", "--numstat", "#{base}..#{head}"],
+           run(repo, @paths_as_written ++ ["diff", "--numstat", {:data, "#{base}..#{head}"}],
              stderr: :separate
            ) do
       {:ok, out |> String.split("\n", trim: true) |> Enum.map(&numstat_line/1)}
@@ -276,9 +279,9 @@ defmodule Forge.Git do
   def ls_dir(repo, sha, dir) do
     # The repository's root is no pathspec at all: `ls-tree -z <sha> -- "/"` is a path that
     # matches nothing, not "everything at the top", so a root asked for with one came back empty.
-    pathspec = if dir == "", do: [], else: ["--", dir <> "/"]
+    pathspec = if dir == "", do: [], else: ["--", {:data, dir <> "/"}]
 
-    with {:ok, out} <- run(repo, ["ls-tree", "-z", sha] ++ pathspec, stderr: :separate) do
+    with {:ok, out} <- run(repo, ["ls-tree", "-z", {:data, sha}] ++ pathspec, stderr: :separate) do
       {:ok, out |> String.split(<<0>>, trim: true) |> Enum.map(&tree_entry/1)}
     end
   end
@@ -318,7 +321,7 @@ defmodule Forge.Git do
   """
   @spec blob_size(repo(), sha(), String.t()) :: {:ok, non_neg_integer()} | {:error, :not_found}
   def blob_size(repo, sha, path) do
-    case run(repo, ["cat-file", "-s", "#{sha}:#{path}"], stderr: :separate) do
+    case run(repo, ["cat-file", "-s", {:data, "#{sha}:#{path}"}], stderr: :separate) do
       {:ok, out} -> {:ok, out |> String.trim() |> String.to_integer()}
       {:error, _reason} -> {:error, :not_found}
     end
@@ -328,7 +331,10 @@ defmodule Forge.Git do
   @spec changed_paths(repo(), sha(), sha(), [String.t()]) ::
           {:ok, [String.t()]} | {:error, term()}
   def changed_paths(repo, base, head, pathspec) do
-    args = @paths_as_written ++ ["diff", "--name-only", "#{base}..#{head}", "--" | pathspec]
+    pathspec = Enum.map(pathspec, &{:data, &1})
+
+    args =
+      @paths_as_written ++ ["diff", "--name-only", {:data, "#{base}..#{head}"}, "--" | pathspec]
 
     with {:ok, out} <- run(repo, args, stderr: :separate) do
       {:ok, out |> String.split("\n", trim: true) |> Enum.map(&unquote_path/1)}
@@ -338,7 +344,11 @@ defmodule Forge.Git do
   @doc "Whether `ancestor` is reachable from `descendant`."
   @spec ancestor?(repo(), String.t(), String.t()) :: boolean()
   def ancestor?(repo, ancestor, descendant),
-    do: match?({:ok, _}, run(repo, ["merge-base", "--is-ancestor", ancestor, descendant]))
+    do:
+      match?(
+        {:ok, _},
+        run(repo, ["merge-base", "--is-ancestor", {:data, ancestor}, {:data, descendant}])
+      )
 
   @doc """
   Points `ref` at `sha`, creating it. Used for `refs/forge/approved/<n>`, which keeps an approved
@@ -346,13 +356,13 @@ defmodule Forge.Git do
   """
   @spec pin(repo(), String.t(), sha()) :: :ok | {:error, term()}
   def pin(repo, ref, sha) do
-    with {:ok, _out} <- run(repo, ["update-ref", ref, sha]), do: :ok
+    with {:ok, _out} <- run(repo, ["update-ref", {:data, ref}, {:data, sha}]), do: :ok
   end
 
   @doc "Commit shas on `head` since `base`, newest first."
   @spec commits_since(repo(), sha(), String.t()) :: {:ok, [sha()]} | {:error, term()}
   def commits_since(repo, base, head) do
-    with {:ok, out} <- run(repo, ["rev-list", "#{base}..#{head}"]) do
+    with {:ok, out} <- run(repo, ["rev-list", {:data, "#{base}..#{head}"}]) do
       {:ok, String.split(out, "\n", trim: true)}
     end
   end
@@ -360,7 +370,8 @@ defmodule Forge.Git do
   @doc "The best common ancestor of `a` and `b`."
   @spec merge_base(repo(), String.t(), String.t()) :: {:ok, sha()} | {:error, term()}
   def merge_base(repo, a, b) do
-    with {:ok, out} <- run(repo, ["merge-base", a, b]), do: {:ok, String.trim(out)}
+    with {:ok, out} <- run(repo, ["merge-base", {:data, a}, {:data, b}]),
+         do: {:ok, String.trim(out)}
   end
 
   # Sha, committer time and subject, unit-separated: a subject may hold anything but a newline,
@@ -378,7 +389,9 @@ defmodule Forge.Git do
     first = if Keyword.get(opts, :first_parent, false), do: ["--first-parent"], else: []
 
     with {:ok, out} <-
-           run(repo, ["log", @log_format] ++ first ++ ["#{base}..#{head}"], stderr: :separate) do
+           run(repo, ["log", @log_format] ++ first ++ [{:data, "#{base}..#{head}"}],
+             stderr: :separate
+           ) do
       {:ok, commits(out)}
     end
   end
@@ -397,7 +410,7 @@ defmodule Forge.Git do
   @spec history(repo(), String.t(), non_neg_integer(), pos_integer()) ::
           {:ok, %{commits: [commit()], more: boolean()}} | {:error, term()}
   def history(repo, ref, skip, limit) do
-    args = ["log", @log_format, "--skip=#{skip}", "--max-count=#{limit + 1}", ref]
+    args = ["log", @log_format, "--skip=#{skip}", "--max-count=#{limit + 1}", {:data, ref}]
 
     with {:ok, out} <- run(repo, args, stderr: :separate) do
       commits = commits(out)
@@ -413,7 +426,7 @@ defmodule Forge.Git do
   """
   @spec parent(repo(), sha()) :: {:ok, sha()} | {:error, :no_parent}
   def parent(repo, sha) do
-    case run(repo, ["rev-parse", "--verify", "--quiet", sha <> "^"]) do
+    case run(repo, ["rev-parse", "--verify", "--quiet", {:data, sha <> "^"}]) do
       {:ok, out} -> {:ok, String.trim(out)}
       {:error, _reason} -> {:error, :no_parent}
     end
@@ -433,8 +446,29 @@ defmodule Forge.Git do
     end
   end
 
+  @typedoc """
+  One argument to git: a literal written at the call site, or `{:data, value}` for a ref, a rev,
+  a range or a path the caller was handed.
+  """
+  @type arg :: String.t() | {:data, String.t()}
+
   @doc """
   Runs git with `args` in `dir`. Public so contexts can do the odd extra call.
+
+  **An argument the caller was handed is marked `{:data, value}`, and is refused when it begins
+  with a dash.** git reads an argument beginning with `-` as an option wherever it sits in the
+  command line — `log --output=<file>` writes a file, relative to the working directory — so a
+  rev that arrives from outside and starts with a dash is an arbitrary create-or-truncate as the
+  platform's own user, not a lookup that misses. A page served
+  `/projects/:name/repo/commits/--output=config` emptied the project's `HEAD` with one GET, and
+  `--output=../../x` wrote outside the repositories directory entirely.
+
+  The mark is on the value rather than a check inside each function because the rule has to hold
+  for the *next* caller too, and because it is greppable: every value in this module that is not
+  a literal carries it, so a new one that does not is visible in review. The refusal is the whole
+  rule — `--end-of-options` would close the same hole, but only on the subcommands that parse it,
+  and there is no position in any git command line where a leading dash is a legitimate rev, ref
+  or path.
 
   Options: `:env` adds variables to the child's environment, and `:stderr` set to `:separate`
   keeps stderr out of the returned output — a hook's messages arrive there, and a caller that
@@ -449,14 +483,33 @@ defmodule Forge.Git do
   the server log on every render — eleven times for two chats in production. It is written to a
   file of its own now and read back.
   """
-  @spec run(String.t(), [String.t()], keyword()) ::
-          {:ok, String.t()} | {:error, {integer(), String.t()}}
+  @spec run(String.t(), [arg()], keyword()) ::
+          {:ok, String.t()} | {:error, {integer(), String.t()} | {:not_a_rev, String.t()}}
   def run(dir, args, opts \\ []) do
     env = [{"GIT_TERMINAL_PROMPT", "0"} | Keyword.get(opts, :env, [])]
 
-    case cmd(dir, args, env, Keyword.get(opts, :stderr)) do
-      {out, 0, _err} -> {:ok, out}
-      {out, code, err} -> {:error, {code, out <> err}}
+    with {:ok, argv} <- argv(args) do
+      case cmd(dir, argv, env, Keyword.get(opts, :stderr)) do
+        {out, 0, _err} -> {:ok, out}
+        {out, code, err} -> {:error, {code, out <> err}}
+      end
+    end
+  end
+
+  defp argv(args) do
+    Enum.reduce_while(args, {:ok, []}, fn arg, {:ok, acc} ->
+      case arg do
+        {:data, "-" <> _rest = value} -> {:halt, {:error, {:not_a_rev, value}}}
+        {:data, value} when is_binary(value) -> {:cont, {:ok, [value | acc]}}
+        # A `{:data, …}` that is not a binary is the same mistake one line later: git is given
+        # a term it cannot be given, and `System.cmd/3` raises rather than refusing.
+        {:data, value} -> {:halt, {:error, {:not_a_rev, inspect(value)}}}
+        literal when is_binary(literal) -> {:cont, {:ok, [literal | acc]}}
+      end
+    end)
+    |> case do
+      {:ok, reversed} -> {:ok, Enum.reverse(reversed)}
+      {:error, reason} -> {:error, reason}
     end
   end
 

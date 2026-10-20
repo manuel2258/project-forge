@@ -1299,7 +1299,10 @@ reload.
   somebody goes looking; reopening one already read draws it from what the page holds rather than
   asking git again. It is **plain identifier text** — mono, no colour, no icons — the way the
   rest of the product draws a path, and a folder is told from a file by the `▸` it carries and
-  nothing else.
+  nothing else. **One file is open at a time**: opening another replaces it, opening the open one
+  closes it. The page therefore holds directory *names* and exactly one file's content, which
+  the 512 KB bound below then bounds in full — the alternative was a reader's whole afternoon of
+  opened files sitting in the socket's own process.
 
 **A file opens in place, as plain text, and only when it is small enough.** Its size is asked of
 git before its content ever is, so a file at or over **512 KB** says so instead and is never
@@ -1307,9 +1310,19 @@ partially loaded. A **binary** file is listed by name and its content is never r
 garbled, not previewed, not offered as a download. Neither limit is a failure the page reports:
 both are the row saying what the file is.
 
+**Binary here means `ForgeCore.Document.text?/1`** — valid UTF-8 with no NUL, over the whole
+file — and not git's own "a NUL in the first 8000 bytes". git's rule is right for git's output
+path and wrong for this one: what the page draws goes out as JSON over the socket, so a latin-1
+source file with no NUL in it at all was drawn garbled, and one whose invalid byte reached the
+rendered HTML made the socket's serializer raise and took every LiveView on that connection
+down. The product already wrote this rule down, for this reason, where a document is read and
+where one is served.
+
 **No syntax colouring, by language or by anything else.** Settled on this ticket by the person who
-answered it, and consistent with § Colour: colour in this product carries one of three meanings,
-and none of them is "this word is a keyword".
+answered it, and consistent with § Colour, whose every entry assigns a hue to something about
+the *work* — a wait, a link or a decision, a job's state, an outcome, an artifact's type — and
+to nothing about the text it draws. "This word is a keyword" is not a meaning colour carries
+here, and giving it one would spend the only scarce thing § Colour has.
 
 **Opening a commit is its own page**, `/projects/:name/repo/commits/:sha`: the commit's identifier
 line, then the files it changed and the patch in each, drawn by `ForgeWeb.Diff.section/1` — the
@@ -1319,15 +1332,28 @@ empty tree, so the first commit in a repository opens like any other. Two arbitr
 not diffed against each other; only a commit's own change. The back link carries the branch and
 the page it was opened from, so returning lands where the reader was rather than at the top.
 
-**No branch is created, moved or deleted here, and no commit is made.** Every read is
-`for-each-ref`, `log`, `ls-tree`, `cat-file` or `rev-parse` against the bare repository: no
-worktree, no checkout, no ref touched. The one byte that is written is the empty tree, which
-`Forge.Git.empty_tree/1` writes the first time a root commit's page reads a diff against it —
+**No branch is created, moved or deleted here, and no commit is made.** The reads are
+`for-each-ref`, `log`, `rev-parse`, `ls-tree`, `cat-file` and `show` on the branch page, and
+`log`, `rev-parse` and `diff` on a commit's: no worktree, no checkout, no ref touched. The one
+object that is written is the empty tree, which `Forge.Git.empty_tree/1` writes with
+`hash-object -w` the first time a root commit's page reads a diff against it —
 the same idempotent zero-byte object a root commit is made of, naming no ref and changing nothing
-anybody can observe.
-A path or a branch name from the address is resolved by git against its own trees and refs, never
-against the filesystem, so `..` in either does not escape anything: it matches nothing and the
-page reads it as not found, like any other typo.
+anybody can observe. The test that holds this records the repository *directory* and not its
+refs, because the first version of this page could write a file into it while every ref stayed
+exactly where it was.
+
+A path or a branch name from the address is resolved by git against its own trees and refs,
+never against the filesystem, so `..` in either does not escape anything: it matches nothing and
+the page reads it as not found, like any other typo. **That is true of a path and a branch and
+was not true of the sha**, which is the harder half of the same question: git reads any argument
+beginning with `-` as an option wherever it sits, and `log --output=<file>` writes a file, so
+`/projects/:name/repo/commits/--output=config` truncated the project's own `HEAD` with one GET
+and `--output=../../x` wrote outside the repositories directory. Two guards answer it now. The
+general one is `Forge.Git.run/3`, which refuses a value the caller was handed when it begins
+with a dash — marked `{:data, value}` at every site in `Forge.Git` that passes one, so the next
+caller inherits the rule rather than the hole. The particular one is this page: the address
+names a commit, so only a hex object name is read out of it, and anything else is the ordinary
+miss before git is reached at all.
 
 ## Not built yet
 

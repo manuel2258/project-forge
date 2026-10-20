@@ -173,6 +173,20 @@ defmodule ForgeCore.Workflow.CommandsTest do
       map = put_in(base_map(), ["commands", "build", "produces"], "../log")
       assert [{"commands.build.produces", "artifact name must be" <> _}] = messages(map)
     end
+
+    # A presentation's artifact name has no marker in it, so a command's log can collide with one
+    # under a name neither declaration shows. The collision is checked from the presentation's
+    # side alone, which is why it is found whichever of the two is declared.
+    test "a log may not share its name with a presentation" do
+      map =
+        base_map()
+        |> put_in(["states", "implementing", "produces"], ["implementation.md", "build.log!"])
+
+      assert messages(map) == [
+               {"states.implementing.produces[1]",
+                "\"build.log\" is also produced by command \"build\""}
+             ]
+    end
   end
 
   # `produces: [package.log, package/*]`: at most one log, any number of groups of files.

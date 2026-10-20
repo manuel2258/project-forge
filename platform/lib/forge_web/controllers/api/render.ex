@@ -195,6 +195,7 @@ defmodule ForgeWeb.Api.Render do
       merged: Forge.Merge.merged?(ticket),
       diff: diff(repo, ticket.base_commit, head),
       documents: review_documents(ticket),
+      presentations: review_presentations(ticket),
       answers: review_answers(ticket),
       cost_usd: Decimal.to_string(ticket.cost_usd)
     }
@@ -217,6 +218,18 @@ defmodule ForgeWeb.Api.Render do
   defp review_documents(%Ticket{} = ticket) do
     for artifact <- Forge.Artifacts.list(ticket.id),
         artifact.kind == :document,
+        version = Forge.Artifacts.latest(ticket.id, artifact.name),
+        version != nil do
+      %{name: artifact.name, version: version.version, content: version.content}
+    end
+  end
+
+  # Separate from the documents, because the kind is the whole difference: a presentation is
+  # nothing's input and carries no approval, and a client that was handed one in `documents`
+  # would have no way to tell. Content as written; the inline quoting is the page's rendering.
+  defp review_presentations(%Ticket{} = ticket) do
+    for artifact <- Forge.Artifacts.list(ticket.id),
+        artifact.kind == :presentation,
         version = Forge.Artifacts.latest(ticket.id, artifact.name),
         version != nil do
       %{name: artifact.name, version: version.version, content: version.content}

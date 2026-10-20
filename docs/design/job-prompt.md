@@ -471,3 +471,18 @@ Only the group's directory is declared, as a directory: a *file* straight in `ou
 `package` is kept out of `undeclared` like the directory would be, and reported instead under the
 group, `package/*`, as "must be a directory, not a file". A directory under `out/` that is not a
 declared group is undeclared.
+
+## Presentations
+
+A state producing `presentation.md!` is told, in its manifest's outputs, to write
+`$FORGE_JOB/out/presentation.md` — the real path, with the marker gone, because the marker is the
+declaration and never part of the filename (`workflow-grammar-v1.md` § Semantics). The line says
+what the entry is: a presentation, shown on the ticket's merge page and read by no later job, so
+there is nothing for it to be a contract with. It carries the outcome when it is the first
+document the state produces, and the line says that too, the same way any other document's does.
+
+The manifest also gives it the one convention the page depends on: a file and a line or line
+range quoted in backticks — `` `lib/scores.ex:42` `` or `` `lib/scores.ex:42-58` `` — has that
+source drawn beneath the paragraph that quoted it, from the changeset's own commit
+(`ui.md` § Changes). It is prose either way; the convention buys the reader the lines without
+leaving the page, and an agent that quotes nothing loses nothing.

@@ -1876,9 +1876,17 @@ defmodule Forge.Jobs do
 
   defp put_proposals(multi, _job, %Result{}), do: multi
 
+  # A document arrives under the name on disk whether its state declared it `deck.md` or
+  # `deck.md!`; the state's declaration is what says which kind it is recorded under, and the
+  # presentation kind is what every surface reads to draw it `VIEW ONLY` with no approval slot
+  # (`docs/design/workflow-grammar-v1.md` § Semantics).
   defp put_documents(multi, ticket, job, %Result{documents: documents}) do
+    presentations = job |> spec() |> Spec.presentation_outputs() |> MapSet.new()
+
     Enum.reduce(documents, multi, fn {name, document}, multi ->
-      Artifacts.put_version(multi, {:doc, name}, ticket.id, name, :document, {:job, job.id}, %{
+      kind = if MapSet.member?(presentations, name), do: :presentation, else: :document
+
+      Artifacts.put_version(multi, {:doc, name}, ticket.id, name, kind, {:job, job.id}, %{
         content: document.raw
       })
     end)

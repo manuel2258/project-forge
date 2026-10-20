@@ -26,6 +26,15 @@ states:
     outcomes: [done, issues_found]
     budget: { turns: 120, cost: 15.00 }
 
+  # A presentation (`produces: [presentation.md!]`): prose for the person deciding, drawn above
+  # the diff on the review page with the source it quotes inline, read by no later state and
+  # approved by nobody (`docs/design/workflow-grammar-v1.md` § Semantics).
+  presenting:
+    prompt: agents/present.md
+    env: default
+    produces: [presentation.md!]
+    budget: { turns: 40, cost: 3.00 }
+
   merged:
     on_enter: merge
     on_conflict: integrating

@@ -201,6 +201,26 @@ defmodule ForgeWorker.Job.DirTest do
     assert %{documents: %{}, invalid: %{"plan.md" => [_]}} = Dir.collect(job_dir, spec)
   end
 
+  # A presentation is declared `deck.md!` and written as `out/deck.md`. The worker knows nothing
+  # of the marker: `Spec.document_outputs/1` hands it the name on disk, so the file is read,
+  # parsed and its outcome taken exactly as any document's. Were the marker to reach here the job
+  # would end `error` reporting `deck.md!` missing and `deck.md` undeclared, with the file written.
+  test "collect/2 reads a presentation as the document it is", %{root: root, spec: spec} do
+    spec = %{spec | produces: ["deck.md!", "changeset"]}
+    job_dir = Dir.prepare(root, spec)
+
+    assert %{documents: %{}, missing: ["deck.md"], undeclared: []} = Dir.collect(job_dir, spec)
+
+    File.write!(Path.join([job_dir, "out", "deck.md"]), "---\noutcome: done\n---\n# Deck\n")
+
+    assert %{
+             documents: %{"deck.md" => %ForgeCore.Document{outcome: "done"}},
+             invalid: %{},
+             missing: [],
+             undeclared: []
+           } = Dir.collect(job_dir, spec)
+  end
+
   describe "sweep/2" do
     @tag :tmp_dir
     test "removes what nothing has touched, and keeps what something has", %{tmp_dir: tmp_dir} do

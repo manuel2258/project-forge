@@ -223,5 +223,4 @@ run rebuilds from the branch and the manifest.
 
 `parent_job_id` and `spec.permitted_children` carry subagents. `worker_id` carried the
 worker tier, which has since arrived. `role` was to carry multi-user; it was dropped for
-`node_admin` and `project_members` when multi-user arrived. `artifact.kind = presentation` exists
-but nothing renders it yet.
+`node_admin` and `project_members` when multi-user arrived.

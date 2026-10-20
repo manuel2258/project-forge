@@ -44,6 +44,31 @@ defmodule ForgeCore.Job.SpecTest do
     assert Spec.outcome_document(%{spec() | produces: ["changeset"]}) == nil
   end
 
+  # The one place the `!` is taken off. The worker finds the file at `out/deck.md`, keys it under
+  # that name, and reports it missing or invalid under it; the platform looks the same name up to
+  # decide the kind. A spec that handed any of them `"deck.md!"` would collect nothing, report
+  # the presentation missing, and end the job `error` with the file sitting right there.
+  test "a presentation is a document output under the name on disk" do
+    spec = %{spec() | produces: ["deck.md!", "changeset"]}
+
+    assert Spec.document_outputs(spec) == ["deck.md"]
+    assert Spec.outcome_document(spec) == "deck.md"
+    assert Spec.presentation_outputs(spec) == ["deck.md"]
+    assert Spec.group_outputs(spec) == []
+  end
+
+  test "an ordinary document is not a presentation" do
+    spec = %{spec() | produces: ["plan.md", "shots/*", "deck.md!", "changeset"]}
+
+    assert Spec.presentation_outputs(spec) == ["deck.md"]
+    assert Spec.document_outputs(spec) == ["plan.md", "deck.md"]
+    assert Spec.outcome_document(spec) == "plan.md"
+    assert Spec.presentation_outputs(spec()) == []
+
+    command = %Spec{job_id: "c", branch: "b", kind: :command, command: %{"outputs" => ["pkg/*"]}}
+    assert Spec.presentation_outputs(command) == []
+  end
+
   # A conversation's spec is the one the round-trip tests above never build: no ticket, no state,
   # no budget, and a `kind` that has to survive the wire. The fixture has all three, so every
   # nil-handling clause in `from_map/1` was unexercised.

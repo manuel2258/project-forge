@@ -239,6 +239,33 @@ defmodule ForgeCore.Workflow do
   @spec group_name(artifact_name()) :: String.t()
   def group_name(name), do: String.replace_suffix(name, "/*", "")
 
+  @doc """
+  Whether a `produces` entry is a presentation, `name!` (`docs/design/workflow-grammar-v1.md`
+  § Semantics): a document in everything but the kind it is recorded under, written for the person
+  deciding whether to merge and read by no later job.
+  """
+  @spec presentation?(artifact_name()) :: boolean()
+  def presentation?(name), do: is_binary(name) and String.ends_with?(name, "!")
+
+  @doc "The artifact a presentation is recorded under: the declaration less its `!`."
+  @spec presentation_name(artifact_name()) :: String.t()
+  def presentation_name(name), do: String.replace_suffix(name, "!", "")
+
+  @doc """
+  The artifact `name` really names, whichever marker a `produces` or `inputs` entry carries.
+
+  For callers that hold an entry without knowing which kind it is. A caller that already knows it
+  has a group calls `group_name/1`, which says so at the call site.
+  """
+  @spec produced_name(artifact_name()) :: String.t()
+  def produced_name(name) do
+    cond do
+      group?(name) -> group_name(name)
+      presentation?(name) -> presentation_name(name)
+      true -> name
+    end
+  end
+
   @doc "The artifact a file of a group is kept as: `package/app.tar.gz`."
   @spec member(String.t(), String.t()) :: artifact_name()
   def member(group, file), do: group <> "/" <> file

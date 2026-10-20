@@ -586,6 +586,15 @@ What the branch holds against its base, bounded per § Semantics that must not b
 - The review page stays: it is where *what it was built from* and *questions answered* sit beside
   the diff, and the queue's review items link there. Changes links to it when the ticket has a
   changeset.
+- **The ticket's presentations come first on the review page**, above the diff and the facts rail
+  and open rather than collapsed: a presentation is the reasoning the patch cannot carry, written
+  to be read before it. Each is drawn dashed and `VIEW ONLY` with no approval slot, as the kind is
+  everywhere (§ Semantics that must not be lost). Where a paragraph quotes `` `path:line` `` or
+  `` `path:start-end` `` in backticks, the matching source from the changeset's head commit is
+  drawn directly beneath that paragraph, so the operator reads the lines the prose is about without
+  going into the diff for them. A path or a range that does not resolve at that commit degrades to
+  a small muted note naming what was asked for; it never fails the page. A ticket with no
+  presentation reviews exactly as it did before: the section is absent, not empty.
 
 ### Docs
 

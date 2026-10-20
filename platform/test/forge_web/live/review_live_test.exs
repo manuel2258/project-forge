@@ -149,6 +149,111 @@ defmodule ForgeWeb.ReviewLiveTest do
     assert mounted =~ ~s(phx-mounted="[[&quot;ignore_attrs&quot;)
   end
 
+  # `docs/design/ui.md` § Changes: a presentation is the reasoning the patch cannot carry, so it is
+  # drawn before the diff, open, dashed and `view only`, and never with an approval slot.
+  test "a presentation is shown before the diff, view only", context do
+    %{conn: conn, project: project, ticket: ticket} = context
+    sha = commit_on_branch(context, "score.ex", "def persist, do: :ok")
+    changeset!(ticket, sha)
+    present!(ticket, "---\noutcome: done\n---\nI moved the table into the database.\n")
+
+    {:ok, view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+
+    assert html =~ "Presented"
+    assert has_element?(view, ~s([id="review-presentation-presentation.md"] .doc))
+    assert render(view) =~ "I moved the table into the database."
+
+    row = view |> element(~s([id="review-presentation-presentation.md"])) |> render()
+    assert row =~ "view only"
+    assert row =~ "border-dashed"
+    refute row =~ "approved"
+
+    # It is not one of the documents the change was built from: those are a contract between
+    # states, and this is consumed by nobody.
+    refute has_element?(view, ~s([id="review-doc-presentation.md"]))
+  end
+
+  test "a ticket with no presentation reviews as it did before", context do
+    %{conn: conn, project: project, ticket: ticket} = context
+    sha = commit_on_branch(context, "score.ex", "def persist, do: :ok")
+    changeset!(ticket, sha)
+
+    {:ok, view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+
+    refute html =~ "Presented"
+    refute has_element?(view, ~s([id="review-presentations"]))
+  end
+
+  # The whole of what the quoting convention buys: the lines the prose is about, from the
+  # changeset's own commit, beneath the paragraph that named them — not a link into the diff.
+  test "a quoted line range draws those exact lines from the changeset", context do
+    %{conn: conn, project: project, ticket: ticket} = context
+    sha = commit_on_branch(context, "score.ex", "one\ntwo\nthree\nfour\nfive\n")
+    changeset!(ticket, sha)
+    present!(ticket, "The interesting part is `score.ex:2-3`, which is new.\n")
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+
+    quoted = view |> element(~s([id="review-presentation-presentation.md"] pre)) |> render()
+    assert quoted =~ "two\nthree"
+    refute quoted =~ "one"
+    refute quoted =~ "four"
+    assert render(view) =~ "score.ex:2-3"
+  end
+
+  test "a single quoted line draws that line alone", context do
+    %{conn: conn, project: project, ticket: ticket} = context
+    sha = commit_on_branch(context, "score.ex", "one\ntwo\nthree\n")
+    changeset!(ticket, sha)
+    present!(ticket, "Look at `score.ex:3`.\n")
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+
+    quoted = view |> element(~s([id="review-presentation-presentation.md"] pre)) |> render()
+    assert quoted =~ "three"
+    refute quoted =~ "two"
+  end
+
+  # The prose is an agent's and unbounded, so every way a quote can fail to resolve is a note on
+  # the page. A raise here would take down the surface merges are approved on.
+  test "a quote that does not resolve degrades to a note", context do
+    %{conn: conn, project: project, ticket: ticket} = context
+    sha = commit_on_branch(context, "score.ex", "one\ntwo\n")
+    changeset!(ticket, sha)
+
+    present!(ticket, """
+    Gone: `missing.ex:1`.
+
+    Past the end: `score.ex:9`.
+
+    Backwards: `score.ex:3-1`.
+
+    Far too much: `score.ex:1-400`.
+    """)
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+    html = render(view)
+
+    assert html =~ "missing.ex:1 is not in this changeset&#39;s commit"
+    assert html =~ "score.ex:9 is not in this changeset&#39;s commit"
+    assert html =~ "score.ex:3-1 is not in this changeset&#39;s commit"
+    assert html =~ "score.ex:1-400 is more than 60 lines"
+    refute has_element?(view, ~s([id="review-presentation-presentation.md"] pre))
+  end
+
+  # The section sits above the diff, so it is drawn on a ticket that has no changeset at all —
+  # there is then no commit to resolve a quote against, and that is a note like any other.
+  test "a presentation is shown, and its quotes noted, with no changeset yet", context do
+    %{conn: conn, project: project, ticket: ticket} = context
+    present!(ticket, "Before any of it: `score.ex:1`.\n")
+
+    {:ok, view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+
+    assert html =~ "No job has produced a changeset"
+    assert render(view) =~ "Before any of it"
+    assert render(view) =~ "score.ex:1 is not in this changeset&#39;s commit"
+  end
+
   test "the queue links to it only for an approval that pins the changeset", context do
     %{conn: conn, ticket: ticket} = context
     sha = commit_on_branch(context, "score.ex", "def persist, do: :ok")
@@ -179,10 +284,48 @@ defmodule ForgeWeb.ReviewLiveTest do
     assert body["diff"]["patch"] =~ "def persist"
   end
 
+  # Separately from the documents, because the kind is the whole difference: a client handed one
+  # in `documents` could not tell that nothing consumes it and nothing approves it.
+  test "the API serves presentations apart from the documents", context do
+    %{project: project, ticket: ticket} = context
+    sha = commit_on_branch(context, "score.ex", "def persist, do: :ok")
+    changeset!(ticket, sha)
+    present!(ticket, "What I did.\n")
+
+    {:ok, _version} =
+      Artifacts.record_version(ticket.id, "report.md", :document, :system, %{
+        content: "# Report\n"
+      })
+
+    token = Forge.Accounts.create_api_token(context.scope.user, "test")
+
+    body =
+      build_conn()
+      |> put_req_header("authorization", "Bearer " <> token)
+      |> get(~p"/api/v1/tickets/#{project.name}/#{ticket.number}/review")
+      |> json_response(200)
+
+    assert [%{"name" => "presentation.md", "version" => 1, "content" => "What I did.\n"}] =
+             body["presentations"]
+
+    names = Enum.map(body["documents"], & &1["name"])
+    assert "report.md" in names
+    refute "presentation.md" in names
+  end
+
   # -- helpers ---------------------------------------------------------------------------------
 
   defp commit_on_branch(%{project: project, ticket: ticket}, path, content) do
     commit_over_http(project, ticket.branch, path, content)
+  end
+
+  defp present!(ticket, content) do
+    {:ok, version} =
+      Artifacts.record_version(ticket.id, "presentation.md", :presentation, :system, %{
+        content: content
+      })
+
+    version
   end
 
   # An operator's decision on one document version, as `Forge.Engine` records one.

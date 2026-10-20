@@ -515,6 +515,11 @@ defmodule ForgeCore.Prompt do
         not Workflow.document?(name) ->
           "- `#{name}`: the diff of your commits on `#{spec.branch}`; no file to write"
 
+        # Before the two branches below, because `name` here still carries its `!` and so can
+        # never equal `outcome_document`, which is already the name on disk.
+        Workflow.presentation?(name) ->
+          presentation(name, job_dir, outcome_document)
+
         name == outcome_document ->
           "- `#{name}` -> `#{Path.join([job_dir, "out", name])}` (carries the outcome)"
 
@@ -522,6 +527,20 @@ defmodule ForgeCore.Prompt do
           "- `#{name}` -> `#{Path.join([job_dir, "out", name])}`"
       end
     end)
+  end
+
+  # What a `name!` entry is, in the manifest's own terms (`docs/design/job-prompt.md`
+  # § Presentations): the real path, that nothing downstream reads it, and the one convention the
+  # review page needs from the prose.
+  defp presentation(name, job_dir, outcome_document) do
+    real = Workflow.presentation_name(name)
+    carries = if real == outcome_document, do: " (carries the outcome)", else: ""
+
+    "- `#{real}` -> `#{Path.join([job_dir, "out", real])}`#{carries}: a presentation. " <>
+      "Write what you would say to the person deciding whether to merge; it is shown on " <>
+      "the ticket's merge page and read by no later job. Quote a file and line range in " <>
+      "backticks — `path:42` or `path:42-58` — and those lines are drawn beneath the " <>
+      "paragraph that quotes them."
   end
 
   # Named, never valued: the values are in the environment and nowhere in this prompt. What it asks

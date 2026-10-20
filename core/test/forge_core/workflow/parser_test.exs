@@ -308,16 +308,15 @@ defmodule ForgeCore.Workflow.ParserTest do
     test "a human state writes documents, never the changeset", %{map: map} do
       map = put_in(map, ["states", "review_ready", "produces"], ["changeset"])
       groups = put_in(map, ["states", "review_ready", "produces"], ["shots/*"])
+      # A presentation is a document in every respect but its kind, so nothing else here refuses
+      # it on a human state — and nothing would ever write it, since `Forge.Operator` records
+      # what a person writes as a document whatever the state declared.
+      deck = put_in(map, ["states", "review_ready", "produces"], ["deck.md!"])
+      refusal = "a human state writes documents, not changeset, groups of files or presentations"
 
-      assert messages(groups) == [
-               {"states.review_ready.produces",
-                "a human state writes documents, not changeset or groups of files"}
-             ]
-
-      assert messages(map) == [
-               {"states.review_ready.produces",
-                "a human state writes documents, not changeset or groups of files"}
-             ]
+      for bad <- [map, groups, deck] do
+        assert messages(bad) == [{"states.review_ready.produces", refusal}]
+      end
     end
 
     test "inputs must be ticket or produced somewhere", %{map: map} do
@@ -387,6 +386,90 @@ defmodule ForgeCore.Workflow.ParserTest do
                {"states.implementing.inputs[1]", "a group of files is not an input yet"},
                {"transitions[6].approve[1]", "a group of files cannot be approved"}
              ]
+    end
+
+    # `docs/design/workflow-grammar-v1.md` § Semantics: `name!` is a presentation.
+    test "a presentation is produced under the name less its marker", %{map: map} do
+      map = put_in(map, ["states", "verifying", "produces"], ["report.md", "deck.md!"])
+
+      assert {:ok, workflow} = Parser.from_map(map)
+      assert workflow.states["verifying"].produces == ["report.md", "deck.md!"]
+      assert Workflow.producers(workflow, "deck.md!") == ["verifying"]
+      assert Workflow.presentation?("deck.md!")
+      assert Workflow.presentation_name("deck.md!") == "deck.md"
+    end
+
+    # A presentation whose state produces nothing else carries the outcome, like any first
+    # document — under the name on disk, which is what the worker writes and the engine reads.
+    test "a presentation alone carries its job's outcome", %{map: map} do
+      map = put_in(map, ["states", "verifying", "produces"], ["deck.md!"])
+
+      assert {:ok, workflow} = Parser.from_map(map)
+      assert State.outcome_document(workflow.states["verifying"]) == "deck.md"
+    end
+
+    test "a presentation is never an input and never approved", %{map: map} do
+      map =
+        map
+        |> put_in(["states", "planning", "produces"], ["plan.md", "deck.md!"])
+        |> put_in(["states", "review_ready", "produces"], [])
+        |> update_in(["transitions"], fn transitions ->
+          List.update_at(transitions, 6, &Map.put(&1, "approve", ["changeset", "deck.md"]))
+        end)
+        |> put_in(["states", "implementing", "inputs"], ["plan.md", "deck.md"])
+
+      assert messages(map) == [
+               {"states.implementing.inputs[1]",
+                "\"deck.md\" is a presentation and cannot be an input"},
+               {"transitions[6].approve[1]", "a presentation carries no approval"}
+             ]
+    end
+
+    # Marker and all: an entry that keeps its `!` finds its producer by name, so without a branch
+    # of its own it reads as an ordinary, perfectly valid input or approval.
+    test "a presentation is refused as an input or approval under its declared name", %{map: map} do
+      map =
+        map
+        |> put_in(["states", "planning", "produces"], ["plan.md", "deck.md!"])
+        |> put_in(["states", "review_ready", "produces"], [])
+        |> update_in(["transitions"], fn transitions ->
+          List.update_at(transitions, 6, &Map.put(&1, "approve", ["changeset", "deck.md!"]))
+        end)
+        |> put_in(["states", "implementing", "inputs"], ["plan.md", "deck.md!"])
+
+      assert messages(map) == [
+               {"states.implementing.inputs[1]",
+                "\"deck.md\" is a presentation and cannot be an input"},
+               {"transitions[6].approve[1]", "a presentation carries no approval"}
+             ]
+    end
+
+    test "a presentation is one state's, under a name nothing else produces or keeps", %{map: map} do
+      map =
+        map
+        |> put_in(["states", "verifying", "produces"], ["report.md", "deck.md!"])
+        |> put_in(
+          ["states", "planning", "produces"],
+          ["plan.md", "deck.md!", "report.md!", "proposals!"]
+        )
+
+      assert messages(map) == [
+               {"states.planning.produces[1]",
+                "\"deck.md!\" is produced by more than one state: planning, verifying"},
+               {"states.planning.produces[2]", "\"report.md\" is also produced as a document"},
+               {"states.planning.produces[3]", "\"proposals\" is reserved for ticket proposals"},
+               {"states.verifying.produces[1]",
+                "\"deck.md!\" is produced by more than one state: planning, verifying"}
+             ]
+    end
+
+    test "a presentation is named as an artifact is", %{map: map} do
+      map = put_in(map, ["states", "verifying", "produces"], ["report.md", "../up!"])
+
+      assert {"states.verifying",
+              "artifact name \"../up\" must be a single path segment: " <> Workflow.name_rule()} in messages(
+               map
+             )
     end
 
     test "a group is named as an artifact is", %{map: map} do

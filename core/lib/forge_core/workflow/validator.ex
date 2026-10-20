@@ -43,7 +43,7 @@ defmodule ForgeCore.Workflow.Validator do
 
       artifact_errors =
         (state.inputs ++ state.produces)
-        |> Enum.map(&Workflow.group_name/1)
+        |> Enum.map(&Workflow.produced_name/1)
         |> Enum.reject(&valid_name?/1)
         |> Enum.uniq()
         |> Enum.map(
@@ -125,11 +125,12 @@ defmodule ForgeCore.Workflow.Validator do
   # a state (`docs/design/workflow-grammar-v1.md` § Semantics).
   defp state_shape(path, %State{prompt: nil} = human) do
     changeset =
-      if Enum.any?(human.produces, &(not Workflow.document?(&1))),
+      if Enum.any?(human.produces, &(not Workflow.document?(&1) or Workflow.presentation?(&1))),
         do: [
           Error.new(
             Error.join(path, "produces"),
-            "a human state writes documents, not #{Workflow.changeset_artifact()} or groups of files"
+            "a human state writes documents, not #{Workflow.changeset_artifact()}, " <>
+              "groups of files or presentations"
           )
         ],
         else: []
@@ -349,12 +350,25 @@ defmodule ForgeCore.Workflow.Validator do
     end)
   end
 
+  # Whether `name` is a presentation, either way round: the entry carries the marker, or it names
+  # the artifact a presentation elsewhere in the workflow is recorded under. Without the first,
+  # `inputs: [deck.md!]` and `approve: [deck.md!]` would both find their producer by name and read
+  # as perfectly ordinary ones.
+  defp presents?(workflow, name),
+    do: Workflow.presentation?(name) or Workflow.producers(workflow, name <> "!") != []
+
   defp input_error(workflow, producers_before, path, name, index) do
     producers = Workflow.producers(workflow, name)
 
     cond do
       Workflow.group?(name) ->
         Error.new(Error.join(path, index), "a group of files is not an input yet")
+
+      presents?(workflow, name) ->
+        Error.new(
+          Error.join(path, index),
+          "#{inspect(Workflow.produced_name(name))} is a presentation and cannot be an input"
+        )
 
       name == Workflow.answers_artifact() ->
         Error.new(Error.join(path, index), "answers.md is platform-managed and never declared")
@@ -403,6 +417,9 @@ defmodule ForgeCore.Workflow.Validator do
       Workflow.group?(name) ->
         group_error(workflow, Error.join(path, index), name, producers)
 
+      Workflow.presentation?(name) ->
+        presentation_error(workflow, Error.join(path, index), name, producers)
+
       name in [Workflow.ticket_artifact(), Workflow.answers_artifact()] ->
         Error.new(Error.join(path, index), "#{inspect(name)} is reserved and cannot be produced")
 
@@ -444,6 +461,35 @@ defmodule ForgeCore.Workflow.Validator do
 
       command_producing(workflow, group) != [] ->
         Error.new(path, "#{inspect(group)} is also produced by a command")
+
+      true ->
+        nil
+    end
+  end
+
+  # A presentation is one artifact under one kind, so the name it is recorded under may not also be
+  # something's document — a state's or a command's log — and it is one job state's
+  # (`docs/design/workflow-grammar-v1.md` § Validation). Both collisions are checked from here and
+  # only from here: the pass sees the whole workflow, so the order the two were declared in makes
+  # no difference to the answer.
+  defp presentation_error(workflow, path, declared, producers) do
+    name = Workflow.presentation_name(declared)
+
+    cond do
+      reserved = Workflow.document_name_error(name) ->
+        Error.new(path, reserved)
+
+      Workflow.producers(workflow, name) != [] ->
+        Error.new(path, "#{inspect(name)} is also produced as a document")
+
+      command = Workflow.log_producer(workflow, name) ->
+        Error.new(path, "#{inspect(name)} is also produced by command #{inspect(command)}")
+
+      length(producers) > 1 ->
+        Error.new(
+          path,
+          "#{inspect(declared)} is produced by more than one state: #{Enum.join(Enum.sort(producers), ", ")}"
+        )
 
       true ->
         nil
@@ -761,6 +807,9 @@ defmodule ForgeCore.Workflow.Validator do
       cond do
         Workflow.group?(artifact) ->
           [Error.new(at, "a group of files cannot be approved")]
+
+        presents?(workflow, artifact) ->
+          [Error.new(at, "a presentation carries no approval")]
 
         Enum.any?(Workflow.producers(workflow, artifact), &MapSet.member?(allowed, &1)) ->
           []

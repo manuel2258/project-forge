@@ -98,6 +98,10 @@ defmodule ForgeWeb.JobLive do
   def handle_event("notices", params, socket),
     do: JobStream.handle_event("notices", params, socket)
 
+  # Each `produces` entry as the declaration says it, beside the name the artifact is recorded
+  # under: `{"deck.md!", "deck.md"}`, `{"shots/*", "shots"}`, `{"plan.md", "plan.md"}`.
+  defp declared(spec), do: Enum.map(spec.produces, &{&1, ForgeCore.Workflow.produced_name(&1)})
+
   # Why there is no log to link, which is three different things.
   defp no_log(command, job) do
     cond do
@@ -368,25 +372,33 @@ defmodule ForgeWeb.JobLive do
                 docs/design/ui.md § Addressable artifact versions. --%>
           <h3 class="mt-6 font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Declares</h3>
           <ul class="mt-3 flex flex-col gap-1 font-mono text-[12.5px]">
+            <%!-- The declaration is drawn as written, marker and all, and looked up by the name
+                  the artifact is really recorded under: a presentation declared `deck.md!`
+                  arrives as `deck.md`, and comparing the raw string would call every one of them
+                  "not written". --%>
             <li
-              :for={name <- @spec.produces}
+              :for={{name, recorded} <- declared(@spec)}
               class={
-                not MapSet.member?(@written_names, name) && not Map.has_key?(@refusals, name) &&
+                not MapSet.member?(@written_names, recorded) &&
+                  not Map.has_key?(@refusals, recorded) &&
                   "opacity-50"
               }
             >
               {name}<span
-                :if={not MapSet.member?(@written_names, name) and not Map.has_key?(@refusals, name)}
+                :if={
+                  not MapSet.member?(@written_names, recorded) and
+                    not Map.has_key?(@refusals, recorded)
+                }
                 class="ml-2 opacity-70"
-              >not written</span><span :if={Map.has_key?(@refusals, name)} class="ml-2 text-error">refused</span>
+              >not written</span><span :if={Map.has_key?(@refusals, recorded)} class="ml-2 text-error">refused</span>
               <%!-- A refused document is not kept, so why is only here: the reason a job ended
                     `error` having written its document (`docs/design/ui.md` § Decide and
                     Timeline). --%>
               <pre
-                :if={Map.has_key?(@refusals, name)}
-                id={"refused-#{name}"}
+                :if={Map.has_key?(@refusals, recorded)}
+                id={"refused-#{recorded}"}
                 class="mt-1 whitespace-pre-wrap break-words font-mono text-[12px]/[1.5] opacity-80"
-              >{@refusals[name]}</pre>
+              >{@refusals[recorded]}</pre>
             </li>
             <li :if={@spec.produces == []} class="opacity-50">nothing</li>
           </ul>

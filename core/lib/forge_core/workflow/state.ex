@@ -102,6 +102,9 @@ defmodule ForgeCore.Workflow.State do
   @doc "The document whose front matter carries the job's outcome, or nil if none."
   @spec outcome_document(t()) :: String.t() | nil
   def outcome_document(%__MODULE__{produces: produces}) do
-    Enum.find(produces, &Workflow.document?/1)
+    case Enum.find(produces, &Workflow.document?/1) do
+      nil -> nil
+      name -> Workflow.produced_name(name)
+    end
   end
 end

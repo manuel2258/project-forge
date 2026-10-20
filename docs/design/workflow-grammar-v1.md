@@ -225,9 +225,10 @@ ticket. A loop is how a later state sends work back with its reasons, so the rea
 readable on the way back round — and absent on the way in.
 
 **Produces** are the artifacts the job must write. `changeset` is reserved and means the diff
-of the job's branch against the ticket's base. A name ending `/*` is a group of files (below).
-Every other name is a document the job writes to the platform's artifact store. A job that
-finishes without producing a document or the changeset it declared has outcome `error`.
+of the job's branch against the ticket's base. A name ending `/*` is a group of files (below),
+and a name ending `!` is a presentation (below). Every other name is a document the job writes to
+the platform's artifact store. A job that finishes without producing a document or the changeset
+it declared has outcome `error`.
 
 **A name ending `/*` is a group of files** — `package/*`, `screenshots/*` — for what is not a
 document: a build to try, a screenshot, anything whose bytes are not text. The job writes any
@@ -240,6 +241,21 @@ job. A group is not a document: it carries no outcome and no questions. **It is 
 and cannot be approved**: nothing on the reading side exists, and the validator says so rather
 than accept a declaration nothing honours. A command produces groups the same way
 (§ Commands).
+
+**A name ending `!` is a presentation** — `presentation.md!`, `deck.md!` — the artifact kind the
+data model has always had and nothing wrote: prose an agent composes for the person deciding
+whether to merge, and for nobody else. The real artifact name is the name with the `!` stripped,
+which is what the job writes to `$FORGE_JOB/out/` and what the version is recorded under; the
+marker stays in `produces` because it is the declaration, not the filename. It is parsed exactly
+as a document is — front matter and all, so it may carry the outcome and may ask questions — and
+differs from one only in the kind it is recorded under, which is what the ticket's surfaces read
+to draw it `VIEW ONLY` with no approval slot (`docs/design/ui.md` § Semantics that must not be
+lost). **It is never an input and cannot be approved**: nothing downstream consumes a
+presentation, by decision, and the validator says so rather than accept a declaration nothing
+honours. **Only a job state may declare one**, because neither other shape fits: a human state
+writes nothing itself, and a command's output is captured stdout, not composed prose. A name may
+not be produced as a document by one state and a presentation by another — it is one artifact
+with one kind.
 
 **Outcomes.** A job ends with exactly one outcome. Engine outcomes always exist and cannot be
 declared: `did_not_converge`, `budget_exhausted`, `error`, `cancelled`. Declared outcomes are
@@ -753,7 +769,8 @@ merges: re-pinning takes the default branch, never the ticket's own.
   `invoke` and `exit` and none of `prompt`, `inputs`, `produces`, `outcomes`, `budget`, `model`,
   `env`, `may_invoke` or `secrets`. A human state has
   none of those but `produces`, and no `invoke` either; `on_enter` and `produces` are the keys it
-  may carry, and what it produces is documents — never `changeset`.
+  may carry, and what it produces is documents — never `changeset`, a group of files or a
+  presentation.
 - `model`, where present, is a non-empty string. Its value is not checked against anything.
 - State and artifact names are single path segments: letters, digits, `.`, `_`, `-`.
 - Every `inputs` entry is `ticket`, a command's log, or produced by a state that can run before the
@@ -784,6 +801,9 @@ is never produced; `answers.md` is platform-managed and never declared.
   name, and the group is produced by exactly one job state or command, never by a human state,
   and never under a name something produces as a document. A group is neither an input nor
   approved.
+- A presentation `name!` names one artifact: `name` is an artifact name, and the presentation is
+  produced by exactly one job state — never by a human state or a command — and never under a
+  name something produces as a document. A presentation is neither an input nor approved.
 - Every `on_enter` entry is a known action (`merge` alone in v1); `on_enter` is absent from every
   job state and every command state; at most one state in a workflow merges; `initial` does not merge; and a workflow that
   merges has a state producing `changeset`.

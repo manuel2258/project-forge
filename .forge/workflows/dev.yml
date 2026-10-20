@@ -39,6 +39,10 @@ states:
     extends: reviewing
     inputs: [refinement.md, plan.md, implementation.md, changeset]
 
+  presenting:
+    extends: presenting
+    inputs: [refinement.md, plan.md, implementation.md, report.md, changeset]
+
   review_ready: {}
 
   merged:
@@ -57,8 +61,9 @@ transitions:
   - { from: implementing, to: planning,     when: plan_invalid }
   - { from: checking,     to: reviewing }
   - { from: checking,     to: implementing, when: checks_failed,     max: 3 }
-  - { from: reviewing,    to: review_ready }
+  - { from: reviewing,    to: presenting }
   - { from: reviewing,    to: implementing, when: issues_found,      max: 3 }
+  - { from: presenting,   to: review_ready }
   - { from: review_ready, to: merged,       approve: [changeset] }
   - { from: integrating,  to: checking }
 
@@ -71,6 +76,8 @@ transitions:
   - { from: implementing, to: implementing, when: did_not_converge,  max: 1 }
   - { from: reviewing,    to: reviewing,    when: budget_exhausted,  max: 1 }
   - { from: reviewing,    to: reviewing,    when: did_not_converge,  max: 1 }
+  - { from: presenting,   to: presenting,   when: budget_exhausted,  max: 1 }
+  - { from: presenting,   to: presenting,   when: did_not_converge,  max: 1 }
 
 limits:
   ticket_cost: 120.00

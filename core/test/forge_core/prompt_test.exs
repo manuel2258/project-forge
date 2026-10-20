@@ -155,6 +155,26 @@ defmodule ForgeCore.PromptTest do
                "- `shots/*` -> any number of files in `/j/out/shots/`, each kept as `shots/<file>`"
     end
 
+    # The marker is the declaration, so the manifest must name the path the agent actually writes
+    # and must not read as an ordinary document: nothing downstream consumes it, and the quoting
+    # convention is the only thing the review page needs from the prose
+    # (`docs/design/job-prompt.md` § Presentations).
+    test "a presentation is named by its real path, and said to be read by no later job" do
+      manifest = Prompt.manifest(%{spec() | produces: ["plan.md", "deck.md!"]}, "/j")
+
+      assert manifest =~ "- `deck.md` -> `/j/out/deck.md`: a presentation."
+      assert manifest =~ "read by no later job"
+      assert manifest =~ "`path:42-58`"
+      refute manifest =~ "deck.md!"
+      refute manifest =~ "- `deck.md` -> `/j/out/deck.md`\n"
+    end
+
+    test "a presentation that is the only document says it carries the outcome" do
+      manifest = Prompt.manifest(%{spec() | produces: ["deck.md!", "changeset"]}, "/j")
+
+      assert manifest =~ "- `deck.md` -> `/j/out/deck.md` (carries the outcome): a presentation."
+    end
+
     test "a job that may not invoke is not told the file exists" do
       manifest = Prompt.manifest(spec(), "/j")
       refute manifest =~ "invoke.json"

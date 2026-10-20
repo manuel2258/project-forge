@@ -16,12 +16,21 @@ defmodule ForgeWeb.ReviewLive do
   import ForgeWeb.Indicators
   import ForgeWeb.Operator.Components
 
-  alias Forge.{Artifacts, Events, Merge, Projects, Tickets}
+  alias Forge.{Artifacts, Events, Git, Merge, Projects, Tickets}
   alias ForgeCore.Workflow
   alias ForgeWeb.{Diff, FileType, Format}
   alias ForgeWeb.Operator.Actions
   alias ForgeWeb.Operator.Board
   alias ForgeWeb.Operator.Drafts
+
+  # A file and a line or range quoted in backticks, which the prose that quotes it has drawn
+  # beneath it (`docs/design/ui.md` § Changes). No colon, backtick or space in the path, because
+  # the colon is the separator and the quote is one token of prose.
+  @quoted ~r/`([^`:\s]+):(\d+)(?:-(\d+))?`/
+
+  # A range longer than this is a file, not a quote: it would push the prose it belongs to off
+  # the screen, which is the one thing this section exists to keep readable.
+  @max_quoted_lines 60
 
   # Beyond this the patch is offered per file instead. A page nobody can read is not a review.
   @impl true
@@ -50,6 +59,7 @@ defmodule ForgeWeb.ReviewLive do
       merged: Merge.merged?(ticket),
       diff: diff(project, ticket, changeset),
       documents: documents(ticket),
+      presentations: presentations(ticket, project, head(changeset)),
       answers: Artifacts.answered(ticket.id),
       pending: ticket.pending_transition,
       approve: approve_pins(project, ticket, changeset),
@@ -82,6 +92,89 @@ defmodule ForgeWeb.ReviewLive do
     end
     |> Enum.sort_by(& &1.version.inserted_at, DateTime)
   end
+
+  defp head(%{blob_uri: "git:" <> head}), do: head
+  defp head(_none), do: nil
+
+  # What an agent wrote for the person deciding, newest material last, drawn before the diff: a
+  # presentation is the reasoning the patch cannot carry (`docs/design/ui.md` § Changes). Loaded by
+  # kind and not by name, for the reason `documents/1` gives: the name is the project's.
+  defp presentations(ticket, project, head) do
+    repo = Projects.repo_path(project)
+
+    for artifact <- Artifacts.list(ticket.id),
+        artifact.kind == :presentation,
+        version = Artifacts.latest(ticket.id, artifact.name),
+        version != nil do
+      %{
+        name: artifact.name,
+        version: version,
+        blocks: blocks(version.content, repo, head)
+      }
+    end
+    |> Enum.sort_by(& &1.version.inserted_at, DateTime)
+  end
+
+  # Paragraphs, each with the source it quotes beneath it. Splitting on blank lines is the whole
+  # of the parsing, and it is meant to be: a quote inside a fenced block or a list item spanning
+  # paragraphs is drawn under the block it sits in rather than beside its own line, which costs
+  # placement and never the page. A bigger parser would buy very little prose this simple.
+  defp blocks(content, repo, head) do
+    content
+    |> ForgeWeb.Markdown.strip_front_matter()
+    |> String.split(~r/\r?\n[ \t]*\r?\n/)
+    |> Enum.reject(&(String.trim(&1) == ""))
+    |> Enum.map(&%{html: ForgeWeb.Markdown.to_html(&1), quotes: quotes(&1, repo, head)})
+  end
+
+  defp quotes(paragraph, repo, head) do
+    @quoted
+    |> Regex.scan(paragraph)
+    |> Enum.uniq()
+    |> Enum.map(&quoted(&1, repo, head))
+  end
+
+  defp quoted([all, path, line], repo, head), do: quoted([all, path, line, line], repo, head)
+
+  defp quoted([_all, path, from, to], repo, head) do
+    from = String.to_integer(from)
+    to = String.to_integer(to)
+    label = if from == to, do: "#{path}:#{from}", else: "#{path}:#{from}-#{to}"
+
+    %{label: label, lines: lines(repo, head, path, from, to)}
+  end
+
+  # The changeset's own commit and no other: a presentation quotes the change it is about
+  # (`docs/design/ui.md` § Changes). Anything that does not resolve there — no changeset yet, a
+  # path that is not in that tree, a range the file does not reach, a range the wrong way round —
+  # is a note and never a raised page, because the prose is an agent's and unbounded.
+  defp lines(_repo, nil, _path, _from, _to), do: :unresolved
+
+  defp lines(repo, head, path, from, to) when from >= 1 and to >= from do
+    if to - from + 1 > @max_quoted_lines do
+      :too_long
+    else
+      case Git.show(repo, head, path) do
+        {:ok, content} -> slice(content, from, to)
+        {:error, _reason} -> :unresolved
+      end
+    end
+  end
+
+  defp lines(_repo, _head, _path, _from, _to), do: :unresolved
+
+  defp slice(content, from, to) do
+    all = String.split(content, ~r/\r?\n/)
+
+    if to <= length(all),
+      do: {:ok, all |> Enum.slice(from - 1, to - from + 1) |> Enum.join("\n")},
+      else: :unresolved
+  end
+
+  defp note(%{label: label, lines: :too_long}),
+    do: "#{label} is more than #{@max_quoted_lines} lines; read it in the diff"
+
+  defp note(%{label: label}), do: "#{label} is not in this changeset's commit"
 
   defp approve_pins(project, ticket, changeset) do
     for name <- Forge.Engine.awaiting_approval(ticket),
@@ -134,6 +227,49 @@ defmodule ForgeWeb.ReviewLive do
         <div class="mt-3">
           <.approval_card ticket={@ticket} pending={@pending} approve={@approve} drafts={@drafts} />
         </div>
+      </section>
+
+      <%!-- Before the diff and outside its columns: a presentation is written to be read first,
+            and it is the one thing on this page that is neither the patch nor a contract between
+            states. Dashed and `view only`, like the kind everywhere else, so it can never be
+            misread as something to approve (`docs/design/ui.md` § Changes). --%>
+      <section :if={@presentations != []} class="mt-6" id="review-presentations">
+        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Presented</h2>
+        <article
+          :for={shown <- @presentations}
+          id={"review-presentation-#{shown.name}"}
+          class="mt-3 min-w-0 rounded-box border border-dashed border-base-300 px-4 py-3"
+        >
+          <header class="flex min-h-[46px] flex-wrap items-center gap-x-3 font-mono text-[12.5px]">
+            <FileType.file_icon artifact={%{name: shown.name, kind: :presentation}} />
+            <span class="min-w-0 break-all">{shown.name}</span>
+            <span class="opacity-60">v{shown.version.version}</span>
+            <span class="tracking-[.14em] uppercase opacity-50">view only</span>
+          </header>
+
+          <div :for={block <- shown.blocks} class="mt-2 min-w-0">
+            <div class="doc">{block.html}</div>
+            <div :for={quoted <- block.quotes} class="mt-2 min-w-0">
+              <div class="font-mono text-[11px] opacity-50">{quoted.label}</div>
+              <pre
+                :if={match?({:ok, _}, quoted.lines)}
+                class="mt-1 overflow-x-auto rounded-box bg-base-200 px-3 py-2 font-mono text-[12px]/[1.5]"
+              >{elem(quoted.lines, 1)}</pre>
+              <p :if={not match?({:ok, _}, quoted.lines)} class="mt-1 text-[12.5px] opacity-60">
+                {note(quoted)}
+              </p>
+            </div>
+          </div>
+
+          <.link
+            href={
+              ~p"/tickets/#{@project.name}/#{@ticket.number}/artifacts/#{shown.name}/#{shown.version.version}"
+            }
+            class="mt-2 flex min-h-[46px] items-center font-mono text-[12.5px] text-primary hover:underline"
+          >
+            source ›
+          </.link>
+        </article>
       </section>
 
       <p :if={is_nil(@changeset)} class="mt-6 text-sm/[1.55] opacity-70">

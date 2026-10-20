@@ -47,6 +47,11 @@ defmodule Forge.Provisioning.Template do
     # never the word `latest` — and it is what the failure counter and the protocol learning
     # compare a machine against.
     field :resolved_image, :string
+    # When the provider was last asked what the mark points at. Not castable: it is the
+    # platform's record of a request it made, not something a form may set. Null is *never
+    # asked* — every template naming a snapshot, which never resolves, and every row that
+    # predates the column.
+    field :resolved_at, :utc_datetime
     field :memory, :integer
     field :cores, :integer
     field :accepts, {:array, Ecto.Enum}, values: Job.kinds()

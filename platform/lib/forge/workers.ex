@@ -1229,7 +1229,7 @@ defmodule Forge.Workers do
     with {:ok, slot} <- room(template, demand),
          :ok <- probed(template),
          {:ok, credential} <- spendable(template),
-         {:ok, template} <- resolve(template, credential),
+         {:ok, template} <- resolve(template, demand, credential),
          :ok <- speaks(template),
          :ok <- serves(template, demand),
          :ok <- probed(template) do
@@ -1250,15 +1250,19 @@ defmodule Forge.Workers do
   # resolution has just replaced it. `Provisioning.speaks?/2` is the one definition of *new
   # enough*, so the two cannot disagree.
   #
-  # **The gate's answer, not the template's failure.** The recipe is not broken: the account has no
-  # new enough snapshot marked yet, and the sentence `{:no_template, :none_fit}` already carries —
-  # *runs a worker new enough for it* — is the one that tells the operator to build or mark one.
-  # Counting it would disable the template three passes before they did, and then the build they
-  # made would not be followed until somebody pressed Enable.
+  # **A wait, not the template's failure and not a stick.** The recipe is not broken: the account
+  # has no new enough snapshot marked yet, so counting it would disable the template three passes
+  # before the operator built the image that fixes it. And it must not stick the ticket, which is
+  # what `{:no_template, :none_fit}` would have done: a placement stick comes back only on an
+  # arrival inside the platform, and a new snapshot taking the mark is none of them — so the job
+  # would leave `Jobs.pending/2`, nothing would re-resolve, and the ticket would sit stuck through
+  # the very build its sentence asked for until somebody edited the template. Waiting, it is
+  # offered again every pass and the first pass after the build makes the machine
+  # (`docs/design/provisioning.md` § Where a machine comes from).
   defp serves(template, demand) do
     if Provisioning.speaks?(template, demand[:protocol]),
       do: :ok,
-      else: {:error, {:no_template, :none_fit}}
+      else: {:error, {:image_too_old, demand[:protocol], template.image_protocol}}
   end
 
   # **Resolved fresh at every create, and never cached across one.** The mark moves when an image
@@ -1269,17 +1273,31 @@ defmodule Forge.Workers do
   # Nothing marked, or a listing that cannot be read, is the template's failure the way a
   # credential it may not spend is — no row, no create request, and out of service after three
   # passes (§ A template that cannot make a working machine is taken out of service).
-  defp resolve(template, credential) do
-    if Provisioning.Template.latest?(template) do
-      case Provider.images(template.provider, open_secret(credential)) do
-        {:ok, images} ->
-          marked(template, Provisioning.current_image(images))
+  defp resolve(template, demand, credential) do
+    cond do
+      not Provisioning.Template.latest?(template) -> {:ok, template}
+      Provisioning.speaks?(template, demand[:protocol]) -> ask(template, credential)
+      Provisioning.asked_recently?(template) -> {:ok, template}
+      true -> ask(template, credential)
+    end
+  end
 
-        {:error, reason} ->
-          refuse_image(template, "its images could not be read: #{message(reason)}")
-      end
-    else
-      {:ok, template}
+  # **Rate-limited only where the answer can only be a refusal.** A job no marked snapshot is new
+  # enough for waits rather than sticking, so it is offered again every pass; asking on each one
+  # sent a listing per pass per waiting job, and a rate limit from the provider comes back as this
+  # template's failure. So when what is stored already cannot serve the demand — when `serves/2`
+  # below is going to refuse whatever the answer is — the provider is asked at most once per
+  # `Provisioning.resolve_after_ms/0`, and the pass refuses on what it has.
+  #
+  # **A resolution that is going to make a machine is never rate-limited.** What a machine is made
+  # from has to be the snapshot that carries the mark now, so the branch above it asks every time.
+  defp ask(template, credential) do
+    case Provider.images(template.provider, open_secret(credential)) do
+      {:ok, images} ->
+        marked(template, Provisioning.current_image(images))
+
+      {:error, reason} ->
+        refuse_image(template, "its images could not be read: #{message(reason)}")
     end
   end
 

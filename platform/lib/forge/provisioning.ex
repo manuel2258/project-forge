@@ -292,6 +292,14 @@ defmodule Forge.Provisioning do
   right now waits, and a job that could never fit sticks its ticket with the reason. Without
   this the second looks like the first for ever.
   """
+  #
+  # **`or might_hold?/2` is an equivalent mutant at the only caller, and is kept for the next one.**
+  # `Forge.Workers.no_template_for/2` asks this only once `for_demand/2` has returned nil for the
+  # same demand and the same `usable/1` set, which means neither predicate held for any template —
+  # so dropping it changes no answer production can reach, and no test can honestly claim it does.
+  # It is here because the two functions are the same question asked two ways, and a caller that
+  # asks this one first would otherwise get *could never fit* for a template `for_demand/2` would
+  # hand out.
   @spec could_ever_hold?(String.t(), map()) :: boolean()
   def could_ever_hold?(project_id, demand) do
     project_id |> usable() |> Enum.any?(&(holds?(&1, demand) or might_hold?(&1, demand)))
@@ -507,19 +515,64 @@ defmodule Forge.Provisioning do
       )
 
     resolved = %{resolved_image: id, image_build: build, image_protocol: protocol}
+    asked = %{resolved_at: DateTime.utc_now(:second)}
 
+    # **`resolved_at` is written on every resolution, the other three only when they changed.**
+    # The timestamp is a record of a request that was made, which is what `asked_recently?/1`
+    # rate-limits on, so it has to move even when the answer is the same; `updated_at` moves only
+    # with the answer, so *nothing was written about this template* stays a thing a reader can
+    # tell. The common case is still one small write and no change to what anything reads.
     if Map.take(template, Map.keys(resolved)) == resolved do
-      template
+      write(template, asked)
     else
-      {_count, _} =
-        Repo.update_all(
-          from(t in Template, where: t.id == ^template.id),
-          set: Map.to_list(resolved) ++ [updated_at: DateTime.utc_now(:second)]
-        )
-
-      struct!(template, resolved)
+      write(template, Map.merge(resolved, asked), updated_at: DateTime.utc_now(:second))
     end
   end
+
+  defp write(template, fields, also \\ []) do
+    {_count, _} =
+      Repo.update_all(
+        from(t in Template, where: t.id == ^template.id),
+        set: Map.to_list(fields) ++ also
+      )
+
+    struct!(template, fields)
+  end
+
+  @doc """
+  Whether this template's mark was resolved too recently to ask the provider again.
+
+  **What bounds the cost of a job nothing marked is new enough for.** Such a job waits rather than
+  sticking its ticket (`Forge.Jobs.Scheduler`), so it is offered again every pass — and resolving
+  on each one sent one listing request per pass per waiting job, 1800 an hour at the default two
+  seconds against an account whose published limit is 3600. The 429 would come back through the
+  template's own failure counter and disable it: the loop the probe was moved ahead of the
+  catalogue call to avoid, reached by the one refusal that cannot be asked before resolving.
+
+  **Only asked where the answer can only be a refusal.** `Forge.Workers` rate-limits a resolution
+  whose stored answer already cannot serve the demand; one that is going to make a machine is
+  never rate-limited, because what a machine is made from has to be current
+  (`docs/design/provisioning.md` § Where a machine comes from).
+
+  Null is *never asked* — every template naming a snapshot, and every row that predates the
+  column — and is never recent.
+  """
+  @spec asked_recently?(Template.t()) :: boolean()
+  def asked_recently?(%Template{resolved_at: nil}), do: false
+
+  def asked_recently?(%Template{resolved_at: at}) do
+    DateTime.diff(DateTime.utc_now(), at, :millisecond) < resolve_after_ms()
+  end
+
+  @doc """
+  How long a template on the mark holds its last answer before asking the provider again, when
+  asking could only repeat a refusal. A minute: short enough that a build is picked up while the
+  operator is still looking at the page, long enough that a waiting job costs one request a minute
+  rather than one every pass.
+  """
+  @spec resolve_after_ms() :: pos_integer()
+  def resolve_after_ms,
+    do: :forge |> Application.get_env(__MODULE__, []) |> Keyword.get(:resolve_after_ms, 60_000)
 
   @doc """
   Why no machine may be made from this template's image, or nil when one may: its known protocol

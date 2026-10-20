@@ -3518,8 +3518,11 @@ defmodule Forge.WorkersTest do
 
       marking("snap-older", %{protocol: current - 1})
 
+      # **Not `{:no_template, _}`**, which is what sticks a ticket: the remedy is a build the
+      # platform cannot see coming, so the job waits and the next pass after it tries again.
       for _pass <- 1..2 do
-        assert {:error, {:no_template, :none_fit}} = Workers.create_machine(needs_current)
+        assert {:error, {:image_too_old, ^current, has}} = Workers.create_machine(needs_current)
+        assert has == current - 1
       end
 
       refute_receive {:provider_create, _opts}
@@ -3532,6 +3535,62 @@ defmodule Forge.WorkersTest do
 
       # It did resolve, so the next build is followed with no edit.
       assert reloaded(template).resolved_image == "snap-older"
+    end
+
+    # **A waiting job is offered every pass, so the resolution behind it is rate-limited.** Asking
+    # on each attempt sent one listing per pass per waiting job — 1800 an hour at the default two
+    # seconds against an account whose published limit is 3600 — and the 429 comes back as this
+    # template's failure and disables it. Only where the answer can only be a refusal: the branch
+    # that is going to make a machine asks every time, which the tests above pin.
+    test "a refusal it can only repeat does not ask the provider again", context do
+      %{user: user, project: project} = context
+      current = ForgeCore.WorkerProtocol.current()
+      needs_current = demand(project_id: project.id) |> Map.put(:protocol, current)
+
+      assigned(user, project, %{
+        image: "latest",
+        resolved_image: "snap-old",
+        image_protocol: current,
+        max_workers: 2
+      })
+
+      marking("snap-older", %{protocol: current - 1})
+
+      assert {:error, {:image_too_old, _need, _has}} = Workers.create_machine(needs_current)
+      assert_receive {:provider_images, _credential}
+
+      for _pass <- 1..3 do
+        assert {:error, {:image_too_old, _need, _has}} = Workers.create_machine(needs_current)
+      end
+
+      refute_receive {:provider_images, _credential}
+    end
+
+    # And it does ask again once the interval has passed, which is what makes the build land.
+    test "it asks again when the interval has passed", context do
+      %{user: user, project: project} = context
+      current = ForgeCore.WorkerProtocol.current()
+      needs_current = demand(project_id: project.id) |> Map.put(:protocol, current)
+      previous = Application.get_env(:forge, Provisioning, [])
+      on_exit(fn -> Application.put_env(:forge, Provisioning, previous) end)
+      Application.put_env(:forge, Provisioning, Keyword.put(previous, :resolve_after_ms, 0))
+
+      assigned(user, project, %{
+        image: "latest",
+        resolved_image: "snap-old",
+        image_protocol: current,
+        max_workers: 2
+      })
+
+      marking("snap-older", %{protocol: current - 1})
+      assert {:error, {:image_too_old, _need, _has}} = Workers.create_machine(needs_current)
+      assert_receive {:provider_images, _credential}
+
+      # The operator builds an image, and nothing about the template is touched.
+      marking("snap-new", %{protocol: current})
+
+      assert {:error, :creating} = Workers.create_machine(needs_current)
+      assert_receive {:provider_create, %{image: "snap-new"}}
     end
 
     # The same snapshot serves a job that asks for nothing newer, which is what keeps the refusal

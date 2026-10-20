@@ -824,7 +824,35 @@ defmodule Forge.ProvisioningTest do
 
       assert %{id: id} = Provisioning.for_demand(project.id, needs_two)
       assert id == following.id
-      assert Provisioning.could_ever_hold?(project.id, needs_two)
+    end
+
+    # **The fallback is every dimension but the protocol, and nothing used to check that.**
+    # Dropping its size or its kind conjunct failed no test: the size and kind tests above use
+    # templates with no image, where `Template.latest?/1` is false and the conjuncts are never
+    # reached — so `for_demand/2` handing out an undersized template, or one that refuses the
+    # job's kind, as its fallback would have gone unnoticed.
+    test "the fallback is still held to size and kind", context do
+      %{user: user, project: project} = context
+      needs_two = Map.put(demand(memory: 9_000, cores: 16), :protocol, 2)
+
+      assigned(user, project, %{
+        memory: 1_000,
+        cores: 1,
+        image: "latest",
+        resolved_image: "snap-1",
+        image_protocol: 1
+      })
+
+      assigned(user, project, %{
+        memory: 9_000,
+        cores: 16,
+        accepts: [:chat],
+        image: "latest",
+        resolved_image: "snap-1",
+        image_protocol: 1
+      })
+
+      assert Provisioning.for_demand(project.id, needs_two) == nil
     end
 
     # The distinction the design insists on: does not fit *now* is a queue, and could never fit

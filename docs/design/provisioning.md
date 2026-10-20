@@ -472,18 +472,38 @@ it.
   So it is neither guess. **`for_demand/2` prefers a template that fits on what is known, and
   falls back to one on the mark that might fit once re-resolved** — so a template that certainly
   works is never passed over — and **the create attempt asks the job's own protocol of the
-  snapshot it has just resolved**, which is where the demand is in hand. Too old, and the answer
-  is the one the gate gives for a template that cannot hold the job: `{:no_template, :none_fit}`,
-  whose sentence already says *runs a worker new enough for it*. Nothing is billed, the ticket
-  sticks with something a person can act on, and **the template is not failed for it** — the
-  recipe is not broken, the account simply has no new enough snapshot marked yet, and counting it
-  would disable the template three passes before the operator built the image that fixes it.
+  snapshot it has just resolved**, which is where the demand is in hand. Nothing is billed, and
+  **the template is not failed for it**: the recipe is not broken, the account simply has no new
+  enough snapshot marked yet, and counting it would disable the template three passes before the
+  operator built the image that fixes it.
 
-  **And so a resolution brings nothing back, because it cannot change what the gate answered.**
-  `image_protocol` is in `@holds` for a template naming an id, which an edit is the only way to
-  move; for one on the mark the gate reads it only to *prefer* another template, never to refuse
-  this one, so writing it during a create attempt changes no gate answer and there is no stuck
-  ticket to resume (§ Editing a template).
+  **The job waits; its ticket does not stick**, and that is the difference between following the
+  mark and not. A placement stick comes back only on an arrival inside the platform — a template
+  assigned, enabled or edited, a machine putting a disabled one back in service — and **a new
+  snapshot taking the mark is none of those.** Stuck, the job leaves `Jobs.pending/2`, so no
+  create attempt is made, so nothing re-resolves: the operator does exactly what the sentence
+  asks, builds an image, and the ticket stays stuck until somebody edits the template — the edit
+  this whole feature exists to remove. Waiting, the job is offered again every pass and the first
+  pass after the build makes the machine, with nobody touching anything.
+
+  It is also the category the platform already puts an image problem in: a snapshot this platform
+  cannot talk to is `image_refused`, a wait with a sentence, not a stick (`Forge.Jobs.Scheduler`'s
+  `waiting/1`). *Could never fit* is what sticks a ticket (§ The gate), and this is not that — it
+  is *cannot yet*, resolved by a build the platform cannot see coming.
+
+  **And a waiting job is offered every pass, so the resolution behind it is rate-limited.** Asking
+  the catalogue on each attempt sent one listing per pass per waiting job — 1800 an hour at the
+  default two seconds, against an account whose published limit is 3600, and a 429 comes back as
+  this template's own failure and disables it. So a resolution that can only repeat a refusal is
+  asked at most once per `resolve_after_ms`, from `worker_templates.resolved_at`. **A resolution
+  that is going to make a machine is never rate-limited**, because what a machine is made from has
+  to be current: the rate limit applies only where what is already stored cannot serve the demand,
+  which is exactly the case where the answer is a refusal either way.
+
+  **And so a resolution brings nothing back.** `image_protocol` is in `@holds` for a template
+  naming an id, which an edit is the only way to move; for one on the mark the gate reads it only
+  to *prefer* another template, never to refuse this one. Nothing sticks for it, so there is no
+  stuck ticket for a resolution to resume (§ Editing a template).
 
   **What is stale is the probe and the labels the page draws**, and both cost at most one pass:
   a template on the mark shows the build and protocol of the snapshot it was last resolved onto

@@ -34,8 +34,30 @@ states:
   # them over the cap and allowed through only because nothing looks until the turn ends. $35 is
   # above the one measured converging run that exceeded $15, with room for the mutation lens.
   # Turns stay at 120: not one of the five exhausted runs came near them, so they were never the
-  # binding limit. Raising this means raising `limits.ticket_cost` in each workflow that has a
-  # `reviewing` state, which is where the arithmetic for it is.
+  # binding limit.
+  #
+  # **Raising this means raising `limits.ticket_cost` in each workflow that has a `reviewing`
+  # state**, because the cap is checked before each job starts against what the ticket has spent
+  # already — so what has to fit under it is every running total, not the finished total. Both
+  # workflows cost the same on the way in, $22 (refining $3, the state that plans or diagnoses $4,
+  # implementing $15) with `checking` free because a command buys no inference, so the review loop
+  # they declare prices out the same:
+  #
+  #     22 + 35                        =  57    the way in, then the first review
+  #     3 × (15 + 0 + 35)              = 150    three `issues_found` round-trips at `max: 3`
+  #                                      ---
+  #                                      207    of which 172 is spent before the last review
+  #
+  # At a $120 cap and this $35 the third round-trip stopped mid-loop, after $15 of implementing
+  # that was then never checked or reviewed, and `max: 3` on `reviewing → implementing` could not
+  # be reached at all. $210 clears it, the $172 included.
+  #
+  # **That is the declared review loop and not the worst journey**, which is not a finite number:
+  # the edge that sends `implementing` back to be planned again — `plan_invalid` in `dev.yml`,
+  # `diagnosis_invalid` in `bug.yml` — carries no `max`, so the two can alternate without bound
+  # and no cap clears them. Bounding exactly that is what a cap is for.
+  # `project_workflows_test.exs` prices the review loop out of the files themselves, so these
+  # numbers and the caps cannot drift apart.
   reviewing:
     prompt: agents/review.md
     env: default

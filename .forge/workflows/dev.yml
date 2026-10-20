@@ -73,19 +73,7 @@ transitions:
   - { from: reviewing,    to: reviewing,    when: did_not_converge,  max: 1 }
 
 limits:
-  # **Raised with `reviewing`'s budget, because the cap is what the loops have to fit inside.**
-  # `within_ticket_budget?/2` is checked before each job starts, against what the ticket has
-  # already spent, so what must stay under the cap is every running total — and the worst journey
-  # these transitions allow is the way in plus three `issues_found` round-trips:
-  #
-  #     3 + 4 + 15 + 0 + 35            = 57     refining, planning, implementing, checking, review
-  #     3 × (15 + 0 + 35)              = 150    three round-trips at `max: 3`
-  #                                      ---
-  #                                      207    of which 172 is spent before the last review
-  #
-  # At $120 the third round-trip stopped mid-loop, after $15 of implementing that was then never
-  # checked or reviewed, and `max: 3` on `reviewing → implementing` could not be reached at all.
-  # $210 clears the whole journey, the $172 it has spent before its last job included.
-  # `project_workflows_test.exs` prices this out of the file itself, so the two numbers cannot
-  # drift apart again.
+  # $210 and not $120 because `reviewing` costs $35: the cap is what the review loop has to fit
+  # inside, and `.forge/common.yml` derives the figure beside the budget it follows from.
+  # `project_workflows_test.exs` computes it from this file rather than trusting the comment.
   ticket_cost: 210.00

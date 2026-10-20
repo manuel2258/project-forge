@@ -8,9 +8,9 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
   What it asserts beyond "it parses" is the behaviour of `reviewing`, whose budget and edges are
   ticket 13's: an exhausted review goes to `review_ready` and not round again, its
   `did_not_converge` retry survives that edit, its budget is the figure the comment in
-  `common.yml` derives, the loops the transitions allow fit inside `limits.ticket_cost`, and every
-  state a person may be offered can actually be moved to by hand. Each of those is config, which
-  is where ticket 13's failure lived and which nothing here read before.
+  `common.yml` derives, the review round-trips it declares fit inside `limits.ticket_cost`, and
+  every state a person may be offered can actually be moved to by hand. Each of those is config,
+  which is where ticket 13's failure lived and which nothing here read before.
   """
 
   use ExUnit.Case, async: true
@@ -116,7 +116,14 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
   # `within_ticket_budget?/2` is asked *before* a job starts, against what the ticket has spent
   # already, so a journey fits only if every one of its running totals is under the cap — and the
   # journey is priced out of the workflow itself, so the cap and the budgets cannot drift apart.
-  test "the review round-trips the transitions allow fit inside the ticket cost cap" do
+  #
+  # **The journey priced here is the review loop these workflows declare, and not the worst one
+  # they allow**, which has no price: the edge sending `implementing` back to be planned again
+  # carries no `max` in either workflow, so the two can alternate without bound. That
+  # is what a cap is for, and it is why this asserts what the ticket asked about — three
+  # `issues_found` round-trips at the new review budget — rather than a maximum that does not
+  # exist.
+  test "the review round-trips these workflows declare fit inside the ticket cost cap" do
     for {name, workflow} <- reviewing_workflows() do
       loop =
         Enum.find(Workflow.transitions_from(workflow, "reviewing"), &(&1.when == "issues_found"))

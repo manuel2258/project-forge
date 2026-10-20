@@ -437,8 +437,16 @@ defmodule Forge.Engine do
   @doc """
   A person takes a declared transition out of the current state: from a human state, or to
   unstick a ticket. Refused while a job for the current state is pending, running or
-  waiting. A transition that requires approval records the approvals as part of the choice.
+  waiting, and while a decision on another transition is pending. A transition that requires
+  approval records the approvals as part of the choice.
   Options: `:outcome` picks between parallel edges, `:comment` is stored with approvals.
+
+  **The pending check is here and not on a page.** It was the ticket page's
+  `:if={!@ticket.pending_transition}` alone, which was armour while clicking was the only way in
+  — and a conversation asks for a transition by writing a file, not by finding a button
+  (`docs/design/conversations.md` § Taking a transition). So every caller meets it at the
+  operation: the chat, the API and the page. `:pending_approval` is `repinnable/2`'s name for the
+  same condition, not a second one.
   """
   @spec choose(Ticket.t(), String.t(), String.t(), keyword()) ::
           {:ok, Ticket.t()} | {:error, term()}
@@ -446,6 +454,9 @@ defmodule Forge.Engine do
 
   def choose(%Ticket{status: :cancelled}, _user_id, _to, _opts),
     do: {:error, {:not_active, :cancelled}}
+
+  def choose(%Ticket{pending_transition: %{}}, _user_id, _to, _opts),
+    do: {:error, :pending_approval}
 
   def choose(%Ticket{} = ticket, user_id, to, opts) do
     workflow = Tickets.workflow(ticket)

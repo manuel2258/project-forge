@@ -667,6 +667,100 @@ defmodule ForgeWorker.Job.DirTest do
     end
   end
 
+  # `docs/design/conversations.md` § Taking a transition: read like `invoke.json`, then removed.
+  describe "transition.json" do
+    setup %{root: root, spec: spec} do
+      job_dir = Dir.prepare(root, spec)
+      %{job_dir: job_dir, path: Dir.transition_path(job_dir), owner: File.stat!(job_dir).uid}
+    end
+
+    test "is nothing when the conversation asked for nothing", %{job_dir: job_dir} do
+      assert Dir.transition_request(job_dir) == :none
+    end
+
+    test "a transition to take is read once, then gone", %{job_dir: job_dir, path: path} do
+      File.write!(path, ~s({"to": "implementing", "comment": "tests were the problem"}))
+
+      assert Dir.transition_request(job_dir) ==
+               {:ok, %{"to" => "implementing", "comment" => "tests were the problem"}}
+
+      refute File.exists?(path)
+      assert Dir.transition_request(job_dir) == :none
+    end
+
+    test "a decision is read the same way, either value", %{job_dir: job_dir, path: path} do
+      for decision <- ["approved", "rejected"] do
+        File.write!(path, ~s({"decision": "#{decision}"}))
+        assert Dir.transition_request(job_dir) == {:ok, %{"decision" => decision}}
+      end
+    end
+
+    # Only what the platform reads travels. A file with more in it is not refused — the request
+    # it makes is clear — but nothing beside the request is carried into the turn's payload.
+    test "keys the platform does not read are dropped", %{job_dir: job_dir, path: path} do
+      File.write!(path, ~s({"to": "planning", "outcome": "plan_invalid", "force": true}))
+      assert Dir.transition_request(job_dir) == {:ok, %{"to" => "planning"}}
+    end
+
+    test "a file that is not a request says why, and is gone too", %{
+      job_dir: job_dir,
+      path: path
+    } do
+      for {content, why} <- [
+            {"not json", "transition.json is not valid JSON"},
+            {"[]", "transition.json must be one JSON object"},
+            {"{}", "transition.json must be one JSON object"},
+            {~s({"to": ""}), "transition.json must be one JSON object"},
+            {~s({"to": 3}), "transition.json must be one JSON object"},
+            {~s({"decision": "maybe"}), "transition.json must be one JSON object"},
+            {~s({"decision": true}), "transition.json must be one JSON object"},
+            {~s({"to": "planning", "decision": "approved"}),
+             "transition.json names both `to` and `decision`"},
+            {~s({"to": "planning", "comment": 7}),
+             "transition.json has a comment that is not a string"}
+          ] do
+        File.write!(path, content)
+        assert {:error, reason} = Dir.transition_request(job_dir)
+        assert String.starts_with?(reason, why), "#{content}: #{reason}"
+        refute File.exists?(path)
+      end
+    end
+
+    # The same model as `out/` and `invoke.json`: what is read is the file the handle opened,
+    # owned by the job. A request planted by anything else moves somebody's ticket.
+    test "a file the job does not own, or a link, is refused", %{
+      job_dir: job_dir,
+      path: path,
+      owner: owner
+    } do
+      File.write!(path, ~s({"to": "planning"}))
+      assert {:error, reason} = Dir.transition_request(job_dir, owner + 1)
+      assert reason =~ "the job's own file"
+
+      target = Path.join(job_dir, "elsewhere.json")
+      File.write!(target, ~s({"to": "planning"}))
+      File.ln_s!(target, path)
+      assert {:error, reason} = Dir.transition_request(job_dir)
+      assert reason =~ "regular file"
+    end
+
+    # A conversation is reopened, and a transition is not idempotent: a request left by the
+    # process that died has not been acted on and must not be acted on now.
+    test "a request left from a stopped process is gone before the next one starts", %{
+      root: root,
+      spec: spec,
+      path: path
+    } do
+      File.write!(path, ~s({"to": "planning"}))
+      Dir.prepare(root, spec, resume: true)
+      refute File.exists?(path)
+
+      File.write!(path, ~s({"to": "planning"}))
+      Dir.prepare(root, spec)
+      refute File.exists?(path)
+    end
+  end
+
   describe "the command logs folder" do
     test "holds a resumed run's logs, read-only, and nothing named off the pattern", %{
       root: root,

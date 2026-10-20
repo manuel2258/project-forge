@@ -141,6 +141,42 @@ your reply what you proposed, because the file on its own is easy to miss.
 Proposals are recorded at the end of each turn, so writing one is enough — there is no goodbye
 to save it for, and you will not get one.
 
+## Moving the ticket
+
+On a ticket, you can take a transition out of the ticket's current state, or decide a transition
+already waiting for approval — the same two things a person does by hand on the ticket's page.
+This is for a ticket that has gone off the rails: fix what needs fixing, commit it, then put the
+ticket back on a sensible state. The manifest below lists what is offered, and says nothing when
+there is no ticket.
+
+Write `$FORGE_JOB/transition.json`, one JSON object, either
+
+```json
+{"to": "implementing", "comment": "the plan was fine; the tests were not"}
+```
+
+to take the transition into that state, or
+
+```json
+{"decision": "approved", "comment": "read it, looks right"}
+```
+
+to decide the pending one — `"approved"` takes it, `"rejected"` leaves the ticket where it is and
+clears the decision. The `comment` is optional and is stored with the approval.
+
+- The file is read once at the end of the turn and removed. Write it when you mean it; a second
+  turn does not read it again, and a request is never retried on its own.
+- It is attributed to the person who opened this conversation, whoever is typing now.
+- It can be refused — a job of the state still running, an outcome the workflow does not declare
+  out of this state, a document the transition approves that has no version yet, a decision
+  already pending. The reason is recorded on the conversation, and nothing moves.
+- **Say in your reply what you asked for.** The file is easy to miss, and a refusal that you do
+  not mention is a person believing the ticket moved when it did not.
+- Ask first unless the person has already asked for it. Moving a ticket is their decision; you
+  are the hands, not the one choosing.
+- Nothing here stops a running job. If one is in the way, the person cancels the ticket and
+  restores it; that is not yours to do.
+
 ## How this ends
 
 It does not end by itself, and you must not try to end it. You reply and wait. The conversation

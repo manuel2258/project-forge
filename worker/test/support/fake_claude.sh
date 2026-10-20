@@ -217,6 +217,19 @@ case "${FAKE_SCENARIO:-success}" in
           ;;
       esac
 
+      # A conversation asking the platform to move its ticket, and one writing a file that is
+      # not a request at all (`docs/design/conversations.md` § Taking a transition).
+      # `BADMOVE` first: `*MOVE*` matches it too, and `case` takes the first pattern that fits.
+      case "$text" in
+        *BADMOVE*)
+          printf 'not a request\n' > "$FORGE_JOB/transition.json"
+          ;;
+        *MOVE*)
+          printf '{"to": "implementing", "comment": "the tests were the problem"}\n' \
+            > "$FORGE_JOB/transition.json"
+          ;;
+      esac
+
       emit "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"reply to $(json_escape "$text")\"}]}}"
       # Cumulative, as measured. A platform that adds this per turn over-counts every turn but
       # the first, and the number stays plausible while it does.

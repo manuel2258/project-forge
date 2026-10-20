@@ -324,6 +324,79 @@ is replace: a question counts on the latest version only, so a chat's version of
 closes the questions of the version before. An assumption dropped that way is dropped as a
 person's edit drops one; a blocking question a job waits on is the case refused above.
 
+## Taking a transition
+
+**A ticket chat may move its ticket.** A ticket whose workflow has gone wrong — a job that
+failed badly, an outcome nothing matched, an approval nobody will give as it stands — is already
+a person's to fix by hand on the ticket page: edit what needs editing, then pick the next
+transition. A conversation is the surface for the fixing half, and without this it has to hand
+the last step back to a person at a keyboard. So it reaches the same two operations a person's
+click does, and nothing more.
+
+**One file, read and removed once per turn**, exactly as `invoke.json` is
+(`docs/design/commands.md` § How an agent invokes): `$FORGE_JOB/transition.json`, holding one
+JSON object, one of
+
+- `{"to": "<state>", "comment": "<optional>"}` — take a transition declared out of the ticket's
+  current state. A target only, no outcome: the ticket page's chooser asks a person for a target
+  only too, so there is nothing more to offer here.
+- `{"decision": "approved" | "rejected", "comment": "<optional>"}` — decide the ticket's pending
+  transition.
+
+A file is a request, not a guarantee. It is read after the turn's own transaction commits, and
+applied by calling `Forge.Operator.transition/4` or `Forge.Operator.decide/4` — **the functions
+the ticket page and the API already call**, membership guard included. Every rule a person meets
+is therefore met here with no second copy of it: a live job for the current state refuses the
+request (`Engine.choose/4`'s `no_live_job/1`), so does an `approve` list naming an artifact with
+no version, a rejection leaves the ticket where it is and clears the decision, and an approval
+records against the latest version of each named artifact. The chat does not stop a live job —
+a person cancels the ticket and restores it, which is what they already have.
+
+**It is attributed to whoever opened the conversation**, for every request it ever makes,
+regardless of who sent the message that triggered the turn. Membership of the project is the whole
+guard on talking to one — `Operator.send/3` asks for `:use` on it and nothing about who opened the
+conversation (`identity.md` § Where the guard lives) — so there is no owner model to consult, and
+"whoever is typing" would need the triggering message's id threaded through the turn, racing the
+next message's own event, to answer a question the simpler rule answers outright. The opener is
+on the job's own `chat.opened` event, the first thing logged for it, read back by
+`Events.earliest_for_job/2`. A
+conversation opened by something that is not a user — a Mix task's `:system` actor — cannot make
+the request at all, rather than have a `transition.taken` claim nobody took it.
+
+What the ticket records is what a by-hand choice records and nothing beside it: the same
+`transition.taken`, the same approval rows, the same `ticket.stuck`. There is no chat-flavoured
+copy, because "indistinguishable from one taken by hand" is a property of not writing one.
+
+**A refusal is an event, `chat.transition_refused`** on the conversation, carrying the raw
+request and why it was refused. It is the only new event type here, and it plays the part
+`refused_documents` plays for a document that could not be recorded: the person reads why nothing
+moved, and so does the agent the next time it looks. The agent is told to say in its reply what
+it asked for, because the file is not retried on its own.
+
+**It runs inside the turn's idempotency gate.** `record_turn/2` is idempotent on
+`(job, session, turn)` because the worker re-sends an unacked turn, and every side effect of a
+turn has to tolerate being asked twice. Documents and proposals are idempotent by content; a
+transition is not — asked twice it would be tried against a ticket that has already left the
+state. So the request is applied from inside `do_record_turn/3`, which a re-sent turn never
+reaches, and after that function's own transaction rather than within it: entering a merging
+state performs a real git merge after the engine's transaction commits, which cannot sit inside
+another one. The turn's own bookkeeping — its cost, its commit, its `chat.turn` event, its
+documents — is unaffected by whether a transition was asked for or what became of it.
+
+**`Engine.choose/4` refuses while a decision is pending**, as `repinnable/2` already does and
+with the same `{:error, :pending_approval}`. It never did before: only the ticket page's
+`:if={!@ticket.pending_transition}` kept a person from reaching it, which was armour nobody could
+walk around by hand. A file is not a hidden button, so the check belongs at the operation, where
+every caller meets it — the chat, the API and the page alike.
+
+**What the chat is told it can do** is in its manifest (§ Context), from the spec's one `moving`
+field: the transitions offered out of the current state with each one's `approve` list, the
+pending decision if there is one, and whether a job is live for the state. One field and not
+three, because they are one question — what can this chat do to its ticket now — read in one
+place, and nil for a project chat and for every workflow job. Composed once when the process starts, like the rest of its
+context, and carrying the same caveat — a turn later the ticket may have moved, which is why a
+refusal says so rather than the manifest pretending to be current.
+
 ## Lifetime
 
 - **A chat holds its slice while it lives.** First come, first served: a pending job waits for a
@@ -603,7 +676,7 @@ Four additions to `docs/design/worker-channel.md` § Messages. Nothing that exis
 | `message` | → worker | — | a user message, written to the harness's stdin |
 | `interrupt` | → worker | — | end this turn, keep the process |
 | `close` | → worker | — | end the conversation, release the machine |
-| `turn` | → platform | **yes** | a turn ended: its index, its cost, the commit it made, and the proposals and documents in `out/` (§ Commits) |
+| `turn` | → platform | **yes** | a turn ended: its index, its cost, the commit it made, the proposals and documents in `out/` (§ Commits), and any `transition.json` it wrote (§ Taking a transition) |
 
 `turn` is acked because it carries the cost, and the cost is what the daily cap is computed from —
 the one class of message § Delivery says must not be lost. Its harness summary also carries the

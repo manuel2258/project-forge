@@ -302,6 +302,32 @@ defmodule Forge.FlowTest do
     assert "job.orphaned" in event_types(ticket)
   end
 
+  # The guard that was a page's `:if` and nothing else. While a decision is pending on one
+  # transition, no other may be taken — and the only thing stopping a person was the ticket
+  # page hiding its chooser, which a conversation writing `transition.json` does not go through
+  # (`docs/design/conversations.md` § Taking a transition).
+  test "a transition is refused while a decision on another is pending", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
+    {:ok, _job} = run(only_pending(ticket), worker, "success", "refinement.md")
+
+    ticket = Tickets.get!(ticket.id)
+    assert ticket.pending_transition["to"] == "planning"
+
+    # `planning` is where the pending decision goes, and it is refused for the same reason any
+    # other target is: the decision comes first, whichever edge is asked for.
+    assert Engine.choose(ticket, user.id, "planning") == {:error, :pending_approval}
+    assert Tickets.get!(ticket.id).state == "refining"
+    assert Tickets.get!(ticket.id).pending_transition["to"] == "planning"
+
+    # Decided, the ticket moves and the next choice is reachable again.
+    {:ok, ticket} = Engine.decide(ticket, user.id, :approved, nil)
+    assert ticket.state == "planning"
+  end
+
   test "a resume that never reaches the harness is re-queued as a fresh run", %{
     project: project,
     user: user,

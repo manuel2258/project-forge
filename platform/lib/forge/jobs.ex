@@ -1050,7 +1050,8 @@ defmodule Forge.Jobs do
       preamble_hash: ForgeCore.Prompt.chat_preamble_hash(),
       model: model_for(job),
       produces: [],
-      outcomes: []
+      outcomes: [],
+      moving: moving(ticket)
     }
 
     :ok = Spec.validate(spec)
@@ -1089,6 +1090,41 @@ defmodule Forge.Jobs do
 
         %{spec | inputs: spec.inputs ++ [answers]}
     end
+  end
+
+  # What a ticket conversation may ask the engine for (`docs/design/conversations.md` § Taking a
+  # transition): the same edges a person is offered, each with the `approve` list its choice would
+  # record. Assembled here rather than from `Engine.offered_transitions/2`, which answers with
+  # names only because no other caller needs more; the filter — an edge approving a document with
+  # no version is not offered, since taking it is refused — is that function's and is asked for by
+  # name so the two cannot disagree about which edges exist.
+  #
+  # Two edges may share a target, and the list names it once with everything either would
+  # approve — as the page names it once. Asking for it is then refused as `{:ambiguous, outcomes}`,
+  # which is what a person's by-hand choice of the same target already gets: `Core.choose/4` is
+  # given no outcome by either, and there is no second offer here to be more specific with.
+  defp moving(nil), do: nil
+
+  defp moving(%Ticket{} = ticket) do
+    %{
+      "transitions" => chat_transitions(ticket),
+      "pending" => ticket.pending_transition,
+      "job_live" => live?(ticket.id, ticket.state)
+    }
+  end
+
+  defp chat_transitions(%Ticket{} = ticket) do
+    workflow = Tickets.workflow(ticket)
+    offered = Engine.offered_transitions(ticket, workflow)
+
+    workflow
+    |> ForgeCore.Workflow.transitions_from(ticket.state)
+    |> Enum.filter(&(&1.to in offered))
+    |> Enum.group_by(& &1.to, & &1.approve)
+    |> Enum.map(fn {to, approve} ->
+      %{"to" => to, "approve" => approve |> List.flatten() |> Enum.uniq()}
+    end)
+    |> Enum.sort_by(& &1["to"])
   end
 
   # An integrating job's checkout fetches the default branch too; every other job's does not

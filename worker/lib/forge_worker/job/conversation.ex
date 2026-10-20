@@ -379,6 +379,9 @@ defmodule ForgeWorker.Job.Conversation do
     # by content, so re-reporting the same file every turn costs nothing.
     proposals = Dir.proposals(job_dir(state))
     documents = Dir.documents(job_dir(state))
+    # Read once per turn and removed by the read, so a request is carried exactly once
+    # (`docs/design/conversations.md` § Taking a transition).
+    transition = Dir.transition_request(job_dir(state))
 
     # After every turn and not at the end, because a conversation's end may be its machine's: it
     # goes dormant when its worker is lost, and a reopen resumes what the last turn left.
@@ -387,20 +390,24 @@ defmodule ForgeWorker.Job.Conversation do
     send(
       state.link,
       {:chat_turn, state.job_id, index,
-       Secrets.mask(secrets(state), %{
-         "job_id" => state.job_id,
-         "turn" => index,
-         "commit" => head,
-         "interrupted" => event.payload[:interrupted] == true,
-         "proposals" =>
-           Map.new(proposals.proposals, fn {file, p} ->
-             {file, %{"title" => p.title, "body" => p.body, "raw" => p.raw}}
-           end),
-         "invalid_proposals" => proposals.invalid_proposals,
-         "documents" => documents.documents,
-         "invalid_documents" => documents.invalid_documents,
-         "harness" => turn_summary(event, session, state.version)
-       })}
+       Secrets.mask(
+         secrets(state),
+         %{
+           "job_id" => state.job_id,
+           "turn" => index,
+           "commit" => head,
+           "interrupted" => event.payload[:interrupted] == true,
+           "proposals" =>
+             Map.new(proposals.proposals, fn {file, p} ->
+               {file, %{"title" => p.title, "body" => p.body, "raw" => p.raw}}
+             end),
+           "invalid_proposals" => proposals.invalid_proposals,
+           "documents" => documents.documents,
+           "invalid_documents" => documents.invalid_documents,
+           "harness" => turn_summary(event, session, state.version)
+         }
+         |> Map.merge(transition_keys(transition))
+       )}
     )
 
     {:noreply, %{state | turns: index}}
@@ -422,6 +429,13 @@ defmodule ForgeWorker.Job.Conversation do
     Logger.debug("conversation ignored #{inspect(message)}")
     {:noreply, state}
   end
+
+  # Absent unless the conversation wrote the file, so a turn that asked for nothing says nothing.
+  # Merged before the masking wrap closes, not after: the request carries the agent's own
+  # `comment`, which is text it wrote and so is text that could hold a secret.
+  defp transition_keys(:none), do: %{}
+  defp transition_keys({:ok, request}), do: %{"transition_request" => request}
+  defp transition_keys({:error, reason}), do: %{"invalid_transition_request" => reason}
 
   # -- ending ---------------------------------------------------------------------------------
 

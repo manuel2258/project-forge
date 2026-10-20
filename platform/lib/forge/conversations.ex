@@ -17,7 +17,7 @@ defmodule Forge.Conversations do
   import Ecto.Query, only: [from: 2, where: 3]
 
   alias Ecto.Multi
-  alias Forge.{Events, Git, Jobs, Projects, Proposals, Repo, Secrets, Tickets, Workers}
+  alias Forge.{Events, Git, Jobs, Operator, Projects, Proposals, Repo, Secrets, Tickets, Workers}
   alias Forge.Events.Event
   alias Forge.Git.Tokens
   alias Forge.Jobs.{Job, Runs}
@@ -392,12 +392,168 @@ defmodule Forge.Conversations do
         # A turn ending is the event worth a notification; an interrupted one is not, because
         # the person who interrupted it is the person who would be told.
         unless payload["interrupted"] == true, do: push_reply(chat)
+        apply_transition_request(chat, payload)
         {:ok, chat}
 
       {:error, step, reason, _changes} ->
         {:error, {step, reason}}
     end
   end
+
+  # What the conversation asked the engine to do with its ticket, if anything
+  # (`docs/design/conversations.md` § Taking a transition).
+  #
+  # **Called after the turn's transaction, from inside `do_record_turn/3`.** Inside, because a
+  # re-sent turn never reaches that function — `record_turn/2` returns on `recorded?/2` first —
+  # and taking a transition twice is not taking it twice: the second attempt meets a ticket that
+  # has already left the state. After, because entering a merging state does a real git merge
+  # once the engine's own transaction commits, which cannot sit inside another one.
+  #
+  # The turn is recorded either way. Nothing here can fail the turn, whose cost is the one thing
+  # that must not be lost.
+  defp apply_transition_request(chat, payload) do
+    case request(payload) do
+      :none -> :ok
+      {:ok, request} -> refuse_or_apply(chat, request)
+      {:error, reason} -> refused(chat, nil, reason)
+    end
+  end
+
+  # The worker's decoded request, or its own complaint about a file it could not decode. Both
+  # keys are checked, because a worker that refused the file still reports it: the agent hears
+  # why nothing moved rather than nothing at all.
+  defp request(%{"transition_request" => %{} = request}), do: {:ok, request}
+
+  defp request(%{"invalid_transition_request" => reason}) when is_binary(reason),
+    do: {:error, reason}
+
+  defp request(_payload), do: :none
+
+  defp refuse_or_apply(chat, request) do
+    case transition_actor(chat, request) do
+      {:ok, ticket, user} -> apply_request(chat, ticket, user, request)
+      {:error, reason} -> refused(chat, request, reason)
+    end
+  end
+
+  # Everything that must hold before the engine is asked, each refused with what a person reads.
+  # The shape is re-checked although the worker checked it: what crosses the channel is not a
+  # guard, the same reason `documents/2` asks again about a name the worker already matched.
+  defp transition_actor(chat, request) do
+    with :ok <- on_a_ticket(chat),
+         :ok <- shaped(request),
+         {:ok, user} <- opener(chat) do
+      {:ok, Tickets.get!(chat.ticket_id), user}
+    end
+  end
+
+  defp on_a_ticket(%Job{ticket_id: nil}),
+    do: {:error, "this conversation is about the project, and has no ticket to move"}
+
+  defp on_a_ticket(%Job{}), do: :ok
+
+  defp shaped(%{"to" => to, "decision" => _} = _both) when is_binary(to),
+    do: {:error, "names both a transition to take and a decision to make; write one or the other"}
+
+  defp shaped(%{"to" => to}) when is_binary(to) and to != "", do: :ok
+
+  defp shaped(%{"decision" => decision}) when decision in ["approved", "rejected"], do: :ok
+
+  defp shaped(%{"decision" => decision}) when is_binary(decision),
+    do: {:error, "has a decision of #{inspect(decision)}, which is not `approved` or `rejected`"}
+
+  defp shaped(_request),
+    do:
+      {:error,
+       "must be one JSON object with either `to` — the state to move to — or " <>
+         "`decision`, `approved` or `rejected`"}
+
+  # **Whoever opened the conversation, not whoever is typing.** Read from the first thing logged
+  # for this job, which is the only place it is (§ Taking a transition). A conversation a Mix
+  # task opened has `:system` for an actor and cannot move a ticket: a `transition.taken` whose
+  # actor is nobody, for a move a conversation plainly asked for, is worse than a refusal.
+  defp opener(%Job{id: id}) do
+    case Events.earliest_for_job(id, "chat.opened") do
+      %Event{actor: %{"kind" => "user", "id" => user_id}} ->
+        case Forge.Accounts.get_user(user_id) do
+          nil -> {:error, "the person who opened this conversation no longer has an account"}
+          user -> {:ok, user}
+        end
+
+      _not_a_person ->
+        {:error, "nobody opened this conversation, so there is no one to attribute a move to"}
+    end
+  end
+
+  # `Forge.Operator`, not `Forge.Engine`: the membership guard is the operator's and a chat is a
+  # third caller of the same function the page and the API call, with no copy of any rule
+  # (§ Taking a transition).
+  defp apply_request(chat, ticket, user, %{"to" => to} = request) do
+    engine_said(chat, request, Operator.transition(ticket, user, to, comment: comment(request)))
+  end
+
+  defp apply_request(chat, ticket, user, %{"decision" => decision} = request) do
+    engine_said(
+      chat,
+      request,
+      Operator.decide(ticket, user, decided(decision), comment(request))
+    )
+  end
+
+  # Named rather than converted, as `Spec.kind/1` names a job's kind: `shaped/1` has already
+  # refused anything else, and `String.to_existing_atom/1` on a value off the wire is a different
+  # rule in a second place.
+  defp decided("approved"), do: :approved
+  defp decided("rejected"), do: :rejected
+
+  defp comment(%{"comment" => comment}) when is_binary(comment), do: comment
+  defp comment(_request), do: nil
+
+  # A move that happened needs nothing written here: the ticket's own `transition.taken`,
+  # approvals and `ticket.stuck` are the record, and a second chat-flavoured copy of them is
+  # exactly what would make it distinguishable from a person's choice.
+  defp engine_said(_chat, _request, {:ok, _ticket}), do: :ok
+  defp engine_said(chat, request, {:error, reason}), do: refused(chat, request, humanise(reason))
+
+  defp refused(chat, request, reason) do
+    Events.append("chat.transition_refused", {:job, chat.id}, %{
+      ticket_id: chat.ticket_id,
+      job_id: chat.id,
+      payload: %{"request" => request, "reason" => reason}
+    })
+
+    Events.notify(chat.ticket_id)
+    :ok
+  end
+
+  # The engine's and the operator's own refusals, in the words the agent and the person read.
+  # Every one of them is a reason a person's click is refused too; none is invented here.
+  defp humanise(:forbidden),
+    do: "the person who opened this conversation is no longer a member of the project"
+
+  defp humanise(:pending_approval),
+    do: "a decision on another transition is already pending; decide that one first"
+
+  defp humanise(:nothing_pending), do: "no transition is waiting for a decision"
+
+  defp humanise(:no_such_transition),
+    do: "the workflow declares no such transition out of this state"
+
+  defp humanise({:job_live, state}),
+    do: "a job of `#{state}` is still running; the ticket has to be cancelled and restored first"
+
+  defp humanise({:not_active, status}), do: "the ticket is #{status}"
+
+  defp humanise({:no_version, name}),
+    do: "`#{name}` has no version yet, so nothing can approve it"
+
+  defp humanise({:ambiguous, outcomes}),
+    do:
+      "more than one transition goes there, on " <>
+        Enum.map_join(outcomes, ", ", &"`#{&1 || "no outcome"}`") <>
+        "; a person has to choose by hand"
+
+  defp humanise(reason), do: "refused: #{inspect(reason)}"
 
   # A conversation proposes like any job, and its proposals arrive with the turn rather than
   # with a result: there is no result, because a conversation has no outcome and never calls

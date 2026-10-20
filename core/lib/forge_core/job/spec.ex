@@ -88,7 +88,18 @@ defmodule ForgeCore.Job.Spec do
     # A conversation's: what it was opened with that has been deleted since, so a reopened one is
     # told the variable is gone rather than finding it missing (`docs/design/secrets.md`
     # § Conversations). Always empty for a workflow job, which does not run without them.
-    secrets_gone: []
+    secrets_gone: [],
+    # A ticket conversation's, string keys: `transitions`, the edges declared out of the ticket's
+    # state that it may ask for, each `%{"to", "approve"}`; `pending`, the ticket's pending
+    # decision as `%{"to", "outcome", "approve"}` or nil; and `job_live`, whether a job of the
+    # state was live when this started, since a transition is refused while one is
+    # (`docs/design/conversations.md` § Taking a transition). Filled at run time, as `may_invoke`
+    # is, and a snapshot of when the process started like the rest of a conversation's context.
+    #
+    # One field rather than three because they are one question — what can this chat do to its
+    # ticket now — and are read in one place, the manifest's § Moving the ticket. Nil for a
+    # project chat and for every workflow job, neither of which reads it.
+    moving: nil
   ]
 
   @workflow_keys [
@@ -114,6 +125,7 @@ defmodule ForgeCore.Job.Spec do
           integration: %{String.t() => term()} | nil,
           secrets: [String.t()],
           secrets_gone: [String.t()],
+          moving: %{String.t() => term()} | nil,
           ticket:
             %{number: pos_integer(), title: String.t(), ticket_type: String.t() | nil} | nil,
           state: String.t() | nil,
@@ -238,7 +250,20 @@ defmodule ForgeCore.Job.Spec do
       permitted_children: or_default(get, :permitted_children, []),
       answered_keys: or_default(get, :answered_keys, []),
       secrets: or_default(get, :secrets, []),
-      secrets_gone: or_default(get, :secrets_gone, [])
+      secrets_gone: or_default(get, :secrets_gone, []),
+      moving: moving_from_map(get.(:moving))
+    }
+  end
+
+  # String keys whichever way it arrived, for the reason `entered` is: the manifest reads it by
+  # string, and a spec built in memory and one read back from the row must render the same.
+  defp moving_from_map(nil), do: nil
+
+  defp moving_from_map(map) do
+    %{
+      "transitions" => nested(map, :transitions) || [],
+      "pending" => nested(map, :pending),
+      "job_live" => nested(map, :job_live) == true
     }
   end
 

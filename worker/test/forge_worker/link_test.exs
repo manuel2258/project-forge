@@ -3811,6 +3811,94 @@ defmodule ForgeWorker.LinkTest do
       assert again == documents
     end
 
+    # A transition is not a document: it is an instruction, and it travels on the turn that asked
+    # for it and no other (`docs/design/conversations.md` § Taking a transition). The turn before
+    # and the turn after must carry neither key, or the platform would take the same transition
+    # again on every turn until the conversation ended.
+    test "a transition asked for during a turn goes out with that turn, and only that turn",
+         context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin)
+      push(client, @topic, "assign", job)
+      {first, _} = take_push("turn")
+      refute Map.has_key?(first, "transition_request")
+      refute Map.has_key?(first, "invalid_transition_request")
+
+      push(client, @topic, "message", %{
+        "job_id" => job["job_id"],
+        "message_id" => "m-2",
+        "text" => "MOVE it back"
+      })
+
+      {%{"turn" => 2} = second, _} = take_push("turn")
+
+      assert second["transition_request"] == %{
+               "to" => "implementing",
+               "comment" => "the tests were the problem"
+             }
+
+      push(client, @topic, "message", %{
+        "job_id" => job["job_id"],
+        "message_id" => "m-3",
+        "text" => "thanks"
+      })
+
+      {%{"turn" => 3} = third, _} = take_push("turn")
+      refute Map.has_key?(third, "transition_request")
+      refute Map.has_key?(third, "invalid_transition_request")
+    end
+
+    # A file that is not a request is reported as one that is not, rather than dropped: the
+    # agent asked for something and has to be told nothing happened.
+    test "a transition file the worker cannot read goes out as invalid", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin)
+      push(client, @topic, "assign", job)
+      {_first, _} = take_push("turn")
+
+      push(client, @topic, "message", %{
+        "job_id" => job["job_id"],
+        "message_id" => "m-2",
+        "text" => "BADMOVE please"
+      })
+
+      {%{"turn" => 2} = second, _} = take_push("turn")
+      refute Map.has_key?(second, "transition_request")
+      assert second["invalid_transition_request"] =~ "transition.json is not valid JSON"
+    end
+
+    # The comment is the agent's own text, so it is masked like everything else a turn carries.
+    # Merged into the payload after the masking wrap would have sent the value through verbatim.
+    test "a secret in the request's comment is masked", context do
+      %{client: client, origin: origin, root: root} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = origin |> chat() |> with_secrets(%{"STRIPE_TEST_KEY" => "sk_test_in-a-comment"})
+      push(client, @topic, "assign", job)
+      {_first, _} = take_push("turn")
+
+      File.write!(
+        Path.join([root, "jobs", job["job_id"], "transition.json"]),
+        ~s({"to": "implementing", "comment": "as sk_test_in-a-comment said"})
+      )
+
+      push(client, @topic, "message", %{
+        "job_id" => job["job_id"],
+        "message_id" => "m-2",
+        "text" => "thanks"
+      })
+
+      {%{"turn" => 2} = second, _} = take_push("turn")
+      assert second["transition_request"]["comment"] == "as [secret STRIPE_TEST_KEY] said"
+    end
+
     # What the worker refuses goes to the platform too, with why, so the page can list it: a
     # document that did not arrive has to be visible rather than merely absent. Every other test
     # left `out/` clean, and a turn that always sent no refusals passed them all.

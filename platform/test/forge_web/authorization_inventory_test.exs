@@ -252,6 +252,7 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     # A card's draft is the page's alone, the same as a question form's: nothing is written
     # until the form it sits in is submitted, and that submit carries its own guard.
     {"project_live.ex", "draft:change"} => :local,
+    {"operator/drafts.ex", "draft:change"} => :local,
     {"operator/question_form.ex", "form:change"} => :local,
     {"operator/question_form.ex", "form:open"} => :local,
     {"operator/question_form.ex", "questions:send"} => :member,

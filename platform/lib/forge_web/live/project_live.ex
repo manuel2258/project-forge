@@ -109,6 +109,10 @@ defmodule ForgeWeb.ProjectLive do
   # Typing into a proposal's comment or choosing its type (`ForgeWeb.Operator.Drafts`). This page
   # does not route through `ForgeWeb.Operator.Actions`, so it carries the clause itself.
   @impl true
+  # Both answers are the same answer here — the draft is held, or the payload named no form and
+  # there was nothing to hold — and neither needs a reload. The `:unknown` arm is answered
+  # rather than matched on purpose: the payload is off the wire, and a crafted one naming no
+  # form would otherwise take the page down with a match error.
   def handle_event("draft:change", params, socket) do
     case Drafts.handle("draft:change", params, socket) do
       {:state, socket} -> {:noreply, socket}
@@ -143,6 +147,13 @@ defmodule ForgeWeb.ProjectLive do
     end
   end
 
+  # Forgetting here is an equivalent mutant, kept for the assign rather than for the page: a
+  # decided proposal is not in `Proposals.open/1` any more, so `propose-<version_id>` is never
+  # drawn again and keeping it changes nothing anybody could see. There is no test for it on
+  # purpose (`CLAUDE.md` § Testing); what it buys is a `:drafts` map that does not grow for the
+  # life of the page. The approval card's own `forget` is not this — `approve-<ticket_id>` comes
+  # round again, because the same ticket is approved more than once — and it shares the one line
+  # in `ForgeWeb.Operator.Actions` that a document's save covers.
   defp decided(socket, params, message),
     do: socket |> Drafts.forget(params["draft"]) |> put_flash(:info, message)
 

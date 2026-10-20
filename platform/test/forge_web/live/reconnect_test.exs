@@ -25,6 +25,7 @@ defmodule ForgeWeb.ReconnectTest do
   import Forge.GitFixtures
 
   alias Forge.{Conversations, Jobs, Projects, Tickets}
+  alias ForgeWeb.Operator.Drafts
 
   setup :register_and_log_in_user
 
@@ -73,7 +74,16 @@ defmodule ForgeWeb.ReconnectTest do
     {in_forms, loose}
   end
 
-  defp typed_into(node), do: Floki.find(node, "textarea, input[type=text]")
+  # The same boxes `holds_a_box?/2` counts below, so the walk and the inventory cannot disagree
+  # about what a person types into: an `<.input type="number">` drawn outside a form would
+  # otherwise pass the walk and fail the inventory.
+  defp typed_into(node),
+    do:
+      Floki.find(
+        node,
+        "textarea, input[type=text], input[type=email], input[type=password], " <>
+          "input[type=url], input[type=number]"
+      )
 
   # The shape half: if this fails, nothing the handler does matters, because the client never
   # sends the event that would reach it.
@@ -164,6 +174,28 @@ defmodule ForgeWeb.ReconnectTest do
 
       assert view |> element("#approval-#{ticket.id} textarea[name=comment]") |> render() =~
                "pinned at the wrong one"
+    end
+
+    # The three `render_component` tests below hand `drafts` in ready-made, so the path from a
+    # replayed payload to a drawn `<select>` was covered nowhere: adding `ticket_type` to the
+    # keys `Drafts.handle/3` throws away left every test green. This drives the handler itself
+    # and draws the component from what it held.
+    test "puts back every field of a replayed form, the chosen type included" do
+      assert {:state, socket} =
+               Drafts.handle(
+                 "draft:change",
+                 %{
+                   "draft" => "propose-v1",
+                   "version_id" => "v1",
+                   "comment" => "worth doing after the release",
+                   "ticket_type" => "bug"
+                 },
+                 %Phoenix.LiveView.Socket{}
+               )
+
+      html = proposal_html(socket.assigns.drafts)
+      assert html =~ "worth doing after the release"
+      assert selected(html) == ["bug"]
     end
 
     test "puts a proposal's comment and its chosen type back", %{
@@ -386,6 +418,338 @@ defmodule ForgeWeb.ReconnectTest do
       editor = view |> element(~s([id="write-test-report.md"])) |> render()
       assert editor =~ "the whole thing"
       refute editor =~ "half of a sentence"
+    end
+
+    # The other half of the same line: `ForgeWeb.Operator.Actions.act_on/3` forgets a draft on
+    # success and deliberately not on a refusal, so a send that was turned down leaves what was
+    # typed to send again. Only a comment defended that, and forgetting on both branches passed
+    # the whole suite — a refused save or a refused approval losing the text is this ticket's own
+    # defect, on the surface this ticket added.
+    #
+    # The document editor is where the rule is observable and the approval card is not: the
+    # refusal easiest to arrange there — somebody else decided it first — takes the pending
+    # transition away, so the card the comment sits in is not drawn at all afterwards. One
+    # `act_on` serves both.
+    test "keeps the draft when the save is refused", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      path = ~p"/tickets/#{project.name}/#{ticket.number}?tab=decide"
+      {:ok, view, _html} = live(conn, path)
+
+      # An unclosed question block: `ForgeCore.Document.parse/1` refuses it, so nothing is
+      # written and there is no saved version for the box to fall back to.
+      refused = "```question\nkey: a\n"
+      editor = ~s(form[id="write-test-report.md"])
+
+      # The change the client debounces out while it is typed, then the Save it was typed for.
+      view |> form(editor, %{"content" => refused}) |> render_change()
+      html = view |> form(editor, %{"content" => refused}) |> render_submit()
+
+      assert html =~ "Failed:"
+      assert Forge.Artifacts.latest(ticket.id, "test-report.md") == nil
+      assert view |> element(~s([id="write-test-report.md"])) |> render() =~ "key: a"
+    end
+
+    # The draft outliving the socket is what this ticket is for; outliving a version somebody
+    # else wrote while it sat there is not. Before the draft was held, the box was redrawn from
+    # `@latest` on every reload, so a Save could only ever land on what the operator had just
+    # been shown. Now the box keeps the draft — so the Save has to say which version the text was
+    # written against, and be refused when that is not the latest any more
+    # (`docs/design/ui.md` § A reconnect is not a reload). Both people's work is still on screen
+    # afterwards: theirs in the document, the operator's in the box.
+    test "refuses to save a draft that a newer version has overtaken", %{
+      conn: conn,
+      project: project,
+      user: user,
+      ticket: ticket
+    } do
+      {:ok, _ticket} = Forge.Operator.edit(ticket, user, "test-report.md", "mine, v1\n")
+
+      path = ~p"/tickets/#{project.name}/#{ticket.number}?tab=decide"
+      {:ok, view, _html} = live(conn, path)
+      editor = ~s(form[id="write-test-report.md"])
+
+      view |> form(editor, %{"content" => "typed against v1\n"}) |> render_change()
+
+      # Somebody else writes while the draft sits in the box. The page reloads on the event and
+      # keeps the draft, which is the point — and makes the Save below a stale write.
+      {:ok, _ticket} = Forge.Operator.edit(ticket, user, "test-report.md", "theirs, v2\n")
+
+      html = view |> form(editor, %{"content" => "typed against v1\n"}) |> render_submit()
+
+      assert html =~ "is at v2 now"
+
+      assert %{version: 2, content: "theirs, v2\n"} =
+               Forge.Artifacts.latest(ticket.id, "test-report.md")
+
+      assert view |> element(~s([id="write-test-report.md"])) |> render() =~ "typed against v1"
+    end
+
+    # The refusal has to have a way out of it, or the operator is told their text is safe and
+    # holds no gesture that would send it: the base is drawn from the draft, so without this the
+    # second Save and every Save after it is refused in the same words, and the only thing that
+    # moves the base — a reload — is also the thing that empties the box.
+    test "writes the draft when the same Save is made again", %{
+      conn: conn,
+      project: project,
+      user: user,
+      ticket: ticket
+    } do
+      {:ok, _ticket} = Forge.Operator.edit(ticket, user, "test-report.md", "mine, v1\n")
+
+      path = ~p"/tickets/#{project.name}/#{ticket.number}?tab=decide"
+      {:ok, view, _html} = live(conn, path)
+      editor = ~s(form[id="write-test-report.md"])
+
+      view |> form(editor, %{"content" => "typed against v1\n"}) |> render_change()
+      {:ok, _ticket} = Forge.Operator.edit(ticket, user, "test-report.md", "theirs, v2\n")
+
+      assert view |> form(editor, %{"content" => "typed against v1\n"}) |> render_submit() =~
+               "save again to write it over v2"
+
+      # The same gesture, now a decision rather than an accident.
+      assert view |> form(editor, %{"content" => "typed against v1\n"}) |> render_submit() =~
+               "Saved test-report.md"
+
+      assert %{version: 3, content: "typed against v1\n"} =
+               Forge.Artifacts.latest(ticket.id, "test-report.md")
+    end
+
+    # `Drafts.forget/2` is handed `params["draft"]`, and six events on this page carry no such
+    # param: Repin, Retry, Integrate, Cancel, Restore and a hand-taken transition are all
+    # `phx-click` buttons. A `forget/2` that cleared the map instead of nothing would wipe a
+    # half-typed document on any of them, and nothing said so but the docstring.
+    test "a button that names no draft keeps one that is held", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      path = ~p"/tickets/#{project.name}/#{ticket.number}?tab=decide"
+      {:ok, view, _html} = live(conn, path)
+
+      view
+      |> form(~s(form[id="write-test-report.md"]), %{"content" => "half of a sentence"})
+      |> render_change()
+
+      # Repin only succeeds when the default branch has moved, so move it.
+      commit_to_default(project, %{"README.md" => "moved on\n"})
+      html = render_click(view, "repin", %{"ticket" => ticket.id})
+
+      assert html =~ "Re-pinned at"
+      assert view |> element(~s([id="write-test-report.md"])) |> render() =~ "half of a sentence"
+    end
+  end
+
+  # Every form in the web layer that holds a box a person types into, and whether a rejoin can
+  # put what was typed back. The page walks above cover the five surfaces this ticket is about;
+  # this covers the ones nobody walks, a page that does not exist yet included — a new form with
+  # a box and no replay fails here until somebody records it. Same shape as
+  # `authorization_inventory_test.exs`: a claim in a note with a way to fail.
+  #
+  # A form's box is often not written in the form: `message_box/1` draws the operator's,
+  # `open_question/1` the question form's, `model_field/1` and `template_fields/1` the settings
+  # ones. The first version of this scan read only a form's own body and so saw none of them —
+  # which is how a seventh form lost what was typed while the note said six. It now asks which
+  # components draw a box, to a fixpoint, and counts a call to one of those.
+  #
+  # What it still does not reach is a box drawn outside a form altogether. No page draws one
+  # today; if one appears, only the walks above would catch it, and only on the pages they visit.
+  describe "every form that holds a box" do
+    # The forms that still lose what was typed, and why none is fixed here: giving back a
+    # secret's value or a password means holding it in page state, which is a decision for a
+    # person (`docs/design/secrets.md`), and the other two are that same decision about a page
+    # holding what was typed into it.
+    @unrecoverable %{
+      {"live/project_settings_live.ex", "add-member"} => "an email, on a project's members",
+      {"live/project_settings_live.ex", "set-secret"} => "a secret's name and its value",
+      {"live/project_settings_live.ex", "add-mirror"} => "a mirror's url, user and token",
+      {"live/workers_live.ex", "save"} => "a worker's memory and cores",
+      {"live/project_settings_live.ex", "model"} => "a model name, while no worker is connected",
+      {"live/user_live/login.ex", "submit_magic"} => "an email, to be sent a link",
+      {"live/user_live/login.ex", "submit_password"} => "an email and a password"
+    }
+
+    test "either recovers on a rejoin, or is recorded as not" do
+      {recovers, loses} = Enum.split_with(forms_with_boxes(), &elem(&1, 1))
+      keys = Enum.map(loses, &elem(&1, 0))
+      recorded = MapSet.new(Map.keys(@unrecoverable))
+
+      assert keys == Enum.uniq(keys),
+             "two forms in one file under one name, so one hides the other: #{inspect(keys)}"
+
+      unrecorded = MapSet.difference(MapSet.new(keys), recorded)
+
+      assert MapSet.to_list(unrecorded) == [],
+             "form(s) holding a box that a rejoin cannot replay, with nothing recording why: " <>
+               inspect(MapSet.to_list(unrecorded))
+
+      stale = MapSet.difference(recorded, MapSet.new(keys))
+
+      assert MapSet.to_list(stale) == [],
+             "recorded as losing what was typed, but it does not any more — drop the entry: " <>
+               inspect(MapSet.to_list(stale))
+
+      # The surfaces this ticket is about, by name. A scan that stopped seeing one of them would
+      # pass everything above, and the first version of this one did exactly that: `message_box`
+      # is a component, so none of the forms holding the operator's own unsent work matched a
+      # `<textarea>`.
+      recovering = Enum.map(recovers, &elem(&1, 0))
+
+      for site <- [
+            {"live/chat_live.ex", "send"},
+            {"live/operator/components.ex", "decide"},
+            {"live/operator/components.ex", "decide_proposal"},
+            {"live/operator/components.ex", "write_document"}
+          ] do
+        assert site in recovering, "#{inspect(site)} is not in the scan at all"
+      end
+    end
+
+    # One entry per form that holds a box: `{{file, the event it submits}, whether a rejoin can
+    # replay it}`. A rejoin replays a form carrying both an `id` and a `phx-change`, and nothing
+    # else (this file's moduledoc).
+    defp forms_with_boxes do
+      sources = Map.new(Path.wildcard("lib/forge_web/**/*.{ex,heex}"), &{&1, File.read!(&1)})
+      drawn = box_components(sources)
+
+      Enum.flat_map(sources, fn {path, source} ->
+        file = Path.relative_to(path, "lib/forge_web")
+
+        for {tag, body} <- forms(markup(path, source)), holds_a_box?(body, drawn) do
+          {{file, attribute(tag, "phx-submit")}, tag =~ "id=" and tag =~ "phx-change"}
+        end
+      end)
+    end
+
+    # Which components draw a box, to a fixpoint: one with box markup of its own, or one that
+    # calls another that has. `message_box/1` is the first kind, `open_question/1` the second.
+    #
+    # Kept as a list of `{{file, name}, markup}` and not a map keyed by name: names are shared
+    # across modules — `render/1` is in twenty-one — and a map keeps whichever file the wildcard
+    # read last, dropping the box another module's definition of that name draws. A *call* is
+    # still matched by name alone, because resolving which module `<.name>` means would take the
+    # import graph, so the scan is deliberately generous: a name any module draws a box with
+    # counts as a box everywhere it is called. Generous shows up as an entry nobody can explain;
+    # the other direction hides a form, which is how `#model-form` sat unrecorded.
+    #
+    # **Keying it by name again is an equivalent mutant today, and kept anyway.** Run it: every
+    # test here still passes, because no shared name has a box-drawing definition sitting behind
+    # a non-box one — of the six shared names that are called, none draws a box at all, and the
+    # `render/1` that is read last draws one. It is written this way so that the next shared
+    # name cannot hide a form, which is the failure one level up from the one this attempt
+    # fixed. Do not write a test for it: the only one possible asserts by name, and a name is
+    # exactly what the mutation does not change.
+    defp box_components(sources) do
+      bodies =
+        for {path, source} <- sources,
+            {name, body} <- components(source),
+            do: {{path, name}, body}
+
+      Stream.iterate(MapSet.new(), fn known ->
+        for {{_path, name}, body} <- bodies,
+            holds_a_box?(body, known),
+            into: MapSet.new(),
+            do: name
+      end)
+      |> Stream.chunk_every(2, 1)
+      |> Enum.find_value(fn [known, next] -> if MapSet.equal?(known, next), do: known end)
+    end
+
+    # Every `def name(assigns)` with markup of its own, as `{name, markup}`. Splitting at the
+    # heads is what ties a sigil to its function: each belongs to the nearest head above it,
+    # which is how every component in this layer is written.
+    defp components(source) do
+      source
+      |> String.split(~r/\bdefp?\s+(?=[a-z_][\w?!]*\(assigns\))/)
+      |> Enum.flat_map(fn part ->
+        case Regex.run(~r/^([a-z_][\w?!]*)\(assigns\)/, part) do
+          [_whole, name] -> [{name, heex_sigils(part)}]
+          nil -> []
+        end
+      end)
+    end
+
+    # The markup a file holds and not its prose: `core_components.ex`'s moduledoc names
+    # `<.form>` in a sentence, and reading that as a form made every `<.input>` after it part of
+    # its body. A template is markup whole; in Elixir, markup is what sits inside `~H"""`.
+    defp markup(path, source) do
+      if Path.extname(path) == ".heex", do: source, else: heex_sigils(source)
+    end
+
+    defp heex_sigils(source) do
+      source
+      |> String.split(~s(~H"""))
+      |> Enum.drop(1)
+      |> Enum.map_join("\n", fn chunk -> chunk |> String.split(~s(""")) |> hd() end)
+    end
+
+    # Each form's opening tag and the markup inside it. HTML forms do not nest, so the first
+    # close after a form is that form's; `<form>` and `<.form>` are both counted.
+    defp forms(markup) do
+      markup
+      |> String.split(~r/<\.?form(?=[\s>])/)
+      |> Enum.drop(1)
+      |> Enum.map(fn chunk ->
+        [form | _rest] = String.split(chunk, ~r/<\/\.?form>/, parts: 2)
+        tag_and_body(form)
+      end)
+    end
+
+    # A box is a textarea or an input a person types into, written here or drawn by one of
+    # `drawn`. A `<.input>` with no `type` is a text field, which is why the absent case counts;
+    # a select, a radio and a hidden field are not boxes, because nothing is typed in them.
+    defp holds_a_box?(body, drawn) do
+      Enum.any?(fields(body), fn
+        {"textarea", _attrs} -> true
+        {"select", _attrs} -> false
+        {"input", attrs} -> attribute(attrs, "type") in [nil | ~w(text email password url number)]
+      end) or calls_a_box?(body, drawn)
+    end
+
+    defp calls_a_box?(body, drawn) do
+      ~r/<(?:\.|[A-Z][\w.]*\.)([a-z_][\w?!]*)(?=[\s\/>])/
+      |> Regex.scan(body)
+      |> Enum.any?(fn [_whole, name] -> MapSet.member?(drawn, name) end)
+    end
+
+    defp fields(body) do
+      ~r/<(?:\.|[A-Z][\w.]*\.)?(input|textarea|select)(?=[\s\/>])/
+      |> Regex.scan(body, return: :index)
+      |> Enum.map(fn [{at, len}, {name_at, name_len}] ->
+        rest = binary_part(body, at + len, byte_size(body) - at - len)
+        {binary_part(body, name_at, name_len), rest |> tag_and_body() |> elem(0)}
+      end)
+    end
+
+    defp attribute(tag, name) do
+      case Regex.run(~r/#{name}="([^"]*)"/, tag) do
+        nil -> nil
+        [_whole, value] -> value
+      end
+    end
+
+    # A tag ends at the first `>` outside a HEEx `{…}`, which is where `value={"write-#{@name}"}`
+    # and `phx-change={JS.push(…)}` would otherwise cut it short.
+    defp tag_and_body(chunk), do: tag_and_body(chunk, 0, 0)
+
+    defp tag_and_body(chunk, _depth, index) when index >= byte_size(chunk), do: {chunk, ""}
+
+    defp tag_and_body(chunk, depth, index) do
+      case {binary_part(chunk, index, 1), depth} do
+        {"{", _} ->
+          tag_and_body(chunk, depth + 1, index + 1)
+
+        {"}", _} ->
+          tag_and_body(chunk, depth - 1, index + 1)
+
+        {">", 0} ->
+          {binary_part(chunk, 0, index), binary_part(chunk, index, byte_size(chunk) - index)}
+
+        _other ->
+          tag_and_body(chunk, depth, index + 1)
+      end
     end
   end
 end

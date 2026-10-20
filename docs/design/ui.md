@@ -327,26 +327,44 @@ live DOM and re-pushes its change event with what was typed, before the new moun
 applied; a form missing either attribute is not copied, is not replayed, and is drawn empty by
 that render. So the page's handler for the change holds what arrives, and the box is drawn from
 what it holds — see `ForgeWeb.Operator.Drafts` for the cards and
-`ForgeWeb.Operator.QuestionForm` for the question form, which hold it the same way for the same
-reason.
+`ForgeWeb.Operator.QuestionForm` for the question form. Two modules, deliberately: a question
+form holds a structured set of answers it has to validate and send, a card holds the fields of
+one form as they came off the wire, and folding the first into the second would lose the
+structure for the sake of one fewer module.
 
 What this does not reach is a reconnect the framework answers with a hard page refresh, which it
 does when a push times out: there is no DOM left to copy from. That is a reload, and the three
 deliberate cases' rule applies.
 
-**Where the rule holds today.** On every surface a person's unsent work sits on: the
-conversation's composer and the question form docked under it, a document's question form, an
-approval's comment, a proposal's comment and its type, and a human state's document.
-`ForgeWeb.ReconnectTest` walks those pages and fails on a box drawn outside a form carrying
-both attributes, so a new one cannot quietly miss it.
+**Where the rule holds today.** On the conversation's composer and the question form docked
+under it, a document's question form, an approval's comment, a proposal's comment and its type,
+a human state's document, and the two screens that start something — a new ticket and a new
+conversation, which is where the person who reported this said they lost work.
 
-It does **not** hold yet on six forms, counted: a project's members, its secrets and its
-mirrors, a worker's resources, and the two log-in forms. Each carries no `phx-change`, so each
-loses what was typed on a rejoin. That is a gap with a proposal open on it rather than a case
-the rule excuses — and two of them are why a person settles it and not the next agent: a
-secret's value or a password coming back means holding it in page state, which is a decision of
-its own (`docs/design/secrets.md`).
+`ForgeWeb.ReconnectTest` holds the rule two ways: it walks those pages and fails on a box drawn
+outside a form carrying both attributes, and it inventories every form in the web layer that
+holds a box — including the boxes components draw rather than the form itself — so a new one
+that cannot be replayed fails until somebody records why, the way
+`authorization_inventory_test.exs` does for events. What neither reaches is a box drawn in no
+form at all; no page draws one today, and only the walks would catch it if one appeared.
 
+It does **not** hold yet on seven forms, which that inventory is where to read: a project's
+members, its secrets, its mirrors and its default model, a worker's resources, and the two
+log-in forms. Each carries no `phx-change`, so each loses what was typed on a rejoin. That is a
+gap the inventory records rather than one the rule excuses — and two of them are why a person
+settles it and not the next agent: a secret's value or a password coming back means holding it
+in page state, which is a decision of its own (`docs/design/secrets.md`).
+
+**A draft the document moved under is refused once, then saved on purpose.** The box keeps what
+was typed even across a reload, so a Save from it could land on top of a version somebody else
+wrote while it sat there — v5 from text written against v3, with v4's work gone from what the
+workflow reads. The editor sends the version its draft was written against, and the first Save
+after a newer version arrives is refused whole: the flash says which version it is now and that
+the text is still in the box. **Saving again writes it.** The refusal is the warning, and
+repeating the gesture is the decision to write over what arrived — a refusal with no way
+forward would leave the operator told their text was safe and holding no gesture that could
+send it, which is the same dead end as losing it. Nothing goes silently either way: the other
+version is in the document and named in the refusal, and the typed text never leaves the box.
 
 ## The queue item
 

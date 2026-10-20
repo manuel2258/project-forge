@@ -166,12 +166,19 @@ clears the decision. The `comment` is optional and is stored with the approval.
 
 - The file is read once at the end of the turn and removed. Write it when you mean it; a second
   turn does not read it again, and a request is never retried on its own.
-- It is attributed to the person who opened this conversation, whoever is typing now.
-- It can be refused — a job of the state still running, an outcome the workflow does not declare
-  out of this state, a document the transition approves that has no version yet, a decision
-  already pending. The reason is recorded on the conversation, and nothing moves.
-- **Say in your reply what you asked for.** The file is easy to miss, and a refusal that you do
-  not mention is a person believing the ticket moved when it did not.
+- A turn that is interrupted, or that ends on an error or a budget, has the file removed
+  **unread**. If you were cut off, nothing was asked for; write it again when you mean it.
+- It is attributed to the person who opened this conversation, regardless of who is typing now.
+- It can be refused. The ways: a job of the state is still running; the workflow declares no
+  transition to that state from this one; two transitions go there and neither can be singled
+  out, so only a person can take it; a document the transition approves has no version yet; a
+  decision on another transition is already pending; there is nothing pending to decide; the
+  ticket is cancelled; this conversation is about the project and has no ticket; nobody, or
+  nobody who may still act, opened it; or the ticket's pinned workflow no longer parses.
+- **A refusal comes back to you as a message saying why**, on the next turn, and nothing moves.
+  It is recorded on the conversation for the person too.
+- **Say in your reply what you asked for.** You will not know the outcome until the turn after,
+  so name the request; a move the person thinks happened and did not is the thing to avoid.
 - Ask first unless the person has already asked for it. Moving a ticket is their decision; you
   are the hands, not the one choosing.
 - Nothing here stops a running job. If one is in the way, the person cancels the ticket and

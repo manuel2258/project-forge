@@ -281,10 +281,18 @@ defmodule ForgeCore.Prompt do
     You can ask for a transition, or decide a pending one, by writing
     `#{Path.join(job_dir, "transition.json")}`; the preamble says how. Everything here is as of
     when this conversation started and the ticket may have moved since — a request the engine
-    refuses is reported back to you with the reason, and nothing happens.
+    refuses comes back to you as a message saying why, and nothing happens.
     #{offered(moving)}#{pending(moving)}#{live(moving)}
     """
   end
+
+  # The pinning no longer parses, so there is nothing to offer and no honest list to print. Said
+  # rather than shown as an empty state: the ticket cannot move at all until a person repins it,
+  # which is a different problem from a state that simply declares no way out.
+  defp offered(%{"workflow_broken" => true}),
+    do:
+      "\n- This ticket's pinned workflow no longer parses, so no transition can be offered or\n" <>
+        "  taken. A person has to repin it before the ticket can move."
 
   defp offered(%{"transitions" => []}),
     do: "\n- No transition is declared out of the ticket's state, so there is none to ask for."

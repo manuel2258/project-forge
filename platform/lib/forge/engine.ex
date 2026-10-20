@@ -472,17 +472,32 @@ defmodule Forge.Engine do
   end
 
   @doc """
-  The states a person may move the ticket to from where it rests, each named once — two edges may
-  share a target — and **none whose transition approves a document with no version**, because
-  taking it would record an approval of nothing and is refused (`workflow-grammar-v1.md`
-  § Semantics). A refinement that failed left its ticket offering `planning`, which failed twice
-  when taken. The ticket page and the queue both ask this, so they cannot disagree.
+  The transitions a person may take out of where the ticket rests: every edge declared from the
+  current state **but none whose `approve` names a document with no version**, because taking it
+  would record an approval of nothing and is refused (`workflow-grammar-v1.md` § Semantics). A
+  refinement that failed left its ticket offering `planning`, which failed twice when taken.
+
+  The *edges*, not their targets, because the filter is per edge and two edges may reach one
+  target with only one of them offerable. Everything that offers a transition reads this one
+  walk — the ticket page and the queue through `offered_transitions/2` below, a conversation's
+  manifest through `Forge.Jobs` — so none of them can disagree about which edge survived.
   """
-  @spec offered_transitions(Ticket.t(), Workflow.t()) :: [String.t()]
-  def offered_transitions(%Ticket{} = ticket, %Workflow{} = workflow) do
+  @spec offered_edges(Ticket.t(), Workflow.t()) :: [Transition.t()]
+  def offered_edges(%Ticket{} = ticket, %Workflow{} = workflow) do
     workflow
     |> Workflow.transitions_from(ticket.state)
     |> Enum.filter(&(unversioned(ticket, &1) == []))
+  end
+
+  @doc """
+  The states a person may move the ticket to from where it rests, each named once — two edges may
+  share a target. `offered_edges/2`'s targets; the ticket page and the queue both ask this, so
+  they cannot disagree.
+  """
+  @spec offered_transitions(Ticket.t(), Workflow.t()) :: [String.t()]
+  def offered_transitions(%Ticket{} = ticket, %Workflow{} = workflow) do
+    ticket
+    |> offered_edges(workflow)
     |> Enum.map(& &1.to)
     |> Enum.uniq()
   end

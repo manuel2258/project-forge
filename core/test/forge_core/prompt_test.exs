@@ -757,6 +757,27 @@ defmodule ForgeCore.PromptTest do
       assert flat =~ "cancels the ticket and restores it"
     end
 
+    # A pinning that no longer parses has nothing to offer, and an empty list would read as a
+    # state with no way out — a different problem with a different answer.
+    test "about a ticket whose workflow no longer parses says that instead" do
+      spec =
+        chat_spec(%{
+          ticket: %{number: 7, title: "Stuck"},
+          moving: %{
+            "transitions" => [],
+            "pending" => nil,
+            "job_live" => false,
+            "workflow_broken" => true
+          }
+        })
+
+      manifest = Prompt.chat_manifest(spec, "/var/forge/jobs/chat-1")
+
+      assert manifest =~ "pinned workflow no longer parses"
+      assert manifest =~ "repin"
+      refute manifest =~ "No transition is declared"
+    end
+
     # A project chat has no ticket and nothing to transition, so it is not handed a section
     # describing a file it can never usefully write.
     test "about the repository as a whole is told nothing about moving a ticket" do

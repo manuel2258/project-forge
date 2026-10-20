@@ -279,13 +279,23 @@ left it pending left the ticket saying "waiting for you to choose" while the que
 page both still drew the approve-or-reject card, because each of them checks `pending_transition`
 before anything else. There was no way forward from the page at all.
 
+**While a decision is pending, no other transition may be taken.** The decision comes first,
+whichever edge is asked for, and `Forge.Engine.choose/4` refuses with `{:error, :pending_approval}`
+— `repinnable/2`'s name for the same condition. This is a rule of the grammar and not of a
+surface, which is the correction: it used to live only in the ticket page's `:if` on its chooser,
+which was armour while clicking was the only way in. A conversation asks for a transition by
+writing a file (`conversations.md` § Taking a transition), so the check belongs at the operation,
+where the chat, the API and the page all meet it.
+
 **A transition that approves a document with no version is not offered.** Approving records an
 approval on the latest version of each listed artifact, and a state whose job failed may never have
 written one: a refinement that did not parse left its ticket stuck in `refining` with `planning`
 offered, and taking it failed on `{:no_version, "refinement.md"}` twice before anyone could say
 why. So the surfaces list only the transitions whose `approve` names all have a version
-(`Forge.Engine.offered_transitions/2`), and taking one anyway is refused with the name that has
-none.
+(`Forge.Engine.offered_edges/2`, whose targets are `offered_transitions/2`), and taking one anyway
+is refused with the name that has none. The filter is per *edge*, which is why the surviving edges
+and not merely their targets are what the one walk returns: two edges may reach one target with
+only one of them offerable.
 
 **Running a state again.** A person may run the ticket's current state again whenever it is a job
 or command state and nothing is live in it — stuck or active, after a failure, and after a

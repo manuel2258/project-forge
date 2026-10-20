@@ -152,7 +152,7 @@ Worker → platform:
 | `stats` | `cpu`, `memory_used`, `memory_total`, `disk_used`, `disk_total`, each only when readable | no |
 | `log` | `at`, `type`, `level`, `message`, and `job_id` on a line about a job | no |
 | `event` | `job_id`, normalised harness event | no |
-| `turn` | `job_id`, turn index, commit, the turn's proposals and documents, and a harness summary carrying its cost | yes |
+| `turn` | `job_id`, turn index, commit, the turn's proposals and documents, any `transition.json` it wrote (`conversations.md` § Taking a transition), and a harness summary carrying its cost | yes |
 | `result` | `job_id`, `ForgeCore.Job.Result` as JSON — `status` `parked` for an agent that invoked commands, with the invocations and the commit it pushed; a command's with its exit status, duration and log key; either's `blobs` (name → key and size) and `invalid_blobs` (name → why) for its groups of files | yes |
 | `hibernated` | `job_id`, commit sha, reason, the result as far as it got; a chat adds its turn count | yes |
 | `failed` | `job_id`, reason | yes |

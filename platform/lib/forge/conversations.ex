@@ -17,6 +17,7 @@ defmodule Forge.Conversations do
   import Ecto.Query, only: [from: 2, where: 3]
 
   alias Ecto.Multi
+  alias Forge.Accounts.User
   alias Forge.{Events, Git, Jobs, Operator, Projects, Proposals, Repo, Secrets, Tickets, Workers}
   alias Forge.Events.Event
   alias Forge.Git.Tokens
@@ -442,8 +443,29 @@ defmodule Forge.Conversations do
   defp transition_actor(chat, request) do
     with :ok <- on_a_ticket(chat),
          :ok <- shaped(request),
-         {:ok, user} <- opener(chat) do
-      {:ok, Tickets.get!(chat.ticket_id), user}
+         {:ok, user} <- opener(chat),
+         ticket = Tickets.get!(chat.ticket_id),
+         :ok <- parses(ticket) do
+      {:ok, ticket, user}
+    end
+  end
+
+  # **The pinning is asked about here because the engine would raise on it.**
+  # `Engine.choose/4` reads `Tickets.workflow/1`, which is `{:ok, w} = parsed_workflow(ticket)`
+  # and so a `MatchError` on a pinning that has stopped parsing. Raising from here is worse than
+  # anywhere else: this runs after the turn's transaction has committed, so the channel's
+  # `handle_in("turn", ...)` dies, the worker re-sends, `recorded?/2` says the turn is already
+  # recorded, and the request vanishes with no refusal event and nothing said to anyone. Asked
+  # and refused instead (§ Taking a transition).
+  defp parses(ticket) do
+    case Tickets.parsed_workflow(ticket) do
+      {:ok, _workflow} ->
+        :ok
+
+      {:error, errors} ->
+        {:error,
+         "this ticket's pinned workflow no longer parses, so nothing can be taken out of " <>
+           "any state until a person repins it: " <> ForgeCore.Error.format(errors)}
     end
   end
 
@@ -452,7 +474,11 @@ defmodule Forge.Conversations do
 
   defp on_a_ticket(%Job{}), do: :ok
 
-  defp shaped(%{"to" => to, "decision" => _} = _both) when is_binary(to),
+  # **No type guard on `to`.** `apply_request/4` dispatches on the key being *present*, so a
+  # `to` of any type beside a `decision` would validate as a decision here and then dispatch as
+  # a transition — two models of one request, which is the trap CLAUDE.md names. Both keys
+  # present is refused whatever they hold.
+  defp shaped(%{"to" => _to, "decision" => _decision}),
     do: {:error, "names both a transition to take and a decision to make; write one or the other"}
 
   defp shaped(%{"to" => to}) when is_binary(to) and to != "", do: :ok
@@ -483,13 +509,32 @@ defmodule Forge.Conversations do
         # the agent can read is the cheaper wrong answer.
         case Forge.Accounts.get_user(user_id) do
           nil -> {:error, "the person who opened this conversation no longer has an account"}
-          user -> {:ok, user}
+          user -> standing(user)
         end
 
       _not_a_person ->
         {:error, "nobody opened this conversation, so there is no one to attribute a move to"}
     end
   end
+
+  # **Read from the row, every time.** Membership is the operator's guard and is reached by
+  # calling it; approval and suspension are this path's to ask, because `Projects.role/2` reads
+  # only the membership row and a conversation outlives the standing of whoever opened it. Any
+  # member can type into it, so without this an account suspended since would still have tickets
+  # moved in its name by somebody else's message — the rule `Forge.Workers.create/2` already
+  # keeps for a page that holds the user it mounted with (§ Taking a transition).
+  defp standing(user) do
+    if User.active?(user) do
+      {:ok, user}
+    else
+      {:error,
+       "the person who opened this conversation is #{standing_word(User.standing(user))}, " <>
+         "so nothing can be done in their name"}
+    end
+  end
+
+  defp standing_word(:suspended), do: "suspended"
+  defp standing_word(:not_approved), do: "not an approved account"
 
   # `Forge.Operator`, not `Forge.Engine`: the membership guard is the operator's and a chat is a
   # third caller of the same function the page and the API call, with no copy of any rule
@@ -521,6 +566,16 @@ defmodule Forge.Conversations do
   defp engine_said(_chat, _request, {:ok, _ticket}), do: :ok
   defp engine_said(chat, request, {:error, reason}), do: refused(chat, request, humanise(reason))
 
+  # The event is for the person — the ticket's history and the conversation's Activity tab, where
+  # `Events.detail/1` renders the reason. **The message is for the agent**, and it is not
+  # optional: `transcript/1` folds `chat.message` and the two harness types and nothing else, so
+  # an event on its own is a refusal the agent never hears. It wrote a file and would be told
+  # nothing at all (§ Taking a transition).
+  #
+  # `send/3` with a `:system` actor is the existing way anything puts words into a conversation,
+  # so the sentence reaches the harness on the next turn, lands in the transcript the person
+  # reads, and replays on a reopen. Its `{:error, :not_live}` is left alone: a conversation whose
+  # process has gone keeps the event, and there is nothing running to tell.
   defp refused(chat, request, reason) do
     Events.append("chat.transition_refused", {:job, chat.id}, %{
       ticket_id: chat.ticket_id,
@@ -529,6 +584,7 @@ defmodule Forge.Conversations do
     })
 
     Events.notify(chat.ticket_id)
+    send(chat, "Your request to move the ticket was refused: #{reason}", actor: :system)
     :ok
   end
 
@@ -552,6 +608,22 @@ defmodule Forge.Conversations do
 
   defp humanise({:no_version, name}),
     do: "`#{name}` has no version yet, so nothing can approve it"
+
+  # The merging states' own refusals (`Engine.enter/4`). Without these a chat asking for a
+  # merging state on a conflicting ticket records `refused: {:merge_conflict, [...]}` as the
+  # sentence a person reads; `ForgeWeb.Operator.Actions` already has prose for the same pair.
+  defp humanise({:merge_conflict, paths}),
+    do:
+      "the merge hit conflicts in " <>
+        Enum.map_join(paths, ", ", &"`#{&1}`") <> "; they have to be resolved first"
+
+  # Git's own words when it has them — `reason` is whatever the git layer returned, which is a
+  # string for a failed command and a term for anything else.
+  defp humanise({:merge_impossible, reason}) when is_binary(reason),
+    do: "the merge could not be attempted: #{reason}"
+
+  defp humanise({:merge_impossible, reason}),
+    do: "the merge could not be attempted: #{inspect(reason)}"
 
   defp humanise({:ambiguous, outcomes}),
     do:
@@ -1520,7 +1592,7 @@ defmodule Forge.Conversations do
 
   # A row carries the project's name and the last thing the agent said, so an unscoped list is a
   # transcript leak and not only a name one. See `docs/design/identity.md` § Read scoping.
-  defp for_user(%Forge.Accounts.User{} = user) do
+  defp for_user(%User{} = user) do
     project_ids = Enum.map(Forge.Projects.list(user), & &1.id)
     Repo.all(from j in node_wide(), where: j.project_id in ^project_ids)
   end

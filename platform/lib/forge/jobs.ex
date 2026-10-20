@@ -1094,37 +1094,43 @@ defmodule Forge.Jobs do
 
   # What a ticket conversation may ask the engine for (`docs/design/conversations.md` § Taking a
   # transition): the same edges a person is offered, each with the `approve` list its choice would
-  # record. Assembled here rather than from `Engine.offered_transitions/2`, which answers with
-  # names only because no other caller needs more; the filter — an edge approving a document with
-  # no version is not offered, since taking it is refused — is that function's and is asked for by
-  # name so the two cannot disagree about which edges exist.
+  # record.
   #
-  # Two edges may share a target, and the list names it once with everything either would
-  # approve — as the page names it once. Asking for it is then refused as `{:ambiguous, outcomes}`,
-  # which is what a person's by-hand choice of the same target already gets: `Core.choose/4` is
-  # given no outcome by either, and there is no second offer here to be more specific with.
+  # **`parsed_workflow/1`, never `workflow/1`.** A pinning validated at admission can stop parsing
+  # later as the validator's rules move on, and `workflow/1` raises on one that has. This runs for
+  # every ticket chat assignment, inside `assign/2` after `mark_started` has set the row running,
+  # so a raise here fails the job — on precisely the broken ticket a conversation is the way to
+  # rescue. Nothing is offered instead, and the manifest says why.
   defp moving(nil), do: nil
 
   defp moving(%Ticket{} = ticket) do
     %{
       "transitions" => chat_transitions(ticket),
       "pending" => ticket.pending_transition,
-      "job_live" => live?(ticket.id, ticket.state)
+      "job_live" => live?(ticket.id, ticket.state),
+      "workflow_broken" => match?({:error, _}, Tickets.parsed_workflow(ticket))
     }
   end
 
+  # `Engine.offered_edges/2` and no second walk of the workflow: the edges it returns are the
+  # ones that survived the unversioned-artifact filter, so a target reached by two edges carries
+  # only the surviving ones' `approve` names. Grouping on the target names it once, as the page
+  # names it once; asking for it is then refused as `{:ambiguous, outcomes}`, which is what a
+  # person's by-hand choice of the same target already gets.
   defp chat_transitions(%Ticket{} = ticket) do
-    workflow = Tickets.workflow(ticket)
-    offered = Engine.offered_transitions(ticket, workflow)
+    case Tickets.parsed_workflow(ticket) do
+      {:ok, workflow} ->
+        ticket
+        |> Engine.offered_edges(workflow)
+        |> Enum.group_by(& &1.to, & &1.approve)
+        |> Enum.map(fn {to, approve} ->
+          %{"to" => to, "approve" => approve |> List.flatten() |> Enum.uniq()}
+        end)
+        |> Enum.sort_by(& &1["to"])
 
-    workflow
-    |> ForgeCore.Workflow.transitions_from(ticket.state)
-    |> Enum.filter(&(&1.to in offered))
-    |> Enum.group_by(& &1.to, & &1.approve)
-    |> Enum.map(fn {to, approve} ->
-      %{"to" => to, "approve" => approve |> List.flatten() |> Enum.uniq()}
-    end)
-    |> Enum.sort_by(& &1["to"])
+      {:error, _errors} ->
+        []
+    end
   end
 
   # An integrating job's checkout fetches the default branch too; every other job's does not

@@ -379,9 +379,9 @@ defmodule ForgeWorker.Job.Conversation do
     # by content, so re-reporting the same file every turn costs nothing.
     proposals = Dir.proposals(job_dir(state))
     documents = Dir.documents(job_dir(state))
-    # Read once per turn and removed by the read, so a request is carried exactly once
-    # (`docs/design/conversations.md` § Taking a transition).
-    transition = Dir.transition_request(job_dir(state))
+    # Read once per turn and removed by the read, so a request is carried exactly once — and
+    # only off a turn that ended cleanly (`docs/design/conversations.md` § Taking a transition).
+    transition = transition_request(job_dir(state), event.payload)
 
     # After every turn and not at the end, because a conversation's end may be its machine's: it
     # goes dormant when its worker is lost, and a reopen resumes what the last turn left.
@@ -428,6 +428,26 @@ defmodule ForgeWorker.Job.Conversation do
   def handle_info(message, state) do
     Logger.debug("conversation ignored #{inspect(message)}")
     {:noreply, state}
+  end
+
+  # **Only a clean turn's request is read; any other's file is removed unread.** The same gate
+  # `invoke.json` has, for the same reason it has it — a run that may not invoke has its file
+  # removed "so a stray file cannot turn a finished run into a round of refusals"
+  # (`runner.ex`'s `invocations/3`). Here the turn to refuse is the interrupted one above all: the
+  # person cut the agent off mid-sentence, a file half-written when that happened is not a request
+  # anybody made, and `push_reply/1` — the thing that would have told somebody — is the one step
+  # an interrupted turn skips. A turn the harness ended on an error or a budget is no better.
+  defp transition_request(job_dir, payload) do
+    clean? =
+      payload[:interrupted] != true and payload[:subtype] == "success" and
+        payload[:is_error] != true
+
+    if clean? do
+      Dir.transition_request(job_dir)
+    else
+      File.rm_rf(Dir.transition_path(job_dir))
+      :none
+    end
   end
 
   # Absent unless the conversation wrote the file, so a turn that asked for nothing says nothing.

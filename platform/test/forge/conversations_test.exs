@@ -1442,6 +1442,57 @@ defmodule Forge.ConversationsTest do
       assert spec["moving"]["job_live"] == false
     end
 
+    # **Two edges, one target, only one offerable.** The filter is per edge, so a manifest built
+    # by intersecting on the *target* carries the dead edge's `approve` list too — telling the
+    # agent a transition approves a document that has no version, which taking it is refused
+    # for. `Engine.offered_edges/2` is the one walk both halves read
+    # (`docs/design/conversations.md` § Taking a transition).
+    test "a target reached by two edges carries only the offerable edge's approvals", %{
+      project: project
+    } do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+
+      # A second way from `refining` to `planning`, approving a document nothing has written.
+      ticket = second_edge!(ticket, "notes.md")
+
+      {:ok, version} =
+        Forge.Artifacts.record_version(ticket.id, "refinement.md", :document, :system, %{
+          content: "---\noutcome: done\n---\n# R\n"
+        })
+
+      assert version
+      {:ok, chat} = Conversations.open(project, "about this", ticket: ticket)
+      finish_jobs(ticket)
+
+      spec = Jobs.assignment(chat, Tickets.get!(ticket.id), project, "token")["spec"]
+
+      assert spec["moving"]["transitions"] == [
+               %{"to" => "planning", "approve" => ["refinement.md"]}
+             ]
+
+      # The page is offered the same target, which is what makes the two agree.
+      assert Forge.Engine.offered_transitions(
+               Tickets.get!(ticket.id),
+               Tickets.workflow(Tickets.get!(ticket.id))
+             ) == ["planning"]
+    end
+
+    # The pinning stopped parsing. `moving/1` runs for every ticket chat assignment, inside
+    # `assign/2` after the row is already `:running`, so `Tickets.workflow/1` — which raises —
+    # would fail the job on exactly the broken ticket a conversation is the way to rescue.
+    test "a ticket whose workflow no longer parses still gets a spec, with nothing offered", %{
+      project: project
+    } do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+      {:ok, chat} = Conversations.open(project, "about this", ticket: ticket)
+      ticket = ticket |> Ecto.Changeset.change(%{workflow: %{}}) |> Repo.update!()
+
+      spec = Jobs.assignment(chat, ticket, project, "token")["spec"]
+
+      assert spec["moving"]["transitions"] == []
+      assert spec["moving"]["workflow_broken"] == true
+    end
+
     test "a project chat's spec carries no transitions and no decision", %{project: project} do
       {:ok, chat} = Conversations.open(project, "about the repository")
 
@@ -2205,6 +2256,102 @@ defmodule Forge.ConversationsTest do
       assert length(turn_events(chat)) == 1
     end
 
+    # **Finding 1.** The pinning a ticket was admitted with can stop parsing as the validator
+    # moves on, and that ticket is exactly the one a conversation exists to rescue. The apply
+    # path runs after the turn's transaction has committed, so a raise here kills the channel's
+    # handler, the worker re-sends, `recorded?/2` says the turn is recorded, and the request is
+    # gone with nothing said to anybody. Refused instead.
+    test "a ticket whose pinned workflow no longer parses is refused, not raised on", %{
+      ticket: ticket,
+      chat: chat
+    } do
+      unparseable!(ticket)
+
+      {:ok, _chat} = Conversations.record_turn(chat, turn_asking(1, %{"to" => "planning"}))
+
+      assert Tickets.get!(ticket.id).state == "refining"
+      assert [reason] = refusals(chat)
+      assert reason =~ "no longer parses"
+      # The validator's own complaint, so a person knows what to repin.
+      assert reason =~ "is required"
+    end
+
+    # **Finding 3.** Membership is caught by the operator; standing is this path's to ask.
+    # A conversation outlives the standing of whoever opened it and any member may type into
+    # it, so without this an account suspended since would have tickets moved in its name by
+    # somebody else's message.
+    test "an opener suspended or un-approved since cannot move anything", %{
+      project: project,
+      ticket: ticket,
+      chat: chat,
+      opener: opener
+    } do
+      refinement!(ticket, opener)
+
+      suspend!(opener)
+      {:ok, _chat} = Conversations.record_turn(chat, turn_asking(1, %{"to" => "planning"}))
+
+      assert Tickets.get!(ticket.id).state == "refining"
+      assert List.last(refusals(chat)) =~ "suspended"
+
+      # Un-approval is the other half of `User.active?/1`, and reads as its own word.
+      reinstate!(opener)
+      unapprove!(opener)
+      {:ok, _chat} = Conversations.record_turn(chat, turn_asking(2, %{"to" => "planning"}))
+
+      assert Tickets.get!(ticket.id).state == "refining"
+      assert List.last(refusals(chat)) =~ "not an approved account"
+
+      # Standing restored, the same request goes through: it was the standing and nothing else.
+      approve!(opener)
+      {:ok, _chat} = Conversations.record_turn(chat, turn_asking(3, %{"to" => "planning"}))
+
+      assert Tickets.get!(ticket.id).state == "planning"
+      assert Projects.role(project, opener) != nil
+    end
+
+    # **Finding 4.** `apply_request/4` dispatches on the key being present, with no type guard,
+    # so the both-keys refusal must not carry one either: a `to` of the wrong type beside a
+    # `decision` validated as a decision and then dispatched as a transition, and the decision
+    # was silently not made.
+    test "both keys are refused whatever the types are", %{
+      ticket: ticket,
+      chat: chat,
+      opener: opener
+    } do
+      refinement!(ticket, opener)
+      pending!(ticket)
+
+      for {request, index} <- Enum.with_index([%{"to" => 5}, %{"to" => nil}], 1) do
+        asked = Map.put(request, "decision", "approved")
+        {:ok, _chat} = Conversations.record_turn(chat, turn_asking(index, asked))
+
+        assert List.last(refusals(chat)) =~ "both"
+        # Neither taken nor decided: the pending decision is still the ticket's.
+        assert Tickets.get!(ticket.id).state == "refining"
+        assert Tickets.get!(ticket.id).pending_transition["to"] == "planning"
+      end
+    end
+
+    # **Finding 6.** An event is for the person. The agent only ever hears what is folded into
+    # the transcript, and `transcript/1` folds `chat.message` and the harness types — so a
+    # refusal that is only an event is one the agent is never told, having written a file and
+    # been answered with silence.
+    test "a refusal is said back to the conversation, not only recorded", %{chat: chat} do
+      {:ok, _chat} = Conversations.record_turn(chat, turn_asking(1, %{"decision" => "approved"}))
+
+      assert [reason] = refusals(chat)
+
+      said =
+        for %{role: :user, text: text} <- Conversations.transcript(chat.id),
+            text =~ "refused",
+            do: text
+
+      assert [text] = said
+      assert text =~ reason
+      assert text =~ "move the ticket was refused"
+    end
+
     defp turn_asking(index, request) do
       index
       |> turn(0.01 * index)
@@ -2249,6 +2396,26 @@ defmodule Forge.ConversationsTest do
       |> Repo.update!()
     end
 
+    # A pinning that no longer parses: validated at admission, and `%{}` fails every rule the
+    # validator has now.
+    defp unparseable!(ticket) do
+      ticket
+      |> Ecto.Changeset.change(%{workflow: %{}})
+      |> Repo.update!()
+    end
+
+    defp suspend!(user), do: stamp!(user, :suspended_at, DateTime.utc_now(:second))
+    defp reinstate!(user), do: stamp!(user, :suspended_at, nil)
+    defp unapprove!(user), do: stamp!(user, :approved_at, nil)
+    defp approve!(user), do: stamp!(user, :approved_at, DateTime.utc_now(:second))
+
+    defp stamp!(user, field, value) do
+      Forge.Accounts.User
+      |> Repo.get!(user.id)
+      |> Ecto.Changeset.change(%{field => value})
+      |> Repo.update!()
+    end
+
     defp finish_jobs(ticket) do
       for job <- Jobs.for_ticket(ticket.id) do
         job
@@ -2256,6 +2423,22 @@ defmodule Forge.ConversationsTest do
         |> Repo.update!()
       end
     end
+  end
+
+  # A second `refining -> planning` edge in the ticket's own pinning, approving `name`, told
+  # apart from the first by its `when`.
+  defp second_edge!(ticket, name) do
+    extra = %{"from" => "refining", "to" => "planning", "approve" => [name], "when" => "redo"}
+
+    workflow =
+      ticket.workflow
+      |> Map.update!("transitions", &(&1 ++ [extra]))
+      |> put_in(["states", "refining", "outcomes"], ["done", "redo"])
+      # The validator wants an approved name produced by that state or an earlier one, so the
+      # dead edge's document is declared and simply never written — which is the case.
+      |> update_in(["states", "refining", "produces"], &(&1 ++ [name]))
+
+    ticket |> Ecto.Changeset.change(%{workflow: workflow}) |> Repo.update!()
   end
 
   defp turn_with_proposals(index, proposals, invalid \\ %{}) do

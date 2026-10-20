@@ -333,7 +333,7 @@ transition. A conversation is the surface for the fixing half, and without this 
 the last step back to a person at a keyboard. So it reaches the same two operations a person's
 click does, and nothing more.
 
-**One file, read and removed once per turn**, exactly as `invoke.json` is
+**One file, read at most once per turn and removed either way**, as `invoke.json` is
 (`docs/design/commands.md` § How an agent invokes): `$FORGE_JOB/transition.json`, holding one
 JSON object, one of
 
@@ -343,6 +343,13 @@ JSON object, one of
 - `{"decision": "approved" | "rejected", "comment": "<optional>"}` — decide the ticket's pending
   transition.
 
+**Only a turn that ended cleanly is read.** This is where the parity with `invoke.json` is
+exact and matters: a run that may not invoke has its file "removed unread, so a stray file cannot
+turn a finished run into a round of refusals" (`runner.ex`'s `invocations/3`), and the same holds
+here for a turn the person interrupted or the harness ended on an error or a budget. A person who
+hits interrupt mid-sentence cut the agent off, and a file half-written when that happened is not
+a request anybody made; it is removed unread so the next turn cannot find it either.
+
 A file is a request, not a guarantee. It is read after the turn's own transaction commits, and
 applied by calling `Forge.Operator.transition/4` or `Forge.Operator.decide/4` — **the functions
 the ticket page and the API already call**, membership guard included. Every rule a person meets
@@ -351,6 +358,13 @@ request (`Engine.choose/4`'s `no_live_job/1`), so does an `approve` list naming 
 no version, a rejection leaves the ticket where it is and clears the decision, and an approval
 records against the latest version of each named artifact. The chat does not stop a live job —
 a person cancels the ticket and restores it, which is what they already have.
+
+**A pinning that no longer parses refuses the request rather than raising.** A ticket's workflow
+is validated when it is admitted and kept as it was, while the validator's rules move on, so a
+pinning can stop parsing long after it was written (`Tickets.parsed_workflow/1`). That ticket is
+exactly the one in trouble this feature exists for, so neither half may raise on it: the manifest
+offers no transitions and says why, and the apply path refuses with the validator's own complaint.
+`Tickets.workflow/1` — which raises — is read nowhere on either path.
 
 **It is attributed to whoever opened the conversation**, for every request it ever makes,
 regardless of who sent the message that triggered the turn. Membership of the project is the whole
@@ -363,15 +377,32 @@ on the job's own `chat.opened` event, the first thing logged for it, read back b
 conversation opened by something that is not a user — a Mix task's `:system` actor — cannot make
 the request at all, rather than have a `transition.taken` claim nobody took it.
 
+**The opener's standing is read again every time, not trusted from when the conversation opened.**
+Membership is the operator's guard and is reached by calling it; approval and suspension are this
+path's to ask, for the reason `Forge.Workers.create/2` already states of a page — "a page holds
+the user it mounted with, and one suspended since would otherwise still mint". A conversation
+outlives the standing of whoever opened it, and every member can type into it, so an account
+suspended or un-approved since would otherwise have tickets moved in its name by somebody else's
+message. `User.active?/1` is asked on the row, not on the struct.
+
 What the ticket records is what a by-hand choice records and nothing beside it: the same
 `transition.taken`, the same approval rows, the same `ticket.stuck`. There is no chat-flavoured
 copy, because "indistinguishable from one taken by hand" is a property of not writing one.
 
 **A refusal is an event, `chat.transition_refused`** on the conversation, carrying the raw
-request and why it was refused. It is the only new event type here, and it plays the part
-`refused_documents` plays for a document that could not be recorded: the person reads why nothing
-moved, and so does the agent the next time it looks. The agent is told to say in its reply what
-it asked for, because the file is not retried on its own.
+request and why it was refused. It is the only new event type here. The person reads it in the
+ticket's history and the conversation's Activity tab, where `Events.detail/1` renders the reason.
+
+**And it is said back to the agent, as a message in the conversation.** An event alone would not
+reach it: `transcript/1` folds `chat.message` and the two harness types and nothing else, so a
+refusal recorded only as an event is one the agent never hears — it would write a file, be told
+nothing, and have no way to know the ticket did not move. So `refused/3` goes on to
+`Conversations.send/3` with a `:system` actor, which is the existing way anything puts words into
+a conversation: the message is logged, pushed to the harness, and read on the next turn. It lands
+in the transcript, so the person sees the same sentence in the reply stream and a reopened
+conversation replays it. A conversation whose process has already gone gets the event and no
+message, which is `send/3`'s own `:not_live` and is the one case the agent is not told — there is
+nothing running to tell.
 
 **It runs inside the turn's idempotency gate.** `record_turn/2` is idempotent on
 `(job, session, turn)` because the worker re-sends an unacked turn, and every side effect of a
@@ -391,7 +422,13 @@ every caller meets it — the chat, the API and the page alike.
 
 **What the chat is told it can do** is in its manifest (§ Context), from the spec's one `moving`
 field: the transitions offered out of the current state with each one's `approve` list, the
-pending decision if there is one, and whether a job is live for the state. One field and not
+pending decision if there is one, and whether a job is live for the state. The edges come from
+`Engine.offered_edges/2`, which is the one walk of the workflow that both halves read —
+`offered_transitions/2` is its targets, so the page's list and the chat's cannot disagree about
+which *edge* survived the unversioned-artifact filter, not merely about which target did. Two
+edges to one target are named once, with only the surviving edges' `approve` lists; asking for
+such a target is then refused as `{:ambiguous, outcomes}`, exactly as a person's by-hand choice
+of it already is. One field and not
 three, because they are one question — what can this chat do to its ticket now — read in one
 place, and nil for a project chat and for every workflow job. Composed once when the process starts, like the rest of its
 context, and carrying the same caveat — a turn later the ticket may have moved, which is why a

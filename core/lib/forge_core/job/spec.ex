@@ -91,8 +91,10 @@ defmodule ForgeCore.Job.Spec do
     secrets_gone: [],
     # A ticket conversation's, string keys: `transitions`, the edges declared out of the ticket's
     # state that it may ask for, each `%{"to", "approve"}`; `pending`, the ticket's pending
-    # decision as `%{"to", "outcome", "approve"}` or nil; and `job_live`, whether a job of the
-    # state was live when this started, since a transition is refused while one is
+    # decision as `%{"to", "outcome", "approve"}` or nil; `job_live`, whether a job of the
+    # state was live when this started, since a transition is refused while one is; and
+    # `workflow_broken`, whether the ticket's pinned workflow still parses — when it does not
+    # there are no transitions to offer and the reason is worth saying
     # (`docs/design/conversations.md` § Taking a transition). Filled at run time, as `may_invoke`
     # is, and a snapshot of when the process started like the rest of a conversation's context.
     #
@@ -263,7 +265,8 @@ defmodule ForgeCore.Job.Spec do
     %{
       "transitions" => nested(map, :transitions) || [],
       "pending" => nested(map, :pending),
-      "job_live" => nested(map, :job_live) == true
+      "job_live" => nested(map, :job_live) == true,
+      "workflow_broken" => nested(map, :workflow_broken) == true
     }
   end
 

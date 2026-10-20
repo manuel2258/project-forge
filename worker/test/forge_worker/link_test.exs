@@ -3851,6 +3851,47 @@ defmodule ForgeWorker.LinkTest do
       refute Map.has_key?(third, "invalid_transition_request")
     end
 
+    # **An interrupted turn's request is removed unread.** The gate `invoke.json` has, for the
+    # reason it has it (`runner.ex`'s `invocations/3`): the person cut the agent off, a file
+    # half-written when that happened is not a request anybody made, and `push_reply/1` — the
+    # thing that would have told somebody — is the one step an interrupted turn skips.
+    test "a request written before an interrupt is dropped, and gone for the next turn too",
+         context do
+      %{client: client, origin: origin, root: root} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin, env: [{"FAKE_TURN_SECONDS", "5"}])
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      push(client, @topic, "message", %{
+        "job_id" => job_id,
+        "message_id" => "m-2",
+        "text" => "PREMOVE SLOW please"
+      })
+
+      push(client, @topic, "interrupt", %{"job_id" => job_id})
+
+      {%{"turn" => 2, "interrupted" => true} = second, _} = take_push("turn")
+      refute Map.has_key?(second, "transition_request")
+      refute Map.has_key?(second, "invalid_transition_request")
+
+      # Removed, not merely skipped: a file left behind would be read as a fresh request by
+      # the very next turn, which is the interrupt applied one turn late.
+      refute File.exists?(Path.join([root, "jobs", job_id, "transition.json"]))
+
+      push(client, @topic, "message", %{
+        "job_id" => job_id,
+        "message_id" => "m-3",
+        "text" => "never mind"
+      })
+
+      {%{"turn" => 3} = third, _} = take_push("turn")
+      refute Map.has_key?(third, "transition_request")
+    end
+
     # A file that is not a request is reported as one that is not, rather than dropped: the
     # agent asked for something and has to be told nothing happened.
     test "a transition file the worker cannot read goes out as invalid", context do

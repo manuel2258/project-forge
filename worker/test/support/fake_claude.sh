@@ -166,6 +166,15 @@ case "${FAKE_SCENARIO:-success}" in
       # The echo, which the real harness writes only when it takes the message.
       emit "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"$(json_escape "$text")\"}]}}"
 
+      # A request written before the turn could end, for the interrupted case: the file is on
+      # disk and the turn never finished (`docs/design/conversations.md` § Taking a transition).
+      case "$text" in
+        *PREMOVE*)
+          printf '{"to": "implementing", "comment": "cut off mid-thought"}\n' \
+            > "$FORGE_JOB/transition.json"
+          ;;
+      esac
+
       # A turn that takes time and can be cut while it does. Sleeping outright would make the
       # interrupt land after the turn had already ended, which proves nothing — the same trap
       # the spike fell into against the real harness.

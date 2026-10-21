@@ -503,13 +503,24 @@ have moved, as below.
 **Protocol 7 is presentations and optional outputs** (`docs/design/workflow-grammar-v1.md`
 § Semantics): a `produces` entry ending `!`, whose artifact is the name without it, and
 `optional` in the spec. It is a bump because the worker composes the manifest, collects `out/`
-and decides the outcome, and an older one gets all three wrong rather than less: it tells the
-agent to write `$FORGE_JOB/out/presentation.md!`, collects the file under that name — which the
-platform records as an approvable *document*, the two things a presentation must never be — and
-reports `error` for an absent optional document the manifest told the agent it could skip, on a
-state with no `error` edge. So a job whose state declares either needs protocol 7
-(`Forge.Jobs.protocol/1`, from the stored spec), and a protocol 4, 5 or 6 worker keeps taking
-every job that declares neither: its spec is exactly what it was. The minimum stays 4.
+and decides the outcome, and an older one gets all three wrong rather than less. It runs an older
+`forge_core`, which strips no marker: it tells the agent to write `$FORGE_JOB/out/presentation.md!`
+and collects the file under that name, which this platform records as an approvable *document* —
+the two things a presentation must never be. And its manifest says every declared document is
+required, because the note that says otherwise is new here: an agent that skips an optional one is
+nagged for it by that worker's own `Correction`, and the job ends `error` on a state whose workflow
+has no `error` edge, because the document was meant to be skippable. So a job whose state declares
+either needs protocol 7 (`Forge.Jobs.protocol/1`, from the stored spec), and a protocol 4, 5 or 6
+worker keeps taking every job that declares neither — `optional` is a new key in every workflow
+job's spec, and an older `Spec.from_map/1` reads the keys it knows by name and ignores the rest.
+The minimum stays 4.
+
+**This one is louder than the others on the way out**, because forge's own workflows reach it on
+every ticket: `presenting` is on the only path to `review_ready` in both `.forge/workflows/dev.yml`
+and `bug.yml`. Until a template's snapshot speaks 7, such a job sticks its ticket for placement —
+or, from an unlabelled template, makes one machine, learns 6 at its join and sticks from the next
+pass. It is a placement stick, so pointing a template at a new snapshot brings every stuck ticket
+back; `docs/deploy.md` § Upgrading is where the operator reads that.
 
 What rides along without a bump, because an older side may ignore it: `job.harness.memory`
 events and the `memory` a `starting` event carries (`docs/design/claude-code-events.md` § Memory),

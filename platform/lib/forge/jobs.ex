@@ -706,11 +706,12 @@ defmodule Forge.Jobs do
     run at all (`docs/design/secrets.md` § Delivery). A job that names none asks nothing more.
   - **A job whose state declares a presentation or an optional output needs protocol 7**: the
     worker is what composes the manifest, collects `out/` and decides the outcome, and a release
-    from before these does all three wrong — it names `out/presentation.md!` in the manifest and
-    collects the file under that name, which the platform then records as an approvable
-    *document*, or it reports `error` for an absent optional document the manifest told the agent
-    it could skip (`docs/design/worker-channel.md` § Versions). A state that declares neither asks
-    nothing more.
+    from before these does all three wrong. It strips no marker, so it names
+    `out/presentation.md!` in the manifest and collects the file under that name, which the
+    platform then records as an approvable *document*; and its manifest says every declared
+    document is required, because the note that says otherwise is new with this, so it nags for
+    an optional one the agent skipped and ends the job `error` on a state with no `error` edge
+    (`docs/design/worker-channel.md` § Versions). A state that declares neither asks nothing more.
   """
   @spec protocol(Job.t()) :: non_neg_integer()
   def protocol(%Job{} = job),

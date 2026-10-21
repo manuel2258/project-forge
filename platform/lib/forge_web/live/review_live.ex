@@ -27,8 +27,10 @@ defmodule ForgeWeb.ReviewLive do
   # beneath it (`docs/design/ui.md` § Changes). No colon, backtick or space in the path, because
   # the colon is the separator and the quote is one token of prose. The line numbers are bounded
   # here rather than parsed and judged: `String.to_integer` on an unbounded run of digits is work
-  # proportional to the digits, and 450,000 of them took two seconds before they could be refused
-  # for naming a line no file has.
+  # proportional to the digits, and a million of them measured 177 ms before any of it could be
+  # refused for naming a line no file has. The prose cap below holds a document to 64 KiB now, so
+  # that is no longer the worst case; the bound stays because seven digits is every line of every
+  # file anyone has, and refusing the eighth costs nothing.
   @quoted ~r/`([^`:\s]+):(\d{1,7})(?:-(\d{1,7}))?`/
 
   # A range longer than this is a file, not a quote: it would push the prose it belongs to off
@@ -39,20 +41,26 @@ defmodule ForgeWeb.ReviewLive do
   # megabyte. Both caps are on the slice, so neither depends on how the file is formatted.
   @max_quoted_bytes 16 * 1024
 
-  # **No file is read past this, whichever lines are quoted from it.** The caps above are on the
-  # slice, and a slice is taken from a blob the whole of which `Git.show/3` has captured: five
-  # lines quoted out of a 53 MB tracked file cost 98 MB of heap and half a second before either
-  # cap could refuse them. So the blob's size is asked for first (`Git.blob_size/3`) and a file
-  # past this is never read at all — what a quote costs to draw is then bounded by this and not
-  # by what the repository happens to hold.
-  @max_quoted_file_bytes 1024 * 1024
+  # **How many bytes one presentation reads out of git, over all its quotes.** The caps above are
+  # on the slice, and a slice is cut from a blob the whole of which `Git.show/3` has captured:
+  # five lines quoted out of a 53 MB tracked file cost 98 MB of heap and half a second before
+  # either cap could refuse them. So a blob's size is asked for first (`Git.blob_size/3`) and a
+  # file that does not fit in what is left of this budget is never read.
+  #
+  # A budget for the presentation and not a cap per file, because a cap per file multiplies by
+  # `@max_quotes`: twelve 1 MiB files are all held in `acc.files` at once until `blocks/3`
+  # returns, and twelve of one-byte lines measured 8 s and 550 MiB — enough to be OOM-killed on a
+  # 4 GB machine. **What this bounds is the bytes, not the cost of splitting them**: that scales
+  # with the file's line count, and 1 MiB of one-byte lines is 524,289 lines, 665 ms and 46 MiB
+  # retained. One such file per presentation is the worst case now, where twelve was.
+  @max_read_bytes 1024 * 1024
 
   # **How many quotes are drawn at all**, counted over the whole presentation and over every
   # paragraph of it. The prose is an agent's and bounded only by the cap below, in which
-  # `` `a:1` `a:2` … `` fits tens of thousands of quotes; drawing them would be tens of thousands
-  # of `pre` blocks of up to 16 KiB, built inside `mount/3`, per viewer, and again on every patch
-  # of the page. It counts what is *drawn* and not what is distinct: one quote named in forty
-  # paragraphs is forty blocks against one path read, and bounding the reads is only half of it.
+  # `` `a:1` `a:2` … `` fits some thirteen thousand quotes; drawing them would be thirteen
+  # thousand `pre` blocks of up to 16 KiB, built inside `mount/3`, per viewer, and again on every
+  # patch of the page. It counts what is *drawn* and not what is distinct: one quote named in
+  # forty paragraphs is forty blocks against one path read, and bounding the reads is half of it.
   # A page nobody can read is not a review, which is the same standard the patch is bounded to.
   @max_quotes 12
 
@@ -61,7 +69,8 @@ defmodule ForgeWeb.ReviewLive do
   # because each paragraph is parsed on its own so that what it quotes can be drawn beneath it.
   # Past this the page draws the beginning and says so, with its own `source ›` link to the whole.
   # A presentation is prose a person reads in a minute (`docs/design/ui.md` § Changes), which this
-  # is many times over.
+  # is many times over. It makes that cost 15 times smaller rather than nothing: 64 KiB of
+  # paragraphs is still some 760 ms, in `mount/3` and again on every `load/1`.
   @max_prose_bytes 64 * 1024
 
   # Beyond this the patch is offered per file instead. A page nobody can read is not a review.
@@ -164,8 +173,12 @@ defmodule ForgeWeb.ReviewLive do
       |> String.split(~r/\r?\n[ \t]*\r?\n/)
       |> Enum.reject(&(String.trim(&1) == ""))
 
+    # `files` and `read` are the reading budget, `drawn` and `dropped` the drawing cap: all four
+    # are the presentation's and not the paragraph's, which is what the caps above say.
+    budget = %{files: %{}, read: 0, drawn: 0, dropped: 0}
+
     {blocks, counted} =
-      Enum.map_reduce(paragraphs, %{files: %{}, drawn: 0, dropped: 0}, fn paragraph, acc ->
+      Enum.map_reduce(paragraphs, budget, fn paragraph, acc ->
         {quotes, acc} = draw(Enum.uniq(tokens(paragraph)), repo, head, acc)
         {%{html: ForgeWeb.Markdown.to_html(paragraph), quotes: quotes}, acc}
       end)
@@ -183,10 +196,18 @@ defmodule ForgeWeb.ReviewLive do
       else: {prose, false}
   end
 
+  # A character is at most four bytes, so a cut inside one leaves at most three bytes to drop, and
+  # three is where this stops. A prefix no such drop makes valid came from content that was
+  # already invalid, which cannot be stored: a version's content is a Postgres `text` column, and
+  # `Jason.decode/1` refuses a lone surrogate before the column ever sees it. Bounded rather than
+  # walking back to the start of the document, which was quadratic on exactly the input it exists
+  # for — an invalid byte at offset 0 of a 64 KiB prefix is 65,500 passes of `String.valid?/1`
+  # over 64 KiB.
   defp whole_characters(prose) do
-    if String.valid?(prose),
-      do: prose,
-      else: whole_characters(binary_part(prose, 0, byte_size(prose) - 1))
+    Enum.find_value(0..3, prose, fn drop ->
+      prefix = binary_part(prose, 0, byte_size(prose) - drop)
+      if String.valid?(prefix), do: prefix
+    end)
   end
 
   # One paragraph's quotes, against the cap for the whole presentation: `@max_quotes` drawn, the
@@ -195,9 +216,9 @@ defmodule ForgeWeb.ReviewLive do
   defp draw(tokens, repo, head, acc) do
     Enum.flat_map_reduce(tokens, acc, fn {path, from, to}, acc ->
       if acc.drawn < @max_quotes do
-        {lines, files} = lines(acc.files, repo, head, path, from, to)
+        {lines, acc} = lines(acc, repo, head, path, from, to)
         quoted = %{label: label(path, from, to), lines: lines}
-        {[quoted], %{acc | files: files, drawn: acc.drawn + 1}}
+        {[quoted], %{acc | drawn: acc.drawn + 1}}
       else
         {[], %{acc | dropped: acc.dropped + 1}}
       end
@@ -225,52 +246,55 @@ defmodule ForgeWeb.ReviewLive do
   # (`docs/design/ui.md` § Changes). Anything that does not resolve there — no changeset yet, a
   # path that is not in that tree, a line before the first or after the last, a range the wrong
   # way round — is a note and never a raised page, because the prose is an agent's and unbounded.
-  defp lines(files, _repo, nil, _path, _from, _to), do: {:unresolved, files}
+  defp lines(acc, _repo, nil, _path, _from, _to), do: {:unresolved, acc}
 
-  defp lines(files, repo, head, path, from, to) when from >= 1 and to >= from do
+  defp lines(acc, repo, head, path, from, to) when from >= 1 and to >= from do
     if to - from + 1 > @max_quoted_lines do
-      {:too_long, files}
+      {:too_long, acc}
     else
-      {content, files} = file(files, repo, head, path)
-      {slice(content, from, to), files}
+      {content, acc} = file(acc, repo, head, path)
+      {slice(content, from, to), acc}
     end
   end
 
-  defp lines(files, _repo, _head, _path, _from, _to), do: {:unresolved, files}
+  defp lines(acc, _repo, _head, _path, _from, _to), do: {:unresolved, acc}
 
   # Keyed by the path, never by the quote: the whole file is cached and the slice taken after,
   # so one entry serves every range quoted out of it. Keying it by anything that is not the path
   # — a constant, say — would serve one file's lines under another's label, which is what the
   # two-file test on this page holds. (That each path is read *once* is the saving, and is an
   # equivalent mutant: nothing a test can see distinguishes one `git show` from three.)
-  defp file(files, repo, head, path) do
-    case Map.fetch(files, path) do
-      {:ok, cached} -> {cached, files}
-      :error -> read(files, repo, head, path)
+  defp file(acc, repo, head, path) do
+    case Map.fetch(acc.files, path) do
+      {:ok, cached} -> {cached, acc}
+      :error -> read(acc, repo, head, path)
     end
   end
 
   # **The size first, then the bytes.** A quote names a path in a tree at head, not a path in the
-  # change, so it reaches every blob the repository holds at that commit — a megabyte cap on the
-  # blob is what keeps drawing one bounded, since both caps above are on the slice and a slice is
-  # cut from a file already in memory.
+  # change, so it reaches every blob the repository holds at that commit — `@max_read_bytes` is
+  # what keeps drawing one bounded, since both caps above are on the slice and a slice is cut from
+  # a file already in memory. What is left of the budget is what this file may be; spending it is
+  # what a read costs, and a path already in `acc.files` costs nothing because it is not read
+  # again.
   #
   # And a blob is only text if it says so. `Git.show/3` hands back whatever bytes are there, the
   # diff prints `Binary files … differ` rather than them, and a `pre` of invalid UTF-8 is a
   # `Jason` exception in the socket's serializer — on the page where merges are approved, for
   # every viewer at once. So the bytes are checked before they can be drawn, which is the same
   # standard `ForgeWeb.Markdown` holds its own renderer to.
-  defp read(files, repo, head, path) do
-    read =
-      with {:ok, bytes} when bytes <= @max_quoted_file_bytes <- Git.blob_size(repo, head, path),
+  defp read(acc, repo, head, path) do
+    {read, bytes} =
+      with {:ok, size} when size <= @max_read_bytes - acc.read <-
+             Git.blob_size(repo, head, path),
            {:ok, content} <- Git.show(repo, head, path) do
-        if String.valid?(content), do: source_lines(content), else: :not_text
+        {if(String.valid?(content), do: source_lines(content), else: :not_text), size}
       else
-        {:ok, _too_big} -> :too_big
-        {:error, _reason} -> :missing
+        {:ok, _over_budget} -> {:too_big, 0}
+        {:error, _reason} -> {:missing, 0}
       end
 
-    {read, Map.put(files, path, read)}
+    {read, %{acc | files: Map.put(acc.files, path, read), read: acc.read + bytes}}
   end
 
   # A file's lines, counted the way an editor counts them. `String.split/2` on text ending in a

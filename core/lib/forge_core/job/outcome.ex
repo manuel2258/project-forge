@@ -199,17 +199,21 @@ defmodule ForgeCore.Job.Outcome do
   end
 
   # An outcome document nobody wrote is `done`, and could be nothing else: there is no front
-  # matter to choose in. So it is `done` only where the state accepts `done` — the same question
-  # `declared_in/3` asks of a written one, and asked here for the same reason. A workflow that
-  # declared a choice of outcomes and made the document optional is refused at parse time
-  # (`ForgeCore.Workflow.Validator`); a spec that says so anyway arrived from somewhere else, and
-  # converging it on an outcome the state never declared sticks the ticket behind a job that
-  # succeeded, which is the one failure nothing downstream can read.
+  # matter to choose in. So it is `done` only for a state whose only outcome *is* `done`, which is
+  # the validator's rule for making that document optional at all
+  # (`docs/design/workflow-grammar-v1.md` § Validation), re-asserted here because this is where
+  # believing it decides something. A spec that says otherwise arrived from somewhere the parser
+  # is not, and the two ways of believing it are both silent failures: where the state does not
+  # declare `done`, the ticket sticks behind a job that reported success, with no transition the
+  # engine can match; where it declares `done` among others, an agent passes the `done` edge of a
+  # gate by writing nothing, and whatever another document of the same job said is thrown away.
   defp absent(%Spec{outcomes: outcomes}, name) do
-    if "done" in outcomes do
+    if outcomes == ["done"] do
       {:converged, "done", "#{name} was not written, and is optional"}
     else
-      {:error, nil, "#{name} was not written, and this state does not accept \"done\""}
+      {:error, nil,
+       "#{name} was not written, and carries the outcome of a state that declares a choice: " <>
+         Enum.join(outcomes, ", ")}
     end
   end
 

@@ -353,9 +353,10 @@ defmodule ForgeWeb.ReviewLiveTest do
     assert pres(view) == []
   end
 
-  # The prose is an agent's and bounded only by a document's megabyte, in which a hundred thousand
-  # distinct quotes fit. Every one of them would be a `git show` inside `mount/3`, per viewer, and
-  # again on every patch of the page.
+  # The prose is an agent's, and `@max_prose_bytes` of it holds some thirteen thousand quotes.
+  # Every one of them would be a `pre` of up to 16 KiB built inside `mount/3`, per viewer, and
+  # again on every patch of the page; the reads are fewer than that, because a path quoted twice
+  # is read once, which is what the cache above is for.
   test "only a bounded number of quotes is drawn, and the rest are counted", context do
     %{conn: conn, project: project, ticket: ticket} = context
     sha = commit_on_branch(context, "score.ex", Enum.map_join(1..40, "\n", &"line #{&1}"))
@@ -418,6 +419,102 @@ defmodule ForgeWeb.ReviewLiveTest do
     assert html =~ "The start of it."
     refute html =~ "The end of it."
     assert html =~ "longer than the page draws"
+  end
+
+  # **Both edges of the read budget, and that it is one budget for the presentation.** Quoted in
+  # this order on purpose: the file one byte over the budget is refused with the whole budget
+  # free, then the file of exactly the budget is read, and then there is nothing left for a third
+  # file that would otherwise be trivial to draw.
+  test "a file of exactly the read budget is read, one byte more is not", context do
+    %{conn: conn, project: project, ticket: ticket} = context
+    commit_on_branch(context, "score.ex", "one\ntwo", "small")
+    commit_on_branch(context, "over.txt", at_budget(1), "over")
+    sha = commit_on_branch(context, "at.txt", at_budget(0), "at")
+    changeset!(ticket, sha)
+
+    present!(ticket, """
+    One byte over: `over.txt:1-2`.
+
+    Exactly the budget: `at.txt:1-2`.
+
+    Nothing left for this: `score.ex:1`.
+    """)
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+    html = render(view)
+
+    assert html =~ "over.txt:1-2 is too much to draw here"
+    assert pres(view) == ["x\nx"]
+    assert html =~ "score.ex:1 is too much to draw here"
+  end
+
+  # The prose cap at its boundary in both directions: a test that overshoots it by 90 KB says
+  # nothing about where it is.
+  test "a presentation of exactly the prose cap is drawn whole", context do
+    %{conn: conn, project: project, ticket: ticket} = context
+    sha = commit_on_branch(context, "score.ex", "def persist, do: :ok")
+    changeset!(ticket, sha)
+    present!(ticket, String.duplicate("a", 64 * 1024))
+
+    {:ok, _view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+    refute html =~ "longer than the page draws"
+
+    {:ok, _version} =
+      Artifacts.record_version(ticket.id, "presentation.md", :presentation, :system, %{
+        content: String.duplicate("a", 64 * 1024 + 1)
+      })
+
+    {:ok, _view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+    assert html =~ "longer than the page draws"
+  end
+
+  # **The cut lands on a whole character.** Every other truncation here cuts at an ASCII boundary,
+  # where the function that exists for this does nothing: the first prefix is already valid. Here
+  # the cap falls inside a two-byte `é`, so the prefix has to lose that byte and keep the `Z`
+  # before it — one byte further back and the marker goes with it, and a page of invalid UTF-8 is
+  # what the socket's serializer raises on.
+  test "a presentation cut short mid-character keeps the character before it", context do
+    %{conn: conn, project: project, ticket: ticket} = context
+    sha = commit_on_branch(context, "score.ex", "def persist, do: :ok")
+    changeset!(ticket, sha)
+    present!(ticket, String.duplicate("a", 64 * 1024 - 2) <> "Zé and the rest of it")
+
+    {:ok, _view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+
+    assert html =~ "aZ"
+    refute html =~ "the rest of it"
+    assert html =~ "longer than the page draws"
+    assert {:ok, _json} = Jason.encode(html)
+
+    # And where the cap already falls between characters, nothing is dropped: the character at the
+    # cap is the last one drawn. Both halves are needed — the case above passes whether the walk
+    # back starts at nought or at one, and only this one says it starts at nought.
+    {:ok, _version} =
+      Artifacts.record_version(ticket.id, "presentation.md", :presentation, :system, %{
+        content: String.duplicate("a", 64 * 1024 - 1) <> "Q and the rest of it"
+      })
+
+    {:ok, _view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+
+    assert html =~ "aQ"
+    refute html =~ "the rest of it"
+  end
+
+  # Seven digits is every line of every file anyone has; the eighth stops it being a quote at all,
+  # so there is no note either — the prose keeps the words it wrote and the page does no work.
+  test "a line number past the pattern's bound is not a quote", context do
+    %{conn: conn, project: project, ticket: ticket} = context
+    sha = commit_on_branch(context, "score.ex", "one\ntwo")
+    changeset!(ticket, sha)
+    present!(ticket, "Eight digits: `score.ex:12345678`. Seven: `score.ex:1234567`.\n")
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+    html = render(view)
+
+    assert pres(view) == []
+    # The seven-digit one is a quote and says it does not resolve; the eight-digit one is prose.
+    assert html =~ "score.ex:1234567 is not in this changeset"
+    refute html =~ "score.ex:12345678 is not in this changeset"
   end
 
   # "Newest material last" is the comment's claim and every other test records one presentation,
@@ -560,6 +657,13 @@ defmodule ForgeWeb.ReviewLiveTest do
 
   defp commit_on_branch(%{project: project, ticket: ticket}, path, content, message \\ nil) do
     commit_over_http(project, ticket.branch, path, content, message)
+  end
+
+  # A file of exactly `@max_read_bytes` bytes, plus `over`, in lines small enough that what is
+  # quoted out of it is nowhere near the per-quote caps. `commit_over_http/5` appends a newline,
+  # which is the byte this leaves out.
+  defp at_budget(over) do
+    String.duplicate("x\n", 524_287) <> "x" <> String.duplicate("y", over)
   end
 
   # The text of every quote the presentation drew, in the order it drew them.

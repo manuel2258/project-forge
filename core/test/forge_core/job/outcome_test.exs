@@ -183,8 +183,16 @@ defmodule ForgeCore.Job.OutcomeTest do
   # The state whose only document is optional: absent, there is no front matter to read an outcome
   # from, and the answer is the one a state producing no document at all gets. Fetching it would
   # raise, which on the platform is a job whose result can never be recorded.
+  #
+  # `outcomes: ["done"]` because that is the only state the grammar lets excuse its outcome
+  # document — the fixture's `[done, plan_invalid]` is the shape the test below holds.
   test "a job whose optional outcome document is absent is done" do
-    spec = %{spec() | produces: ["deck.md!", "changeset"], optional: ["deck.md"]}
+    spec = %{
+      spec()
+      | produces: ["deck.md!", "changeset"],
+        optional: ["deck.md"],
+        outcomes: ["done"]
+    }
 
     assert {:finished, :converged, "done", "deck.md was not written, and is optional"} =
              Outcome.decide(spec, run(%{missing: ["deck.md"]}))
@@ -197,16 +205,39 @@ defmodule ForgeCore.Job.OutcomeTest do
   # arrived from somewhere the parser is not: `done` is then an outcome the state never declared,
   # no transition can match it, and the ticket sticks behind a job that reported success. An
   # error is recoverable — a stuck ticket, by a job that succeeded, is not.
-  test "an absent optional outcome document is not done where the state does not accept done" do
-    spec = %{
+  test "an absent optional outcome document is not done for a state that declares a choice" do
+    stuck = %{
       spec()
       | produces: ["verdict.md!"],
         optional: ["verdict.md"],
         outcomes: ["approved", "rejected"]
     }
 
-    assert {:finished, :error, nil, why} = Outcome.decide(spec, run(%{missing: ["verdict.md"]}))
-    assert why == "verdict.md was not written, and this state does not accept \"done\""
+    assert {:finished, :error, nil, why} = Outcome.decide(stuck, run(%{missing: ["verdict.md"]}))
+    assert why =~ "verdict.md was not written, and carries the outcome of a state that declares"
+    assert why =~ "approved, rejected"
+
+    # The other shape, and the sharper one: `done` is among the outcomes, so believing an absent
+    # document would take the `done` edge of a gate and throw away what the job's other document
+    # said — `issues_found` here — rather than merely sticking the ticket.
+    gate = %{
+      spec()
+      | produces: ["verdict.md!", "report.md"],
+        optional: ["verdict.md"],
+        outcomes: ["done", "issues_found"]
+    }
+
+    assert {:finished, :error, nil, _why} =
+             Outcome.decide(
+               gate,
+               run(%{documents: %{"report.md" => plan("issues_found")}, missing: ["verdict.md"]})
+             )
+
+    # And the state the rule permits — one outcome, which an absent document can only be.
+    only = %{spec() | produces: ["deck.md!"], optional: ["deck.md"], outcomes: ["done"]}
+
+    assert {:finished, :converged, "done", "deck.md was not written, and is optional"} =
+             Outcome.decide(only, run(%{missing: ["deck.md"]}))
   end
 
   test "outputs must be complete, declared and parseable" do

@@ -190,6 +190,20 @@ defmodule ForgeCore.Workflow.CommandsTest do
              ]
     end
 
+    # Which of the two command collisions is reported when both are true. The comment at
+    # `presentation_error/4` says its branch order is asserted, and this is the pair that was not:
+    # the group is reported, because a group is a name on disk and a log is a name the platform
+    # gives the output of a script.
+    test "a presentation colliding with both a command's group and a command's log names the group" do
+      map =
+        base_map()
+        |> put_in(["commands", "build", "produces"], ["deck.md", "deck.md/*"])
+        |> put_in(["states", "implementing", "produces"], ["implementation.md", "deck.md!"])
+
+      assert {"states.implementing.produces[1]",
+              "\"deck.md\" is also produced as a group of files by a command"} in messages(map)
+    end
+
     # A presentation's artifact name has no marker in it, so a command's log can collide with one
     # under a name neither declaration shows. The collision is checked from the presentation's
     # side alone, which is why it is found whichever of the two is declared.

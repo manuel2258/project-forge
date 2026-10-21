@@ -597,9 +597,10 @@ What the branch holds against its base, bounded per § Semantics that must not b
   the patch beneath it is**, and the prose is an agent's, so every bound is on what the page
   draws rather than on what the document says: a fixed number of quotes drawn per presentation,
   counted over the whole of it and not per paragraph, since the same quote in forty paragraphs
-  is forty blocks; a fixed number of lines and bytes per quote; a fixed size of file that is read
-  from git at all, asked of git before the bytes are; and a fixed length of prose rendered, past which the page draws the
-  beginning and says the rest is in the source. Each bound that stops something says so where it
+  is forty blocks; a fixed number of lines and bytes per quote; a fixed number of bytes read out
+  of git for the whole presentation, asked of git — and of the *blob*, not of whatever a path
+  resolves to — before any of those bytes are; and a fixed length of prose rendered, past which
+  the page draws the beginning and says the rest is in the source. Each bound that stops something says so where it
   would have drawn it — how many quotes it left out, or to read that one in the diff. A path or a
   range that does not resolve at that commit degrades to the same kind of muted note naming what
   was asked for, and **so does a path whose file is not text**: the diff prints `Binary files …

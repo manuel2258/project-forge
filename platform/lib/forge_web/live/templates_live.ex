@@ -30,6 +30,7 @@ defmodule ForgeWeb.TemplatesLive do
   import ForgeCore.Workflow.Resources, only: [gib: 1]
 
   alias Forge.{Projects, Provider, Provisioning, Workers}
+  alias Forge.Provisioning.Template
   alias ForgeWeb.Format
 
   @impl true
@@ -391,10 +392,22 @@ defmodule ForgeWeb.TemplatesLive do
   # wrong protocol). An image the listing does not have — typed by hand for a provider that lists
   # none, or gone since the page loaded — is unlabelled, and `Template.changeset/2` keeps what is
   # already known about an image that did not change.
+  # **And for `latest`, what the snapshot now marked carries**, so the page says something
+  # sensible the moment the template is saved rather than after its first machine. A seed and not
+  # the authority: `Forge.Workers` re-asks the driver at every create, so a stale one shows a
+  # wrong build on this page until then and never makes a machine from the wrong snapshot
+  # (`docs/design/provisioning.md` § Where a machine comes from).
   defp labelled(attrs, images) do
-    image = Enum.find(images, &(&1.id == attrs.image))
+    image =
+      if Template.latest?(attrs),
+        do: Provisioning.current_image(images),
+        else: Enum.find(images, &(&1.id == attrs.image))
 
     Map.merge(attrs, %{
+      # Only for `latest`. A snapshot id resolves to itself and `Template.changeset/2` is what
+      # says so, so this page does not carry a second copy of that rule; nil here is *nothing
+      # new*, which a save of an unchanged image keeps rather than forgets.
+      resolved_image: if(Template.latest?(attrs), do: image && image.id),
       image_build: image && image[:build],
       image_protocol: image && image[:protocol]
     })
@@ -476,9 +489,35 @@ defmodule ForgeWeb.TemplatesLive do
   defp blank_choice(required, field, otherwise),
     do: {if(field in required, do: "choose one", else: otherwise), ""}
 
-  # A snapshot as the image select offers it: its name, then what it carries.
-  defp image_label(image, current_build),
-    do: "#{image.name || image.id} · #{carries(image[:build], image[:protocol], current_build)}"
+  # A snapshot as the image select offers it: its name, then what it carries, and whether it is
+  # the one `latest` resolves to — so choosing the mark and choosing an id are the same informed
+  # choice (`docs/design/provisioning.md` § Where a machine comes from).
+  defp image_label(image, current_build) do
+    "#{image.name || image.id} · #{carries(image[:build], image[:protocol], current_build)}" <>
+      if image[:current], do: " · carries latest", else: ""
+  end
+
+  # A row's identifiers: the provider, the size and the image it names. A template naming `latest`
+  # names no snapshot, so the one it is resolved to goes after it — the row would otherwise say
+  # nothing about which build its next machine comes from.
+  defp names(%Template{} = template) do
+    [template.provider, template.size, template.image, followed(template)]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join(" · ")
+  end
+
+  defp followed(%Template{resolved_image: resolved} = template) when is_binary(resolved) do
+    if Template.latest?(template), do: "now #{resolved}"
+  end
+
+  defp followed(_template), do: nil
+
+  # The mark itself, offered beside the snapshots: a template naming it is made from whichever
+  # one carries it at the time, so the option says which that is today. *None marked yet* rather
+  # than no option at all, because a provider whose account has never been built for is exactly
+  # where a person needs to be told what the word would mean.
+  defp latest_label(nil), do: "#{Template.latest()} · none marked yet"
+  defp latest_label(current), do: "#{Template.latest()} · #{current.name || current.id}"
 
   # What a snapshot carries, in the words the template row and the image select share: its build
   # against the one this platform ships with, and its protocol — or *unlabelled*, for a snapshot
@@ -614,8 +653,10 @@ defmodule ForgeWeb.TemplatesLive do
           type="select"
           label="Image"
           options={
-            [blank_choice(@required, :image, "the node's default")] ++
-              for(i <- @images, do: {image_label(i, @current_build), i.id})
+            [
+              blank_choice(@required, :image, "the node's default"),
+              {latest_label(Provisioning.current_image(@images)), Template.latest()}
+            ] ++ for(i <- @images, do: {image_label(i, @current_build), i.id})
           }
         />
         <.input
@@ -778,8 +819,7 @@ defmodule ForgeWeb.TemplatesLive do
               Disabled
             </span>
             <span class="font-mono text-[12.5px] opacity-60">
-              {template.provider}{if template.size, do: " · #{template.size}"}{if template.image,
-                do: " · #{template.image}"}
+              {names(template)}
             </span>
             <%!-- What the snapshot carries, beside it: from its labels, or learnt from a machine
                   refused at join (`provisioning.md` § A snapshot that speaks the wrong

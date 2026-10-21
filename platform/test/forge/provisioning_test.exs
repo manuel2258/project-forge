@@ -394,6 +394,259 @@ defmodule Forge.ProvisioningTest do
     end
   end
 
+  # A template may name the mark instead of a snapshot, and then what it is made from is whichever
+  # snapshot carries the mark at the moment of creation (`docs/design/provisioning.md` § Where a
+  # machine comes from).
+  describe "a template that follows the latest mark" do
+    test "a snapshot id resolves to itself", %{user: user} do
+      {:ok, template} = create_template(user, %{image: "snap-1"})
+      assert template.resolved_image == "snap-1"
+
+      {:ok, saved} = Provisioning.update_template(user, template.id, %{image: "snap-2"})
+      assert saved.resolved_image == "snap-2"
+    end
+
+    # The id a form sends cannot talk the template onto another snapshot than the one it names:
+    # `image` is what decides, every time it changes.
+    test "a resolved image from the form is overruled by the image itself", %{user: user} do
+      {:ok, template} =
+        create_template(user, %{image: "snap-1", resolved_image: "somebody-elses-snapshot"})
+
+      assert template.resolved_image == "snap-1"
+    end
+
+    # The word is not a snapshot, so what it resolves to is the caller's: the catalogue's marked
+    # entry at save time, and a fresh resolution at every create.
+    test "the mark resolves to what the caller found, not to itself", %{user: user} do
+      {:ok, template} =
+        create_template(user, %{image: "latest", resolved_image: "snap-7"})
+
+      assert {template.image, template.resolved_image} == {"latest", "snap-7"}
+      assert Template.latest?(template)
+    end
+
+    # The rule `keep_what_was_learnt/1` already kept for the labels: a rename carries no answer
+    # about what the mark points at, and reading its own column as that answer would unresolve it.
+    test "a save that says nothing new keeps what it resolved to", %{user: user} do
+      {:ok, template} = create_template(user, %{image: "latest", resolved_image: "snap-7"})
+
+      {:ok, saved} =
+        Provisioning.update_template(user, template.id, %{
+          name: "renamed",
+          resolved_image: nil,
+          image_build: nil,
+          image_protocol: nil
+        })
+
+      assert saved.resolved_image == "snap-7"
+    end
+
+    test "the newest of the snapshots marked is the one the mark means" do
+      images = [
+        %{id: "old", name: "old", created: "2026-10-01T00:00:00+00:00", current: true},
+        %{id: "new", name: "new", created: "2026-10-20T00:00:00+00:00", current: true},
+        %{id: "newest-unmarked", name: "u", created: "2026-10-21T00:00:00+00:00"}
+      ]
+
+      assert %{id: "new"} = Provisioning.current_image(images)
+    end
+
+    test "an account with nothing marked carries no mark" do
+      assert Provisioning.current_image([]) == nil
+      assert Provisioning.current_image([%{id: "a", name: "a", current: false}]) == nil
+      assert Provisioning.current_image([%{id: "a", name: "a"}]) == nil
+    end
+
+    test "resolving takes the snapshot's own labels", %{user: user} do
+      {:ok, template} = create_template(user, %{image: "latest"})
+
+      resolved =
+        Provisioning.resolve_latest(template, %{
+          id: "snap-9",
+          name: "nine",
+          build: "aaaaaaaaaaaa",
+          protocol: 4
+        })
+
+      assert {resolved.resolved_image, resolved.image_build, resolved.image_protocol} ==
+               {"snap-9", "aaaaaaaaaaaa", 4}
+
+      stored = Repo.get!(Template, template.id)
+
+      assert {stored.resolved_image, stored.image_build, stored.image_protocol} ==
+               {"snap-9", "aaaaaaaaaaaa", 4}
+    end
+
+    # Another snapshot is another question, and what was learnt about the last one is no answer —
+    # the same rule a save keeps when the image changes.
+    test "resolving onto another snapshot forgets the last one's labels", %{user: user} do
+      {:ok, template} =
+        create_template(user, %{
+          image: "latest",
+          resolved_image: "snap-8",
+          image_build: "bbbbbbbbbbbb",
+          image_protocol: 4
+        })
+
+      resolved = Provisioning.resolve_latest(template, %{id: "snap-9", name: "nine"})
+
+      assert {resolved.resolved_image, resolved.image_build, resolved.image_protocol} ==
+               {"snap-9", nil, nil}
+    end
+
+    # **The loop this rule exists to stop.** An unlabelled snapshot's protocol is learnt from the
+    # machine that was refused for it; a resolution that read the listing's silence as *unknown*
+    # would forget it and earn that snapshot another machine on every pass.
+    test "resolving onto the same snapshot keeps what a refused machine taught", %{user: user} do
+      {:ok, template} = create_template(user, %{image: "latest", resolved_image: "snap-9"})
+      :ok = Provisioning.learn_protocol(template.id, "snap-9", 7, "cccccccccccc")
+      template = Repo.get!(Template, template.id)
+
+      resolved = Provisioning.resolve_latest(template, %{id: "snap-9", name: "nine"})
+
+      assert {resolved.image_build, resolved.image_protocol} == {"cccccccccccc", 7}
+    end
+
+    test "a label that is there still replaces what was learnt", %{user: user} do
+      {:ok, template} = create_template(user, %{image: "latest", resolved_image: "snap-9"})
+      :ok = Provisioning.learn_protocol(template.id, "snap-9", 7, "cccccccccccc")
+      template = Repo.get!(Template, template.id)
+
+      resolved =
+        Provisioning.resolve_latest(template, %{
+          id: "snap-9",
+          name: "n",
+          build: "dddddddddddd",
+          protocol: 2
+        })
+
+      assert {resolved.image_build, resolved.image_protocol} == {"dddddddddddd", 2}
+    end
+
+    # Nothing is written when the three fields already say this, which is the common case: the
+    # mark moves when an image is built, not between two scheduling passes.
+    test "resolving onto what it already resolved writes nothing", %{user: user} do
+      {:ok, template} =
+        create_template(user, %{
+          image: "latest",
+          resolved_image: "snap-9",
+          image_build: "aaaaaaaaaaaa",
+          image_protocol: 4
+        })
+
+      was = Repo.get!(Template, template.id).updated_at
+
+      {1, _} =
+        Repo.update_all(from(t in Template, where: t.id == ^template.id),
+          set: [updated_at: DateTime.add(was, -3600, :second)]
+        )
+
+      moved_back = Repo.get!(Template, template.id).updated_at
+
+      _same =
+        Provisioning.resolve_latest(Repo.get!(Template, template.id), %{
+          id: "snap-9",
+          name: "nine",
+          build: "aaaaaaaaaaaa",
+          protocol: 4
+        })
+
+      assert Repo.get!(Template, template.id).updated_at == moved_back
+    end
+
+    # **A save must not carry one snapshot's labels onto another.** `image` is the word for a
+    # template on the mark and never changes, so deciding by it meant a rename after the mark had
+    # moved wrote the old snapshot's build and protocol onto the new one — a machine made from an
+    # unprobed snapshot on a protocol nobody had verified.
+    test "a save onto a newly marked snapshot takes its labels, nothing included", %{user: user} do
+      {:ok, template} =
+        create_template(user, %{
+          image: "latest",
+          resolved_image: "snap-x",
+          image_build: "aaaaaaaaaaaa",
+          image_protocol: 6
+        })
+
+      # What the page sends for a rename once the mark has moved to an unlabelled snapshot.
+      {:ok, saved} =
+        Provisioning.update_template(user, template.id, %{
+          name: "renamed",
+          image: "latest",
+          resolved_image: "snap-y",
+          image_build: nil,
+          image_protocol: nil
+        })
+
+      assert {saved.resolved_image, saved.image_build, saved.image_protocol} ==
+               {"snap-y", nil, nil}
+    end
+
+    # The other half of the same rule, and the one that was already right: staying on the snapshot
+    # it is on keeps what a refused machine taught about it.
+    test "a save that stays on the same snapshot keeps what was learnt", %{user: user} do
+      {:ok, template} = create_template(user, %{image: "latest", resolved_image: "snap-x"})
+      :ok = Provisioning.learn_protocol(template.id, "snap-x", 6, "aaaaaaaaaaaa")
+
+      {:ok, saved} =
+        Provisioning.update_template(user, template.id, %{
+          name: "renamed",
+          image: "latest",
+          resolved_image: "snap-x",
+          image_build: nil,
+          image_protocol: nil
+        })
+
+      assert {saved.image_build, saved.image_protocol} == {"aaaaaaaaaaaa", 6}
+    end
+
+    # **The most ordinary thing an operator does here: point a template at a new snapshot.** Every
+    # snapshot built from one release carries the same protocol, so the new one's protocol usually
+    # equals the stored one — and `cast/3` registers no change for a value equal to the row, so
+    # reading what the listing offered with `get_change/2` read it as *nothing offered* and wiped
+    # the protocol. The page then said *unlabelled*, the next create was spent as a probe, and a
+    # snapshot the platform would have refused before paying cost a machine instead.
+    test "a repoint onto a snapshot of the same protocol keeps the protocol", %{user: user} do
+      current = ForgeCore.WorkerProtocol.current()
+
+      {:ok, template} =
+        create_template(user, %{
+          image: "snap-a",
+          image_build: "aaaaaaaaaaaa",
+          image_protocol: current
+        })
+
+      {:ok, saved} =
+        Provisioning.update_template(user, template.id, %{
+          image: "snap-b",
+          image_build: "bbbbbbbbbbbb",
+          image_protocol: current
+        })
+
+      assert {saved.resolved_image, saved.image_build, saved.image_protocol} ==
+               {"snap-b", "bbbbbbbbbbbb", current}
+    end
+
+    # **The dead comparison this column exists to prevent.** `workers.image` is always a concrete
+    # snapshot and a template naming the mark never holds one in `image`, so a counter keyed on
+    # `image` could never reset for one and a protocol could never be learnt — silently, for ever.
+    test "its counter and its protocol are keyed on what it resolved to", %{user: user} do
+      {:ok, template} = create_template(user, %{image: "latest", resolved_image: "snap-9"})
+      for _ <- 1..Provisioning.failure_limit(), do: Provisioning.failed(template.id, "nope")
+
+      refute Provisioning.succeeded(template.id, "latest")
+      assert Provisioning.disabled?(Repo.get!(Template, template.id))
+
+      :ok = Provisioning.learn_protocol(template.id, "latest", 7)
+      assert Repo.get!(Template, template.id).image_protocol == nil
+
+      assert Provisioning.succeeded(template.id, "snap-9")
+      refute Provisioning.disabled?(Repo.get!(Template, template.id))
+
+      :ok = Provisioning.learn_protocol(template.id, "snap-9", 7)
+      assert Repo.get!(Template, template.id).image_protocol == 7
+    end
+  end
+
   describe "assigning a template to a project" do
     setup %{user: user} do
       {:ok, project} = Forge.Projects.register(project_attrs(), user)
@@ -525,6 +778,81 @@ defmodule Forge.ProvisioningTest do
 
       assigned(user, project, %{memory: 9_000, cores: 16, image: "snap-2", image_protocol: nil})
       assert %{image: "snap-2"} = Provisioning.for_demand(project.id, needs_two)
+    end
+
+    # **And it comes last.** Read as *yes* and taken in size order, a template on the mark was
+    # handed jobs ahead of a concrete template in the same project that would have served them —
+    # the protocol filter was what used to remove it, and order is by size. Both templates here
+    # are the same size, and the one on the mark is created first so that name order would pick it.
+    test "a template that fits is never passed over for one on the mark", context do
+      %{user: user, project: project} = context
+      needs_two = Map.put(demand(), :protocol, 2)
+
+      _stale =
+        assigned(user, project, %{
+          memory: 9_000,
+          cores: 16,
+          image: "latest",
+          resolved_image: "snap-1",
+          image_protocol: 1
+        })
+
+      fits =
+        assigned(user, project, %{memory: 9_000, cores: 16, image: "snap-2", image_protocol: 2})
+
+      assert %{id: id} = Provisioning.for_demand(project.id, needs_two)
+      assert id == fits.id
+    end
+
+    # **A template on the mark is the exception, and it is the mark's one dead case otherwise.**
+    # What such a template stores is its *old* snapshot's protocol, and the gate may not ask the
+    # driver — so filtering on it kept the template out of every demand its old snapshot was too
+    # old for, and the create attempt that would have resolved it onto the newly marked snapshot
+    # never ran. Raising the protocol is why an operator builds an image.
+    test "a template on the mark is not held to the protocol its old snapshot spoke", context do
+      %{user: user, project: project} = context
+      needs_two = Map.put(demand(), :protocol, 2)
+
+      following =
+        assigned(user, project, %{
+          memory: 9_000,
+          cores: 16,
+          image: "latest",
+          resolved_image: "snap-1",
+          image_protocol: 1
+        })
+
+      assert %{id: id} = Provisioning.for_demand(project.id, needs_two)
+      assert id == following.id
+    end
+
+    # **The fallback is every dimension but the protocol, and nothing used to check that.**
+    # Dropping its size or its kind conjunct failed no test: the size and kind tests above use
+    # templates with no image, where `Template.latest?/1` is false and the conjuncts are never
+    # reached — so `for_demand/2` handing out an undersized template, or one that refuses the
+    # job's kind, as its fallback would have gone unnoticed.
+    test "the fallback is still held to size and kind", context do
+      %{user: user, project: project} = context
+      needs_two = Map.put(demand(memory: 9_000, cores: 16), :protocol, 2)
+
+      assigned(user, project, %{
+        memory: 1_000,
+        cores: 1,
+        image: "latest",
+        resolved_image: "snap-1",
+        image_protocol: 1
+      })
+
+      assigned(user, project, %{
+        memory: 9_000,
+        cores: 16,
+        accepts: [:chat],
+        image: "latest",
+        resolved_image: "snap-1",
+        image_protocol: 1
+      })
+
+      assert Provisioning.for_demand(project.id, needs_two) == nil
     end
 
     # The distinction the design insists on: does not fit *now* is a queue, and could never fit

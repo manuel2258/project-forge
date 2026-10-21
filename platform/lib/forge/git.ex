@@ -119,6 +119,25 @@ defmodule Forge.Git do
     end
   end
 
+  @doc """
+  The size in bytes of the blob at `path` in `sha`, without reading it.
+
+  What `show/3` would return the length of, asked first: a caller that draws a bounded slice of a
+  file has to be able to refuse the file before it is in memory, and `show/3` captures all of it
+  (`ForgeWeb.ReviewLive`). `:not_found` where git can read no object there — a missing path, an
+  unknown sha. A path naming a directory has a size here, as it has content in `show/3`: the
+  tree's own, which is small, and whatever `show/3` then prints for it.
+  """
+  @spec blob_size(repo(), sha(), String.t()) :: {:ok, non_neg_integer()} | {:error, :not_found}
+  def blob_size(repo, sha, path) do
+    with {:ok, output} <- run(repo, ["cat-file", "-s", "#{sha}:#{path}"]),
+         {bytes, _rest} <- Integer.parse(String.trim(output)) do
+      {:ok, bytes}
+    else
+      _other -> {:error, :not_found}
+    end
+  end
+
   @spec exists?(repo(), sha(), String.t()) :: boolean()
   def exists?(repo, sha, path), do: match?({:ok, _}, show(repo, sha, path))
 

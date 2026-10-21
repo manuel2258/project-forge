@@ -193,6 +193,22 @@ defmodule ForgeCore.Job.OutcomeTest do
              Outcome.decide(spec, run(%{documents: %{"deck.md" => plan("done")}}))
   end
 
+  # The grammar refuses this workflow (`ForgeCore.Workflow.Validator`), so a spec that says it
+  # arrived from somewhere the parser is not: `done` is then an outcome the state never declared,
+  # no transition can match it, and the ticket sticks behind a job that reported success. An
+  # error is recoverable — a stuck ticket, by a job that succeeded, is not.
+  test "an absent optional outcome document is not done where the state does not accept done" do
+    spec = %{
+      spec()
+      | produces: ["verdict.md!"],
+        optional: ["verdict.md"],
+        outcomes: ["approved", "rejected"]
+    }
+
+    assert {:finished, :error, nil, why} = Outcome.decide(spec, run(%{missing: ["verdict.md"]}))
+    assert why == "verdict.md was not written, and this state does not accept \"done\""
+  end
+
   test "outputs must be complete, declared and parseable" do
     assert {:finished, :error, nil, "missing outputs: plan.md"} =
              Outcome.decide(spec(), run(%{missing: ["plan.md"]}))

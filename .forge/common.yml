@@ -32,7 +32,9 @@ states:
   #
   # `optional`, so a ticket may reach review with no presentation: an agent with nothing worth
   # saying about a one-line fix should say nothing rather than pad. A project that wants one on
-  # every ticket imports this template and drops the line.
+  # every ticket writes `optional: []` in the state that extends this — `extends` merges the
+  # template's keys under the state's own, so a state that omits the key inherits this one. Then
+  # add an edge out of `presenting` on `error`, or a ticket whose agent writes nothing sticks.
   presenting:
     prompt: agents/present.md
     env: default

@@ -525,7 +525,111 @@ defmodule ForgeCore.Workflow.ParserTest do
                {"states.verifying.optional[4]",
                 "changeset is the diff of the job's commits and cannot be optional"},
                {"states.verifying.optional[5]",
-                "must be a single path segment: " <> Workflow.name_rule()}
+                "must be a single path segment: " <> Workflow.name_rule()},
+               # `report.md` is also `verifying`'s outcome document, and `verifying` declares a
+               # choice of outcomes: the rule below.
+               {"states.verifying.outcomes",
+                "declaring outcomes other than done requires the document that carries the " <>
+                  "outcome: \"report.md\" is optional, and an outcome nobody wrote is done"}
+             ]
+    end
+
+    # `docs/design/workflow-grammar-v1.md` § Validation. An absent outcome document is `done` and
+    # can be nothing else — there is no front matter to choose in — so a state that declares a
+    # choice and excuses that document has given itself a way to take the `done` edge by writing
+    # nothing, and a state whose outcomes do not include `done` a way to converge on an outcome no
+    # transition matches.
+    test "a state declaring a choice of outcomes cannot make its outcome document optional", %{
+      map: map
+    } do
+      choice =
+        map
+        |> put_in(["states", "verifying", "produces"], ["report.md", "deck.md!"])
+        |> put_in(["states", "verifying", "optional"], ["report.md"])
+
+      assert {"states.verifying.outcomes",
+              "declaring outcomes other than done requires the document that carries the " <>
+                "outcome: \"report.md\" is optional, and an outcome nobody wrote is done"} in messages(
+               choice
+             )
+
+      # Not only where `done` is one of them: a state whose outcomes are all its own would
+      # converge on `done` and stick behind a job that succeeded.
+      none =
+        map
+        |> put_in(["states", "verifying", "outcomes"], ["tests_failed", "flaky"])
+        |> put_in(["states", "verifying", "optional"], ["report.md"])
+
+      assert {"states.verifying.outcomes",
+              "declaring outcomes other than done requires the document that carries the " <>
+                "outcome: \"report.md\" is optional, and an outcome nobody wrote is done"} in messages(
+               none
+             )
+
+      # And the document it does not carry the outcome in may still be optional.
+      fine =
+        map
+        |> put_in(["states", "verifying", "produces"], ["report.md", "deck.md!"])
+        |> put_in(["states", "verifying", "optional"], ["deck.md"])
+
+      assert {:ok, _workflow} = Parser.from_map(fine)
+    end
+
+    # Which collision is reported when more than one is true. The branches are ordered, the order
+    # is what a person reads, and nothing asserted it: a name that is a document *and* a group is
+    # reported as the document, which is the nearer mistake — the author wrote `deck.md` twice.
+    test "a presentation's collisions are reported nearest first", %{map: map} do
+      both =
+        map
+        |> put_in(["states", "verifying", "produces"], ["report.md", "deck.md!"])
+        |> put_in(["states", "planning", "produces"], ["plan.md", "deck.md", "deck.md/*"])
+
+      assert {"states.verifying.produces[1]", "\"deck.md\" is also produced as a document"} in messages(
+               both
+             )
+
+      group =
+        map
+        |> put_in(["states", "verifying", "produces"], ["report.md", "deck.md!"])
+        |> put_in(["states", "planning", "produces"], ["plan.md", "deck.md/*"])
+
+      assert {"states.verifying.produces[1]", "\"deck.md\" is also produced as a group of files"} in messages(
+               group
+             )
+
+      # And a reserved name is refused for being reserved, before any collision under it.
+      reserved =
+        map
+        |> put_in(["states", "verifying", "produces"], ["report.md", "proposals!"])
+        |> put_in(["states", "planning", "produces"], ["plan.md", "proposals/*"])
+
+      assert {"states.verifying.produces[1]", "\"proposals\" is reserved for ticket proposals"} in messages(
+               reserved
+             )
+    end
+
+    # The same ordering on the reading side: an input that names a reserved artifact somebody also
+    # declared a presentation under is refused for the name, not for the presentation.
+    test "a reserved input is refused for being reserved, not for a presentation", %{map: map} do
+      map =
+        map
+        |> put_in(["states", "verifying", "produces"], ["report.md", "proposal-deck.md!"])
+        |> put_in(["states", "planning", "inputs"], ["ticket", "proposal-deck.md"])
+
+      assert {"states.planning.inputs[1]",
+              "\"proposal-deck.md\" is reserved for ticket proposals"} in messages(map)
+
+      refute {"states.planning.inputs[1]",
+              "\"proposal-deck.md\" is a presentation and cannot be an input"} in messages(map)
+    end
+
+    # `changeset` in `optional` is refused by name only where the state produces it; elsewhere it
+    # is simply not one of this state's documents, which is the message that tells the author what
+    # to do about it.
+    test "optional refuses changeset by name only where the state produces it", %{map: map} do
+      assert messages(put_in(map, ["states", "planning", "optional"], ["changeset"])) == [
+               {"states.planning.optional[0]",
+                "\"changeset\" is not a document this state produces"}
              ]
     end
 
@@ -560,16 +664,24 @@ defmodule ForgeCore.Workflow.ParserTest do
     # An input whose only producer may finish without writing it is not required, or the job that
     # reads it could not be created at all — which undoes the transition into it and sticks the
     # ticket (`ForgeCore.Workflow.required_input?/3`).
+    # `notes.md` rather than `implementation.md`, which is `implementing`'s outcome document and
+    # so may not be optional at all while that state declares a choice of outcomes (below).
     test "an optional output never makes an input required", %{map: map} do
-      map = put_in(map, ["states", "verifying", "inputs"], ["plan.md", "implementation.md"])
+      map =
+        map
+        |> put_in(
+          ["states", "implementing", "produces"],
+          ["implementation.md", "changeset", "notes.md"]
+        )
+        |> put_in(["states", "verifying", "inputs"], ["plan.md", "notes.md"])
 
       assert {:ok, required} = Parser.from_map(map)
-      assert Workflow.required_input?(required, "verifying", "implementation.md")
+      assert Workflow.required_input?(required, "verifying", "notes.md")
 
-      optional = put_in(map, ["states", "implementing", "optional"], ["implementation.md"])
+      optional = put_in(map, ["states", "implementing", "optional"], ["notes.md"])
 
       assert {:ok, workflow} = Parser.from_map(optional)
-      refute Workflow.required_input?(workflow, "verifying", "implementation.md")
+      refute Workflow.required_input?(workflow, "verifying", "notes.md")
       assert Workflow.required_input?(workflow, "verifying", "plan.md")
     end
 

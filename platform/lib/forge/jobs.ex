@@ -50,6 +50,7 @@ defmodule Forge.Jobs do
   @questions_protocol 3
   @integration_protocol 5
   @secrets_protocol 6
+  @optional_outputs_protocol 7
 
   # How many of the merges that landed on the default branch since a ticket's base an integrating
   # job is told about by name; the rest are counted (`docs/design/job-prompt.md` § Integrating the
@@ -703,10 +704,32 @@ defmodule Forge.Jobs do
   - **A job that names a secret needs protocol 6**, whatever its kind: a release from before it
     ignores the assignment's `secrets` and would run the job without them, where it should not
     run at all (`docs/design/secrets.md` § Delivery). A job that names none asks nothing more.
+  - **A job whose state declares a presentation or an optional output needs protocol 7**: the
+    worker is what composes the manifest, collects `out/` and decides the outcome, and a release
+    from before these does all three wrong — it names `out/presentation.md!` in the manifest and
+    collects the file under that name, which the platform then records as an approvable
+    *document*, or it reports `error` for an absent optional document the manifest told the agent
+    it could skip (`docs/design/worker-channel.md` § Versions). A state that declares neither asks
+    nothing more.
   """
   @spec protocol(Job.t()) :: non_neg_integer()
-  def protocol(%Job{secret_names: [_ | _]} = job), do: max(kind_protocol(job), @secrets_protocol)
-  def protocol(%Job{} = job), do: kind_protocol(job)
+  def protocol(%Job{} = job),
+    do: Enum.max([kind_protocol(job), secrets_protocol(job), outputs_protocol(job)])
+
+  defp secrets_protocol(%Job{secret_names: [_ | _]}), do: @secrets_protocol
+  defp secrets_protocol(%Job{}), do: 0
+
+  # Read from the stored spec rather than the workflow, as the integrating clause is: the spec is
+  # what the worker is handed, and a workflow edited since cannot change what this job needs.
+  defp outputs_protocol(%Job{kind: :workflow} = job) do
+    spec = spec(job)
+
+    if spec.optional != [] or Enum.any?(spec.produces, &Workflow.presentation?/1),
+      do: @optional_outputs_protocol,
+      else: 0
+  end
+
+  defp outputs_protocol(%Job{}), do: 0
 
   defp kind_protocol(%Job{kind: :command}), do: @commands_protocol
 

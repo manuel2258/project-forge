@@ -193,7 +193,7 @@ defmodule ForgeWeb.Api.Render do
       ticket: ticket(ticket, project.name),
       changeset: %{version: changeset.version, commit: head, base: ticket.base_commit},
       merged: Forge.Merge.merged?(ticket),
-      diff: diff(repo, ticket.base_commit, head),
+      diff: diff(repo, ticket.base_commit, head, changeset.blob_uri),
       documents: review_artifacts(ticket, :document),
       presentations: review_artifacts(ticket, :presentation),
       answers: review_answers(ticket),
@@ -201,7 +201,12 @@ defmodule ForgeWeb.Api.Render do
     }
   end
 
-  defp diff(repo, base, head) do
+  # Nil where the stored uri is not a commit, as `ReviewLive.diff/3` and `Merge.changeset/1` both
+  # say in their own words: interpolated, it makes `base..`, which git reads as `base..HEAD` and
+  # answers with the default branch's diff as this ticket's change.
+  defp diff(_repo, _base, nil, uri), do: %{error: inspect({:not_a_commit, uri})}
+
+  defp diff(repo, base, head, _uri) do
     with {:ok, stat} <- Forge.Git.diff_stat(repo, base, head),
          {:ok, patch} <- Forge.Git.diff(repo, base, head) do
       files =

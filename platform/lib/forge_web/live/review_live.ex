@@ -25,8 +25,11 @@ defmodule ForgeWeb.ReviewLive do
 
   # A file and a line or range quoted in backticks, which the prose that quotes it has drawn
   # beneath it (`docs/design/ui.md` § Changes). No colon, backtick or space in the path, because
-  # the colon is the separator and the quote is one token of prose.
-  @quoted ~r/`([^`:\s]+):(\d+)(?:-(\d+))?`/
+  # the colon is the separator and the quote is one token of prose. The line numbers are bounded
+  # here rather than parsed and judged: `String.to_integer` on an unbounded run of digits is work
+  # proportional to the digits, and 450,000 of them took two seconds before they could be refused
+  # for naming a line no file has.
+  @quoted ~r/`([^`:\s]+):(\d{1,7})(?:-(\d{1,7}))?`/
 
   # A range longer than this is a file, not a quote: it would push the prose it belongs to off
   # the screen, which is the one thing this section exists to keep readable.
@@ -36,14 +39,30 @@ defmodule ForgeWeb.ReviewLive do
   # megabyte. Both caps are on the slice, so neither depends on how the file is formatted.
   @max_quoted_bytes 16 * 1024
 
-  # **How many quotes are drawn at all.** The prose is an agent's and bounded only by a document's
-  # megabyte, in which `` `a:1` `a:2` … `` fits a hundred thousand distinct quotes; drawing them
-  # would be a hundred thousand `git show` calls and hundreds of megabytes of HTML, inside
-  # `mount/3`, per viewer, and again on every patch of the page. The cap is applied before
-  # anything is read from git, so what a presentation can cost to open does not depend on what it
-  # says. A page nobody can read is not a review, which is the same standard the patch is bounded
-  # to.
+  # **No file is read past this, whichever lines are quoted from it.** The caps above are on the
+  # slice, and a slice is taken from a blob the whole of which `Git.show/3` has captured: five
+  # lines quoted out of a 53 MB tracked file cost 98 MB of heap and half a second before either
+  # cap could refuse them. So the blob's size is asked for first (`Git.blob_size/3`) and a file
+  # past this is never read at all — what a quote costs to draw is then bounded by this and not
+  # by what the repository happens to hold.
+  @max_quoted_file_bytes 1024 * 1024
+
+  # **How many quotes are drawn at all**, counted over the whole presentation and over every
+  # paragraph of it. The prose is an agent's and bounded only by the cap below, in which
+  # `` `a:1` `a:2` … `` fits tens of thousands of quotes; drawing them would be tens of thousands
+  # of `pre` blocks of up to 16 KiB, built inside `mount/3`, per viewer, and again on every patch
+  # of the page. It counts what is *drawn* and not what is distinct: one quote named in forty
+  # paragraphs is forty blocks against one path read, and bounding the reads is only half of it.
+  # A page nobody can read is not a review, which is the same standard the patch is bounded to.
   @max_quotes 12
+
+  # **How much of a presentation's prose is drawn.** A document may be a megabyte, and `x\n\n` a
+  # megabyte long is 300,000 paragraphs — ten seconds of Markdown inside `mount/3`, per viewer,
+  # because each paragraph is parsed on its own so that what it quotes can be drawn beneath it.
+  # Past this the page draws the beginning and says so, with its own `source ›` link to the whole.
+  # A presentation is prose a person reads in a minute (`docs/design/ui.md` § Changes), which this
+  # is many times over.
+  @max_prose_bytes 64 * 1024
 
   # Beyond this the patch is offered per file instead. A page nobody can read is not a review.
   @impl true
@@ -63,6 +82,7 @@ defmodule ForgeWeb.ReviewLive do
     ticket = Tickets.get!(id)
     workflow = Tickets.workflow(ticket)
     changeset = Artifacts.latest(ticket.id, Workflow.changeset_artifact())
+    artifacts = Artifacts.list(ticket.id)
 
     assign(socket,
       page_title: "#{project.name}##{ticket.number} review",
@@ -71,8 +91,8 @@ defmodule ForgeWeb.ReviewLive do
       changeset: changeset,
       merged: Merge.merged?(ticket),
       diff: diff(project, ticket, changeset),
-      documents: documents(ticket),
-      presentations: presentations(ticket, project, Artifacts.commit(changeset)),
+      documents: documents(ticket, artifacts),
+      presentations: presentations(ticket, artifacts, project, Artifacts.commit(changeset)),
       answers: Artifacts.answered(ticket.id),
       pending: ticket.pending_transition,
       approve: approve_pins(project, ticket, changeset),
@@ -90,41 +110,46 @@ defmodule ForgeWeb.ReviewLive do
     end
   end
 
+  # The latest version of each of the ticket's artifacts of one kind, in the order they were
+  # written: what both sections below are, differing only in what they draw from it. One walk of
+  # the ticket's artifacts for the two of them, since the page loads them together.
+  defp by_kind(ticket, artifacts, kind) do
+    for artifact <- artifacts,
+        artifact.kind == kind,
+        version = Artifacts.latest(ticket.id, artifact.name),
+        version != nil do
+      {artifact.name, version}
+    end
+    |> Enum.sort_by(fn {_name, version} -> version.inserted_at end, DateTime)
+  end
+
   # The chain the change was built from, in the order it was written. The last document is the
   # verification report in every workflow that has one; naming it by convention would hard-code a
   # state name the grammar leaves to the project.
-  defp documents(ticket) do
-    for artifact <- Artifacts.list(ticket.id),
-        artifact.kind == :document,
-        version = Artifacts.latest(ticket.id, artifact.name),
-        version != nil do
+  defp documents(ticket, artifacts) do
+    for {name, version} <- by_kind(ticket, artifacts, :document) do
       %{
-        name: artifact.name,
+        name: name,
         version: version,
         approved: Artifacts.approved?(version),
-        body: FileType.render_document(artifact.name, version.content)
+        body: FileType.render_document(name, version.content)
       }
     end
-    |> Enum.sort_by(& &1.version.inserted_at, DateTime)
   end
 
   # What an agent wrote for the person deciding, newest material last, drawn before the diff: a
   # presentation is the reasoning the patch cannot carry (`docs/design/ui.md` § Changes). Loaded by
-  # kind and not by name, for the reason `documents/1` gives: the name is the project's.
-  defp presentations(ticket, project, head) do
+  # kind and not by name, for the reason `documents/2` gives: the name is the project's.
+  defp presentations(ticket, artifacts, project, head) do
     repo = Projects.repo_path(project)
 
-    for artifact <- Artifacts.list(ticket.id),
-        artifact.kind == :presentation,
-        version = Artifacts.latest(ticket.id, artifact.name),
-        version != nil do
-      %{name: artifact.name, version: version}
-      |> Map.merge(blocks(version.content, repo, head))
+    for {name, version} <- by_kind(ticket, artifacts, :presentation) do
+      Map.merge(%{name: name, version: version}, blocks(version.content, repo, head))
     end
-    |> Enum.sort_by(& &1.version.inserted_at, DateTime)
   end
 
-  # Paragraphs, each with the source it quotes beneath it, and how many quotes the cap left out.
+  # Paragraphs, each with the source it quotes beneath it, how many quotes the cap left out, and
+  # whether the prose itself was cut short.
   #
   # Splitting on blank lines is the whole of the parsing, and it is meant to be: a quote inside a
   # list item spanning paragraphs is drawn under the part it sits in rather than beside its own
@@ -132,23 +157,51 @@ defmodule ForgeWeb.ReviewLive do
   # prose. Both cost legibility in one paragraph and neither can fail the page. A bigger parser
   # would buy very little for prose this simple.
   defp blocks(content, repo, head) do
+    {prose, truncated} = prose(content)
+
     paragraphs =
-      content
-      |> ForgeWeb.Markdown.strip_front_matter()
+      prose
       |> String.split(~r/\r?\n[ \t]*\r?\n/)
       |> Enum.reject(&(String.trim(&1) == ""))
 
-    tokens = paragraphs |> Enum.flat_map(&tokens/1) |> Enum.uniq()
-    drawn = Enum.take(tokens, @max_quotes)
-    resolved = resolve(drawn, repo, head)
-
-    blocks =
-      Enum.map(paragraphs, fn paragraph ->
-        quotes = for token <- Enum.uniq(tokens(paragraph)), token in drawn, do: resolved[token]
-        %{html: ForgeWeb.Markdown.to_html(paragraph), quotes: quotes}
+    {blocks, counted} =
+      Enum.map_reduce(paragraphs, %{files: %{}, drawn: 0, dropped: 0}, fn paragraph, acc ->
+        {quotes, acc} = draw(Enum.uniq(tokens(paragraph)), repo, head, acc)
+        {%{html: ForgeWeb.Markdown.to_html(paragraph), quotes: quotes}, acc}
       end)
 
-    %{blocks: blocks, dropped: length(tokens) - length(drawn)}
+    %{blocks: blocks, dropped: counted.dropped, truncated: truncated}
+  end
+
+  # The prose the page draws, and whether there was more of it. Cut at a whole character, since
+  # a half of one is not a string any more and every caller downstream treats it as one.
+  defp prose(content) do
+    prose = ForgeWeb.Markdown.strip_front_matter(content)
+
+    if byte_size(prose) > @max_prose_bytes,
+      do: {whole_characters(binary_part(prose, 0, @max_prose_bytes)), true},
+      else: {prose, false}
+  end
+
+  defp whole_characters(prose) do
+    if String.valid?(prose),
+      do: prose,
+      else: whole_characters(binary_part(prose, 0, byte_size(prose) - 1))
+  end
+
+  # One paragraph's quotes, against the cap for the whole presentation: `@max_quotes` drawn, the
+  # rest counted. `acc.files` carries every path already read across paragraphs too, so a path
+  # quoted in three of them is read once — which bounds the reads, where `drawn` bounds the HTML.
+  defp draw(tokens, repo, head, acc) do
+    Enum.flat_map_reduce(tokens, acc, fn {path, from, to}, acc ->
+      if acc.drawn < @max_quotes do
+        {lines, files} = lines(acc.files, repo, head, path, from, to)
+        quoted = %{label: label(path, from, to), lines: lines}
+        {[quoted], %{acc | files: files, drawn: acc.drawn + 1}}
+      else
+        {[], %{acc | dropped: acc.dropped + 1}}
+      end
+    end)
   end
 
   # Every quote the prose makes, in the order it makes them: `{path, from, to}`.
@@ -161,19 +214,9 @@ defmodule ForgeWeb.ReviewLive do
     end)
   end
 
+  # Bounded by the pattern to seven digits, so this is arithmetic on a short string and not on
+  # whatever run of digits the prose held.
   defp to_line(digits), do: String.to_integer(digits)
-
-  # Each quote with its source, reading each path from git at most once however many quotes name
-  # it: a presentation quoting one file three times used to run three `git show`es.
-  defp resolve(tokens, repo, head) do
-    {resolved, _files} =
-      Enum.map_reduce(tokens, %{}, fn {path, from, to} = token, files ->
-        {lines, files} = lines(files, repo, head, path, from, to)
-        {{token, %{label: label(path, from, to), lines: lines}}, files}
-      end)
-
-    Map.new(resolved)
-  end
 
   defp label(path, from, to),
     do: if(from == to, do: "#{path}:#{from}", else: "#{path}:#{from}-#{to}")
@@ -195,20 +238,39 @@ defmodule ForgeWeb.ReviewLive do
 
   defp lines(files, _repo, _head, _path, _from, _to), do: {:unresolved, files}
 
+  # Keyed by the path, never by the quote: the whole file is cached and the slice taken after,
+  # so one entry serves every range quoted out of it. Keying it by anything that is not the path
+  # — a constant, say — would serve one file's lines under another's label, which is what the
+  # two-file test on this page holds. (That each path is read *once* is the saving, and is an
+  # equivalent mutant: nothing a test can see distinguishes one `git show` from three.)
   defp file(files, repo, head, path) do
     case Map.fetch(files, path) do
-      {:ok, cached} ->
-        {cached, files}
-
-      :error ->
-        read =
-          case Git.show(repo, head, path) do
-            {:ok, content} -> source_lines(content)
-            {:error, _reason} -> :missing
-          end
-
-        {read, Map.put(files, path, read)}
+      {:ok, cached} -> {cached, files}
+      :error -> read(files, repo, head, path)
     end
+  end
+
+  # **The size first, then the bytes.** A quote names a path in a tree at head, not a path in the
+  # change, so it reaches every blob the repository holds at that commit — a megabyte cap on the
+  # blob is what keeps drawing one bounded, since both caps above are on the slice and a slice is
+  # cut from a file already in memory.
+  #
+  # And a blob is only text if it says so. `Git.show/3` hands back whatever bytes are there, the
+  # diff prints `Binary files … differ` rather than them, and a `pre` of invalid UTF-8 is a
+  # `Jason` exception in the socket's serializer — on the page where merges are approved, for
+  # every viewer at once. So the bytes are checked before they can be drawn, which is the same
+  # standard `ForgeWeb.Markdown` holds its own renderer to.
+  defp read(files, repo, head, path) do
+    read =
+      with {:ok, bytes} when bytes <= @max_quoted_file_bytes <- Git.blob_size(repo, head, path),
+           {:ok, content} <- Git.show(repo, head, path) do
+        if String.valid?(content), do: source_lines(content), else: :not_text
+      else
+        {:ok, _too_big} -> :too_big
+        {:error, _reason} -> :missing
+      end
+
+    {read, Map.put(files, path, read)}
   end
 
   # A file's lines, counted the way an editor counts them. `String.split/2` on text ending in a
@@ -222,6 +284,8 @@ defmodule ForgeWeb.ReviewLive do
   end
 
   defp slice(:missing, _from, _to), do: :unresolved
+  defp slice(:too_big, _from, _to), do: :too_long
+  defp slice(:not_text, _from, _to), do: :not_text
 
   defp slice(all, from, to) when is_list(all) do
     if to <= length(all) do
@@ -242,6 +306,9 @@ defmodule ForgeWeb.ReviewLive do
 
   defp note(%{label: label, lines: :too_long}),
     do: "#{label} is too much to draw here; read it in the diff"
+
+  defp note(%{label: label, lines: :not_text}),
+    do: "#{label} is not text; read it in the diff"
 
   defp note(%{label: label}), do: "#{label} is not in this changeset's commit"
 
@@ -329,6 +396,10 @@ defmodule ForgeWeb.ReviewLive do
               </p>
             </div>
           </div>
+
+          <p :if={shown.truncated} class="mt-2 text-[12.5px] opacity-60">
+            This presentation is longer than the page draws; the rest is in its source.
+          </p>
 
           <p :if={shown.dropped > 0} class="mt-2 text-[12.5px] opacity-60">
             {dropped_note(shown.dropped)}

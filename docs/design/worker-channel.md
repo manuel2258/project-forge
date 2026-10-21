@@ -500,6 +500,17 @@ taking every job that names none: an assignment without secrets is exactly what 
 credential's seal is unchanged. The minimum stays 4 until the templates and permanent machines
 have moved, as below.
 
+**Protocol 7 is presentations and optional outputs** (`docs/design/workflow-grammar-v1.md`
+§ Semantics): a `produces` entry ending `!`, whose artifact is the name without it, and
+`optional` in the spec. It is a bump because the worker composes the manifest, collects `out/`
+and decides the outcome, and an older one gets all three wrong rather than less: it tells the
+agent to write `$FORGE_JOB/out/presentation.md!`, collects the file under that name — which the
+platform records as an approvable *document*, the two things a presentation must never be — and
+reports `error` for an absent optional document the manifest told the agent it could skip, on a
+state with no `error` edge. So a job whose state declares either needs protocol 7
+(`Forge.Jobs.protocol/1`, from the stored spec), and a protocol 4, 5 or 6 worker keeps taking
+every job that declares neither: its spec is exactly what it was. The minimum stays 4.
+
 What rides along without a bump, because an older side may ignore it: `job.harness.memory`
 events and the `memory` a `starting` event carries (`docs/design/claude-code-events.md` § Memory),
 which an older platform records like any other harness event; and `memory` in a result's or a

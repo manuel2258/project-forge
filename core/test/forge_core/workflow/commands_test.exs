@@ -174,6 +174,22 @@ defmodule ForgeCore.Workflow.CommandsTest do
       assert [{"commands.build.produces", "artifact name must be" <> _}] = messages(map)
     end
 
+    # `docs/design/workflow-grammar-v1.md` § Validation: a presentation is never under a name a
+    # command produces as a group of files either. `command_outputs_errors/4` cannot see it from
+    # its own side — it matches `deck.md` and `deck.md/*`, and the declaration is `deck.md!` — so
+    # the clause is the presentation's, and one artifact would otherwise have two kinds.
+    test "a presentation may not share its name with a command's group of files" do
+      map =
+        base_map()
+        |> put_in(["commands", "build", "produces"], ["build.log", "deck.md/*"])
+        |> put_in(["states", "implementing", "produces"], ["implementation.md", "deck.md!"])
+
+      assert messages(map) == [
+               {"states.implementing.produces[1]",
+                "\"deck.md\" is also produced as a group of files by a command"}
+             ]
+    end
+
     # A presentation's artifact name has no marker in it, so a command's log can collide with one
     # under a name neither declaration shows. The collision is checked from the presentation's
     # side alone, which is why it is found whichever of the two is declared.

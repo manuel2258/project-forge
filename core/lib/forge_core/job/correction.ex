@@ -43,8 +43,14 @@ defmodule ForgeCore.Job.Correction do
   end
 
   defp problems(spec, result) do
-    missing =
-      Enum.map(result.missing, &"#{&1}: was not written; write it to $FORGE_JOB/out/#{&1}")
+    # An optional output's absence is not a failure, so it is not a problem to correct either
+    # (`docs/design/workflow-grammar-v1.md` § Semantics). `result.missing` carries every declared
+    # document that was not written, optional ones included — which of them is a failure is the
+    # spec's to say, as `Outcome` says it. Without the filter, a run that failed on something else
+    # entirely would tell the same session to write the document the manifest told it it could
+    # skip.
+    required = result.missing -- Spec.optional_outputs(spec)
+    missing = Enum.map(required, &"#{&1}: was not written; write it to $FORGE_JOB/out/#{&1}")
 
     undeclared =
       Enum.map(

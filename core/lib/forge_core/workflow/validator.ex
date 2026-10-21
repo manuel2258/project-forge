@@ -475,10 +475,15 @@ defmodule ForgeCore.Workflow.Validator do
   end
 
   # A presentation is one artifact under one kind, so the name it is recorded under may not also be
-  # something's document — a state's or a command's log — and it is one job state's
-  # (`docs/design/workflow-grammar-v1.md` § Validation). Both collisions are checked from here and
-  # only from here: the pass sees the whole workflow, so the order the two were declared in makes
-  # no difference to the answer.
+  # something's document — a state's or a command's log — nor a group of files, a state's or a
+  # command's, and it is one job state's (`docs/design/workflow-grammar-v1.md` § Validation). Every
+  # collision is checked from here and only from here: the pass sees the whole workflow, so the
+  # order the two were declared in makes no difference to the answer, and the other side cannot
+  # see this one — `command_outputs_errors/4` matches `deck.md` and `deck.md/*`, neither of which
+  # is the declaration `deck.md!`.
+  #
+  # The order of the branches is what the message says when more than one is true, and is
+  # asserted: a collision is reported as the collision it is, nearest first.
   defp presentation_error(workflow, path, declared, producers) do
     name = Workflow.presentation_name(declared)
 
@@ -491,6 +496,9 @@ defmodule ForgeCore.Workflow.Validator do
 
       Workflow.producers(workflow, name <> "/*") != [] ->
         Error.new(path, "#{inspect(name)} is also produced as a group of files")
+
+      command_producing(workflow, name <> "/*") != [] ->
+        Error.new(path, "#{inspect(name)} is also produced as a group of files by a command")
 
       command = Workflow.log_producer(workflow, name) ->
         Error.new(path, "#{inspect(name)} is also produced by command #{inspect(command)}")
@@ -775,8 +783,19 @@ defmodule ForgeCore.Workflow.Validator do
     conflict = Enum.filter(declared, &(&1 == Workflow.merge_conflict_outcome()))
     duplicates = declared -- Enum.uniq(declared)
 
-    needs_document =
-      declared != [Workflow.default_outcome()] and State.outcome_document(state) == nil
+    document = State.outcome_document(state)
+    needs_document = declared != [Workflow.default_outcome()] and document == nil
+
+    # **And a document that was written.** An absent optional outcome document is `done` and can
+    # be nothing else — there is no front matter to choose with — so a state that declares a
+    # choice and excuses the document the choice is made in has given itself a way to take the
+    # `done` edge by writing nothing. Worse where `done` is not among the outcomes: the job
+    # converges on an outcome no transition can match, and the ticket sticks behind a job that
+    # succeeded. Beside the rule above because it is the same rule: an outcome other than `done`
+    # is chosen in a document, so there has to be one, and it has to be written.
+    unwritten_document =
+      declared != [Workflow.default_outcome()] and document != nil and
+        State.optional?(state, document)
 
     List.flatten([
       if(declared == [], do: Error.new(path, "must not be empty"), else: []),
@@ -791,6 +810,15 @@ defmodule ForgeCore.Workflow.Validator do
       ),
       if(needs_document,
         do: Error.new(path, "declaring outcomes other than done requires a document in produces"),
+        else: []
+      ),
+      if(unwritten_document,
+        do:
+          Error.new(
+            path,
+            "declaring outcomes other than done requires the document that carries the " <>
+              "outcome: #{inspect(document)} is optional, and an outcome nobody wrote is done"
+          ),
         else: []
       )
     ])

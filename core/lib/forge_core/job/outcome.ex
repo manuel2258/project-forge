@@ -193,8 +193,23 @@ defmodule ForgeCore.Job.Outcome do
         # `error` above, so this is the state that declared its outcome document a nicety.
         case Map.fetch(documents, name) do
           {:ok, document} -> declared_in(spec, document, name)
-          :error -> {:converged, "done", "#{name} was not written, and is optional"}
+          :error -> absent(spec, name)
         end
+    end
+  end
+
+  # An outcome document nobody wrote is `done`, and could be nothing else: there is no front
+  # matter to choose in. So it is `done` only where the state accepts `done` — the same question
+  # `declared_in/3` asks of a written one, and asked here for the same reason. A workflow that
+  # declared a choice of outcomes and made the document optional is refused at parse time
+  # (`ForgeCore.Workflow.Validator`); a spec that says so anyway arrived from somewhere else, and
+  # converging it on an outcome the state never declared sticks the ticket behind a job that
+  # succeeded, which is the one failure nothing downstream can read.
+  defp absent(%Spec{outcomes: outcomes}, name) do
+    if "done" in outcomes do
+      {:converged, "done", "#{name} was not written, and is optional"}
+    else
+      {:error, nil, "#{name} was not written, and this state does not accept \"done\""}
     end
   end
 

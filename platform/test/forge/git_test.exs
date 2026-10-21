@@ -23,6 +23,17 @@ defmodule Forge.GitTest do
     assert {:error, {:unknown_ref, "nope"}} = Git.resolve(repo, "nope")
   end
 
+  # What a caller asks before it reads: `show/3` captures the whole blob, so a bounded slice of an
+  # unbounded file has to be refusable before the bytes are in memory (`ForgeWeb.ReviewLive`).
+  test "blob_size/3 answers a blob's size without reading it", %{repo: repo} do
+    {:ok, sha} = Git.resolve(repo, "main")
+    {:ok, content} = Git.show(repo, sha, ".forge/workflow.yml")
+
+    assert {:ok, byte_size(content)} == Git.blob_size(repo, sha, ".forge/workflow.yml")
+    assert {:error, :not_found} = Git.blob_size(repo, sha, ".forge/missing.yml")
+    assert {:error, :not_found} = Git.blob_size(repo, String.duplicate("b", 40), "x")
+  end
+
   test "branches, worktrees, commits and diffs round-trip", %{repo: repo, scratch: scratch} do
     {:ok, base} = Git.resolve(repo, "main")
     assert :ok = Git.create_branch(repo, "ticket/1", base)

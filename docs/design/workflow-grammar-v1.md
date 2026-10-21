@@ -269,7 +269,9 @@ produces no document at all. The names are the artifacts' own, with no marker:
 `produces: [presentation.md!]` is excused by `optional: [presentation.md]`, the spelling `inputs`
 and `approve` use. Only a document may be optional — `changeset` is the branch the job's commits
 made, and a group of files already has no minimum — and only a job state may say so, since nothing
-obliges a person to write a human state's documents in the first place.
+obliges a person to write a human state's documents in the first place. **A state that declares a
+choice of outcomes may not excuse the document that carries it** (§ Validation): the choice is
+made in that document's front matter, and there is nothing to read in a file nobody wrote.
 
 **This is how a workflow says whether an artifact is required**: the same state, with or without
 the line. The cost is that nothing then distinguishes an agent with nothing to say from an agent
@@ -821,11 +823,18 @@ is never produced; `answers.md` is platform-managed and never declared.
   approved.
 - A presentation `name!` names one artifact: `name` is an artifact name, and the presentation is
   produced by exactly one job state — never by a human state or a command — and never under a
-  name something produces as a document or as a group of files. A presentation is neither an input
-  nor approved.
+  name a state produces as a document or a group of files, or a command produces as its log or a
+  group of files. A presentation is neither an input nor approved.
 - `optional`, where present, is on a job state and lists names, each the artifact name of one of
   that state's own produced documents, none twice. `changeset` and a group of files are refused by
   that rule and refused by name, so the message says which it is rather than "not produced here".
+- **A state declaring outcomes other than `done` may not make its outcome document optional.**
+  An absent document is `done` and can be nothing else, so excusing the document the choice is
+  written in is a way to take the `done` edge by writing nothing — and where `done` is not among
+  the declared outcomes, a way to converge on an outcome no transition can match and stick the
+  ticket behind a job that succeeded. It is the same rule as "declaring outcomes other than done
+  requires a document in produces", one step further: there has to be one, and it has to be
+  written.
 - Every `on_enter` entry is a known action (`merge` alone in v1); `on_enter` is absent from every
   job state and every command state; at most one state in a workflow merges; `initial` does not merge; and a workflow that
   merges has a state producing `changeset`.

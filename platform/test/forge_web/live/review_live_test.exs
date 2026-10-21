@@ -276,9 +276,11 @@ defmodule ForgeWeb.ReviewLiveTest do
     assert drawn =~ "score.ex:1-61 is too much to draw here"
   end
 
-  # The file is read once per path however many quotes name it, so the cache must be keyed by the
-  # path and never by the quote: keyed by the quote it would serve one range's lines for another.
-  # That it reads once rather than three times is not observable from here and no test claims it.
+  # The slice is taken after the cache returns, so what the cache holds is the whole file: keyed by
+  # anything but the path — a constant, say — it would serve one file's lines under another's
+  # label, which is what the two-file case below holds. (Keying it by the quote instead would be
+  # correct and merely wasteful, so that is not what this guards.) That the file is read once
+  # rather than three times is not observable from here, and the comment at the code says so.
   test "two ranges of one file each draw their own lines", context do
     %{conn: conn, project: project, ticket: ticket} = context
     sha = commit_on_branch(context, "score.ex", "one\ntwo\nthree\nfour")
@@ -287,16 +289,68 @@ defmodule ForgeWeb.ReviewLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
 
-    [first, second] =
-      view
-      |> element(~s([id="review-presentation-presentation.md"]))
-      |> render()
-      |> Floki.parse_fragment!()
-      |> Floki.find("pre")
-      |> Enum.map(&Floki.text/1)
+    assert pres(view) == ["one", "three\nfour"]
+  end
 
-    assert first == "one"
-    assert second == "three\nfour"
+  # Two files in one presentation, which nothing else here does: every other case quotes ranges of
+  # `score.ex`, and a cache that returned any file's content for any path would pass all of them.
+  test "two different files each draw their own content", context do
+    %{conn: conn, project: project, ticket: ticket} = context
+    commit_on_branch(context, "a.ex", "alpha")
+    sha = commit_on_branch(context, "b.ex", "beta")
+    changeset!(ticket, sha)
+    present!(ticket, "First `a.ex:1`, then `b.ex:1`.\n")
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+
+    assert [first, second] = pres(view)
+    assert first == "alpha"
+    assert second == "beta"
+  end
+
+  # **The page is rendered into JSON for every connected viewer.** `Jason` raises on invalid
+  # UTF-8, so a `pre` of a binary file's bytes would not merely look wrong: it would take the
+  # surface merges are approved on down for everyone reading it, which is what
+  # `ForgeWeb.Markdown`'s own rescue clause exists to prevent. The diff does not print those bytes
+  # either — git says `Binary files … differ` — and a quote reaches any path in the tree at head,
+  # not only the ones the change touched.
+  test "a quoted file that is not text is a note, and the page survives it", context do
+    %{conn: conn, project: project, ticket: ticket} = context
+    sha = commit_on_branch(context, "logo.png", <<137, 80, 78, 71, 0, 255, 254>>)
+    changeset!(ticket, sha)
+    present!(ticket, "The icon is `logo.png:1`.\n")
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+    html = render(view)
+
+    assert html =~ "logo.png:1 is not text; read it in the diff"
+    assert pres(view) == []
+    # What the socket's serializer does with the rendered tree, which `Phoenix.LiveViewTest`
+    # never does: the page is only as safe as its bytes are encodable.
+    assert {:ok, _json} = Jason.encode(html)
+  end
+
+  # Both caps on size, each at a boundary no line count catches: one minified line is a megabyte,
+  # and a file quoted at its first line can still be any size at all. The second is refused
+  # before the blob is read rather than after — the cap the `git show` used to be inside of.
+  test "a quote is refused for its bytes as well as its lines", context do
+    %{conn: conn, project: project, ticket: ticket} = context
+    commit_on_branch(context, "min.js", String.duplicate("x", 17_000), "minified")
+    sha = commit_on_branch(context, "big.txt", String.duplicate("line\n", 300_000), "big")
+    changeset!(ticket, sha)
+
+    present!(ticket, """
+    One long line: `min.js:1`.
+
+    A big file, quoted small: `big.txt:1-2`.
+    """)
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+    html = render(view)
+
+    assert html =~ "min.js:1 is too much to draw here"
+    assert html =~ "big.txt:1-2 is too much to draw here"
+    assert pres(view) == []
   end
 
   # The prose is an agent's and bounded only by a document's megabyte, in which a hundred thousand
@@ -311,8 +365,59 @@ defmodule ForgeWeb.ReviewLiveTest do
     {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
     drawn = view |> element(~s([id="review-presentation-presentation.md"])) |> render()
 
-    assert drawn |> Floki.parse_fragment!() |> Floki.find("pre") |> length() == 12
+    assert length(pres(view)) == 12
     assert drawn =~ "8 further quotes are not drawn: a presentation draws at most 12."
+  end
+
+  # **The cap counts what is drawn, not what is distinct.** One quote named in forty paragraphs is
+  # forty `pre` blocks against one path read, and a cap on distinct quotes bounds the reads and
+  # nothing else — which is the half that does not make the page expensive.
+  test "the same quote in many paragraphs is capped too", context do
+    %{conn: conn, project: project, ticket: ticket} = context
+    sha = commit_on_branch(context, "score.ex", Enum.map_join(1..10, "\n", &"line #{&1}"))
+    changeset!(ticket, sha)
+    present!(ticket, Enum.map_join(1..40, "\n\n", fn n -> "Point #{n}: `score.ex:1-5`." end))
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+    drawn = view |> element(~s([id="review-presentation-presentation.md"])) |> render()
+
+    assert length(pres(view)) == 12
+    assert drawn =~ "28 further quotes are not drawn"
+  end
+
+  # One over the cap, which is the only case the singular sentence is written for.
+  test "one quote over the cap is counted in the singular", context do
+    %{conn: conn, project: project, ticket: ticket} = context
+    sha = commit_on_branch(context, "score.ex", Enum.map_join(1..20, "\n", &"line #{&1}"))
+    changeset!(ticket, sha)
+    present!(ticket, Enum.map_join(1..13, " ", &"`score.ex:#{&1}`") <> "\n")
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+    drawn = view |> element(~s([id="review-presentation-presentation.md"])) |> render()
+
+    assert drawn =~ "1 further quote is not drawn: a presentation draws at most 12."
+    refute drawn =~ "1 further quotes"
+  end
+
+  # A megabyte of `x\n\n` is 300,000 paragraphs, each parsed as Markdown on its own so that what
+  # it quotes can be drawn beneath it: ten seconds inside `mount/3`, per viewer. The page draws
+  # the beginning and says where the rest is.
+  test "a presentation longer than the page draws is cut short, and says so", context do
+    %{conn: conn, project: project, ticket: ticket} = context
+    sha = commit_on_branch(context, "score.ex", "def persist, do: :ok")
+    changeset!(ticket, sha)
+
+    present!(
+      ticket,
+      "The start of it.\n\n" <> String.duplicate("filler\n\n", 12_000) <> "The end of it.\n"
+    )
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+    html = render(view)
+
+    assert html =~ "The start of it."
+    refute html =~ "The end of it."
+    assert html =~ "longer than the page draws"
   end
 
   # "Newest material last" is the comment's claim and every other test records one presentation,
@@ -398,6 +503,30 @@ defmodule ForgeWeb.ReviewLiveTest do
     assert body["diff"]["patch"] =~ "def persist"
   end
 
+  # A changeset version whose uri is not a commit. Interpolated into `base..head` a nil head makes
+  # `base..`, which git reads as `base..HEAD`: the API would answer with the default branch's diff
+  # as this ticket's change, and say nothing was wrong. The page and the merge both refuse it, and
+  # this is the third site of the three.
+  test "the API refuses a changeset that is not a commit rather than diffing the branch",
+       context do
+    %{project: project, ticket: ticket} = context
+    commit_on_branch(context, "score.ex", "def persist, do: :ok")
+
+    {:ok, _version} =
+      Artifacts.record_version(ticket.id, "changeset", :blob, :system, %{blob_uri: "blob:nope"})
+
+    token = Forge.Accounts.create_api_token(context.scope.user, "test")
+
+    body =
+      build_conn()
+      |> put_req_header("authorization", "Bearer " <> token)
+      |> get(~p"/api/v1/tickets/#{project.name}/#{ticket.number}/review")
+      |> json_response(200)
+
+    assert body["diff"]["error"] =~ "not_a_commit"
+    refute body["diff"]["patch"]
+  end
+
   # Separately from the documents, because the kind is the whole difference: a client handed one
   # in `documents` could not tell that nothing consumes it and nothing approves it.
   test "the API serves presentations apart from the documents", context do
@@ -429,8 +558,18 @@ defmodule ForgeWeb.ReviewLiveTest do
 
   # -- helpers ---------------------------------------------------------------------------------
 
-  defp commit_on_branch(%{project: project, ticket: ticket}, path, content) do
-    commit_over_http(project, ticket.branch, path, content)
+  defp commit_on_branch(%{project: project, ticket: ticket}, path, content, message \\ nil) do
+    commit_over_http(project, ticket.branch, path, content, message)
+  end
+
+  # The text of every quote the presentation drew, in the order it drew them.
+  defp pres(view) do
+    view
+    |> element(~s([id="review-presentation-presentation.md"]))
+    |> render()
+    |> Floki.parse_fragment!()
+    |> Floki.find("pre")
+    |> Enum.map(&Floki.text/1)
   end
 
   defp present!(ticket, content) do

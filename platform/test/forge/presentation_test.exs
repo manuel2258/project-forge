@@ -148,6 +148,29 @@ defmodule Forge.PresentationTest do
     assert %{meta: %{"outcome" => "done"}} = Artifacts.latest(ticket.id, "deck.md")
   end
 
+  # The worker composes the manifest, collects `out/` and decides the outcome, and all three now
+  # turn on the marker and on `optional` (`docs/design/worker-channel.md` § Versions). A release
+  # from before them names `out/deck.md!` in the manifest, collects the file under that name —
+  # which this platform records as an approvable *document* — and reports `error` for an absent
+  # optional document the manifest said could be skipped. So the job asks for a machine that
+  # speaks protocol 7, and the gate keeps it off every older one.
+  test "a job declaring a presentation or an optional output needs protocol 7", context do
+    [job] = Jobs.for_ticket(context.ticket.id)
+
+    assert Jobs.protocol(job) == 7
+    assert Jobs.protocol(job) <= ForgeCore.WorkerProtocol.current()
+
+    # Each half on its own, and a state that declares neither asking no more than any agent job.
+    assert Jobs.protocol(respec(job, ["refinement.md", "deck.md!"], [])) == 7
+    assert Jobs.protocol(respec(job, ["refinement.md"], ["refinement.md"])) == 7
+    assert Jobs.protocol(respec(job, ["refinement.md"], [])) == 3
+  end
+
+  defp respec(job, produces, optional) do
+    spec = job.spec |> Map.put("produces", produces) |> Map.put("optional", optional)
+    %{job | spec: spec}
+  end
+
   # The job page draws `produces` as the workflow declared it and looks each entry up by the name
   # the artifact is recorded under. Comparing the declaration itself would call every presentation
   # ever written "not written", on the one page a reader goes to to find out what a run produced.

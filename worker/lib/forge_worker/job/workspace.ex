@@ -51,7 +51,8 @@ defmodule ForgeWorker.Job.Workspace do
   **The tree is `user`'s before any git runs in it, and git runs as `user`**
   (`docs/design/worker-tier.md` § The job slice). A snapshot of a ticket's template carries the
   last job's `.git`, hooks and all; a tree left by an earlier attempt carries this job's. Only a
-  clone, into a directory nothing has touched, is the worker's own, and it is handed over after.
+  clone — into an empty volume this module just made, which nothing of a job has touched — is the
+  worker's own, and it is handed over after.
   """
   @spec prepare(assignment(), String.t(), Slice.user()) :: {:ok, String.t()} | {:error, term()}
   def prepare(assignment, root, user) do
@@ -280,12 +281,40 @@ defmodule ForgeWorker.Job.Workspace do
     end
   end
 
-  # The worker's own clone, into a directory that does not exist yet, and the job's user's the
-  # moment it does.
+  # The worker's own clone, into an empty volume of its own making, and the job's user's the
+  # moment the checkout is in it.
+  #
+  # **The volume comes first, and that is the point.** `git clone` is happy with a directory that
+  # already exists as long as it is empty, and a worktree the clone created itself is a plain
+  # directory — which `promote/3` cannot snapshot, so a ticket whose first job here was a cold
+  # clone never got a template and every job on it cloned cold again, for the whole life of the
+  # ticket. The warm paths never had this: `from_volume/5` snapshots *into* `dir`, so there the
+  # worktree is a volume before git sees it.
   defp clone(assignment, dir, user) do
+    volume(dir, assignment["job_id"])
+
     with :ok <- Checkout.ensure(checkout_opts(assignment, dir, user, [])),
          :ok <- Slice.own(user, [dir]),
          do: {:ok, dir}
+  end
+
+  # Best effort, like every other volume operation here and for the same reason: a volume is
+  # warmth, and warmth is not correctness. A machine that will not make one — a root that is not
+  # btrfs, a full disk — costs this ticket's next job a cold start, and failing this job instead
+  # would cost it the run. `git clone` makes the directory itself when this leaves none.
+  defp volume(dir, job_id) do
+    case Volume.impl().create(dir) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Log.line(
+          "volume.uncreated",
+          :warning,
+          "could not make #{dir} a volume, so the next job starts colder: #{inspect(reason)}",
+          job_id: job_id
+        )
+    end
   end
 
   defp checkout_opts(assignment, dir, user, extra) do

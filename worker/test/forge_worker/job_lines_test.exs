@@ -40,6 +40,15 @@ defmodule ForgeWorker.JobLinesTest.StuckVolume do
   def delete(_path), do: {:error, :busy}
 end
 
+defmodule ForgeWorker.JobLinesTest.UnmakeableVolume do
+  @moduledoc """
+  A volume that cannot be made: a root that is not btrfs, a quota, a full disk. `create/1` is
+  the only function a cold clone reaches, and the only one here.
+  """
+
+  def create(_path), do: {:error, {:btrfs, "subvolume", 1, "ERROR: not a btrfs filesystem\n"}}
+end
+
 defmodule ForgeWorker.JobLinesTest do
   @moduledoc """
   What the worker could not do for a job is a line in the machine's log, tied to the job
@@ -58,7 +67,7 @@ defmodule ForgeWorker.JobLinesTest do
 
   alias ForgeCore.Job.{Result, Spec}
   alias ForgeWorker.Job.{Blobs, Command, Conversation, Credential, Dir, Runner, Workspace}
-  alias ForgeWorker.JobLinesTest.{RefusingSlice, StuckVolume}
+  alias ForgeWorker.JobLinesTest.{RefusingSlice, StuckVolume, UnmakeableVolume}
   alias ForgeWorker.Slice.Systemd
 
   @direct {ForgeWorker.Slice.Direct, %{kind: :direct}}
@@ -163,6 +172,22 @@ defmodule ForgeWorker.JobLinesTest do
       assert :ok = Workspace.promote(job, context.root, Path.join(context.root, "no-such-tree"))
 
       assert line("volume.unkept", context.job_id)["message"] =~ "next job starts colder"
+    end
+
+    # A cold clone makes its worktree a volume first, so that the finished tree can become the
+    # ticket's template. A machine that will not make one still runs the job — warmth is not
+    # correctness — and the line is the only thing that says why the next job starts cold.
+    test "a worktree that cannot be made a volume says so, and the job runs anyway", context do
+      job = assignment(context.origin, context.job_id)
+      Application.put_env(:forge_worker, :volume, UnmakeableVolume)
+
+      assert {:ok, dir} = Workspace.prepare(job, context.root, @direct)
+      assert File.read!(Path.join(dir, "README.md")) == "# Game\n"
+
+      entry = line("volume.uncreated", context.job_id)
+      assert entry["level"] == "warning"
+      assert entry["message"] =~ "not a btrfs filesystem"
+      assert entry["message"] =~ "next job starts colder"
     end
 
     test "a worktree that will not go says so", context do

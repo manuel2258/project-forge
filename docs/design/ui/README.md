@@ -274,7 +274,7 @@ something different on Monday than on Friday.
 
 | Exhausted | Resolved by | Treatment |
 |---|---|---|
-| Job turn budget | the engine retries | outcome `budget_exhausted` on the job row, nowhere else |
+| A job's own budget | **the workflow** — a retry, or an edge onward to a person | outcome `budget_exhausted` on the job row, nowhere else |
 | Ticket allowance | **a human** — raise it or reroute | sticks the ticket, enters the queue, drawn in **accent** |
 | Window / weekly capacity | **time** | `PAUSED · CAPACITY 1h 12m`, neutral, on board and ticket, **never in the queue** |
 

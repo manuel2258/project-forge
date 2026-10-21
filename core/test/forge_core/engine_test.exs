@@ -72,21 +72,43 @@ defmodule ForgeCore.EngineTest do
     end
 
     test "disambiguates parallel edges by outcome" do
-      yaml = """
+      workflow = parallel_edges("- {from: a, to: b}")
+
+      assert {:ok, %Transition{when: "again"}} = Engine.choose(workflow, "a", "b", "again")
+      assert {:ok, %Transition{when: nil}} = Engine.choose(workflow, "a", "b", "done")
+    end
+
+    # The regression `reviewing → review_ready` was: a target with a bare edge and an outcome edge
+    # could not be moved to at all, because the operator surface offers the target and sends no
+    # outcome. The bare edge is what a person's move means.
+    test "takes the default edge when no outcome is given and several lead to the target" do
+      workflow = parallel_edges("- {from: a, to: b}")
+
+      assert {:ok, %Transition{when: nil}} = Engine.choose(workflow, "a", "b")
+    end
+
+    test "stays ambiguous when several lead to the target and none is the default" do
+      workflow = parallel_edges("- {from: a, to: b, when: done}")
+
+      assert {:error, {:ambiguous, outcomes}} = Engine.choose(workflow, "a", "b")
+      assert Enum.sort(outcomes) == ["again", "done"]
+    end
+
+    # Two edges from `a` to `b`: the second is always `when: again`, and the first is what the
+    # test varies — bare, or naming `done` outright, which is the same outcome written out and so
+    # not the default edge.
+    defp parallel_edges(first_edge) do
+      Parser.parse!("""
       version: 1
       initial: a
       states:
         a: {prompt: p.md, produces: [a.md], outcomes: [done, again], budget: {turns: 1, cost: 1}}
         b: {}
       transitions:
-        - {from: a, to: b}
+        #{first_edge}
         - {from: a, to: b, when: again}
       limits: {ticket_cost: 1}
-      """
-
-      workflow = Parser.parse!(yaml)
-      assert {:error, {:ambiguous, ["done", "again"]}} = Engine.choose(workflow, "a", "b")
-      assert {:ok, %Transition{when: "again"}} = Engine.choose(workflow, "a", "b", "again")
+      """)
     end
   end
 

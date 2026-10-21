@@ -92,10 +92,17 @@ Only one of them is the operator's.
 
 | Exhausted | Resolved by | Treatment |
 |---|---|---|
-| Job turn budget | the engine retries | outcome `budget_exhausted` on the job row with `· turns` beside it, nowhere else |
+| A job's own budget | **the workflow** — a retry, or an edge onward to a person | outcome `budget_exhausted` on the job row with `· turns`, `· cost` or `· wall clock` beside it, nowhere else |
 | Ticket allowance | **a human** — raise it or reroute | sticks the ticket, enters the queue, drawn in accent |
 | Daily spend cap | **time**, or the operator raising it | `PAUSED · SPEND 6h 12m`, neutral, on the ticket; the board and the project page draw `PAUSED · SPEND` without the countdown. **Never in the queue** |
 | Window capacity | **time** | `PAUSED · CAPACITY 1h 12m`, neutral, on the board and the ticket, **never in the queue**. Not built (§ Engine support) |
+
+**The first row is the workflow's, not the engine's.** What happens to a job that ran out is an
+edge in the definition: a self-retry where one is declared, and otherwise wherever
+`when: budget_exhausted` points — forge's own `reviewing` sends it on to `review_ready`, because a
+review that spent its budget on subagents learns nothing from being run again from scratch and a
+person should read whatever report it left. Where the workflow declares no edge at all the ticket
+sticks and enters the queue, which is the second row's treatment reached by another road.
 
 **`budget_exhausted` names its ceiling.** The outcome says a job ran out; which of the three
 ceilings it ran out of — its turn budget, its cost budget, or the driver's wall clock — is a word

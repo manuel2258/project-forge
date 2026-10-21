@@ -25,13 +25,46 @@ states:
     invoke: [check]
     exit: { 0: done, 2: gate_unavailable, "*": checks_failed }
 
+  # **The cost is sized for a review that fans out, not for one top-level agent.**
+  # `agents/review.md` runs the `review` skill, which dispatches a subagent per lens, and the
+  # budget is checked between the top-level agent's turns — so a whole fan-out lands inside one
+  # turn and the cap is seen only after it. At $15 that cap was crossed by five reviews on
+  # 2026-10-20 (forge#6 ×2, forge#7 ×3) between one and eight top-level turns in, each having
+  # spent its $15 almost exactly, while the two that did report cost $9.70 and $19.53 — one of
+  # them over the cap and allowed through only because nothing looks until the turn ends. $35 is
+  # above the one measured converging run that exceeded $15, with room for the mutation lens.
+  # Turns stay at 120: not one of the five exhausted runs came near them, so they were never the
+  # binding limit.
+  #
+  # **Raising this means raising `limits.ticket_cost` in each workflow that has a `reviewing`
+  # state**, because the cap is checked before each job starts against what the ticket has spent
+  # already — so what has to fit under it is every running total, not the finished total. Both
+  # workflows cost the same on the way in, $22 (refining $3, the state that plans or diagnoses $4,
+  # implementing $15) with `checking` free because a command buys no inference, so the review loop
+  # they declare prices out the same:
+  #
+  #     22 + 35                        =  57    the way in, then the first review
+  #     3 × (15 + 0 + 35)              = 150    three `issues_found` round-trips at `max: 3`
+  #                                      ---
+  #                                      207    of which 172 is spent before the last review
+  #
+  # At a $120 cap and this $35 the third round-trip stopped mid-loop, after $15 of implementing
+  # that was then never checked or reviewed, and `max: 3` on `reviewing → implementing` could not
+  # be reached at all. $210 clears it, the $172 included.
+  #
+  # **That is the declared review loop and not the worst journey**, which is not a finite number:
+  # the edge that sends `implementing` back to be planned again — `plan_invalid` in `dev.yml`,
+  # `diagnosis_invalid` in `bug.yml` — carries no `max`, so the two can alternate without bound
+  # and no cap clears them. Bounding exactly that is what a cap is for.
+  # `project_workflows_test.exs` prices the review loop out of the files themselves, so these
+  # numbers and the caps cannot drift apart.
   reviewing:
     prompt: agents/review.md
     env: default
     model: opus
     produces: [report.md]
     outcomes: [done, issues_found]
-    budget: { turns: 120, cost: 15.00 }
+    budget: { turns: 120, cost: 35.00 }
 
   merged:
     on_enter: merge

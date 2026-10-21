@@ -280,8 +280,9 @@ defmodule ForgeCore.Prompt do
 
     You can ask for a transition, or decide a pending one, by writing
     `#{Path.join(job_dir, "transition.json")}`; the preamble says how. Everything here is as of
-    when this conversation started and the ticket may have moved since — a request the engine
-    refuses comes back to you as a message saying why, and nothing happens.
+    when this conversation started and the ticket may have moved since. **You will not be told
+    what became of a request**: if it is refused, the reason is recorded for the person to read
+    and nothing moves. Say what you asked for, so they know what to look for.
     #{offered(moving)}#{pending(moving)}#{live(moving)}
     """
   end
@@ -305,6 +306,14 @@ defmodule ForgeCore.Prompt do
     #{Enum.map_join(transitions, "\n", &edge/1)}
     """
   end
+
+  # A target reached by two edges is listed and marked as not askable: the request carries a
+  # target and no outcome, so the engine refuses it every time. Marked rather than dropped, so
+  # the agent can tell the person the state exists and why it is out of reach.
+  defp edge(%{"to" => to, "ambiguous" => true}),
+    do:
+      "- `#{to}` — **cannot be asked for**: two transitions go there and the request cannot say\n" <>
+        "  which. Nor can the ticket page; only a direct API call can."
 
   defp edge(%{"to" => to} = transition) do
     case transition["approve"] || [] do

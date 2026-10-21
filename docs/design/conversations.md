@@ -364,12 +364,14 @@ is validated when it is admitted and kept as it was, while the validator's rules
 pinning can stop parsing long after it was written (`Tickets.parsed_workflow/1`). That ticket is
 exactly the one in trouble this feature exists for, so neither half may raise on it: the manifest
 offers no transitions and says why, and the apply path refuses with the validator's own complaint.
-`Tickets.workflow/1` — which raises — is read nowhere on either path.
+`Engine.choose/4` and `Engine.decide/4` both open with `Tickets.workflow/1`, which raises; what
+makes the raise unreachable is that `parses/1` asks `parsed_workflow/1` on the same struct first,
+before either is called. That ordering is the guard, so it is not a line to tidy away.
 
 **It is attributed to whoever opened the conversation**, for every request it ever makes,
 regardless of who sent the message that triggered the turn. Membership of the project is the whole
-guard on talking to one — `Operator.send/3` asks for `:use` on it and nothing about who opened the
-conversation (`identity.md` § Where the guard lives) — so there is no owner model to consult, and
+guard on talking to one — `Operator.send_chat/4` asks for `:use` on it and nothing about who
+opened the conversation (`identity.md` § Where the guard lives) — so there is no owner model to consult, and
 "whoever is typing" would need the triggering message's id threaded through the turn, racing the
 next message's own event, to answer a question the simpler rule answers outright. The opener is
 on the job's own `chat.opened` event, the first thing logged for it, read back by
@@ -393,16 +395,28 @@ copy, because "indistinguishable from one taken by hand" is a property of not wr
 request and why it was refused. It is the only new event type here. The person reads it in the
 ticket's history and the conversation's Activity tab, where `Events.detail/1` renders the reason.
 
-**And it is said back to the agent, as a message in the conversation.** An event alone would not
-reach it: `transcript/1` folds `chat.message` and the two harness types and nothing else, so a
-refusal recorded only as an event is one the agent never hears — it would write a file, be told
-nothing, and have no way to know the ticket did not move. So `refused/3` goes on to
-`Conversations.send/3` with a `:system` actor, which is the existing way anything puts words into
-a conversation: the message is logged, pushed to the harness, and read on the next turn. It lands
-in the transcript, so the person sees the same sentence in the reply stream and a reopened
-conversation replays it. A conversation whose process has already gone gets the event and no
-message, which is `send/3`'s own `:not_live` and is the one case the agent is not told — there is
-nothing running to tell.
+**The agent is not told, and is told so.** It writes a file, says in its reply what it asked for,
+and the person reads what became of it. This is what `refused_documents` does for a document that
+could not be recorded, and it is a deliberate retreat from an earlier attempt that said the
+refusal back into the conversation with `Conversations.send/3` and a `:system` actor. That shape
+looks right and is wrong three times over:
+
+- `fold/2` hard-codes `role: :user` for every `chat.message` whatever its actor, so the person
+  read *themselves* saying their request was refused. The one existing `:system` sender,
+  `Operator.answer_chat/4`, sends text that really is the person's answers — which is why nothing
+  had needed the distinction before.
+- `Forge.Queue` lists a conversation only when its last message is the agent's, so the reply put
+  the chat in the person's queue and the refusal landed after it and took it out again: the
+  notification led to nothing waiting.
+- `opening/1` splits the transcript at the last agent reply, so on a reopen the refusal became the
+  new process's prompt — "the next thing the person said".
+
+**And a message to a conversation is a turn.** It would cost money nobody asked for, reset the
+idle timer § Lifetime measures from the last human message, and leave a refusal that persists —
+"a job of `implementing` is still running" stays true for as long as the job runs — bounded only
+by the node's daily cap. § Spend's reasoning is that the thing which stops a conversation is the
+person stopping typing; a platform message with nobody behind it is the first thing that would
+have broken it. Telling the agent is not worth any of that.
 
 **It runs inside the turn's idempotency gate.** `record_turn/2` is idempotent on
 `(job, session, turn)` because the worker re-sends an unacked turn, and every side effect of a
@@ -420,15 +434,20 @@ with the same `{:error, :pending_approval}`. It never did before: only the ticke
 walk around by hand. A file is not a hidden button, so the check belongs at the operation, where
 every caller meets it — the chat, the API and the page alike.
 
-**What the chat is told it can do** is in its manifest (§ Context), from the spec's one `moving`
+**What the chat is told it can do** is in its manifest, in a § Moving the ticket of its own, from the spec's one `moving`
 field: the transitions offered out of the current state with each one's `approve` list, the
 pending decision if there is one, and whether a job is live for the state. The edges come from
 `Engine.offered_edges/2`, which is the one walk of the workflow that both halves read —
 `offered_transitions/2` is its targets, so the page's list and the chat's cannot disagree about
 which *edge* survived the unversioned-artifact filter, not merely about which target did. Two
 edges to one target are named once, with only the surviving edges' `approve` lists; asking for
-such a target is then refused as `{:ambiguous, outcomes}`, exactly as a person's by-hand choice
-of it already is. One field and not
+such a target is **refused every time**, as `{:ambiguous, outcomes}`: the request names a target
+and no outcome, and neither does the ticket page's chooser or `mix forge.transition`, so the only
+caller that can take one of these is a direct API call. This is not hypothetical — this
+repository's own `dev.yml` reaches `implementing` twice out of `implementing`. So the manifest
+marks such a target as one that cannot be asked for rather than listing it as though it could, and
+the refusal says who can take it instead of telling the agent to send the person to a button that
+does not exist. One field and not
 three, because they are one question — what can this chat do to its ticket now — read in one
 place, and nil for a project chat and for every workflow job. Composed once when the process starts, like the rest of its
 context, and carrying the same caveat — a turn later the ticket may have moved, which is why a

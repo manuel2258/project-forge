@@ -381,7 +381,7 @@ defmodule ForgeWorker.Job.Conversation do
     documents = Dir.documents(job_dir(state))
     # Read once per turn and removed by the read, so a request is carried exactly once — and
     # only off a turn that ended cleanly (`docs/design/conversations.md` § Taking a transition).
-    transition = transition_request(job_dir(state), event.payload)
+    transition = transition_request(state, event.payload)
 
     # After every turn and not at the end, because a conversation's end may be its machine's: it
     # goes dormant when its worker is lost, and a reopen resumes what the last turn left.
@@ -437,15 +437,15 @@ defmodule ForgeWorker.Job.Conversation do
   # person cut the agent off mid-sentence, a file half-written when that happened is not a request
   # anybody made, and `push_reply/1` — the thing that would have told somebody — is the one step
   # an interrupted turn skips. A turn the harness ended on an error or a budget is no better.
-  defp transition_request(job_dir, payload) do
+  defp transition_request(state, payload) do
     clean? =
       payload[:interrupted] != true and payload[:subtype] == "success" and
         payload[:is_error] != true
 
     if clean? do
-      Dir.transition_request(job_dir)
+      Dir.transition_request(job_dir(state))
     else
-      File.rm_rf(Dir.transition_path(job_dir))
+      File.rm_rf(Dir.transition_path(job_dir(state)))
       :none
     end
   end

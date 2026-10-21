@@ -140,6 +140,14 @@ defmodule ForgeWeb.Operator.Actions do
   defp describe({:merge_conflict, paths}),
     do: "it conflicts with the default branch in #{Enum.join(paths, ", ")}"
 
+  # Its sibling, which fell to the catch-all and so told a person to read the server log for a
+  # refusal that has a reason to hand.
+  defp describe({:merge_impossible, reason}) when is_binary(reason),
+    do: "the merge could not be attempted: #{reason}"
+
+  defp describe({:merge_impossible, reason}),
+    do: "the merge could not be attempted: #{inspect(reason)}"
+
   defp describe({:no_state, state}),
     do: "the default branch's workflow has no state #{state}; move the ticket first"
 

@@ -90,8 +90,10 @@ defmodule ForgeCore.Job.Spec do
     # § Conversations). Always empty for a workflow job, which does not run without them.
     secrets_gone: [],
     # A ticket conversation's, string keys: `transitions`, the edges declared out of the ticket's
-    # state that it may ask for, each `%{"to", "approve"}`; `pending`, the ticket's pending
-    # decision as `%{"to", "outcome", "approve"}` or nil; `job_live`, whether a job of the
+    # state that it may ask for, each `%{"to", "approve", "ambiguous"}` — `ambiguous` marking a
+    # target two edges reach, which cannot be asked for because the request names no outcome;
+    # `pending`, the ticket's pending decision as the engine built it, `%{"from", "to",
+    # "outcome", "approve"}`, or nil; `job_live`, whether a job of the
     # state was live when this started, since a transition is refused while one is; and
     # `workflow_broken`, whether the ticket's pinned workflow still parses — when it does not
     # there are no transitions to offer and the reason is worth saying

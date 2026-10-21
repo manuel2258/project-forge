@@ -3892,6 +3892,34 @@ defmodule ForgeWorker.LinkTest do
       refute Map.has_key?(third, "transition_request")
     end
 
+    # The other half of the clean-turn rule, which the note asserts and nothing drove: a turn the
+    # harness ended on an error, and one whose subtype says success while `is_error` says
+    # otherwise — a budget stop. Both have the file removed unread, as an interrupt does.
+    test "a request on a turn that ended badly is dropped, by subtype and by is_error", context do
+      %{client: client, origin: origin, root: root} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin)
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      for {text, index} <- [{"ERRMOVE now", 2}, {"BUDGETMOVE now", 3}] do
+        push(client, @topic, "message", %{
+          "job_id" => job_id,
+          "message_id" => "m-#{index}",
+          "text" => text
+        })
+
+        {%{"turn" => ^index} = turn, _} = take_push("turn")
+
+        refute Map.has_key?(turn, "transition_request"), text
+        refute Map.has_key?(turn, "invalid_transition_request"), text
+        refute File.exists?(Path.join([root, "jobs", job_id, "transition.json"])), text
+      end
+    end
+
     # A file that is not a request is reported as one that is not, rather than dropped: the
     # agent asked for something and has to be told nothing happened.
     test "a transition file the worker cannot read goes out as invalid", context do

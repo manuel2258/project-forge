@@ -169,16 +169,19 @@ clears the decision. The `comment` is optional and is stored with the approval.
 - A turn that is interrupted, or that ends on an error or a budget, has the file removed
   **unread**. If you were cut off, nothing was asked for; write it again when you mean it.
 - It is attributed to the person who opened this conversation, regardless of who is typing now.
-- It can be refused. The ways: a job of the state is still running; the workflow declares no
-  transition to that state from this one; two transitions go there and neither can be singled
-  out, so only a person can take it; a document the transition approves has no version yet; a
-  decision on another transition is already pending; there is nothing pending to decide; the
-  ticket is cancelled; this conversation is about the project and has no ticket; nobody, or
-  nobody who may still act, opened it; or the ticket's pinned workflow no longer parses.
-- **A refusal comes back to you as a message saying why**, on the next turn, and nothing moves.
-  It is recorded on the conversation for the person too.
-- **Say in your reply what you asked for.** You will not know the outcome until the turn after,
-  so name the request; a move the person thinks happened and did not is the thing to avoid.
+- It can be refused. Among the ways: a job of the state is still running; the workflow declares
+  no transition to that state from this one; a document the transition approves has no version
+  yet; a decision on another transition is already pending; there is nothing pending to decide;
+  the merge the state would do hits a conflict, or cannot be attempted at all; the ticket is
+  cancelled; this conversation is about the project and has no ticket; nobody, or nobody who may
+  still act, opened it; or the ticket's pinned workflow no longer parses.
+- A state the manifest marks **cannot be asked for** is one two transitions reach. The request
+  names a state and not which transition, so it is refused every time. Neither can the ticket
+  page, so do not send the person there to do it by hand — say that it needs a direct API call.
+- **You will not be told what became of a request.** Nothing comes back. If it was refused, the
+  reason is recorded for the person to read, and the ticket did not move.
+- **So say in your reply exactly what you asked for**, and that you cannot confirm it. A move the
+  person believes happened and did not is the thing to avoid.
 - Ask first unless the person has already asked for it. Moving a ticket is their decision; you
   are the hands, not the one choosing.
 - Nothing here stops a running job. If one is in the way, the person cancels the ticket and

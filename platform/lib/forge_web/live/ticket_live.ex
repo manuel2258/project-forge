@@ -972,8 +972,10 @@ defmodule ForgeWeb.TicketLive do
   end
 
   # The events whose type alone does not say what happened: which outcome a batch decided, why the
-  # ticket stuck, where it went. Every other type is its own sentence here.
-  @said ~w(commands.decided ticket.stuck transition.taken ticket.merge_conflicted)
+  # ticket stuck, where it went, why a conversation's request to move it moved nothing. Every
+  # other type is its own sentence here.
+  @said ~w(commands.decided ticket.stuck transition.taken ticket.merge_conflicted
+           chat.transition_refused)
 
   defp said(%{type: type} = event) when type in @said, do: Forge.Events.summary(event)
   defp said(_event), do: nil

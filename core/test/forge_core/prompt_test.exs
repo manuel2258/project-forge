@@ -757,6 +757,32 @@ defmodule ForgeCore.PromptTest do
       assert flat =~ "cancels the ticket and restores it"
     end
 
+    # A target two edges reach can never be asked for, because the request names no outcome. Said
+    # so in the list rather than offered as though it could be taken — and said accurately: the
+    # ticket page cannot take one either.
+    test "about a ticket marks a target that cannot be asked for" do
+      spec =
+        chat_spec(%{
+          ticket: %{number: 7, title: "Round and round"},
+          moving: %{
+            "transitions" => [
+              %{"to" => "implementing", "approve" => [], "ambiguous" => true},
+              %{"to" => "verifying", "approve" => [], "ambiguous" => false}
+            ],
+            "pending" => nil,
+            "job_live" => false
+          }
+        })
+
+      manifest = Prompt.chat_manifest(spec, "/var/forge/jobs/chat-1")
+      flat = String.replace(manifest, "\n", " ")
+
+      assert flat =~ "`implementing` — **cannot be asked for**"
+      assert flat =~ "Nor can the ticket page"
+      # The one that can be is still plainly offered.
+      assert manifest =~ "- `verifying`"
+    end
+
     # A pinning that no longer parses has nothing to offer, and an empty list would read as a
     # state with no way out — a different problem with a different answer.
     test "about a ticket whose workflow no longer parses says that instead" do

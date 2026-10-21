@@ -175,6 +175,22 @@ case "${FAKE_SCENARIO:-success}" in
           ;;
       esac
 
+      # A request written and then a turn that ends badly: `ERRMOVE` on an error subtype,
+      # `BUDGETMOVE` on a success subtype that is still an error. Both must have the file
+      # removed unread (`docs/design/conversations.md` § Taking a transition).
+      case "$text" in
+        *ERRMOVE*)
+          printf '{"to": "implementing"}\n' > "$FORGE_JOB/transition.json"
+          emit "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"num_turns\":1,\"duration_ms\":9,\"total_cost_usd\":$cost,\"result\":null,\"session_id\":\"$sid\"}"
+          continue
+          ;;
+        *BUDGETMOVE*)
+          printf '{"to": "implementing"}\n' > "$FORGE_JOB/transition.json"
+          emit "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"num_turns\":1,\"duration_ms\":9,\"total_cost_usd\":$cost,\"result\":\"stopped\",\"session_id\":\"$sid\"}"
+          continue
+          ;;
+      esac
+
       # A turn that takes time and can be cut while it does. Sleeping outright would make the
       # interrupt land after the turn had already ended, which proves nothing — the same trap
       # the spike fell into against the real harness.

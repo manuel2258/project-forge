@@ -251,7 +251,16 @@ defmodule ForgeWorker.Job.Dir do
           {:error, reason} -> {:error, "transition.json " <> reason}
         end
 
+      # Removed before it is reported, as the readable case is: a file left here would be
+      # re-reported by every later turn for ever, since nothing else takes it away.
+      #
+      # **The removal is an equivalent mutant and no test can catch it.** Nothing reaches this
+      # branch: the worker owns the directory, `:enoent` is answered above, and a symlink, a
+      # directory and a FIFO are each refused *and* removed by the readable branch. Taking the
+      # `File.rm_rf/1` away changes nothing observable, which is why there is no test for it —
+      # it is here so that a trigger nobody has found yet cannot turn into a refusal every turn.
       {:error, reason} ->
+        File.rm_rf(path)
         {:error, "transition.json is unreadable: #{inspect(reason)}"}
     end
   end

@@ -1104,11 +1104,15 @@ defmodule Forge.Jobs do
   defp moving(nil), do: nil
 
   defp moving(%Ticket{} = ticket) do
+    # Parsed once. Both halves of this asked separately before, which was two parses of the same
+    # map per chat assignment for one answer.
+    parsed = Tickets.parsed_workflow(ticket)
+
     %{
-      "transitions" => chat_transitions(ticket),
+      "transitions" => chat_transitions(ticket, parsed),
       "pending" => ticket.pending_transition,
       "job_live" => live?(ticket.id, ticket.state),
-      "workflow_broken" => match?({:error, _}, Tickets.parsed_workflow(ticket))
+      "workflow_broken" => match?({:error, _}, parsed)
     }
   end
 
@@ -1117,21 +1121,29 @@ defmodule Forge.Jobs do
   # only the surviving ones' `approve` names. Grouping on the target names it once, as the page
   # names it once; asking for it is then refused as `{:ambiguous, outcomes}`, which is what a
   # person's by-hand choice of the same target already gets.
-  defp chat_transitions(%Ticket{} = ticket) do
-    case Tickets.parsed_workflow(ticket) do
-      {:ok, workflow} ->
-        ticket
-        |> Engine.offered_edges(workflow)
-        |> Enum.group_by(& &1.to, & &1.approve)
-        |> Enum.map(fn {to, approve} ->
-          %{"to" => to, "approve" => approve |> List.flatten() |> Enum.uniq()}
-        end)
-        |> Enum.sort_by(& &1["to"])
-
-      {:error, _errors} ->
-        []
-    end
+  defp chat_transitions(%Ticket{} = ticket, {:ok, workflow}) do
+    ticket
+    |> Engine.offered_edges(workflow)
+    # One entry per edge, grouped by target: the list's length is how many edges reach it.
+    |> Enum.group_by(& &1.to, & &1.approve)
+    |> Enum.map(fn {to, edge_approvals} ->
+      %{
+        "to" => to,
+        "approve" => edge_approvals |> List.flatten() |> Enum.uniq(),
+        # **Two edges to one target cannot be asked for at all.** The request carries a target
+        # and no outcome, so `Engine.choose/4` answers `{:ambiguous, outcomes}` every time — and
+        # this repository's own `dev.yml` reaches `implementing` twice out of `implementing`, on
+        # `budget_exhausted` and `did_not_converge`. Said here rather than left for the agent to
+        # discover by being refused, and said accurately: the ticket page and
+        # `mix forge.transition` pass no outcome either, so the only caller that can take one of
+        # these is the HTTP API.
+        "ambiguous" => length(edge_approvals) > 1
+      }
+    end)
+    |> Enum.sort_by(& &1["to"])
   end
+
+  defp chat_transitions(%Ticket{}, {:error, _errors}), do: []
 
   # An integrating job's checkout fetches the default branch too; every other job's does not
   # (`docs/design/git-hosting.md` § The job's own git).

@@ -1432,7 +1432,7 @@ defmodule Forge.ConversationsTest do
       spec = Jobs.assignment(chat, Tickets.get!(ticket.id), project, "token")["spec"]
 
       assert spec["moving"]["transitions"] == [
-               %{"to" => "planning", "approve" => ["refinement.md"]}
+               %{"to" => "planning", "approve" => ["refinement.md"], "ambiguous" => false}
              ]
 
       # And `job_live` is the state's own answer rather than a constant: with the admission's
@@ -1467,7 +1467,7 @@ defmodule Forge.ConversationsTest do
       spec = Jobs.assignment(chat, Tickets.get!(ticket.id), project, "token")["spec"]
 
       assert spec["moving"]["transitions"] == [
-               %{"to" => "planning", "approve" => ["refinement.md"]}
+               %{"to" => "planning", "approve" => ["refinement.md"], "ambiguous" => false}
              ]
 
       # The page is offered the same target, which is what makes the two agree.
@@ -1491,6 +1491,44 @@ defmodule Forge.ConversationsTest do
 
       assert spec["moving"]["transitions"] == []
       assert spec["moving"]["workflow_broken"] == true
+    end
+
+    # **A chat's project and its ticket's must be the same one.** Nothing crossed them before, so
+    # this was tidy rather than load-bearing; a transition request guards membership of the
+    # *ticket's* project while `send_chat/4` guards the *chat's*, so a mismatched pair would let
+    # a member of one project move another's ticket.
+    test "a conversation cannot be opened on another project's ticket", %{project: project} do
+      theirs = ticket_fixture(%{project: project_fixture()})
+
+      assert Conversations.open(project, "move it", ticket: theirs) ==
+               {:error, :ticket_not_in_project}
+
+      # Its own project's ticket is unaffected, so the guard is the pairing and not the ticket.
+      {:ok, ours} = Tickets.admit(project, %{title: "Ours"}, :system)
+      assert {:ok, _chat} = Conversations.open(project, "move it", ticket: ours)
+    end
+
+    # **Finding 2.** Two edges to one target cannot be asked for: the request names a target and
+    # no outcome, so `choose/4` answers `{:ambiguous, _}` every time. This repository's own
+    # `dev.yml` reaches `implementing` twice out of `implementing`, so the manifest would
+    # otherwise advertise a state that can never be taken.
+    test "a target two edges reach is marked as one that cannot be asked for", %{
+      project: project
+    } do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+      ticket = second_edge!(ticket, "refinement.md")
+
+      {:ok, _version} =
+        Forge.Artifacts.record_version(ticket.id, "refinement.md", :document, :system, %{
+          content: "---\noutcome: done\n---\n# R\n"
+        })
+
+      {:ok, chat} = Conversations.open(project, "about this", ticket: ticket)
+      finish_jobs(ticket)
+
+      spec = Jobs.assignment(chat, Tickets.get!(ticket.id), project, "token")["spec"]
+
+      assert [%{"to" => "planning", "ambiguous" => true}] = spec["moving"]["transitions"]
     end
 
     test "a project chat's spec carries no transitions and no decision", %{project: project} do
@@ -2333,23 +2371,128 @@ defmodule Forge.ConversationsTest do
       end
     end
 
-    # **Finding 6.** An event is for the person. The agent only ever hears what is folded into
-    # the transcript, and `transcript/1` folds `chat.message` and the harness types — so a
-    # refusal that is only an event is one the agent is never told, having written a file and
-    # been answered with silence.
-    test "a refusal is said back to the conversation, not only recorded", %{chat: chat} do
+    # **A refusal is recorded and says nothing into the conversation.** An earlier attempt sent
+    # it back with `send/3` and a `:system` actor, which `fold/2` projects as `role: :user` —
+    # the person read themselves saying it, `Forge.Queue` dropped the chat back out of their
+    # queue, and `opening/1` made it the next process's prompt. A message is also a turn, so it
+    # would bill one and reset the idle timer § Lifetime measures from the last human message.
+    # This is the test that fails if any of that comes back.
+    test "a refusal is recorded without putting words in the conversation", %{chat: chat} do
       {:ok, _chat} = Conversations.record_turn(chat, turn_asking(1, %{"decision" => "approved"}))
 
+      assert [_reason] = refusals(chat)
+
+      # The opening message and nothing since: no message of the platform's, and in particular
+      # none projected as the person's.
+      assert [%{role: :user, text: "the plan went wrong"}] = Conversations.transcript(chat.id)
+
+      assert for(%{type: "chat.message", payload: p} <- Events.for_job(chat.id), do: p["text"]) ==
+               ["the plan went wrong"]
+    end
+
+    # **Finding 6.** The branch an earlier comment excused as an equivalent mutant. `events.actor`
+    # is a JSON column with no reference and `open/3` writes the actor straight through, so an id
+    # that never named an account reaches `get_user/1`'s nil in one line — and
+    # `Accounts.delete_unapproved_user/2` can make it happen for real.
+    test "an opener whose account is gone cannot move anything", %{
+      project: project,
+      ticket: ticket
+    } do
+      {:ok, chat} =
+        Conversations.open(project, "who am i",
+          ticket: ticket,
+          actor: {:user, Ecto.UUID.generate()}
+        )
+
+      {:ok, _chat} = Conversations.record_turn(chat, turn_asking(1, %{"to" => "planning"}))
+
+      assert Tickets.get!(ticket.id).state == "refining"
       assert [reason] = refusals(chat)
+      assert reason =~ "no longer has an account"
+    end
 
-      said =
-        for %{role: :user, text: text} <- Conversations.transcript(chat.id),
-            text =~ "refused",
-            do: text
+    # **Finding 11.** A frame the worker never sends. Answering it with `:none` answered it with
+    # silence, where every other malformed request is answered with a reason.
+    test "a forged request of the wrong shape is refused, not ignored", %{chat: chat} do
+      for {payload, index} <-
+            Enum.with_index(
+              [
+                %{"transition_request" => "hello"},
+                %{"invalid_transition_request" => 7}
+              ],
+              1
+            ) do
+        turn = Map.merge(turn(index, 0.01), payload)
+        {:ok, _chat} = Conversations.record_turn(chat, turn)
+      end
 
-      assert [text] = said
-      assert text =~ reason
-      assert text =~ "move the ticket was refused"
+      assert [first, second] = refusals(chat)
+      assert first =~ "not a JSON object"
+      assert second =~ "was not text"
+    end
+
+    # **Finding 11.** `Dir.transition/1` refuses a non-string comment, so this must too: a frame
+    # the worker would have refused must not be applied here with the comment quietly dropped.
+    test "a comment that is not text is refused, as the worker refuses it", %{
+      ticket: ticket,
+      chat: chat,
+      opener: opener
+    } do
+      refinement!(ticket, opener)
+
+      turn =
+        Map.put(turn(1, 0.01), "transition_request", %{"to" => "planning", "comment" => 7})
+
+      {:ok, _chat} = Conversations.record_turn(chat, turn)
+
+      assert Tickets.get!(ticket.id).state == "refining"
+      assert [reason] = refusals(chat)
+      assert reason =~ "comment that is not text"
+    end
+
+    # **Finding 9.** The worker removes the file unread on a turn that did not end cleanly, where
+    # `subtype` and `is_error` are known. `interrupted` is on the payload the platform already
+    # reads, so the rule does not live on one side of the channel alone.
+    test "an interrupted turn's request is not applied even if it arrives", %{
+      ticket: ticket,
+      chat: chat,
+      opener: opener
+    } do
+      refinement!(ticket, opener)
+
+      turn = Map.put(turn_asking(1, %{"to" => "planning"}), "interrupted", true)
+      {:ok, _chat} = Conversations.record_turn(chat, turn)
+
+      assert Tickets.get!(ticket.id).state == "refining"
+      # Dropped, not refused: nobody asked for it, so there is nothing to tell anyone about.
+      assert refusals(chat) == []
+    end
+
+    # **Finding 9.** The request is echoed into a log § Lifetime keeps for ever, and it arrived
+    # as a file the agent wrote — a mebibyte of it, per refused turn, uncapped.
+    test "a huge request is cut down before it reaches the log", %{chat: chat} do
+      long = String.duplicate("x", 5_000)
+
+      turn =
+        Map.put(turn(1, 0.01), "transition_request", %{
+          "to" => long,
+          "comment" => long,
+          "padding" => long
+        })
+
+      {:ok, _chat} = Conversations.record_turn(chat, turn)
+
+      assert [%{payload: %{"request" => request}}] =
+               for(
+                 event <- Events.for_job(chat.id),
+                 event.type == "chat.transition_refused",
+                 do: event
+               )
+
+      assert byte_size(request["to"]) < 250
+      assert byte_size(request["comment"]) < 250
+      # Only the keys the platform reads travel; a key it never looks at is not kept at all.
+      refute Map.has_key?(request, "padding")
     end
 
     defp turn_asking(index, request) do

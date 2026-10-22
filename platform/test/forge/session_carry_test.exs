@@ -282,21 +282,19 @@ defmodule Forge.SessionCarryTest do
       assert pending(ticket).resume_from_id == nil
     end
 
-    # Criterion-for-criterion, the rest of what stays out. The predecessor is written to the
-    # outcome under test rather than driven to it — `cancelled` has no came_back path of its own
-    # (a cancelled ticket is restored `stuck`, and *Run again* does not fork), so the row is the
-    # only way to put `forkable/4` in front of one. Add any of these three to its `in` list and
-    # the case for it fails.
-    for outcome <- [:did_not_converge, :error, :cancelled] do
-      test "after one recorded #{outcome} starts fresh", context do
-        {ticket, first, _} = run(context.ticket, context.worker, "implementation.md", "done")
-        first |> Ecto.Changeset.change(outcome: unquote(outcome)) |> Repo.update!()
+    # The last of the three that stay out, and the only one no test above reaches by running a
+    # job: `cancelled` has no came_back path of its own — a cancelled ticket is restored `stuck`,
+    # and *Run again* does not fork — so writing the row is the only way to put `forkable/4` in
+    # front of one. The other two are driven rather than written — `did_not_converge` by the test
+    # just above, `error` by "after an attempt that ended in an error starts fresh" below.
+    test "after one recorded cancelled starts fresh", context do
+      {ticket, first, _} = run(context.ticket, context.worker, "implementation.md", "done")
+      first |> Ecto.Changeset.change(outcome: :cancelled) |> Repo.update!()
 
-        {ticket, _review, _} = run(ticket, context.worker, "review.md", "changes_requested")
+      {ticket, _review, _} = run(ticket, context.worker, "review.md", "changes_requested")
 
-        assert ticket.state == "implementing"
-        assert pending(ticket).resume_from_id == nil
-      end
+      assert ticket.state == "implementing"
+      assert pending(ticket).resume_from_id == nil
     end
 
     # A fork remembers the instructions its session began with, and is told they are its own. A
@@ -366,7 +364,7 @@ defmodule Forge.SessionCarryTest do
       assert FakeWorker.assign(again, worker)["resume_session"] == nil
     end
 
-    test "after an attempt that did not converge starts fresh", context do
+    test "after an attempt that ended in an error starts fresh", context do
       {ticket, _impl, _} = run(context.ticket, context.worker, "implementation.md", "done")
       assignment = ticket |> pending() |> FakeWorker.assign(context.worker)
 
@@ -383,7 +381,7 @@ defmodule Forge.SessionCarryTest do
       assert pending(ticket).resume_from_id == nil
     end
 
-    # Only the attempt just before: a third after a second that did not converge does not reach
+    # Only the attempt just before: a third after a second that ended in an error does not reach
     # back past it to the first, whose session is two rounds out of date.
     test "after a failed attempt, does not fork the one before it", context do
       {ticket, _impl, _} = run(context.ticket, context.worker, "implementation.md", "done")

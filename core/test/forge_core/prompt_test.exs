@@ -1108,6 +1108,19 @@ defmodule ForgeCore.PromptTest do
       refute prompt =~ "ran out of budget"
     end
 
+    # And the other half of the same rule: a self-loop that is *not* a budget stop. `dev.yml`
+    # sends a state back into itself on `did_not_converge` too, so a same-state arrival alone
+    # does not mean the budget ran out — and telling that attempt it did would name the wrong
+    # thing to watch. Only the two together read as a budget stop.
+    test "for a new attempt sent back to itself on another outcome reads as coming back" do
+      entered = %{"from" => "planning", "outcome" => "did_not_converge", "by" => "engine"}
+      spec = %{resumed_spec() | attempt: 2, entered: entered}
+      prompt = Prompt.continuation(spec, "/var/forge/jobs/job-1", "c0ffee", fork: true)
+
+      assert prompt =~ "The ticket went on from here and has come back"
+      refute prompt =~ "ran out of budget"
+    end
+
     test "for a resume of the same attempt says nothing of a new one" do
       prompt = Prompt.continuation(resumed_spec(), "/var/forge/jobs/job-1", "c0ffee", fork: false)
 

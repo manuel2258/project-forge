@@ -19,6 +19,7 @@ defmodule ForgeWeb.ChatLive do
   import ForgeWeb.Operator.QuestionForm, only: [question_form: 1]
 
   alias Forge.{Artifacts, Conversations, Events, Git, Jobs, Merge, Operator, Projects, Tickets}
+  alias ForgeCore.Workflow
   alias ForgeWeb.{Actions, Diff, Format, JobStream, Transcript, WorkScreen}
 
   @tabs ~w(talk changes docs activity)
@@ -82,6 +83,13 @@ defmodule ForgeWeb.ChatLive do
       diff: chat_diff(project, chat),
       commits: commits(project, chat),
       branch_exists: Git.branch_exists?(repo, branch),
+      # What a merge of this branch would say. Read in the conversation's own document scope, the
+      # same one its turns write in, and the same version the merge itself would read.
+      commit_message:
+        chat
+        |> Conversations.document_scope()
+        |> Artifacts.versions(Workflow.commit_message_artifact())
+        |> List.last(),
       # Where a reopen makes a deleted branch again, from the definition the reopen uses.
       base_branch: Conversations.base_branch(project, ticket),
       merged: Merge.merged_chat?(chat),
@@ -617,8 +625,15 @@ defmodule ForgeWeb.ChatLive do
         Already on {@project.default_branch}.
       </p>
 
+      <%!-- Above the merge control and read-only, as on a ticket's review page. The button is
+            drawn only where there is one: pressing merge without it is refused, and a page that
+            offered it would be offering something that fails (`conversations.md` § Commits). --%>
+      <div :if={not @merged and @diff[:files] not in [nil, []]} class="mt-4">
+        <WorkScreen.commit_message version={@commit_message} id="chat-commit-message" />
+      </div>
+
       <button
-        :if={not @merged and @diff[:files] not in [nil, []]}
+        :if={not @merged and @commit_message && @diff[:files] not in [nil, []]}
         type="button"
         phx-click="merge"
         data-confirm="Merge this into the default branch?"

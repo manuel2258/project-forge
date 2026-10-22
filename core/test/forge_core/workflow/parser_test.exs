@@ -916,6 +916,25 @@ defmodule ForgeCore.Workflow.ParserTest do
                map
              )
     end
+
+    # The second half of the same rule: a merge that cannot say anything is as broken as one with
+    # nothing to merge, and it is caught here rather than at the merge (§ Validation).
+    test "merging needs a state that produces the commit message", %{map: map} do
+      map = put_in(map, ["states", "refining", "produces"], ["refinement.md"])
+
+      assert {"states.merged.on_enter", "merge needs a state that produces commit-message"} in messages(
+               map
+             )
+    end
+
+    test "the commit message may not be optional", %{map: map} do
+      map = put_in(map, ["states", "refining", "optional"], ["commit-message"])
+
+      assert {"states.refining.optional[0]",
+              "commit-message is what the merge commit says and cannot be optional"} in messages(
+               map
+             )
+    end
   end
 
   describe "resources" do

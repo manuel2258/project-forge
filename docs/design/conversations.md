@@ -216,6 +216,19 @@ merge on a diff they are looking at. It is one implementation with two callers, 
 ticket's functions and the chat's both build the same plan — repository, destination, source, the
 ref that keeps it reachable, and what the commit should say — and hand it to the same merge.
 
+**A conversation may write `commit-message`, and its merge needs one.** It is an ordinary
+document — the name is not reserved against a chat the way `changeset` is, and it is written,
+versioned and re-reported every turn like any other (below) — but it is the one the merge reads:
+`Merge.perform_chat/2` resolves its latest version in the conversation's own document scope at the
+moment merge is pressed, and the commit says exactly that, with nobody editing it. The chat agent
+writes it, is told to keep it describing the whole branch rather than the last turn, and front
+matter it carries is not part of the message.
+
+Pressing merge with no `commit-message` version yet is refused the same way a conflicting branch
+is, and **the page says so rather than offering a button that fails**: where the branch has
+something to merge, the message sits above the merge control read-only, and where no version
+exists the page says there is nothing to merge yet and draws no button.
+
 **What the chat's merge takes is the branch as it is when merge is pressed, not the diff the page
 drew.** `Merge.perform_chat/2` resolves `chat/<id>` at the click. A conversation that is still
 running pushes at the end of every turn, and the page redraws only once that turn is recorded —

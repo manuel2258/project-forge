@@ -49,6 +49,7 @@ defmodule ForgeCore.Workflow do
   @merge_conflict "merge_conflict"
   @ticket "ticket"
   @changeset "changeset"
+  @commit_message "commit-message"
   @answers "answers.md"
   @proposals "proposals"
   @proposal_prefix "proposal-"
@@ -101,6 +102,17 @@ defmodule ForgeCore.Workflow do
 
   @doc "Reserved artifact name for the diff of the job's branch."
   def changeset_artifact, do: @changeset
+
+  @doc """
+  Reserved artifact name for what the merge commit says.
+
+  An ordinary document in every other respect — a state declares it, a job writes it to `out/`,
+  and it is kept as a version like any other. What is reserved is that a workflow which merges
+  must have a state producing it and may never declare it `optional`, and that the merge's entry
+  action reads it directly rather than through a job's inputs
+  (`docs/design/workflow-grammar-v1.md` § Semantics).
+  """
+  def commit_message_artifact, do: @commit_message
 
   @doc "Platform-managed document holding answers; never declared in a workflow."
   def answers_artifact, do: @answers

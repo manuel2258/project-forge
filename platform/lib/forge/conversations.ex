@@ -754,10 +754,17 @@ defmodule Forge.Conversations do
     {{scope, write}, Map.merge(payload["invalid_documents"] || %{}, refused)}
   end
 
-  # Against the ticket for a ticket chat, because that is the work it is about; against the
-  # conversation for a project chat, which has nothing else to belong to (§ Commits).
-  defp document_scope(%Job{ticket_id: nil, id: id}), do: {:job, id}
-  defp document_scope(%Job{ticket_id: ticket_id}), do: {:ticket, ticket_id}
+  @doc """
+  The artifact scope a conversation's documents are written in: the ticket for a ticket chat,
+  because that is the work it is about; the conversation itself for a project chat, which has
+  nothing else to belong to (`docs/design/conversations.md` § Commits).
+
+  Public because `Forge.Merge` reads one of those documents — `commit-message`, what a merge of
+  this conversation's branch says — and the rule which scope to look in has one definition.
+  """
+  @spec document_scope(Job.t()) :: Forge.Artifacts.scope()
+  def document_scope(%Job{ticket_id: nil, id: id}), do: {:job, id}
+  def document_scope(%Job{ticket_id: ticket_id}), do: {:ticket, ticket_id}
 
   # Whether this can be recorded as `name` in `scope`: `{:ok, front_matter}`, or refused with
   # why. The workflow's rules where they apply, each with its one definition: the name, the text,

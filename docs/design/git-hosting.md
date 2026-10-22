@@ -243,10 +243,13 @@ collectable, and the merge would then act on an object that has gone. Two things
    now also what makes the ref mean something when nobody approved: an engine-taken merge
    (`workflow-grammar-v1.md` § Merging, route (b)) pins the commit its transition named exactly as
    a person's does.
-2. `Forge.Merge.perform/3` verifies the commit its transition named still resolves, and refuses
+2. `Forge.Merge.perform/4` verifies the commit its transition named still resolves, and refuses
    loudly rather than quietly merging whatever the branch head happens to be now.
 
-**An integration merges, it does not rebase**, and the squash keeps it a merge. A ticket whose
+**An integration merges, it does not rebase**, and the squash keeps it a merge. This paragraph is
+about the *integrating* job's own merge commit on the *ticket's own* branch
+(`ForgeWorker.Checkout.squash/5`), not about what lands on the default branch: that is one plain
+commit with one parent (§ The merge), and nothing here makes it a merge. A ticket whose
 changeset no longer merges is sent to its integrating state (`workflow-grammar-v1.md` § Merging),
 whose job merges the default branch into the ticket branch. A rebase would leave the commit the
 last merge attempt pinned off the branch, and the version a person approved no ancestor of the one
@@ -406,15 +409,22 @@ worktree, no filesystem cost:
 
 ```
 git merge-tree --write-tree --messages <default head> <approved sha>
-git commit-tree <tree> -p <default head> -p <approved sha> -m <message>
+git commit-tree <tree> -p <default head> -m <message>
 git push <bare repo path> <new sha>:refs/heads/<default>
 ```
 
 `merge-tree` is a real three-way merge from the merge base; a non-zero exit lists the conflicted
 paths, so conflict detection is free and costs nothing when there is no conflict. The commit's
 author is the approving operator and its committer is forge, so *who approved* is recorded in git
-itself and survives the platform. The message carries `Ticket:`, `Changeset:` and `Approved-by:`
-trailers.
+itself and survives the platform — unaffected by who wrote the message text.
+
+**The message is an agent's, used as written.** It is the `commit-message` document the workflow
+declares — `presenting` in this project's own workflows, `publishing` in `release.yml`, the chat
+agent's own for a conversation — read at the version the transition into the merging state named
+(`workflow-grammar-v1.md` § Merging) and passed to `commit-tree` unchanged. The approving operator
+sees it above the approve control and does not type or edit it. Nothing generates `Ticket:`,
+`Changeset:` or `Approved-by:` trailers any more; a merge with no `commit-message` version is
+refused and sticks the ticket, rather than landing under a message nobody wrote.
 
 **The merge pushes rather than calling `update-ref`.** Pushing over the local transport spawns
 `receive-pack` in the bare repository, which runs both hooks — so the merge is enforced by, and
@@ -422,13 +432,22 @@ mirrored by, exactly the code path a job's push takes. `update-ref` plus an expl
 would mean the branch discipline and the mirror each had two implementations, and the demo's
 "mirrored" claim would be proven by a path no job ever takes. One rule, one enforcement point.
 
-The new commit's first parent is the current default head, so the push is a fast-forward and
-needs no force; `pre-receive` asserts that. Its second parent is the approved sha, so the ticket's
-own commits stay reachable from the default branch and `git log` says where the change came from.
-One parent would put the merged content on the branch and lose every commit that produced it.
+The new commit's only parent is the current default head, so the push is a fast-forward and needs
+no force; `pre-receive` asserts that. **There is no second parent**, deliberately: a ticket lands
+as one plain commit, `git log --merges` shows nothing for it, and the ticket's own run-by-run
+commits are not part of the default branch's ancestry afterwards — they stay on the ticket's own
+ref. This reverses what this note settled on before, and the reversal is a human's: a single tidy
+commit per ticket is what the history is wanted to read like. What keeps the approved commit
+itself reachable is not the branch's ancestry but `refs/forge/approved/<n>`, which every attempt
+already writes for the unrelated reason in § Non-fast-forward on a ticket branch and now carries
+this one too.
 
-`perform/3` is idempotent: if the commit it is given is already an ancestor of the default branch it
-returns without making a second commit. Safe to call twice, safe to retry.
+`perform/4` is idempotent, and reachability can no longer tell it so: a commit it has just merged
+is not an ancestor of the default branch at all. It asks the merge instead — merging changes
+nothing exactly when the three-way merge resolves to the default head's own tree — which answers
+for both shapes at once, a commit that is a literal ancestor (every ticket merged under the old
+two-parent shape, so no migration) and one whose whole diff already landed as a squash commit.
+Safe to call twice, safe to retry.
 
 ### Where it runs, and what a conflict does
 
@@ -451,7 +470,7 @@ default branch never moved. The resolution is a **pre-flight check**, shaped lik
    the transition names the commit it was checked on.
 3. After it commits, the entry action runs the merge for real, on that commit.
 4. A late failure — another merge moved the default branch while this one was being written — is
-   **retried once against the new head**. `Forge.Merge.perform/3` makes an attempt from the head
+   **retried once against the new head**. `Forge.Merge.perform/4` makes an attempt from the head
    it resolves; when the attempt fails and the default branch is no longer at that head, it
    resolves the branch again and makes one more attempt from there. Whatever the second attempt
    returns is final. A conflict leaves the merging state by its `on_conflict`, when it has one;
@@ -481,7 +500,7 @@ refused while the disk was full), is rare enough to be named here rather than bu
 it was meant to close was a workflow question, not a git one, and the workflow now answers it for
 the common case: a merging state's `on_conflict` is the way out of a terminal state that a
 conflict takes (`workflow-grammar-v1.md` § Merging). What is left of the dead end is a failure
-that is not a conflict, and a workflow that names no `on_conflict`. `perform/3` is idempotent, so
+that is not a conflict, and a workflow that names no `on_conflict`. `perform/4` is idempotent, so
 a retry, whenever something asks for one, is safe.
 
 ### After a merge, the other tickets

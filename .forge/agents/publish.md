@@ -25,3 +25,9 @@ the snapshot's verdict and either its name/build/protocol from `hetzner-snapshot
 was skipped or failed, and the reminder that pointing a template at a new snapshot is still the
 operator's own action on `/templates` — and the changeset, now that there is something worth
 approving.
+
+Produce **`commit-message`** too: the message the merge commit will carry for this whole release.
+A summary line under about 70 characters, then a blank line, then body paragraphs if there is more
+to say. No front matter and no trailers. It is drawn read-only above the merge control and written
+to the commit exactly as you leave it — nobody edits it — and it is never optional, so a run that
+finishes without it sticks the ticket here.

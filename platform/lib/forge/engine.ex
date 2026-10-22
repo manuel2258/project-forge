@@ -120,7 +120,9 @@ defmodule Forge.Engine do
     * `:source` - for a transition into the merging state, the changeset version it is taken for,
       as `Forge.Merge.changeset/1` read it when it was checked. Read now when not given. Either
       way the event names it, and the merge after the transition merges it and no later version
-      (`docs/design/workflow-grammar-v1.md` § Merging).
+      (`docs/design/workflow-grammar-v1.md` § Merging). The `commit-message` version is read here
+      in both cases — nothing checks it beforehand, so there is no earlier read to carry — and
+      named on the same event, so what the commit says is what that version said.
   """
   @spec put_transition(
           Multi.t(),
@@ -182,13 +184,16 @@ defmodule Forge.Engine do
   defp put_comment(payload, nil), do: payload
   defp put_comment(payload, comment), do: Map.put(payload, "comment", comment)
 
-  # The commit a transition into the merging state is taken for, named on its event: what the merge
-  # after it merges (`merge_now/3`), so a version written later is never what it merges.
+  # The commit a transition into the merging state is taken for and the message it will carry,
+  # named on its event: what the merge after it merges and what it says (`merge_now/3`), so
+  # neither a changeset nor a `commit-message` written later is what it uses.
   defp put_source(payload, ticket, workflow, %Transition{to: to}, opts) do
     if Workflow.merges_on_enter?(workflow, to) do
       case opts |> Keyword.fetch(:source) |> or_latest(ticket) do
         {:ok, %{sha: sha, version: version}} ->
-          Map.merge(payload, %{"changeset" => sha, "changeset_version" => version})
+          payload
+          |> Map.merge(%{"changeset" => sha, "changeset_version" => version})
+          |> put_commit_message(Merge.commit_message_version(ticket))
 
         {:error, _none} ->
           payload
@@ -197,6 +202,12 @@ defmodule Forge.Engine do
       payload
     end
   end
+
+  # No key where the ticket has no `commit-message` yet, the way a missing changeset leaves none:
+  # `named/1` then reports it rather than the merge inventing something to say.
+  defp put_commit_message(payload, nil), do: payload
+  defp put_commit_message(payload, version),
+    do: Map.put(payload, "commit_message_version", version)
 
   defp blank_to_nil(text) when is_binary(text) do
     case String.trim(text) do
@@ -1094,10 +1105,10 @@ defmodule Forge.Engine do
   `merge` is the only action in v1, and it merges the commit the transition into the state named
   (`docs/design/workflow-grammar-v1.md` § Merging). It was checked before the transition was taken,
   so a failure here is a race — something else moved the default branch in between.
-  `Forge.Merge.perform/3` retries once against the moved head, and what it returns then is final:
+  `Forge.Merge.perform/4` retries once against the moved head, and what it returns then is final:
   a conflict leaves the merging state by its `on_conflict`, when it names one, and anything else
   but success sticks the ticket with the reason rather than leaving it claiming to be merged.
-  `Forge.Merge.perform/3` is idempotent, so retrying is always safe.
+  `Forge.Merge.perform/4` is idempotent, so retrying is always safe.
   """
   @spec enter(Ticket.t(), Workflow.t(), String.t(), String.t() | nil) :: Ticket.t()
   def enter(%Ticket{} = ticket, %Workflow{} = workflow, state_name, user_id) do
@@ -1118,7 +1129,7 @@ defmodule Forge.Engine do
 
     case named(ticket) do
       {:ok, source} ->
-        case Merge.perform(ticket, source.sha, user) do
+        case Merge.perform(ticket, source.sha, source.commit_message_version, user) do
           {:ok, merged} ->
             merged(ticket, source, merged, user_id)
 
@@ -1174,8 +1185,14 @@ defmodule Forge.Engine do
         select: e.payload
     )
     |> case do
-      %{"changeset" => sha, "changeset_version" => version} ->
-        {:ok, %{sha: sha, version: version}}
+      %{"changeset" => sha, "changeset_version" => version, "commit_message_version" => message} ->
+        {:ok, %{sha: sha, version: version, commit_message_version: message}}
+
+      # A transition that named a changeset and no `commit-message`: the ticket reached its merge
+      # with nothing written for the commit to say. Sticking says so, rather than merging under a
+      # message nobody wrote.
+      %{"changeset" => _sha, "changeset_version" => _version} ->
+        {:error, :no_commit_message}
 
       _none ->
         {:error, :no_changeset}

@@ -97,29 +97,103 @@ defmodule Forge.MergeTest do
     %{project: project, bare: bare, destination: destination, user: user, ticket: ticket}
   end
 
-  describe "perform/3" do
-    test "puts the approved commit on the default branch and on the mirror", context do
+  describe "perform/4" do
+    test "puts the approved commit's content on the default branch and on the mirror", context do
       %{ticket: ticket, bare: bare, destination: destination, user: user} = context
       sha = commit_on_branch(context, "feature.txt", "the change")
       changeset!(ticket, sha)
+      message = commit_message!(ticket)
 
-      assert {:ok, %{sha: merged, already: false}} = Merge.perform(ticket, sha, user)
+      assert {:ok, %{sha: merged, already: false}} = Merge.perform(ticket, sha, message, user)
       assert {:ok, ^merged} = Git.resolve(bare, "refs/heads/main")
-      assert Git.ancestor?(bare, sha, merged)
+      assert {:ok, "the change\n"} = Git.show(bare, merged, "feature.txt")
       assert {:ok, ^merged} = Git.resolve(Projects.repo_path(destination), "refs/heads/main")
+    end
+
+    # The one call the old behaviour and the new one disagree about: the approved commit's content
+    # lands, the approved commit itself does not join the default branch's ancestry, and the pin
+    # is what keeps it reachable (`docs/design/git-hosting.md` § The merge).
+    test "lands one commit with one parent, the approved commit no ancestor of it", context do
+      %{ticket: ticket, bare: bare, user: user} = context
+      {:ok, before} = Git.resolve(bare, "refs/heads/main")
+      sha = commit_on_branch(context, "feature.txt", "the change")
+      changeset!(ticket, sha)
+      message = commit_message!(ticket)
+
+      assert {:ok, %{sha: merged}} = Merge.perform(ticket, sha, message, user)
+
+      assert {:ok, ^before} = Git.resolve(bare, merged <> "^1")
+      assert {:error, _no_second_parent} = Git.resolve(bare, merged <> "^2")
+      refute Git.ancestor?(bare, sha, merged)
+      assert {:ok, ^sha} = Git.resolve(bare, "refs/forge/approved/#{ticket.number}")
+      assert {:ok, ""} = Git.run(bare, ["log", "--merges", "--format=%H", {:data, merged}])
+    end
+
+    test "says what the commit message document says, and nothing else", context do
+      %{ticket: ticket, bare: bare, user: user} = context
+      sha = commit_on_branch(context, "feature.txt", "the change")
+      changeset!(ticket, sha)
+      message = commit_message!(ticket, "Persist the scores\n\nThey were lost on restart.\n")
+
+      {:ok, %{sha: merged}} = Merge.perform(ticket, sha, message, user)
+      {:ok, body} = Git.run(bare, ["show", "--no-patch", "--format=%B", merged])
+
+      assert String.trim_trailing(body) == "Persist the scores\n\nThey were lost on restart."
+      refute body =~ "Changeset:"
+      refute body =~ "Ticket:"
+      refute body =~ "Approved-by:"
+    end
+
+    # The version the transition named, not the latest: a later one exists and is not used.
+    test "says the version it was given, not the latest", context do
+      %{ticket: ticket, bare: bare, user: user} = context
+      sha = commit_on_branch(context, "feature.txt", "the change")
+      changeset!(ticket, sha)
+      named = commit_message!(ticket, "What the approval saw\n")
+      commit_message!(ticket, "What a chat wrote afterwards\n")
+
+      {:ok, %{sha: merged}} = Merge.perform(ticket, sha, named, user)
+      {:ok, body} = Git.run(bare, ["show", "--no-patch", "--format=%B", merged])
+
+      assert String.trim(body) == "What the approval saw"
+    end
+
+    test "front matter is not part of the message", context do
+      %{ticket: ticket, bare: bare, user: user} = context
+      sha = commit_on_branch(context, "feature.txt", "the change")
+      changeset!(ticket, sha)
+      message = commit_message!(ticket, "---\noutcome: done\n---\n\nJust the body\n")
+
+      {:ok, %{sha: merged}} = Merge.perform(ticket, sha, message, user)
+      {:ok, body} = Git.run(bare, ["show", "--no-patch", "--format=%B", merged])
+
+      assert String.trim(body) == "Just the body"
+    end
+
+    test "refuses when there is no commit message, and when it is blank", context do
+      %{ticket: ticket, bare: bare, user: user} = context
+      {:ok, before} = Git.resolve(bare, "refs/heads/main")
+      sha = commit_on_branch(context, "feature.txt", "the change")
+      changeset!(ticket, sha)
+
+      assert {:error, :no_commit_message} = Merge.perform(ticket, sha, nil, user)
+      assert {:error, :no_commit_message} = Merge.perform(ticket, sha, 1, user)
+
+      blank = commit_message!(ticket, "---\noutcome: done\n---\n")
+      assert {:error, :no_commit_message} = Merge.perform(ticket, sha, blank, user)
+      assert {:ok, ^before} = Git.resolve(bare, "refs/heads/main")
     end
 
     test "records who approved in the commit itself", context do
       %{ticket: ticket, bare: bare, user: user} = context
       sha = commit_on_branch(context, "feature.txt", "the change")
       changeset!(ticket, sha)
+      message = commit_message!(ticket)
 
-      {:ok, %{sha: merged}} = Merge.perform(ticket, sha, user)
-      {:ok, message} = Git.run(bare, ["show", "--no-patch", "--format=%an%n%B", merged])
+      {:ok, %{sha: merged}} = Merge.perform(ticket, sha, message, user)
+      {:ok, who} = Git.run(bare, ["show", "--no-patch", "--format=%an", merged])
 
-      assert message =~ user.email
-      assert message =~ "Changeset: #{sha}"
-      assert message =~ "Ticket: #{Tickets.project_of(ticket).name}##{ticket.number}"
+      assert String.trim(who) == user.email
     end
 
     # The author is who approved; the committer is the platform, and is *stated* rather than
@@ -131,37 +205,51 @@ defmodule Forge.MergeTest do
       %{ticket: ticket, bare: bare, user: user} = context
       sha = commit_on_branch(context, "feature.txt", "the change")
       changeset!(ticket, sha)
+      message = commit_message!(ticket)
 
-      {:ok, %{sha: merged}} = Merge.perform(ticket, sha, user)
+      {:ok, %{sha: merged}} = Merge.perform(ticket, sha, message, user)
       {:ok, who} = Git.run(bare, ["show", "--no-patch", "--format=%cn <%ce>|%an", merged])
 
       assert String.trim(who) == "forge <forge@localhost>|#{user.email}"
     end
 
-    test "is idempotent", context do
+    # Reachability cannot answer this once a merge leaves one parent: the merged commit is not an
+    # ancestor of the default branch, so a second call that read it that way would make a second,
+    # content-identical commit every time (`Forge.Merge.merged_tree/3`).
+    test "is idempotent, and the branch does not grow a second time", context do
       %{ticket: ticket, bare: bare} = context
       sha = commit_on_branch(context, "feature.txt", "the change")
       changeset!(ticket, sha)
+      message = commit_message!(ticket)
 
-      {:ok, %{sha: merged, already: false}} = Merge.perform(ticket, sha, context.user)
-      assert {:ok, %{sha: ^merged, already: true}} = Merge.perform(ticket, sha, context.user)
-      assert {:ok, [^merged]} = Git.commits_since(bare, sha, "refs/heads/main")
+      {:ok, base} = Git.resolve(bare, "refs/heads/main")
+      {:ok, %{sha: merged, already: false}} = Merge.perform(ticket, sha, message, context.user)
+      assert {:ok, [^merged]} = Git.commits_since(bare, base, "refs/heads/main")
+
+      assert {:ok, %{sha: ^merged, already: true}} =
+               Merge.perform(ticket, sha, message, context.user)
+
+      assert Merge.merged?(ticket)
+      assert {:ok, ^merged} = Git.resolve(bare, "refs/heads/main")
+      assert {:ok, [^merged]} = Git.commits_since(bare, base, "refs/heads/main")
     end
 
     test "pins the approved commit so a rewritten branch cannot lose it", context do
       %{ticket: ticket, bare: bare} = context
       sha = commit_on_branch(context, "feature.txt", "the change")
       changeset!(ticket, sha)
+      message = commit_message!(ticket)
 
-      {:ok, _merged} = Merge.perform(ticket, sha, context.user)
+      {:ok, _merged} = Merge.perform(ticket, sha, message, context.user)
       assert {:ok, ^sha} = Git.resolve(bare, "refs/forge/approved/#{ticket.number}")
     end
 
     test "refuses when the commit it was named is gone", %{ticket: ticket, user: user} do
       gone = String.duplicate("a", 40)
       changeset!(ticket, gone)
+      message = commit_message!(ticket)
 
-      assert {:error, {:approved_commit_gone, ^gone}} = Merge.perform(ticket, gone, user)
+      assert {:error, {:approved_commit_gone, ^gone}} = Merge.perform(ticket, gone, message, user)
     end
 
     test "a ticket with no changeset names nothing to merge", %{ticket: ticket} do
@@ -169,13 +257,22 @@ defmodule Forge.MergeTest do
       refute Merge.merged?(ticket)
     end
 
+    test "names the commit message version a transition would, or nothing", %{ticket: ticket} do
+      refute Merge.commit_message_version(ticket)
+      assert commit_message!(ticket) == 1
+      assert Merge.commit_message_version(ticket) == 1
+      assert commit_message!(ticket, "again\n") == 2
+      assert Merge.commit_message_version(ticket) == 2
+    end
+
     test "reports the conflicted paths and changes nothing", context do
       %{ticket: ticket, bare: bare, user: user} = context
       sha = commit_on_branch(context, "README.md", "the branch's version")
       changeset!(ticket, sha)
+      message = commit_message!(ticket)
       main = diverge_default_branch(context, "README.md", "the trunk's version")
 
-      assert {:conflict, ["README.md"], ^main} = Merge.perform(ticket, sha, user)
+      assert {:conflict, ["README.md"], ^main} = Merge.perform(ticket, sha, message, user)
       assert {:ok, ^main} = Git.resolve(bare, "refs/heads/main")
     end
 
@@ -192,10 +289,11 @@ defmodule Forge.MergeTest do
       commit_on_branch(context, readable, "the branch's version")
       sha = commit_on_branch(context, unreadable, "the branch's version")
       changeset!(ticket, sha)
+      message = commit_message!(ticket)
       diverge_default_branch(context, readable, "the trunk's version")
       diverge_default_branch(context, unreadable, "the trunk's version")
 
-      assert {:conflict, paths, _main} = Merge.perform(ticket, sha, user)
+      assert {:conflict, paths, _main} = Merge.perform(ticket, sha, message, user)
       # Readable where there is a readable form, escaped where there is not — and never the
       # `"r\303\251sum\303\251.md"` git itself prints, which is neither.
       assert Enum.sort(paths) == Enum.sort([readable, ~s("caf\\351.md")])
@@ -207,8 +305,10 @@ defmodule Forge.MergeTest do
   describe "entering a state that merges" do
     test "approving the changeset merges, and says so in the event log", context do
       %{ticket: ticket, bare: bare, user: user} = context
+      {:ok, before} = Git.resolve(bare, "refs/heads/main")
       sha = commit_on_branch(context, "feature.txt", "the change")
       changeset!(ticket, sha)
+      commit_message!(ticket, "Persist the scores\n")
       ticket = pend_merge(ticket)
 
       assert {:ok, ticket} = Operator.decide(ticket, user, :approved, "ship it")
@@ -217,7 +317,43 @@ defmodule Forge.MergeTest do
       assert "ticket.merged" in event_types(ticket)
 
       {:ok, head} = Git.resolve(bare, "refs/heads/main")
-      assert Git.ancestor?(bare, sha, head)
+      assert {:ok, ^before} = Git.resolve(bare, head <> "^1")
+      assert {:ok, "the change\n"} = Git.show(bare, head, "feature.txt")
+      {:ok, body} = Git.run(bare, ["show", "--no-patch", "--format=%B", head])
+      assert String.trim(body) == "Persist the scores"
+    end
+
+    # The version the transition named is on its event, and the merge after it says that version.
+    test "the transition names the commit message version, and that one is used", context do
+      %{ticket: ticket, bare: bare, user: user} = context
+      sha = commit_on_branch(context, "feature.txt", "the change")
+      changeset!(ticket, sha)
+      commit_message!(ticket, "What the approval saw\n")
+      ticket = pend_merge(ticket)
+
+      assert {:ok, ticket} = Operator.decide(ticket, user, :approved, nil)
+      assert latest_payload(ticket, "transition.taken")["commit_message_version"] == 1
+
+      {:ok, head} = Git.resolve(bare, "refs/heads/main")
+      {:ok, body} = Git.run(bare, ["show", "--no-patch", "--format=%B", head])
+      assert String.trim(body) == "What the approval saw"
+    end
+
+    # A ticket that reached its merge with nothing written for the commit to say does not land
+    # under a message nobody wrote (`docs/design/workflow-grammar-v1.md` § Merging).
+    test "a merge with no commit message sticks the ticket rather than inventing one", context do
+      %{ticket: ticket, bare: bare, user: user} = context
+      {:ok, before} = Git.resolve(bare, "refs/heads/main")
+      sha = commit_on_branch(context, "feature.txt", "the change")
+      changeset!(ticket, sha)
+      ticket = pend_merge(ticket)
+
+      assert {:ok, ticket} = Operator.decide(ticket, user, :approved, nil)
+
+      assert ticket.status == :stuck
+      assert stuck_reason(ticket) == "could not merge: :no_commit_message"
+      refute "ticket.merged" in event_types(ticket)
+      assert {:ok, ^before} = Git.resolve(bare, "refs/heads/main")
     end
 
     # Had the ticket moved into terminal `merged` first, a stuck item there would offer no
@@ -228,6 +364,7 @@ defmodule Forge.MergeTest do
       %{ticket: ticket, bare: bare, user: user} = context
       sha = commit_on_branch(context, "README.md", "the branch's version")
       changeset!(ticket, sha)
+      commit_message!(ticket)
       main = diverge_default_branch(context, "README.md", "the trunk's version")
       ticket = pend_merge(ticket)
 
@@ -245,6 +382,7 @@ defmodule Forge.MergeTest do
       %{ticket: ticket, user: user} = context
       sha = commit_on_branch(context, "feature.txt", "the change")
       changeset!(ticket, sha)
+      commit_message!(ticket)
       ticket = pend_merge(ticket)
 
       # The engine's own path skips the pre-flight, which is what makes a late failure visible.
@@ -275,6 +413,7 @@ defmodule Forge.MergeTest do
       %{ticket: ticket, bare: bare, user: user} = context
       sha = commit_on_branch(context, "feature.txt", "the change")
       changeset!(ticket, sha)
+      commit_message!(ticket)
       {:ok, before} = Git.resolve(bare, "refs/heads/main")
       other = commit_beside(bare, before, "other.txt", "another merge")
       pushes = race(bare, moves: [other])
@@ -287,17 +426,18 @@ defmodule Forge.MergeTest do
       assert "ticket.merged" in event_types(ticket)
       assert pushes.() == 2
 
-      # On top of what moved the branch, not over it: the other merge is the first parent, and
-      # the approved commit the second.
+      # On top of what moved the branch, not over it: what moved it is the only parent.
       {:ok, head} = Git.resolve(bare, "refs/heads/main")
       assert {:ok, ^other} = Git.resolve(bare, head <> "^1")
-      assert {:ok, ^sha} = Git.resolve(bare, head <> "^2")
+      assert {:error, _no_second_parent} = Git.resolve(bare, head <> "^2")
+      assert {:ok, "the change\n"} = Git.show(bare, head, "feature.txt")
     end
 
     test "is stuck, naming the paths, when the new head conflicts", context do
       %{ticket: ticket, bare: bare, user: user} = context
       sha = commit_on_branch(context, "README.md", "the branch's version")
       changeset!(ticket, sha)
+      commit_message!(ticket)
       {:ok, before} = Git.resolve(bare, "refs/heads/main")
       other = commit_beside(bare, before, "README.md", "the trunk's version")
       pushes = race(bare, moves: [other])
@@ -319,6 +459,7 @@ defmodule Forge.MergeTest do
       %{ticket: ticket, bare: bare, user: user} = context
       sha = commit_on_branch(context, "feature.txt", "the change")
       changeset!(ticket, sha)
+      commit_message!(ticket)
       {:ok, before} = Git.resolve(bare, "refs/heads/main")
       first = commit_beside(bare, before, "one.txt", "a merge")
       second = commit_beside(bare, first, "two.txt", "and another")
@@ -339,6 +480,7 @@ defmodule Forge.MergeTest do
       %{ticket: ticket, bare: bare, user: user} = context
       sha = commit_on_branch(context, "feature.txt", "the change")
       changeset!(ticket, sha)
+      commit_message!(ticket)
       {:ok, before} = Git.resolve(bare, "refs/heads/main")
       pushes = race(bare, refuse: true)
       ticket = pend_merge(ticket)
@@ -356,6 +498,7 @@ defmodule Forge.MergeTest do
       %{project: project, bare: bare, user: user} = context
       {:ok, chat} = Forge.Conversations.open(project, "have a look at this")
       head = commit_on_chat(project, chat, "NOTES.md", "from a conversation\n")
+      chat_commit_message!(chat)
       {:ok, before} = Git.resolve(bare, "refs/heads/main")
       other = commit_beside(bare, before, "other.txt", "another merge")
       pushes = race(bare, moves: [other])
@@ -364,7 +507,9 @@ defmodule Forge.MergeTest do
 
       assert pushes.() == 2
       assert {:ok, ^other} = Git.resolve(bare, merged <> "^1")
-      assert {:ok, ^head} = Git.resolve(bare, merged <> "^2")
+      assert {:error, _no_second_parent} = Git.resolve(bare, merged <> "^2")
+      refute Git.ancestor?(bare, head, merged)
+      assert {:ok, "from a conversation\n"} = Git.show(bare, merged, "NOTES.md")
     end
   end
 
@@ -426,14 +571,33 @@ defmodule Forge.MergeTest do
 
     test "merges into the default branch by the same route a ticket takes", context do
       %{project: project, chat: chat, bare: bare, user: user} = context
+      {:ok, before} = Git.resolve(bare, "refs/heads/main")
       head = commit_on_chat(project, chat, "NOTES.md", "from a conversation\n")
+      chat_commit_message!(chat, "Write the notes down\n")
 
       assert {:ok, %{sha: sha, already: false}} = Merge.perform_chat(chat, user)
 
       {:ok, default} = Git.resolve(bare, "refs/heads/main")
       assert default == sha
-      assert Git.ancestor?(bare, head, default)
+      assert {:ok, ^before} = Git.resolve(bare, sha <> "^1")
+      assert {:error, _no_second_parent} = Git.resolve(bare, sha <> "^2")
+      refute Git.ancestor?(bare, head, default)
       assert {:ok, "from a conversation\n"} = Git.show(bare, sha, "NOTES.md")
+
+      {:ok, body} = Git.run(bare, ["show", "--no-patch", "--format=%B", sha])
+      assert String.trim(body) == "Write the notes down"
+    end
+
+    # The page offers no merge until one exists, and the merge itself refuses rather than
+    # committing an empty message (`docs/design/conversations.md` § Commits).
+    test "a conversation with no commit message cannot be merged", context do
+      %{project: project, chat: chat, bare: bare, user: user} = context
+      {:ok, before} = Git.resolve(bare, "refs/heads/main")
+      commit_on_chat(project, chat, "NOTES.md", "from a conversation\n")
+
+      assert {:error, :no_commit_message} = Merge.perform_chat(chat, user)
+      assert {:ok, ^before} = Git.resolve(bare, "refs/heads/main")
+      assert Git.branch_exists?(bare, Forge.Jobs.chat_branch(chat))
     end
 
     # The pin is what keeps the merged commit reachable. Deleting the branch before it exists
@@ -442,6 +606,7 @@ defmodule Forge.MergeTest do
     test "the branch is gone afterwards, and the commit is still reachable", context do
       %{project: project, chat: chat, bare: bare, user: user} = context
       head = commit_on_chat(project, chat, "NOTES.md", "keep me\n")
+      chat_commit_message!(chat)
 
       assert {:ok, _result} = Merge.perform_chat(chat, user)
 
@@ -454,6 +619,7 @@ defmodule Forge.MergeTest do
 
       # The default branch moves under the conversation, on the same file.
       commit_on_chat(project, chat, "README.md", "the conversation's version\n")
+      chat_commit_message!(chat)
       work = tmp_dir("main-work")
       {_out, 0} = System.cmd("git", ["clone", "--quiet", bare, work])
       File.write!(Path.join(work, "README.md"), "someone else's version\n")
@@ -481,6 +647,7 @@ defmodule Forge.MergeTest do
 
     test "a conversation that changed nothing is already merged", context do
       %{chat: chat, user: user} = context
+      chat_commit_message!(chat)
 
       assert Merge.merged_chat?(chat)
       assert {:ok, %{already: true}} = Merge.perform_chat(chat, user)

@@ -17,6 +17,32 @@ defmodule Forge.MergeFixtures do
   end
 
   @doc """
+  Records `text` as the ticket's next `commit-message` version and returns its number. What the
+  merge commit will say; a merge with none is refused.
+  """
+  def commit_message!(ticket, text \\ "Land the change\n\nWhat it was for.\n") do
+    {:ok, %{version: version}} =
+      Artifacts.record_version(ticket.id, "commit-message", :document, :system, %{content: text})
+
+    version
+  end
+
+  @doc """
+  The same for a conversation, in its own document scope — the ticket's for a ticket chat, its own
+  otherwise, which is where its merge reads one.
+  """
+  def chat_commit_message!(chat, text \\ "Land the conversation's work\n") do
+    scope = Forge.Conversations.document_scope(chat)
+
+    {:ok, %{version: version}} =
+      Artifacts.record_version(scope, "commit-message", :document, {:job, chat.id}, %{
+        content: text
+      })
+
+    version
+  end
+
+  @doc """
   The state the workflow leaves a ticket in just before the merge: resting in `review_ready`,
   active, with the approval of `changeset` into `merged` pending.
   """

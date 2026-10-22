@@ -229,7 +229,8 @@ defmodule ForgeCore.Workflow.Validator do
       Enum.flat_map(states, &entry_action_shape/1),
       merge_count(merging),
       merge_not_initial(merging, initial),
-      merge_needs_changeset(merging, workflow)
+      merge_needs_changeset(merging, workflow),
+      merge_needs_commit_message(merging, workflow)
     ])
   end
 
@@ -277,6 +278,23 @@ defmodule ForgeCore.Workflow.Validator do
         Error.new(
           Error.join(Error.join("states", name), "on_enter"),
           "merge needs a state that produces #{changeset}"
+        )
+      ]
+    end
+  end
+
+  defp merge_needs_commit_message([], _workflow), do: []
+
+  defp merge_needs_commit_message([name | _rest], %Workflow{states: states}) do
+    message = Workflow.commit_message_artifact()
+
+    if Enum.any?(states, fn {_n, state} -> message in state.produces end) do
+      []
+    else
+      [
+        Error.new(
+          Error.join(Error.join("states", name), "on_enter"),
+          "merge needs a state that produces #{message}"
         )
       ]
     end
@@ -552,6 +570,13 @@ defmodule ForgeCore.Workflow.Validator do
 
       entry in repeated ->
         "#{inspect(entry)} is listed twice"
+
+      # Before the clause below, not after it: `commit-message` is one of the state's own
+      # documents, so "it is a document this state produces" would excuse it like any other.
+      # Merging has nothing to fall back on when it is absent, which is what makes it the one
+      # produced document a state may not be let off writing.
+      entry == Workflow.commit_message_artifact() ->
+        "#{Workflow.commit_message_artifact()} is what the merge commit says and cannot be optional"
 
       entry in documents ->
         nil

@@ -18,10 +18,21 @@ someone who did the work telling them what matters in it.
 - **Say what you are unsure about.** A risk, a shortcut, a test you could not make fail — this is
   the last place it can be said before the change lands.
 
-**Your manifest says whether this document is optional**, because the workflow decides that and
+Also write **`commit-message`**: the message the merge commit will carry, for the whole changeset
+and not just one run. A summary line under about 70 characters, then a blank line, then body
+paragraphs if there is more worth saying. No front matter, no trailers — nothing generates
+`Ticket:` or `Approved-by:` lines any more, and *who* approved is recorded in the commit's author
+field by git itself. **Nobody edits it.** It is drawn read-only above the approve control, and the
+merge writes it exactly as you left it, so write it as a git message and not as a note to the
+operator.
+
+Unlike the presentation, this one is **never optional**: the merge has nothing to say without it,
+and a run that finishes without writing it sticks the ticket here.
+
+**Your manifest says whether `presentation.md` is optional**, because the workflow decides that and
 not this prompt. If it says you may finish without writing it, and there is genuinely nothing to
 say that the diff and the report do not already say, then finish without writing it rather than
 padding. If it does not say so, the document is required: write it, and keep it short.
 
-Nothing downstream reads this document, and nobody approves it. Change no code here: the ticket's
-work is finished by the time you are asked for this.
+Nothing downstream reads the presentation, and nobody approves either document. Change no code
+here: the ticket's work is finished by the time you are asked for this.

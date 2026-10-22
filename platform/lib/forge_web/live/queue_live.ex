@@ -15,6 +15,13 @@ defmodule ForgeWeb.QueueLive do
   did not stop for, as lines that lead to their tickets. They count towards nothing on this page
   — `docs/design/ui.md` § Not waiting on you. One asked in the same document as a blocking
   question is in that document's form instead, optional (§ Answering questions).
+
+  Beneath that again is the work already **under way**: a ticket whose current job is running on
+  a worker, or still pending. Same register as the digest and for the same reason —
+  neither is a decision, so neither carries a mark, an accent or a place in a count
+  (`docs/design/ui.md` § A job waiting for a machine). It is the one group on this page read from
+  `Queue.worker_status/1` rather than `Queue.items/1`, and it never enters `group/1` or
+  `decorate/1`, which exist for the decision cards.
   """
 
   use ForgeWeb, :live_view
@@ -66,9 +73,18 @@ defmodule ForgeWeb.QueueLive do
     assign(socket,
       items: items,
       digest: digest,
+      # Counted from `items` and nothing else, which is what keeps the header and the nav badge
+      # out of reach of `under_way` below it.
       decisions: Enum.sum(Enum.map(items, & &1.decisions)),
+      under_way: under_way(socket.assigns.current_scope.user),
       now: DateTime.utc_now()
     )
+  end
+
+  defp under_way(user) do
+    user
+    |> Queue.worker_status()
+    |> Enum.map(&Map.put(&1, :project, &1.project.name))
   end
 
   # One job, stopped, against one artifact version, carrying N questions. Everything else is
@@ -308,6 +324,38 @@ defmodule ForgeWeb.QueueLive do
         </ul>
       </section>
 
+      <%!-- Prose again, and for the digest's reason: a job on a machine and a job waiting for one
+            are both waiting on nobody, so no mark, no accent, no answer row, and no number
+            anywhere else on the page counts them — docs/design/ui.md § A job waiting for a
+            machine. --%>
+      <section
+        :if={@under_way != []}
+        id="queue-under-way"
+        class="mt-8 border-t border-base-300 pt-5"
+      >
+        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Under way</h2>
+        <p class="mt-2 text-sm/[1.55] opacity-70">{under_way_sentence(@under_way)}</p>
+        <ul class="mt-2 flex flex-col">
+          <li :for={item <- @under_way} id={"under-way-#{item.ticket.id}"}>
+            <.link
+              navigate={destination(item)}
+              class="flex min-h-[46px] flex-col justify-center gap-0.5 py-2 opacity-80 hover:opacity-100"
+            >
+              <span class="flex items-baseline justify-between gap-3">
+                <span class="text-sm/[1.55]">{item.ticket.title}</span>
+                <span class="shrink-0 font-mono text-[12.5px] opacity-60">
+                  {Format.ago(item.since, @now)}
+                </span>
+              </span>
+              <span class="text-sm/[1.55] opacity-70">{under_way_line(item)}</span>
+              <span class="font-mono text-[12.5px] opacity-60">
+                {item.project}#{item.ticket.number}
+              </span>
+            </.link>
+          </li>
+        </ul>
+      </section>
+
       <section class="mt-8 border-t border-base-300 pt-5" id="queue-end">
         <h2 class="font-mono text-[11px] tracking-[.14em] uppercase text-success">End of queue</h2>
         <p class="mt-2 text-sm/[1.55]">{closing(@items)}</p>
@@ -424,6 +472,24 @@ defmodule ForgeWeb.QueueLive do
     |> hd()
     |> String.slice(0, 160)
   end
+
+  # What the line says is which of the two the ticket is in, and nothing else. *Why* a pending
+  # job could not be placed is the sentence on the ticket's own timeline (`docs/design/ui.md`
+  # § A job waiting for a machine) and is not restated here.
+  defp under_way_line(%{kind: :on_worker}), do: "Running on a worker."
+  defp under_way_line(%{kind: :awaiting_worker}), do: "Waiting for a worker."
+
+  # Both counts when there are both: telling the two apart at a glance is what this group is for,
+  # and one total would hide it.
+  defp under_way_sentence(items) do
+    {running, waiting} = Enum.split_with(items, &(&1.kind == :on_worker))
+    clauses = [tickets(running, "running on a worker"), tickets(waiting, "waiting for a worker")]
+
+    Enum.join(Enum.reject(clauses, &is_nil/1), ", ") <> "."
+  end
+
+  defp tickets([], _what), do: nil
+  defp tickets(items, what), do: "#{length(items)} #{noun(length(items), "ticket")} #{what}"
 
   defp digest_sentence([_one]), do: "1 assumption was stated and work continued."
 

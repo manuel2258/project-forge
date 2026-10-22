@@ -4,13 +4,17 @@ defmodule Forge.Queue do
   Blocking questions, pending approvals, stuck tickets, tickets resting in a human state that
   has a way forward, and conversations waiting on a reply.
 
-  And one kind that is waiting on nobody: an open non-blocking question, served as
+  And one kind in that list that is waiting on nobody: an open non-blocking question, served as
   `:assumption` — the agent said what it assumed and carried on. It is here so that it reaches
   someone who has not opened its ticket (`docs/design/job-prompt.md` § Non-blocking questions),
   and it is a kind of its own so that nothing reading the queue can count it as a question that
   halted a job. `waiting?/1` is the one place that says which is which. The list is the
   decisions, oldest first, and then the assumptions, oldest first: they are never sorted in among
   what is waiting (`docs/design/ui.md` § Not waiting on you).
+
+  `worker_status/1` is a second list, read by the Queue page alone: the tickets whose current job
+  is running on a worker or still waiting for one. It is not in `items/1` and nothing counts it —
+  see its own doc.
   """
 
   import Ecto.Query, only: [from: 2, dynamic: 1, dynamic: 2]
@@ -18,7 +22,7 @@ defmodule Forge.Queue do
   require Logger
 
   alias Forge.Accounts.User
-  alias Forge.{Artifacts, Conversations, Engine, Projects, Repo, Tickets}
+  alias Forge.{Artifacts, Conversations, Engine, Jobs, Projects, Repo, Tickets}
   alias Forge.Artifacts.Question
   alias Forge.Jobs.Job
   alias Forge.Tickets.Ticket
@@ -35,7 +39,15 @@ defmodule Forge.Queue do
   take a project of its own rather than reaching through the ticket.
   """
   @type item :: %{
-          kind: :question | :assumption | :approval | :stuck | :review | :chat,
+          kind:
+            :question
+            | :assumption
+            | :approval
+            | :stuck
+            | :review
+            | :chat
+            | :on_worker
+            | :awaiting_worker,
           ticket: Ticket.t() | nil,
           project: Projects.Project.t(),
           since: DateTime.t(),
@@ -86,7 +98,90 @@ defmodule Forge.Queue do
   """
   @spec waiting?(item()) :: boolean()
   def waiting?(%{kind: :assumption}), do: false
+
+  # Named rather than left to the catch-all below. `worker_status/1`'s kinds never reach here
+  # through `items/1`, but this function's contract is every kind of `item()`, and a reader that
+  # asked it about one would otherwise be told a running job is waiting on a person.
+  def waiting?(%{kind: kind}) when kind in [:on_worker, :awaiting_worker], do: false
+
   def waiting?(%{kind: _kind}), do: true
+
+  @doc """
+  The tickets whose work is already moving, or would be if a machine were free: the current job
+  of each, as `:on_worker` when it is running on an assigned worker and `:awaiting_worker` when
+  it is still pending. Oldest first, as one group.
+
+  Active tickets only. A stuck one keeps the accent flag `items/1` gives it rather than a second,
+  quieter line, which is why the status is narrowed in the query and not afterwards.
+
+  `worker_id` separates the two kinds on the running side only. See `under_way_item/1`.
+
+  Deliberately not part of `items/1`. That list is what the JSON API, the CLI and the push digest
+  are built on, and each of them matches its kinds exhaustively — `Forge.CLI.queue_line/1` has no
+  catch-all clause at all. Neither of these kinds is a decision, so neither belongs in a list
+  whose readers are entitled to assume one (`docs/design/ui.md` § A job waiting for a machine).
+  """
+  @spec worker_status(User.t()) :: [item()]
+  def worker_status(%User{} = user),
+    do: under_way(Enum.map(Projects.list(user), & &1.id))
+
+  defp under_way(project_ids) do
+    Repo.all(
+      from t in Ticket,
+        # `:active`, not `@open`. A stuck ticket can legitimately hold a job that still reads
+        # pending — the engine's stuck-for-placement leaves the pending job on the row — and a
+        # stuck ticket keeps its accent flag rather than gaining a second, quieter line that says
+        # the opposite. Excluded by the read, whose model is the ticket's own `status` column,
+        # and not by an `if` over a derived flag afterwards.
+        where: t.status == :active,
+        where: ^visible(project_ids)
+    )
+    |> Enum.flat_map(&under_way_item/1)
+    |> oldest_first()
+  end
+
+  # Only the ticket's *current* workflow job, which is the last one `Jobs.for_ticket/1` returns —
+  # the same read the ticket's own page calls current. A ticket whose latest job has finished,
+  # parked or stopped on a question matches neither clause and contributes nothing; so does one
+  # with no job at all.
+  #
+  # `worker_id` is checked on the running clause and deliberately not on the pending one, because
+  # the column says where the job's *last* run was and not what is holding it: `Jobs.resume/1`
+  # and `Commands.put_resume/3` put a job back to `:pending` without clearing it, so a resumed
+  # job is pending on a worker id that is not a reservation. It is waiting for a machine like any
+  # other pending job, and matching `worker_id: nil` here would show nothing for exactly the
+  # tickets a person had just unblocked.
+  defp under_way_item(%Ticket{} = ticket) do
+    case ticket.id |> Jobs.for_ticket() |> List.last() do
+      %Job{status: :running, worker_id: worker_id} = job when not is_nil(worker_id) ->
+        [under_way_entry(ticket, job, :on_worker)]
+
+      %Job{status: :pending} = job ->
+        [under_way_entry(ticket, job, :awaiting_worker)]
+
+      _other ->
+        []
+    end
+  end
+
+  # `since` is when this job was created, not when the ticket last changed: the ticket's
+  # `updated_at` moves for reasons that have nothing to do with the job it is running. It is
+  # deliberately the plainest of the three candidates — `started_at` is null on a job that has
+  # never run, and `updated_at` moves on every turn a running job reports, so neither reads as an
+  # age of anything. For a first attempt still pending, which is the common case, it is how long
+  # the ticket has been held; for a job that ran, stopped on a question and was resumed, it is
+  # older than the current wait, and why the job is waiting stays the sentence on its own
+  # timeline (`docs/design/ui.md` § A job waiting for a machine).
+  defp under_way_entry(%Ticket{} = ticket, %Job{} = job, kind) do
+    %{
+      kind: kind,
+      ticket: ticket,
+      project: Projects.get!(ticket.project_id),
+      since: job.inserted_at,
+      question: nil,
+      detail: %{job_id: job.id}
+    }
+  end
 
   defp build(project_ids) do
     tickets =

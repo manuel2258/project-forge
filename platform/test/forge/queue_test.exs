@@ -394,5 +394,191 @@ defmodule Forge.QueueTest do
     end
   end
 
+  # `worker_status/1`: the second list, for the Queue page alone — a ticket whose current job is
+  # running on a worker, or still pending. Not a decision and in no count, so what is tested here
+  # is which tickets are in it and which are deliberately not: a stuck one, a finished one, and
+  # another project's (`docs/design/ui.md` § A job waiting for a machine).
+  describe "work under way" do
+    setup do
+      project = project_fixture()
+      %{project: project, user: member_fixture(project)}
+    end
+
+    defp worker! do
+      {:ok, worker, _token} = Forge.Workers.create(%{provider: "fake"})
+      worker
+    end
+
+    defp under_way(user, ticket),
+      do: Enum.filter(Queue.worker_status(user), &(&1.ticket.id == ticket.id))
+
+    defp activate!(ticket) do
+      {:ok, ticket} =
+        Repo.update(
+          Forge.Tickets.Ticket.progress_changeset(ticket, %{
+            state: ticket.state,
+            status: :active,
+            cost_usd: ticket.cost_usd
+          })
+        )
+
+      ticket
+    end
+
+    test "a job running on an assigned worker is on worker", context do
+      ticket = ticket_fixture(%{project: context.project})
+      job = job_fixture(%{ticket: ticket, worker_id: worker!().id, status: :running})
+
+      assert [%{kind: :on_worker, since: since, detail: %{job_id: job_id}}] =
+               under_way(context.user, ticket)
+
+      assert job_id == job.id
+      assert since == job.inserted_at
+    end
+
+    # The whole distinction the ticket asks for: this one is not on a machine, and the operator
+    # should be able to tell without opening it.
+    test "a pending job is awaiting a worker", context do
+      ticket = ticket_fixture(%{project: context.project})
+      job_fixture(%{ticket: ticket})
+
+      assert [%{kind: :awaiting_worker}] = under_way(context.user, ticket)
+    end
+
+    # `worker_id` records where the job's last run was, not a reservation: `Jobs.resume/1` leaves
+    # it on the row. A job a person has just unblocked is waiting for a machine like any other.
+    test "a resumed job still awaits a worker, stale worker and all", context do
+      ticket = ticket_fixture(%{project: context.project})
+      job = job_fixture(%{ticket: ticket, worker_id: worker!().id, status: :waiting})
+
+      {:ok, resumed} = Jobs.resume(job)
+      assert resumed.status == :pending
+      refute is_nil(resumed.worker_id)
+
+      assert [%{kind: :awaiting_worker}] = under_way(context.user, ticket)
+    end
+
+    # A running job carries the worker it was started on, written in the same update as the
+    # status (`Jobs.mark_started/3`). A row saying it runs on nothing is not something to label
+    # "running on a worker".
+    test "a running job with no worker is neither", context do
+      ticket = ticket_fixture(%{project: context.project})
+      job_fixture(%{ticket: ticket, status: :running})
+
+      assert under_way(context.user, ticket) == []
+    end
+
+    # Criterion 5, and the mutation that matters most: read the first job instead of the last and
+    # this ticket is reported as running on a worker forever.
+    test "only the current job counts, not an earlier one", context do
+      ticket = ticket_fixture(%{project: context.project})
+      job_fixture(%{ticket: ticket, worker_id: worker!().id, status: :running})
+      job_fixture(%{ticket: ticket, status: :waiting, attempt: 2})
+
+      assert under_way(context.user, ticket) == []
+    end
+
+    test "a ticket with no jobs at all is in neither", context do
+      ticket = ticket_fixture(%{project: context.project})
+
+      assert under_way(context.user, ticket) == []
+    end
+
+    # Criterion 6. A placement stick leaves the pending job on the row (`Engine.stick/3`, and
+    # `Engine.resume_placement/2`'s doc says so), so this ticket matches the pending clause on
+    # everything but its status — and
+    # it already has an accent flag saying it needs a person. A second, quieter line saying it is
+    # merely waiting for a machine would contradict it.
+    test "a stuck ticket keeps its flag instead of a quiet line", context do
+      ticket = ticket_fixture(%{project: context.project})
+      job_fixture(%{ticket: ticket})
+      {:ok, _stuck} = Forge.Engine.stick(ticket, "no template could hold it", :placement)
+
+      assert under_way(context.user, ticket) == []
+
+      # And it is in the queue proper, as the accent item: the ticket is visible, just not here.
+      assert [%{kind: :stuck}] =
+               Enum.filter(Queue.items(context.user), &(&1.ticket.id == ticket.id))
+    end
+
+    test "a finished ticket is in neither, whatever its last job says", context do
+      ticket = ticket_fixture(%{project: context.project})
+      job_fixture(%{ticket: ticket, worker_id: worker!().id, status: :running})
+
+      {:ok, _done} =
+        Repo.update(
+          Forge.Tickets.Ticket.progress_changeset(ticket, %{
+            state: ticket.state,
+            status: :done,
+            cost_usd: ticket.cost_usd
+          })
+        )
+
+      assert under_way(context.user, ticket) == []
+    end
+
+    # The read that leaks most easily, the same way `items/1` leaks it
+    # (`docs/design/identity.md` § Read scoping is the half that leaks).
+    test "another project's ticket is never in it", context do
+      elsewhere = ticket_fixture()
+      job_fixture(%{ticket: elsewhere})
+
+      assert under_way(context.user, elsewhere) == []
+
+      # Visible to one of its own members, so the absence above is the scoping and not the shape.
+      assert [%{kind: :awaiting_worker}] =
+               under_way(member_fixture(Forge.Projects.get!(elsewhere.project_id)), elsewhere)
+    end
+
+    test "oldest first", context do
+      older = activate!(ticket_fixture(%{project: context.project}))
+      newer = activate!(ticket_fixture(%{project: context.project}))
+      job_fixture(%{ticket: older})
+      job_fixture(%{ticket: newer})
+
+      age(older, 3600)
+
+      assert [older.id, newer.id] ==
+               context.user |> Queue.worker_status() |> Enum.map(& &1.ticket.id)
+    end
+
+    defp age(ticket, seconds) do
+      Repo.update_all(
+        from(j in Forge.Jobs.Job, where: j.ticket_id == ^ticket.id),
+        set: [inserted_at: DateTime.add(DateTime.utc_now(), -seconds, :second)]
+      )
+    end
+  end
+
+  # Neither kind waits on a person, so nothing that counts what is waiting may count them: the
+  # push gate and the page's header are both `waiting?/1`, and the clause is what keeps a running
+  # job off somebody's phone.
+  test "neither kind of work under way is waiting on a person" do
+    refute Queue.waiting?(%{kind: :on_worker})
+    refute Queue.waiting?(%{kind: :awaiting_worker})
+
+    # The catch-all still says yes for a kind that is a decision, so the two clauses above are
+    # doing the work and not a blanket `false`.
+    assert Queue.waiting?(%{kind: :stuck})
+  end
+
+  # The boundary the design rests on: `items/1` is what the JSON API, the CLI and the push digest
+  # read, and `Forge.CLI.queue_line/1` has no catch-all clause. A later change that folded the two
+  # functions together would reach all three, and should trip this instead.
+  test "items/1 carries neither kind, even for a ticket that is in worker_status/1" do
+    project = project_fixture()
+    user = member_fixture(project)
+    ticket = ticket_fixture(%{project: project})
+
+    job_fixture(%{
+      ticket: ticket,
+      worker_id: elem(Forge.Workers.create(%{provider: "fake"}), 1).id,
+      status: :running
+    })
+
+    assert [%{kind: :on_worker}] = Queue.worker_status(user)
+    assert Enum.filter(Queue.items(user), &(&1.kind in [:on_worker, :awaiting_worker])) == []
+  end
+
   defp event_types(ticket), do: ticket.id |> Events.for_ticket() |> Enum.map(& &1.type)
 end

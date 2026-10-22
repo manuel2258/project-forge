@@ -98,7 +98,8 @@ states:
       build: { max: 40 }
       test: { max: 20, concurrent: 4 }
     inputs: [plan.md]
-    produces: [implementation.md, changeset]   # notes on what was done, and the diff
+    # Notes on what was done, the diff, and what the merge commit will say (§ Merging).
+    produces: [implementation.md, changeset, commit-message]
     outcomes: [done, plan_invalid]
     budget: { turns: 200, cost: 10.00 }
 
@@ -112,7 +113,7 @@ states:
     may_invoke:
       test: { max: 10 }
     inputs: [plan.md, implementation.md, changeset]
-    produces: [report.md, commit-message]   # the report, and what the merge commit will say
+    produces: [report.md]
     outcomes: [done, tests_failed]
     budget: { turns: 60, cost: 3.00 }
 

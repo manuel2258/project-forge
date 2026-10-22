@@ -213,8 +213,9 @@ by the same hook with `FORGE_INTERNAL`, and neither lets a job write the default
 differs is what authorises it — the changeset version a ticket's transition into its merging state
 named (`workflow-grammar-v1.md` § Merging), or an operator pressing
 merge on a diff they are looking at. It is one implementation with two callers, not two: the
-ticket's functions and the chat's both build the same plan — repository, destination, source, the
-ref that keeps it reachable, and what the commit should say — and hand it to the same merge.
+ticket's functions and the chat's both build the same plan — repository, destination, source and
+the ref that keeps it reachable — and hand it to the same merge. What the commit says is read
+separately, by each of the two functions that make one (below).
 
 **A conversation may write `commit-message`, and its merge needs one.** It is an ordinary
 document — the name is not reserved against a chat the way `changeset` is, and it is written,

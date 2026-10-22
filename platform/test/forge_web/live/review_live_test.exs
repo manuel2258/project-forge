@@ -55,8 +55,10 @@ defmodule ForgeWeb.ReviewLiveTest do
 
   test "the approval pins the changeset version and merges", context do
     %{conn: conn, project: project, ticket: ticket, bare: bare} = context
+    {:ok, before} = Git.resolve(bare, "refs/heads/main")
     sha = commit_on_branch(context, "score.ex", "def persist, do: :ok")
     changeset!(ticket, sha)
+    commit_message!(ticket, "Persist the scores\n")
     pend_merge(ticket)
 
     {:ok, view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
@@ -68,7 +70,40 @@ defmodule ForgeWeb.ReviewLiveTest do
 
     assert Tickets.get!(ticket.id).state == "merged"
     {:ok, head} = Git.resolve(bare, "refs/heads/main")
-    assert Git.ancestor?(bare, sha, head)
+    assert {:ok, ^before} = Git.resolve(bare, head <> "^1")
+    assert {:ok, "def persist, do: :ok\n"} = Git.show(bare, head, "score.ex")
+  end
+
+  # The operator reads what the merge will commit and then confirms; the text is the agent's and
+  # this page never offers to change it (`docs/design/ui.md` § Changes).
+  test "draws the commit message above the approval, read only", context do
+    %{conn: conn, project: project, ticket: ticket} = context
+    sha = commit_on_branch(context, "score.ex", "def persist, do: :ok")
+    changeset!(ticket, sha)
+    commit_message!(ticket, "Persist the scores\n\nThey were lost on restart.\n")
+    pend_merge(ticket)
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+    block = view |> element("#review-commit-message") |> render()
+
+    assert block =~ "Persist the scores"
+    assert block =~ "They were lost on restart."
+    assert block =~ "view only"
+    refute block =~ "<textarea"
+    refute block =~ "<input"
+  end
+
+  test "says there is nothing to merge yet when nothing wrote a commit message", context do
+    %{conn: conn, project: project, ticket: ticket} = context
+    sha = commit_on_branch(context, "score.ex", "def persist, do: :ok")
+    changeset!(ticket, sha)
+    pend_merge(ticket)
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+    block = view |> element("#review-commit-message") |> render()
+
+    assert block =~ "nothing to merge yet"
+    refute block =~ "view only"
   end
 
   test "says so plainly when no job has produced a changeset", context do

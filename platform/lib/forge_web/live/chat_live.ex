@@ -633,7 +633,7 @@ defmodule ForgeWeb.ChatLive do
       </div>
 
       <button
-        :if={not @merged and @commit_message && @diff[:files] not in [nil, []]}
+        :if={(not @merged and @commit_message) && @diff[:files] not in [nil, []]}
         type="button"
         phx-click="merge"
         data-confirm="Merge this into the default branch?"

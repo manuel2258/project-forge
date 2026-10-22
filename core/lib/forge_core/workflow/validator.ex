@@ -571,6 +571,15 @@ defmodule ForgeCore.Workflow.Validator do
       entry in repeated ->
         "#{inspect(entry)} is listed twice"
 
+      true ->
+        optional_target_error(state, entry, documents)
+    end
+  end
+
+  # What a well-formed, unrepeated entry points at: nil where it is one of the state's own
+  # documents and may be excused, otherwise why it may not be.
+  defp optional_target_error(state, entry, documents) do
+    cond do
       # Before the clause below, not after it: `commit-message` is one of the state's own
       # documents, so "it is a document this state produces" would excuse it like any other.
       # Merging has nothing to fall back on when it is absent, which is what makes it the one

@@ -206,6 +206,7 @@ defmodule Forge.Engine do
   # No key where the ticket has no `commit-message` yet, the way a missing changeset leaves none:
   # `named/1` then reports it rather than the merge inventing something to say.
   defp put_commit_message(payload, nil), do: payload
+
   defp put_commit_message(payload, version),
     do: Map.put(payload, "commit_message_version", version)
 

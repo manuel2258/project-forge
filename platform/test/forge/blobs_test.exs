@@ -82,12 +82,14 @@ defmodule Forge.BlobsTest do
 
   defp finish_agent(assignment, blobs, invalid \\ %{}) do
     FakeWorker.put_transcript(assignment)
+
     written = %{
       "implementation.md" => "---\noutcome: done\n---\n# Done\n",
       # This workflow merges, so a state has to produce `commit-message`; a job of this state
       # that wrote none would be `error` rather than `done`.
       "commit-message" => "Land the change\n"
     }
+
     result = FakeWorker.result(assignment, "success", written: written)
     Jobs.complete(assignment["job_id"], %{result | blobs: blobs, invalid_blobs: invalid})
   end
@@ -156,6 +158,7 @@ defmodule Forge.BlobsTest do
         "implementation.md" => "---\noutcome: done\n---\n# Done\n",
         "commit-message" => "Land the change\n"
       }
+
       result = FakeWorker.result(assignment, "success", written: written)
 
       {:ok, _job} =

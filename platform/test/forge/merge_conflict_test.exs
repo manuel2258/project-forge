@@ -51,6 +51,11 @@ defmodule Forge.MergeConflictTest do
     {:ok, ticket} =
       Tickets.admit(project, %{title: "Practice timer", body: "do it"}, {:user, user.id})
 
+    # Every merge needs what the commit will say, and these tests are about which commit is
+    # merged rather than about the message: that a merge without one is refused is
+    # `Forge.MergeTest`'s.
+    commit_message!(ticket)
+
     %{project: project, bare: bare, user: user, ticket: ticket}
   end
 
@@ -312,8 +317,8 @@ defmodule Forge.MergeConflictTest do
       assert ticket.state == "merged"
       assert ticket.status == :done
       {:ok, main} = Git.resolve(bare, "refs/heads/main")
-      assert Git.ancestor?(bare, integrated, main)
-      assert {:ok, ^integrated} = Git.resolve(bare, main <> "^2")
+      assert {:ok, ^integrated} = Git.resolve(bare, "refs/forge/approved/#{ticket.number}")
+      assert {:ok, ^integrated} = Git.resolve(bare, "refs/forge/approved/#{ticket.number}")
 
       assert %{"to" => "merged", "changeset" => ^integrated, "changeset_version" => 2} =
                latest_payload(ticket, "transition.taken")
@@ -476,7 +481,7 @@ defmodule Forge.MergeConflictTest do
       assert ticket.state == "merged"
       assert ticket.status == :done
       {:ok, main} = Git.resolve(bare, "refs/heads/main")
-      assert {:ok, ^integrated} = Git.resolve(bare, main <> "^2")
+      assert {:ok, ^integrated} = Git.resolve(bare, "refs/forge/approved/#{ticket.number}")
     end
 
     # The option the check hands the transition: what it names is the version that was checked,
@@ -526,7 +531,7 @@ defmodule Forge.MergeConflictTest do
       assert ticket.state == "merged"
       assert ticket.status == :done
       {:ok, main} = Git.resolve(bare, "refs/heads/main")
-      assert {:ok, ^integrated} = Git.resolve(bare, main <> "^2")
+      assert {:ok, ^integrated} = Git.resolve(bare, "refs/forge/approved/#{ticket.number}")
       assert [%{decision: :approved}] = Artifacts.approvals(changeset_version(ticket, 2).id)
     end
 
@@ -552,7 +557,7 @@ defmodule Forge.MergeConflictTest do
 
       assert moved.status == :done
       {:ok, main} = Git.resolve(bare, "refs/heads/main")
-      assert {:ok, ^first} = Git.resolve(bare, main <> "^2")
+      assert {:ok, ^first} = Git.resolve(bare, "refs/forge/approved/#{ticket.number}")
       refute Git.ancestor?(bare, later, main)
       assert %{"changeset" => ^first} = latest_payload(moved, "ticket.merged")
     end

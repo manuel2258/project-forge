@@ -163,7 +163,10 @@ defmodule Forge.DemoTest do
     assert Merge.merged?(ticket)
 
     {:ok, merged} = Git.resolve(bare, "refs/heads/main")
-    assert Git.ancestor?(bare, head, merged)
+    # One commit, one parent: the approved commit's content lands and the commit itself stays on
+    # the ticket's own ref (`docs/design/git-hosting.md` § The merge).
+    refute Git.ancestor?(bare, head, merged)
+    assert {:ok, ^head} = Git.resolve(bare, "refs/forge/approved/#{ticket.number}")
     assert {:ok, "def persist, do: :ok\n"} = Git.show(bare, merged, "score.ex")
 
     # …and the mirror has it, pushed by the repository's own post-receive hook.

@@ -28,7 +28,7 @@ defmodule ForgeCore.Workflow.ParserTest do
                env: "implement",
                model: "opus",
                inputs: ["plan.md"],
-               produces: ["implementation.md", "changeset"],
+               produces: ["implementation.md", "changeset", "commit-message"],
                outcomes: ["done", "plan_invalid"],
                budget: %Budget{turns: 200, cost: 10.0}
              } = workflow.states["implementing"]
@@ -671,7 +671,7 @@ defmodule ForgeCore.Workflow.ParserTest do
         map
         |> put_in(
           ["states", "implementing", "produces"],
-          ["implementation.md", "changeset", "notes.md"]
+          ["implementation.md", "changeset", "commit-message", "notes.md"]
         )
         |> put_in(["states", "verifying", "inputs"], ["plan.md", "notes.md"])
 
@@ -736,6 +736,9 @@ defmodule ForgeCore.Workflow.ParserTest do
       assert messages(map) == [
                {"states.implementing.outcomes",
                 "declaring outcomes other than done requires a document in produces"},
+               # `implementing` is also where the fixture produces `commit-message`, so leaving it
+               # `changeset` alone leaves the workflow's merge with nothing to say.
+               {"states.merged.on_enter", "merge needs a state that produces commit-message"},
                {"states.planning.outcomes", "\"done\" is declared more than once"},
                {"states.planning.outcomes",
                 "\"error\" is an engine outcome and cannot be declared"}
@@ -920,17 +923,20 @@ defmodule ForgeCore.Workflow.ParserTest do
     # The second half of the same rule: a merge that cannot say anything is as broken as one with
     # nothing to merge, and it is caught here rather than at the merge (§ Validation).
     test "merging needs a state that produces the commit message", %{map: map} do
-      map = put_in(map, ["states", "refining", "produces"], ["refinement.md"])
+      map =
+        put_in(map, ["states", "implementing", "produces"], ["implementation.md", "changeset"])
 
       assert {"states.merged.on_enter", "merge needs a state that produces commit-message"} in messages(
                map
              )
     end
 
+    # On the state that does produce it, which is the case the rule is for: "it is a document this
+    # state produces" would otherwise excuse it like any other.
     test "the commit message may not be optional", %{map: map} do
-      map = put_in(map, ["states", "refining", "optional"], ["commit-message"])
+      map = put_in(map, ["states", "implementing", "optional"], ["commit-message"])
 
-      assert {"states.refining.optional[0]",
+      assert {"states.implementing.optional[0]",
               "commit-message is what the merge commit says and cannot be optional"} in messages(
                map
              )

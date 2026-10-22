@@ -140,6 +140,7 @@ defmodule Forge.MergeWatchTest do
     %{project: project, bare: bare, user: user} = context
     {:ok, unchanged} = Tickets.admit(project, %{title: "No change", body: ""}, {:user, user.id})
     changeset!(unchanged, unchanged.base_commit)
+    commit_message!(unchanged)
     waiting = ticket!(context, "README.md", "the ticket's")
     commit_to(bare, "main", %{"README.md" => "the trunk's\n"}, "trunk")
 
@@ -147,6 +148,7 @@ defmodule Forge.MergeWatchTest do
     assert %{"already" => true} = latest_payload(merged, "ticket.merged")
 
     {:ok, chat} = Forge.Conversations.open(project, "nothing to change")
+    chat_commit_message!(chat)
     assert {:ok, %{already: true}} = Operator.merge_chat(chat, user)
 
     assert events_of(waiting, "ticket.conflict_found") == []
@@ -157,6 +159,7 @@ defmodule Forge.MergeWatchTest do
     waiting = ticket!(context, "README.md", "the ticket's")
     {:ok, chat} = Forge.Conversations.open(project, "tidy the readme")
     commit_on_chat!(project, chat, "README.md", "the conversation's\n")
+    chat_commit_message!(chat)
 
     assert {:ok, %{already: false}} = Operator.merge_chat(chat, user)
 
@@ -339,6 +342,8 @@ defmodule Forge.MergeWatchTest do
     {:ok, ticket} = Tickets.admit(project, %{title: content, body: ""}, {:user, user.id})
     sha = commit_over_http(project, ticket.branch, path, content)
     changeset!(ticket, sha)
+    # A ticket at the edge of its merge has what the commit will say, as its agent wrote it.
+    commit_message!(ticket)
     ticket
   end
 

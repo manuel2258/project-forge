@@ -166,6 +166,31 @@ case "${FAKE_SCENARIO:-success}" in
       # The echo, which the real harness writes only when it takes the message.
       emit "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"$(json_escape "$text")\"}]}}"
 
+      # A request written before the turn could end, for the interrupted case: the file is on
+      # disk and the turn never finished (`docs/design/conversations.md` § Taking a transition).
+      case "$text" in
+        *PREMOVE*)
+          printf '{"to": "implementing", "comment": "cut off mid-thought"}\n' \
+            > "$FORGE_JOB/transition.json"
+          ;;
+      esac
+
+      # A request written and then a turn that ends badly: `ERRMOVE` on an error subtype,
+      # `BUDGETMOVE` on a success subtype that is still an error. Both must have the file
+      # removed unread (`docs/design/conversations.md` § Taking a transition).
+      case "$text" in
+        *ERRMOVE*)
+          printf '{"to": "implementing"}\n' > "$FORGE_JOB/transition.json"
+          emit "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"num_turns\":1,\"duration_ms\":9,\"total_cost_usd\":$cost,\"result\":null,\"session_id\":\"$sid\"}"
+          continue
+          ;;
+        *BUDGETMOVE*)
+          printf '{"to": "implementing"}\n' > "$FORGE_JOB/transition.json"
+          emit "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"num_turns\":1,\"duration_ms\":9,\"total_cost_usd\":$cost,\"result\":\"stopped\",\"session_id\":\"$sid\"}"
+          continue
+          ;;
+      esac
+
       # A turn that takes time and can be cut while it does. Sleeping outright would make the
       # interrupt land after the turn had already ended, which proves nothing — the same trap
       # the spike fell into against the real harness.
@@ -214,6 +239,19 @@ case "${FAKE_SCENARIO:-success}" in
           mkdir -p "$out/proposals"
           printf -- '# Extract the score table\n\nThe person asked for this to be filed.\n' \
             > "$out/proposals/score-table.md"
+          ;;
+      esac
+
+      # A conversation asking the platform to move its ticket, and one writing a file that is
+      # not a request at all (`docs/design/conversations.md` § Taking a transition).
+      # `BADMOVE` first: `*MOVE*` matches it too, and `case` takes the first pattern that fits.
+      case "$text" in
+        *BADMOVE*)
+          printf 'not a request\n' > "$FORGE_JOB/transition.json"
+          ;;
+        *MOVE*)
+          printf '{"to": "implementing", "comment": "the tests were the problem"}\n' \
+            > "$FORGE_JOB/transition.json"
           ;;
       esac
 

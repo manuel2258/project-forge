@@ -263,9 +263,92 @@ defmodule ForgeCore.Prompt do
 
     #{inputs(spec, job_dir)}
     #{history(spec, job_dir)}
-    #{replay(spec, job_dir)}#{secrets(spec)}
+    #{replay(spec, job_dir)}#{secrets(spec)}#{moving_the_ticket(spec, job_dir)}
     """
   end
+
+  # What a ticket conversation may ask the engine for (`docs/design/conversations.md` § Taking a
+  # transition). Only for a ticket chat: a project chat has no ticket, and a section about the
+  # file would otherwise describe something it can never do.
+  defp moving_the_ticket(%Spec{ticket: nil}, _job_dir), do: ""
+  defp moving_the_ticket(%Spec{moving: nil}, _job_dir), do: ""
+
+  defp moving_the_ticket(%Spec{moving: moving}, job_dir) do
+    """
+
+    ## Moving the ticket
+
+    You can ask for a transition, or decide a pending one, by writing
+    `#{Path.join(job_dir, "transition.json")}`; the preamble says how. Everything here is as of
+    when this conversation started and the ticket may have moved since. **You will not be told
+    what became of a request**: if it is refused, the reason is recorded for the person to read
+    and nothing moves. Say what you asked for, so they know what to look for.
+    #{offered(moving)}#{pending(moving)}#{live(moving)}
+    """
+  end
+
+  # The pinning no longer parses, so there is nothing to offer and no honest list to print. Said
+  # rather than shown as an empty state: the ticket cannot move at all until a person repins it,
+  # which is a different problem from a state that simply declares no way out.
+  defp offered(%{"workflow_broken" => true}),
+    do:
+      "\n- This ticket's pinned workflow no longer parses, so no transition can be offered or\n" <>
+        "  taken. A person has to repin it before the ticket can move."
+
+  defp offered(%{"transitions" => []}),
+    do: "\n- No transition is declared out of the ticket's state, so there is none to ask for."
+
+  defp offered(%{"transitions" => transitions}) do
+    """
+
+    Transitions out of the ticket's state:
+
+    #{Enum.map_join(transitions, "\n", &edge/1)}
+    """
+  end
+
+  # A target reached by two edges is listed and marked as not askable: the request carries a
+  # target and no outcome, so the engine refuses it every time. Marked rather than dropped, so
+  # the agent can tell the person the state exists and why it is out of reach.
+  defp edge(%{"to" => to, "ambiguous" => true}),
+    do:
+      "- `#{to}` — **cannot be asked for**: two transitions go there and the request cannot say\n" <>
+        "  which. Nor can the ticket page; only a direct API call can."
+
+  defp edge(%{"to" => to} = transition) do
+    case transition["approve"] || [] do
+      [] -> "- `#{to}`"
+      names -> "- `#{to}` — approves #{Enum.map_join(names, ", ", &"`#{&1}`")} on the way"
+    end
+  end
+
+  defp pending(%{"pending" => nil}), do: ""
+
+  defp pending(%{"pending" => decision}) do
+    """
+
+    A decision is already pending on this ticket: moving to `#{decision["to"]}`#{on_outcome(decision)}#{approving(decision["approve"] || [])}.
+    Until it is decided no other transition can be taken — decide this one, or leave it to the
+    person.
+    """
+  end
+
+  defp on_outcome(%{"outcome" => outcome}) when is_binary(outcome), do: " on `#{outcome}`"
+  defp on_outcome(_decision), do: ""
+
+  defp approving([]), do: ""
+  defp approving(names), do: ", approving " <> Enum.map_join(names, ", ", &"`#{&1}`")
+
+  defp live(%{"job_live" => true}) do
+    """
+
+    A job of the ticket's state was running when this conversation started. While one is, no
+    transition can be taken — the person cancels the ticket and restores it, which is what stops
+    a job, and that is theirs to do and not yours.
+    """
+  end
+
+  defp live(_moving), do: ""
 
   # A reopened conversation is a new process with none of the old one's context, and the
   # message at the end of this prompt is the next thing the person said — not the first. Told

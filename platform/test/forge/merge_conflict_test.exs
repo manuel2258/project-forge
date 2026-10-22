@@ -121,6 +121,40 @@ defmodule Forge.MergeConflictTest do
       assert {:ok, ^main} = Git.resolve(bare, "refs/heads/main")
     end
 
+    # A conversation reaches the same two refusals, and they are the two the chat's own reason
+    # list had no words for: without a `humanise/1` clause each the sentence a person reads is
+    # `refused: {:merge_conflict, ["README.md"]}` (`conversations.md` § Taking a transition).
+    @tag route: :plain
+    test "a conversation deciding into a conflict is told in words", context do
+      %{project: project, ticket: ticket, user: user} = context
+      conflicting!(context)
+      ticket = pend_merge(ticket)
+
+      {:ok, chat} =
+        Forge.Conversations.open(project, "merge it", ticket: ticket, actor: {:user, user.id})
+
+      {:ok, _chat} = Forge.Conversations.record_turn(chat, chat_decision(1))
+
+      assert [conflict] = chat_refusals(chat)
+      assert conflict =~ "conflicts in `README.md`"
+      refute conflict =~ "merge_conflict"
+      assert Tickets.get!(ticket.id).state == "review_ready"
+    end
+
+    test "a conversation whose merge cannot even be attempted is told in words", context do
+      %{project: project, ticket: ticket, user: user} = context
+      ticket = pend_merge(ticket)
+
+      {:ok, chat} =
+        Forge.Conversations.open(project, "merge it", ticket: ticket, actor: {:user, user.id})
+
+      {:ok, _chat} = Forge.Conversations.record_turn(chat, chat_decision(1))
+
+      assert [impossible] = chat_refusals(chat)
+      assert impossible =~ "could not be attempted"
+      assert impossible =~ "no_changeset"
+    end
+
     test "a failure that is not a conflict is refused, not routed", context do
       %{ticket: ticket, user: user} = context
       ticket = pend_merge(ticket)
@@ -528,6 +562,21 @@ defmodule Forge.MergeConflictTest do
 
   # The ticket branch and the default branch both change README.md: the case #9 met in
   # production, in one file. Returns the branch's commit, recorded as changeset version 1.
+  # A turn whose conversation asked to approve the pending decision.
+  defp chat_decision(index) do
+    %{
+      "turn" => index,
+      "commit" => String.duplicate("a", 40),
+      "harness" => %{"turns" => 1, "cost_usd" => 0.01, "session_id" => "sess-1"},
+      "transition_request" => %{"decision" => "approved"}
+    }
+  end
+
+  defp chat_refusals(chat) do
+    for %{type: "chat.transition_refused", payload: payload} <- Events.for_job(chat.id),
+        do: payload["reason"]
+  end
+
   defp conflicting!(%{project: project, ticket: ticket, bare: bare}) do
     sha = commit_over_http(project, ticket.branch, "README.md", "the branch's version")
     changeset!(ticket, sha)

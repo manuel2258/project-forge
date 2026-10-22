@@ -88,6 +88,23 @@ defmodule Forge.Events do
     )
   end
 
+  @doc """
+  The oldest event of `type` for a job, or nil.
+
+  The mirror of `latest_for_job/2`, for the facts a job's *first* event settles: who opened a
+  conversation, which is the actor every transition it asks for is attributed to
+  (`docs/design/conversations.md` § Taking a transition).
+  """
+  @spec earliest_for_job(String.t(), String.t()) :: Event.t() | nil
+  def earliest_for_job(job_id, type) do
+    Repo.one(
+      from e in Event,
+        where: e.job_id == ^job_id and e.type == ^type,
+        order_by: [asc: e.seq],
+        limit: 1
+    )
+  end
+
   @doc "The newest event of `type` for a ticket, or nil."
   @spec latest_for_ticket(String.t(), String.t()) :: Event.t() | nil
   def latest_for_ticket(ticket_id, type) do
@@ -255,6 +272,13 @@ defmodule Forge.Events do
        do: "statuses #{Enum.map_join(statuses, ", ", &(&1 || "none"))} → #{outcome}"
 
   defp describe(%Event{type: "ticket.stuck", payload: %{"reason" => reason}}, _bound), do: reason
+
+  # Why a conversation's request to move its ticket moved nothing
+  # (`docs/design/conversations.md` § Taking a transition). The reason, not the request: the
+  # request is in the payload for whoever opens the event, and the row is read for what went
+  # wrong.
+  defp describe(%Event{type: "chat.transition_refused", payload: %{"reason" => reason}}, bound),
+    do: bounded(reason, 160, bound)
 
   defp describe(
          %Event{type: "transition.taken", payload: %{"from" => from, "to" => to} = p},

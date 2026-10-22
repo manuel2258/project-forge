@@ -106,7 +106,8 @@ defmodule ForgeWorker.Job.WorkspaceUserTest do
     out
   end
 
-  # The clone is the worker's own — into a directory nothing has touched — and the only one.
+  # The clone is the worker's own — into an empty volume nothing of a job has touched — and the
+  # only one. Making that volume is not the slice's business, so it is no line in `told/1`.
   test "a clone is the worker's, and the tree is the user's the moment it exists", context do
     job = assignment(context.origin)
 

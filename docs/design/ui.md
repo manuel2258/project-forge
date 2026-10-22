@@ -563,6 +563,14 @@ composer, the now line, and any open question's form.
   Any result with `is_error` is in error colour with its excerpt shown. A retry or a rate limit is
   not a line: it is what the now line says (below). Notices, `control` and `delivered` are not
   drawn, per § Motion and structure.
+- **A line of the platform's own, where the turn it is about stands.** The transcript is what
+  the two sides said, with one exception: a turn whose work did not reach the branch
+  (`conversations.md` § Commits). One warning-coloured line, `⚠` and a sentence, unboxed, after
+  that turn's last box — and wearing **neither speaker's micro label**, because the platform said
+  it and a turn that only acted has no box of its own to put it under. It is not a harness
+  `notice` event, which is still not drawn. It can only appear on a turn that has *ended* — it is
+  what closing the turn found — so it never interrupts a reply being spoken; and it ends the
+  agent's run of boxes, so whatever the agent says next is labelled again.
 - **Live, every line; finished, each run folded.** While a turn is open its action lines appear as
   their events arrive. When it ends, each run of actions between two text boxes folds into one
   line — *11 actions · edited parser.ex, lexer.ex · mix test ✗→✓* — that expands in place. An
@@ -1094,7 +1102,7 @@ card and no box, in this order:
   `current` or `other build` (below); and, on the right, *Log* — on every row, destroyed ones
   too — and the control that ends it.
 - **A refusal line**, when the machine's last join spoke a protocol this platform does not
-  accept, in `error`: *refused: protocol 3, this platform accepts 4–5 — update it*. It is drawn
+  accept, in `error`: *refused: protocol 3, this platform accepts 4–8 — update it*. It is drawn
   from the protocol the row recorded and the range the platform accepts now, so it cannot say
   something the next join would not.
 - **An unhealthy line**, when the machine said its systemd stopped answering, in `error`:

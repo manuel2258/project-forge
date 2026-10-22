@@ -551,9 +551,11 @@ ticket's base, and once the branch has merged the default branch that diff would
 other ticket's work since. So when a job's result records a `changeset` version whose commit
 contains a later default-branch commit than the base — the merge base of that commit and the
 default branch's head, when it descends from the base — the base moves there, in the same
-transaction, and `ticket.base_moved` says from where to where. Only an integrating job's checkout
-can see the default branch, so in practice that is the integrating job's result; a person's hand
-resolution moves it the same way when the next job records the branch.
+transaction, and `ticket.base_moved` says from where to where. Of the runs on a ticket's branch
+only an integrating job's checkout can see the default branch, so in practice that is the
+integrating job's result; a person's hand resolution moves it the same way when the next job
+records the branch. A conversation's checkout can see it too (`conversations.md` § Commits), but
+it commits to `chat/<id>` and records no `changeset`, so nothing of it reaches here.
 
 **A conflict can be found before the merge.** After every merge into the default branch — a
 ticket's or a conversation's — the project's other open tickets with a changeset are checked, and

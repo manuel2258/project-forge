@@ -35,6 +35,7 @@ defmodule Forge.Jobs do
   alias Forge.Events.Event
   alias Forge.Git.{Tokens, Url}
   alias Forge.Jobs.{Blobs, Commands, Job, Runs}
+  alias Forge.Projects.Project
   alias Forge.Tickets.Ticket
   alias Forge.Workers.Worker
   alias ForgeCore.Job.{Result, Spec}
@@ -51,6 +52,7 @@ defmodule Forge.Jobs do
   @integration_protocol 5
   @secrets_protocol 6
   @optional_outputs_protocol 7
+  @merge_protocol 8
 
   # How many of the merges that landed on the default branch since a ticket's base an integrating
   # job is told about by name; the rest are counted (`docs/design/job-prompt.md` § Integrating the
@@ -688,12 +690,12 @@ defmodule Forge.Jobs do
   @doc """
   The worker protocol a job needs, or 0 for any.
 
-  - **An agent — a workflow job or a conversation — needs protocol 3.** Its questions are a
-    headline and a sentence, and the release that composes its prompt and corrects its outputs is
-    what teaches and checks that. A release from before it teaches `options: [a, b]` and
-    `default:`, which this platform's parser refuses when it records the document — so the job's
-    result could never be recorded, and a chat's question would reach the page as prose
-    (`docs/design/job-prompt.md` § Output format).
+  - **A workflow job needs protocol 3**, and so would a conversation but for its own floor below.
+    Its questions are a headline and a sentence, and the release that composes its prompt and
+    corrects its outputs is what teaches and checks that. A release from before it teaches
+    `options: [a, b]` and `default:`, which this platform's parser refuses when it records the
+    document — so the job's result could never be recorded, and a chat's question would reach the
+    page as prose (`docs/design/job-prompt.md` § Output format).
   - **A command needs protocol 2**, which commands and groups of files arrived in: a release from
     before them would run a command's spec as an agent job's (`docs/design/commands.md`
     § Worker pools). Its output is a script's, not an agent's, so the questions change asks
@@ -712,6 +714,10 @@ defmodule Forge.Jobs do
     document is required, because the note that says otherwise is new with this, so it nags for
     an optional one the agent skipped and ends the job `error` on a state with no `error` edge
     (`docs/design/worker-channel.md` § Versions). A state that declares neither asks nothing more.
+  - **A conversation needs protocol 8**: it is now told the default branch, and a release from
+    before 8 acts on that without being able to squash a merge that is still open — the turn dies
+    on `reset --soft` and every turn after it does too, which is a trap a chat could not reach
+    while nothing told it the branch (ticket 11, `docs/design/worker-channel.md` § Versions).
   """
   @spec protocol(Job.t()) :: non_neg_integer()
   def protocol(%Job{} = job),
@@ -738,7 +744,7 @@ defmodule Forge.Jobs do
     if spec(job).integration, do: @integration_protocol, else: @questions_protocol
   end
 
-  defp kind_protocol(%Job{kind: :chat}), do: @questions_protocol
+  defp kind_protocol(%Job{kind: :chat}), do: @merge_protocol
   defp kind_protocol(%Job{}), do: 0
 
   @doc "How many of `parent_id`'s invocations of `command` are running now."
@@ -790,7 +796,7 @@ defmodule Forge.Jobs do
           "branch" => branch(job, ticket),
           "base" => ticket && ticket.base_commit
         }
-        |> put_default_branch(job),
+        |> put_default_branch(job, project),
       "store" =>
         %{
           "transcript_key" => transcript,
@@ -1188,16 +1194,31 @@ defmodule Forge.Jobs do
 
   defp chat_transitions(%Ticket{}, {:error, _errors}), do: []
 
-  # An integrating job's checkout fetches the default branch too; every other job's does not
-  # (`docs/design/git-hosting.md` § The job's own git).
-  defp put_default_branch(git, %Job{kind: :workflow} = job) do
+  # An integrating job's checkout fetches the default branch too, and so does a conversation's;
+  # every other job's does not (`docs/design/git-hosting.md` § The job's own git).
+  #
+  # **A conversation is told the project's, not a spec's.** It has no state and no `integration`,
+  # and it is the one job kind whose agent fetches and merges the default branch on its own
+  # initiative — which it could not do at all without this, and whose merge the squash dropped
+  # because nothing named a branch to keep (ticket 11, `docs/design/conversations.md` § Commits).
+  # Reading is all it adds: the chat's token writes `refs/heads/chat/<id>` and nothing else
+  # (`Forge.Git.Tokens.issue_for_job/3`), and `pre-receive` refuses the default branch from it.
+  defp put_default_branch(git, %Job{kind: :workflow} = job, _project) do
     case spec(job).integration do
       %{"default_branch" => branch} -> Map.put(git, "default_branch", branch)
       nil -> git
     end
   end
 
-  defp put_default_branch(git, %Job{}), do: git
+  # The struct, not a map with the key: `assignment/4` is given a `Project.t()`, and a clause that
+  # matched anything with a `default_branch` would let a partial one fall through to the catch-all
+  # and hand a conversation no default branch at all — this ticket's own failure, silently. An
+  # equivalent mutant, since every caller passes the struct: loosening it is caught by nothing,
+  # which is the reason to write the tight one rather than a test for it.
+  defp put_default_branch(git, %Job{kind: :chat}, %Project{default_branch: branch}),
+    do: Map.put(git, "default_branch", branch)
+
+  defp put_default_branch(git, %Job{}, _project), do: git
 
   @doc """
   What this job runs on: the most specific thing that says so.

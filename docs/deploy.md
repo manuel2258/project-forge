@@ -574,6 +574,16 @@ which are best-effort.
 What changes for a node that is already running, where the change is in what the platform does
 with rows it already has. Newest first.
 
+- **A conversation merges the default branch, and needs protocol 8**
+  (`design/conversations.md` § Commits, `design/worker-channel.md` § Versions). Nothing is
+  refused: the minimum stays 4, and an older machine takes every workflow job and command exactly
+  as before. But **no conversation runs until a machine speaks 8** — a template's snapshot built
+  from this release (`bin/hetzner-image`) with the template pointing at it, or
+  `bin/worker-update` on a permanent machine. Until then opening a chat leaves it waiting, and
+  its page says *no worker template … runs a worker new enough for it*. The chat's own token is
+  unchanged: it reads the whole project, as every job token has, and writes only
+  `refs/heads/chat/<id>`.
+
 - **A presentation and an optional output need protocol 7, and this project's own workflows use
   both** (`design/workflow-grammar-v1.md` § Semantics, `design/worker-channel.md` § Versions).
   Nothing is refused — the minimum stays 4 — but this entry is louder than the one below it:

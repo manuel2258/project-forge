@@ -207,6 +207,40 @@ defmodule ForgeWorker.Job.WorkspaceTest do
 
     defp rev(dir, ref), do: git!(nil, ["-C", dir, "rev-parse", ref]) |> String.trim()
 
+    # The index and the worktree in one string: what a conflicted path is staged as (`UU`) and
+    # what is modified or untracked beside it.
+    defp status(dir), do: git!(dir, ["status", "--porcelain"])
+
+    # A path with a newline in its name, conflicting on both branches: `ls-files` quotes such a
+    # name unless it is asked with `-z`.
+    defp diverge_newline(origin) do
+      for {branch, content} <- [{"ticket/1", "ours\n"}, {"main", "theirs\n"}] do
+        work = tmp_dir("newline-" <> String.replace(branch, "/", "-"))
+        git!(nil, ["clone", "--quiet", "--branch", branch, origin, work])
+        git!(work, ["config", "user.name", "newline"])
+        git!(work, ["config", "user.email", "newline@forge"])
+        File.write!(Path.join(work, "two\nlines.md"), content)
+        git!(work, ["add", "--", "two\nlines.md"])
+        git!(work, ["-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "two lines"])
+        git!(work, ["push", "--quiet", "origin", branch])
+      end
+    end
+
+    # A file with a NUL byte in it, different on each branch: git merges no such file and writes
+    # no marker in one, so the index is the only record that it conflicted.
+    defp diverge_binary(origin) do
+      for {branch, content} <- [{"ticket/1", "ours\0"}, {"main", "theirs\0"}] do
+        work = tmp_dir("binary-" <> String.replace(branch, "/", "-"))
+        git!(nil, ["clone", "--quiet", "--branch", branch, origin, work])
+        git!(work, ["config", "user.name", "binary"])
+        git!(work, ["config", "user.email", "binary@forge"])
+        File.write!(Path.join(work, "logo.png"), content)
+        git!(work, ["add", "logo.png"])
+        git!(work, ["-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "a logo"])
+        git!(work, ["push", "--quiet", "origin", branch])
+      end
+    end
+
     # What the agent is told to do: merge, resolve, commit the merge.
     defp merge_and_resolve(dir) do
       {_out, 1} = System.cmd("git", ["-C", dir, "merge", "--quiet", "origin/main"])
@@ -360,6 +394,368 @@ defmodule ForgeWorker.Job.WorkspaceTest do
 
       assert {:ok, ^dir} = Workspace.prepare(job, root, @direct)
       assert rev(dir, "refs/remotes/origin/main") == rev(origin, "refs/heads/main")
+    end
+
+    # The run ended mid-merge, with the conflict still open: `git reset --soft` is refused in the
+    # middle of a merge, and before this the whole squash died on it with the run's work neither
+    # committed nor explained (ticket 11). A conflicted tree is not work to push, so nothing is
+    # committed — and nothing is touched either, so the next run can finish the merge.
+    test "an unresolved conflict commits nothing and names the paths", context do
+      %{origin: origin, root: root, ticket: ticket} = context
+      job = integrating(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      {_out, 1} = System.cmd("git", ["-C", dir, "merge", "--quiet", "origin/main"])
+      before = status(dir)
+
+      assert {:error, {:merge_unresolved, ["README.md"]}} =
+               Workspace.commit_and_push(job, dir, "integrating: attempt 1", @direct)
+
+      # Nothing pushed; and the whole index and worktree are as the run left them, which is the
+      # claim "nothing is staged, committed or reset" makes and the one a stray `add -A` breaks.
+      assert rev(origin, "refs/heads/ticket/1") == ticket
+      assert status(dir) == before
+      assert File.exists?(Path.join([dir, ".git", "MERGE_HEAD"]))
+      assert File.read!(Path.join(dir, "README.md")) =~ "<<<<<<<"
+      assert rev(dir, "HEAD") == ticket
+    end
+
+    # **`git add` on a conflicted path clears the index's record of the conflict**, so an index
+    # with nothing unmerged says only that the agent staged something. Staging the markers and
+    # stopping is the commonest reflex there is, and judging the index alone pushed
+    # `<<<<<<< HEAD` onto the branch as the merge's resolution — with the merge kept as a second
+    # parent, so nothing would ever find that conflict again.
+    test "a conflict staged without being resolved is still unresolved", context do
+      %{origin: origin, root: root, ticket: ticket} = context
+      job = integrating(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      {_out, 1} = System.cmd("git", ["-C", dir, "merge", "--quiet", "origin/main"])
+
+      # A second file with the same markers, left untracked — `git mergetool` leaves exactly this
+      # behind as `<path>.orig`, and `add -A` would commit it. Both are named, once each and in
+      # the order a person reads them in.
+      File.write!(Path.join(dir, "AAA.orig"), "<<<<<<< HEAD\nmine\n=======\ntheirs\n>>>>>>> x\n")
+      git!(dir, ["add", "README.md"])
+
+      assert {:error, {:merge_unresolved, ["AAA.orig", "README.md"]}} =
+               Workspace.commit_and_push(job, dir, "integrating: attempt 1", @direct)
+
+      assert rev(origin, "refs/heads/ticket/1") == ticket
+      refute git!(nil, ["-C", origin, "show", ticket <> ":README.md"]) =~ "<<<<<<<"
+    end
+
+    # **An attribute must not be able to hide a conflict from the question.** `*.lock -diff`,
+    # `*.min.js binary` and `*.svg binary` are ordinary, and git's text-only readers skip exactly
+    # those paths — including a `.gitattributes` the run itself wrote and has not committed, which
+    # would otherwise take a conflicted tree from refused to pushed and commit the attribute file
+    # along with the markers.
+    test "an attribute that calls a path binary does not hide its conflict", context do
+      %{origin: origin, root: root, ticket: ticket} = context
+      job = integrating(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      {_out, 1} = System.cmd("git", ["-C", dir, "merge", "--quiet", "origin/main"])
+      File.write!(Path.join(dir, ".gitattributes"), "README.md -diff\n")
+      git!(dir, ["add", "-A"])
+
+      assert {:error, {:merge_unresolved, ["README.md"]}} =
+               Workspace.commit_and_push(job, dir, "integrating: attempt 1", @direct)
+
+      assert rev(origin, "refs/heads/ticket/1") == ticket
+    end
+
+    # A marker-shaped line is not a conflict: a Markdown heading underlined with seven `=` is one
+    # line of the three, and refusing a run for it would lose a turn's work over a file nothing
+    # conflicted in — on the default branch's own content, every turn, for ever.
+    test "a line of seven equals signs on its own is not a conflict", context do
+      %{origin: origin, root: root} = context
+      job = integrating(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      {_out, 1} = System.cmd("git", ["-C", dir, "merge", "--quiet", "origin/main"])
+      File.write!(Path.join(dir, "README.md"), "# Game, both\n")
+      File.write!(Path.join(dir, "NOTES.md"), "Heading\n=======\n\nand a line with a tab\t\n")
+      git!(dir, ["add", "-A"])
+
+      assert {:ok, head} = Workspace.commit_and_push(job, dir, "integrating: attempt 1", @direct)
+      assert git!(nil, ["-C", origin, "show", head <> ":NOTES.md"]) =~ "======="
+    end
+
+    # **`git commit` is what closes an operation**, so an agent that staged its markers and
+    # committed them leaves nothing open: no `MERGE_HEAD`, no unmerged index, and the markers
+    # still in the tree. That is the worst case, not the mildest — the squash would keep the merge
+    # as a second parent, so no later `merge-tree` would ever find that conflict again — and it is
+    # why the question is also asked of a run with a merge to keep.
+    test "a conflict the run committed itself is still refused", context do
+      %{origin: origin, root: root, ticket: ticket} = context
+      job = integrating(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      {_out, 1} = System.cmd("git", ["-C", dir, "merge", "--quiet", "origin/main"])
+      git!(dir, ["add", "-A"])
+      git!(dir, ["-c", "commit.gpgsign=false", "commit", "--quiet", "--no-edit"])
+      refute File.exists?(Path.join([dir, ".git", "MERGE_HEAD"]))
+
+      assert {:error, {:merge_unresolved, ["README.md"]}} =
+               Workspace.commit_and_push(job, dir, "integrating: attempt 1", @direct)
+
+      assert rev(origin, "refs/heads/ticket/1") == ticket
+    end
+
+    # And not asked of a run with no merge to keep and nothing open: a repository whose own files
+    # show a conflict — a design note about one, a `.orig` nobody cleaned up — is asked about
+    # while it is resolving or merging, and not on every run for the rest of time.
+    test "a file that shows a conflict is no business of a run that merged nothing", context do
+      %{origin: origin, root: root} = context
+      job = assignment(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      File.write!(Path.join(dir, "NOTES.md"), "<<<<<<< HEAD\nmine\n=======\ntheirs\n>>>>>>> x\n")
+
+      assert {:ok, head} = Workspace.commit_and_push(job, dir, "planning: attempt 1", @direct)
+      assert git!(nil, ["-C", origin, "show", head <> ":NOTES.md"]) =~ "<<<<<<<"
+    end
+
+    # **The dialect is not the repository's to choose.** `grep.patternType` is read from a config
+    # the job's user can write, and `fixed` makes every pattern a literal — `^` included — so a
+    # conflicted tree matched nothing and was called resolved.
+    test "a repository's own grep config cannot switch the question off", context do
+      %{origin: origin, root: root, ticket: ticket} = context
+      job = integrating(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      git!(dir, ["config", "grep.patternType", "fixed"])
+      {_out, 1} = System.cmd("git", ["-C", dir, "merge", "--quiet", "origin/main"])
+      git!(dir, ["add", "-A"])
+
+      assert {:error, {:merge_unresolved, ["README.md"]}} =
+               Workspace.commit_and_push(job, dir, "integrating: attempt 1", @direct)
+
+      assert rev(origin, "refs/heads/ticket/1") == ticket
+    end
+
+    # A git that failed is not a tree that is clean. Provoked with a config git refuses outright,
+    # which is also what a `grep.patternType` it does not know would do: the run fails saying so,
+    # rather than passing on an answer nobody got.
+    test "a git that fails the question fails the run", context do
+      %{origin: origin, root: root, ticket: ticket} = context
+      job = integrating(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      {_out, 1} = System.cmd("git", ["-C", dir, "merge", "--quiet", "origin/main"])
+      git!(dir, ["add", "-A"])
+      git!(dir, ["config", "grep.threads", "not-a-number"])
+
+      assert {:error, {128, out}} =
+               Workspace.commit_and_push(job, dir, "integrating: attempt 1", @direct)
+
+      assert out =~ "grep.threads"
+      assert rev(origin, "refs/heads/ticket/1") == ticket
+    end
+
+    # **What git chatters is not an answer.** `git/3` folds stderr into stdout, so a repository
+    # whose `core.fsmonitor` writes there mixes its lines into every reply. The verdicts are exit
+    # statuses, which that cannot touch; the names are filtered to what git prints as a path, so
+    # the chatter does not reach the person as a conflicted file.
+    test "a repository that chatters on stderr is still read correctly", context do
+      %{origin: origin, root: root} = context
+      job = integrating(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      monitor = Path.join(root, "chatter.sh")
+      File.write!(monitor, "#!/bin/sh\necho 'fsmonitor chatter' >&2\nexit 1\n")
+      File.chmod!(monitor, 0o755)
+      git!(dir, ["config", "core.fsmonitor", monitor])
+      {_out, 1} = System.cmd("git", ["-C", dir, "merge", "--quiet", "origin/main"])
+
+      assert {:error, {:merge_unresolved, ["README.md"]}} =
+               Workspace.commit_and_push(job, dir, "integrating: attempt 1", @direct)
+
+      # And with the markers staged, where the answer comes from `git grep` instead.
+      git!(dir, ["add", "-A"])
+
+      assert {:error, {:merge_unresolved, paths}} =
+               Workspace.commit_and_push(job, dir, "integrating: attempt 1", @direct)
+
+      refute Enum.any?(paths, &(&1 =~ "chatter"))
+    end
+
+    # **What git wrote to stderr is not a conflicted file.** `git/3` folds stderr into stdout, so a
+    # directory the run cannot read makes `git grep` warn into the middle of its own answer — and
+    # that warning went into the reason, and from there into the sentence the person in a chat
+    # reads. The verdict is an exit status, which the warning cannot touch; the names keep only
+    # what git prints as a path, so the worst it costs is a name.
+    test "what git warns about is kept out of the paths a person reads", context do
+      %{origin: origin, root: root, ticket: ticket} = context
+      job = integrating(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      {_out, 1} = System.cmd("git", ["-C", dir, "merge", "--quiet", "origin/main"])
+      git!(dir, ["add", "-A"])
+      locked = Path.join(dir, "locked")
+      File.mkdir_p!(locked)
+      File.write!(Path.join(locked, "x.md"), "<<<<<<< HEAD\na\n=======\nb\n>>>>>>> x\n")
+      File.chmod!(locked, 0o000)
+      on_exit(fn -> File.chmod(locked, 0o755) end)
+
+      assert {:error, {:merge_unresolved, paths}} =
+               Workspace.commit_and_push(job, dir, "integrating: attempt 1", @direct)
+
+      assert rev(origin, "refs/heads/ticket/1") == ticket
+      refute Enum.any?(paths, &(&1 =~ "Permission denied"))
+    end
+
+    # A path with a newline in it, which `ls-files` quotes unless it is asked with `-z`: the name
+    # a person reads is the name on disk.
+    test "a conflicted path with a newline in its name is named whole", context do
+      %{origin: origin, root: root} = context
+      job = integrating(origin)
+      diverge_newline(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      {_out, 1} = System.cmd("git", ["-C", dir, "merge", "--quiet", "origin/main"])
+
+      assert {:error, {:merge_unresolved, paths}} =
+               Workspace.commit_and_push(job, dir, "integrating: attempt 1", @direct)
+
+      assert "two\nlines.md" in paths
+    end
+
+    # Resolved and staged, and the run ended before `git commit`: the same refusal from git, and
+    # the work was there to keep. The merge is finished for it, which is what makes `merged/4`
+    # see the default branch in the run's history at all.
+    test "a merge resolved but not committed is finished and kept", context do
+      %{origin: origin, root: root, ticket: ticket, main: main} = context
+      job = integrating(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      {_out, 1} = System.cmd("git", ["-C", dir, "merge", "--quiet", "origin/main"])
+      File.write!(Path.join(dir, "README.md"), "# Game, both\n")
+      git!(dir, ["add", "README.md"])
+
+      assert {:ok, head} = Workspace.commit_and_push(job, dir, "integrating: attempt 1", @direct)
+
+      assert rev(origin, "refs/heads/ticket/1") == head
+      assert rev(origin, head <> "^1") == ticket
+      assert rev(origin, head <> "^2") == main
+      assert git!(nil, ["-C", origin, "show", head <> ":README.md"]) == "# Game, both\n"
+      refute File.exists?(Path.join([dir, ".git", "MERGE_HEAD"]))
+    end
+
+    # **An edit left unstaged is not a resolution**, which is a decision and not an oversight:
+    # judging the content instead would need a model the operation does not have for a binary
+    # conflict or a `-diff` path, where nothing but `git add` can say the agent chose. So the run
+    # is refused, the paths are named, and the tree is left — a conversation's next turn stages it
+    # and the work goes with that turn.
+    test "a resolution the run never staged is refused, and the tree is left alone", context do
+      %{origin: origin, root: root, ticket: ticket} = context
+      job = integrating(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      {_out, 1} = System.cmd("git", ["-C", dir, "merge", "--quiet", "origin/main"])
+      File.write!(Path.join(dir, "README.md"), "# Game, both\n")
+      before = status(dir)
+
+      assert {:error, {:merge_unresolved, ["README.md"]}} =
+               Workspace.commit_and_push(job, dir, "integrating: attempt 1", @direct)
+
+      assert rev(origin, "refs/heads/ticket/1") == ticket
+      assert status(dir) == before
+      assert File.read!(Path.join(dir, "README.md")) == "# Game, both\n"
+    end
+
+    # **A binary conflict can only be resolved by staging**: git writes no marker in one, leaves
+    # *ours* in the worktree, and no reading of the content can tell a choice from an untouched
+    # file. The index is what knows, which is why it is what is asked.
+    test "a binary conflict is unresolved until it is staged", context do
+      %{origin: origin, root: root} = context
+      job = integrating(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      diverge_binary(origin)
+      {:ok, ^dir} = Workspace.prepare(job, root, @direct)
+      {_out, 1} = System.cmd("git", ["-C", dir, "merge", "--quiet", "origin/main"])
+
+      assert {:error, {:merge_unresolved, paths}} =
+               Workspace.commit_and_push(job, dir, "integrating: attempt 1", @direct)
+
+      assert "logo.png" in paths
+
+      # Staging it *is* the resolution — ours, deliberately — and the squash keeps the merge. The
+      # text conflict beside it is resolved the ordinary way, since nothing is resolved by halves.
+      File.write!(Path.join(dir, "README.md"), "# Game, both\n")
+      git!(dir, ["add", "-A"])
+      assert {:ok, head} = Workspace.commit_and_push(job, dir, "integrating: attempt 1", @direct)
+      assert rev(origin, head <> "^2") == rev(origin, "refs/heads/main")
+    end
+
+    # **`MERGE_HEAD` is not the question git asks.** `reset --soft` refuses on an unmerged index
+    # as well (`builtin/reset.c`), and a conflicted cherry-pick, rebase or revert has no
+    # `MERGE_HEAD` at all — so a guard that asked only for one died on exactly the error ticket 11
+    # is about, with no paths in it. There is no second parent to keep for any of them: what the
+    # tree needs is the conflict gone.
+    for {op, args} <- [
+          {"cherry-pick", ["cherry-pick", "origin/main"]},
+          {"rebase", ["rebase", "origin/main"]},
+          {"revert", ["revert", "--no-edit", "origin/main"]}
+        ] do
+      test "a conflicted #{op} is refused, not run into a git error", context do
+        %{origin: origin, root: root, ticket: ticket} = context
+        job = integrating(origin)
+        {:ok, dir} = Workspace.prepare(job, root, @direct)
+        {_out, code} = System.cmd("git", ["-C", dir] ++ unquote(args), stderr_to_stdout: true)
+        assert code != 0, "#{unquote(op)} was expected to conflict"
+
+        assert {:error, {:merge_unresolved, ["README.md"]}} =
+                 Workspace.commit_and_push(job, dir, "integrating: attempt 1", @direct)
+
+        # And the same with the markers staged, where the index has nothing left to say and only
+        # the sequencer's own head says an operation is open at all.
+        git!(dir, ["add", "-A"])
+
+        assert {:error, {:merge_unresolved, ["README.md"]}} =
+                 Workspace.commit_and_push(job, dir, "integrating: attempt 1", @direct)
+
+        assert rev(origin, "refs/heads/ticket/1") == ticket
+      end
+    end
+
+    # **A finished rebase leaves `REBASE_HEAD` behind for ever.** Asking that ref said an operation
+    # was open for the rest of the worktree's life — every later turn of a conversation — so one
+    # file carrying markers, which this one has, meant nothing was ever committed again and the
+    # person was told a conflict was unresolved in a file that has none. The rebase's own
+    # directory is what git asks, and it goes when the rebase does. This run keeps no merge, so
+    # the one thing that could open the gate is the operation.
+    test "a rebase that finished is not an operation in progress", context do
+      %{origin: origin, root: root} = context
+      job = assignment(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      git!(dir, ["fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main"])
+      {_out, 1} = System.cmd("git", ["-C", dir, "rebase", "origin/main"])
+      File.write!(Path.join(dir, "README.md"), "# Game, both\n")
+      git!(dir, ["add", "-A"])
+
+      {_out, 0} =
+        System.cmd("git", ["-C", dir, "-c", "commit.gpgsign=false", "rebase", "--continue"],
+          env: [{"GIT_EDITOR", "true"}]
+        )
+
+      # The ref git leaves behind, and the directory it does not: the first is why this test
+      # exists, the second is what the code asks.
+      assert File.exists?(Path.join([dir, ".git", "REBASE_HEAD"]))
+      refute File.exists?(Path.join([dir, ".git", "rebase-merge"]))
+
+      File.write!(Path.join(dir, "stale.orig"), "<<<<<<< HEAD\na\n=======\nb\n>>>>>>> x\n")
+
+      assert {:ok, head} = Workspace.commit_and_push(job, dir, "planning: attempt 1", @direct)
+      assert rev(origin, "refs/heads/ticket/1") == head
+    end
+
+    test "a cherry-pick resolved and staged is squashed, with one parent", context do
+      %{origin: origin, root: root, ticket: ticket} = context
+      job = integrating(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      {_out, 1} = System.cmd("git", ["-C", dir, "cherry-pick", "origin/main"])
+      File.write!(Path.join(dir, "README.md"), "# Game, both\n")
+      git!(dir, ["add", "-A"])
+
+      assert {:ok, head} = Workspace.commit_and_push(job, dir, "integrating: attempt 1", @direct)
+
+      assert rev(origin, head <> "^1") == ticket
+      assert git!(nil, ["-C", origin, "show", head <> ":README.md"]) == "# Game, both\n"
+
+      # Not a merge: nothing named `origin/main` as merged, and a cherry-pick does not merge it.
+      assert {_out, 128} =
+               System.cmd("git", ["-C", origin, "rev-parse", "--verify", head <> "^2"],
+                 stderr_to_stdout: true
+               )
     end
 
     # The default branch is fetched after the ticket's, and a fetch writes FETCH_HEAD, which is

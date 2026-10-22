@@ -636,8 +636,9 @@ runs in:
   never a failed run: warmth is not correctness.
 
 **Promotion happens only after the run committed and pushed**, and that is what makes the template
-safe to snapshot without cleaning. `Checkout.squash/4` does `reset --soft origin/<branch>` then
-`add -A`, so after a successful run every untracked file that was not ignored has been committed,
+safe to snapshot without cleaning. `Checkout.squash/5` settles a conflict the run left open and
+then does `reset --soft origin/<branch>` and `add -A`, so after a successful run every untracked
+file that was not ignored has been committed,
 and what is left beside the checkout is the ignored build output the whole mechanism is for. A run
 that failed before it pushed keeps its worktree's untracked debris, and promoting that would hand
 the next job exactly the inheritance the clean rule exists to prevent. So a failed run promotes

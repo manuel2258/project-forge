@@ -76,7 +76,7 @@ defmodule ForgeWorker.Job.Workspace do
   this one left off rather than where the project's seed was published.
 
   **Only after the run committed and pushed**, which is what makes the template safe to snapshot
-  from without cleaning: `Checkout.squash/4` stages everything with `add -A`, so what is left
+  from without cleaning: `Checkout.squash/5` stages everything with `add -A`, so what is left
   beside the checkout is the ignored build output and nothing a later run could mistake for its
   own work. A run that ended before that keeps the template the ticket already had.
 
@@ -404,8 +404,10 @@ defmodule ForgeWorker.Job.Workspace do
 
   defp remote(git), do: "origin/" <> git["branch"]
 
-  # An integrating job's default branch, as its checkout fetched it: what the squash keeps as a
-  # second parent when the run merged it (`Checkout.squash/5`).
+  # The default branch an integrating job or a conversation was given, as its checkout fetched it:
+  # what the squash keeps as a second parent when the run merged it (`Checkout.squash/5`). Kind is
+  # not asked here and is not knowable from an assignment's `git`; the platform decides which runs
+  # are told a default branch (`Forge.Jobs.assignment/4`).
   defp merged(%{"default_branch" => default}) when is_binary(default),
     do: "refs/remotes/origin/" <> default
 

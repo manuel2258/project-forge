@@ -9,7 +9,11 @@ states:
     env: default
     inputs: [ticket]
     produces: [refinement.md]
-    budget: { turns: 40, cost: 3.00 }
+    # Turns at 60 and not 40, as on every state here whose budget is a few dollars: a turn buys
+    # no inference and a job stopped by its turn ceiling throws away everything it spent, so the
+    # cost ceiling is the one that should bind. Ticket 7's `planning` died at turn 51 of 50 with
+    # $1.11 of its $4.00 unspent, and one of its four refinements used 36 of these 40.
+    budget: { turns: 60, cost: 3.00 }
 
   # `implementation.md` is here for the same reason `bug.yml`'s `diagnosing` reads it: the ticket
   # comes back on `plan_invalid`, and a re-plan that cannot read why re-derives the same plan. It
@@ -19,7 +23,7 @@ states:
     env: default
     inputs: [ticket, refinement.md, implementation.md]
     produces: [plan.md]
-    budget: { turns: 50, cost: 4.00 }
+    budget: { turns: 80, cost: 4.00 }
 
   implementing:
     prompt: agents/implement.md
@@ -35,9 +39,14 @@ states:
   checking:
     extends: checking
 
+  # `report.md` is this state's own last version, and optional: the way in from `checking` on a
+  # first pass has written no review. It is here so that a second round can verify the fixes to
+  # what it found and read only what changed since, rather than re-deriving the whole diff at
+  # full price — ticket 7's second review spent $21.96 doing exactly that, and its fifth, scoped,
+  # cost $4.13.
   reviewing:
     extends: reviewing
-    inputs: [refinement.md, plan.md, implementation.md, changeset]
+    inputs: [refinement.md, plan.md, implementation.md, report.md, changeset]
 
   presenting:
     extends: presenting

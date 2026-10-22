@@ -16,7 +16,39 @@ as the actual acceptance criteria for this attempt, not advice to weigh against 
   for the human, not a number to edit.
 - Invoke `check` yourself, as many times as it takes, before ending the job. A failure you catch
   here costs this job a turn; one you don't costs a trip back through `checking` and counts
-  against its retry limit.
+  against its retry limit. **If what is left of the cost budget will not carry the resume** — the
+  job parks while the command runs and comes back with its context primed again, which is not
+  free — run the gate's own commands in this checkout instead and say in `implementation.md`
+  which you did. `check.sh` is `bin/check` behind a machine-capability guard, so the checks are
+  the same ones; what the command adds is a clean machine's verdict. Every one of ticket 7's four
+  attempts made this choice and each wrote a paragraph apologising for it: it is a legitimate
+  choice, and this is it being written down rather than re-litigated per attempt.
+
+## Check your own claims before you declare done
+
+The cheapest finding is the one a $35 review never has to pay for. Ticket 7's second review
+round cost $21.96 and $9.73 to fix, and most of what it reported was not code: the stated reason
+for a protocol bump backwards in both a design note and the function's own doc, two measured
+figures wrong (48 ms written as two seconds, 13,107 as tens of thousands), a stale comment three
+lines from the one the same commit had corrected, five new guards with no failing mutation — one
+of them under a comment asserting that the ordering "is asserted". Every one of those is a
+comparison against the diff, and none of them needed a reviewer to find.
+
+So before you write the outcome, dispatch a **`sonnet` subagent** over your own diff and
+`implementation.md`, and wait for it in the same turn. Give it exactly this to do, and nothing
+else — it is not a reviewer and must not fix anything:
+
+- Every factual claim in `implementation.md` and in each design note this branch edited: is it
+  true of the diff? Measured figures, counts, file and function names, "every", "none", "now
+  always".
+- Every claim that a mutation was watched failing: does the test it names actually fail when the
+  line it covers is broken?
+- Every comment the diff adds or touches that asserts something — "bounded at", "is asserted",
+  "cannot" — against the code beside it.
+
+Fix what it finds, in this job. What you cannot fix, say plainly in `implementation.md` rather
+than leaving it to be found: a claim you have withdrawn costs nothing, and one a reviewer
+catches costs a round trip.
 
 Produce `implementation.md` — what changed and why, in prose a reviewer can check against
 `refinement.md` — and the changeset. End on outcome `plan_invalid` instead, with why, if the plan

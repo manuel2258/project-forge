@@ -290,12 +290,25 @@ defmodule ForgeWorker.Job.Workspace do
   # clone never got a template and every job on it cloned cold again, for the whole life of the
   # ticket. The warm paths never had this: `from_volume/5` snapshots *into* `dir`, so there the
   # worktree is a volume before git sees it.
+  #
+  # **And a failure takes the volume with it**, as `from_volume/5`'s does. `git clone` removes the
+  # directory only when git made it, so a clone that fails would otherwise leave one behind — and
+  # `prepare/3` reads a worktree that is already there as an unfinished run's own and refreshes
+  # it, so that leftover would send this job's next attempt past the ticket's template and into a
+  # cold clone again. Nothing of anyone's is in it to lose: `clone/3` is reached only when `dir`
+  # did not exist. Nothing sweeps `worktrees/*` to clear it either — `Dir.sweep/2` is given
+  # `jobs/` and `sweep/2` here reads `volumes/ticket/*`.
   defp clone(assignment, dir, user) do
     volume(dir, assignment["job_id"])
 
     with :ok <- Checkout.ensure(checkout_opts(assignment, dir, user, [])),
-         :ok <- Slice.own(user, [dir]),
-         do: {:ok, dir}
+         :ok <- Slice.own(user, [dir]) do
+      {:ok, dir}
+    else
+      {:error, reason} ->
+        Volume.impl().delete(dir)
+        {:error, reason}
+    end
   end
 
   # Best effort, like every other volume operation here and for the same reason: a volume is

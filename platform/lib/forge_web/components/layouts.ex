@@ -331,11 +331,15 @@ defmodule ForgeWeb.Layouts do
   attr :prefix, :string, default: "capacity", doc: "the ids' prefix: one gauge per prefix"
 
   @doc """
-  Per window, five-hour then weekly: ten ticks of mean utilization when any credential reported
-  one, and a countdown to the soonest reset whenever a window is known. Neutral, never accent —
-  time resolves it, not a person (`docs/design/capacity.md` § Two objects). What it averages over
-  is in the title, because a mean over the credentials that happened to report is a different
-  claim from one over all of them.
+  Per window, five-hour then weekly: the mean utilization as a percentage and as ten ticks when
+  any credential reported one, and a countdown to the soonest reset whenever a window is known.
+  Neutral, never accent — time resolves it, not a person (`docs/design/capacity.md` § Two
+  objects). What it averages over is in the title, because a mean over the credentials that
+  happened to report is a different claim from one over all of them.
+
+  The number and the title's figure are the same expression, so the gauge cannot read one way and
+  its tooltip another. The ticks keep their `aria-label`, which means a screen reader hears the
+  percentage twice — the same figure, rather than a contradiction.
 
   The top bar draws it, and so does a work screen's context strip, in the same compact form.
   """
@@ -350,6 +354,10 @@ defmodule ForgeWeb.Layouts do
         class="flex items-center gap-1.5"
       >
         <span>{label}</span>
+        <%!-- The figure as a number, beside the ticks and not nested in them: the ticks span is
+        addressed as the gauge's one `[aria-label]`, and a child of it would read as an
+        eleventh tick. --%>
+        <span :if={@capacity[type].mean}>{round(@capacity[type].mean * 100)}%</span>
         <span
           :if={@capacity[type].mean}
           class="flex gap-px"

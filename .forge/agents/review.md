@@ -12,7 +12,7 @@ the commit that version reviewed — not the whole changeset over again.
 
 This is where the money goes. Ticket 7's second review cost $21.96 re-deriving a diff it had
 already read, because `report.md` was not an input and nothing told it what it had already found;
-its fifth, scoped to one integration and sixteen mutations, cost $4.13 and was the more useful
+its eighth, scoped to one integration and sixteen mutations, cost $4.13 and was the more useful
 document. A full re-read of unchanged code is not thoroughness, it is the same reading bought
 twice.
 
@@ -67,9 +67,8 @@ unread. This has happened — ticket 7's `reviewing` attempts 6 and 7 both dispa
 lens in the background, both ended their turn, both had it killed, and both reported `done`. The
 pass neither had run found two uncaught mutations when attempt 8 finally ran it in the foreground.
 So: dispatch the lenses you need, then block on them before you say anything. If a lens cannot
-finish inside what is left of the budget, say in the report that it did not run and set the
-outcome below accordingly — an unrun lens named is worth something, an unrun lens reported as
-clean is worth less than nothing.
+finish at all, name it in the report as not run and take the verdict rule below — an unrun lens
+named is worth something, an unrun lens reported as clean is worth less than nothing.
 
 ## Write `report.md` as you go
 
@@ -78,6 +77,12 @@ reports in. Do not hold everything for one write at the end: this state can stop
 budget inside a single turn of yours, and what is on disk then is the whole of what a person gets.
 A report listing two confirmed findings and saying which lenses had not reported yet is worth a
 great deal; an empty `out/` is worth nothing.
+
+**Name the commit you reviewed, in every version.** `git rev-parse HEAD` in the opening lines,
+beside the base you diffed against. It is what makes the scoping above possible: the next round
+reads this document to find out where to start, and a report that does not say what it covered
+leaves it no choice but to read everything again. It is also what tells a person whether the
+report beside the diff is the one for that diff.
 
 **Every write leaves a whole document** — the front matter opened and closed, the prose finished.
 A half-written file is not a shorter report, it is no report: a `report.md` whose `---` block is

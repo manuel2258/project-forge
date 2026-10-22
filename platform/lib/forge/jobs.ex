@@ -35,6 +35,7 @@ defmodule Forge.Jobs do
   alias Forge.Events.Event
   alias Forge.Git.{Tokens, Url}
   alias Forge.Jobs.{Blobs, Commands, Job, Runs}
+  alias Forge.Projects.Project
   alias Forge.Tickets.Ticket
   alias Forge.Workers.Worker
   alias ForgeCore.Job.{Result, Spec}
@@ -50,6 +51,7 @@ defmodule Forge.Jobs do
   @questions_protocol 3
   @integration_protocol 5
   @secrets_protocol 6
+  @merge_protocol 7
 
   # How many of the merges that landed on the default branch since a ticket's base an integrating
   # job is told about by name; the rest are counted (`docs/design/job-prompt.md` § Integrating the
@@ -702,6 +704,10 @@ defmodule Forge.Jobs do
   - **A job that names a secret needs protocol 6**, whatever its kind: a release from before it
     ignores the assignment's `secrets` and would run the job without them, where it should not
     run at all (`docs/design/secrets.md` § Delivery). A job that names none asks nothing more.
+  - **A conversation needs protocol 7**: it is now told the default branch, and a release from
+    before 7 acts on that without being able to squash a merge that is still open — the turn dies
+    on `reset --soft` and every turn after it does too, which is a trap a chat could not reach
+    while nothing told it the branch (ticket 11, `docs/design/worker-channel.md` § Versions).
   """
   @spec protocol(Job.t()) :: non_neg_integer()
   def protocol(%Job{secret_names: [_ | _]} = job), do: max(kind_protocol(job), @secrets_protocol)
@@ -713,7 +719,7 @@ defmodule Forge.Jobs do
     if spec(job).integration, do: @integration_protocol, else: @questions_protocol
   end
 
-  defp kind_protocol(%Job{kind: :chat}), do: @questions_protocol
+  defp kind_protocol(%Job{kind: :chat}), do: @merge_protocol
   defp kind_protocol(%Job{}), do: 0
 
   @doc "How many of `parent_id`'s invocations of `command` are running now."
@@ -1107,7 +1113,12 @@ defmodule Forge.Jobs do
     end
   end
 
-  defp put_default_branch(git, %Job{kind: :chat}, %{default_branch: branch}),
+  # The struct, not a map with the key: `assignment/4` is given a `Project.t()`, and a clause that
+  # matched anything with a `default_branch` would let a partial one fall through to the catch-all
+  # and hand a conversation no default branch at all — this ticket's own failure, silently. An
+  # equivalent mutant, since every caller passes the struct: loosening it is caught by nothing,
+  # which is the reason to write the tight one rather than a test for it.
+  defp put_default_branch(git, %Job{kind: :chat}, %Project{default_branch: branch}),
     do: Map.put(git, "default_branch", branch)
 
   defp put_default_branch(git, %Job{}, _project), do: git

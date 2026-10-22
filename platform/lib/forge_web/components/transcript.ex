@@ -8,8 +8,9 @@ defmodule ForgeWeb.Transcript do
   turn is open, and each run folded into one line once it has ended, with a failure kept visible
   beneath the fold.
 
-  A turn whose work did not reach the branch carries a line under it saying so: the one thing in
-  here the platform says rather than either side (`Forge.Conversations`'s `uncommitted`).
+  **A notice is the platform's own line**, standing where the turn it is about stands and wearing
+  neither side's label: a turn whose work did not reach the branch
+  (`docs/design/ui.md` § Talk).
 
   **A message keeps the line breaks it was written with.** The body is Markdown, which joins
   single newlines into one paragraph; the `msg` class restores them (`app.css`). That is a rule of
@@ -36,7 +37,7 @@ defmodule ForgeWeb.Transcript do
       id={"said-#{index}"}
     >
       <div
-        :if={labelled?}
+        :if={labelled? and message.role != :notice}
         class="flex items-baseline gap-2 font-mono text-[11px] tracking-[.14em] uppercase opacity-50"
       >
         <%= if message.role == :user do %>
@@ -60,11 +61,15 @@ defmodule ForgeWeb.Transcript do
         folded={message.turn != nil or not @live}
       />
 
-      <%!-- What the turn's work did not do, where the turn is: a person reading the
-            conversation is told their work is not on the branch, which otherwise only the
-            machine's log says (`docs/design/conversations.md` § Commits). --%>
-      <p :if={message[:uncommitted]} class="chat-uncommitted text-sm/[1.55] text-warning">
-        ⚠ {message[:uncommitted]}
+      <%!-- Neither side's: the platform saying this turn's work is not on the branch, which
+            otherwise only the machine's log says (`docs/design/conversations.md` § Commits). --%>
+      <p
+        :if={message.role == :notice}
+        class="chat-uncommitted flex gap-2 text-sm/[1.55] text-warning"
+        data-said="forge"
+      >
+        <span aria-hidden="true">⚠</span>
+        <span>{message.text}</span>
       </p>
     </li>
     """

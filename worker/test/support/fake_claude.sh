@@ -266,6 +266,13 @@ case "${FAKE_SCENARIO:-success}" in
     printf 'edited by the agent\n' > CHANGED.md
     emit "$result_success"
     ;;
+  # A run told to integrate that merges and stops with the conflict open: the ending that used to
+  # die on `reset --soft` and leave the ticket in `error` with a bare git error (ticket 11).
+  conflicted_merge)
+    printf -- '---\noutcome: done\n---\n# Report\n\nMerged.\n' > "$doc"
+    git merge --quiet origin/main >&2 || true
+    emit "$result_success"
+    ;;
   # A run that ends with work in the tree it never committed: the mutation lens of ticket 1,
   # killed between breaking the code and restoring it. A tracked file modified and an untracked
   # one written, which is both halves of what `git add -A` would sweep into a commit.

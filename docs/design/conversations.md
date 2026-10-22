@@ -190,7 +190,7 @@ end; a conversation has none until a person says so, so each turn is committed a
 the platform records the branch head the moment it hears about a turn, and work that is not on the
 branch is work a lost machine takes with it.
 
-That this accumulates rather than amends was measured, not read: `Checkout.squash/4` resets to
+That this accumulates rather than amends was measured, not read: `Checkout.squash/5` resets to
 `origin/<branch>` before committing, which looks as though every turn would rewrite the last into
 one squashed commit. Pushing moves that remote-tracking ref, so turn two is built on turn one. The
 opposite reading is equally plausible from the code and would quietly lose each turn's history,
@@ -206,13 +206,20 @@ next merge found the same conflict again, which a production chat resolved three
 (ticket 11). It widens nothing the chat may write — the token's scope is `refs/heads/chat/<id>`
 and the hook refuses the default branch from it, as from any job.
 
-**A turn that ends mid-merge keeps its work and says so.** Resolved and not committed, the squash
+**A turn that ends mid-conflict keeps its work and says so.** Resolved — judged on the content,
+not on what was staged (`git-hosting.md` § Non-fast-forward on a ticket branch) — the squash
 finishes the merge and the turn commits as usual. Still conflicted, nothing is committed or pushed
-and the tree is left as the agent left it, so the next turn can finish it — and the turn reports
-`uncommitted` with the conflicted paths, which is kept on its `chat.turn` event and drawn with
-that turn in the conversation. The machine's log says it too (`turn.uncommitted`), but that log is
-read off the machine by its owner and not by the person in the chat, who used to be told nothing
-at all: the turn looked committed, and the work went with the machine.
+and the tree is left as the agent left it, which for a conversation means the next turn can finish
+it: a chat keeps its worktree from turn to turn.
+
+**And the turn says so in the conversation.** Its report carries `uncommitted` — the kind of
+failure, and the conflicted paths for the one kind a person can act on — the `chat.turn` event
+keeps it, and the page draws a line of the platform's own where that turn stands (`ui.md` § Talk).
+**Every turn that did not reach the branch draws one**, not only a conflicted one: a refused
+credential, a hook, a platform that was not there all say the same first thing, which is the part
+its person needs. The machine's log says it too (`turn.uncommitted`), but that log is read off the
+machine by its owner and not by the person in the chat, who used to be told nothing at all: the
+turn looked committed, and the work went with the machine.
 
 This keeps a conversation's work out of a ticket's branch, which matters most for a ticket chat:
 the ticket's branch is written by its jobs, and a chat writing the same ref would race them and

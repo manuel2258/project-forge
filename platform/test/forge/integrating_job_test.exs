@@ -89,12 +89,12 @@ defmodule Forge.IntegratingJobTest do
   test "is told twenty of the merges that landed, and how many more", context do
     %{project: project, bare: bare, ticket: ticket, job: job} = context
     work = Path.join(tmp_dir("landed"), "work")
-    {_out, 0} = git(Path.dirname(work), ["clone", "-q", "--branch", "main", bare, work])
+    {_out, 0} = job_git(Path.dirname(work), ["clone", "-q", "--branch", "main", bare, work])
 
     for n <- 1..21 do
       File.write!(Path.join(work, "landed-#{n}.txt"), "#{n}\n")
-      {_out, 0} = git(work, ["add", "."])
-      {_out, 0} = git(work, ["commit", "-qm", "Merge ticket/#{100 + n}"])
+      {_out, 0} = job_git(work, ["add", "."])
+      {_out, 0} = job_git(work, ["commit", "-qm", "Merge ticket/#{100 + n}"])
     end
 
     {_out, 0} =
@@ -116,13 +116,13 @@ defmodule Forge.IntegratingJobTest do
   test "is told the default branch's merges, not what each brought in", context do
     %{project: project, bare: bare, ticket: ticket, job: job, main: main} = context
     work = Path.join(tmp_dir("first-parent"), "work")
-    {_out, 0} = git(Path.dirname(work), ["clone", "-q", "--branch", "main", bare, work])
-    {_out, 0} = git(work, ["checkout", "-q", "-b", "side"])
+    {_out, 0} = job_git(Path.dirname(work), ["clone", "-q", "--branch", "main", bare, work])
+    {_out, 0} = job_git(work, ["checkout", "-q", "-b", "side"])
     File.write!(Path.join(work, "side.txt"), "a ticket's own commit\n")
-    {_out, 0} = git(work, ["add", "."])
-    {_out, 0} = git(work, ["commit", "-qm", "a ticket's own commit"])
-    {_out, 0} = git(work, ["checkout", "-q", "main"])
-    {_out, 0} = git(work, ["merge", "-q", "--no-ff", "-m", "Merge ticket/11: Side", "side"])
+    {_out, 0} = job_git(work, ["add", "."])
+    {_out, 0} = job_git(work, ["commit", "-qm", "a ticket's own commit"])
+    {_out, 0} = job_git(work, ["checkout", "-q", "main"])
+    {_out, 0} = job_git(work, ["merge", "-q", "--no-ff", "-m", "Merge ticket/11: Side", "side"])
 
     {_out, 0} =
       System.cmd("git", ["push", "-q", "origin", "HEAD:refs/heads/main"],
@@ -158,6 +158,22 @@ defmodule Forge.IntegratingJobTest do
     assert assignment["spec"]["integration"] == nil
   end
 
+  # The kind that is neither: a command reads a commit and merges nothing, so it is told no
+  # default branch either. Without a case for it, the clause that refuses one was only ever
+  # reached by a workflow job without an integration, which lands on the first clause.
+  test "a command is given no default branch", context do
+    %{project: project, ticket: ticket, job: job} = context
+
+    # This job's own spec, integration and all: the clause dispatches on the kind, and a command
+    # that still carried an integration is the sharpest version of the question.
+    command = %Forge.Jobs.Job{job | kind: :command}
+    {:ok, token, _row} = Tokens.issue_for_job(command, ticket, project)
+
+    assignment = Jobs.assignment(command, ticket, project, token)
+
+    refute Map.has_key?(assignment["git"], "default_branch")
+  end
+
   # Read, yes — a job's token has always read the whole project. Write, still only its own branch:
   # `pre-receive` refuses the default branch from it as from any job.
   test "its token reads the default branch and cannot write it", context do
@@ -166,27 +182,17 @@ defmodule Forge.IntegratingJobTest do
     url = Url.with_token(project, token)
     work = Path.join(tmp_dir("integrating"), "clone")
 
-    {_out, 0} = git(Path.dirname(work), ["clone", "-q", "--branch", ticket.branch, url, work])
-    {_out, 0} = git(work, ["fetch", "-q", url, "+refs/heads/main:refs/remotes/origin/main"])
-    {_out, 1} = git(work, ["merge", "-q", "origin/main"])
+    {_out, 0} = job_git(Path.dirname(work), ["clone", "-q", "--branch", ticket.branch, url, work])
+    {_out, 0} = job_git(work, ["fetch", "-q", url, "+refs/heads/main:refs/remotes/origin/main"])
+    {_out, 1} = job_git(work, ["merge", "-q", "origin/main"])
     File.write!(Path.join(work, "README.md"), "both\n")
-    {_out, 0} = git(work, ["commit", "-qam", "merge main"])
+    {_out, 0} = job_git(work, ["commit", "-qam", "merge main"])
 
-    assert {out, code} = git(work, ["push", "-q", url, "HEAD:refs/heads/main"])
+    assert {out, code} = job_git(work, ["push", "-q", url, "HEAD:refs/heads/main"])
     assert code != 0
     assert out =~ "main"
     assert {:ok, ^main} = Git.resolve(bare, "refs/heads/main")
 
-    assert {_out, 0} = git(work, ["push", "-q", url, "HEAD:refs/heads/" <> ticket.branch])
-  end
-
-  defp git(dir, args) do
-    System.cmd(
-      "git",
-      ["-c", "user.name=job", "-c", "user.email=job@forge", "-c", "commit.gpgsign=false" | args],
-      cd: dir,
-      stderr_to_stdout: true,
-      env: [{"GIT_TERMINAL_PROMPT", "0"}]
-    )
+    assert {_out, 0} = job_git(work, ["push", "-q", url, "HEAD:refs/heads/" <> ticket.branch])
   end
 end

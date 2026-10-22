@@ -75,7 +75,7 @@ defmodule ForgeWorker.Job.Workspace do
   this one left off rather than where the project's seed was published.
 
   **Only after the run committed and pushed**, which is what makes the template safe to snapshot
-  from without cleaning: `Checkout.squash/4` stages everything with `add -A`, so what is left
+  from without cleaning: `Checkout.squash/5` stages everything with `add -A`, so what is left
   beside the checkout is the ignored build output and nothing a later run could mistake for its
   own work. A run that ended before that keeps the template the ticket already had.
 

@@ -842,6 +842,37 @@ defmodule ForgeWorker.LinkTest do
       assert git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"]) == before
     end
 
+    # **Criterion 1's workflow half.** An integrating run that ends with its conflict still open
+    # fails with the paths in its reason, not with `fatal: Cannot do a soft reset in the middle of
+    # a merge` — which is what forge#2 was left holding, and what a person reading the ticket's
+    # error had to work out for themselves. `inspect/1` of the reason is what crosses the channel.
+    test "a run that ends mid-conflict fails with the paths in its reason", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      before = diverge(origin, "ticket/1", "# Game, the ticket's\n")
+      diverge(origin, "main", "# Game, another ticket's\n")
+
+      job =
+        origin
+        |> assignment(scenario: "conflicted_merge")
+        |> put_in(["git", "default_branch"], "main")
+
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      {%{"job_id" => ^job_id, "reason" => reason}, _events} = take_push("failed")
+
+      assert reason =~ "merge_unresolved"
+      assert reason =~ "README.md"
+      assert reason =~ "push"
+      refute reason =~ "soft reset"
+
+      # And the conflicted tree reached nothing: the branch is where the run found it.
+      assert rev(origin, "refs/heads/ticket/1") == before
+    end
+
     # The template is the other way the same tree reaches the branch: the ticket's next job
     # starts from it and, if it declares a changeset, commits what it inherited. Promoting a
     # scratch tree would launder a mutation into the next run's `add -A`.
@@ -2253,7 +2284,12 @@ defmodule ForgeWorker.LinkTest do
       job_id = job["job_id"]
       push(client, @topic, "assign", job)
 
-      {%{"turn" => 1, "commit" => nil}, before} = take_push("turn")
+      {%{"turn" => 1, "commit" => nil} = turn, before} = take_push("turn")
+
+      # The turn says it did not reach the branch, and says nothing about a conflict: this is the
+      # common failure — a refused push — and the conflicted one is the only one with paths to
+      # name (`docs/design/conversations.md` § Commits).
+      assert turn["uncommitted"] == %{"reason" => "not_committed"}
 
       assert [line] = for({"log", %{"type" => "turn.uncommitted"} = l} <- before, do: l)
       assert line["job_id"] == job_id
@@ -3371,17 +3407,19 @@ defmodule ForgeWorker.LinkTest do
       {%{"turn" => 2, "commit" => head, "uncommitted" => nil}, _} = take_push("turn")
 
       assert rev(origin, "refs/heads/chat/" <> job_id) == head
-      assert rev(origin, head <> "^1") == before
-      assert rev(origin, head <> "^2") == main
-      assert git!(nil, ["-C", origin, "show", head <> ":README.md"]) == "# Game, both\n"
 
-      # What keeping the merge is for: git's own merge logic finds nothing left to resolve.
+      # What keeping the merge is for, asserted before its shape is: git's own merge logic finds
+      # nothing left to resolve. Status 1 is a conflict, which is what a flattened merge leaves.
       assert {_tree, 0} =
                System.cmd(
                  "git",
                  ["-C", origin, "merge-tree", "--write-tree", head, "refs/heads/main"],
                  stderr_to_stdout: true
                )
+
+      assert rev(origin, head <> "^1") == before
+      assert rev(origin, head <> "^2") == main
+      assert git!(nil, ["-C", origin, "show", head <> ":README.md"]) == "# Game, both\n"
     end
 
     # The turn whose work was lost on production: the merge is still conflicted when the turn

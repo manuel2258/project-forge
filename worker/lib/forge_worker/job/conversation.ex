@@ -477,7 +477,7 @@ defmodule ForgeWorker.Job.Conversation do
 
   # -- the work -------------------------------------------------------------------------------
 
-  # One commit per turn, and they accumulate: `Checkout.squash/4` resets to `origin/<branch>`,
+  # One commit per turn, and they accumulate: `Checkout.squash/5` resets to `origin/<branch>`,
   # and pushing moves that remote-tracking ref, so turn two is built on turn one rather than
   # replacing it. That was measured before it was relied on, because the opposite reading —
   # every turn rewriting the last into a single amended commit — is equally plausible from the

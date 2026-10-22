@@ -262,14 +262,33 @@ the old merge base and find the same conflict again. The rule holds whatever the
 agent that rebased onto the default branch against its instructions still leaves a commit whose
 parents are the old ticket head and the default branch head.
 
-**A merge still open when the run ends is not squashed.** `reset --soft` is what git refuses in
-the middle of a merge, so the squash asks for `MERGE_HEAD` before it resets. Resolved but not
-committed, it finishes the merge — `git commit --no-edit` — and carries on, which is also what
-makes the second parent above findable. Still conflicted, it commits and pushes nothing and fails
-with `{:merge_unresolved, paths}`, leaving the tree and `MERGE_HEAD` exactly as the run left them:
-a conflicted tree is not work to push, and the next run — the next turn, for a conversation — can
-finish the merge. Before this the squash died on the reset with a bare git error, the run's work
-unpushed and nothing but a machine-local line to say so (ticket 11).
+**A conflict still open when the run ends is not squashed.** `reset --soft` refuses on
+`is_merge() || unmerged_cache()` (git's `builtin/reset.c`), so the squash settles the tree before
+it resets, and it asks both halves: `MERGE_HEAD`, and whether the index has an unmerged entry — a
+conflicted cherry-pick, rebase or revert has no `MERGE_HEAD` and dies on the reset just the same.
+Before this the squash died there with a bare git error, the run's work unpushed and nothing but a
+machine-local line to say so (ticket 11).
+
+**Resolved is judged on the content, not on the index.** `git add` on a conflicted path clears its
+stages without resolving anything, so an index with nothing unmerged says only that the agent
+staged something — and committing that put `<<<<<<< HEAD` on the branch *as the merge's
+resolution*, second parent and all, which is the loss this exists to stop made permanent. So the
+question is git's own detector, `diff --check`, over everything the run would commit: a leftover
+conflict marker, staged or not, is an unresolved conflict. The converse is why it is the right
+question — a resolution edited and not staged is a resolution, and the squash does `add -A`
+anyway, so refusing one would throw away the whole run for a `git add` nothing here teaches. The
+cost is a false positive: a line that looks like a marker at column zero in a file the run touched
+refuses the run and names the file. That is loud and recoverable; a wrong resolution on the branch
+is neither.
+
+Resolved, then: the resolution is staged, a merge is committed — `git commit --no-edit`, which is
+also what makes the second parent above findable — and the squash carries on. Unresolved: nothing
+is staged, committed or pushed, the tree and `MERGE_HEAD` are left exactly as the run left them,
+and the run fails with `{:merge_unresolved, paths}`. **Leaving the tree is worth something only to
+a conversation**, which keeps its worktree from turn to turn and can finish the merge in the next
+one; a workflow job's next attempt clones or resets to the branch head (`Checkout.ensure/1`) and
+the conflict is gone with the tree. What it is worth to both is the reason: the paths, in the
+ticket's error or in the chat, rather than a git error about a soft reset.
 
 The rewrite is also visible: the hook prints a note on stderr, and `git http-backend` relays a
 hook's stderr to the *pushing client* over the smart-HTTP sideband — the "remote: " lines a git
@@ -533,8 +552,9 @@ in this one module, which is what keeps the credential's handling in one place.
   on its own initiative, and until it was told the branch it could not
   (`conversations.md` § Commits).
   Read-only, and not by any new grant: a job's token already reads the whole project, and its
-  write scope is still exactly `refs/heads/ticket/<n>` (§ The per-job token), so `pre-receive`
-  refuses a push of the default branch from it as from any job. A test pushes one. The squash at
+  write scope is still exactly the one branch it was issued for — `refs/heads/ticket/<n>` for a
+  job, `refs/heads/chat/<id>` for a conversation (§ The per-job token) — so `pre-receive` refuses
+  a push of the default branch from it as from any job. A test for each pushes one. The squash at
   the end of the run keeps the merge (§ Non-fast-forward on a ticket branch).
 - The credential never reaches argv: git runs with a `credential.helper` that prints
   `$FORGE_GIT_TOKEN`, and the variable is in the environment only.

@@ -563,6 +563,12 @@ composer, the now line, and any open question's form.
   Any result with `is_error` is in error colour with its excerpt shown. A retry or a rate limit is
   not a line: it is what the now line says (below). Notices, `control` and `delivered` are not
   drawn, per § Motion and structure.
+- **A line of the platform's own, where the turn it is about stands.** The transcript is what
+  the two sides said, with one exception: a turn whose work did not reach the branch
+  (`conversations.md` § Commits). One warning-coloured line, `⚠` and a sentence, unboxed, after
+  that turn's last box — and wearing **neither speaker's micro label**, because the platform said
+  it and a turn that only acted has no box of its own to put it under. It is not a harness
+  `notice` event, which is still not drawn.
 - **Live, every line; finished, each run folded.** While a turn is open its action lines appear as
   their events arrive. When it ends, each run of actions between two text boxes folds into one
   line — *11 actions · edited parser.ex, lexer.ex · mix test ✗→✓* — that expands in place. An

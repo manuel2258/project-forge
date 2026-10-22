@@ -776,8 +776,10 @@ defmodule Forge.Conversations do
   `:assistant` message is one turn: its `items` in the order they happened, and its `text`, which
   is only what it said — the text blocks, a blank line between each.
 
-  `uncommitted` is what the turn's work did *not* do, when it did not reach the branch: a
-  sentence, drawn with the turn it belongs to, and `nil` for every turn that committed.
+  **A `:notice` is the platform's own line in the conversation**, and the only entry neither side
+  said: a turn whose work did not reach the branch, standing where that turn is
+  (`docs/design/conversations.md` § Commits, `ui.md` § Talk). It is not in `messages/1`, because
+  nobody said it.
   """
   @type message ::
           %{role: :user, text: String.t(), at: DateTime.t(), delivered: boolean(), id: String.t()}
@@ -786,9 +788,9 @@ defmodule Forge.Conversations do
               text: String.t(),
               items: [item()],
               at: DateTime.t(),
-              turn: pos_integer() | nil,
-              uncommitted: String.t() | nil
+              turn: pos_integer() | nil
             }
+          | %{role: :notice, text: String.t(), at: DateTime.t(), turn: pos_integer() | nil}
 
   @typedoc """
   One thing in a turn: a block of what the agent said, or something it did.
@@ -829,6 +831,7 @@ defmodule Forge.Conversations do
   def said(transcript), do: Enum.reject(transcript, &silent?/1)
 
   defp silent?(%{role: :assistant, text: ""}), do: true
+  defp silent?(%{role: :notice}), do: true
   defp silent?(_message), do: false
 
   @doc """
@@ -922,16 +925,15 @@ defmodule Forge.Conversations do
 
   defp fold(%Event{type: "chat.turn"} = event, %{round: round} = state) do
     turn = event.payload["turn"]
-    notice = uncommitted(event.payload["uncommitted"])
-    stamp = fn message -> stamp(message, round, turn, notice) end
+    stamp = fn message -> stamp(message, round, turn) end
 
     %{
       state
       | done:
           state.done
           |> flush(state.open)
-          |> spoken(round, event, notice)
-          |> Enum.map(stamp),
+          |> Enum.map(stamp)
+          |> notice(event, turn),
         open: nil,
         round: round + 1
     }
@@ -944,16 +946,28 @@ defmodule Forge.Conversations do
 
   defp fold(%Event{}, state), do: state
 
-  # **What a turn that reached the branch with nothing says.** A conversation's person is told
-  # inside the conversation, where they are, rather than only in the machine's log, which is read
-  # off the machine by its owner and not by them (`docs/design/conversations.md` § Commits). The
-  # merge case names the paths, because it is the one a person can do something about: the work is
-  # still on the machine and the next turn can finish the merge.
+  # **The platform's own line, once per turn that could not commit.** Prepended — `done` is
+  # newest first — so it stands after the reply of the turn it belongs to, and it is an entry of
+  # its own rather than something added to that reply: the words are the platform's, a turn that
+  # only acted has no reply to put them on, and a turn split by a message sent in the middle of it
+  # has two. A conversation's person is told where they are, rather than only in the machine's
+  # log, which is read off the machine by its owner and not by them
+  # (`docs/design/conversations.md` § Commits).
+  defp notice(done, %Event{payload: payload} = event, turn) do
+    case uncommitted(payload["uncommitted"]) do
+      nil -> done
+      text -> [%{role: :notice, text: text, at: event.inserted_at, turn: turn} | done]
+    end
+  end
+
+  # The merge case names the paths, because it is the one a person can do something about: the
+  # work is still on the machine and the next turn can finish the merge. Any other failure — a
+  # credential refused, a hook, the platform unreachable — is the plain sentence: the turn did not
+  # reach the branch, which is the part its person needs either way.
   defp uncommitted(%{"reason" => "merge_unresolved"} = reason) do
-    "Nothing from this turn reached the branch: a merge is unfinished" <>
+    "Nothing from this turn reached the branch: a conflict is unresolved" <>
       conflicted(reason["paths"]) <>
-      ". Its work is still on the machine, and finishing the " <>
-      "merge in the next turn commits it."
+      ". Its work is still on the machine, and resolving the conflict in the next turn commits it."
   end
 
   defp uncommitted(%{}), do: "Nothing from this turn reached the branch."
@@ -963,22 +977,6 @@ defmodule Forge.Conversations do
     do: " in " <> Enum.map_join(paths, ", ", &string/1)
 
   defp conflicted(_none), do: ""
-
-  # The notice goes on the reply this turn spoke, which is the turn `stamp/4` is naming. A turn
-  # that said and did nothing has no reply to put it on and gets a bare one: a turn whose work
-  # was lost may well be one that only acted, and this is the only word its person gets.
-  defp spoken(done, _round, _event, nil), do: done
-
-  defp spoken(done, round, event, _notice) do
-    if Enum.any?(done, &match?(%{role: :assistant, round: ^round, turn: nil}, &1)) do
-      done
-    else
-      [
-        %{role: :assistant, items: [], at: event.inserted_at, turn: nil, round: round}
-        | done
-      ]
-    end
-  end
 
   @doc """
   One tool call as the transcript holds it, from a `tool_use` event's payload. The agent wrote the
@@ -1082,10 +1080,10 @@ defmodule Forge.Conversations do
     with {:ok, rest} <- update_in_items(rest, id, fun), do: {:ok, [item | rest]}
   end
 
-  defp stamp(%{role: :assistant, round: round, turn: nil} = message, round, turn, notice),
-    do: message |> Map.put(:turn, turn) |> Map.put(:uncommitted, notice)
+  defp stamp(%{role: :assistant, round: round, turn: nil} = message, round, turn),
+    do: %{message | turn: turn}
 
-  defp stamp(message, _round, _turn, _notice), do: message
+  defp stamp(message, _round, _turn), do: message
 
   # A user message arriving mid-reply ends the assistant message being accumulated.
   defp flush(acc, nil), do: acc

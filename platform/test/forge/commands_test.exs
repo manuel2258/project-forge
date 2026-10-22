@@ -750,10 +750,12 @@ defmodule Forge.CommandsTest do
       assert Workers.speaks?(old, 0) and Workers.speaks?(silent, 0)
     end
 
-    # A command needs the protocol commands arrived in; an agent — a workflow job, invoking or
-    # not, or a conversation — needs the one questions as a headline and a sentence arrived in,
-    # because its release teaches and corrects the block (`worker-channel.md` § Versions).
-    test "asks a command for protocol 2 and an agent for protocol 3", context do
+    # A command needs the protocol commands arrived in; a workflow job needs the one questions as
+    # a headline and a sentence arrived in, because its release teaches and corrects the block.
+    # A conversation needs 7, the one that squashes a merge it left open: it is told the default
+    # branch, and a release that acts on that without 7's squash loses every turn after the merge
+    # (`worker-channel.md` § Versions).
+    test "asks a command for protocol 2, a workflow job 3 and a conversation 7", context do
       [job] = pending(context.ticket)
       assert Jobs.protocol(job) == 3
 
@@ -762,7 +764,7 @@ defmodule Forge.CommandsTest do
       assert Jobs.protocol(build) == 2
       assert Jobs.harness(build) == nil
 
-      assert Jobs.protocol(%Job{kind: :chat}) == 3
+      assert Jobs.protocol(%Job{kind: :chat}) == 7
     end
 
     # The scheduler's own demand: a protocol 2 release serving the project is not handed an agent,

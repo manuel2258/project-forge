@@ -62,6 +62,10 @@ defmodule ForgeWeb.ChatLiveTest do
 
     assert has_element?(view, ".chat-uncommitted", "README.md")
     assert view |> element(".chat-uncommitted") |> render() =~ "Nothing from this turn reached"
+
+    # Nobody's reply: it carries neither side's label, which is what `ui.md` § Talk says of a
+    # notice. Drawn as an assistant message it wore "agent · turn 1" over the platform's words.
+    refute view |> element(".chat-uncommitted") |> render() =~ "agent"
   end
 
   test "it shows what was said, and where it is", %{conn: conn, chat: chat, project: project} do

@@ -500,12 +500,25 @@ taking every job that names none: an assignment without secrets is exactly what 
 credential's seal is unchanged. The minimum stays 4 until the templates and permanent machines
 have moved, as below.
 
-**`default_branch` for a conversation rides along without a bump** (`conversations.md`
-§ Commits). A protocol 5 or 6 worker already fetches the branch and keeps a merge of it, whatever
-kind of run was told one, so it does exactly what is wanted; a protocol 4 worker drops the key and
-its chat cannot merge the default branch, which is where every chat was before this. Less, not
-wrong. The same holds for `uncommitted` on a turn: an older platform keeps it in the event's
-payload and draws nothing, and an older worker never sends it.
+**Protocol 7 is a conversation that merges the default branch** (`conversations.md` § Commits):
+`default_branch` in a *chat's* assignment's `git`, and a squash that settles a conflict the run
+left open instead of dying on `reset --soft` (`git-hosting.md` § Non-fast-forward on a ticket
+branch). It is a bump because the first without the second is worse than neither. A protocol 5 or
+6 worker fetches the branch and keeps a committed merge — that half was never kind-aware — but
+its squash cannot survive a merge the turn left open, so the turn dies with a bare git error and
+so does every turn after it, a trap no chat could reach while nothing told it the branch. So a
+conversation needs protocol 7 (`Forge.Jobs.protocol/1`), a protocol 4-6 worker keeps taking every
+workflow job and command, and the minimum stays 4.
+
+**What this leaves exposed, named rather than claimed closed**: an *integrating* job still asks
+only for 5, and on a 5 or 6 worker a run of it that ends mid-conflict fails the way forge#2 did.
+That is the bug being fixed, not a misread of anything new the platform sends, and raising that
+floor would strand tickets on machines that can still do everything else such a job needs. It
+closes when the templates move, as every protocol does.
+
+**`uncommitted` on a turn rides along without a bump.** An older worker never sends it, and an
+older platform builds the `chat.turn` payload key by key (`Conversations.record_turn/2`) and so
+drops it: the turn is recorded as it was before, with no commit and no reason.
 
 What rides along without a bump, because an older side may ignore it: `job.harness.memory`
 events and the `memory` a `starting` event carries (`docs/design/claude-code-events.md` § Memory),

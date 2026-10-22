@@ -111,18 +111,16 @@ defmodule ForgeWorker.Checkout do
   moved has fetched a newer head than the one it merged. `base` stays the first parent whatever the
   run did, so a run that rebased instead of merging still leaves the commit before it an ancestor.
 
-  **A merge the run left open is dealt with before the reset**, which git refuses outright in the
-  middle of one — the squash used to die on it with the run's work neither committed nor explained
-  (ticket 11). Resolved but not committed: the merge is finished, and `merged/4` then sees the
-  default branch in the run's history as it would have. Still conflicted:
-  `{:error, {:merge_unresolved, paths}}`, and nothing is staged, committed or reset — a conflicted
-  tree is not work to push, and leaving it as the run left it is what lets the next run finish the
-  merge.
+  **A conflict the run left in the tree is dealt with before the reset**, which git refuses
+  outright while one is open — the squash used to die on it with the run's work neither committed
+  nor explained (ticket 11). See `settle/2`: resolved, the resolution is staged and a merge is
+  committed, so `merged/4` sees the default branch in the run's history as it would have;
+  unresolved, `{:error, {:merge_unresolved, paths}}` and nothing is staged, committed or reset.
   """
   @spec squash(String.t(), String.t(), String.t(), ForgeWorker.Slice.as(), keyword()) ::
           {:ok, boolean()} | {:error, term()}
   def squash(dir, base, message, as, opts \\ []) do
-    with :ok <- finish_merge(dir, as),
+    with :ok <- settle(dir, as),
          {:ok, merged} <- merged(dir, base, Keyword.get(opts, :keep), as),
          {:ok, _out} <- git(dir, ["reset", "--soft", base], as: as),
          {:ok, _out} <- git(dir, ["add", "-A"], as: as) do
@@ -130,31 +128,98 @@ defmodule ForgeWorker.Checkout do
     end
   end
 
-  # `MERGE_HEAD` is git's own record of a merge in progress and the thing `reset --soft` refuses
-  # on, so it is what is asked — rather than the index, or a file under `.git`, which are a
-  # different model of the same question (`CLAUDE.md` § Rules). `rev-parse --verify` fails when
-  # there is none, which is every ordinary run.
-  defp finish_merge(dir, as) do
-    case git(dir, ["rev-parse", "-q", "--verify", "MERGE_HEAD"], as: as) do
-      {:error, _none} ->
-        :ok
-
-      {:ok, _sha} ->
-        with {:ok, []} <- unmerged(dir, as),
-             {:ok, _out} <- git(dir, ["commit", "--no-edit", "--quiet"], as: as) do
-          :ok
-        else
-          {:ok, [_ | _] = paths} -> {:error, {:merge_unresolved, paths}}
-          {:error, reason} -> {:error, reason}
-        end
+  # **Leaves the tree in a state `reset --soft` will accept, or refuses to touch it.**
+  #
+  # git refuses the reset on `is_merge() || unmerged_cache()` (`builtin/reset.c`) — the one
+  # question has two halves, and `MERGE_HEAD` alone is not it: a conflicted cherry-pick, rebase or
+  # revert has none and dies on the reset just the same, with the bare git error ticket 11 is
+  # about. So both are asked, and the index is asked first because it is the half that names
+  # paths.
+  #
+  # **Resolution is judged on content, not on the index.** `git add` on a conflicted path clears
+  # its stages without resolving anything, so an index with nothing unmerged says only that the
+  # agent staged something — and committing that pushed `<<<<<<< HEAD` onto the branch as the
+  # merge's resolution, with the merge kept as a second parent, so nothing would ever find the
+  # conflict again. The question asked instead is git's own detector, `diff --check`, over
+  # everything the run would commit: a leftover conflict marker, whether it is staged or only in
+  # the worktree, is an unresolved conflict. The converse case is why: a resolution edited and not
+  # staged is a resolution, and refusing it would throw away the whole run for a `git add` the
+  # squash does anyway.
+  #
+  # The cost of asking the content is a false positive: a line that looks like a marker at column
+  # zero in a file the run touched refuses the run and names the file and line. That is the same
+  # question a `pre-commit` hook asks, it is loud, and it is recoverable — the alternative is a
+  # silent wrong resolution on the branch.
+  defp settle(dir, as) do
+    with {:ok, unmerged?} <- unmerged?(dir, as),
+         {:ok, merge?} <- merging?(dir, as) do
+      if unmerged? or merge?, do: settle(dir, as, unmerged?, merge?), else: :ok
     end
   end
 
-  # The paths git still has both sides of, which is what "unresolved" means to git: an index
-  # entry at a stage above zero. Reported in the error so the reason a person reads names them.
-  defp unmerged(dir, as) do
-    with {:ok, out} <- git(dir, ["diff", "--name-only", "--diff-filter=U"], as: as) do
-      {:ok, out |> String.split("\n", trim: true) |> Enum.map(&String.trim/1)}
+  defp settle(dir, as, unmerged?, merge?) do
+    case markers(dir, as) do
+      {:ok, []} -> stage_and_commit(dir, as, unmerged?, merge?)
+      {:ok, paths} -> {:error, {:merge_unresolved, paths}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # Staged so the index has nothing unmerged left in it, and committed when the operation in
+  # progress is a merge: the commit is what `merged/4` reads the merged history from, and what
+  # `reset --soft` needs gone. A cherry-pick or a rebase has no second parent to keep, so clearing
+  # the index is the whole of what it needs — its own state is the agent's business.
+  defp stage_and_commit(dir, as, unmerged?, merge?) do
+    with {:ok, _out} <- stage(dir, as, unmerged?),
+         {:ok, _out} <- commit_merge(dir, as, merge?) do
+      :ok
+    end
+  end
+
+  defp stage(_dir, _as, false), do: {:ok, ""}
+  defp stage(dir, as, true), do: git(dir, ["add", "-A"], as: as)
+
+  defp commit_merge(_dir, _as, false), do: {:ok, ""}
+  defp commit_merge(dir, as, true), do: git(dir, ["commit", "--no-edit", "--quiet"], as: as)
+
+  # Whether the index has an entry at a stage above zero, which is `unmerged_cache()`'s own
+  # question. Asked of `ls-files` rather than of a diff: a diff would have to name paths, and
+  # nothing here needs their names — `markers/2` names what a person reads.
+  defp unmerged?(dir, as) do
+    with {:ok, out} <- git(dir, ["ls-files", "--unmerged"], as: as),
+         do: {:ok, String.trim(out) != ""}
+  end
+
+  defp merging?(dir, as),
+    do:
+      {:ok, match?({:ok, _sha}, git(dir, ["rev-parse", "-q", "--verify", "MERGE_HEAD"], as: as))}
+
+  # Where git says a conflict marker is left, as paths. `--check` reports whitespace errors on the
+  # same stream, so the marker lines are the ones taken — `<path>:<line>: leftover conflict
+  # marker`, in English because `git/3` runs every git under the `C` locale.
+  #
+  # `core.quotePath=false` is an equivalent mutant: git does not quote the path in `--check`'s
+  # output as it does in `--name-only`'s, so no test can tell. It stays because that is git's
+  # undocumented habit rather than its promise, and a C-quoted path here would be a path a person
+  # cannot find.
+  @marker ~r/\A(?<path>.+):\d+: leftover conflict marker\z/
+
+  defp markers(dir, as) do
+    case git(dir, ["-c", "core.quotePath=false", "diff", "HEAD", "--check"], as: as) do
+      {:ok, _clean} ->
+        {:ok, []}
+
+      # Status 1 is a whitespace error or a marker, 2 is both; anything else is git failing.
+      {:error, {code, out}} when code in [1, 2] ->
+        {:ok,
+         out
+         |> String.split("\n", trim: true)
+         |> Enum.flat_map(&Regex.run(@marker, &1, capture: ["path"]))
+         |> Enum.uniq()
+         |> Enum.sort()}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -338,8 +403,10 @@ defmodule ForgeWorker.Checkout do
     {executable, args} =
       as.("git", ["-c", "credential.helper=", "-c", "credential.helper=" <> @helper] ++ args)
 
+    # `LC_ALL` because this module reads what git prints — `markers/2` matches an English
+    # sentence — and a translated message would be a marker nothing noticed.
     env =
-      [{"GIT_TERMINAL_PROMPT", "0"}] ++
+      [{"GIT_TERMINAL_PROMPT", "0"}, {"LC_ALL", "C"}] ++
         case Keyword.get(opts, :token) do
           nil -> []
           token when is_function(token, 0) -> [{"FORGE_GIT_TOKEN", token.()}]

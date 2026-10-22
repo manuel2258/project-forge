@@ -1122,9 +1122,22 @@ defmodule Forge.Jobs do
   # names it once; asking for it is then refused as `{:ambiguous, outcomes}`, which is what a
   # person's by-hand choice of the same target already gets.
   defp chat_transitions(%Ticket{} = ticket, {:ok, workflow}) do
+    # **The ambiguity count is over every declared edge, not over the offered ones.**
+    # `ForgeCore.Engine.choose/4` counts its candidates straight off `transitions_from/2` with no
+    # unversioned-artifact filter, so counting the filtered set here would be a guard using a
+    # different model from the operation it guards (CLAUDE.md § Rules): a target reached by two
+    # edges with one of them filtered out would be marked askable and refused `{:ambiguous, _}`
+    # every time — the exact thing the marker exists to stop. No shipped workflow can reach it
+    # today (`dev.yml`, `bug.yml` and `release.yml` have nine two-edge targets between them and
+    # none carries an `approve`), which is why it is a rule broken rather than a bug seen.
+    reaching =
+      workflow
+      |> ForgeCore.Workflow.transitions_from(ticket.state)
+      |> Enum.frequencies_by(& &1.to)
+
     ticket
     |> Engine.offered_edges(workflow)
-    # One entry per edge, grouped by target: the list's length is how many edges reach it.
+    # One entry per offered edge, grouped by target.
     |> Enum.group_by(& &1.to, & &1.approve)
     |> Enum.map(fn {to, edge_approvals} ->
       %{
@@ -1137,7 +1150,7 @@ defmodule Forge.Jobs do
         # discover by being refused, and said accurately: the ticket page and
         # `mix forge.transition` pass no outcome either, so the only caller that can take one of
         # these is the HTTP API.
-        "ambiguous" => length(edge_approvals) > 1
+        "ambiguous" => Map.fetch!(reaching, to) > 1
       }
     end)
     |> Enum.sort_by(& &1["to"])

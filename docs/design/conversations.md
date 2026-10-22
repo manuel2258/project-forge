@@ -371,9 +371,10 @@ before either is called. That ordering is the guard, so it is not a line to tidy
 **It is attributed to whoever opened the conversation**, for every request it ever makes,
 regardless of who sent the message that triggered the turn. Membership of the project is the whole
 guard on talking to one — `Operator.send_chat/4` asks for `:use` on it and nothing about who
-opened the conversation (`identity.md` § Where the guard lives) — so there is no owner model to consult, and
-"whoever is typing" would need the triggering message's id threaded through the turn, racing the
-next message's own event, to answer a question the simpler rule answers outright. The opener is
+opened the conversation (`identity.md` § Where the guard lives) — so there is no owner model to
+consult, and "whoever is typing" would need the triggering message's id threaded through the
+turn, racing the next message's own event, to answer a question the simpler rule answers
+outright. The opener is
 on the job's own `chat.opened` event, the first thing logged for it, read back by
 `Events.earliest_for_job/2`. A
 conversation opened by something that is not a user — a Mix task's `:system` actor — cannot make
@@ -434,9 +435,10 @@ with the same `{:error, :pending_approval}`. It never did before: only the ticke
 walk around by hand. A file is not a hidden button, so the check belongs at the operation, where
 every caller meets it — the chat, the API and the page alike.
 
-**What the chat is told it can do** is in its manifest, in a § Moving the ticket of its own, from the spec's one `moving`
-field: the transitions offered out of the current state with each one's `approve` list, the
-pending decision if there is one, and whether a job is live for the state. The edges come from
+**What the chat is told it can do** is in its manifest, in a § Moving the ticket of its own,
+from the spec's one `moving` field: the transitions offered out of the current state with each
+one's `approve` list, the pending decision if there is one, and whether a job is live for the
+state. The edges come from
 `Engine.offered_edges/2`, which is the one walk of the workflow that both halves read —
 `offered_transitions/2` is its targets, so the page's list and the chat's cannot disagree about
 which *edge* survived the unversioned-artifact filter, not merely about which target did. Two
@@ -449,9 +451,9 @@ marks such a target as one that cannot be asked for rather than listing it as th
 the refusal says who can take it instead of telling the agent to send the person to a button that
 does not exist. One field and not
 three, because they are one question — what can this chat do to its ticket now — read in one
-place, and nil for a project chat and for every workflow job. Composed once when the process starts, like the rest of its
-context, and carrying the same caveat — a turn later the ticket may have moved, which is why a
-refusal says so rather than the manifest pretending to be current.
+place, and nil for a project chat and for every workflow job. Composed once when the process
+starts, like the rest of its context, and carrying the same caveat — a turn later the ticket may
+have moved, which is why a refusal says so rather than the manifest pretending to be current.
 
 ## Lifetime
 

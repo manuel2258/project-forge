@@ -144,6 +144,19 @@ defmodule ForgeWeb.ChatNewLive do
            secret_names: secret_names(project)
          )}
 
+      # The ticket is not this project's. **An equivalent mutant: no test can reach this clause**,
+      # because the form resolves the ticket from the project it is already on
+      # (`Tickets.get_by_number!/2`), so `Conversations.open/3` is never handed a mismatched pair
+      # from here. It is written anyway because the catch-all below shows a person `inspect/1`
+      # output, and a reason with no sentence is the class this very commit fixed for
+      # `{:merge_impossible, _}` — worth a line before the next caller makes it reachable.
+      {:error, :ticket_not_in_project} ->
+        {:noreply,
+         assign(socket,
+           error: "that ticket belongs to another project",
+           secret_names: secret_names(project)
+         )}
+
       {:error, reason} ->
         {:noreply, assign(socket, error: "could not start it: #{inspect(reason)}")}
     end

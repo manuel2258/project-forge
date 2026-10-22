@@ -1466,8 +1466,11 @@ defmodule Forge.ConversationsTest do
 
       spec = Jobs.assignment(chat, Tickets.get!(ticket.id), project, "token")["spec"]
 
+      # `approve` carries only the surviving edge's names — and `ambiguous` is true, because the
+      # dead edge still *exists*: the engine counts every declared edge to the target, so this
+      # said `false` until round 4 found that the marker and the engine disagreed.
       assert spec["moving"]["transitions"] == [
-               %{"to" => "planning", "approve" => ["refinement.md"], "ambiguous" => false}
+               %{"to" => "planning", "approve" => ["refinement.md"], "ambiguous" => true}
              ]
 
       # The page is offered the same target, which is what makes the two agree.
@@ -1529,6 +1532,38 @@ defmodule Forge.ConversationsTest do
       spec = Jobs.assignment(chat, Tickets.get!(ticket.id), project, "token")["spec"]
 
       assert [%{"to" => "planning", "ambiguous" => true}] = spec["moving"]["transitions"]
+    end
+
+    # **Finding 1 of round 4.** `ForgeCore.Engine.choose/4` counts its candidates straight off
+    # `transitions_from/2`, with no unversioned-artifact filter. So a target reached by two edges
+    # where one is filtered out is *still* refused `{:ambiguous, _}` — and marking it askable
+    # because only one survived would be a guard using a different model from the operation it
+    # guards, in the code written to tell the agent the truth about ambiguity.
+    test "a target stays unaskable when one of its two edges was filtered out", %{
+      project: project
+    } do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+
+      # Two edges to `planning`: the original approving `refinement.md`, and a second approving
+      # `notes.md`, which nothing ever writes — so `offered_edges/2` returns only the first.
+      ticket = second_edge!(ticket, "notes.md")
+
+      {:ok, _version} =
+        Forge.Artifacts.record_version(ticket.id, "refinement.md", :document, :system, %{
+          content: "---\noutcome: done\n---\n# R\n"
+        })
+
+      {:ok, chat} = Conversations.open(project, "about this", ticket: ticket)
+      finish_jobs(ticket)
+      ticket = Tickets.get!(ticket.id)
+
+      spec = Jobs.assignment(chat, ticket, project, "token")["spec"]
+
+      assert [%{"to" => "planning", "ambiguous" => true}] = spec["moving"]["transitions"]
+
+      # And the engine really does refuse it, which is what makes the marker honest.
+      assert {:error, {:ambiguous, _outcomes}} =
+               ForgeCore.Engine.choose(Tickets.workflow(ticket), ticket.state, "planning")
     end
 
     test "a project chat's spec carries no transitions and no decision", %{project: project} do
@@ -2471,7 +2506,12 @@ defmodule Forge.ConversationsTest do
     # **Finding 9.** The request is echoed into a log § Lifetime keeps for ever, and it arrived
     # as a file the agent wrote — a mebibyte of it, per refused turn, uncapped.
     test "a huge request is cut down before it reaches the log", %{chat: chat} do
-      long = String.duplicate("x", 5_000)
+      # **Multi-byte, not ASCII.** A byte offset through this text lands inside a character about
+      # as often as not: the result fails `String.valid?/1`, `Jason` refuses it, and the insert
+      # raises *after* the turn's transaction has committed — so the worker re-sends, the turn is
+      # already recorded, and the request vanishes with nothing said to anyone. An ASCII string
+      # cannot see any of that.
+      long = String.duplicate("—", 5_000)
 
       turn =
         Map.put(turn(1, 0.01), "transition_request", %{
@@ -2489,8 +2529,11 @@ defmodule Forge.ConversationsTest do
                  do: event
                )
 
-      assert byte_size(request["to"]) < 250
-      assert byte_size(request["comment"]) < 250
+      # Still valid text, which is the whole point: an invalid binary never reaches the column.
+      assert String.valid?(request["to"])
+      assert String.valid?(request["comment"])
+      assert String.length(request["to"]) < 250
+      assert String.length(request["comment"]) < 250
       # Only the keys the platform reads travel; a key it never looks at is not kept at all.
       refute Map.has_key?(request, "padding")
     end

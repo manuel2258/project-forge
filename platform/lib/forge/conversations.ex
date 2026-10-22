@@ -608,9 +608,10 @@ defmodule Forge.Conversations do
   # and the reasons are worth keeping, because the shape looks right until each is traced:
   #
   #   * `fold/2` hard-codes `role: :user` for every `chat.message` whatever its actor, so the
-  #     person read *themselves* saying their request was refused. The one existing `:system`
-  #     sender, `Operator.answer_chat/4`, sends text that really is the person's answers, which
-  #     is why nothing had needed the distinction before.
+  #     person read *themselves* saying their request was refused. Every `:system` sender there
+  #     was — `Operator.answer_chat/4`, and `mix forge.e2e.chat` on `send/2`'s default actor —
+  #     sends text that stands in for the person, which is why that projection was right until
+  #     this became the first `chat.message` whose words were the platform's own.
   #   * `Forge.Queue` lists a conversation only when its last message is the agent's. The reply
   #     put the chat in the person's queue and the refusal landed after it and took it out again,
   #     so the notification led to nothing waiting.
@@ -647,8 +648,18 @@ defmodule Forge.Conversations do
 
   defp bounded_request(request), do: cut(request)
 
-  defp cut(value) when is_binary(value) and byte_size(value) > 200,
-    do: binary_part(value, 0, 200) <> "…"
+  # **`String.slice/3` and not `binary_part/3`.** This is free text the agent wrote, and a byte
+  # offset lands inside a multi-byte character about as often as not: the result is an invalid
+  # binary, `Jason` refuses to encode it, and the insert raises — *after* the turn's transaction
+  # has committed, which is the one failure the comments above spend two paragraphs avoiding.
+  # Checked rather than reasoned about: `binary_part(String.duplicate("—", 500), 0, 200)` is
+  # `String.valid?/1` false and `Jason.encode/1` answers `{:error, %Jason.EncodeError{}}`.
+  #
+  # So the unit is characters. 200 of them is a longer binary than 200 bytes and still bounded,
+  # which is all this is for.
+  defp cut(value) when is_binary(value) do
+    if String.length(value) > 200, do: String.slice(value, 0, 200) <> "…", else: value
+  end
 
   defp cut(value), do: value
 

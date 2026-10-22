@@ -51,7 +51,8 @@ defmodule Forge.Jobs do
   @questions_protocol 3
   @integration_protocol 5
   @secrets_protocol 6
-  @merge_protocol 7
+  @optional_outputs_protocol 7
+  @merge_protocol 8
 
   # How many of the merges that landed on the default branch since a ticket's base an integrating
   # job is told about by name; the rest are counted (`docs/design/job-prompt.md` § Integrating the
@@ -209,6 +210,7 @@ defmodule Forge.Jobs do
          entered: entered,
          may_invoke: grants(state),
          produces: state.produces,
+         optional: state.optional,
          outcomes: state.outcomes,
          permitted_children: [],
          integration: integration(workflow, state_name, project)
@@ -704,14 +706,37 @@ defmodule Forge.Jobs do
   - **A job that names a secret needs protocol 6**, whatever its kind: a release from before it
     ignores the assignment's `secrets` and would run the job without them, where it should not
     run at all (`docs/design/secrets.md` § Delivery). A job that names none asks nothing more.
-  - **A conversation needs protocol 7**: it is now told the default branch, and a release from
-    before 7 acts on that without being able to squash a merge that is still open — the turn dies
+  - **A job whose state declares a presentation or an optional output needs protocol 7**: the
+    worker is what composes the manifest, collects `out/` and decides the outcome, and a release
+    from before these does all three wrong. It strips no marker, so it names
+    `out/presentation.md!` in the manifest and collects the file under that name, which the
+    platform then records as an approvable *document*; and its manifest says every declared
+    document is required, because the note that says otherwise is new with this, so it nags for
+    an optional one the agent skipped and ends the job `error` on a state with no `error` edge
+    (`docs/design/worker-channel.md` § Versions). A state that declares neither asks nothing more.
+  - **A conversation needs protocol 8**: it is now told the default branch, and a release from
+    before 8 acts on that without being able to squash a merge that is still open — the turn dies
     on `reset --soft` and every turn after it does too, which is a trap a chat could not reach
     while nothing told it the branch (ticket 11, `docs/design/worker-channel.md` § Versions).
   """
   @spec protocol(Job.t()) :: non_neg_integer()
-  def protocol(%Job{secret_names: [_ | _]} = job), do: max(kind_protocol(job), @secrets_protocol)
-  def protocol(%Job{} = job), do: kind_protocol(job)
+  def protocol(%Job{} = job),
+    do: Enum.max([kind_protocol(job), secrets_protocol(job), outputs_protocol(job)])
+
+  defp secrets_protocol(%Job{secret_names: [_ | _]}), do: @secrets_protocol
+  defp secrets_protocol(%Job{}), do: 0
+
+  # Read from the stored spec rather than the workflow, as the integrating clause is: the spec is
+  # what the worker is handed, and a workflow edited since cannot change what this job needs.
+  defp outputs_protocol(%Job{kind: :workflow} = job) do
+    spec = spec(job)
+
+    if spec.optional != [] or Enum.any?(spec.produces, &Workflow.presentation?/1),
+      do: @optional_outputs_protocol,
+      else: 0
+  end
+
+  defp outputs_protocol(%Job{}), do: 0
 
   defp kind_protocol(%Job{kind: :command}), do: @commands_protocol
 
@@ -1056,7 +1081,8 @@ defmodule Forge.Jobs do
       preamble_hash: ForgeCore.Prompt.chat_preamble_hash(),
       model: model_for(job),
       produces: [],
-      outcomes: []
+      outcomes: [],
+      moving: moving(ticket)
     }
 
     :ok = Spec.validate(spec)
@@ -1096,6 +1122,77 @@ defmodule Forge.Jobs do
         %{spec | inputs: spec.inputs ++ [answers]}
     end
   end
+
+  # What a ticket conversation may ask the engine for (`docs/design/conversations.md` § Taking a
+  # transition): the same edges a person is offered, each with the `approve` list its choice would
+  # record.
+  #
+  # **`parsed_workflow/1`, never `workflow/1`.** A pinning validated at admission can stop parsing
+  # later as the validator's rules move on, and `workflow/1` raises on one that has. This runs for
+  # every ticket chat assignment, inside `assign/2` after `mark_started` has set the row running,
+  # so a raise here fails the job — on precisely the broken ticket a conversation is the way to
+  # rescue. Nothing is offered instead, and the manifest says why.
+  defp moving(nil), do: nil
+
+  defp moving(%Ticket{} = ticket) do
+    # Parsed once. Both halves of this asked separately before, which was two parses of the same
+    # map per chat assignment for one answer.
+    parsed = Tickets.parsed_workflow(ticket)
+
+    %{
+      "transitions" => chat_transitions(ticket, parsed),
+      "pending" => ticket.pending_transition,
+      "job_live" => live?(ticket.id, ticket.state),
+      "workflow_broken" => match?({:error, _}, parsed)
+    }
+  end
+
+  # `Engine.offered_edges/2` and no second walk of the workflow: the edges it returns are the
+  # ones that survived the unversioned-artifact filter, so a target reached by two edges carries
+  # only the surviving ones' `approve` names. Grouping on the target names it once, as the page
+  # names it once; asking for it is then refused as `{:ambiguous, outcomes}`, which is what a
+  # person's by-hand choice of the same target already gets.
+  defp chat_transitions(%Ticket{} = ticket, {:ok, workflow}) do
+    # **The ambiguity count is over every declared edge, not over the offered ones.**
+    # `ForgeCore.Engine.choose/4` counts its candidates straight off `transitions_from/2` with no
+    # unversioned-artifact filter, so counting the filtered set here would be a guard using a
+    # different model from the operation it guards (CLAUDE.md § Rules): a target reached by two
+    # edges with one of them filtered out would be marked askable and refused `{:ambiguous, _}`
+    # every time — the exact thing the marker exists to stop. No shipped workflow can reach it
+    # today (`dev.yml`, `bug.yml` and `release.yml` have nine two-edge targets between them and
+    # none carries an `approve`), which is why it is a rule broken rather than a bug seen.
+    reaching =
+      workflow
+      |> ForgeCore.Workflow.transitions_from(ticket.state)
+      |> Enum.frequencies_by(& &1.to)
+
+    ticket
+    |> Engine.offered_edges(workflow)
+    # One entry per offered edge, grouped by target.
+    |> Enum.group_by(& &1.to, & &1.approve)
+    |> Enum.map(fn {to, edge_approvals} ->
+      %{
+        "to" => to,
+        "approve" => edge_approvals |> List.flatten() |> Enum.uniq(),
+        # **Two edges to one target are marked as not askable.** The request carries a target
+        # and no outcome, and this repository's own `dev.yml` reaches `implementing` twice out of
+        # `implementing`, on `budget_exhausted` and `did_not_converge`, where `Engine.choose/4`
+        # answers `{:ambiguous, outcomes}`. Said here rather than left for the agent to discover
+        # by being refused: the ticket page and `mix forge.transition` pass no outcome either, so
+        # the only caller that can take one of these is the HTTP API.
+        #
+        # **Where one of the two is the bare edge the engine now takes it** (`default_among/1`,
+        # ticket 13), so this over-marks that case rather than being wrong about it — an agent is
+        # never told it may ask for a target that is then refused, only the other way round. No
+        # shipped workflow has such a pair today. Whether the marker should narrow to match is a
+        # person's call, not a merge's: `proposal-ambiguous-marker.md`.
+        "ambiguous" => Map.fetch!(reaching, to) > 1
+      }
+    end)
+    |> Enum.sort_by(& &1["to"])
+  end
+
+  defp chat_transitions(%Ticket{}, {:error, _errors}), do: []
 
   # An integrating job's checkout fetches the default branch too, and so does a conversation's;
   # every other job's does not (`docs/design/git-hosting.md` § The job's own git).
@@ -1897,9 +1994,17 @@ defmodule Forge.Jobs do
 
   defp put_proposals(multi, _job, %Result{}), do: multi
 
+  # A document arrives under the name on disk whether its state declared it `deck.md` or
+  # `deck.md!`; the state's declaration is what says which kind it is recorded under, and the
+  # presentation kind is what every surface reads to draw it `VIEW ONLY` with no approval slot
+  # (`docs/design/workflow-grammar-v1.md` § Semantics).
   defp put_documents(multi, ticket, job, %Result{documents: documents}) do
+    presentations = job |> spec() |> Spec.presentation_outputs() |> MapSet.new()
+
     Enum.reduce(documents, multi, fn {name, document}, multi ->
-      Artifacts.put_version(multi, {:doc, name}, ticket.id, name, :document, {:job, job.id}, %{
+      kind = if MapSet.member?(presentations, name), do: :presentation, else: :document
+
+      Artifacts.put_version(multi, {:doc, name}, ticket.id, name, kind, {:job, job.id}, %{
         content: document.raw
       })
     end)

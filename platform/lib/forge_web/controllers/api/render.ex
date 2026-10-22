@@ -187,25 +187,31 @@ defmodule ForgeWeb.Api.Render do
   """
   def review(%Ticket{} = ticket, %Project{} = project, %Version{} = changeset) do
     repo = Forge.Projects.repo_path(project)
-    head = String.replace_prefix(changeset.blob_uri || "", "git:", "")
+    head = Forge.Artifacts.commit(changeset)
 
     %{
       ticket: ticket(ticket, project.name),
       changeset: %{version: changeset.version, commit: head, base: ticket.base_commit},
       merged: Forge.Merge.merged?(ticket),
-      diff: diff(repo, ticket.base_commit, head),
-      documents: review_documents(ticket),
+      diff: diff(repo, ticket.base_commit, head, changeset.blob_uri),
+      documents: review_artifacts(ticket, :document),
+      presentations: review_artifacts(ticket, :presentation),
       answers: review_answers(ticket),
       cost_usd: Decimal.to_string(ticket.cost_usd)
     }
   end
+
+  # Nil where the stored uri is not a commit, as `ReviewLive.diff/3` and `Merge.changeset/1` both
+  # say in their own words: interpolated, it makes `base..`, which git reads as `base..HEAD` and
+  # answers with the default branch's diff as this ticket's change.
+  defp diff(_repo, _base, nil, uri), do: %{error: inspect({:not_a_commit, uri})}
 
   # The same bound the pages draw a change under (`ForgeWeb.Diff`), for the same reason and one
   # layer earlier: `Jason` raises on a binary that is not valid UTF-8, so a patch touching a
   # latin-1 file turned this endpoint into a 500. The map of the change is still every file —
   # the paths are safe because `Forge.Git` makes them so — and `patch` is null with `text:
   # false` beside it, which is a client's cue to read it with git rather than a silent truncation.
-  defp diff(repo, base, head) do
+  defp diff(repo, base, head, _uri) do
     with {:ok, stat} <- Forge.Git.diff_stat(repo, base, head),
          {:ok, patch} <- Forge.Git.diff(repo, base, head) do
       files =
@@ -220,9 +226,13 @@ defmodule ForgeWeb.Api.Render do
     end
   end
 
-  defp review_documents(%Ticket{} = ticket) do
+  # Documents and presentations are two keys of the payload and one comprehension: the kind is the
+  # whole difference between them — a presentation is nothing's input and carries no approval — and
+  # a client handed one among the documents would have no way to tell. Content as written; the
+  # inline quoting is the page's rendering, not the payload's.
+  defp review_artifacts(%Ticket{} = ticket, kind) do
     for artifact <- Forge.Artifacts.list(ticket.id),
-        artifact.kind == :document,
+        artifact.kind == kind,
         version = Forge.Artifacts.latest(ticket.id, artifact.name),
         version != nil do
       %{name: artifact.name, version: version.version, content: version.content}

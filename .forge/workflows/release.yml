@@ -68,7 +68,10 @@ states:
       hetzner-check: { max: 3 }
     inputs: [ticket]
     produces: [release-notes.md]
-    budget: { turns: 50, cost: 4.00 }
+    # Turns at 60, as on every job state here costing a few dollars: `.forge/common.yml`'s
+    # `presenting` carries why. No release has been stopped by this ceiling — the raise is the
+    # rule applied to the class, not a fix for something observed here.
+    budget: { turns: 60, cost: 4.00 }
 
   publishing:
     prompt: agents/publish.md
@@ -78,7 +81,10 @@ states:
       hetzner-snapshot: { max: 2 }
     inputs: [release-notes.md]
     produces: [publish-report.md, changeset]
-    budget: { turns: 50, cost: 4.00 }
+    # Turns at 60, and here the ceiling matters more than anywhere: `publishing` has no retry
+    # transition (below), so a run its turn ceiling stops sticks the ticket having already
+    # written to GHCR or Hetzner. The cost ceiling is the one meant to bind.
+    budget: { turns: 60, cost: 4.00 }
 
   release_ready: {}
 

@@ -9,7 +9,8 @@ states:
     env: default
     inputs: [ticket]
     produces: [refinement.md]
-    budget: { turns: 40, cost: 3.00 }
+    # Turns at 60: `dev.yml`'s `refining` carries why, and it is the same state.
+    budget: { turns: 60, cost: 3.00 }
 
   # `implementation.md` is here because `implementing` sends the ticket back on
   # `diagnosis_invalid`, and a re-diagnosis that cannot read why it was sent back re-derives the
@@ -20,7 +21,7 @@ states:
     env: default
     inputs: [ticket, refinement.md, implementation.md]
     produces: [diagnosis.md]
-    budget: { turns: 60, cost: 4.00 }
+    budget: { turns: 80, cost: 4.00 }
 
   implementing:
     prompt: agents/implement-bug.md
@@ -36,9 +37,18 @@ states:
   checking:
     extends: checking
 
+  # `report.md` is this state's own last version, and optional: the way in from `checking` on a
+  # first pass has written no review. It is here so that a second round can verify the fixes to
+  # what it found and read only what changed since, rather than re-deriving the whole diff at
+  # full price — ticket 7's second review spent $21.96 doing exactly that, and its fifth, scoped,
+  # cost $4.13.
   reviewing:
     extends: reviewing
-    inputs: [refinement.md, diagnosis.md, implementation.md, changeset]
+    inputs: [refinement.md, diagnosis.md, implementation.md, report.md, changeset]
+
+  presenting:
+    extends: presenting
+    inputs: [refinement.md, diagnosis.md, implementation.md, report.md, changeset]
 
   review_ready: {}
 
@@ -59,6 +69,19 @@ states:
 # broken rather than something unfinished, and a cancelled ticket takes no transition at all —
 # so both still stick, which is the right default for a fault nobody has read.
 #
+# **`reviewing` is the one state whose exhaustion is not retried.** A review that ran out of money
+# spent it on subagents whose work a fresh attempt throws away, so the retry reached the same wall
+# at the same price; `.forge/common.yml` has the runs that showed it. The edge goes forward to
+# `presenting` instead — and from there to `review_ready`, where a person already reads
+# `report.md` beside the diff, so a partial report lands in front of someone who can decide.
+# `presenting` and not `review_ready` directly because every way to `review_ready` goes through
+# it: a review that ran out of money is exactly the one whose diff a person needs narrated, and
+# at $3 it cannot repeat what exhausted the review. It carries no `max`, which is safe only while
+# nothing routes back into `reviewing` from there: `max: nil` never exhausts, so an edge from
+# `review_ready` towards `implementing` would make this an uncapped loop and would have to cap it.
+# `did_not_converge` keeps its retry: that is a review that had the budget and no answer, which
+# another attempt can change.
+#
 # `integrating` gets none of these, and cannot: it is `merged`'s `on_conflict`, and the validator
 # refuses a state reached by a conflict that any transition also leads into. The rule is right —
 # an integration is a route out of a conflict, not a step anything else may jump into — and it
@@ -70,8 +93,9 @@ transitions:
   - { from: implementing, to: diagnosing,   when: diagnosis_invalid }
   - { from: checking,     to: reviewing }
   - { from: checking,     to: implementing, when: checks_failed,     max: 3 }
-  - { from: reviewing,    to: review_ready }
+  - { from: reviewing,    to: presenting }
   - { from: reviewing,    to: implementing, when: issues_found,      max: 3 }
+  - { from: presenting,   to: review_ready }
   - { from: review_ready, to: merged,       approve: [changeset] }
   - { from: integrating,  to: checking }
 
@@ -82,8 +106,13 @@ transitions:
   - { from: diagnosing,   to: diagnosing,   when: did_not_converge,  max: 1 }
   - { from: implementing, to: implementing, when: budget_exhausted,  max: 1 }
   - { from: implementing, to: implementing, when: did_not_converge,  max: 1 }
-  - { from: reviewing,    to: reviewing,    when: budget_exhausted,  max: 1 }
+  - { from: reviewing,    to: presenting,   when: budget_exhausted }
   - { from: reviewing,    to: reviewing,    when: did_not_converge,  max: 1 }
+  - { from: presenting,   to: presenting,   when: budget_exhausted,  max: 1 }
+  - { from: presenting,   to: presenting,   when: did_not_converge,  max: 1 }
 
 limits:
-  ticket_cost: 120.00
+  # $210 and not $120 because `reviewing` costs $35: the cap is what the review loop has to fit
+  # inside, and `.forge/common.yml` derives the figure beside the budget it follows from.
+  # `project_workflows_test.exs` computes it from this file rather than trusting the comment.
+  ticket_cost: 210.00

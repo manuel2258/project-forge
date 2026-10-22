@@ -379,6 +379,9 @@ defmodule ForgeWorker.Job.Conversation do
     # by content, so re-reporting the same file every turn costs nothing.
     proposals = Dir.proposals(job_dir(state))
     documents = Dir.documents(job_dir(state))
+    # Read once per turn and removed by the read, so a request is carried exactly once — and
+    # only off a turn that ended cleanly (`docs/design/conversations.md` § Taking a transition).
+    transition = transition_request(state, event.payload)
 
     # After every turn and not at the end, because a conversation's end may be its machine's: it
     # goes dormant when its worker is lost, and a reopen resumes what the last turn left.
@@ -387,24 +390,28 @@ defmodule ForgeWorker.Job.Conversation do
     send(
       state.link,
       {:chat_turn, state.job_id, index,
-       Secrets.mask(secrets(state), %{
-         "job_id" => state.job_id,
-         "turn" => index,
-         "commit" => head,
-         # Why the turn has no commit, when it has none: the machine's log is off the machine
-         # and the person in the chat never reads it, so this is the only way they learn that
-         # what the turn did is not on the branch (`docs/design/conversations.md` § Commits).
-         "uncommitted" => uncommitted,
-         "interrupted" => event.payload[:interrupted] == true,
-         "proposals" =>
-           Map.new(proposals.proposals, fn {file, p} ->
-             {file, %{"title" => p.title, "body" => p.body, "raw" => p.raw}}
-           end),
-         "invalid_proposals" => proposals.invalid_proposals,
-         "documents" => documents.documents,
-         "invalid_documents" => documents.invalid_documents,
-         "harness" => turn_summary(event, session, state.version)
-       })}
+       Secrets.mask(
+         secrets(state),
+         %{
+           "job_id" => state.job_id,
+           "turn" => index,
+           "commit" => head,
+           # Why the turn has no commit, when it has none: the machine's log is off the machine
+           # and the person in the chat never reads it, so this is the only way they learn that
+           # what the turn did is not on the branch (`docs/design/conversations.md` § Commits).
+           "uncommitted" => uncommitted,
+           "interrupted" => event.payload[:interrupted] == true,
+           "proposals" =>
+             Map.new(proposals.proposals, fn {file, p} ->
+               {file, %{"title" => p.title, "body" => p.body, "raw" => p.raw}}
+             end),
+           "invalid_proposals" => proposals.invalid_proposals,
+           "documents" => documents.documents,
+           "invalid_documents" => documents.invalid_documents,
+           "harness" => turn_summary(event, session, state.version)
+         }
+         |> Map.merge(transition_keys(transition))
+       )}
     )
 
     {:noreply, %{state | turns: index}}
@@ -426,6 +433,33 @@ defmodule ForgeWorker.Job.Conversation do
     Logger.debug("conversation ignored #{inspect(message)}")
     {:noreply, state}
   end
+
+  # **Only a clean turn's request is read; any other's file is removed unread.** The same gate
+  # `invoke.json` has, for the same reason it has it — a run that may not invoke has its file
+  # removed "so a stray file cannot turn a finished run into a round of refusals"
+  # (`runner.ex`'s `invocations/3`). Here the turn to refuse is the interrupted one above all: the
+  # person cut the agent off mid-sentence, a file half-written when that happened is not a request
+  # anybody made, and `push_reply/1` — the thing that would have told somebody — is the one step
+  # an interrupted turn skips. A turn the harness ended on an error or a budget is no better.
+  defp transition_request(state, payload) do
+    clean? =
+      payload[:interrupted] != true and payload[:subtype] == "success" and
+        payload[:is_error] != true
+
+    if clean? do
+      Dir.transition_request(job_dir(state))
+    else
+      File.rm_rf(Dir.transition_path(job_dir(state)))
+      :none
+    end
+  end
+
+  # Absent unless the conversation wrote the file, so a turn that asked for nothing says nothing.
+  # Merged before the masking wrap closes, not after: the request carries the agent's own
+  # `comment`, which is text it wrote and so is text that could hold a secret.
+  defp transition_keys(:none), do: %{}
+  defp transition_keys({:ok, request}), do: %{"transition_request" => request}
+  defp transition_keys({:error, reason}), do: %{"invalid_transition_request" => reason}
 
   # -- ending ---------------------------------------------------------------------------------
 

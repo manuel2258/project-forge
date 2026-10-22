@@ -458,10 +458,10 @@ systemd-run --pipe --wait --collect --expand-environment=no --unit=forge-job-<sh
   rather than inside it:
   1. **The user is made first** (`Slice.enter/1`), before the worktree exists.
   2. **The worktree is the user's before any git runs in it** (`Slice.own/2`). Root runs git only
-     to clone into a directory nothing has touched. A snapshot of a seed or a ticket's template, and
-     a tree left by an earlier attempt, are handed over first and refreshed as the user — a
-     template's `.git` is the last job's, and a `post-checkout` hook in it would otherwise run as
-     root at the next job's `checkout`.
+     to clone into an empty volume nothing of a job has touched. A snapshot of a seed or a
+     ticket's template, and a tree left by an earlier attempt, are handed over first and
+     refreshed as the user — a template's `.git` is the last job's, and a `post-checkout` hook in
+     it would otherwise run as root at the next job's `checkout`.
   3. **Git runs as the user** (`Slice.as/3`: `setpriv` to the user's uid and gid, with a `HOME`
      that does not exist so root's own configuration is not read): refresh, a command's detach,
      every conversation turn's commit and push, a job's commit and push, and the head the worker
@@ -626,6 +626,14 @@ runs in:
 - **The template's HEAD does not matter.** `Checkout.reset/3` does `checkout -B <branch>
   FETCH_HEAD` before `reset --hard`, for the seed's sake — a seed is on whatever commit it was
   built at — and that repoints a ticket volume sitting on the last job's commit just as well.
+- **A worktree is a volume however it was made, a cold clone included.** The warm paths snapshot
+  *into* it, so there it is one before git sees it; a cold clone makes the empty volume first and
+  clones into that, because `git clone` is happy with a directory that already exists as long as
+  it is empty. A worktree the clone created itself is a plain directory, and `btrfs subvolume
+  snapshot` refuses a source that is not a subvolume — so a ticket whose first job on the machine
+  was a cold clone would promote nothing, find no template next time, and clone cold again for the
+  whole life of the ticket. A volume the machine will not make is a warning and a colder next job,
+  never a failed run: warmth is not correctness.
 
 **Promotion happens only after the run committed and pushed**, and that is what makes the template
 safe to snapshot without cleaning. `Checkout.squash/5` settles a conflict the run left open and

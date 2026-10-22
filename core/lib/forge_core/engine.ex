@@ -65,6 +65,20 @@ defmodule ForgeCore.Engine do
   A transition picked by a person: from a human state, or to unstick a ticket. Any declared
   transition out of `state` may be chosen; `max` does not bind a human decision. When more
   than one transition leads to `to`, `outcome` picks between them.
+
+  **With no outcome given and several edges to `to`, the one for the default outcome is taken.**
+  A person names a state and not an edge — the operator surface offers each target once
+  (`Forge.Engine.offered_transitions/2`) — so without this a target reached by two edges could
+  not be moved to at all. The default edge is the right one to mean: it is the state's ordinary
+  way out, and a human move records no outcome against the job anyway (`Forge.Engine`'s
+  `put_transition/7`), so what the choice settles is the label on the event and which counter is
+  bumped. `reviewing → review_ready` is the case that made it necessary: it has a bare edge and a
+  `when: budget_exhausted` one, and a stuck review is exactly where a person needs that button.
+
+  **Several edges to `to` and none of them the default is still ambiguous**, because nothing here
+  can tell which a person meant: `refining → refining` carries `budget_exhausted` and
+  `did_not_converge` and no bare edge. That case needs the outcome sent along with the target,
+  which is the operator surface's to fix, not this function's to guess.
   """
   @spec choose(
           Workflow.t(),
@@ -83,7 +97,16 @@ defmodule ForgeCore.Engine do
     case candidates do
       [] -> {:error, :no_such_transition}
       [transition] -> {:ok, transition}
-      many -> {:error, {:ambiguous, Enum.map(many, &Transition.outcome/1)}}
+      many -> default_among(many)
+    end
+  end
+
+  # At most one, always: the validator refuses two transitions from one state on the same outcome,
+  # and a bare edge is the one for `default_outcome/0`.
+  defp default_among(many) do
+    case Enum.find(many, &(&1.when == nil)) do
+      %Transition{} = default -> {:ok, default}
+      nil -> {:error, {:ambiguous, Enum.map(many, &Transition.outcome/1)}}
     end
   end
 

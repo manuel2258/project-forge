@@ -21,6 +21,17 @@ defmodule ForgeWeb.Api.FallbackController do
   def call(conn, {:error, :nothing_pending}),
     do: error(conn, :conflict, "nothing_pending", "no transition awaits approval")
 
+  # The state of the ticket and so the client's to resolve, not a platform fault: decide the
+  # pending transition and the next one becomes reachable (`workflow-grammar-v1.md` § Approval).
+  def call(conn, {:error, :pending_approval}),
+    do:
+      error(
+        conn,
+        :conflict,
+        "pending_approval",
+        "a decision on another transition is pending; decide that one first"
+      )
+
   def call(conn, {:error, :no_such_transition}),
     do: error(conn, :unprocessable_entity, "no_such_transition", nil)
 

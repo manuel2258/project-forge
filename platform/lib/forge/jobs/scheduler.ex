@@ -254,9 +254,14 @@ defmodule Forge.Jobs.Scheduler do
     do:
       "every worker template assigned to this project is disabled after failing to make a machine"
 
-  # Big enough, taking this kind *and* new enough: `Provisioning.could_ever_hold?/2` asks all
-  # three, so a template that refuses chats is this answer for a chat however large it is, and one
-  # whose snapshot speaks protocol 4 is this answer for a job holding secrets (`Jobs.protocol/1`).
+  # Big enough and taking this kind, from `Provisioning.could_ever_hold?/2`, so a template that
+  # refuses chats is this answer for a chat however large it is. **And new enough, which that no
+  # longer answers for every template**: a template naming a snapshot is still filtered on its
+  # protocol there, so one speaking 4 is this answer for a job holding secrets
+  # (`Jobs.protocol/1`) — but one on the mark stores its last resolution's protocol, which the
+  # gate deliberately does not refuse on, and *new enough* is then `Workers.serves/2`'s to answer
+  # after it has resolved. That one waits rather than sticking, with `image_too_old`'s sentence
+  # below (`docs/design/provisioning.md` § Where a machine comes from).
   defp reason({:no_template, :none_fit}),
     do:
       "no worker template assigned to this project takes this kind of job, is big enough for " <>
@@ -315,6 +320,22 @@ defmodule Forge.Jobs.Scheduler do
       {"create_failed",
        "Waiting for a machine: the provider refused to make one, and the workers page of " <>
          "whoever owns the template says why."}
+
+  # **The snapshot the mark points at is older than this job needs**, which is not *could never
+  # fit* and so does not stick the ticket: the remedy is a build, which the platform cannot see
+  # coming and which no arrival inside it corresponds to. Stuck, the job would leave the pending
+  # set and nothing would ever re-resolve — the operator would build the image this sentence asks
+  # for and the ticket would stay stuck. Waiting, the next pass after the build makes the machine
+  # (`docs/design/provisioning.md` § Where a machine comes from).
+  #
+  # `has` is an integer and never nil: an unlabelled snapshot is unknown rather than too old, and
+  # `Provisioning.speaks?/2` lets it through to be probed, so `Workers.serves/2` cannot refuse one.
+  defp waiting({:image_too_old, need, has}),
+    do:
+      {"image_too_old",
+       "Waiting for a newer worker image: this job needs worker protocol #{need} and the " <>
+         "snapshot its template follows speaks #{has}. Build one and mark it, and the next " <>
+         "pass will use it; nothing needs editing."}
 
   # Only a chat reaches these two: anything else sticks its ticket instead (`stick/2`).
   defp waiting({:no_template, why} = refusal),

@@ -3950,6 +3950,163 @@ defmodule ForgeWorker.LinkTest do
       assert again == documents
     end
 
+    # A transition is not a document: it is an instruction, and it travels on the turn that asked
+    # for it and no other (`docs/design/conversations.md` § Taking a transition). The turn before
+    # and the turn after must carry neither key, or the platform would take the same transition
+    # again on every turn until the conversation ended.
+    test "a transition asked for during a turn goes out with that turn, and only that turn",
+         context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin)
+      push(client, @topic, "assign", job)
+      {first, _} = take_push("turn")
+      refute Map.has_key?(first, "transition_request")
+      refute Map.has_key?(first, "invalid_transition_request")
+
+      push(client, @topic, "message", %{
+        "job_id" => job["job_id"],
+        "message_id" => "m-2",
+        "text" => "MOVE it back"
+      })
+
+      {%{"turn" => 2} = second, _} = take_push("turn")
+
+      assert second["transition_request"] == %{
+               "to" => "implementing",
+               "comment" => "the tests were the problem"
+             }
+
+      push(client, @topic, "message", %{
+        "job_id" => job["job_id"],
+        "message_id" => "m-3",
+        "text" => "thanks"
+      })
+
+      {%{"turn" => 3} = third, _} = take_push("turn")
+      refute Map.has_key?(third, "transition_request")
+      refute Map.has_key?(third, "invalid_transition_request")
+    end
+
+    # **An interrupted turn's request is removed unread.** The gate `invoke.json` has, for the
+    # reason it has it (`runner.ex`'s `invocations/3`): the person cut the agent off, a file
+    # half-written when that happened is not a request anybody made, and `push_reply/1` — the
+    # thing that would have told somebody — is the one step an interrupted turn skips.
+    test "a request written before an interrupt is dropped, and gone for the next turn too",
+         context do
+      %{client: client, origin: origin, root: root} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin, env: [{"FAKE_TURN_SECONDS", "5"}])
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      push(client, @topic, "message", %{
+        "job_id" => job_id,
+        "message_id" => "m-2",
+        "text" => "PREMOVE SLOW please"
+      })
+
+      push(client, @topic, "interrupt", %{"job_id" => job_id})
+
+      {%{"turn" => 2, "interrupted" => true} = second, _} = take_push("turn")
+      refute Map.has_key?(second, "transition_request")
+      refute Map.has_key?(second, "invalid_transition_request")
+
+      # Removed, not merely skipped: a file left behind would be read as a fresh request by
+      # the very next turn, which is the interrupt applied one turn late.
+      refute File.exists?(Path.join([root, "jobs", job_id, "transition.json"]))
+
+      push(client, @topic, "message", %{
+        "job_id" => job_id,
+        "message_id" => "m-3",
+        "text" => "never mind"
+      })
+
+      {%{"turn" => 3} = third, _} = take_push("turn")
+      refute Map.has_key?(third, "transition_request")
+    end
+
+    # The other half of the clean-turn rule, which the note asserts and nothing drove: a turn the
+    # harness ended on an error, and one whose subtype says success while `is_error` says
+    # otherwise — a budget stop. Both have the file removed unread, as an interrupt does.
+    test "a request on a turn that ended badly is dropped, by subtype and by is_error", context do
+      %{client: client, origin: origin, root: root} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin)
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      for {text, index} <- [{"ERRMOVE now", 2}, {"BUDGETMOVE now", 3}] do
+        push(client, @topic, "message", %{
+          "job_id" => job_id,
+          "message_id" => "m-#{index}",
+          "text" => text
+        })
+
+        {%{"turn" => ^index} = turn, _} = take_push("turn")
+
+        refute Map.has_key?(turn, "transition_request"), text
+        refute Map.has_key?(turn, "invalid_transition_request"), text
+        refute File.exists?(Path.join([root, "jobs", job_id, "transition.json"])), text
+      end
+    end
+
+    # A file that is not a request is reported as one that is not, rather than dropped: the
+    # agent asked for something and has to be told nothing happened.
+    test "a transition file the worker cannot read goes out as invalid", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin)
+      push(client, @topic, "assign", job)
+      {_first, _} = take_push("turn")
+
+      push(client, @topic, "message", %{
+        "job_id" => job["job_id"],
+        "message_id" => "m-2",
+        "text" => "BADMOVE please"
+      })
+
+      {%{"turn" => 2} = second, _} = take_push("turn")
+      refute Map.has_key?(second, "transition_request")
+      assert second["invalid_transition_request"] =~ "transition.json is not valid JSON"
+    end
+
+    # The comment is the agent's own text, so it is masked like everything else a turn carries.
+    # Merged into the payload after the masking wrap would have sent the value through verbatim.
+    test "a secret in the request's comment is masked", context do
+      %{client: client, origin: origin, root: root} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = origin |> chat() |> with_secrets(%{"STRIPE_TEST_KEY" => "sk_test_in-a-comment"})
+      push(client, @topic, "assign", job)
+      {_first, _} = take_push("turn")
+
+      File.write!(
+        Path.join([root, "jobs", job["job_id"], "transition.json"]),
+        ~s({"to": "implementing", "comment": "as sk_test_in-a-comment said"})
+      )
+
+      push(client, @topic, "message", %{
+        "job_id" => job["job_id"],
+        "message_id" => "m-2",
+        "text" => "thanks"
+      })
+
+      {%{"turn" => 2} = second, _} = take_push("turn")
+      assert second["transition_request"]["comment"] == "as [secret STRIPE_TEST_KEY] said"
+    end
+
     # What the worker refuses goes to the platform too, with why, so the page can list it: a
     # document that did not arrive has to be visible rather than merely absent. Every other test
     # left `out/` clean, and a turn that always sent no refusals passed them all.

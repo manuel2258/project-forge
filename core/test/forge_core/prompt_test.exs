@@ -155,6 +155,54 @@ defmodule ForgeCore.PromptTest do
                "- `shots/*` -> any number of files in `/j/out/shots/`, each kept as `shots/<file>`"
     end
 
+    # The marker is the declaration, so the manifest must name the path the agent actually writes
+    # and must not read as an ordinary document: nothing downstream consumes it, and the quoting
+    # convention is the only thing the review page needs from the prose
+    # (`docs/design/job-prompt.md` § Presentations).
+    test "a presentation is named by its real path, and said to be read by no later job" do
+      manifest = Prompt.manifest(%{spec() | produces: ["plan.md", "deck.md!"]}, "/j")
+
+      assert manifest =~ "- `deck.md` -> `/j/out/deck.md`: a presentation."
+      assert manifest =~ "read by no later job"
+      assert manifest =~ "`path:42-58`"
+      refute manifest =~ "deck.md!"
+      refute manifest =~ "- `deck.md` -> `/j/out/deck.md`\n"
+    end
+
+    # An agent told nothing about `optional` assumes what a declared output has always meant, and
+    # pads rather than finishing without one.
+    test "an optional output is named as one, and a required one is not" do
+      spec = %{spec() | produces: ["plan.md", "deck.md!"], optional: ["deck.md"]}
+      manifest = Prompt.manifest(spec, "/j")
+
+      assert manifest =~ "Optional: you may finish without writing it"
+      assert manifest =~ "`deck.md` -> `/j/out/deck.md`: a presentation."
+
+      [plan_line, deck_line] =
+        manifest |> String.split("\n") |> Enum.filter(&String.contains?(&1, "/j/out/"))
+
+      assert plan_line =~ "plan.md"
+      refute plan_line =~ "Optional"
+      assert deck_line =~ "Optional"
+    end
+
+    test "a required document says nothing about being optional" do
+      refute Prompt.manifest(spec(), "/j") =~ "Optional"
+    end
+
+    test "a presentation says where the path is from, and that the page draws a few" do
+      manifest = Prompt.manifest(%{spec() | produces: ["deck.md!"]}, "/j")
+
+      assert manifest =~ "the path from the repository root"
+      assert manifest =~ "A handful of quotes are drawn"
+    end
+
+    test "a presentation that is the only document says it carries the outcome" do
+      manifest = Prompt.manifest(%{spec() | produces: ["deck.md!", "changeset"]}, "/j")
+
+      assert manifest =~ "- `deck.md` -> `/j/out/deck.md` (carries the outcome): a presentation."
+    end
+
     test "a job that may not invoke is not told the file exists" do
       manifest = Prompt.manifest(spec(), "/j")
       refute manifest =~ "invoke.json"
@@ -690,6 +738,133 @@ defmodule ForgeCore.PromptTest do
       assert manifest =~ "- About ticket 7: Persist the high score table"
       assert manifest =~ "## What already ran on this ticket"
       assert manifest =~ "/var/forge/jobs/chat-1/history"
+    end
+
+    # `docs/design/conversations.md` § Taking a transition: a ticket chat is told what it may ask
+    # the engine for, with each edge's `approve` list, and that the list is a snapshot.
+    test "about a ticket is told the transitions it may ask for" do
+      spec =
+        chat_spec(%{
+          ticket: %{number: 7, title: "Persist the high score table"},
+          moving: %{
+            "transitions" => [
+              %{"to" => "planning", "approve" => ["refinement.md"]},
+              %{"to" => "verifying", "approve" => []}
+            ],
+            "pending" => nil,
+            "job_live" => false
+          }
+        })
+
+      manifest = Prompt.chat_manifest(spec, "/var/forge/jobs/chat-1")
+      flat = String.replace(manifest, "\n", " ")
+
+      assert manifest =~ "## Moving the ticket"
+      assert manifest =~ "`/var/forge/jobs/chat-1/transition.json`"
+      assert manifest =~ "- `planning` — approves `refinement.md` on the way"
+      assert manifest =~ "- `verifying`"
+      assert flat =~ "as of when this conversation started"
+      # Nothing is pending and no job is live, so neither is claimed.
+      refute manifest =~ "already pending"
+      refute manifest =~ "was running"
+    end
+
+    test "about a ticket with nothing to take says so plainly" do
+      spec =
+        chat_spec(%{
+          ticket: %{number: 7, title: "Done"},
+          moving: %{"transitions" => [], "pending" => nil, "job_live" => false}
+        })
+
+      manifest = Prompt.chat_manifest(spec, "/var/forge/jobs/chat-1")
+
+      assert manifest =~ "## Moving the ticket"
+      assert manifest =~ "No transition is declared out of the ticket's state"
+    end
+
+    test "about a ticket with a decision pending, or a live job, is told" do
+      spec =
+        chat_spec(%{
+          ticket: %{number: 7, title: "Persist"},
+          moving: %{
+            "transitions" => [],
+            "pending" => %{
+              "to" => "planning",
+              "outcome" => "done",
+              "approve" => ["refinement.md"]
+            },
+            "job_live" => true
+          }
+        })
+
+      flat = spec |> Prompt.chat_manifest("/var/forge/jobs/chat-1") |> String.replace("\n", " ")
+
+      assert flat =~ "already pending on this ticket: moving to `planning` on `done`"
+      assert flat =~ "approving `refinement.md`"
+      assert flat =~ "A job of the ticket's state was running"
+      assert flat =~ "cancels the ticket and restores it"
+    end
+
+    # A target two edges reach can never be asked for, because the request names no outcome. Said
+    # so in the list rather than offered as though it could be taken — and said accurately: the
+    # ticket page cannot take one either.
+    test "about a ticket marks a target that cannot be asked for" do
+      spec =
+        chat_spec(%{
+          ticket: %{number: 7, title: "Round and round"},
+          moving: %{
+            "transitions" => [
+              %{"to" => "implementing", "approve" => [], "ambiguous" => true},
+              %{"to" => "verifying", "approve" => [], "ambiguous" => false}
+            ],
+            "pending" => nil,
+            "job_live" => false
+          }
+        })
+
+      manifest = Prompt.chat_manifest(spec, "/var/forge/jobs/chat-1")
+      flat = String.replace(manifest, "\n", " ")
+
+      assert flat =~ "`implementing` — **cannot be asked for**"
+      assert flat =~ "Nor can the ticket page"
+      # The one that can be is still plainly offered.
+      assert manifest =~ "- `verifying`"
+    end
+
+    # A pinning that no longer parses has nothing to offer, and an empty list would read as a
+    # state with no way out — a different problem with a different answer.
+    test "about a ticket whose workflow no longer parses says that instead" do
+      spec =
+        chat_spec(%{
+          ticket: %{number: 7, title: "Stuck"},
+          moving: %{
+            "transitions" => [],
+            "pending" => nil,
+            "job_live" => false,
+            "workflow_broken" => true
+          }
+        })
+
+      manifest = Prompt.chat_manifest(spec, "/var/forge/jobs/chat-1")
+
+      assert manifest =~ "pinned workflow no longer parses"
+      assert manifest =~ "repin"
+      refute manifest =~ "No transition is declared"
+    end
+
+    # A project chat has no ticket and nothing to transition, so it is not handed a section
+    # describing a file it can never usefully write.
+    test "about the repository as a whole is told nothing about moving a ticket" do
+      spec =
+        chat_spec(%{
+          moving: %{
+            "transitions" => [%{"to" => "planning", "approve" => []}],
+            "pending" => nil,
+            "job_live" => true
+          }
+        })
+
+      refute Prompt.chat_manifest(spec, "/var/forge/jobs/chat-1") =~ "Moving the ticket"
     end
 
     # A reopened conversation is a new process, and the message at the end of its prompt is the

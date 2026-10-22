@@ -152,7 +152,7 @@ Worker → platform:
 | `stats` | `cpu`, `memory_used`, `memory_total`, `disk_used`, `disk_total`, each only when readable | no |
 | `log` | `at`, `type`, `level`, `message`, and `job_id` on a line about a job | no |
 | `event` | `job_id`, normalised harness event | no |
-| `turn` | `job_id`, turn index, commit, `uncommitted` (why there is no commit, when there is none), the turn's proposals and documents, and a harness summary carrying its cost | yes |
+| `turn` | `job_id`, turn index, commit, `uncommitted` (why there is no commit, when there is none), the turn's proposals and documents, any `transition.json` it wrote (`conversations.md` § Taking a transition), and a harness summary carrying its cost | yes |
 | `result` | `job_id`, `ForgeCore.Job.Result` as JSON — `status` `parked` for an agent that invoked commands, with the invocations and the commit it pushed; a command's with its exit status, duration and log key; either's `blobs` (name → key and size) and `invalid_blobs` (name → why) for its groups of files | yes |
 | `hibernated` | `job_id`, commit sha, reason, the result as far as it got; a chat adds its turn count | yes |
 | `failed` | `job_id`, reason | yes |
@@ -487,10 +487,11 @@ is labelled older makes no machine until it names another, and one whose snapsho
 makes one, which is refused and marks the image (below). What the floor leaves with nothing to decide is still in the
 code: `Forge.Jobs.protocol/1`'s per-kind protocols (2 for a command, 3 for a workflow job), and
 the templates page's word for a snapshot that cannot run an agent. Every worker the floor accepts
-can run those two; a conversation is the kind that now asks for more (protocol 7, below).
+can run those two; a conversation is the kind that now asks for more (protocol 8, below).
 **The protocol dimension of `Workers.fits?/2` and the scheduler's demand decides something
-again** since protocol 5: an integrating job needs it, a job that names a secret needs 6, a
-conversation needs 7, and a protocol 4 worker is still accepted, so the gate is what keeps such a
+again** since protocol 5: an integrating job needs it, a job that names a secret needs 6, a state
+that declares a presentation or an optional output needs 7, a conversation needs 8, and a
+protocol 4 worker is still accepted, so the gate is what keeps such a
 job off it (above).
 
 **Protocol 6 is project secrets** (`docs/design/secrets.md` § Delivery): `secrets` on an
@@ -502,18 +503,40 @@ taking every job that names none: an assignment without secrets is exactly what 
 credential's seal is unchanged. The minimum stays 4 until the templates and permanent machines
 have moved, as below.
 
-**Protocol 7 is a conversation that merges the default branch** (`conversations.md` § Commits):
+**Protocol 7 is presentations and optional outputs** (`docs/design/workflow-grammar-v1.md`
+§ Semantics): a `produces` entry ending `!`, whose artifact is the name without it, and
+`optional` in the spec. It is a bump because the worker composes the manifest, collects `out/`
+and decides the outcome, and an older one gets all three wrong rather than less. It runs an older
+`forge_core`, which strips no marker: it tells the agent to write `$FORGE_JOB/out/presentation.md!`
+and collects the file under that name, which this platform records as an approvable *document* —
+the two things a presentation must never be. And its manifest says every declared document is
+required, because the note that says otherwise is new here: an agent that skips an optional one is
+nagged for it by that worker's own `Correction`, and the job ends `error` on a state whose workflow
+has no `error` edge, because the document was meant to be skippable. So a job whose state declares
+either needs protocol 7 (`Forge.Jobs.protocol/1`, from the stored spec), and a protocol 4, 5 or 6
+worker keeps taking every job that declares neither — `optional` is a new key in every workflow
+job's spec, and an older `Spec.from_map/1` reads the keys it knows by name and ignores the rest.
+The minimum stays 4.
+
+**This one is louder than the others on the way out**, because forge's own workflows reach it on
+every ticket: `presenting` is on the only path to `review_ready` in both `.forge/workflows/dev.yml`
+and `bug.yml`. Until a template's snapshot speaks 7, such a job sticks its ticket for placement —
+or, from an unlabelled template, makes one machine, learns 6 at its join and sticks from the next
+pass. It is a placement stick, so pointing a template at a new snapshot brings every stuck ticket
+back; `docs/deploy.md` § Upgrading is where the operator reads that.
+
+**Protocol 8 is a conversation that merges the default branch** (`conversations.md` § Commits):
 `default_branch` in a *chat's* assignment's `git`, and a squash that settles a conflict the run
 left open instead of dying on `reset --soft` (`git-hosting.md` § Non-fast-forward on a ticket
-branch). It is a bump because the first without the second is worse than neither. A protocol 5 or
-6 worker fetches the branch and keeps a committed merge — that half was never kind-aware — but
+branch). It is a bump because the first without the second is worse than neither. A protocol 5, 6 or
+7 worker fetches the branch and keeps a committed merge — that half was never kind-aware — but
 its squash cannot survive a merge the turn left open, so the turn dies with a bare git error and
 so does every turn after it, a trap no chat could reach while nothing told it the branch. So a
-conversation needs protocol 7 (`Forge.Jobs.protocol/1`), a protocol 4-6 worker keeps taking every
+conversation needs protocol 8 (`Forge.Jobs.protocol/1`), a protocol 4-7 worker keeps taking every
 workflow job and command, and the minimum stays 4.
 
 **What this leaves exposed, named rather than claimed closed**: an *integrating* job still asks
-only for 5, and on a 5 or 6 worker a run of it that ends mid-conflict fails the way forge#2 did.
+only for 5, and on a 5, 6 or 7 worker a run of it that ends mid-conflict fails the way forge#2 did.
 That is the bug being fixed, not a misread of anything new the platform sends, and raising that
 floor would strand tickets on machines that can still do everything else such a job needs. It
 closes when the templates move, as every protocol does.
@@ -744,7 +767,8 @@ already has the framework for.
   every accepted worker at protocol 4 or later, `Forge.Jobs.protocol/1`'s numbers for a command and
   a workflow job decide nothing; the protocol dimension of `Workers.fits?/2` and the scheduler's
   demand stay, because an integrating job needs protocol 5, a job that names a secret needs 6, a
-  conversation needs 7, and the floor is still 4; the workers
+  state that declares a presentation or an optional output needs 7, a conversation needs 8, and
+  the floor is still 4; the workers
   page's *no stats — update it*, for a connected machine that spoke no protocol, can no longer be
   drawn; and `Provisioning.holds?/2` still asks only whether a template's image is new enough for
   the job, not whether this platform accepts it, so a project with a small template labelled 3 and

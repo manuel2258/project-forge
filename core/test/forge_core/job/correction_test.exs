@@ -46,6 +46,25 @@ defmodule ForgeCore.Job.CorrectionTest do
       assert undeclared =~ "notes.md: is not a declared output"
     end
 
+    # `docs/design/workflow-grammar-v1.md` § Semantics: an optional document's absence is not a
+    # failure, so it is not something to correct either. The run has to have failed on something
+    # else for the list to be reached at all, which is exactly the case this guards: the session
+    # would otherwise be told to write the document its own manifest told it it could skip
+    # (`.forge/agents/present.md`).
+    test "an optional output that was not written is not a problem to correct" do
+      spec = %{spec() | produces: ["plan.md", "deck.md!"], optional: ["deck.md"]}
+
+      assert {:correct, problems} =
+               Correction.needed(spec, failed(missing: ["plan.md", "deck.md"]))
+
+      assert problems == ["plan.md: was not written; write it to $FORGE_JOB/out/plan.md"]
+
+      assert {:correct, [undeclared]} =
+               Correction.needed(spec, failed(missing: ["deck.md"], undeclared: ["notes.md"]))
+
+      assert undeclared =~ "notes.md: is not a declared output"
+    end
+
     test "names an outcome the state does not accept, and the ones it does" do
       result = failed(documents: %{"plan.md" => plan("shipped")})
 

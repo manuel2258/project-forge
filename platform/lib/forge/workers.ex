@@ -491,9 +491,9 @@ defmodule Forge.Workers do
 
     # The recipe works: a machine from it booted and called home. Consecutive failures reset
     # here and nowhere else, because this is the only event that proves anything — and only at a
-    # machine's first `ready`, from the image its template still names: a reconnect of a machine
-    # made from an older snapshot put a template that the new one had taken out of service back
-    # in, at every restart of the platform (`docs/design/provisioning.md` § A template that cannot
+    # machine's first `ready`, from the image its template still resolves to: a reconnect of a
+    # machine made from an older snapshot put a template that the new one had taken out of service
+    # back in, at every restart of the platform (`docs/design/provisioning.md` § A template that cannot
     # make a working machine is taken out of service). First is never seen, as the sweep that
     # counts a machine that never called home reads it.
     template_back? =
@@ -1206,14 +1206,108 @@ defmodule Forge.Workers do
       (is_nil(worker.cores) or worker.cores >= demand.cores)
   end
 
+  # **Every cheap refusal is asked before the catalogue call, and the ones resolution can change
+  # are asked again after it.** Resolving the mark is a request to the provider
+  # (`docs/design/provisioning.md` § Where a machine comes from), and a pass that was never going
+  # to make a machine must not spend one: room first, then the probe, which is the refusal that
+  # holds for *minutes* while a machine from an unheard-of snapshot boots. Asked only after
+  # resolution, it let a template on the mark send up to `max_workers` listings every scheduling
+  # pass for the whole of that boot, each discarded two lines later — and a rate limit from the
+  # provider comes back as this template's failure and takes it out of service.
+  #
+  # The pre-resolution probe reads the snapshot the template was last resolved onto, so a mark
+  # that has just moved can hold one create back for as long as the old snapshot's probe is
+  # booting. It only ever delays, and the pass after the probe joins or goes resolves as normal.
+  #
+  # **Both protocol questions are asked only after resolution**, and that is not an oversight:
+  # what a template on the mark stores is its *old* snapshot's protocol, so refusing on it before
+  # resolving is how it stopped following the mark. `speaks/1` asks whether this platform can talk
+  # to the resolved snapshot at all and `serves/2` whether it is new enough for the job in hand —
+  # two different questions, and the second was missing, which is why machines were made that
+  # could not take the job they were made for.
   defp create_from(template, demand) do
     with {:ok, slot} <- room(template, demand),
-         :ok <- speaks(template),
          :ok <- probed(template),
-         {:ok, credential} <- spendable(template) do
+         {:ok, credential} <- spendable(template),
+         {:ok, template} <- resolve(template, demand, credential),
+         :ok <- speaks(template),
+         :ok <- serves(template, demand),
+         :ok <- probed(template) do
       make_in(slot, template, credential)
     end
   end
+
+  # **The job's own protocol, asked of the snapshot that was just resolved.** `speaks/1` above asks
+  # whether this platform can talk to the snapshot at all, which is a different question and not a
+  # substitute: `image_refusal/1` compares it against this platform's accepted range, so a
+  # snapshot speaking 5 is perfectly acceptable to a platform that accepts 4–6 and nothing refused
+  # it for a job needing 6. That made a machine which could not take the job it was made for, then
+  # another, up to `max_workers`, and then answered `at_capacity` — *busy or still starting* — for
+  # ever (`docs/design/provisioning.md` § Where a machine comes from).
+  #
+  # The gate asks this of every template before `create_from/2` is reached; it is asked again here
+  # because for a template on the mark the row's answer was about the snapshot before, and
+  # resolution has just replaced it. `Provisioning.speaks?/2` is the one definition of *new
+  # enough*, so the two cannot disagree.
+  #
+  # **A wait, not the template's failure and not a stick.** The recipe is not broken: the account
+  # has no new enough snapshot marked yet, so counting it would disable the template three passes
+  # before the operator built the image that fixes it. And it must not stick the ticket, which is
+  # what `{:no_template, :none_fit}` would have done: a placement stick comes back only on an
+  # arrival inside the platform, and a new snapshot taking the mark is none of them — so the job
+  # would leave `Jobs.pending/2`, nothing would re-resolve, and the ticket would sit stuck through
+  # the very build its sentence asked for until somebody edited the template. Waiting, it is
+  # offered again every pass and the first pass after the build makes the machine
+  # (`docs/design/provisioning.md` § Where a machine comes from).
+  defp serves(template, demand) do
+    if Provisioning.speaks?(template, demand[:protocol]),
+      do: :ok,
+      else: {:error, {:image_too_old, demand[:protocol], template.image_protocol}}
+  end
+
+  # **Resolved fresh at every create, and never cached across one.** The mark moves when an image
+  # is built, which is outside the platform entirely, so the only moment the answer is certainly
+  # current is the moment a machine is about to be made. A template naming a snapshot is not asked
+  # about: it already knows.
+  #
+  # Nothing marked, or a listing that cannot be read, is the template's failure the way a
+  # credential it may not spend is — no row, no create request, and out of service after three
+  # passes (§ A template that cannot make a working machine is taken out of service).
+  defp resolve(template, demand, credential) do
+    cond do
+      not Provisioning.Template.latest?(template) -> {:ok, template}
+      Provisioning.speaks?(template, demand[:protocol]) -> ask(template, credential)
+      Provisioning.asked_recently?(template) -> {:ok, template}
+      true -> ask(template, credential)
+    end
+  end
+
+  # **Rate-limited only where the answer can only be a refusal.** A job no marked snapshot is new
+  # enough for waits rather than sticking, so it is offered again every pass; asking on each one
+  # sent a listing per pass per waiting job, and a rate limit from the provider comes back as this
+  # template's failure. So when what is stored already cannot serve the demand — when `serves/2`
+  # below is going to refuse whatever the answer is — the provider is asked at most once per
+  # `Provisioning.resolve_after_ms/0`, and the pass refuses on what it has.
+  #
+  # **A resolution that is going to make a machine is never rate-limited.** What a machine is made
+  # from has to be the snapshot that carries the mark now, so the branch above it asks every time.
+  defp ask(template, credential) do
+    case Provider.images(template.provider, open_secret(credential)) do
+      {:ok, images} ->
+        marked(template, Provisioning.current_image(images))
+
+      {:error, reason} ->
+        refuse_image(template, "its images could not be read: #{message(reason)}")
+    end
+  end
+
+  # **The stored answer is not a fallback.** A template that resolved to a snapshot last pass and
+  # finds nothing marked this one is refused rather than made from the old one: `latest` means
+  # whichever snapshot carries the mark *now*, and a mark somebody removed is not an answer the
+  # platform may invent.
+  defp marked(template, nil), do: refuse_image(template, "no snapshot carries the latest mark")
+
+  defp marked(template, current), do: {:ok, Provisioning.resolve_latest(template, current)}
 
   # **A slot that has to be freed first is not made in, it is named.** The machine giving it up is
   # destroyed at the end of the pass (`sweep_idle/1`), not here, for two reasons the review of this
@@ -1228,7 +1322,7 @@ defmodule Forge.Workers do
 
     do_create(
       Provisioning.Template.worker_attrs(template),
-      %{size: template.size, image: template.image},
+      %{size: template.size, image: template.resolved_image},
       credential,
       template.name
     )
@@ -1243,14 +1337,17 @@ defmodule Forge.Workers do
   # it takes to create from it again.
   defp speaks(template) do
     case Provisioning.image_refusal(template) do
-      nil ->
-        :ok
-
-      message ->
-        Logger.warning("not making a machine from template #{template.id}: #{message}")
-        Provisioning.failed(template.id, message)
-        {:error, {:create_failed, {:image, message}}}
+      nil -> :ok
+      message -> refuse_image(template, message)
     end
+  end
+
+  # One refusal for every reason the image is the thing that stopped this: the words go on the
+  # template, where the page reads them, and the counter takes it out of service.
+  defp refuse_image(template, message) do
+    Logger.warning("not making a machine from template #{template.id}: #{message}")
+    Provisioning.failed(template.id, message)
+    {:error, {:create_failed, {:image, message}}}
   end
 
   # **An image nobody has heard speak is probed by one machine, not several.** Its protocol is
@@ -1265,7 +1362,12 @@ defmodule Forge.Workers do
   #
   # A template naming no image is not probed, for the reason `unlabelled/1` does not warn about
   # one: it boots the driver's default, this host's own. Every Hetzner template names one.
-  defp probed(%{image: image, image_protocol: nil} = template) when is_binary(image) do
+  #
+  # **The probe is of the resolved snapshot, not of whatever the template names.** For one naming
+  # `latest` the two differ, and a word is not something a machine can be made from: a build that
+  # moved the mark between two passes is a different image and gets its own probe
+  # (`docs/design/provisioning.md` § Where a machine comes from).
+  defp probed(%{resolved_image: image, image_protocol: nil} = template) when is_binary(image) do
     probing =
       Repo.exists?(
         from w in Worker,
@@ -1280,8 +1382,10 @@ defmodule Forge.Workers do
   # **Unlabelled is unknown, not compatible**, and it is still made: the join decides, and a
   # refusal teaches the template, so an unlabelled snapshot that cannot work costs one machine.
   # A template naming no image boots the driver's default, which is the node's own and was built
-  # with this platform.
-  defp unlabelled(%{image: image, image_protocol: nil} = template) when is_binary(image) do
+  # with this platform. The snapshot named is the resolved one, as in `probed/1`, so the warning
+  # says which image it is about rather than the word `latest`.
+  defp unlabelled(%{resolved_image: image, image_protocol: nil} = template)
+       when is_binary(image) do
     Logger.warning(
       "making a machine from template #{template.id}, whose image #{image} carries no protocol " <>
         "label; the machine's join will say whether this platform can use it"

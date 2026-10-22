@@ -621,6 +621,27 @@ What the branch holds against its base, bounded per § Semantics that must not b
 - The review page stays: it is where *what it was built from* and *questions answered* sit beside
   the diff, and the queue's review items link there. Changes links to it when the ticket has a
   changeset.
+- **The ticket's presentations come first on the review page**, above the diff and the facts rail
+  and open rather than collapsed: a presentation is the reasoning the patch cannot carry, written
+  to be read before it. Each is drawn dashed and `VIEW ONLY` with no approval slot, as the kind is
+  everywhere (§ Semantics that must not be lost). Where a paragraph quotes `` `path:line` `` or
+  `` `path:start-end` `` in backticks, the matching source from the changeset's head commit is
+  drawn directly beneath that paragraph — any path in that tree, which is the repository as the
+  change leaves it and not only the files the change touched — so the operator reads the lines
+  the prose is about without going into the diff for them. **What is drawn is bounded, the way
+  the patch beneath it is**, and the prose is an agent's, so every bound is on what the page
+  draws rather than on what the document says: a fixed number of quotes drawn per presentation,
+  counted over the whole of it and not per paragraph, since the same quote in forty paragraphs
+  is forty blocks; a fixed number of lines and bytes per quote; a fixed number of bytes read out
+  of git for the whole presentation, asked of git — and of the *blob*, not of whatever a path
+  resolves to — before any of those bytes are; and a fixed length of prose rendered, past which
+  the page draws the beginning and says the rest is in the source. Each bound that stops something says so where it
+  would have drawn it — how many quotes it left out, or to read that one in the diff. A path or a
+  range that does not resolve at that commit degrades to the same kind of muted note naming what
+  was asked for, and **so does a path whose file is not text**: the diff prints `Binary files …
+  differ` rather than those bytes, and a page that drew them would not survive being encoded for
+  the browser. None of it can fail the page. A ticket with no presentation reviews exactly as it
+  did before: the section is absent, not empty.
 
 ### Docs
 
@@ -1081,7 +1102,7 @@ card and no box, in this order:
   `current` or `other build` (below); and, on the right, *Log* — on every row, destroyed ones
   too — and the control that ends it.
 - **A refusal line**, when the machine's last join spoke a protocol this platform does not
-  accept, in `error`: *refused: protocol 3, this platform accepts 4–7 — update it*. It is drawn
+  accept, in `error`: *refused: protocol 3, this platform accepts 4–8 — update it*. It is drawn
   from the protocol the row recorded and the range the platform accepts now, so it cannot say
   something the next join would not.
 - **An unhealthy line**, when the machine said its systemd stopped answering, in `error`:

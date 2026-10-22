@@ -17,7 +17,8 @@ defmodule Forge.Conversations do
   import Ecto.Query, only: [from: 2, where: 3]
 
   alias Ecto.Multi
-  alias Forge.{Events, Git, Jobs, Projects, Proposals, Repo, Secrets, Tickets, Workers}
+  alias Forge.Accounts.User
+  alias Forge.{Events, Git, Jobs, Operator, Projects, Proposals, Repo, Secrets, Tickets, Workers}
   alias Forge.Events.Event
   alias Forge.Git.Tokens
   alias Forge.Jobs.{Job, Runs}
@@ -38,12 +39,26 @@ defmodule Forge.Conversations do
     # A chat has no state and so no declaration to resolve — the grammar is a workflow's, and
     # this is not one. So the person opening it says, and the platform's defaults are what they
     # get when they do not (`docs/design/conversations.md` § What it asks for).
-    with {:ok, memory} <- resource(opts, :memory, Jobs.default_resources().memory),
+    with :ok <- ticket_of(project, Keyword.get(opts, :ticket)),
+         {:ok, memory} <- resource(opts, :memory, Jobs.default_resources().memory),
          {:ok, cores} <- resource(opts, :cores, Jobs.default_resources().cores),
          {:ok, secrets} <- secret_names(project, Keyword.get(opts, :secrets, [])) do
       insert(project, text, Keyword.merge(opts, memory: memory, cores: cores, secrets: secrets))
     end
   end
+
+  # **The ticket must be the project's.** Nothing crossed these before: every caller resolves the
+  # ticket from the project (`Tickets.get_by_number!/2`, or one ref for `mix forge.chat`), so a
+  # chat whose two disagreed was unreachable. It is now load-bearing rather than tidy:
+  # `send_chat/4` guards membership of the *chat's* project while a transition request guards
+  # membership of the *ticket's*, so a mismatched pair would let a member of one project move
+  # another's ticket. Refused where the pair is made, which is the only place that can see both.
+  defp ticket_of(_project, nil), do: :ok
+
+  defp ticket_of(%Projects.Project{id: id}, %Tickets.Ticket{project_id: id}), do: :ok
+
+  defp ticket_of(%Projects.Project{}, %Tickets.Ticket{}),
+    do: {:error, :ticket_not_in_project}
 
   # **Picked by the person opening it, from the project's own** (`docs/design/secrets.md`
   # § Conversations). A name that is not one of this project's live secrets is refused, never
@@ -395,13 +410,311 @@ defmodule Forge.Conversations do
         Events.notify(chat.ticket_id)
         # A turn ending is the event worth a notification; an interrupted one is not, because
         # the person who interrupted it is the person who would be told.
-        unless payload["interrupted"] == true, do: push_reply(chat)
+        unless payload["interrupted"] == true do
+          push_reply(chat)
+          # **Asked here too, not only on the worker.** The worker removes the file unread on a
+          # turn that did not end cleanly, which is where `subtype` and `is_error` are known;
+          # `interrupted` is on the payload this already reads, so the rule a person's Stop
+          # relies on does not live on one side of the channel alone. A frame that says it was
+          # interrupted and carries a request anyway is a frame to drop.
+          apply_transition_request(chat, payload)
+        end
+
         {:ok, chat}
 
       {:error, step, reason, _changes} ->
         {:error, {step, reason}}
     end
   end
+
+  # What the conversation asked the engine to do with its ticket, if anything
+  # (`docs/design/conversations.md` § Taking a transition).
+  #
+  # **Called after the turn's transaction, from inside `do_record_turn/3`.** Inside, because a
+  # re-sent turn never reaches that function — `record_turn/2` returns on `recorded?/2` first —
+  # and taking a transition twice is not taking it twice: the second attempt meets a ticket that
+  # has already left the state. After, because entering a merging state does a real git merge
+  # once the engine's own transaction commits, which cannot sit inside another one.
+  #
+  # The turn is recorded either way. Nothing here can fail the turn, whose cost is the one thing
+  # that must not be lost.
+  defp apply_transition_request(chat, payload) do
+    case request(payload) do
+      :none -> :ok
+      {:ok, request} -> refuse_or_apply(chat, request)
+      {:error, reason} -> refused(chat, nil, reason)
+    end
+  end
+
+  # The worker's decoded request, or its own complaint about a file it could not decode. Both
+  # keys are checked, because a worker that refused the file still reports it: the agent hears
+  # why nothing moved rather than nothing at all.
+  defp request(%{"transition_request" => %{} = request}), do: {:ok, request}
+
+  defp request(%{"invalid_transition_request" => reason}) when is_binary(reason),
+    do: {:error, reason}
+
+  # The key is there and is not of the shape the worker sends, so this is a forged frame — and
+  # answering it with `:none` is answering it with silence, where every other malformed request
+  # is answered with a reason.
+  defp request(%{"transition_request" => _not_a_map}),
+    do: {:error, "the request was not a JSON object"}
+
+  defp request(%{"invalid_transition_request" => _not_a_string}),
+    do: {:error, "the worker's complaint about the request was not text"}
+
+  defp request(_payload), do: :none
+
+  defp refuse_or_apply(chat, request) do
+    case transition_actor(chat, request) do
+      {:ok, ticket, user} -> apply_request(chat, ticket, user, request)
+      {:error, reason} -> refused(chat, request, reason)
+    end
+  end
+
+  # Everything that must hold before the engine is asked, each refused with what a person reads.
+  # The shape is re-checked although the worker checked it: what crosses the channel is not a
+  # guard, the same reason `documents/2` asks again about a name the worker already matched.
+  defp transition_actor(chat, request) do
+    with :ok <- on_a_ticket(chat),
+         :ok <- shaped(request),
+         {:ok, user} <- opener(chat),
+         ticket = Tickets.get!(chat.ticket_id),
+         :ok <- parses(ticket) do
+      {:ok, ticket, user}
+    end
+  end
+
+  # **The pinning is asked about here because the engine would raise on it.**
+  # `Engine.choose/4` reads `Tickets.workflow/1`, which is `{:ok, w} = parsed_workflow(ticket)`
+  # and so a `MatchError` on a pinning that has stopped parsing. Raising from here is worse than
+  # anywhere else: this runs after the turn's transaction has committed, so the channel's
+  # `handle_in("turn", ...)` dies, the worker re-sends, `recorded?/2` says the turn is already
+  # recorded, and the request vanishes with no refusal event and nothing said to anyone. Asked
+  # and refused instead (§ Taking a transition).
+  defp parses(ticket) do
+    case Tickets.parsed_workflow(ticket) do
+      {:ok, _workflow} ->
+        :ok
+
+      {:error, errors} ->
+        {:error,
+         "this ticket's pinned workflow no longer parses, so nothing can be taken out of " <>
+           "any state until a person repins it: " <> ForgeCore.Error.format(errors)}
+    end
+  end
+
+  defp on_a_ticket(%Job{ticket_id: nil}),
+    do: {:error, "this conversation is about the project, and has no ticket to move"}
+
+  defp on_a_ticket(%Job{}), do: :ok
+
+  # **No type guard on `to`.** `apply_request/4` dispatches on the key being *present*, so a
+  # `to` of any type beside a `decision` would validate as a decision here and then dispatch as
+  # a transition — two models of one request, which is the trap CLAUDE.md names. Both keys
+  # present is refused whatever they hold.
+  defp shaped(%{"to" => _to, "decision" => _decision}),
+    do: {:error, "names both a transition to take and a decision to make; write one or the other"}
+
+  # `comment` is checked before either shape, because `Dir.transition/1` refuses a non-string one
+  # and this must agree with it: a frame the worker would have refused must not be applied here
+  # with the comment quietly dropped.
+  defp shaped(%{"comment" => comment}) when not is_binary(comment) and not is_nil(comment),
+    do: {:error, "has a comment that is not text"}
+
+  defp shaped(%{"to" => to}) when is_binary(to) and to != "", do: :ok
+
+  defp shaped(%{"decision" => decision}) when decision in ["approved", "rejected"], do: :ok
+
+  defp shaped(%{"decision" => decision}) when is_binary(decision),
+    do: {:error, "has a decision of #{inspect(decision)}, which is not `approved` or `rejected`"}
+
+  defp shaped(_request),
+    do:
+      {:error,
+       "must be one JSON object with either `to` — the state to move to — or " <>
+         "`decision`, `approved` or `rejected`"}
+
+  # **Whoever opened the conversation, not whoever is typing.** Read from the first thing logged
+  # for this job, which is the only place it is (§ Taking a transition). A conversation a Mix
+  # task opened has `:system` for an actor and cannot move a ticket: a `transition.taken` whose
+  # actor is nobody, for a move a conversation plainly asked for, is worse than a refusal.
+  defp opener(%Job{id: id}) do
+    case Events.earliest_for_job(id, "chat.opened") do
+      %Event{actor: %{"kind" => "user", "id" => user_id}} ->
+        # The non-bang form on purpose: the bang would turn a row that is gone into a crash
+        # costing the turn its cost and its commit, where a refusal costs nothing. **Reachable
+        # and tested** — an earlier comment here claimed this was an equivalent mutant because
+        # nothing deletes a user, which was wrong twice: `Accounts.delete_unapproved_user/2`
+        # deletes the row, and `events.actor` is a JSON column with no reference, so an id that
+        # never named an account reaches this in one line.
+        case Forge.Accounts.get_user(user_id) do
+          nil -> {:error, "the person who opened this conversation no longer has an account"}
+          user -> standing(user)
+        end
+
+      _not_a_person ->
+        {:error, "nobody opened this conversation, so there is no one to attribute a move to"}
+    end
+  end
+
+  # **Read from the row, every time.** Membership is the operator's guard and is reached by
+  # calling it; approval and suspension are this path's to ask, because `Projects.role/2` reads
+  # only the membership row and a conversation outlives the standing of whoever opened it. Any
+  # member can type into it, so without this an account suspended since would still have tickets
+  # moved in its name by somebody else's message — the rule `Forge.Workers.create/2` already
+  # keeps for a page that holds the user it mounted with (§ Taking a transition).
+  defp standing(user) do
+    if User.active?(user) do
+      {:ok, user}
+    else
+      {:error,
+       "the person who opened this conversation is #{standing_word(User.standing(user))}, " <>
+         "so nothing can be done in their name"}
+    end
+  end
+
+  defp standing_word(:suspended), do: "suspended"
+  defp standing_word(:not_approved), do: "not an approved account"
+
+  # `Forge.Operator`, not `Forge.Engine`: the membership guard is the operator's and a chat is a
+  # third caller of the same function the page and the API call, with no copy of any rule
+  # (§ Taking a transition).
+  defp apply_request(chat, ticket, user, %{"to" => to} = request) do
+    engine_said(chat, request, Operator.transition(ticket, user, to, comment: comment(request)))
+  end
+
+  defp apply_request(chat, ticket, user, %{"decision" => decision} = request) do
+    engine_said(
+      chat,
+      request,
+      Operator.decide(ticket, user, decided(decision), comment(request))
+    )
+  end
+
+  # Named rather than converted, as `Spec.kind/1` names a job's kind: `shaped/1` has already
+  # refused anything else, and `String.to_existing_atom/1` on a value off the wire is a different
+  # rule in a second place.
+  defp decided("approved"), do: :approved
+  defp decided("rejected"), do: :rejected
+
+  defp comment(%{"comment" => comment}) when is_binary(comment), do: comment
+  defp comment(_request), do: nil
+
+  # A move that happened needs nothing written here: the ticket's own `transition.taken`,
+  # approvals and `ticket.stuck` are the record, and a second chat-flavoured copy of them is
+  # exactly what would make it distinguishable from a person's choice.
+  defp engine_said(_chat, _request, {:ok, _ticket}), do: :ok
+  defp engine_said(chat, request, {:error, reason}), do: refused(chat, request, humanise(reason))
+
+  # **The refusal is for the person, and is not said back to the agent.** An earlier attempt put
+  # it into the conversation with `send/3` and a `:system` actor. That was wrong three times over
+  # and the reasons are worth keeping, because the shape looks right until each is traced:
+  #
+  #   * `fold/2` hard-codes `role: :user` for every `chat.message` whatever its actor, so the
+  #     person read *themselves* saying their request was refused. Every `:system` sender there
+  #     was — `Operator.answer_chat/4`, and `mix forge.e2e.chat` on `send/2`'s default actor —
+  #     sends text that stands in for the person, which is why that projection was right until
+  #     this became the first `chat.message` whose words were the platform's own.
+  #   * `Forge.Queue` lists a conversation only when its last message is the agent's. The reply
+  #     put the chat in the person's queue and the refusal landed after it and took it out again,
+  #     so the notification led to nothing waiting.
+  #   * `opening/1` splits the transcript at the last agent reply, so on a reopen the refusal
+  #     became the new process's prompt — "the next thing the person said".
+  #
+  # And a message to a conversation *is* a turn: it would cost money nobody asked for, reset the
+  # idle timer that § Lifetime measures from the last human message, and leave a refusal that
+  # persists — "a job of `implementing` is still running" — bounded only by the node's daily cap.
+  #
+  # So this records and notifies, which is what `refused_documents` does for a document that
+  # could not be recorded: the person reads it, the agent is not told, and the agent is told in
+  # its preamble that it will not be told (§ Taking a transition).
+  defp refused(chat, request, reason) do
+    Events.append("chat.transition_refused", {:job, chat.id}, %{
+      ticket_id: chat.ticket_id,
+      job_id: chat.id,
+      payload: %{"request" => bounded_request(request), "reason" => reason}
+    })
+
+    Events.notify(chat.ticket_id)
+    :ok
+  end
+
+  # The request is echoed into an append-only log that § Lifetime keeps for ever, and it arrived
+  # as a file the agent wrote: `read_text/2` caps it at a mebibyte, which is a mebibyte per
+  # refused turn. Only the keys the platform reads are kept, each cut to a length that still
+  # shows a person what was asked for.
+  defp bounded_request(request) when is_map(request) do
+    for {key, value} <- request, key in ["to", "decision", "comment"], into: %{} do
+      {key, cut(value)}
+    end
+  end
+
+  defp bounded_request(request), do: cut(request)
+
+  # **`String.slice/3` and not `binary_part/3`.** This is free text the agent wrote, and a byte
+  # offset lands inside a multi-byte character about as often as not: the result is an invalid
+  # binary, `Jason` refuses to encode it, and the insert raises — *after* the turn's transaction
+  # has committed, which is the one failure the comments above spend two paragraphs avoiding.
+  # Checked rather than reasoned about: `binary_part(String.duplicate("—", 500), 0, 200)` is
+  # `String.valid?/1` false and `Jason.encode/1` answers `{:error, %Jason.EncodeError{}}`.
+  #
+  # So the unit is characters. 200 of them is a longer binary than 200 bytes and still bounded,
+  # which is all this is for.
+  defp cut(value) when is_binary(value) do
+    if String.length(value) > 200, do: String.slice(value, 0, 200) <> "…", else: value
+  end
+
+  defp cut(value), do: value
+
+  # The engine's and the operator's own refusals, in the words the agent and the person read.
+  # Every one of them is a reason a person's click is refused too; none is invented here.
+  defp humanise(:forbidden),
+    do: "the person who opened this conversation is no longer a member of the project"
+
+  defp humanise(:pending_approval),
+    do: "a decision on another transition is already pending; decide that one first"
+
+  defp humanise(:nothing_pending), do: "no transition is waiting for a decision"
+
+  defp humanise(:no_such_transition),
+    do: "the workflow declares no such transition out of this state"
+
+  defp humanise({:job_live, state}),
+    do: "a job of `#{state}` is still running; the ticket has to be cancelled and restored first"
+
+  defp humanise({:not_active, status}), do: "the ticket is #{status}"
+
+  defp humanise({:no_version, name}),
+    do: "`#{name}` has no version yet, so nothing can approve it"
+
+  # The merging states' own refusals (`Engine.enter/4`). Without these a chat asking for a
+  # merging state on a conflicting ticket records `refused: {:merge_conflict, [...]}` as the
+  # sentence a person reads. `ForgeWeb.Operator.Actions` has prose for the conflict; the
+  # impossible one fell to its catch-all until this branch gave it a line there too.
+  defp humanise({:merge_conflict, paths}),
+    do:
+      "the merge hit conflicts in " <>
+        Enum.map_join(paths, ", ", &"`#{&1}`") <> "; they have to be resolved first"
+
+  # Git's own words when it has them — `reason` is whatever the git layer returned, which is a
+  # string for a failed command and a term for anything else.
+  defp humanise({:merge_impossible, reason}) when is_binary(reason),
+    do: "the merge could not be attempted: #{reason}"
+
+  defp humanise({:merge_impossible, reason}),
+    do: "the merge could not be attempted: #{inspect(reason)}"
+
+  # **Not "a person has to choose by hand".** A person cannot: the ticket page and
+  # `mix forge.transition` pass no outcome either, and the only caller that can is a direct API
+  # call. Saying otherwise sends the agent to tell the person to press a button that is not there.
+  defp humanise({:ambiguous, outcomes}),
+    do:
+      "more than one transition goes there, on " <>
+        Enum.map_join(outcomes, ", ", &"`#{&1 || "no outcome"}`") <>
+        "; neither this nor the ticket page can say which, so only a direct API call can take it"
+
+  defp humanise(reason), do: "refused: #{inspect(reason)}"
 
   # A conversation proposes like any job, and its proposals arrive with the turn rather than
   # with a result: there is no result, because a conversation has no outcome and never calls
@@ -1409,7 +1722,7 @@ defmodule Forge.Conversations do
 
   # A row carries the project's name and the last thing the agent said, so an unscoped list is a
   # transcript leak and not only a name one. See `docs/design/identity.md` § Read scoping.
-  defp for_user(%Forge.Accounts.User{} = user) do
+  defp for_user(%User{} = user) do
     project_ids = Enum.map(Forge.Projects.list(user), & &1.id)
     Repo.all(from j in node_wide(), where: j.project_id in ^project_ids)
   end

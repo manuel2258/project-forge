@@ -93,13 +93,16 @@ It lints the shell (shellcheck, shfmt) and runs `mix check` in every project: co
 warnings as errors, format check, Credo strict, tests with coverage. A commit that does not pass
 the gate is not made.
 
-It installs Hex and starts a throwaway postgres on `localhost:5432` first, when the machine has
-neither — a command pool's machine has the devshell and nothing else, and without both the gate
-died before compiling anything and again at "The database for Forge.Repo couldn't be created".
-An operator's own Hex and postgres are left alone; the postgres it starts makes a password for
-that run and hands it to the suite in the environment, so that nothing else on a shared machine
-can authenticate — a committed password would be readable by every job with a checkout — and it
-goes when the run does.
+It installs Hex and starts a throwaway postgres first, when the machine has neither — a command
+pool's machine has the devshell and nothing else, and without both the gate died before compiling
+anything and again at "The database for Forge.Repo couldn't be created". An operator's own Hex and
+postgres are left alone, and **whether there is a postgres to leave alone is decided by logging
+in, not by asking whether something answers on 5432**: a server an earlier killed run left behind
+answers that and then refuses the suite's credentials, and the gate skipped starting its own and
+died at authentication. The one it starts listens on a unix socket in a directory only that run
+can read and on no TCP port at all, so nothing else on a shared machine can reach it, there is no
+password in `config/test.exs` for a job with a checkout to read, and whatever holds 5432 is
+irrelevant. It goes when the run does.
 `mix deps.get` runs every time, in every project, which is the one of the three steps that
 writes to a checkout: it can rewrite `mix.lock` where `mix.exs` has moved on. None of them
 relaxes a check — the suite runs against a real database either way.

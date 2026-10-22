@@ -17,6 +17,15 @@
 # another's build. Never typed. The platform reads them back to say
 # which snapshots are current and to refuse one it cannot talk to before it pays for a machine
 # (docs/design/provisioning.md § A snapshot that speaks the wrong protocol).
+#
+# **And with `forge-worker-current`, the mark a template naming `latest` follows.** The snapshot
+# this run makes takes the mark and the one before it loses it, so a template naming `latest`
+# makes its next machine from this build without anybody repointing it
+# (docs/design/provisioning.md § Where a machine comes from). The new one is marked in the same
+# call that creates it and every other marked snapshot is unmarked after, deliberately: the other
+# order would leave a window with none marked, and every create from such a template failing until
+# somebody reran this. Interrupted between the two, an account holds two marked snapshots — which
+# the platform reads as the newer — until the next build, which unmarks whatever is not its own.
 set -euo pipefail
 
 usage() {
@@ -312,10 +321,55 @@ hcloud server poweroff "$server"
 until [ "$(hcloud server describe "$server" -o format='{{.Status}}')" = "off" ]; do sleep 3; done
 
 echo "snapshotting as $name"
-hcloud server create-image --type snapshot --description "$name" \
+created="$(hcloud server create-image --type snapshot --description "$name" \
   --label "forge-worker-build=$build" --label "forge-worker-protocol=$protocol" \
-  "$server" > /dev/null
+  --label "forge-worker-current=1" \
+  "$server")"
+
+# **The id of the snapshot this call made, out of `Image <id> created from Server <id>`.** The
+# loop below has to tell this run's snapshot from every other marked one, and it did that by
+# comparing the description it holds against the `--name` we passed in: a string we sent against
+# a string hcloud gave back, which is the guard-and-operation model mismatch `CLAUDE.md` § Rules
+# warns about. Anything that altered, padded or trimmed it unmarked the snapshot this run had
+# just made and left the account with **none** marked — the one state the ordering here exists to
+# avoid, and one that fails every create from a template on the mark until somebody builds again.
+# An id compared against an id is the same model on both sides.
+#
+# The message is hcloud 1.67.0's, the version the devshell pins. A line that is not that shape
+# stops the script rather than guessing which snapshot to keep, which leaves the new one marked
+# along with the ones before it — the safe direction, since the platform takes the newest marked
+# and the next build cleans up. `bin/check` cannot run this script, so the shape was checked by
+# hand against the binary's own format string and not by a test.
+snapshot="$(awk '$1 == "Image" && $2 ~ /^[0-9]+$/ { print $2; exit }' <<< "$created")"
+[ -n "$snapshot" ] || {
+  echo "could not read the new snapshot's id from: $created" >&2
+  echo "it is built and carries the latest mark; so do the ones before it, until the next build" >&2
+  exit 1
+}
+
+# **Everything marked but this run's own snapshot, decided from what the account holds now.**
+# This read the marked set *before* creating and unmarked exactly those ids, which left two
+# snapshots marked for good in cases a real account will reach: two builds started close together
+# both read the old one, both marked their own and both unmarked the old, so neither cleaned up
+# after the other — and a run killed between the two steps left the same with nothing to fix it.
+# Asking the account afterwards and keeping only what this run made converges on one however many
+# runs overlap or die, and cleans up whatever an earlier one left behind.
+#
+# A `remove-label` that fails stops the script under `set -e` with the new snapshot already
+# marked, so the account is never left with none — which would fail every create from a template
+# on the mark — and the next build finishes the job.
+echo "taking the latest mark off every snapshot but $snapshot"
+hcloud image list --type snapshot -l forge-worker-current -o noheader -o columns=id |
+  while read -r id; do
+    # An `if`, not `[ ... ] && continue`: a test that fails is the last command of the loop body,
+    # and under `set -e` that is a way to end the script having unmarked nothing.
+    if [ "$id" != "$snapshot" ]; then
+      echo "  unmarking snapshot $id"
+      hcloud image remove-label "$id" forge-worker-current
+    fi
+  done
 
 echo
-echo "done. The snapshot is listed on /templates as $name, build $build, protocol $protocol."
+echo "done. The snapshot is listed on /templates as $name, build $build, protocol $protocol,"
+echo "and carries the latest mark: a template naming 'latest' makes its next machine from it."
 echo "Password for the rescue session, had you needed it: ${password:-<none captured>}"

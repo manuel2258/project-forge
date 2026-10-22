@@ -166,6 +166,31 @@ case "${FAKE_SCENARIO:-success}" in
       # The echo, which the real harness writes only when it takes the message.
       emit "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"$(json_escape "$text")\"}]}}"
 
+      # A request written before the turn could end, for the interrupted case: the file is on
+      # disk and the turn never finished (`docs/design/conversations.md` § Taking a transition).
+      case "$text" in
+        *PREMOVE*)
+          printf '{"to": "implementing", "comment": "cut off mid-thought"}\n' \
+            > "$FORGE_JOB/transition.json"
+          ;;
+      esac
+
+      # A request written and then a turn that ends badly: `ERRMOVE` on an error subtype,
+      # `BUDGETMOVE` on a success subtype that is still an error. Both must have the file
+      # removed unread (`docs/design/conversations.md` § Taking a transition).
+      case "$text" in
+        *ERRMOVE*)
+          printf '{"to": "implementing"}\n' > "$FORGE_JOB/transition.json"
+          emit "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"num_turns\":1,\"duration_ms\":9,\"total_cost_usd\":$cost,\"result\":null,\"session_id\":\"$sid\"}"
+          continue
+          ;;
+        *BUDGETMOVE*)
+          printf '{"to": "implementing"}\n' > "$FORGE_JOB/transition.json"
+          emit "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"num_turns\":1,\"duration_ms\":9,\"total_cost_usd\":$cost,\"result\":\"stopped\",\"session_id\":\"$sid\"}"
+          continue
+          ;;
+      esac
+
       # A turn that takes time and can be cut while it does. Sleeping outright would make the
       # interrupt land after the turn had already ended, which proves nothing — the same trap
       # the spike fell into against the real harness.
@@ -217,6 +242,19 @@ case "${FAKE_SCENARIO:-success}" in
           ;;
       esac
 
+      # A conversation asking the platform to move its ticket, and one writing a file that is
+      # not a request at all (`docs/design/conversations.md` § Taking a transition).
+      # `BADMOVE` first: `*MOVE*` matches it too, and `case` takes the first pattern that fits.
+      case "$text" in
+        *BADMOVE*)
+          printf 'not a request\n' > "$FORGE_JOB/transition.json"
+          ;;
+        *MOVE*)
+          printf '{"to": "implementing", "comment": "the tests were the problem"}\n' \
+            > "$FORGE_JOB/transition.json"
+          ;;
+      esac
+
       emit "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"reply to $(json_escape "$text")\"}]}}"
       # Cumulative, as measured. A platform that adds this per turn over-counts every turn but
       # the first, and the number stays plausible while it does.
@@ -248,6 +286,15 @@ case "${FAKE_SCENARIO:-success}" in
     # In the worktree, which is where the agent's actual work goes: the job directory is the
     # interface, the worktree is the change.
     printf 'edited by the agent\n' > CHANGED.md
+    emit "$result_success"
+    ;;
+  # A run that ends with work in the tree it never committed: the mutation lens of ticket 1,
+  # killed between breaking the code and restoring it. A tracked file modified and an untracked
+  # one written, which is both halves of what `git add -A` would sweep into a commit.
+  leaves_dirty)
+    printf -- '---\noutcome: done\n---\n# Report\n\nReviewed.\n' > "$doc"
+    printf 'mutated by the reviewer\n' >> README.md
+    printf 'scratch\n' > SCRATCH.md
     emit "$result_success"
     ;;
   plan_invalid)
@@ -399,5 +446,25 @@ case "${FAKE_SCENARIO:-success}" in
     ;;
   hang)
     sleep 60
+    ;;
+  # The mutation lens of ticket 1 as it really ended: the tree broken, and then the process
+  # stopped from outside before anything restored it. `leaves_dirty` proves the converged
+  # ending; this one proves the killed-partway ending the acceptance criteria also name.
+  dirties_then_hangs)
+    printf 'mutated by the reviewer\n' >> README.md
+    printf 'scratch\n' > SCRATCH.md
+    # Written last, and the only thing that says the tree is now dirty. A test that cancels on
+    # a channel event instead is racing a timer: this scenario emits nothing, so the first event
+    # to arrive is the runner's own and says nothing about what this script has done.
+    printf 'yes\n' > "$FORGE_JOB/fake-dirtied.txt"
+    sleep 60
+    ;;
+  # And the third ending the criteria name: the tree broken and the run then failing on its own.
+  # No document, so the job cannot converge however the commit went.
+  dirties_then_fails)
+    printf 'mutated by the reviewer\n' >> README.md
+    printf 'scratch\n' > SCRATCH.md
+    emit '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":2,"duration_ms":9,"total_cost_usd":0.02,"session_id":"sess-42"}'
+    exit 1
     ;;
 esac

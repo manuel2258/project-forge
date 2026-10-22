@@ -259,7 +259,13 @@ defmodule Forge.FakeWorker do
         %{base | status: :waiting, questions: questions}
 
       {:finished, outcome, declared, reason} ->
-        %{base | outcome: outcome, declared_outcome: declared, reason: reason}
+        %{
+          base
+          | outcome: outcome,
+            declared_outcome: declared,
+            reason: reason,
+            exhausted: Outcome.exhausted(run)
+        }
     end
   end
 

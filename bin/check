@@ -45,9 +45,10 @@ export HEX_HOME="$PWD/.hex-home"
 
 # A machine that has never run this — a command pool's, not an operator's — has an empty
 # MIX_HOME, and `mix check` goes straight to compiling: no alias in any project installs Hex or
-# fetches deps, so Mix dies asking for Hex before a single check runs. Install and fetch when
-# they are absent. Nothing here relaxes a check; it only gets Mix to where it can run them, and
-# on a machine that already has both it is a no-op.
+# fetches deps, so Mix dies asking for Hex before a single check runs. Hex and rebar are
+# installed when they are absent and left alone when they are not; `mix deps.get` below runs
+# every time, in every project, because a lock the deps do not match is the same cold-machine
+# failure one commit later. Nothing here relaxes a check.
 if ! mix hex.info > /dev/null 2>&1; then
   echo "==> hex"
   mix local.hex --force > /dev/null
@@ -61,15 +62,30 @@ fi
 # operator's own alone — `pg_isready` asks in the protocol Ecto will use rather than guessing
 # from an open port.
 #
-# This does make the gate start infrastructure it does not otherwise own, which is a deliberate
-# choice between the three in `proposal-test-database-for-command-machines.md` and the only one
-# that needs nothing outside this repository. It relaxes no check: the suite runs against a real
-# postgres either way, and against the operator's where there is one.
+# This does make the gate start infrastructure it does not otherwise own. The alternatives were
+# a postgres in the devshell or an environment override in `config/test.exs` with a server
+# supplied per machine; this is the one that needs nothing outside the repository, and
+# `CLAUDE.md` § Quality gate is where the choice is recorded. It relaxes no check: the suite
+# runs against a real postgres either way, and against the operator's where there is one.
 if ! pg_isready -h localhost -p 5432 -q; then
   echo "==> postgres"
   pgroot="$(mktemp -d)"
   trap 'pg_ctl -D "$pgroot/data" -m immediate stop > /dev/null 2>&1 || true; rm -rf "$pgroot"' EXIT
-  initdb -U postgres -A trust -D "$pgroot/data" > /dev/null
+  # Scram over the loopback on a password made for this run, and `trust` only on the unix
+  # socket, which lives in this private directory. A trusting superuser on 5432 is a shell for
+  # every other process on the machine — `COPY … FROM PROGRAM` runs as whoever runs the gate —
+  # and a shared command-pool machine is the case this whole block exists for. A password out of
+  # `config/test.exs` would not help there: every job on such a machine has a checkout and could
+  # read it. This one exists only in this process and the directory that goes with the run.
+  (
+    umask 077
+    head -c 24 /dev/urandom | base64 | tr -d '\n=+/' > "$pgroot/pw"
+  )
+  FORGE_TEST_DB_PASSWORD="$(cat "$pgroot/pw")"
+  export FORGE_TEST_DB_PASSWORD
+  initdb -U postgres --auth-local=trust --auth-host=scram-sha-256 --pwfile="$pgroot/pw" \
+    -D "$pgroot/data" > /dev/null
+  rm -f "$pgroot/pw"
   pg_ctl -D "$pgroot/data" -l "$pgroot/server.log" -w \
     -o "-p 5432 -c listen_addresses=localhost -c unix_socket_directories=$pgroot" start > /dev/null
 fi

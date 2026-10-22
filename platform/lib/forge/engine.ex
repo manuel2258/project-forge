@@ -437,8 +437,16 @@ defmodule Forge.Engine do
   @doc """
   A person takes a declared transition out of the current state: from a human state, or to
   unstick a ticket. Refused while a job for the current state is pending, running or
-  waiting. A transition that requires approval records the approvals as part of the choice.
+  waiting, and while a decision on another transition is pending. A transition that requires
+  approval records the approvals as part of the choice.
   Options: `:outcome` picks between parallel edges, `:comment` is stored with approvals.
+
+  **The pending check is here and not on a page.** It was the ticket page's
+  `:if={!@ticket.pending_transition}` alone, which was armour while clicking was the only way in
+  — and a conversation asks for a transition by writing a file, not by finding a button
+  (`docs/design/conversations.md` § Taking a transition). So every caller meets it at the
+  operation: the chat, the API and the page. `:pending_approval` is `repinnable/2`'s name for the
+  same condition, not a second one.
   """
   @spec choose(Ticket.t(), String.t(), String.t(), keyword()) ::
           {:ok, Ticket.t()} | {:error, term()}
@@ -446,6 +454,9 @@ defmodule Forge.Engine do
 
   def choose(%Ticket{status: :cancelled}, _user_id, _to, _opts),
     do: {:error, {:not_active, :cancelled}}
+
+  def choose(%Ticket{pending_transition: %{}}, _user_id, _to, _opts),
+    do: {:error, :pending_approval}
 
   def choose(%Ticket{} = ticket, user_id, to, opts) do
     workflow = Tickets.workflow(ticket)
@@ -461,17 +472,32 @@ defmodule Forge.Engine do
   end
 
   @doc """
-  The states a person may move the ticket to from where it rests, each named once — two edges may
-  share a target — and **none whose transition approves a document with no version**, because
-  taking it would record an approval of nothing and is refused (`workflow-grammar-v1.md`
-  § Semantics). A refinement that failed left its ticket offering `planning`, which failed twice
-  when taken. The ticket page and the queue both ask this, so they cannot disagree.
+  The transitions a person may take out of where the ticket rests: every edge declared from the
+  current state **but none whose `approve` names a document with no version**, because taking it
+  would record an approval of nothing and is refused (`workflow-grammar-v1.md` § Semantics). A
+  refinement that failed left its ticket offering `planning`, which failed twice when taken.
+
+  The *edges*, not their targets, because the filter is per edge and two edges may reach one
+  target with only one of them offerable. Everything that offers a transition reads this one
+  walk — the ticket page and the queue through `offered_transitions/2` below, a conversation's
+  manifest through `Forge.Jobs` — so none of them can disagree about which edge survived.
   """
-  @spec offered_transitions(Ticket.t(), Workflow.t()) :: [String.t()]
-  def offered_transitions(%Ticket{} = ticket, %Workflow{} = workflow) do
+  @spec offered_edges(Ticket.t(), Workflow.t()) :: [Transition.t()]
+  def offered_edges(%Ticket{} = ticket, %Workflow{} = workflow) do
     workflow
     |> Workflow.transitions_from(ticket.state)
     |> Enum.filter(&(unversioned(ticket, &1) == []))
+  end
+
+  @doc """
+  The states a person may move the ticket to from where it rests, each named once — two edges may
+  share a target. `offered_edges/2`'s targets; the ticket page and the queue both ask this, so
+  they cannot disagree.
+  """
+  @spec offered_transitions(Ticket.t(), Workflow.t()) :: [String.t()]
+  def offered_transitions(%Ticket{} = ticket, %Workflow{} = workflow) do
+    ticket
+    |> offered_edges(workflow)
     |> Enum.map(& &1.to)
     |> Enum.uniq()
   end

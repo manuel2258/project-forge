@@ -41,10 +41,18 @@ defmodule ForgeWorker.Job.Workspace do
   progress is the point of resuming. A tree made for the resume — a snapshot, a clone — has no
   work in progress, and is the branch as the platform has it like any other.
 
+  **A state that produces no `changeset` is always the second case.** Its run's tree is never
+  committed and `promote/3` is skipped for it (`ForgeWorker.Link`), and the worktree is discarded
+  at the end of every run, so a resume finds nothing of its own here and falls through to the
+  ticket's older template or the seed. That is what such a state promised — its documents are its
+  output and its tree is scratch — and its continuation prompt says so rather than telling it the
+  files are the ones it left (`ForgeCore.Prompt.branch_state/2`).
+
   **The tree is `user`'s before any git runs in it, and git runs as `user`**
   (`docs/design/worker-tier.md` § The job slice). A snapshot of a ticket's template carries the
   last job's `.git`, hooks and all; a tree left by an earlier attempt carries this job's. Only a
-  clone, into a directory nothing has touched, is the worker's own, and it is handed over after.
+  clone — into an empty volume this module just made, which nothing of a job has touched — is the
+  worker's own, and it is handed over after.
   """
   @spec prepare(assignment(), String.t(), Slice.user()) :: {:ok, String.t()} | {:error, term()}
   def prepare(assignment, root, user) do
@@ -130,6 +138,18 @@ defmodule ForgeWorker.Job.Workspace do
       Checkout.head(dir, as)
     end
   end
+
+  @doc """
+  The ticket branch head this run started from: the `origin/<branch>` its checkout fetched, read
+  as `user`.
+
+  Not the worktree's own `HEAD`, which an agent that used git itself has already moved past —
+  onto commits that were never pushed and, for a state that produces no changeset, never will
+  be. This is what such a run reports instead of a push (`ForgeWorker.Link`).
+  """
+  @spec base(assignment(), String.t(), Slice.user()) :: {:ok, String.t()} | {:error, term()}
+  def base(assignment, dir, user),
+    do: Checkout.rev(dir, remote(assignment["git"]), Slice.as_user(user))
 
   @doc "The commit the worktree is on, read as `user`."
   @spec head(String.t(), Slice.user()) :: {:ok, String.t()} | {:error, term()}
@@ -261,12 +281,53 @@ defmodule ForgeWorker.Job.Workspace do
     end
   end
 
-  # The worker's own clone, into a directory that does not exist yet, and the job's user's the
-  # moment it does.
+  # The worker's own clone, into an empty volume of its own making, and the job's user's the
+  # moment the checkout is in it.
+  #
+  # **The volume comes first, and that is the point.** `git clone` is happy with a directory that
+  # already exists as long as it is empty, and a worktree the clone created itself is a plain
+  # directory — which `promote/3` cannot snapshot, so a ticket whose first job here was a cold
+  # clone never got a template and every job on it cloned cold again, for the whole life of the
+  # ticket. The warm paths never had this: `from_volume/5` snapshots *into* `dir`, so there the
+  # worktree is a volume before git sees it.
+  #
+  # **And a failure takes the volume with it**, as `from_volume/5`'s does. `git clone` removes the
+  # directory only when git made it, so a clone that fails would otherwise leave one behind — and
+  # `prepare/3` reads a worktree that is already there as an unfinished run's own and refreshes
+  # it, so that leftover would send this job's next attempt past the ticket's template and into a
+  # cold clone again. Nothing of anyone's is in it to lose: `clone/3` is reached only when `dir`
+  # did not exist. Nothing sweeps `worktrees/*` to clear it either — `Dir.sweep/2` is given
+  # `jobs/` and `sweep/2` here reads `volumes/ticket/*`.
   defp clone(assignment, dir, user) do
+    volume(dir, assignment["job_id"])
+
     with :ok <- Checkout.ensure(checkout_opts(assignment, dir, user, [])),
-         :ok <- Slice.own(user, [dir]),
-         do: {:ok, dir}
+         :ok <- Slice.own(user, [dir]) do
+      {:ok, dir}
+    else
+      {:error, reason} ->
+        Volume.impl().delete(dir)
+        {:error, reason}
+    end
+  end
+
+  # Best effort, like every other volume operation here and for the same reason: a volume is
+  # warmth, and warmth is not correctness. A machine that will not make one — a root that is not
+  # btrfs, a full disk — costs this ticket's next job a cold start, and failing this job instead
+  # would cost it the run. `git clone` makes the directory itself when this leaves none.
+  defp volume(dir, job_id) do
+    case Volume.impl().create(dir) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Log.line(
+          "volume.uncreated",
+          :warning,
+          "could not make #{dir} a volume, so the next job starts colder: #{inspect(reason)}",
+          job_id: job_id
+        )
+    end
   end
 
   defp checkout_opts(assignment, dir, user, extra) do

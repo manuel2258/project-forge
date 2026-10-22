@@ -29,6 +29,7 @@ defmodule ForgeCore.Workflow.State do
     :on_conflict,
     inputs: [],
     produces: [],
+    optional: [],
     on_enter: [],
     invoke: [],
     may_invoke: %{},
@@ -54,6 +55,9 @@ defmodule ForgeCore.Workflow.State do
           budget: Budget.t() | nil,
           inputs: [String.t()],
           produces: [String.t()],
+          # A job state's: which of its produced documents it may finish without writing, by
+          # artifact name (`docs/design/workflow-grammar-v1.md` § Semantics).
+          optional: [String.t()],
           outcomes: [String.t()] | nil,
           # What this state's job asks the scheduler for. Nil in either field means the
           # workflow's defaults, then the platform's — `ForgeCore.Workflow.resources/2` walks
@@ -99,9 +103,18 @@ defmodule ForgeCore.Workflow.State do
   @spec human?(t()) :: boolean()
   def human?(state), do: not runs?(state)
 
-  @doc "The document whose front matter carries the job's outcome, or nil if none."
+  @doc """
+  The document whose front matter carries the job's outcome, or nil if none.
+
+  `ForgeCore.Workflow.outcome_document/1`'s answer about this state's `produces`. Its one caller
+  here asks only whether there is one, so the stripping is an equivalent mutant *at this call
+  site* and is pinned where it is defined and where `ForgeCore.Job.Spec` reads it — the name the
+  worker writes and the engine keys on comes from there.
+  """
   @spec outcome_document(t()) :: String.t() | nil
-  def outcome_document(%__MODULE__{produces: produces}) do
-    Enum.find(produces, &Workflow.document?/1)
-  end
+  def outcome_document(%__MODULE__{produces: produces}), do: Workflow.outcome_document(produces)
+
+  @doc "Whether this state may finish without writing `name`."
+  @spec optional?(t(), String.t()) :: boolean()
+  def optional?(%__MODULE__{optional: optional}, name), do: name in optional
 end

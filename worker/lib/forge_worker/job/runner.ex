@@ -1101,8 +1101,17 @@ defmodule ForgeWorker.Job.Runner do
       {:waiting, questions} ->
         %{base | status: :waiting, questions: questions}
 
+      # `exhausted` is asked of the same run, because the outcome atom cannot carry it: a job
+      # that ran out of turns and one that ran out of money are both `:budget_exhausted`, and
+      # which it was is what the job row has to say (`capacity.md` § Four exhaustions).
       {:finished, outcome, declared, reason} ->
-        %{base | outcome: outcome, declared_outcome: declared, reason: reason}
+        %{
+          base
+          | outcome: outcome,
+            declared_outcome: declared,
+            reason: reason,
+            exhausted: Outcome.exhausted(run)
+        }
     end
   end
 

@@ -5,6 +5,7 @@ defmodule ForgeWeb.OperatorLiveTest do
 
   import Phoenix.LiveViewTest
   import Forge.GitFixtures
+  import Forge.ForgeFixtures, only: [pool!: 2, credential_fixture: 1]
 
   alias Forge.{Jobs, Projects, Tickets}
 
@@ -823,6 +824,137 @@ defmodule ForgeWeb.OperatorLiveTest do
 
     assert render_hook(view, "transition", %{"ticket" => ticket.id, "to" => "planning"}) =~
              "the ticket is cancelled; restore it first"
+  end
+
+  # **A job's turns were drawn against a ceiling they are not measured against.** `job.turns` is
+  # the harness's `num_turns` summed over every invocation the job has had; `spec.budget.turns` is
+  # the `--max-turns` each single invocation gets. This job is stopped by its credential's limit,
+  # resumed on a free one, and converges — 18 turns then 15, against a per-run ceiling of 20 it
+  # never breached. Drawn as a fraction the page said `33/20 converged`: a cap breached by
+  # thirteen that was never breached at all.
+  test "a resumed job's turns are not drawn as a fraction of a per-run ceiling", %{
+    conn: conn,
+    user: user,
+    project: project
+  } do
+    # Two credentials in the pool: the first is the one the limit stops, the second is where the
+    # resume lands — a job with nowhere to move waits instead of running again.
+    pool!(project, credential_fixture(user))
+    pool!(project, credential_fixture(user))
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    [job] = Enum.filter(Jobs.for_ticket(ticket.id), &(&1.status == :pending))
+
+    job
+    |> Forge.FakeWorker.assign(Process.get(:worker))
+    |> Forge.FakeWorker.finish("rate_limited", doc: "refinement.md", harness: %{"turns" => 18})
+
+    assert %{status: :pending, turns: 18} = Jobs.get!(job.id)
+
+    Jobs.get!(job.id)
+    |> Forge.FakeWorker.assign(Process.get(:worker))
+    |> Forge.FakeWorker.finish("success", doc: "refinement.md", harness: %{"turns" => 15})
+
+    assert %{turns: 33, outcome: :converged} = Jobs.get!(job.id)
+
+    {:ok, _view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/jobs/#{job.id}")
+
+    # The turns it used, and the ceiling named as what it bounds — never the two as one figure.
+    assert html =~ "20 turns per run"
+
+    # The figure's whole text, not a substring of the page: `33<span>/20</span>` reads as one
+    # figure to anyone looking at it while `html =~ "33/20"` is false, which is how a fraction
+    # could come back unnoticed.
+    assert html
+           |> Floki.parse_document!()
+           |> Floki.find("#job-turns")
+           |> Floki.text()
+           |> String.trim() == "33"
+  end
+
+  # **`budget_exhausted` says a job ran out; only this says out of what** (`capacity.md` § Four
+  # exhaustions, three treatments). The distinction was decided in `Outcome.budget_stop?/2` and
+  # thrown away on the spot: both ceilings produced the same outcome and the same `nil`, and the
+  # only record was the free text of an event. "Ran out of money" and "ran out of turns" want
+  # different responses from whoever reads the row.
+  for {scenario, word, other} <- [
+        {"max_turns", "turns", "cost"},
+        {"max_budget", "cost", "turns"}
+      ] do
+    test "a job stopped by the #{word} ceiling says which one, on every row that draws it", %{
+      conn: conn,
+      user: user,
+      project: project
+    } do
+      {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+      scenario(unquote(scenario), "refinement.md")
+      job = run_pending(ticket.id)
+
+      assert %{outcome: :budget_exhausted} = Jobs.get!(job.id)
+
+      # **A second attempt, so the exhausted job is an earlier one.** The "Earlier jobs" list
+      # drops the latest and is drawn only for a ticket with more than one job, so the first
+      # version of this test — one job, one attempt — could not reach that row at all, and
+      # deleting the ceiling from it left the whole suite green.
+      {:ok, _retried} = Forge.Engine.retry(Tickets.get!(ticket.id), user.id)
+      assert length(Jobs.for_ticket(ticket.id)) == 2
+
+      # Every row that draws a job's outcome, by the address a person reaches it at: the job
+      # page's header badge, the ticket timeline's row, and the activity tab's earlier jobs.
+      # All three read only `outcome` before, so a turn-exhausted and a cost-exhausted job were
+      # one word.
+      for page <- [
+            ~p"/tickets/#{project.name}/#{ticket.number}/jobs/#{job.id}",
+            ~p"/tickets/#{project.name}/#{ticket.number}?tab=timeline",
+            ~p"/tickets/#{project.name}/#{ticket.number}?tab=activity"
+          ] do
+        {:ok, _view, html} = live(conn, page)
+
+        ceilings =
+          html
+          |> Floki.parse_document!()
+          |> Floki.find("[data-ceiling]")
+          |> Floki.attribute("data-ceiling")
+
+        assert unquote(word) in ceilings, "#{page} drew #{inspect(ceilings)}"
+        refute unquote(other) in ceilings
+      end
+
+      # And the event stream's own record of it, beside the free text it used to be buried in.
+      assert %{"outcome" => "budget_exhausted", "exhausted" => unquote(word)} =
+               job.id
+               |> Forge.Events.for_job()
+               |> Enum.find(&(&1.type == "job.finished"))
+               |> Map.fetch!(:payload)
+    end
+  end
+
+  # **The third of the three words, and the only one no harness result produces**: the engine's
+  # wall clock kills the process and the worker reports `killed: :wall_clock` with no subtype to
+  # read. Written to the row directly, which also proves the column's enum accepts it — the two
+  # scenarios above exercise `:turns` and `:cost` and would pass with `:wall_clock` unstorable
+  # and undrawn.
+  test "a job the wall clock stopped says so too", %{conn: conn, user: user, project: project} do
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    scenario("max_turns", "refinement.md")
+    job = run_pending(ticket.id)
+
+    {:ok, job} =
+      Forge.Repo.update(
+        Forge.Jobs.Job.progress_changeset(Jobs.get!(job.id), %{
+          status: :finished,
+          outcome: :budget_exhausted,
+          exhausted: :wall_clock
+        })
+      )
+
+    assert job.exhausted == :wall_clock
+
+    {:ok, _view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/jobs/#{job.id}")
+
+    assert html
+           |> Floki.parse_document!()
+           |> Floki.find("[data-ceiling]")
+           |> Floki.attribute("data-ceiling") == ["wall clock"]
   end
 
   test "the job page shows the pinned manifest and harness events", %{

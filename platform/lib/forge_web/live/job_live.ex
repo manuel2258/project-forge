@@ -98,6 +98,10 @@ defmodule ForgeWeb.JobLive do
   def handle_event("notices", params, socket),
     do: JobStream.handle_event("notices", params, socket)
 
+  # Each `produces` entry as the declaration says it, beside the name the artifact is recorded
+  # under: `{"deck.md!", "deck.md"}`, `{"shots/*", "shots"}`, `{"plan.md", "plan.md"}`.
+  defp declared(spec), do: Enum.map(spec.produces, &{&1, ForgeCore.Workflow.produced_name(&1)})
+
   # Why there is no log to link, which is three different things.
   defp no_log(command, job) do
     cond do
@@ -248,6 +252,10 @@ defmodule ForgeWeb.JobLive do
                 class="text-3xl"
               />
               <.outcome :if={@job.declared_outcome && @job.outcome} value={to_string(@job.outcome)} />
+              <%!-- Which ceiling stopped it, where one did. Only a `budget_exhausted` job has
+                    one, and such a job declared nothing, so this qualifies the badge above it
+                    and never the agent's own word. --%>
+              <.ceiling job={@job} />
               <.job_status :if={is_nil(@job.outcome)} status={@job.status} />
             </div>
 
@@ -267,11 +275,15 @@ defmodule ForgeWeb.JobLive do
           </header>
 
           <dl class="mt-6 grid grid-cols-3 gap-4 border-y border-base-300 py-4">
+            <%!-- **The turns a job used, not a ratio.** `job.turns` is the harness's `num_turns`
+                  summed over every invocation this job has had — a run the engine resumed after
+                  a rate limit adds to it — while `spec.budget.turns` is the `--max-turns` ceiling
+                  each single invocation gets. Drawn as `37/30` the pair claimed a cap had been
+                  breached by seven that was never breached at all. The ceiling is in the pinned
+                  manifest, which says what it bounds; what ended the job is beside its outcome. --%>
             <div class="min-w-0">
               <dt class="font-mono text-[11px] tracking-[.14em] uppercase opacity-50">Turns</dt>
-              <dd class="mt-1 font-mono text-[17px]">
-                {@job.turns}<span class="opacity-50">/{@spec.budget.turns}</span>
-              </dd>
+              <dd id="job-turns" class="mt-1 font-mono text-[17px]">{@job.turns}</dd>
             </div>
             <div class="min-w-0">
               <dt class="font-mono text-[11px] tracking-[.14em] uppercase opacity-50">Usage</dt>
@@ -324,7 +336,7 @@ defmodule ForgeWeb.JobLive do
             <div class="flex min-w-0 justify-between gap-3">
               <dt class="opacity-50">budget</dt>
               <dd class="font-mono">
-                {@spec.budget.turns} turns · {Format.windows(@spec.budget.cost) || "—"}
+                {@spec.budget.turns} turns per run · {Format.windows(@spec.budget.cost) || "—"}
               </dd>
             </div>
             <div :if={@job.harness_session_id} class="flex min-w-0 justify-between gap-3">
@@ -360,25 +372,33 @@ defmodule ForgeWeb.JobLive do
                 docs/design/ui.md § Addressable artifact versions. --%>
           <h3 class="mt-6 font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Declares</h3>
           <ul class="mt-3 flex flex-col gap-1 font-mono text-[12.5px]">
+            <%!-- The declaration is drawn as written, marker and all, and looked up by the name
+                  the artifact is really recorded under: a presentation declared `deck.md!`
+                  arrives as `deck.md`, and comparing the raw string would call every one of them
+                  "not written". --%>
             <li
-              :for={name <- @spec.produces}
+              :for={{name, recorded} <- declared(@spec)}
               class={
-                not MapSet.member?(@written_names, name) && not Map.has_key?(@refusals, name) &&
+                not MapSet.member?(@written_names, recorded) &&
+                  not Map.has_key?(@refusals, recorded) &&
                   "opacity-50"
               }
             >
               {name}<span
-                :if={not MapSet.member?(@written_names, name) and not Map.has_key?(@refusals, name)}
+                :if={
+                  not MapSet.member?(@written_names, recorded) and
+                    not Map.has_key?(@refusals, recorded)
+                }
                 class="ml-2 opacity-70"
-              >not written</span><span :if={Map.has_key?(@refusals, name)} class="ml-2 text-error">refused</span>
+              >not written</span><span :if={Map.has_key?(@refusals, recorded)} class="ml-2 text-error">refused</span>
               <%!-- A refused document is not kept, so why is only here: the reason a job ended
                     `error` having written its document (`docs/design/ui.md` § Decide and
                     Timeline). --%>
               <pre
-                :if={Map.has_key?(@refusals, name)}
-                id={"refused-#{name}"}
+                :if={Map.has_key?(@refusals, recorded)}
+                id={"refused-#{recorded}"}
                 class="mt-1 whitespace-pre-wrap break-words font-mono text-[12px]/[1.5] opacity-80"
-              >{@refusals[name]}</pre>
+              >{@refusals[recorded]}</pre>
             </li>
             <li :if={@spec.produces == []} class="opacity-50">nothing</li>
           </ul>

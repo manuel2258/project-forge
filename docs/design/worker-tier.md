@@ -458,10 +458,10 @@ systemd-run --pipe --wait --collect --expand-environment=no --unit=forge-job-<sh
   rather than inside it:
   1. **The user is made first** (`Slice.enter/1`), before the worktree exists.
   2. **The worktree is the user's before any git runs in it** (`Slice.own/2`). Root runs git only
-     to clone into a directory nothing has touched. A snapshot of a seed or a ticket's template, and
-     a tree left by an earlier attempt, are handed over first and refreshed as the user — a
-     template's `.git` is the last job's, and a `post-checkout` hook in it would otherwise run as
-     root at the next job's `checkout`.
+     to clone into an empty volume nothing of a job has touched. A snapshot of a seed or a
+     ticket's template, and a tree left by an earlier attempt, are handed over first and
+     refreshed as the user — a template's `.git` is the last job's, and a `post-checkout` hook in
+     it would otherwise run as root at the next job's `checkout`.
   3. **Git runs as the user** (`Slice.as/3`: `setpriv` to the user's uid and gid, with a `HOME`
      that does not exist so root's own configuration is not read): refresh, a command's detach,
      every conversation turn's commit and push, a job's commit and push, and the head the worker
@@ -626,6 +626,14 @@ runs in:
 - **The template's HEAD does not matter.** `Checkout.reset/3` does `checkout -B <branch>
   FETCH_HEAD` before `reset --hard`, for the seed's sake — a seed is on whatever commit it was
   built at — and that repoints a ticket volume sitting on the last job's commit just as well.
+- **A worktree is a volume however it was made, a cold clone included.** The warm paths snapshot
+  *into* it, so there it is one before git sees it; a cold clone makes the empty volume first and
+  clones into that, because `git clone` is happy with a directory that already exists as long as
+  it is empty. A worktree the clone created itself is a plain directory, and `btrfs subvolume
+  snapshot` refuses a source that is not a subvolume — so a ticket whose first job on the machine
+  was a cold clone would promote nothing, find no template next time, and clone cold again for the
+  whole life of the ticket. A volume the machine will not make is a warning and a colder next job,
+  never a failed run: warmth is not correctness.
 
 **Promotion happens only after the run committed and pushed**, and that is what makes the template
 safe to snapshot without cleaning. `Checkout.squash/4` does `reset --soft origin/<branch>` then
@@ -634,6 +642,13 @@ and what is left beside the checkout is the ignored build output the whole mecha
 that failed before it pushed keeps its worktree's untracked debris, and promoting that would hand
 the next job exactly the inheritance the clean rule exists to prevent. So a failed run promotes
 nothing and the ticket keeps the template it had.
+
+**And a state that declares no `changeset` promotes nothing either**, for the same reason read
+the other way: it never commits, deliberately, so its tree is scratch to the end
+(`docs/design/git-hosting.md` § Non-fast-forward on a ticket branch). Promoting it would let the
+ticket's next job inherit work nobody accepted and commit it with its own `add -A` — the branch
+reached by the long way, after the short one was closed. The ticket keeps the template it had and
+the next job starts colder, which is what a cache is allowed to cost.
 
 **Only ticket branches.** A conversation holds one worktree for the whole of its life
 (`ForgeWorker.Job.Conversation` prepares once and discards at close), so it already keeps its own
@@ -877,12 +892,18 @@ or throw away the warm start the seed exists to provide.
 ## Hibernation and resume
 
 A job that is interrupted — cancelled, out of budget, a worker being destroyed — commits before
-it stops. `docs/decisions.md`: jobs are disposable, anything that must survive is committed
-to the branch or written to the store, history is squashed.
+it stops, when its state declares `changeset`. `docs/decisions.md`: jobs are disposable, anything
+that must survive is committed to the branch or written to the store, history is squashed. For a
+state that declares no `changeset` there is nothing that must survive: its tree is scratch, it is
+never committed or pushed however the run ended, and it is discarded with the worktree
+(`docs/design/git-hosting.md` § Non-fast-forward on a ticket branch).
 
-The sequence: SIGTERM the harness, wait the grace period, `git add -A` and commit in the worktree,
-push to the ticket branch with the job's token, upload the transcript to the store, send
-`hibernated` with the commit sha. The platform records the sha and puts a workflow job back to
+The sequence, for a state that declares `changeset`: SIGTERM the harness, wait the grace period,
+`git add -A` and commit in the worktree, push to the ticket branch with the job's token, upload
+the transcript to the store, send `hibernated` with the commit sha. **For a state that declares
+none the three git steps do not happen**: the transcript still goes to the store and `hibernated`
+still carries a sha, but it is the branch head the run started from rather than one the run
+made. The platform records the sha and puts a workflow job back to
 `pending`, to resume from that commit wherever it is placed next; a conversation goes
 `hibernated` — dormant — until a person reopens it. A workflow job used to be set `hibernated`
 too, and nothing ever moved one on: the scheduler places only `pending` jobs, so the ticket sat

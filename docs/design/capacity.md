@@ -92,10 +92,44 @@ Only one of them is the operator's.
 
 | Exhausted | Resolved by | Treatment |
 |---|---|---|
-| Job turn budget | the engine retries | outcome `budget_exhausted` on the job row, nowhere else |
+| A job's own budget | **the workflow** — a retry, or an edge onward to a person | outcome `budget_exhausted` on the job row with `· turns`, `· cost` or `· wall clock` beside it, nowhere else |
 | Ticket allowance | **a human** — raise it or reroute | sticks the ticket, enters the queue, drawn in accent |
 | Daily spend cap | **time**, or the operator raising it | `PAUSED · SPEND 6h 12m`, neutral, on the ticket; the board and the project page draw `PAUSED · SPEND` without the countdown. **Never in the queue** |
 | Window capacity | **time** | `PAUSED · CAPACITY 1h 12m`, neutral, on the board and the ticket, **never in the queue**. Not built (§ Engine support) |
+
+**The first row is the workflow's, not the engine's.** What happens to a job that ran out is an
+edge in the definition: a self-retry where one is declared, and otherwise wherever
+`when: budget_exhausted` points — forge's own `reviewing` sends it on towards `review_ready`,
+because a review that spent its budget on subagents learns nothing from being run again from
+scratch and a person should read whatever report it left. (It goes by way of `presenting`, which
+every route to `review_ready` takes; that is `ui.md` § Changes, not this note.) Where the workflow declares no edge at all the ticket
+sticks and enters the queue, which is the second row's treatment reached by another road.
+
+**`budget_exhausted` names its ceiling.** The outcome says a job ran out; which of the three
+ceilings it ran out of — its turn budget, its cost budget, or the driver's wall clock — is a word
+beside it on every job row (`jobs.exhausted`, `ForgeWeb.Indicators.ceiling/1`, drawn fainter
+than the outcome it qualifies) and on the job in the API, which the UI is a client of. Before it,
+"ran out of money" and "ran out of turns" were one atom and the distinction survived only in the
+free text of a `job.finished` event, which is the wrong place for it: they want different
+responses from whoever reads the row. Nothing is drawn for a job whose ceiling was not
+recorded — a row from before the column, or from a worker too old to send it — because an absent
+fact is not one of the three.
+
+**A job's turns are not drawn against its turn budget.** `jobs.turns` is the harness's own
+`num_turns` summed over every invocation the job has had, and `spec.budget.turns` is the
+`--max-turns` ceiling each single invocation is given; a job the engine resumed after a rate
+limit can pass the second without ever breaching it. Drawn as a ratio the pair told a story the
+numbers do not: `37/30 converged` on a job no cap had stopped, beside `38/60 budget_exhausted` on
+a job that $5.07 of $5.00 had. So the job page draws the turns a job used, the pinned manifest
+draws the ceiling as *per run*, and what actually ended the job is the word above. This departs
+from the handoff's "turns always against budget" (`ui/README.md`), deliberately and for that
+reason.
+
+**The cost ceiling overshoots, and that is the mechanism working.** The provider streams no
+per-turn cost, so the harness stops after the turn that crosses the line: `$5.07 of $5.00` and
+`$9.16 of $8.00` are a cap doing its job, not failing at it. Nothing rounds them down or hides
+the overshoot — a figure the operator cannot reconcile against the run is worse than one that
+reads a few cents over.
 
 Keeping the pauses out of the queue is load-bearing. A paused ticket in the inbox trains the
 operator to open items they cannot act on, which is the exact failure the thesis is written

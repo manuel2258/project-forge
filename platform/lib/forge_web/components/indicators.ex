@@ -12,6 +12,8 @@ defmodule ForgeWeb.Indicators do
       is not `active`. It never replaces the state.
     * `outcome/1` — bare coloured mono at type scale. The declared outcome is the loud one; the
       engine outcome is demoted beside it.
+    * `ceiling/1` — what a `budget_exhausted` job ran out of, demoted beside its outcome. The
+      outcome alone says a job ran out; only this says out of what.
   """
   use ForgeWeb, :html
 
@@ -116,6 +118,45 @@ defmodule ForgeWeb.Indicators do
     </span>
     """
   end
+
+  @doc """
+  What a `budget_exhausted` job ran out of, demoted beside its outcome: `turns`, `cost` or
+  `wall clock`.
+
+  Drawn nowhere else and for no other outcome, and nothing at all for a job whose ceiling was
+  not recorded — a row from before the column, or from a worker too old to send it — because an
+  absent fact is not one of the three (`docs/design/capacity.md` § Four exhaustions, three
+  treatments). Bare mono at a lower opacity than any outcome `outcome/1` draws, rather than a
+  second badge: it qualifies the outcome, and two marks of equal weight would read as two
+  outcomes. Every row that draws it draws its outcome through `outcome/1`, which is what keeps
+  that true.
+  """
+  attr :job, :map, required: true
+
+  def ceiling(assigns) do
+    assigns = assign(assigns, :word, ceiling_word(assigns.job))
+
+    ~H"""
+    <span
+      :if={@word}
+      data-ceiling={@word}
+      class="font-mono text-[12.5px] whitespace-nowrap opacity-50"
+    >
+      · {@word}
+    </span>
+    """
+  end
+
+  # The `outcome:` half of each pattern is an **equivalent mutant**: `Job.progress_changeset/2`
+  # refuses `exhausted` on any outcome but `:budget_exhausted`, and the one write of `outcome`
+  # that bypasses it is scoped to jobs that carry no ceiling — so a job with a ceiling and
+  # another outcome is not a row this can be handed. Dropping it changes nothing observable, and
+  # a test of it would have to build a row the platform cannot store. It is kept for what it
+  # says: the ceiling belongs to that outcome and no other.
+  defp ceiling_word(%{outcome: :budget_exhausted, exhausted: :turns}), do: "turns"
+  defp ceiling_word(%{outcome: :budget_exhausted, exhausted: :cost}), do: "cost"
+  defp ceiling_word(%{outcome: :budget_exhausted, exhausted: :wall_clock}), do: "wall clock"
+  defp ceiling_word(_job), do: nil
 
   @doc """
   The bucket an engine outcome falls in. Anything unrecognised is neutral, never a guess.

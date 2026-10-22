@@ -56,9 +56,14 @@ defmodule Forge.Merge do
           | {:error, term()}
   def changeset(%Ticket{} = ticket) do
     case Artifacts.latest(ticket.id, Workflow.changeset_artifact()) do
-      nil -> {:error, :no_changeset}
-      %{blob_uri: "git:" <> sha} = row -> {:ok, %{sha: sha, version: row.version, row: row}}
-      %{blob_uri: other} -> {:error, {:not_a_commit, other}}
+      nil ->
+        {:error, :no_changeset}
+
+      row ->
+        case Artifacts.commit(row) do
+          nil -> {:error, {:not_a_commit, row.blob_uri}}
+          sha -> {:ok, %{sha: sha, version: row.version, row: row}}
+        end
     end
   end
 
@@ -318,7 +323,9 @@ defmodule Forge.Merge do
   # `merge-tree --write-tree` prints the merged tree, then — on a conflict, exit 1 — a block of
   # `<mode> <oid> <stage>\t<path>` lines, then its messages.
   defp merge_tree(repo, head, approved) do
-    case Git.run(repo, ["merge-tree", "--write-tree", "--messages", head, approved],
+    case Git.run(
+           repo,
+           ["merge-tree", "--write-tree", "--messages", {:data, head}, {:data, approved}],
            stderr: :separate
          ) do
       {:ok, out} ->
@@ -332,12 +339,23 @@ defmodule Forge.Merge do
     end
   end
 
+  # The third producer of paths in this product, after `Forge.Git`'s `--numstat` and `ls-tree`:
+  # these go into an event payload and into a ticket's stuck reason, so JSON and Postgres carry
+  # them. Unlike those two, **this one is about reading and not about safety**: `merge_tree/3`
+  # does not pass `core.quotePath=false`, so git has already quoted anything it cannot print and
+  # what arrives is ASCII either way. What the pair does is put the name back in the form the
+  # rest of the product uses — `résumé.md` rather than `"r\303\251sum\303\251.md"`, and the
+  # escaped form kept only where there is no readable one.
+  #
+  # Unquoting first is what makes it a normalisation rather than a second encoding: without it
+  # a name git had already quoted came out as `"\"caf\\351.md\""`, which is safe and is not
+  # the file's.
   defp conflicted_paths(out) do
     out
     |> String.split("\n")
     |> Enum.flat_map(fn line ->
       case String.split(line, "\t", parts: 2) do
-        [_info, path] -> [path]
+        [_info, path] -> [path |> Git.unquote_path() |> Git.printable_path()]
         _other -> []
       end
     end)
@@ -348,7 +366,19 @@ defmodule Forge.Merge do
   # and `git log <branch>` says where the change came from. One parent would put the merged
   # content on the branch while losing every commit that produced it.
   defp commit_tree(repo, tree, head, source, message, user) do
-    args = ["commit-tree", tree, "-p", head, "-p", source, "-m", message]
+    # Every standalone argument is marked; `message` is not, because `-m` consumes the argument
+    # after it whatever it begins with, and a merge message may legitimately start with a dash
+    # (`Forge.Git.run/3`).
+    args = [
+      "commit-tree",
+      {:data, tree},
+      "-p",
+      {:data, head},
+      "-p",
+      {:data, source},
+      "-m",
+      message
+    ]
 
     case Git.run(repo, args, env: author(user), stderr: :separate) do
       {:ok, sha} -> {:ok, String.trim(sha)}
@@ -403,7 +433,9 @@ defmodule Forge.Merge do
   defp push(repo, %Project{default_branch: default}, sha) do
     env = [{"FORGE_INTERNAL", "1"}]
 
-    case Git.run(repo, ["push", "--quiet", ".", "#{sha}:refs/heads/#{default}"], env: env) do
+    case Git.run(repo, ["push", "--quiet", ".", {:data, "#{sha}:refs/heads/#{default}"}],
+           env: env
+         ) do
       {:ok, _out} -> :ok
       {:error, reason} -> {:error, {:push_refused, reason}}
     end

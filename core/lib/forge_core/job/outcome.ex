@@ -18,7 +18,8 @@ defmodule ForgeCore.Job.Outcome do
       `text` (its own closing words, which are the only field that ever names a cause).
     * `documents` - declared documents that parsed, by name.
     * `invalid` - declared documents that did not parse, by name.
-    * `missing` - declared documents not written.
+    * `missing` - declared documents not written, optional ones included: which of those is a
+      failure is the spec's to say, not the worker's.
     * `undeclared` - files written that were not declared.
   """
   @type run :: %{
@@ -32,6 +33,13 @@ defmodule ForgeCore.Job.Outcome do
         }
 
   @type outcome :: :converged | :did_not_converge | :budget_exhausted | :error | :cancelled
+
+  @typedoc """
+  Which ceiling stopped a run: the harness's turn ceiling, its cost ceiling, or the driver's
+  wall clock. The one thing `:budget_exhausted` alone cannot say, and the three want different
+  responses from whoever reads the job row (`docs/design/capacity.md` § Four exhaustions).
+  """
+  @type ceiling :: :turns | :cost | :wall_clock
 
   @type decision ::
           {:waiting, [Question.t()]}
@@ -72,14 +80,14 @@ defmodule ForgeCore.Job.Outcome do
 
   defp finished(spec, %{result: result} = run) do
     cond do
-      budget_stop?(result, run.exit_status) ->
+      exhausted(run) != nil ->
         {:budget_exhausted, nil, "harness stopped: #{result.subtype}"}
 
       result.subtype != "success" or result.is_error ->
         {:error, nil, "harness error: #{detail(result)}"}
 
-      run.missing != [] ->
-        {:error, nil, "missing outputs: #{Enum.join(run.missing, ", ")}"}
+      missing = required_missing(spec, run) ->
+        {:error, nil, "missing outputs: #{Enum.join(missing, ", ")}"}
 
       run.undeclared != [] ->
         {:error, nil, "undeclared outputs: #{Enum.join(run.undeclared, ", ")}"}
@@ -138,17 +146,74 @@ defmodule ForgeCore.Job.Outcome do
     end)
   end
 
+  @doc """
+  Which ceiling stopped `run`, or nil when none did.
+
+  **The same question `decide/2` asks**, kept as one function because it is the only place in
+  the codebase holding both facts at once — and asked separately because its answer is the half
+  the outcome atom throws away. A run this names a ceiling for is a run `decide/2` finishes
+  `:budget_exhausted`, and the reverse; `ForgeCore.Job.OutcomeTest` holds the two together.
+  (A run that also left a blocking question open waits instead of finishing, and is asked again
+  when it ends for good.)
+  """
+  @spec exhausted(run()) :: ceiling() | nil
+  def exhausted(%{killed: :wall_clock}), do: :wall_clock
+  def exhausted(%{killed: killed}) when killed != nil, do: nil
+  def exhausted(%{result: nil}), do: nil
+  def exhausted(%{result: result} = run), do: ceiling(result, run.exit_status)
+
   # Exit status 2 is documented as the cost ceiling. It does not also cover an authentication
   # failure: that exits 1 and does produce a result message, so it never reaches here.
-  defp budget_stop?(%{subtype: subtype, is_error: is_error}, exit_status) do
-    subtype == "error_max_turns" or String.starts_with?(subtype || "", "error_max_budget") or
-      (exit_status == 2 and is_error)
+  defp ceiling(%{subtype: subtype, is_error: is_error}, exit_status) do
+    cond do
+      subtype == "error_max_turns" -> :turns
+      String.starts_with?(subtype || "", "error_max_budget") -> :cost
+      exit_status == 2 and is_error -> :cost
+      true -> nil
+    end
+  end
+
+  # Nil when every declared document that had to be written was. A state's `optional` excuses its
+  # documents from this one rule and nothing else (`docs/design/workflow-grammar-v1.md`
+  # § Semantics); without it, a workflow could not say that a presentation is a nicety.
+  defp required_missing(spec, run) do
+    case run.missing -- Spec.optional_outputs(spec) do
+      [] -> nil
+      missing -> missing
+    end
   end
 
   defp declared(%Spec{} = spec, documents) do
     case Spec.outcome_document(spec) do
-      nil -> {:converged, "done", "no outcome document; done by definition"}
-      name -> declared_in(spec, Map.fetch!(documents, name), name)
+      nil ->
+        {:converged, "done", "no outcome document; done by definition"}
+
+      name ->
+        # Absent here only when it is optional: a required one that was not written was already
+        # `error` above, so this is the state that declared its outcome document a nicety.
+        case Map.fetch(documents, name) do
+          {:ok, document} -> declared_in(spec, document, name)
+          :error -> absent(spec, name)
+        end
+    end
+  end
+
+  # An outcome document nobody wrote is `done`, and could be nothing else: there is no front
+  # matter to choose in. So it is `done` only for a state whose only outcome *is* `done`, which is
+  # the validator's rule for making that document optional at all
+  # (`docs/design/workflow-grammar-v1.md` § Validation), re-asserted here because this is where
+  # believing it decides something. A spec that says otherwise arrived from somewhere the parser
+  # is not, and the two ways of believing it are both silent failures: where the state does not
+  # declare `done`, the ticket sticks behind a job that reported success, with no transition the
+  # engine can match; where it declares `done` among others, an agent passes the `done` edge of a
+  # gate by writing nothing, and whatever another document of the same job said is thrown away.
+  defp absent(%Spec{outcomes: outcomes}, name) do
+    if outcomes == ["done"] do
+      {:converged, "done", "#{name} was not written, and is optional"}
+    else
+      {:error, nil,
+       "#{name} was not written, and carries the outcome of a state that declares a choice: " <>
+         Enum.join(outcomes, ", ")}
     end
   end
 

@@ -84,7 +84,7 @@ and audited like any other.
 | `POST /projects/:name/tickets` | Admit `{title, body, ticket_type}`; `ticket_type` is required when the project has more than one (`ticket-types.md`) |
 | `GET /tickets/:project/:number` | Ticket with jobs, artifacts, open questions, pending transition |
 | `GET /tickets/:project/:number/events` | The event timeline |
-| `GET /tickets/:project/:number/review` | The merge decision: diff, documents, answers, cost |
+| `GET /tickets/:project/:number/review` | The merge decision: diff, documents, presentations, answers, cost |
 | `GET /tickets/:project/:number/jobs/:job_id` | Job with its spec and harness events |
 | `GET /tickets/:project/:number/artifacts/:name[?version=n]` | A version with content |
 | `POST /tickets/:project/:number/artifacts/:name` | New version `{content}` |
@@ -132,8 +132,9 @@ pending account that a node admin has to approve (`design/identity.md` § Approv
 - `/tickets/:project/:number` — timeline: state, cost, pending decision, open questions,
   jobs, artifacts with the latest document rendered, events.
 - `/tickets/:project/:number/review` — the merge decision: the diff, the documents the change was
-  built from, the questions answered, the total cost, and the approval that pins the changeset by
-  version. Reached by a link from the queue's approval item and from the ticket page.
+  built from, whatever an agent presented about it, the questions answered, the total cost, and the
+  approval that pins the changeset by version. Reached by a link from the queue's approval item and
+  from the ticket page.
 - `/tickets/:project/:number/jobs/:id` — the pinned manifest and the harness events.
 - `/board` — tickets by state per project.
 
@@ -175,9 +176,10 @@ Talk for a conversation.
 Every action is a LiveView event over the socket; the page shows a confirmation flash on
 success and the reason on failure. A lost connection is shown by the framework's reconnect
 banner — which is all it is shown by, so the banner must never be the notice that something was
-also taken: what was typed and not sent survives the rejoin that follows it
-(`design/ui.md` § A reconnect is not a reload). Offline compose and retry queues are out of the
-PoC.
+also taken: on the operator's own surfaces, what was typed and not sent survives the rejoin that
+follows it, and `design/ui.md` § A reconnect is not a reload holds both the mechanism and the
+seven settings and log-in forms where it does not hold yet. Offline compose and retry queues
+are out of the PoC.
 
 ## Documents in the browser
 

@@ -274,6 +274,60 @@ defmodule Forge.GitFixtures do
   end
 
   @doc """
+  Every file under the bare repository at `repo`, by path and content hash.
+
+  What a write of *any* kind changes, and what `for-each-ref` cannot see: a page that wrote a
+  file into a bare repository left every ref exactly where it had been, so the test that was
+  supposed to hold "browsing never writes" walked straight past it.
+  """
+  def tree_of(repo) do
+    repo
+    |> Path.join("**")
+    |> Path.wildcard(match_dot: true)
+    |> Enum.filter(&File.regular?/1)
+    |> Map.new(&{Path.relative_to(&1, repo), :crypto.hash(:sha256, File.read!(&1))})
+  end
+
+  @doc """
+  `count` commits on `branch` of the bare repository at `repo`, numbered `commit 1` upwards and
+  pushed once, returning the branch's new head.
+
+  One clone and one push for all of them: a test that needs thirty-one commits to reach a page
+  boundary is the only reason this exists, and a clone per commit was most of two test files'
+  runtime. `FORGE_INTERNAL` is set for the same reason `commit_to/4` sets it — the branch may be
+  the project's default, which `pre-receive` lets only the platform write.
+  """
+  def seed_commits(repo, branch, count) do
+    work = Path.join(tmp_dir("history"), "work")
+    {:ok, _out} = Git.run(tmp_dir("history-parent"), ["clone", "-q", "-b", branch, repo, work])
+
+    for n <- 1..count do
+      File.write!(Path.join(work, "n.txt"), "#{n}\n")
+      {:ok, _out} = Git.run(work, ["add", "n.txt"])
+
+      {:ok, _out} =
+        Git.run(work, [
+          "-c",
+          "user.name=t",
+          "-c",
+          "user.email=t@forge",
+          "commit",
+          "-q",
+          "-m",
+          "commit #{n}"
+        ])
+    end
+
+    {:ok, _out} =
+      Git.run(work, ["push", "-q", "origin", "HEAD:refs/heads/" <> branch],
+        env: [{"FORGE_INTERNAL", "1"}]
+      )
+
+    {:ok, head} = Git.resolve(repo, "refs/heads/" <> branch)
+    head
+  end
+
+  @doc """
   A commit on top of `parent`, made in a scratch clone and fetched into the bare repository
   without moving any ref: something for `race/2` to move the default branch to.
   """

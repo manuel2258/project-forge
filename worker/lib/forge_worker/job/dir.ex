@@ -50,8 +50,9 @@ defmodule ForgeWorker.Job.Dir do
 
   `:command_logs` is `[{file, path}]`: the logs of the commands a parked job invoked, already
   fetched from the store, copied into `commands/` read-only (`docs/design/job-prompt.md`
-  § Commands). `commands/` and any `invoke.json` are removed on every call first — a request left
-  from the run that parked has been acted on, and one read again would be run twice.
+  § Commands). `commands/`, any `invoke.json` and any `transition.json` are removed on every call
+  first — a request left from the run that parked has been acted on, and one read again would be
+  run twice.
   """
   @spec prepare(String.t(), Spec.t(), keyword()) :: String.t()
   def prepare(root, %Spec{job_id: job_id} = spec, opts \\ []) do
@@ -71,6 +72,10 @@ defmodule ForgeWorker.Job.Dir do
     write_backlog(job_dir, Keyword.get(opts, :backlog), job_id)
     write_replay(job_dir, spec.replay)
     File.rm_rf!(invoke_path(job_dir))
+    # A request left by a crashed attempt has not been acted on and must not be read as this
+    # start's: a conversation is reopened, and a transition is not idempotent
+    # (`docs/design/conversations.md` § Taking a transition).
+    File.rm_rf!(transition_path(job_dir))
     write_command_logs(job_dir, Keyword.get(opts, :command_logs, []), job_id)
     place_session(job_dir, Keyword.get(opts, :session))
 
@@ -206,6 +211,99 @@ defmodule ForgeWorker.Job.Dir do
   end
 
   defp invocation(_entry), do: {:error, "has an entry with no command name"}
+
+  @doc """
+  Where a conversation asks the platform to move its ticket (`docs/design/conversations.md`
+  § Taking a transition).
+  """
+  @spec transition_path(String.t()) :: String.t()
+  def transition_path(job_dir), do: Path.join(job_dir, "transition.json")
+
+  @doc """
+  What the conversation asked of its ticket, read from `transition.json` and then removed:
+  `:none` when it asked for nothing, `{:ok, request}` as `%{"to" => state}` or
+  `%{"decision" => "approved" | "rejected"}`, each optionally with a `"comment"`, or
+  `{:error, reason}` for a file that is there and is not one of those — reported rather than
+  dropped, so the agent hears why nothing moved.
+
+  Read and removed exactly as `invocations/1` is, and for the same reason: a request acted on
+  once must not be read again by the next turn.
+  """
+  @spec transition_request(String.t()) :: :none | {:ok, map()} | {:error, String.t()}
+  def transition_request(job_dir), do: transition_request(job_dir, owner(job_dir))
+
+  @doc false
+  def transition_request(job_dir, owner) do
+    path = transition_path(job_dir)
+
+    case File.lstat(path) do
+      {:error, :enoent} ->
+        :none
+
+      {:ok, _stat} ->
+        read = read_text(path, owner)
+        File.rm_rf(path)
+
+        with {:ok, raw} <- read,
+             {:ok, decoded} <- decode_transition(raw) do
+          {:ok, decoded}
+        else
+          {:error, reason} -> {:error, "transition.json " <> reason}
+        end
+
+      # Removed before it is reported, as the readable case is: a file left here would be
+      # re-reported by every later turn for ever, since nothing else takes it away.
+      #
+      # **The removal is an equivalent mutant and no test can catch it.** Nothing reaches this
+      # branch: the worker owns the directory, `:enoent` is answered above, and a symlink, a
+      # directory and a FIFO are each refused *and* removed by the readable branch. Taking the
+      # `File.rm_rf/1` away changes nothing observable, which is why there is no test for it —
+      # it is here so that a trigger nobody has found yet cannot turn into a refusal every turn.
+      {:error, reason} ->
+        File.rm_rf(path)
+        {:error, "transition.json is unreadable: #{inspect(reason)}"}
+    end
+  end
+
+  defp decode_transition(raw) do
+    case Jason.decode(raw) do
+      {:ok, map} when is_map(map) -> transition(map)
+      {:ok, _other} -> {:error, transition_shape()}
+      {:error, _reason} -> {:error, "is not valid JSON"}
+    end
+  end
+
+  # One or the other, never both: a file naming a target *and* a decision is two different
+  # requests, and guessing which was meant is how a ticket moves somewhere nobody asked for.
+  defp transition(%{"to" => _to, "decision" => _decision}),
+    do: {:error, "names both `to` and `decision`; write one or the other"}
+
+  defp transition(%{"to" => to} = map) when is_binary(to) and to != "",
+    do: with(:ok <- commented(map), do: {:ok, kept(map, "to", to)})
+
+  defp transition(%{"decision" => decision} = map) when decision in ["approved", "rejected"],
+    do: with(:ok <- commented(map), do: {:ok, kept(map, "decision", decision)})
+
+  defp transition(_map), do: {:error, transition_shape()}
+
+  defp commented(%{"comment" => comment}) when not is_binary(comment),
+    do: {:error, "has a comment that is not a string"}
+
+  defp commented(_map), do: :ok
+
+  # Only the keys the platform reads, so a file with more in it travels as what it asked for and
+  # nothing else.
+  defp kept(map, key, value) do
+    case Map.get(map, "comment") do
+      nil -> %{key => value}
+      comment -> %{key => value, "comment" => comment}
+    end
+  end
+
+  defp transition_shape,
+    do:
+      ~s(must be one JSON object: {"to": "<state>"} or ) <>
+        ~s({"decision": "approved" | "rejected"}, each with an optional "comment")
 
   # What a reopened conversation had already said, for the new process to read. Removed when the
   # spec carries none: the directory is keyed by job id and outlives a process, so a file left

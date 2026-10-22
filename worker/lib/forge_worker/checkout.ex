@@ -15,8 +15,8 @@ defmodule ForgeWorker.Checkout do
   repository's hooks and configuration are programs — a `pre-commit`, a `core.fsmonitor` — and
   git runs them as whoever runs git; the job's user can write every one of them. So every
   function that runs git in a checkout takes `as` (`ForgeWorker.Slice.as_user/1`), and the one
-  command that runs as the worker itself is the clone into a directory that does not exist yet,
-  which nothing of a job has touched (`docs/design/worker-tier.md` § The job slice).
+  command that runs as the worker itself is the clone into an empty directory, which nothing of
+  a job has touched (`docs/design/worker-tier.md` § The job slice).
 
   See `docs/design/git-hosting.md`.
   """
@@ -53,8 +53,8 @@ defmodule ForgeWorker.Checkout do
   predecessor it never had.
 
   `as` runs git in a checkout that is already there, and the checkout must already be the job's
-  user's. A clone is the worker's own — into a directory nothing has touched — and the caller
-  gives it to the user afterwards.
+  user's. A clone is the worker's own — into an empty directory nothing of a job has touched,
+  whether the caller made it or git does — and the caller gives it to the user afterwards.
 
   `default` names the project's default branch, for an integrating job: it is fetched as well, on
   every run, into `origin/<default>`, so the job can merge it (`docs/design/job-prompt.md`
@@ -202,13 +202,19 @@ defmodule ForgeWorker.Checkout do
 
   @doc "The commit the checkout is on."
   @spec head(String.t(), ForgeWorker.Slice.as()) :: {:ok, String.t()} | {:error, term()}
-  def head(dir, as) do
-    with {:ok, out} <- git(dir, ["rev-parse", "HEAD"], as: as), do: {:ok, String.trim(out)}
+  def head(dir, as), do: rev(dir, "HEAD", as)
+
+  @doc "The commit `ref` names in this checkout."
+  @spec rev(String.t(), String.t(), ForgeWorker.Slice.as()) ::
+          {:ok, String.t()} | {:error, term()}
+  def rev(dir, ref, as) do
+    with {:ok, out} <- git(dir, ["rev-parse", ref], as: as), do: {:ok, String.trim(out)}
   end
 
-  # The worker's own, and the only git that is: `dir` does not exist yet, so there is no hook or
-  # configuration in it that anybody but git wrote. `as` is dropped rather than used — the job's
-  # user cannot write the directory the clone is made in.
+  # The worker's own, and the only git that is: `dir` is empty where it exists at all — the
+  # caller's own volume, made for this clone — so there is no hook or configuration in it that
+  # anybody but git wrote. `as` is dropped rather than used: the job's user cannot write the
+  # directory the clone is made in.
   defp clone(dir, opts) do
     url = Keyword.fetch!(opts, :url)
     branch = Keyword.fetch!(opts, :branch)

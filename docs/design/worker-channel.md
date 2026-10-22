@@ -152,7 +152,7 @@ Worker → platform:
 | `stats` | `cpu`, `memory_used`, `memory_total`, `disk_used`, `disk_total`, each only when readable | no |
 | `log` | `at`, `type`, `level`, `message`, and `job_id` on a line about a job | no |
 | `event` | `job_id`, normalised harness event | no |
-| `turn` | `job_id`, turn index, commit, the turn's proposals and documents, and a harness summary carrying its cost | yes |
+| `turn` | `job_id`, turn index, commit, the turn's proposals and documents, any `transition.json` it wrote (`conversations.md` § Taking a transition), and a harness summary carrying its cost | yes |
 | `result` | `job_id`, `ForgeCore.Job.Result` as JSON — `status` `parked` for an agent that invoked commands, with the invocations and the commit it pushed; a command's with its exit status, duration and log key; either's `blobs` (name → key and size) and `invalid_blobs` (name → why) for its groups of files | yes |
 | `hibernated` | `job_id`, commit sha, reason, the result as far as it got; a chat adds its turn count | yes |
 | `failed` | `job_id`, reason | yes |
@@ -499,6 +499,28 @@ needs protocol 6 (`Forge.Jobs.protocol/1`), and a protocol 4 or 5 worker, still 
 taking every job that names none: an assignment without secrets is exactly what it was, and the
 credential's seal is unchanged. The minimum stays 4 until the templates and permanent machines
 have moved, as below.
+
+**Protocol 7 is presentations and optional outputs** (`docs/design/workflow-grammar-v1.md`
+§ Semantics): a `produces` entry ending `!`, whose artifact is the name without it, and
+`optional` in the spec. It is a bump because the worker composes the manifest, collects `out/`
+and decides the outcome, and an older one gets all three wrong rather than less. It runs an older
+`forge_core`, which strips no marker: it tells the agent to write `$FORGE_JOB/out/presentation.md!`
+and collects the file under that name, which this platform records as an approvable *document* —
+the two things a presentation must never be. And its manifest says every declared document is
+required, because the note that says otherwise is new here: an agent that skips an optional one is
+nagged for it by that worker's own `Correction`, and the job ends `error` on a state whose workflow
+has no `error` edge, because the document was meant to be skippable. So a job whose state declares
+either needs protocol 7 (`Forge.Jobs.protocol/1`, from the stored spec), and a protocol 4, 5 or 6
+worker keeps taking every job that declares neither — `optional` is a new key in every workflow
+job's spec, and an older `Spec.from_map/1` reads the keys it knows by name and ignores the rest.
+The minimum stays 4.
+
+**This one is louder than the others on the way out**, because forge's own workflows reach it on
+every ticket: `presenting` is on the only path to `review_ready` in both `.forge/workflows/dev.yml`
+and `bug.yml`. Until a template's snapshot speaks 7, such a job sticks its ticket for placement —
+or, from an unlabelled template, makes one machine, learns 6 at its join and sticks from the next
+pass. It is a placement stick, so pointing a template at a new snapshot brings every stuck ticket
+back; `docs/deploy.md` § Upgrading is where the operator reads that.
 
 What rides along without a bump, because an older side may ignore it: `job.harness.memory`
 events and the `memory` a `starting` event carries (`docs/design/claude-code-events.md` § Memory),

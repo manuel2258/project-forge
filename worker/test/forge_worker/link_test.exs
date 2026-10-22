@@ -270,7 +270,8 @@ defmodule ForgeWorker.LinkTest do
     if scenario = Keyword.get(opts, :scenario) do
       harness = Application.get_env(:forge_worker, :harness_opts, [])
       Application.put_env(:forge_worker, :harness_opts, harness)
-      Application.put_env(:forge_worker, :extra_env, [{"FAKE_SCENARIO", scenario}])
+      env = [{"FAKE_SCENARIO", scenario} | Keyword.get(opts, :env, [])]
+      Application.put_env(:forge_worker, :extra_env, env)
     end
 
     %{
@@ -806,6 +807,146 @@ defmodule ForgeWorker.LinkTest do
 
     # The agent's work reached the branch before the result was sent.
     assert git!(nil, ["-C", origin, "show", "refs/heads/ticket/1:CHANGED.md"]) =~ "by the agent"
+  end
+
+  # `docs/design/git-hosting.md` § Non-fast-forward on a ticket branch: the squash belongs to a
+  # state that declares `changeset`. A state that declares none — `reviewing`, whose output is its
+  # report — works in a scratch tree, and whatever is left in it when the run ends is nobody's
+  # work. Ticket 3: a review killed mid-mutation had its broken tree committed and pushed, and
+  # the branch is what merges.
+  describe "a state whose produces holds no changeset" do
+    defp reviewing(origin, opts) do
+      origin
+      |> assignment(Keyword.merge([env: [{"FAKE_DOC", "report.md"}]], opts))
+      |> put_in(["spec", "produces"], ["report.md"])
+    end
+
+    test "leaves the ticket branch where it found it, whatever the run left in the tree",
+         context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      before = git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"])
+      job = reviewing(origin, scenario: "leaves_dirty")
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      {%{"job_id" => ^job_id, "result" => result}, _events} = take_push("result")
+
+      # The run itself converged: its document is its output, and it was accepted.
+      assert %{"status" => "finished", "outcome" => "converged"} = result
+
+      # And nothing of its tree reached the branch — not the tracked file it modified, not the
+      # untracked one it wrote, and no commit at all.
+      assert git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"]) == before
+    end
+
+    # The template is the other way the same tree reaches the branch: the ticket's next job
+    # starts from it and, if it declares a changeset, commits what it inherited. Promoting a
+    # scratch tree would launder a mutation into the next run's `add -A`.
+    test "does not keep its scratch tree as the ticket's template", context do
+      %{client: client, origin: origin, root: root} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = reviewing(origin, scenario: "leaves_dirty")
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      {%{"job_id" => ^job_id}, _events} = take_push("result")
+
+      refute File.dir?(Path.join([root, "volumes", "ticket", "1"]))
+    end
+
+    # The second of criterion 1's three endings: the run fails on its own, with the tree dirty.
+    # It reaches `keep/4` through the same join as a converged one, so this is cover by
+    # construction rather than a separate path — but the criterion names the ending, and an
+    # argument is not a test.
+    test "a failed run leaves the ticket branch where it found it too", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      before = git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"])
+      job = reviewing(origin, scenario: "dirties_then_fails")
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      {%{"job_id" => ^job_id, "result" => result}, _events} = take_push("result")
+
+      refute result["outcome"] == "converged"
+      assert git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"]) == before
+    end
+
+    # Criterion 1 names three endings — converged, failed, and killed partway through with the
+    # tree left dirty. The test above drives the first; this drives the third, which is the
+    # ticket's own reproduction: a review stopped from outside between breaking the code and
+    # restoring it. `terminal(%Result{killed: :operator}, head)` now reports the base for such a
+    # state, and its only other test uses the default changeset spec.
+    test "a cancelled run hibernates at the head it started from, committing nothing", context do
+      %{client: client, origin: origin, root: root} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      before = git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"]) |> String.trim()
+      job = reviewing(origin, scenario: "dirties_then_hangs")
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      # **Not on a channel event: the scenario emits none, so the first event to arrive is the
+      # runner's own, on a timer, and says nothing about what the harness has done.** Cancelling
+      # on one left this test passing against the unconditional-commit mutation whenever the
+      # timer won, which is a test that cannot be relied on to fail. The marker is written after
+      # the two files are dirtied, so waiting for it is the ordering the assertion needs.
+      dirtied = Path.join([root, "jobs", job["spec"]["job_id"], "fake-dirtied.txt"])
+      wait_until(fn -> File.exists?(dirtied) end, 500)
+
+      assert git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"]) |> String.trim() ==
+               before
+
+      push(client, @topic, "cancel", %{"job_id" => job_id, "reason" => "ticket_cancelled"})
+
+      {%{"job_id" => ^job_id, "commit" => commit}, _events} = take_push("hibernated")
+
+      # It still says what it spent, and it names the head it started from rather than one of
+      # its own — because it made none.
+      assert commit == before
+
+      assert git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"]) |> String.trim() ==
+               before
+    end
+
+    # Criterion 3 of the refinement: the head a run reports is the one it started from, and a
+    # state that never calls the push still has to name it. A parked run is where that head is
+    # read — the commands it asked for run at it.
+    #
+    # The agent commits one of its own, which is what makes this the branch head and not the
+    # worktree's: reporting `HEAD` here would name a commit that is on no ref anybody else can
+    # fetch, and the commands would be asked to run at it.
+    test "a parked run reports the head it started from", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      before = git!(nil, ["-C", origin, "rev-parse", "refs/heads/ticket/1"]) |> String.trim()
+
+      job =
+        origin
+        |> reviewing(
+          scenario: "invokes",
+          env: [{"FAKE_DOC", "report.md"}, {"FAKE_COMMIT", "NOTES.md"}]
+        )
+        |> put_in(["spec", "may_invoke"], %{"build" => %{"max" => 2}, "test" => %{"max" => 2}})
+
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      {%{"job_id" => ^job_id, "result" => result}, _events} = take_push("result")
+
+      assert result["status"] == "parked"
+      assert result["commit"] == before
+    end
   end
 
   # `docs/design/commands.md`: a command is checked out at its commit, runs the script its spec
@@ -3668,6 +3809,163 @@ defmodule ForgeWorker.LinkTest do
 
       {%{"turn" => 3, "documents" => again}, _} = take_push("turn")
       assert again == documents
+    end
+
+    # A transition is not a document: it is an instruction, and it travels on the turn that asked
+    # for it and no other (`docs/design/conversations.md` § Taking a transition). The turn before
+    # and the turn after must carry neither key, or the platform would take the same transition
+    # again on every turn until the conversation ended.
+    test "a transition asked for during a turn goes out with that turn, and only that turn",
+         context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin)
+      push(client, @topic, "assign", job)
+      {first, _} = take_push("turn")
+      refute Map.has_key?(first, "transition_request")
+      refute Map.has_key?(first, "invalid_transition_request")
+
+      push(client, @topic, "message", %{
+        "job_id" => job["job_id"],
+        "message_id" => "m-2",
+        "text" => "MOVE it back"
+      })
+
+      {%{"turn" => 2} = second, _} = take_push("turn")
+
+      assert second["transition_request"] == %{
+               "to" => "implementing",
+               "comment" => "the tests were the problem"
+             }
+
+      push(client, @topic, "message", %{
+        "job_id" => job["job_id"],
+        "message_id" => "m-3",
+        "text" => "thanks"
+      })
+
+      {%{"turn" => 3} = third, _} = take_push("turn")
+      refute Map.has_key?(third, "transition_request")
+      refute Map.has_key?(third, "invalid_transition_request")
+    end
+
+    # **An interrupted turn's request is removed unread.** The gate `invoke.json` has, for the
+    # reason it has it (`runner.ex`'s `invocations/3`): the person cut the agent off, a file
+    # half-written when that happened is not a request anybody made, and `push_reply/1` — the
+    # thing that would have told somebody — is the one step an interrupted turn skips.
+    test "a request written before an interrupt is dropped, and gone for the next turn too",
+         context do
+      %{client: client, origin: origin, root: root} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin, env: [{"FAKE_TURN_SECONDS", "5"}])
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      push(client, @topic, "message", %{
+        "job_id" => job_id,
+        "message_id" => "m-2",
+        "text" => "PREMOVE SLOW please"
+      })
+
+      push(client, @topic, "interrupt", %{"job_id" => job_id})
+
+      {%{"turn" => 2, "interrupted" => true} = second, _} = take_push("turn")
+      refute Map.has_key?(second, "transition_request")
+      refute Map.has_key?(second, "invalid_transition_request")
+
+      # Removed, not merely skipped: a file left behind would be read as a fresh request by
+      # the very next turn, which is the interrupt applied one turn late.
+      refute File.exists?(Path.join([root, "jobs", job_id, "transition.json"]))
+
+      push(client, @topic, "message", %{
+        "job_id" => job_id,
+        "message_id" => "m-3",
+        "text" => "never mind"
+      })
+
+      {%{"turn" => 3} = third, _} = take_push("turn")
+      refute Map.has_key?(third, "transition_request")
+    end
+
+    # The other half of the clean-turn rule, which the note asserts and nothing drove: a turn the
+    # harness ended on an error, and one whose subtype says success while `is_error` says
+    # otherwise — a budget stop. Both have the file removed unread, as an interrupt does.
+    test "a request on a turn that ended badly is dropped, by subtype and by is_error", context do
+      %{client: client, origin: origin, root: root} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin)
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      for {text, index} <- [{"ERRMOVE now", 2}, {"BUDGETMOVE now", 3}] do
+        push(client, @topic, "message", %{
+          "job_id" => job_id,
+          "message_id" => "m-#{index}",
+          "text" => text
+        })
+
+        {%{"turn" => ^index} = turn, _} = take_push("turn")
+
+        refute Map.has_key?(turn, "transition_request"), text
+        refute Map.has_key?(turn, "invalid_transition_request"), text
+        refute File.exists?(Path.join([root, "jobs", job_id, "transition.json"])), text
+      end
+    end
+
+    # A file that is not a request is reported as one that is not, rather than dropped: the
+    # agent asked for something and has to be told nothing happened.
+    test "a transition file the worker cannot read goes out as invalid", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin)
+      push(client, @topic, "assign", job)
+      {_first, _} = take_push("turn")
+
+      push(client, @topic, "message", %{
+        "job_id" => job["job_id"],
+        "message_id" => "m-2",
+        "text" => "BADMOVE please"
+      })
+
+      {%{"turn" => 2} = second, _} = take_push("turn")
+      refute Map.has_key?(second, "transition_request")
+      assert second["invalid_transition_request"] =~ "transition.json is not valid JSON"
+    end
+
+    # The comment is the agent's own text, so it is masked like everything else a turn carries.
+    # Merged into the payload after the masking wrap would have sent the value through verbatim.
+    test "a secret in the request's comment is masked", context do
+      %{client: client, origin: origin, root: root} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = origin |> chat() |> with_secrets(%{"STRIPE_TEST_KEY" => "sk_test_in-a-comment"})
+      push(client, @topic, "assign", job)
+      {_first, _} = take_push("turn")
+
+      File.write!(
+        Path.join([root, "jobs", job["job_id"], "transition.json"]),
+        ~s({"to": "implementing", "comment": "as sk_test_in-a-comment said"})
+      )
+
+      push(client, @topic, "message", %{
+        "job_id" => job["job_id"],
+        "message_id" => "m-2",
+        "text" => "thanks"
+      })
+
+      {%{"turn" => 2} = second, _} = take_push("turn")
+      assert second["transition_request"]["comment"] == "as [secret STRIPE_TEST_KEY] said"
     end
 
     # What the worker refuses goes to the platform too, with why, so the page can list it: a

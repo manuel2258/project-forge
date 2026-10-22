@@ -103,6 +103,37 @@ defmodule ForgeCore.WorkflowTest do
     end
   end
 
+  describe "the markers a produces entry may carry" do
+    test "a presentation is its name and a bang" do
+      assert Workflow.presentation?("deck.md!")
+      refute Workflow.presentation?("deck.md")
+      refute Workflow.presentation?("shots/*")
+      refute Workflow.presentation?(Workflow.changeset_artifact())
+      refute Workflow.presentation?(nil)
+    end
+
+    test "the marker is the declaration and never the filename" do
+      assert Workflow.presentation_name("deck.md!") == "deck.md"
+      assert Workflow.presentation_name("deck.md") == "deck.md"
+    end
+
+    # A presentation is a document in every respect but the kind it is recorded under, which is
+    # what lets the worker collect it, parse it and read its outcome knowing nothing of the marker.
+    test "a presentation is a document and a group is not" do
+      assert Workflow.document?("deck.md!")
+      assert Workflow.document?("deck.md")
+      refute Workflow.document?("shots/*")
+      refute Workflow.document?(Workflow.changeset_artifact())
+    end
+
+    test "produced_name strips whichever marker the entry carries, and nothing else" do
+      assert Workflow.produced_name("deck.md!") == "deck.md"
+      assert Workflow.produced_name("shots/*") == "shots"
+      assert Workflow.produced_name("plan.md") == "plan.md"
+      assert Workflow.produced_name(Workflow.changeset_artifact()) == "changeset"
+    end
+  end
+
   describe "the documents handed to an agent" do
     test "the grammar is the design note itself, not a copy of it" do
       grammar = Workflow.grammar()

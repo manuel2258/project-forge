@@ -30,7 +30,8 @@ These decisions are settled. They are not to be reopened.
 
 - A job receives an immutable specification: prompt, inputs pinned by version, environment, commit, budgets, permitted children.
 - Jobs are disposable. Anything that must survive is committed to the job's branch or written to the artifact store. Nothing else exists.
-- A job commits its work before hibernating. History is squashed.
+- A job commits its work before hibernating, when its state declares a `changeset`. A state
+  that declares none has a scratch tree and commits nothing, ever. History is squashed.
 - Resuming the agent's own conversation is an optimisation, never a dependency. Artifacts are the contract.
 - A job waiting on a human holds no process and no machine, so waiting is free.
 

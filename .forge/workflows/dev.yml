@@ -9,7 +9,11 @@ states:
     env: default
     inputs: [ticket]
     produces: [refinement.md]
-    budget: { turns: 40, cost: 3.00 }
+    # Turns at 60 and not 40, as on every state here whose budget is a few dollars: a turn buys
+    # no inference and a job stopped by its turn ceiling throws away everything it spent, so the
+    # cost ceiling is the one that should bind. Ticket 7's `planning` died at turn 51 of 50 with
+    # $1.11 of its $4.00 unspent, and one of its four refinements used 36 of these 40.
+    budget: { turns: 60, cost: 3.00 }
 
   # `implementation.md` is here for the same reason `bug.yml`'s `diagnosing` reads it: the ticket
   # comes back on `plan_invalid`, and a re-plan that cannot read why re-derives the same plan. It
@@ -19,7 +23,7 @@ states:
     env: default
     inputs: [ticket, refinement.md, implementation.md]
     produces: [plan.md]
-    budget: { turns: 50, cost: 4.00 }
+    budget: { turns: 80, cost: 4.00 }
 
   implementing:
     prompt: agents/implement.md
@@ -35,9 +39,18 @@ states:
   checking:
     extends: checking
 
+  # `report.md` is this state's own last version, and optional: the way in from `checking` on a
+  # first pass has written no review. It is here so that a second round can verify the fixes to
+  # what it found and read only what changed since, rather than re-deriving the whole diff at
+  # full price — ticket 7's second review spent $21.96 doing exactly that, and its fifth, scoped,
+  # cost $4.13.
   reviewing:
     extends: reviewing
-    inputs: [refinement.md, plan.md, implementation.md, changeset]
+    inputs: [refinement.md, plan.md, implementation.md, report.md, changeset]
+
+  presenting:
+    extends: presenting
+    inputs: [refinement.md, plan.md, implementation.md, report.md, changeset]
 
   review_ready: {}
 
@@ -57,8 +70,9 @@ transitions:
   - { from: implementing, to: planning,     when: plan_invalid }
   - { from: checking,     to: reviewing }
   - { from: checking,     to: implementing, when: checks_failed,     max: 3 }
-  - { from: reviewing,    to: review_ready }
+  - { from: reviewing,    to: presenting }
   - { from: reviewing,    to: implementing, when: issues_found,      max: 3 }
+  - { from: presenting,   to: review_ready }
   - { from: review_ready, to: merged,       approve: [changeset] }
   - { from: integrating,  to: checking }
 
@@ -69,8 +83,13 @@ transitions:
   - { from: planning,     to: planning,     when: did_not_converge,  max: 1 }
   - { from: implementing, to: implementing, when: budget_exhausted,  max: 1 }
   - { from: implementing, to: implementing, when: did_not_converge,  max: 1 }
-  - { from: reviewing,    to: reviewing,    when: budget_exhausted,  max: 1 }
+  - { from: reviewing,    to: presenting,   when: budget_exhausted }
   - { from: reviewing,    to: reviewing,    when: did_not_converge,  max: 1 }
+  - { from: presenting,   to: presenting,   when: budget_exhausted,  max: 1 }
+  - { from: presenting,   to: presenting,   when: did_not_converge,  max: 1 }
 
 limits:
-  ticket_cost: 120.00
+  # $210 and not $120 because `reviewing` costs $35: the cap is what the review loop has to fit
+  # inside, and `.forge/common.yml` derives the figure beside the budget it follows from.
+  # `project_workflows_test.exs` computes it from this file rather than trusting the comment.
+  ticket_cost: 210.00

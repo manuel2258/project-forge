@@ -113,6 +113,31 @@ defmodule ForgeWeb.ApiTest do
     assert [%{attempt: 2}] = Enum.filter(Jobs.for_ticket(ticket.id), &(&1.status == :pending))
   end
 
+  # The pending-approval guard moved from the ticket page's `:if` into `Engine.choose/4`, which
+  # made `:pending_approval` reachable from here for the first time. Every sibling reason has a
+  # clause in the fallback controller; without one this answered a client error with 500, which
+  # `docs/design/api-and-ui.md`'s contract of 400/401/404/409/422 does not allow.
+  test "a transition while a decision is pending is a conflict, not a server fault", %{
+    conn: conn,
+    user: user,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
+    name = project.name
+
+    scenario("success", "refinement.md")
+    run_pending(ticket.id)
+
+    assert Tickets.get!(ticket.id).pending_transition["to"] == "planning"
+
+    assert %{"error" => %{"reason" => "pending_approval", "detail" => detail}} =
+             conn
+             |> post(~p"/api/v1/tickets/#{name}/1/transition", %{to: "planning"})
+             |> json_response(409)
+
+    assert detail =~ "decide that one first"
+  end
+
   test "a ticket is cancelled and restored, and leaves the ticket list meanwhile", %{
     conn: conn,
     user: user,
@@ -386,6 +411,34 @@ defmodule ForgeWeb.ApiTest do
              conn
              |> get(~p"/api/v1/tickets/#{project.name}/1/artifacts/ticket?version=9")
              |> json_response(404)
+  end
+
+  # **The API is the product and the UI is a client of it** (`docs/design/api-and-ui.md`), so a
+  # fact only the LiveViews carry is a fact no other client can read. Which ceiling stopped a
+  # `budget_exhausted` job is the whole point of recording it — "ran out of money" and "ran out
+  # of turns" want different responses — and it shipped on three LiveView rows and nowhere here.
+  test "a job says which ceiling stopped it", %{conn: conn, project: project} do
+    name = project.name
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, project_owner(project).id})
+
+    scenario("max_turns", "refinement.md")
+    run_pending(ticket.id)
+
+    assert %{"jobs" => [%{"outcome" => "budget_exhausted", "exhausted" => "turns"}]} =
+             conn |> get(~p"/api/v1/tickets/#{name}/#{ticket.number}") |> json_response(200)
+
+    # And nothing for a job no ceiling stopped, rather than a guess at one of the three.
+    {:ok, other} = Tickets.admit(project, %{title: "y"}, {:user, project_owner(project).id})
+    scenario("success", "refinement.md")
+    run_pending(other.id)
+
+    assert %{"jobs" => [%{"outcome" => "converged", "exhausted" => nil}]} =
+             conn |> get(~p"/api/v1/tickets/#{name}/#{other.number}") |> json_response(200)
+  end
+
+  defp project_owner(project) do
+    [%{user_id: user_id} | _rest] = Projects.members(project)
+    Forge.Repo.get!(Forge.Accounts.User, user_id)
   end
 
   test "admits, shows, approves, answers, transitions and reads artifacts and events", %{

@@ -93,6 +93,38 @@ defmodule ForgeWorker.Job.WorkspaceTest do
     refute File.exists?(Path.join(dir, "debris.txt"))
   end
 
+  # What a state that produces no `changeset` reports instead of a push. `head/2` would name the
+  # agent's own commit, which is on no ref anybody else can fetch; a parked run's commands would
+  # then be dispatched at it.
+  test "the base is the fetched branch head, not the agent's own commits", context do
+    %{origin: origin, root: root} = context
+    job = assignment(origin)
+    {:ok, dir} = Workspace.prepare(job, root, @direct)
+    fetched = git!(dir, ["rev-parse", "origin/ticket/1"]) |> String.trim()
+
+    git!(dir, ["config", "user.name", "agent"])
+    git!(dir, ["config", "user.email", "agent@forge"])
+    File.write!(Path.join(dir, "NOTES.md"), "the agent's own\n")
+    git!(dir, ["add", "NOTES.md"])
+    git!(dir, ["commit", "--quiet", "-m", "the agent's own commit"])
+
+    assert {:ok, ^fetched} = Workspace.base(job, dir, @direct)
+    assert {:ok, own} = Workspace.head(dir, @direct)
+    refute own == fetched
+  end
+
+  # The one way `base/3` can fail, and what makes `ForgeWorker.Link`'s `{:branch_head, _}` tag
+  # worth keeping apart from `{:push, _}`: nothing was pushed, so nothing about a push went
+  # wrong. Reachable here and not through `Link`, where a branch the clone could not fetch fails
+  # in `prepare/3` long before a run ends.
+  test "the base errors when the branch has no fetched head", context do
+    %{origin: origin, root: root} = context
+    {:ok, dir} = Workspace.prepare(assignment(origin), root, @direct)
+    elsewhere = put_in(assignment(origin), ["git", "branch"], "ticket/404")
+
+    assert {:error, _reason} = Workspace.base(elsewhere, dir, @direct)
+  end
+
   test "a resume keeps the work in progress", %{origin: origin, root: root} do
     job = assignment(origin)
     {:ok, dir} = Workspace.prepare(job, root, @direct)
@@ -579,6 +611,25 @@ defmodule ForgeWorker.Job.WorkspaceTest do
       # And it is this branch at the head the platform has, exactly as a cold start would be.
       assert git!(second, ["rev-parse", "--abbrev-ref", "HEAD"]) |> String.trim() == "ticket/1"
       assert File.read!(Path.join(second, "NOTES.md")) == "first"
+    end
+
+    # A clone that fails must leave nothing behind. `prepare/3` reads a worktree that is already
+    # there as an unfinished run's own and refreshes it, so an empty directory left by a clone
+    # that never got going sends the job's next attempt past the ticket's template — the warmth
+    # this whole mechanism is for — and nothing sweeps `worktrees/*` to clear it either.
+    test "a cold clone that fails leaves nothing for the retry to mistake for a tree", context do
+      %{origin: origin, root: root} = context
+      job = assignment(origin, job_id: uuid())
+      broken = put_in(job, ["git", "url"], Path.join(tmp_dir("gone"), "missing.git"))
+
+      assert {:error, _reason} = Workspace.prepare(broken, root, @direct)
+      refute File.exists?(Workspace.dir(job, root))
+
+      # The ticket gets its template meanwhile, from another of its jobs.
+      run!(assignment(origin, job_id: uuid()), root, "first")
+
+      assert {:ok, dir} = Workspace.prepare(job, root, @direct)
+      assert File.read!(Path.join(dir, "build/warm.o")) == "first"
     end
 
     test "each job's own work reaches the next one through the template", context do

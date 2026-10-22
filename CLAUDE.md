@@ -96,8 +96,13 @@ the gate is not made.
 It installs Hex and starts a throwaway postgres on `localhost:5432` first, when the machine has
 neither — a command pool's machine has the devshell and nothing else, and without both the gate
 died before compiling anything and again at "The database for Forge.Repo couldn't be created".
-An operator's own Hex and postgres are left alone. Neither step relaxes a check: the suite runs
-against a real database either way.
+An operator's own Hex and postgres are left alone; the postgres it starts makes a password for
+that run and hands it to the suite in the environment, so that nothing else on a shared machine
+can authenticate — a committed password would be readable by every job with a checkout — and it
+goes when the run does.
+`mix deps.get` runs every time, in every project, which is the one of the three steps that
+writes to a checkout: it can rewrite `mix.lock` where `mix.exs` has moved on. None of them
+relaxes a check — the suite runs against a real database either way.
 
 It also points `MIX_HOME` and `HEX_HOME` at `.mix-home/` and `.hex-home/` inside the checkout,
 so that Hex is installed and the registry fetched once per ticket rather than once per job: a
@@ -200,7 +205,8 @@ and pushes. No pull requests, no merge commits.
 `GITHUB_TOKEN`, and builds the Hetzner worker snapshot with `HCLOUD_TOKEN` and the ssh key in
 `HETZNER_PRIVATE_KEY` when the worker changed — checking every credential before it writes
 anything (`bin/hetzner-image --check` for the Hetzner ones), and stopping to report only when
-something fails. Pointing a template at a new snapshot stays the operator's.
+something fails. Pointing a template at a new snapshot stays the operator's, unless it names
+`latest` — each build marks the snapshot it made, and a template naming the mark follows it.
 
 ## Rules
 

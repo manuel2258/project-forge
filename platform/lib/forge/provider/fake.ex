@@ -126,11 +126,33 @@ defmodule Forge.Provider.Fake do
   def images(credential) do
     notify({:provider_images, credential})
 
-    {:ok,
-     :persistent_term.get({__MODULE__, :images}, [
-       %{id: "snapshot-1", name: "forge-worker", status: "available", build: nil, protocol: nil}
-     ])}
+    case :persistent_term.get({__MODULE__, :refuse_images}, nil) do
+      nil ->
+        {:ok,
+         :persistent_term.get({__MODULE__, :images}, [
+           %{
+             id: "snapshot-1",
+             name: "forge-worker",
+             status: "available",
+             build: nil,
+             protocol: nil
+           }
+         ])}
+
+      reason ->
+        {:error, reason}
+    end
   end
+
+  @doc """
+  Makes `images/1` fail with `reason`: an account whose catalogue cannot be read at all.
+
+  The case a template naming `latest` has to survive — a revoked token, an API that is down —
+  where it cannot be told which snapshot it would be made from
+  (`docs/design/provisioning.md` § Where a machine comes from).
+  """
+  @spec refuse_images(term()) :: :ok
+  def refuse_images(reason), do: :persistent_term.put({__MODULE__, :refuse_images}, reason)
 
   @doc """
   What `images/1` will list until `allow/0`, so a page test can offer labelled and unlabelled
@@ -164,14 +186,15 @@ defmodule Forge.Provider.Fake do
   @doc """
   Stops refusing, all three kinds, stops requiring template fields and billing by the hour, holds
   no unrecorded machine, and lists the default images again. Called on exit by anything that
-  called `refuse/1`, `refuse_destroy/1`, `refuse_find/1`, `holding_made/2`, `requiring/1`,
-  `billing/1`, `listing/1` or `during_create/1`.
+  called `refuse/1`, `refuse_destroy/1`, `refuse_find/1`, `refuse_images/1`, `holding_made/2`,
+  `requiring/1`, `billing/1`, `listing/1` or `during_create/1`.
   """
   @spec allow() :: :ok
   def allow do
     :persistent_term.erase({__MODULE__, :refuse})
     :persistent_term.erase({__MODULE__, :refuse_destroy})
     :persistent_term.erase({__MODULE__, :refuse_find})
+    :persistent_term.erase({__MODULE__, :refuse_images})
     :persistent_term.erase({__MODULE__, :made})
     :persistent_term.erase({__MODULE__, :requires})
     :persistent_term.erase({__MODULE__, :billed_increment_ms})

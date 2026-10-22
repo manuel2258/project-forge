@@ -35,8 +35,13 @@ on commands it invoked, holding no slice: `design/commands.md` § Always park), 
 command's, null for every other kind and for a command that ended without one),
 `outcome` (`converged | did_not_converge | budget_exhausted | error | cancelled`, null until
 finished), `declared_outcome` (the workflow outcome the agent selected, null unless converged),
-`turns`, `cost_usd` (what its runs have cost between them — a conversation's read from them with
-`Runs.total/1`, a workflow job's added up as each run reports; see **job_run**),
+`exhausted` (`turns | cost | wall_clock` — which ceiling stopped a `budget_exhausted` job, null
+for every other and for one whose worker was too old to say; `design/capacity.md` § Four
+exhaustions, three treatments), `turns`, `cost_usd` (what the job has used and what
+its runs have cost between them — a conversation's read from them with `Runs.total/1`, a workflow
+job's added up as each run reports; see **job_run** — and both running totals over every
+invocation the job has had, so neither is commensurate with `spec.budget`, which is one
+invocation's ceiling),
 `harness_session_id` (opaque, nullable, an optimisation only), `session_blob` (the latest session
 file the worker uploaded — its store key and the Claude Code version that wrote it — which a resume
 on another machine puts back; `design/claude-code-events.md` § Resume), `resume_from_id` (the
@@ -218,5 +223,4 @@ run rebuilds from the branch and the manifest.
 
 `parent_job_id` and `spec.permitted_children` carry subagents. `worker_id` carried the
 worker tier, which has since arrived. `role` was to carry multi-user; it was dropped for
-`node_admin` and `project_members` when multi-user arrived. `artifact.kind = presentation` exists
-but nothing renders it yet.
+`node_admin` and `project_members` when multi-user arrived.

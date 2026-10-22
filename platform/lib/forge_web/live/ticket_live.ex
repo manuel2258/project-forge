@@ -607,6 +607,7 @@ defmodule ForgeWeb.TicketLive do
                     bucket={job.declared_outcome && Indicators.bucket(job.outcome)}
                   />
                   <.job_status :if={is_nil(job.outcome)} status={job.status} />
+                  <.ceiling job={job} />
                   <%!-- Language, not an identifier: sans at body size, and never accent — a
                         machine is being waited on, not the operator. --%>
                   <span
@@ -767,7 +768,14 @@ defmodule ForgeWeb.TicketLive do
               class="flex min-h-[46px] items-center gap-3 border-b border-base-300/60 font-mono text-[12.5px] hover:bg-base-200"
             >
               <span class="min-w-0 flex-1 truncate">{job.state} #{job.attempt}</span>
-              <span class="shrink-0 opacity-60">{job.outcome || job.status}</span>
+              <%!-- Through `Indicators`, like every other row: `ui.md` § The three axes says
+                    nothing else may draw a job outcome, and this row drew it as plain demoted
+                    text — which left the ceiling beside it at exactly the same weight. --%>
+              <span class="shrink-0">
+                <.outcome :if={job.outcome} value={to_string(job.outcome)} />
+                <.job_status :if={is_nil(job.outcome)} status={job.status} />
+              </span>
+              <.ceiling job={job} />
               <span class="shrink-0 opacity-40" aria-hidden="true">›</span>
             </.link>
           </li>
@@ -964,8 +972,10 @@ defmodule ForgeWeb.TicketLive do
   end
 
   # The events whose type alone does not say what happened: which outcome a batch decided, why the
-  # ticket stuck, where it went. Every other type is its own sentence here.
-  @said ~w(commands.decided ticket.stuck transition.taken ticket.merge_conflicted)
+  # ticket stuck, where it went, why a conversation's request to move it moved nothing. Every
+  # other type is its own sentence here.
+  @said ~w(commands.decided ticket.stuck transition.taken ticket.merge_conflicted
+           chat.transition_refused)
 
   defp said(%{type: type} = event) when type in @said, do: Forge.Events.summary(event)
   defp said(_event), do: nil

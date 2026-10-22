@@ -196,6 +196,24 @@ one squashed commit. Pushing moves that remote-tracking ref, so turn two is buil
 opposite reading is equally plausible from the code and would quietly lose each turn's history,
 which is why it is written down here with the reason.
 
+**A conversation may merge the default branch itself, and the merge survives the turn.** It is
+the one job kind whose agent fetches and merges on its own initiative — nobody routes a chat to an
+integrating state — so its assignment carries `default_branch` the way an integrating job's does
+(`git-hosting.md` § The job's own git), its checkout fetches `origin/<default>`, and the turn's
+squash keeps that merge as the commit's second parent. Without it every turn flattened the agent's
+merge into one ordinary commit: the branch lost that the default branch was ever merged, and the
+next merge found the same conflict again, which a production chat resolved three times over
+(ticket 11). It widens nothing the chat may write — the token's scope is `refs/heads/chat/<id>`
+and the hook refuses the default branch from it, as from any job.
+
+**A turn that ends mid-merge keeps its work and says so.** Resolved and not committed, the squash
+finishes the merge and the turn commits as usual. Still conflicted, nothing is committed or pushed
+and the tree is left as the agent left it, so the next turn can finish it — and the turn reports
+`uncommitted` with the conflicted paths, which is kept on its `chat.turn` event and drawn with
+that turn in the conversation. The machine's log says it too (`turn.uncommitted`), but that log is
+read off the machine by its owner and not by the person in the chat, who used to be told nothing
+at all: the turn looked committed, and the work went with the machine.
+
 This keeps a conversation's work out of a ticket's branch, which matters most for a ticket chat:
 the ticket's branch is written by its jobs, and a chat writing the same ref would race them and
 muddy what the changeset means. A chat that wants its work on the ticket is a chat that produces

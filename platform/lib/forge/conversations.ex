@@ -373,6 +373,10 @@ defmodule Forge.Conversations do
         "turn" => turn,
         "session_id" => harness["session_id"],
         "commit" => payload["commit"],
+        # Why there is no commit, when there is none: the worker's reason, kept so the page can
+        # say it in the conversation rather than leaving it in the machine's log, which the
+        # person in the chat does not read (`docs/design/conversations.md` § Commits).
+        "uncommitted" => payload["uncommitted"],
         "interrupted" => payload["interrupted"] == true,
         "cost_usd" => harness["cost_usd"],
         "subtype" => harness["subtype"],
@@ -771,6 +775,9 @@ defmodule Forge.Conversations do
   One entry in a conversation. A `:user` message carries the state of its delivery; an
   `:assistant` message is one turn: its `items` in the order they happened, and its `text`, which
   is only what it said — the text blocks, a blank line between each.
+
+  `uncommitted` is what the turn's work did *not* do, when it did not reach the branch: a
+  sentence, drawn with the turn it belongs to, and `nil` for every turn that committed.
   """
   @type message ::
           %{role: :user, text: String.t(), at: DateTime.t(), delivered: boolean(), id: String.t()}
@@ -779,7 +786,8 @@ defmodule Forge.Conversations do
               text: String.t(),
               items: [item()],
               at: DateTime.t(),
-              turn: pos_integer() | nil
+              turn: pos_integer() | nil,
+              uncommitted: String.t() | nil
             }
 
   @typedoc """
@@ -914,11 +922,16 @@ defmodule Forge.Conversations do
 
   defp fold(%Event{type: "chat.turn"} = event, %{round: round} = state) do
     turn = event.payload["turn"]
-    stamp = fn message -> stamp(message, round, turn) end
+    notice = uncommitted(event.payload["uncommitted"])
+    stamp = fn message -> stamp(message, round, turn, notice) end
 
     %{
       state
-      | done: state.done |> flush(state.open) |> Enum.map(stamp),
+      | done:
+          state.done
+          |> flush(state.open)
+          |> spoken(round, event, notice)
+          |> Enum.map(stamp),
         open: nil,
         round: round + 1
     }
@@ -930,6 +943,42 @@ defmodule Forge.Conversations do
     do: %{state | done: flush(state.done, state.open), open: nil, round: state.round + 1}
 
   defp fold(%Event{}, state), do: state
+
+  # **What a turn that reached the branch with nothing says.** A conversation's person is told
+  # inside the conversation, where they are, rather than only in the machine's log, which is read
+  # off the machine by its owner and not by them (`docs/design/conversations.md` § Commits). The
+  # merge case names the paths, because it is the one a person can do something about: the work is
+  # still on the machine and the next turn can finish the merge.
+  defp uncommitted(%{"reason" => "merge_unresolved"} = reason) do
+    "Nothing from this turn reached the branch: a merge is unfinished" <>
+      conflicted(reason["paths"]) <>
+      ". Its work is still on the machine, and finishing the " <>
+      "merge in the next turn commits it."
+  end
+
+  defp uncommitted(%{}), do: "Nothing from this turn reached the branch."
+  defp uncommitted(_none), do: nil
+
+  defp conflicted(paths) when is_list(paths) and paths != [],
+    do: " in " <> Enum.map_join(paths, ", ", &string/1)
+
+  defp conflicted(_none), do: ""
+
+  # The notice goes on the reply this turn spoke, which is the turn `stamp/4` is naming. A turn
+  # that said and did nothing has no reply to put it on and gets a bare one: a turn whose work
+  # was lost may well be one that only acted, and this is the only word its person gets.
+  defp spoken(done, _round, _event, nil), do: done
+
+  defp spoken(done, round, event, _notice) do
+    if Enum.any?(done, &match?(%{role: :assistant, round: ^round, turn: nil}, &1)) do
+      done
+    else
+      [
+        %{role: :assistant, items: [], at: event.inserted_at, turn: nil, round: round}
+        | done
+      ]
+    end
+  end
 
   @doc """
   One tool call as the transcript holds it, from a `tool_use` event's payload. The agent wrote the
@@ -1033,10 +1082,10 @@ defmodule Forge.Conversations do
     with {:ok, rest} <- update_in_items(rest, id, fun), do: {:ok, [item | rest]}
   end
 
-  defp stamp(%{role: :assistant, round: round, turn: nil} = message, round, turn),
-    do: %{message | turn: turn}
+  defp stamp(%{role: :assistant, round: round, turn: nil} = message, round, turn, notice),
+    do: message |> Map.put(:turn, turn) |> Map.put(:uncommitted, notice)
 
-  defp stamp(message, _round, _turn), do: message
+  defp stamp(message, _round, _turn, _notice), do: message
 
   # A user message arriving mid-reply ends the assistant message being accumulated.
   defp flush(acc, nil), do: acc

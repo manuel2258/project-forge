@@ -765,7 +765,7 @@ defmodule Forge.Jobs do
           "branch" => branch(job, ticket),
           "base" => ticket && ticket.base_commit
         }
-        |> put_default_branch(job),
+        |> put_default_branch(job, project),
       "store" =>
         %{
           "transcript_key" => transcript,
@@ -1091,16 +1091,26 @@ defmodule Forge.Jobs do
     end
   end
 
-  # An integrating job's checkout fetches the default branch too; every other job's does not
-  # (`docs/design/git-hosting.md` § The job's own git).
-  defp put_default_branch(git, %Job{kind: :workflow} = job) do
+  # An integrating job's checkout fetches the default branch too, and so does a conversation's;
+  # every other job's does not (`docs/design/git-hosting.md` § The job's own git).
+  #
+  # **A conversation is told the project's, not a spec's.** It has no state and no `integration`,
+  # and it is the one job kind whose agent fetches and merges the default branch on its own
+  # initiative — which it could not do at all without this, and whose merge the squash dropped
+  # because nothing named a branch to keep (ticket 11, `docs/design/conversations.md` § Commits).
+  # Reading is all it adds: the chat's token writes `refs/heads/chat/<id>` and nothing else
+  # (`Forge.Git.Tokens.issue_for_job/3`), and `pre-receive` refuses the default branch from it.
+  defp put_default_branch(git, %Job{kind: :workflow} = job, _project) do
     case spec(job).integration do
       %{"default_branch" => branch} -> Map.put(git, "default_branch", branch)
       nil -> git
     end
   end
 
-  defp put_default_branch(git, %Job{}), do: git
+  defp put_default_branch(git, %Job{kind: :chat}, %{default_branch: branch}),
+    do: Map.put(git, "default_branch", branch)
+
+  defp put_default_branch(git, %Job{}, _project), do: git
 
   @doc """
   What this job runs on: the most specific thing that says so.

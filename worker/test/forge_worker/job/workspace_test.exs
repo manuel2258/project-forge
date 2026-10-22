@@ -362,6 +362,46 @@ defmodule ForgeWorker.Job.WorkspaceTest do
       assert rev(dir, "refs/remotes/origin/main") == rev(origin, "refs/heads/main")
     end
 
+    # The run ended mid-merge, with the conflict still open: `git reset --soft` is refused by git
+    # in the middle of a merge, and before this the whole squash died on it with the run's work
+    # neither committed nor explained (ticket 11). A conflicted tree is not work to push, so
+    # nothing is committed — and nothing is touched either, so the next run can finish the merge.
+    test "an unresolved merge commits nothing and names the paths", context do
+      %{origin: origin, root: root, ticket: ticket} = context
+      job = integrating(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      {_out, 1} = System.cmd("git", ["-C", dir, "merge", "--quiet", "origin/main"])
+
+      assert {:error, {:merge_unresolved, ["README.md"]}} =
+               Workspace.commit_and_push(job, dir, "integrating: attempt 1", @direct)
+
+      # Nothing pushed, and nothing staged or reset: the merge is still there to finish.
+      assert rev(origin, "refs/heads/ticket/1") == ticket
+      assert File.exists?(Path.join([dir, ".git", "MERGE_HEAD"]))
+      assert File.read!(Path.join(dir, "README.md")) =~ "<<<<<<<"
+      assert rev(dir, "HEAD") == ticket
+    end
+
+    # Resolved and staged, and the run ended before `git commit`: the same refusal from git, and
+    # the work was there to keep. The merge is finished for it, which is what makes `merged/4`
+    # below see the default branch in the run's history at all.
+    test "a merge resolved but not committed is finished and kept", context do
+      %{origin: origin, root: root, ticket: ticket, main: main} = context
+      job = integrating(origin)
+      {:ok, dir} = Workspace.prepare(job, root, @direct)
+      {_out, 1} = System.cmd("git", ["-C", dir, "merge", "--quiet", "origin/main"])
+      File.write!(Path.join(dir, "README.md"), "# Game, both\n")
+      git!(dir, ["add", "README.md"])
+
+      assert {:ok, head} = Workspace.commit_and_push(job, dir, "integrating: attempt 1", @direct)
+
+      assert rev(origin, "refs/heads/ticket/1") == head
+      assert rev(origin, head <> "^1") == ticket
+      assert rev(origin, head <> "^2") == main
+      assert git!(nil, ["-C", origin, "show", head <> ":README.md"]) == "# Game, both\n"
+      refute File.exists?(Path.join([dir, ".git", "MERGE_HEAD"]))
+    end
+
     # The default branch is fetched after the ticket's, and a fetch writes FETCH_HEAD, which is
     # what a cold start resets the worktree to: in the other order the ticket's worktree became
     # the default branch.

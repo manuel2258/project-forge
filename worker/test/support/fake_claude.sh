@@ -200,6 +200,22 @@ case "${FAKE_SCENARIO:-success}" in
         git commit --quiet -m "turn $turns" >&2
       fi
 
+      # A conversation merging the default branch itself, which is the one job kind whose agent
+      # does that on its own initiative (`docs/design/conversations.md` § Commits). The merge
+      # conflicts; RESOLVE stages the resolution and stops short of committing it, which is where
+      # a turn that ran out of things to say leaves the tree.
+      case "$text" in
+        *MERGE*)
+          git merge --quiet origin/main >&2 || true
+          case "$text" in
+            *RESOLVE*)
+              printf '# Game, both\n' > README.md
+              git add README.md >&2
+              ;;
+          esac
+          ;;
+      esac
+
       # A conversation writing a document, which it means to keep by leaving it in `out/`.
       case "$text" in
         *WRITE*)

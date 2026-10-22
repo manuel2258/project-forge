@@ -500,6 +500,13 @@ taking every job that names none: an assignment without secrets is exactly what 
 credential's seal is unchanged. The minimum stays 4 until the templates and permanent machines
 have moved, as below.
 
+**`default_branch` for a conversation rides along without a bump** (`conversations.md`
+§ Commits). A protocol 5 or 6 worker already fetches the branch and keeps a merge of it, whatever
+kind of run was told one, so it does exactly what is wanted; a protocol 4 worker drops the key and
+its chat cannot merge the default branch, which is where every chat was before this. Less, not
+wrong. The same holds for `uncommitted` on a turn: an older platform keeps it in the event's
+payload and draws nothing, and an older worker never sends it.
+
 What rides along without a bump, because an older side may ignore it: `job.harness.memory`
 events and the `memory` a `starting` event carries (`docs/design/claude-code-events.md` § Memory),
 which an older platform records like any other harness event; and `memory` in a result's or a

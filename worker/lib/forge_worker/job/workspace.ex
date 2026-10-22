@@ -362,8 +362,10 @@ defmodule ForgeWorker.Job.Workspace do
 
   defp remote(git), do: "origin/" <> git["branch"]
 
-  # An integrating job's default branch, as its checkout fetched it: what the squash keeps as a
-  # second parent when the run merged it (`Checkout.squash/5`).
+  # The default branch an integrating job or a conversation was given, as its checkout fetched it:
+  # what the squash keeps as a second parent when the run merged it (`Checkout.squash/5`). Kind is
+  # not asked here and is not knowable from an assignment's `git`; the platform decides which runs
+  # are told a default branch (`Forge.Jobs.assignment/4`).
   defp merged(%{"default_branch" => default}) when is_binary(default),
     do: "refs/remotes/origin/" <> default
 

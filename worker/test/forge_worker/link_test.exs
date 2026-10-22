@@ -3051,11 +3051,19 @@ defmodule ForgeWorker.LinkTest do
 
       assignment = assignment(origin, job_id: job_id)
 
+      git = %{"url" => origin, "branch" => "chat/" <> job_id, "base" => nil}
+
+      git =
+        case Keyword.get(opts, :default_branch) do
+          nil -> git
+          branch -> Map.put(git, "default_branch", branch)
+        end
+
       assignment
       |> Map.merge(%{
         "kind" => "chat",
         "idle_ms" => Keyword.get(opts, :idle_ms, 60_000),
-        "git" => %{"url" => origin, "branch" => "chat/" <> job_id, "base" => nil},
+        "git" => git,
         # The same id in both places, as the platform sends it: `Dir.prepare/3` names the job
         # directory after the *spec's* id, so a fixture that gave the two different ones put the
         # directory somewhere nothing else looked — which is how the history folder came to be
@@ -3313,6 +3321,99 @@ defmodule ForgeWorker.LinkTest do
                _other ->
                  false
              end)
+    end
+
+    # Each branch gains a commit on the same file, as a chat and the trunk that moved under it
+    # do: a merge of the two conflicts.
+    defp diverge(origin, branch, content) do
+      work = tmp_dir("diverge-" <> String.replace(branch, "/", "-"))
+      git!(nil, ["clone", "--quiet", "--branch", branch, origin, work])
+      git!(work, ["config", "user.name", "elsewhere"])
+      git!(work, ["config", "user.email", "elsewhere@forge"])
+      git!(work, ["config", "commit.gpgsign", "false"])
+      File.write!(Path.join(work, "README.md"), content)
+      git!(work, ["commit", "--quiet", "-am", "the other side"])
+      git!(work, ["push", "--quiet", "origin", branch])
+      rev(origin, "refs/heads/" <> branch)
+    end
+
+    defp rev(dir, ref), do: git!(nil, ["-C", dir, "rev-parse", ref]) |> String.trim()
+
+    defp diverged(origin, job_id) do
+      chat = diverge(origin, "chat/" <> job_id, "# Game, the chat's\n")
+      %{chat: chat, main: diverge(origin, "main", "# Game, another ticket's\n")}
+    end
+
+    # A conversation is the one job kind whose agent fetches and merges the default branch on its
+    # own initiative, and until ticket 11 nothing told it to fetch one or kept the merge: every
+    # turn's squash flattened the agent's merge into one parent, and the next merge found the same
+    # conflict again (`docs/design/conversations.md` § Commits).
+    test "a turn that merged keeps both parents, and the conflict stays resolved", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin, default_branch: "main")
+      job_id = job["job_id"]
+      %{chat: before, main: main} = diverged(origin, job_id)
+
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      # The merge is resolved and staged and the turn ends there, which is where an agent that
+      # ran out of turn leaves it. The squash finishes it rather than dying on the reset.
+      push(client, @topic, "message", %{
+        "job_id" => job_id,
+        "message_id" => "m-2",
+        "text" => "MERGE and RESOLVE it"
+      })
+
+      {%{"turn" => 2, "commit" => head, "uncommitted" => nil}, _} = take_push("turn")
+
+      assert rev(origin, "refs/heads/chat/" <> job_id) == head
+      assert rev(origin, head <> "^1") == before
+      assert rev(origin, head <> "^2") == main
+      assert git!(nil, ["-C", origin, "show", head <> ":README.md"]) == "# Game, both\n"
+
+      # What keeping the merge is for: git's own merge logic finds nothing left to resolve.
+      assert {_tree, 0} =
+               System.cmd(
+                 "git",
+                 ["-C", origin, "merge-tree", "--write-tree", head, "refs/heads/main"],
+                 stderr_to_stdout: true
+               )
+    end
+
+    # The turn whose work was lost on production: the merge is still conflicted when the turn
+    # ends, nothing can be committed, and the only record was a line in the machine's log that
+    # nobody in the conversation reads. The turn now carries why, and the paths.
+    test "a conflict it left open is reported with the turn, not only logged", context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = chat(origin, default_branch: "main")
+      job_id = job["job_id"]
+      %{chat: before} = diverged(origin, job_id)
+
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      push(client, @topic, "message", %{
+        "job_id" => job_id,
+        "message_id" => "m-2",
+        "text" => "MERGE it"
+      })
+
+      {%{"turn" => 2} = turn, _seen} = take_push("turn")
+
+      assert turn["commit"] == nil
+      assert turn["uncommitted"] == %{"reason" => "merge_unresolved", "paths" => ["README.md"]}
+
+      # And nothing was pushed: the work is on the machine, and the next turn can finish the
+      # merge. The same failure as a line in the machine's log is the describe above's, where
+      # the log stream is on ("a turn it could not push is an error line").
+      assert rev(origin, "refs/heads/chat/" <> job_id) == before
     end
 
     # A reopened conversation whose last word was the agent's has nothing to answer, and the

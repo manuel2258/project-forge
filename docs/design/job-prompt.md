@@ -71,7 +71,8 @@ reaches no git the agent runs itself. So it is given the default branch and told
 
 **The checkout fetches the default branch** into `origin/<default>` on every run, read-only
 (`git-hosting.md` § The job's own git). The assignment says which branch: `default_branch` in its
-`git`, present only for such a job.
+`git` — present for such a job and for a conversation, which merges the default branch on its own
+initiative (`conversations.md` § Commits), and for no other job.
 
 **The manifest has a section of its own, *Integrating `<default>`***, after *How you got here*,
 filled at run time from the spec's `integration` (the stored spec carries only the branch's name,

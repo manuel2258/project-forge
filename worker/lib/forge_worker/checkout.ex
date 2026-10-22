@@ -56,10 +56,11 @@ defmodule ForgeWorker.Checkout do
   user's. A clone is the worker's own — into a directory nothing has touched — and the caller
   gives it to the user afterwards.
 
-  `default` names the project's default branch, for an integrating job: it is fetched as well, on
-  every run, into `origin/<default>`, so the job can merge it (`docs/design/job-prompt.md`
-  § Integrating the default branch). Fetching is all: the job's token still writes nothing but
-  its own branch.
+  `default` names the project's default branch, for an integrating job or a conversation: it is
+  fetched as well, on every run, into `origin/<default>`, so the run can merge it
+  (`docs/design/job-prompt.md` § Integrating the default branch,
+  `docs/design/conversations.md` § Commits). Fetching is all: the job's token still writes nothing
+  but its own branch.
   """
   @spec ensure(opts()) :: :ok | {:error, term()}
   def ensure(opts) do
@@ -100,7 +101,8 @@ defmodule ForgeWorker.Checkout do
   machine. `decisions.md` asks for one commit per run rather than an agent's keystrokes, and
   this is where that happens.
 
-  **`keep` names a branch the run may have merged** — an integrating job's `origin/<default>`. When
+  **`keep` names a branch the run may have merged** — an integrating job's or a conversation's
+  `origin/<default>`. When
   the run's head contains history of it that `base` does not — their merge base is no ancestor of
   `base` — that merge base is the squashed commit's second parent, so the squash keeps the merge: one parent would put the merged tree on the branch while losing
   that the default branch was merged, and the next `merge-tree` would start from the old merge
@@ -108,14 +110,51 @@ defmodule ForgeWorker.Checkout do
   branch). The merge base and not `keep` itself, because a run resumed after the default branch
   moved has fetched a newer head than the one it merged. `base` stays the first parent whatever the
   run did, so a run that rebased instead of merging still leaves the commit before it an ancestor.
+
+  **A merge the run left open is dealt with before the reset**, which git refuses outright in the
+  middle of one — the squash used to die on it with the run's work neither committed nor explained
+  (ticket 11). Resolved but not committed: the merge is finished, and `merged/4` then sees the
+  default branch in the run's history as it would have. Still conflicted:
+  `{:error, {:merge_unresolved, paths}}`, and nothing is staged, committed or reset — a conflicted
+  tree is not work to push, and leaving it as the run left it is what lets the next run finish the
+  merge.
   """
   @spec squash(String.t(), String.t(), String.t(), ForgeWorker.Slice.as(), keyword()) ::
           {:ok, boolean()} | {:error, term()}
   def squash(dir, base, message, as, opts \\ []) do
-    with {:ok, merged} <- merged(dir, base, Keyword.get(opts, :keep), as),
+    with :ok <- finish_merge(dir, as),
+         {:ok, merged} <- merged(dir, base, Keyword.get(opts, :keep), as),
          {:ok, _out} <- git(dir, ["reset", "--soft", base], as: as),
          {:ok, _out} <- git(dir, ["add", "-A"], as: as) do
       commit(dir, base, merged, message, as)
+    end
+  end
+
+  # `MERGE_HEAD` is git's own record of a merge in progress and the thing `reset --soft` refuses
+  # on, so it is what is asked — rather than the index, or a file under `.git`, which are a
+  # different model of the same question (`CLAUDE.md` § Rules). `rev-parse --verify` fails when
+  # there is none, which is every ordinary run.
+  defp finish_merge(dir, as) do
+    case git(dir, ["rev-parse", "-q", "--verify", "MERGE_HEAD"], as: as) do
+      {:error, _none} ->
+        :ok
+
+      {:ok, _sha} ->
+        with {:ok, []} <- unmerged(dir, as),
+             {:ok, _out} <- git(dir, ["commit", "--no-edit", "--quiet"], as: as) do
+          :ok
+        else
+          {:ok, [_ | _] = paths} -> {:error, {:merge_unresolved, paths}}
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
+  # The paths git still has both sides of, which is what "unresolved" means to git: an index
+  # entry at a stage above zero. Reported in the error so the reason a person reads names them.
+  defp unmerged(dir, as) do
+    with {:ok, out} <- git(dir, ["diff", "--name-only", "--diff-filter=U"], as: as) do
+      {:ok, out |> String.split("\n", trim: true) |> Enum.map(&String.trim/1)}
     end
   end
 

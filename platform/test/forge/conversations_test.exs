@@ -14,6 +14,7 @@ defmodule Forge.ConversationsTest do
   import Forge.GitFixtures
 
   alias Forge.{Conversations, Events, Git, Jobs, Projects, Spend, Tickets}
+  alias Forge.Git.{Tokens, Url}
 
   setup do
     {:ok, project} =
@@ -908,6 +909,111 @@ defmodule Forge.ConversationsTest do
 
     test "a project chat has no ticket and so no history" do
       assert Conversations.history(nil) == []
+    end
+  end
+
+  # A conversation is the one job kind whose agent fetches and merges the default branch on its
+  # own initiative, and nothing used to tell it to fetch one: its squash kept no merge, so every
+  # turn flattened the agent's merge and the next one found the same conflict (ticket 11,
+  # `docs/design/conversations.md` § Commits).
+  describe "the default branch" do
+    test "a conversation is assigned it", %{project: project} do
+      {:ok, chat} = Conversations.open(project, "merge main for me")
+
+      assignment = Jobs.assignment(Jobs.get!(chat.id), nil, project, "token")
+
+      assert assignment["git"]["default_branch"] == project.default_branch
+    end
+
+    # Read, yes. Write, no: the token's scope is its own ref and nothing else, so fetching the
+    # default branch is all that was added. The same guard as an integrating job's
+    # (`Forge.IntegratingJobTest`), because this is where a wider token would have been handed out.
+    test "its token reads the default branch and cannot write it", %{project: project} do
+      {:ok, chat} = Conversations.open(project, "merge main for me")
+      repo = Projects.repo_path(project)
+      {:ok, main} = Git.resolve(repo, "refs/heads/main")
+      {:ok, token, _row} = Tokens.issue_for_job(Jobs.get!(chat.id), nil, project)
+      url = Url.with_token(project, token)
+      work = Path.join(tmp_dir("chat-token"), "clone")
+
+      {_out, 0} =
+        git(Path.dirname(work), ["clone", "-q", "--branch", "chat/" <> chat.id, url, work])
+
+      {_out, 0} = git(work, ["fetch", "-q", url, "+refs/heads/main:refs/remotes/origin/main"])
+
+      # A commit of its own, so the push is a change and not a no-op the hook has nothing to
+      # refuse: the chat branch is cut from the default branch and starts out identical to it.
+      File.write!(Path.join(work, "README.md"), "the chat's\n")
+      {_out, 0} = git(work, ["commit", "-qam", "the chat's work"])
+
+      assert {out, code} = git(work, ["push", "-q", url, "HEAD:refs/heads/main"])
+      assert code != 0
+      assert out =~ "main"
+      assert {:ok, ^main} = Git.resolve(repo, "refs/heads/main")
+
+      assert {_out, 0} = git(work, ["push", "-q", url, "HEAD:refs/heads/chat/" <> chat.id])
+    end
+
+    defp git(dir, args) do
+      System.cmd(
+        "git",
+        [
+          "-c",
+          "user.name=chat",
+          "-c",
+          "user.email=chat@forge",
+          "-c",
+          "commit.gpgsign=false" | args
+        ],
+        cd: dir,
+        stderr_to_stdout: true,
+        env: [{"GIT_TERMINAL_PROMPT", "0"}]
+      )
+    end
+  end
+
+  # A turn whose work did not reach the branch used to be indistinguishable, from the
+  # conversation, from one that committed: `commit` was simply nil, and why was a line in the
+  # machine's log that its person never reads (ticket 11).
+  describe "a turn that could not commit" do
+    setup %{project: project} do
+      {:ok, chat} = Conversations.open(project, "merge main for me")
+      %{chat: chat}
+    end
+
+    defp uncommitted_turn(chat, index, uncommitted) do
+      {:ok, _chat} =
+        Conversations.record_turn(
+          chat,
+          turn(index, 0.01) |> Map.put("commit", nil) |> Map.put("uncommitted", uncommitted)
+        )
+    end
+
+    test "says so in the conversation, naming the conflicted paths", %{chat: chat} do
+      text(chat, "Merging main.")
+      uncommitted_turn(chat, 1, %{"reason" => "merge_unresolved", "paths" => ["README.md"]})
+
+      assert [%{role: :user}, %{role: :assistant} = reply] = Conversations.transcript(chat.id)
+      assert reply.turn == 1
+      assert reply.uncommitted =~ "Nothing from this turn reached the branch"
+      assert reply.uncommitted =~ "README.md"
+    end
+
+    # A turn that only acted has no reply to put the notice on, and it is the kind of turn a
+    # merge ends in: it gets one of its own rather than losing the only word there is.
+    test "says so even when the turn said nothing", %{chat: chat} do
+      uncommitted_turn(chat, 1, %{"reason" => "merge_unresolved", "paths" => ["README.md"]})
+
+      assert [%{role: :user}, %{role: :assistant} = reply] = Conversations.transcript(chat.id)
+      assert reply.uncommitted =~ "merge is unfinished in README.md"
+    end
+
+    test "a turn that committed says nothing of the sort", %{chat: chat} do
+      text(chat, "Done.")
+      {:ok, _chat} = Conversations.record_turn(chat, turn(1, 0.01))
+
+      assert [%{role: :user}, %{role: :assistant} = reply] = Conversations.transcript(chat.id)
+      assert reply.uncommitted == nil
     end
   end
 

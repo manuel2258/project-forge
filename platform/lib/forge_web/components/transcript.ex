@@ -8,6 +8,9 @@ defmodule ForgeWeb.Transcript do
   turn is open, and each run folded into one line once it has ended, with a failure kept visible
   beneath the fold.
 
+  A turn whose work did not reach the branch carries a line under it saying so: the one thing in
+  here the platform says rather than either side (`Forge.Conversations`'s `uncommitted`).
+
   **A message keeps the line breaks it was written with.** The body is Markdown, which joins
   single newlines into one paragraph; the `msg` class restores them (`app.css`). That is a rule of
   the transcript's styles and nothing else — a document is rendered as a document.
@@ -56,6 +59,13 @@ defmodule ForgeWeb.Transcript do
         index={index}
         folded={message.turn != nil or not @live}
       />
+
+      <%!-- What the turn's work did not do, where the turn is: a person reading the
+            conversation is told their work is not on the branch, which otherwise only the
+            machine's log says (`docs/design/conversations.md` § Commits). --%>
+      <p :if={message[:uncommitted]} class="chat-uncommitted text-sm/[1.55] text-warning">
+        ⚠ {message[:uncommitted]}
+      </p>
     </li>
     """
   end

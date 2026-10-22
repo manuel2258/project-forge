@@ -262,6 +262,15 @@ the old merge base and find the same conflict again. The rule holds whatever the
 agent that rebased onto the default branch against its instructions still leaves a commit whose
 parents are the old ticket head and the default branch head.
 
+**A merge still open when the run ends is not squashed.** `reset --soft` is what git refuses in
+the middle of a merge, so the squash asks for `MERGE_HEAD` before it resets. Resolved but not
+committed, it finishes the merge — `git commit --no-edit` — and carries on, which is also what
+makes the second parent above findable. Still conflicted, it commits and pushes nothing and fails
+with `{:merge_unresolved, paths}`, leaving the tree and `MERGE_HEAD` exactly as the run left them:
+a conflicted tree is not work to push, and the next run — the next turn, for a conversation — can
+finish the merge. Before this the squash died on the reset with a bare git error, the run's work
+unpushed and nothing but a machine-local line to say so (ticket 11).
+
 The rewrite is also visible: the hook prints a note on stderr, and `git http-backend` relays a
 hook's stderr to the *pushing client* over the smart-HTTP sideband — the "remote: " lines a git
 client prints. **It does not become an event.** That relay is embedded in the CGI's own stdout
@@ -520,6 +529,9 @@ in this one module, which is what keeps the credential's handling in one place.
 - **An integrating job also fetches the default branch**, into `refs/remotes/origin/<default>`,
   on every run — a job whose state is some merging state's `on_conflict` target
   (`workflow-grammar-v1.md` § Merging), told so by `default_branch` in its assignment's `git`.
+  **So does a conversation**, which is the other run that merges it: its agent fetches and merges
+  on its own initiative, and until it was told the branch it could not
+  (`conversations.md` § Commits).
   Read-only, and not by any new grant: a job's token already reads the whole project, and its
   write scope is still exactly `refs/heads/ticket/<n>` (§ The per-job token), so `pre-receive`
   refuses a push of the default branch from it as from any job. A test pushes one. The squash at

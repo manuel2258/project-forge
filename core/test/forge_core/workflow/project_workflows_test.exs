@@ -221,4 +221,38 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
              "#{name}: a person's move out of reviewing takes the bare edge"
     end
   end
+
+  # A second review that cannot read its own last report re-derives the whole diff at full price:
+  # ticket 7's second round cost $21.96 doing that, and its fifth, scoped to what had changed,
+  # cost $4.13. Optional by construction — `reviewing` is its own producer, reached on a first
+  # pass from `checking` with nothing written — so this asserts the input is declared, which is
+  # the half a workflow controls, and the parse test above asserts the validator accepts it.
+  test "a reviewing run is handed the report its last round wrote" do
+    for {name, workflow} <- reviewing_workflows() do
+      assert "report.md" in Workflow.state(workflow, "reviewing").inputs,
+             "#{name}: reviewing cannot read what it already found"
+    end
+  end
+
+  # **On a state costing a few dollars the cost ceiling is the one meant to bind.** A turn buys no
+  # inference, and a job its turn ceiling stops throws away every dollar it had already spent —
+  # ticket 7's `planning` died at turn 51 of 50 with $1.11 of its $4.00 unspent, and `publishing`
+  # has no retry at all, so for it the same ceiling sticks a ticket that has already written to
+  # GHCR. 60 is the repository's floor for that, and this asserts the rule rather than each
+  # figure: a state may give more turns, and `reviewing` at 120 and `implementing` at 200 do.
+  test "a job state costing a few dollars is not stopped by its turn ceiling first" do
+    budgets =
+      for path <- workflow_files(),
+          workflow = load!(path),
+          {state, %State{budget: %{cost: cost, turns: turns}} = declared} <- workflow.states,
+          State.job?(declared),
+          cost <= 5.00,
+          do: {Path.basename(path), state, cost, turns}
+
+    assert budgets != [], "no cheap job state found: the filter no longer matches the workflows"
+
+    for {name, state, cost, turns} <- budgets do
+      assert turns >= 60, "#{name}: #{state} costs $#{cost} but gives only #{turns} turns"
+    end
+  end
 end

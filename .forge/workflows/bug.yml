@@ -9,7 +9,8 @@ states:
     env: default
     inputs: [ticket]
     produces: [refinement.md]
-    budget: { turns: 40, cost: 3.00 }
+    # Turns at 60: `dev.yml`'s `refining` carries why, and it is the same state.
+    budget: { turns: 60, cost: 3.00 }
 
   # `implementation.md` is here because `implementing` sends the ticket back on
   # `diagnosis_invalid`, and a re-diagnosis that cannot read why it was sent back re-derives the
@@ -20,7 +21,7 @@ states:
     env: default
     inputs: [ticket, refinement.md, implementation.md]
     produces: [diagnosis.md]
-    budget: { turns: 60, cost: 4.00 }
+    budget: { turns: 80, cost: 4.00 }
 
   implementing:
     prompt: agents/implement-bug.md
@@ -36,9 +37,14 @@ states:
   checking:
     extends: checking
 
+  # `report.md` is this state's own last version, and optional: the way in from `checking` on a
+  # first pass has written no review. It is here so that a second round can verify the fixes to
+  # what it found and read only what changed since, rather than re-deriving the whole diff at
+  # full price — ticket 7's second review spent $21.96 doing exactly that, and its fifth, scoped,
+  # cost $4.13.
   reviewing:
     extends: reviewing
-    inputs: [refinement.md, diagnosis.md, implementation.md, changeset]
+    inputs: [refinement.md, diagnosis.md, implementation.md, report.md, changeset]
 
   presenting:
     extends: presenting

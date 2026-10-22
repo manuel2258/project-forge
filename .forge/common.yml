@@ -83,7 +83,10 @@ states:
     env: default
     produces: [presentation.md!]
     optional: [presentation.md]
-    budget: { turns: 40, cost: 3.00 }
+    # Turns at 60 for the same reason as `dev.yml`'s `refining`, which carries it: on a state
+    # costing a few dollars the cost ceiling is the one meant to bind, because a turn buys no
+    # inference and a job the turn ceiling stops throws away everything it spent.
+    budget: { turns: 60, cost: 3.00 }
 
   merged:
     on_enter: merge

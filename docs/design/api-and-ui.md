@@ -176,9 +176,10 @@ Talk for a conversation.
 Every action is a LiveView event over the socket; the page shows a confirmation flash on
 success and the reason on failure. A lost connection is shown by the framework's reconnect
 banner — which is all it is shown by, so the banner must never be the notice that something was
-also taken: what was typed and not sent survives the rejoin that follows it
-(`design/ui.md` § A reconnect is not a reload). Offline compose and retry queues are out of the
-PoC.
+also taken: on the operator's own surfaces, what was typed and not sent survives the rejoin that
+follows it, and `design/ui.md` § A reconnect is not a reload holds both the mechanism and the
+seven settings and log-in forms where it does not hold yet. Offline compose and retry queues
+are out of the PoC.
 
 ## Documents in the browser
 

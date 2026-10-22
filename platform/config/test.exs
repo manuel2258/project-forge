@@ -8,9 +8,13 @@ config :pbkdf2_elixir, :rounds, 1
 # The MIX_TEST_PARTITION environment variable can be used
 # to provide built-in test partitioning in CI environment.
 # Run `mix help test` for more information.
+# The password is read from the environment so that a server nobody owns can be given one nobody
+# can look up: `bin/check` starts a throwaway postgres with a password made per run, and a
+# committed one would be readable by every job on a shared machine (`CLAUDE.md` § Quality gate).
+# An operator with their own postgres sets nothing and gets the usual development password.
 config :forge, Forge.Repo,
   username: "postgres",
-  password: "postgres",
+  password: System.get_env("FORGE_TEST_DB_PASSWORD", "postgres"),
   hostname: "localhost",
   database: "forge_test#{System.get_env("MIX_TEST_PARTITION")}",
   pool: Ecto.Adapters.SQL.Sandbox,

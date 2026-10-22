@@ -87,6 +87,11 @@ defmodule Forge.Provisioning do
   # What `holds?/2` reads of a template, and so what an edit has to change for `for_demand/2` or
   # `could_ever_hold?/2` to answer differently. The image beside its protocol, because choosing
   # another image is how what is known of it changes (`Template.changeset/2`).
+  #
+  # `image_protocol` is in the list for a template naming a snapshot, which is the only kind the
+  # gate reads it for: `speaks?/2` ignores it for a template on the mark, so a resolution writing
+  # it cannot change what the gate answers and has nothing to bring back
+  # (`docs/design/provisioning.md` § Editing a template).
   @holds [:memory, :cores, :accepts, :image, :image_protocol]
 
   @doc """
@@ -262,10 +267,22 @@ defmodule Forge.Provisioning do
 
   Smallest rather than first-assigned: creating a thirty-two core machine for a job that
   declared one is how a fleet gets expensive without anybody deciding that it should.
+
+  **A template on the mark that does not fit on what it stores comes last, and only when nothing
+  fits.** Its stored protocol is its *last* resolution's, so whether it can serve a job needing a
+  newer one is unknown until a create attempt re-resolves it — and both guesses were wrong. Read
+  as *no*, the mark was never followed past a protocol bump, which is the case it exists for; read
+  as *yes* and taken in order, a template on the mark was handed jobs ahead of a concrete template
+  in the same project that would have served them, because order is by size and the protocol
+  filter was what used to remove it. Preferring what is known keeps the second from happening and
+  the fallback keeps the first from happening; `Forge.Workers` asks the job's protocol again of
+  what it actually resolved (`docs/design/provisioning.md` § Where a machine comes from).
   """
   @spec for_demand(String.t(), map()) :: Template.t() | nil
   def for_demand(project_id, demand) do
-    project_id |> usable() |> Enum.find(&holds?(&1, demand))
+    usable = usable(project_id)
+
+    Enum.find(usable, &holds?(&1, demand)) || Enum.find(usable, &might_hold?(&1, demand))
   end
 
   @doc """
@@ -275,9 +292,17 @@ defmodule Forge.Provisioning do
   right now waits, and a job that could never fit sticks its ticket with the reason. Without
   this the second looks like the first for ever.
   """
+  #
+  # **`or might_hold?/2` is an equivalent mutant at the only caller, and is kept for the next one.**
+  # `Forge.Workers.no_template_for/2` asks this only once `for_demand/2` has returned nil for the
+  # same demand and the same `usable/1` set, which means neither predicate held for any template —
+  # so dropping it changes no answer production can reach, and no test can honestly claim it does.
+  # It is here because the two functions are the same question asked two ways, and a caller that
+  # asks this one first would otherwise get *could never fit* for a template `for_demand/2` would
+  # hand out.
   @spec could_ever_hold?(String.t(), map()) :: boolean()
   def could_ever_hold?(project_id, demand) do
-    project_id |> usable() |> Enum.any?(&holds?(&1, demand))
+    project_id |> usable() |> Enum.any?(&(holds?(&1, demand) or might_hold?(&1, demand)))
   end
 
   # **The gate skips a disabled template; the page does not.** The filter is here and not in
@@ -293,16 +318,39 @@ defmodule Forge.Provisioning do
   # nothing must not mean different things.
   defp holds?(%Template{} = template, demand) do
     accepts?(template, demand.kind) and speaks?(template, demand[:protocol]) and
-      template.memory >= demand.memory and
-      template.cores >= demand.cores
+      sized?(template, demand)
   end
 
+  # Every dimension but the protocol, for a template on the mark: the one dimension whose stored
+  # answer is about a snapshot it may no longer be on, and the one the create attempt re-asks of
+  # what it resolved. `for_demand/2` says why this is a fallback and not the rule.
+  defp might_hold?(%Template{} = template, demand) do
+    Template.latest?(template) and accepts?(template, demand.kind) and sized?(template, demand)
+  end
+
+  defp sized?(%Template{} = template, demand),
+    do: template.memory >= demand.memory and template.cores >= demand.cores
+
+  @doc """
+  Whether what is known of this template's image is new enough for a job needing `protocol`.
+
+  **Asked of the same template at two moments, so one definition.** The gate asks it of what the
+  row stores (`for_demand/2`); `Forge.Workers` asks it again of what a create attempt has just
+  resolved, because for a template on the mark the row's answer was about the snapshot before.
+  Two copies would be two places for *new enough* to disagree, and a template let through one and
+  refused by the other would be a machine billed for nothing or a job stuck for no reason.
+
+  Nil is unlabelled — unknown, not compatible — and is let through to be probed by one machine,
+  whose join says what the snapshot speaks (`docs/design/provisioning.md` § A snapshot that
+  speaks the wrong protocol).
+  """
+  @spec speaks?(Template.t(), non_neg_integer() | nil) :: boolean()
   # A labelled image older than the job needs makes a machine that joins and cannot take it — and
   # then another, every pass, up to `max_workers`. An unlabelled one is asked once: its first
   # machine's join says what it speaks (`Workers` holds the rest back while that one probes).
-  defp speaks?(_template, need) when need in [nil, 0], do: true
-  defp speaks?(%Template{image_protocol: nil}, _need), do: true
-  defp speaks?(%Template{image_protocol: protocol}, need), do: protocol >= need
+  def speaks?(_template, need) when need in [nil, 0], do: true
+  def speaks?(%Template{image_protocol: nil}, _need), do: true
+  def speaks?(%Template{image_protocol: protocol}, need), do: protocol >= need
 
   defp accepts?(%Template{accepts: nil}, _kind), do: true
   defp accepts?(%Template{accepts: []}, _kind), do: true
@@ -382,14 +430,20 @@ defmodule Forge.Provisioning do
     back == 1
   end
 
-  # The template, while it still names the image a machine was made from. Null matches null: a
-  # template naming no image boots the driver's default, and a machine made from it was made from
-  # that.
+  # The template, while it still resolves to the image a machine was made from. Null matches
+  # null: a template naming no image boots the driver's default, and a machine made from it was
+  # made from that.
+  #
+  # **`resolved_image` and not `image`**, because a template naming `latest` never holds a
+  # concrete id in `image` while `workers.image` always does — so the comparison could never hold
+  # for one, and both this and `learn_protocol/4` would have gone silently dead for it: a counter
+  # that never resets and a protocol never learnt
+  # (`docs/design/provisioning.md` § Where a machine comes from).
   defp naming(template_id, nil),
-    do: from(t in Template, where: t.id == ^template_id and is_nil(t.image))
+    do: from(t in Template, where: t.id == ^template_id and is_nil(t.resolved_image))
 
   defp naming(template_id, image),
-    do: from(t in Template, where: t.id == ^template_id and t.image == ^image)
+    do: from(t in Template, where: t.id == ^template_id and t.resolved_image == ^image)
 
   @doc """
   Records that the image a machine was made from speaks `protocol`, learnt from the machine being
@@ -414,6 +468,111 @@ defmodule Forge.Provisioning do
 
     :ok
   end
+
+  @doc """
+  The snapshot a template naming `latest` would be made from, out of a driver's listing, or nil
+  when none carries the mark.
+
+  **The newest of them when more than one does.** `bin/hetzner-image` marks the snapshot it built
+  before it unmarks the one before — that order, so a build interrupted between the two leaves two
+  marked rather than none, which would fail every create until somebody reran it — and the window
+  is seconds. Either is a real worker image, but the newest is the one the operator just asked
+  for. A listing with no `created` on its entries falls back to the driver's own order.
+  """
+  @spec current_image([Forge.Provider.image()]) :: Forge.Provider.image() | nil
+  def current_image(images) do
+    case Enum.filter(images, & &1[:current]) do
+      [] -> nil
+      marked -> Enum.max_by(marked, &(&1[:created] || ""))
+    end
+  end
+
+  @doc """
+  Points a template naming `latest` at `current`, the snapshot that carries the mark now.
+
+  Called once per create attempt, before anything is asked of the driver, so that what reaches it
+  and what is written onto the machine's row is the concrete snapshot and never the word
+  (`docs/design/provisioning.md` § Where a machine comes from). Unlike `learn_protocol/4` there is
+  no "only if the template still names that image" guard: the listing is authoritative about what
+  `latest` means, and this *is* the template changing what it names.
+
+  **What is known of the snapshot it lands on is `Template.learnt/4`'s to say**, which a save asks
+  too: staying on the same snapshot keeps what was learnt about it, and moving to a different one
+  takes that one's labels, nothing included.
+
+  Returns the template as it now stands. Nothing is written when the three fields already say
+  this, which is the common case: the mark moves when an image is built, not between two
+  scheduling passes.
+  """
+  @spec resolve_latest(Template.t(), Forge.Provider.image()) :: Template.t()
+  def resolve_latest(%Template{} = template, %{id: id} = current) do
+    {build, protocol} =
+      Template.learnt(
+        template.resolved_image,
+        id,
+        {current[:build], current[:protocol]},
+        {template.image_build, template.image_protocol}
+      )
+
+    resolved = %{resolved_image: id, image_build: build, image_protocol: protocol}
+    asked = %{resolved_at: DateTime.utc_now(:second)}
+
+    # **`resolved_at` is written on every resolution, the other three only when they changed.**
+    # The timestamp is a record of a request that was made, which is what `asked_recently?/1`
+    # rate-limits on, so it has to move even when the answer is the same; `updated_at` moves only
+    # with the answer, so *nothing was written about this template* stays a thing a reader can
+    # tell. The common case is still one small write and no change to what anything reads.
+    if Map.take(template, Map.keys(resolved)) == resolved do
+      write(template, asked)
+    else
+      write(template, Map.merge(resolved, asked), updated_at: DateTime.utc_now(:second))
+    end
+  end
+
+  defp write(template, fields, also \\ []) do
+    {_count, _} =
+      Repo.update_all(
+        from(t in Template, where: t.id == ^template.id),
+        set: Map.to_list(fields) ++ also
+      )
+
+    struct!(template, fields)
+  end
+
+  @doc """
+  Whether this template's mark was resolved too recently to ask the provider again.
+
+  **What bounds the cost of a job nothing marked is new enough for.** Such a job waits rather than
+  sticking its ticket (`Forge.Jobs.Scheduler`), so it is offered again every pass — and resolving
+  on each one sent one listing request per pass per waiting job, 1800 an hour at the default two
+  seconds against an account whose published limit is 3600. The 429 would come back through the
+  template's own failure counter and disable it: the loop the probe was moved ahead of the
+  catalogue call to avoid, reached by the one refusal that cannot be asked before resolving.
+
+  **Only asked where the answer can only be a refusal.** `Forge.Workers` rate-limits a resolution
+  whose stored answer already cannot serve the demand; one that is going to make a machine is
+  never rate-limited, because what a machine is made from has to be current
+  (`docs/design/provisioning.md` § Where a machine comes from).
+
+  Null is *never asked* — every template naming a snapshot, and every row that predates the
+  column — and is never recent.
+  """
+  @spec asked_recently?(Template.t()) :: boolean()
+  def asked_recently?(%Template{resolved_at: nil}), do: false
+
+  def asked_recently?(%Template{resolved_at: at}) do
+    DateTime.diff(DateTime.utc_now(), at, :millisecond) < resolve_after_ms()
+  end
+
+  @doc """
+  How long a template on the mark holds its last answer before asking the provider again, when
+  asking could only repeat a refusal. A minute: short enough that a build is picked up while the
+  operator is still looking at the page, long enough that a waiting job costs one request a minute
+  rather than one every pass.
+  """
+  @spec resolve_after_ms() :: pos_integer()
+  def resolve_after_ms,
+    do: :forge |> Application.get_env(__MODULE__, []) |> Keyword.get(:resolve_after_ms, 60_000)
 
   @doc """
   Why no machine may be made from this template's image, or nil when one may: its known protocol

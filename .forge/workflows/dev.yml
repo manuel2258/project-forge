@@ -74,10 +74,13 @@ transitions:
   - { from: planning,     to: planning,     when: did_not_converge,  max: 1 }
   - { from: implementing, to: implementing, when: budget_exhausted,  max: 1 }
   - { from: implementing, to: implementing, when: did_not_converge,  max: 1 }
-  - { from: reviewing,    to: reviewing,    when: budget_exhausted,  max: 1 }
+  - { from: reviewing,    to: presenting,   when: budget_exhausted }
   - { from: reviewing,    to: reviewing,    when: did_not_converge,  max: 1 }
   - { from: presenting,   to: presenting,   when: budget_exhausted,  max: 1 }
   - { from: presenting,   to: presenting,   when: did_not_converge,  max: 1 }
 
 limits:
-  ticket_cost: 120.00
+  # $210 and not $120 because `reviewing` costs $35: the cap is what the review loop has to fit
+  # inside, and `.forge/common.yml` derives the figure beside the budget it follows from.
+  # `project_workflows_test.exs` computes it from this file rather than trusting the comment.
+  ticket_cost: 210.00

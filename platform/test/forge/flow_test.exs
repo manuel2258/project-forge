@@ -302,6 +302,32 @@ defmodule Forge.FlowTest do
     assert "job.orphaned" in event_types(ticket)
   end
 
+  # The guard that was a page's `:if` and nothing else. While a decision is pending on one
+  # transition, no other may be taken — and the only thing stopping a person was the ticket
+  # page hiding its chooser, which a conversation writing `transition.json` does not go through
+  # (`docs/design/conversations.md` § Taking a transition).
+  test "a transition is refused while a decision on another is pending", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
+    {:ok, _job} = run(only_pending(ticket), worker, "success", "refinement.md")
+
+    ticket = Tickets.get!(ticket.id)
+    assert ticket.pending_transition["to"] == "planning"
+
+    # `planning` is where the pending decision goes, and it is refused for the same reason any
+    # other target is: the decision comes first, whichever edge is asked for.
+    assert Engine.choose(ticket, user.id, "planning") == {:error, :pending_approval}
+    assert Tickets.get!(ticket.id).state == "refining"
+    assert Tickets.get!(ticket.id).pending_transition["to"] == "planning"
+
+    # Decided, the ticket moves and the next choice is reachable again.
+    {:ok, ticket} = Engine.decide(ticket, user.id, :approved, nil)
+    assert ticket.state == "planning"
+  end
+
   test "a resume that never reaches the harness is re-queued as a fresh run", %{
     project: project,
     user: user,
@@ -466,6 +492,84 @@ defmodule Forge.FlowTest do
   end
 
   # The distinction `docs/design/provisioning.md` § The gate insists on, end to end. A job no
+  # **A snapshot older than the job needs is *cannot yet*, not *could never*, and sticking it was
+  # the one thing that stopped the mark being followed.** A placement stick comes back only on an
+  # arrival inside the platform, and a new snapshot taking the mark is none of them: stuck, the job
+  # leaves `Jobs.pending/2`, nothing re-resolves, and the operator builds the image the sentence
+  # asks for while the ticket sits stuck until somebody edits the template — the edit the mark
+  # exists to remove (`docs/design/provisioning.md` § Where a machine comes from).
+  test "a job the mark is too old for waits, and the next build is followed with no edit", %{
+    project: project,
+    user: user,
+    worker: worker
+  } do
+    Registry.unregister(Forge.Workers.Registry, worker.id)
+    :ok = Forge.Workers.destroy(worker)
+
+    current = ForgeCore.WorkerProtocol.current()
+    Forge.Provider.Fake.watch()
+    on_exit(&Forge.Provider.Fake.allow/0)
+
+    marking = fn id, protocol ->
+      Forge.Provider.Fake.listing([%{id: id, name: id, protocol: protocol, current: true}])
+    end
+
+    marking.("snap-old", current - 1)
+
+    {:ok, template} =
+      Forge.Provisioning.create_template(user, %{
+        name: "following",
+        provider: "fake",
+        memory: 64 * 1024 * 1024 * 1024,
+        cores: 4,
+        max_workers: 1,
+        image: "latest"
+      })
+
+    {:ok, _} = Forge.Provisioning.assign(user, template.id, project.id)
+
+    {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+    start_supervised!(Forge.Jobs.Scheduler)
+    job = only_job(ticket)
+
+    # A job holding a secret needs a protocol above the minimum (`Jobs.protocol/1`).
+    {:ok, _} =
+      Jobs.get!(job.id)
+      |> Ecto.Changeset.change(%{secret_names: ["TOKEN"]})
+      |> Forge.Repo.update()
+
+    {:ok, _} = Forge.Secrets.set(project, user, "TOKEN", "value-long-enough")
+
+    # **Marked one behind what this job needs, read off the job rather than off `current()`.**
+    # The two were the same number when this was written and stopped being so at the next bump,
+    # which turned "the mark is too old" into "the mark is a protocol the job is happy with" and
+    # failed here. What the test is about is the gap, so the gap is what it sets up.
+    needs = Jobs.protocol(Jobs.get!(job.id))
+    marking.("snap-old", needs - 1)
+
+    assert Forge.Jobs.Scheduler.tick() == 0
+
+    # **The ticket is active and the job still pending**, which is what lets the next pass try.
+    assert Tickets.get!(ticket.id).status == :active
+    refute "ticket.stuck" in event_types(ticket)
+    assert Jobs.get!(job.id).status == :pending
+
+    assert %{payload: %{"reason" => "image_too_old", "text" => text}} =
+             Jobs.current_wait(Jobs.get!(job.id))
+
+    assert text =~ "needs worker protocol #{needs}"
+    assert text =~ "nothing needs editing"
+
+    # The operator builds an image. It takes the mark; nobody touches the template.
+    marking.("snap-new", current)
+    Application.put_env(:forge, Forge.Provisioning, resolve_after_ms: 0)
+    on_exit(fn -> Application.delete_env(:forge, Forge.Provisioning) end)
+
+    assert Forge.Jobs.Scheduler.tick() == 0
+    assert_receive {:provider_create, %{image: "snap-new"}}
+    assert Forge.Repo.get!(Forge.Provisioning.Template, template.id).resolved_image == "snap-new"
+  end
+
   # assigned template could *ever* hold is not a queue — it is a ticket that sticks with the
   # reason, through the mechanism an exhausted allowance already uses. Queued instead, it would
   # wait for ever against capacity that will never exist, and look healthy while doing it.

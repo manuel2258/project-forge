@@ -41,9 +41,21 @@ defmodule ForgeWeb.Operator.Actions do
         {:handled, socket |> Drafts.forget(params["draft"]) |> put_flash(:info, message)}
 
       {:error, reason} ->
-        {:handled, put_flash(socket, :error, "Failed: #{describe(reason)}")}
+        {:handled,
+         socket |> refused(params, reason) |> put_flash(:error, "Failed: #{describe(reason)}")}
     end
   end
+
+  # A refusal leaves what was typed, and a stale document's base moves to the version that
+  # overtook it — so the Save that was refused once goes through when it is made again. Without
+  # that the base stayed the overtaken version and every later Save was refused in the same
+  # words: the text safe in the box, and no gesture that would send it. The refusal is the
+  # warning; repeating the gesture is the decision to write over what arrived
+  # (`docs/design/ui.md` § A reconnect is not a reload).
+  defp refused(socket, params, {:stale_document, _name, version}),
+    do: Drafts.put(socket, params["draft"], "base", to_string(version))
+
+  defp refused(socket, _params, _reason), do: socket
 
   defp act("decide", %{"ticket" => id, "decision" => decision} = params, socket) do
     decision = if decision == "rejected", do: :rejected, else: :approved
@@ -94,8 +106,12 @@ defmodule ForgeWeb.Operator.Actions do
 
   # A document a human state declares, written from the ticket's Decide tab. The same write the
   # API's `POST …/artifacts/:name` makes (`docs/design/workflow-grammar-v1.md` § Semantics).
-  defp act("write_document", %{"ticket" => id, "name" => name, "content" => content}, socket) do
-    with {:ok, ticket} <- Operator.edit(ticket(id), user(socket), name, content) do
+  # `base` is the version the draft in the box was typed against, which the form carries in a
+  # hidden field and the draft therefore holds from the moment anything is typed. Without it a
+  # draft typed against v3 would land as v5 over somebody else's v4, silently
+  # (`docs/design/ui.md` § A reconnect is not a reload).
+  defp act("write_document", %{"ticket" => id, "name" => name, "content" => content} = p, socket) do
+    with {:ok, ticket} <- Operator.edit(ticket(id), user(socket), name, content, p["base"]) do
       {:ok, "Saved #{name}; #{ticket.state} is where it waits"}
     end
   end
@@ -125,6 +141,12 @@ defmodule ForgeWeb.Operator.Actions do
   defp describe({:job_live, state}), do: "a job for #{state} is still live"
   defp describe({:invalid_document, errors}), do: ForgeCore.Error.format(errors)
   defp describe(:nothing_pending), do: "nothing awaits approval"
+
+  defp describe({:stale_document, name, version}),
+    do:
+      "#{name} is at v#{version} now, written since this page was drawn; nothing was saved. " <>
+        "What you typed is still in the box — save again to write it over v#{version}"
+
   defp describe(:no_such_transition), do: "no such transition"
   defp describe({:no_version, name}), do: "#{name} has no version to approve"
   defp describe({:no_job_in, state}), do: "no job runs in #{state}"
@@ -139,6 +161,14 @@ defmodule ForgeWeb.Operator.Actions do
 
   defp describe({:merge_conflict, paths}),
     do: "it conflicts with the default branch in #{Enum.join(paths, ", ")}"
+
+  # Its sibling, which fell to the catch-all and so told a person to read the server log for a
+  # refusal that has a reason to hand.
+  defp describe({:merge_impossible, reason}) when is_binary(reason),
+    do: "the merge could not be attempted: #{reason}"
+
+  defp describe({:merge_impossible, reason}),
+    do: "the merge could not be attempted: #{inspect(reason)}"
 
   defp describe({:no_state, state}),
     do: "the default branch's workflow has no state #{state}; move the ticket first"

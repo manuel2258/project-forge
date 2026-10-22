@@ -1075,7 +1075,8 @@ defmodule Forge.Jobs do
       preamble_hash: ForgeCore.Prompt.chat_preamble_hash(),
       model: model_for(job),
       produces: [],
-      outcomes: []
+      outcomes: [],
+      moving: moving(ticket)
     }
 
     :ok = Spec.validate(spec)
@@ -1115,6 +1116,77 @@ defmodule Forge.Jobs do
         %{spec | inputs: spec.inputs ++ [answers]}
     end
   end
+
+  # What a ticket conversation may ask the engine for (`docs/design/conversations.md` § Taking a
+  # transition): the same edges a person is offered, each with the `approve` list its choice would
+  # record.
+  #
+  # **`parsed_workflow/1`, never `workflow/1`.** A pinning validated at admission can stop parsing
+  # later as the validator's rules move on, and `workflow/1` raises on one that has. This runs for
+  # every ticket chat assignment, inside `assign/2` after `mark_started` has set the row running,
+  # so a raise here fails the job — on precisely the broken ticket a conversation is the way to
+  # rescue. Nothing is offered instead, and the manifest says why.
+  defp moving(nil), do: nil
+
+  defp moving(%Ticket{} = ticket) do
+    # Parsed once. Both halves of this asked separately before, which was two parses of the same
+    # map per chat assignment for one answer.
+    parsed = Tickets.parsed_workflow(ticket)
+
+    %{
+      "transitions" => chat_transitions(ticket, parsed),
+      "pending" => ticket.pending_transition,
+      "job_live" => live?(ticket.id, ticket.state),
+      "workflow_broken" => match?({:error, _}, parsed)
+    }
+  end
+
+  # `Engine.offered_edges/2` and no second walk of the workflow: the edges it returns are the
+  # ones that survived the unversioned-artifact filter, so a target reached by two edges carries
+  # only the surviving ones' `approve` names. Grouping on the target names it once, as the page
+  # names it once; asking for it is then refused as `{:ambiguous, outcomes}`, which is what a
+  # person's by-hand choice of the same target already gets.
+  defp chat_transitions(%Ticket{} = ticket, {:ok, workflow}) do
+    # **The ambiguity count is over every declared edge, not over the offered ones.**
+    # `ForgeCore.Engine.choose/4` counts its candidates straight off `transitions_from/2` with no
+    # unversioned-artifact filter, so counting the filtered set here would be a guard using a
+    # different model from the operation it guards (CLAUDE.md § Rules): a target reached by two
+    # edges with one of them filtered out would be marked askable and refused `{:ambiguous, _}`
+    # every time — the exact thing the marker exists to stop. No shipped workflow can reach it
+    # today (`dev.yml`, `bug.yml` and `release.yml` have nine two-edge targets between them and
+    # none carries an `approve`), which is why it is a rule broken rather than a bug seen.
+    reaching =
+      workflow
+      |> ForgeCore.Workflow.transitions_from(ticket.state)
+      |> Enum.frequencies_by(& &1.to)
+
+    ticket
+    |> Engine.offered_edges(workflow)
+    # One entry per offered edge, grouped by target.
+    |> Enum.group_by(& &1.to, & &1.approve)
+    |> Enum.map(fn {to, edge_approvals} ->
+      %{
+        "to" => to,
+        "approve" => edge_approvals |> List.flatten() |> Enum.uniq(),
+        # **Two edges to one target are marked as not askable.** The request carries a target
+        # and no outcome, and this repository's own `dev.yml` reaches `implementing` twice out of
+        # `implementing`, on `budget_exhausted` and `did_not_converge`, where `Engine.choose/4`
+        # answers `{:ambiguous, outcomes}`. Said here rather than left for the agent to discover
+        # by being refused: the ticket page and `mix forge.transition` pass no outcome either, so
+        # the only caller that can take one of these is the HTTP API.
+        #
+        # **Where one of the two is the bare edge the engine now takes it** (`default_among/1`,
+        # ticket 13), so this over-marks that case rather than being wrong about it — an agent is
+        # never told it may ask for a target that is then refused, only the other way round. No
+        # shipped workflow has such a pair today. Whether the marker should narrow to match is a
+        # person's call, not a merge's: `proposal-ambiguous-marker.md`.
+        "ambiguous" => Map.fetch!(reaching, to) > 1
+      }
+    end)
+    |> Enum.sort_by(& &1["to"])
+  end
+
+  defp chat_transitions(%Ticket{}, {:error, _errors}), do: []
 
   # An integrating job's checkout fetches the default branch too; every other job's does not
   # (`docs/design/git-hosting.md` § The job's own git).

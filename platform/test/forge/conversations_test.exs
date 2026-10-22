@@ -1408,6 +1408,180 @@ defmodule Forge.ConversationsTest do
       assert spec["inputs"] |> Enum.map(& &1["name"]) |> Enum.sort() == ["notes.md", "ticket"]
     end
 
+    # `docs/design/conversations.md` § Taking a transition: what the chat is told it may ask for
+    # is the same set a person is offered, with each edge's `approve` list attached, and whether
+    # a job of the state was live when the process started.
+    test "a ticket chat's spec carries the transitions, the pending decision and the live job",
+         %{project: project} do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+      {:ok, chat} = Conversations.open(project, "about this", ticket: ticket)
+
+      # `refining` declares one edge, to `planning`, approving `refinement.md` — which has no
+      # version yet, so a person is offered nothing and neither is the chat.
+      spec = Jobs.assignment(chat, ticket, project, "token")["spec"]
+      assert spec["moving"]["transitions"] == []
+      assert spec["moving"]["pending"] == nil
+      # The admission's own job is pending for `refining`, which is a live job.
+      assert spec["moving"]["job_live"] == true
+
+      {:ok, _version} =
+        Forge.Artifacts.record_version(ticket.id, "refinement.md", :document, :system, %{
+          content: "---\noutcome: done\n---\n# R\n"
+        })
+
+      spec = Jobs.assignment(chat, Tickets.get!(ticket.id), project, "token")["spec"]
+
+      assert spec["moving"]["transitions"] == [
+               %{"to" => "planning", "approve" => ["refinement.md"], "ambiguous" => false}
+             ]
+
+      # And `job_live` is the state's own answer rather than a constant: with the admission's
+      # job put to rest, a conversation starting now is told nothing is in its way.
+      finish_jobs(Tickets.get!(ticket.id))
+      spec = Jobs.assignment(chat, Tickets.get!(ticket.id), project, "token")["spec"]
+      assert spec["moving"]["job_live"] == false
+    end
+
+    # **Two edges, one target, only one offerable.** The filter is per edge, so a manifest built
+    # by intersecting on the *target* carries the dead edge's `approve` list too — telling the
+    # agent a transition approves a document that has no version, which taking it is refused
+    # for. `Engine.offered_edges/2` is the one walk both halves read
+    # (`docs/design/conversations.md` § Taking a transition).
+    test "a target reached by two edges carries only the offerable edge's approvals", %{
+      project: project
+    } do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+
+      # A second way from `refining` to `planning`, approving a document nothing has written.
+      ticket = second_edge!(ticket, "notes.md")
+
+      {:ok, version} =
+        Forge.Artifacts.record_version(ticket.id, "refinement.md", :document, :system, %{
+          content: "---\noutcome: done\n---\n# R\n"
+        })
+
+      assert version
+      {:ok, chat} = Conversations.open(project, "about this", ticket: ticket)
+      finish_jobs(ticket)
+
+      spec = Jobs.assignment(chat, Tickets.get!(ticket.id), project, "token")["spec"]
+
+      # `approve` carries only the surviving edge's names — and `ambiguous` is true, because the
+      # dead edge still *exists*: the engine counts every declared edge to the target, so this
+      # said `false` until round 4 found that the marker and the engine disagreed.
+      assert spec["moving"]["transitions"] == [
+               %{"to" => "planning", "approve" => ["refinement.md"], "ambiguous" => true}
+             ]
+
+      # The page is offered the same target, which is what makes the two agree.
+      assert Forge.Engine.offered_transitions(
+               Tickets.get!(ticket.id),
+               Tickets.workflow(Tickets.get!(ticket.id))
+             ) == ["planning"]
+    end
+
+    # The pinning stopped parsing. `moving/1` runs for every ticket chat assignment, inside
+    # `assign/2` after the row is already `:running`, so `Tickets.workflow/1` — which raises —
+    # would fail the job on exactly the broken ticket a conversation is the way to rescue.
+    test "a ticket whose workflow no longer parses still gets a spec, with nothing offered", %{
+      project: project
+    } do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+      {:ok, chat} = Conversations.open(project, "about this", ticket: ticket)
+      ticket = ticket |> Ecto.Changeset.change(%{workflow: %{}}) |> Repo.update!()
+
+      spec = Jobs.assignment(chat, ticket, project, "token")["spec"]
+
+      assert spec["moving"]["transitions"] == []
+      assert spec["moving"]["workflow_broken"] == true
+    end
+
+    # **A chat's project and its ticket's must be the same one.** Nothing crossed them before, so
+    # this was tidy rather than load-bearing; a transition request guards membership of the
+    # *ticket's* project while `send_chat/4` guards the *chat's*, so a mismatched pair would let
+    # a member of one project move another's ticket.
+    test "a conversation cannot be opened on another project's ticket", %{project: project} do
+      theirs = ticket_fixture(%{project: project_fixture()})
+
+      assert Conversations.open(project, "move it", ticket: theirs) ==
+               {:error, :ticket_not_in_project}
+
+      # Its own project's ticket is unaffected, so the guard is the pairing and not the ticket.
+      {:ok, ours} = Tickets.admit(project, %{title: "Ours"}, :system)
+      assert {:ok, _chat} = Conversations.open(project, "move it", ticket: ours)
+    end
+
+    # **Finding 2.** Two edges to one target cannot be asked for: the request names a target and
+    # no outcome, so `choose/4` answers `{:ambiguous, _}` every time. This repository's own
+    # `dev.yml` reaches `implementing` twice out of `implementing`, so the manifest would
+    # otherwise advertise a state that can never be taken.
+    test "a target two edges reach is marked as one that cannot be asked for", %{
+      project: project
+    } do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+      ticket = second_edge!(ticket, "refinement.md")
+
+      {:ok, _version} =
+        Forge.Artifacts.record_version(ticket.id, "refinement.md", :document, :system, %{
+          content: "---\noutcome: done\n---\n# R\n"
+        })
+
+      {:ok, chat} = Conversations.open(project, "about this", ticket: ticket)
+      finish_jobs(ticket)
+
+      spec = Jobs.assignment(chat, Tickets.get!(ticket.id), project, "token")["spec"]
+
+      assert [%{"to" => "planning", "ambiguous" => true}] = spec["moving"]["transitions"]
+    end
+
+    # **Finding 1 of round 4.** `ForgeCore.Engine.choose/4` counts its candidates straight off
+    # `transitions_from/2`, with no unversioned-artifact filter, so marking a target askable
+    # because only one edge survived the filter would be a guard using a different model from the
+    # operation it guards. The count is still over every declared edge for that reason; what
+    # ticket 13 changed underneath it is which of those counts the engine then refuses, which the
+    # last assertion records.
+    test "a target stays unaskable when one of its two edges was filtered out", %{
+      project: project
+    } do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+
+      # Two edges to `planning`: the original approving `refinement.md`, and a second approving
+      # `notes.md`, which nothing ever writes — so `offered_edges/2` returns only the first.
+      ticket = second_edge!(ticket, "notes.md")
+
+      {:ok, _version} =
+        Forge.Artifacts.record_version(ticket.id, "refinement.md", :document, :system, %{
+          content: "---\noutcome: done\n---\n# R\n"
+        })
+
+      {:ok, chat} = Conversations.open(project, "about this", ticket: ticket)
+      finish_jobs(ticket)
+      ticket = Tickets.get!(ticket.id)
+
+      spec = Jobs.assignment(chat, ticket, project, "token")["spec"]
+
+      assert [%{"to" => "planning", "ambiguous" => true}] = spec["moving"]["transitions"]
+
+      # **And the engine no longer refuses it, so the marker over-marks.** `Engine.choose/4` grew
+      # `default_among/1` in ticket 13 — landed before this test and never run against it — which
+      # takes the bare edge when one of several leads to the target. The marker above counts
+      # declared edges, so it still says unaskable. That is the safe direction (an agent is never
+      # told it may ask for something that would then be refused) but it is not what this test was
+      # written for, and the two cannot both be right. Asserted as it behaves, so that settling it
+      # either way fails here; `proposal-ambiguous-marker.md` is the question.
+      assert {:ok, %ForgeCore.Workflow.Transition{when: nil}} =
+               ForgeCore.Engine.choose(Tickets.workflow(ticket), ticket.state, "planning")
+    end
+
+    test "a project chat's spec carries no transitions and no decision", %{project: project} do
+      {:ok, chat} = Conversations.open(project, "about the repository")
+
+      spec = Jobs.assignment(chat, nil, project, "token")["spec"]
+
+      # Nil, not an empty map: a project chat has no ticket, and `if spec.moving` must be false.
+      assert spec["moving"] == nil
+    end
+
     # No `chat.turn` closed it: the machine went while the agent was still speaking. A reply
     # that stops mid-sentence would otherwise read as a finished one that trailed off.
     test "a reply the process never finished is replayed as cut off", %{chat: chat} do
@@ -1868,6 +2042,596 @@ defmodule Forge.ConversationsTest do
       assert {:ok, ^head} = Git.resolve(repo, "refs/heads/chat/" <> chat.id)
       assert [%{payload: %{"branch" => "kept"}}] = branch_events(chat, "chat.reopened")
     end
+  end
+
+  # `docs/design/conversations.md` § Taking a transition. The acceptance criteria of ticket 6 are
+  # here: the same two operations a person reaches by hand, attributed to whoever opened the
+  # conversation, refused for exactly the reasons a person's click is refused.
+  describe "a transition a turn asked for" do
+    setup %{project: project} do
+      opener = member_fixture(project)
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, opener.id})
+
+      # The admission's own job is put to rest: a live job of the ticket's state refuses every
+      # transition, which is a test of its own below rather than the background of all of them.
+      finish_jobs(ticket)
+
+      {:ok, chat} =
+        Conversations.open(project, "the plan went wrong",
+          ticket: ticket,
+          actor: {:user, opener.id}
+        )
+
+      %{ticket: Tickets.get!(ticket.id), chat: chat, opener: opener}
+    end
+
+    # AC1 and AC4. The transition moves the ticket and records exactly what a person's by-hand
+    # choice records — and it is attributed to the *opener*, with someone else's message the
+    # thing that triggered the turn. Switch the attribution to "whoever is typing" and this is
+    # the test that notices.
+    test "it moves the ticket, attributed to whoever opened the conversation", %{
+      project: project,
+      ticket: ticket,
+      chat: chat,
+      opener: opener
+    } do
+      refinement!(ticket, opener)
+      someone_else = member_fixture(project)
+      {:ok, _sent} = Forge.Operator.send_chat(chat, someone_else, "put it back on planning")
+
+      {:ok, _chat} = Conversations.record_turn(chat, turn_asking(1, %{"to" => "planning"}))
+
+      assert Tickets.get!(ticket.id).state == "planning"
+
+      assert %{actor: %{"kind" => "user", "id" => actor_id}, payload: %{"to" => "planning"}} =
+               Events.latest_for_ticket(ticket.id, "transition.taken")
+
+      assert actor_id == opener.id
+      refute actor_id == someone_else.id
+
+      # The approval the choice records, against the latest version, as a person's does — and
+      # no second chat-flavoured event beside it.
+      assert [%{decision: :approved, comment: "as asked"}] =
+               Forge.Artifacts.approvals(Forge.Artifacts.latest(ticket.id, "refinement.md").id)
+
+      assert refusals(chat) == []
+    end
+
+    # AC2. The same request against a transition whose `approve` list names a document with no
+    # version: refused for the reason a person's choice is refused, and the artifact is named.
+    test "a transition approving a document with no version is refused", %{
+      ticket: ticket,
+      chat: chat
+    } do
+      assert Forge.Artifacts.latest(ticket.id, "refinement.md") == nil
+
+      {:ok, _chat} = Conversations.record_turn(chat, turn_asking(1, %{"to" => "planning"}))
+
+      assert Tickets.get!(ticket.id).state == "refining"
+      assert [reason] = refusals(chat)
+      assert reason =~ "refinement.md"
+      assert reason =~ "no version"
+    end
+
+    # AC3, approving. The pending decision is the ticket's, whoever asked for it; deciding it
+    # takes the transition and records the approval against the latest version at that moment.
+    test "it decides a pending transition, and approving takes it", %{
+      ticket: ticket,
+      chat: chat,
+      opener: opener
+    } do
+      version = refinement!(ticket, opener)
+      pending!(ticket)
+
+      {:ok, _chat} = Conversations.record_turn(chat, turn_asking(1, %{"decision" => "approved"}))
+
+      ticket = Tickets.get!(ticket.id)
+      assert ticket.state == "planning"
+      assert ticket.pending_transition == nil
+      assert [%{decision: :approved}] = Forge.Artifacts.approvals(version.id)
+      assert refusals(chat) == []
+    end
+
+    # AC3, rejecting: the ticket stays where it is and the decision is cleared, which is what a
+    # person's rejection already does.
+    test "rejecting leaves the ticket where it is and clears the decision", %{
+      ticket: ticket,
+      chat: chat,
+      opener: opener
+    } do
+      version = refinement!(ticket, opener)
+      pending!(ticket)
+
+      {:ok, _chat} = Conversations.record_turn(chat, turn_asking(1, %{"decision" => "rejected"}))
+
+      ticket = Tickets.get!(ticket.id)
+      assert ticket.state == "refining"
+      assert ticket.pending_transition == nil
+      assert [%{decision: :rejected}] = Forge.Artifacts.approvals(version.id)
+      assert Events.latest_for_ticket(ticket.id, "transition.taken") == nil
+    end
+
+    # AC5. The chat does not stop a job, and it does not get past one either: cancelling the
+    # ticket and restoring it is what a person already has, and it is theirs to do.
+    test "it is refused while a job of the ticket's state is live", %{
+      ticket: ticket,
+      chat: chat,
+      opener: opener
+    } do
+      refinement!(ticket, opener)
+      # A second attempt of the state, running: the setup finished the first.
+      job = job_fixture(%{ticket: ticket, status: :running, attempt: 2})
+
+      {:ok, _chat} = Conversations.record_turn(chat, turn_asking(1, %{"to" => "planning"}))
+
+      assert Tickets.get!(ticket.id).state == "refining"
+      assert Jobs.get!(job.id).status == :running
+      assert [reason] = refusals(chat)
+      assert reason =~ "refining"
+      assert reason =~ "cancelled and restored"
+    end
+
+    # While a decision is pending, no other transition may be taken — the guard this ticket
+    # moved from the ticket page's `:if` to `Engine.choose/4` itself.
+    test "a transition is refused while a decision is pending", %{
+      ticket: ticket,
+      chat: chat,
+      opener: opener
+    } do
+      refinement!(ticket, opener)
+      pending!(ticket)
+
+      {:ok, _chat} = Conversations.record_turn(chat, turn_asking(1, %{"to" => "planning"}))
+
+      assert Tickets.get!(ticket.id).state == "refining"
+      assert Tickets.get!(ticket.id).pending_transition["to"] == "planning"
+      assert [reason] = refusals(chat)
+      assert reason =~ "already pending"
+    end
+
+    # Well-formed and still wrong: the agent names a state the workflow does not go to from
+    # here. Refused by the engine's own grammar, not by anything copied into the chat.
+    test "a transition the workflow does not declare is refused", %{
+      ticket: ticket,
+      chat: chat,
+      opener: opener
+    } do
+      refinement!(ticket, opener)
+
+      {:ok, _chat} = Conversations.record_turn(chat, turn_asking(1, %{"to" => "shipping"}))
+
+      assert Tickets.get!(ticket.id).state == "refining"
+      assert [reason] = refusals(chat)
+      assert reason =~ "no such transition"
+    end
+
+    test "a decision with nothing pending is refused", %{ticket: ticket, chat: chat} do
+      {:ok, _chat} = Conversations.record_turn(chat, turn_asking(1, %{"decision" => "approved"}))
+
+      assert Tickets.get!(ticket.id).state == "refining"
+      assert [reason] = refusals(chat)
+      assert reason =~ "waiting for a decision"
+    end
+
+    # A project chat has no ticket, which is the refinement's own out-of-scope list made
+    # concrete: refused here, before the engine is asked anything at all. Opened by a person,
+    # so that this guard is the only thing in the way — with no opener the request would be
+    # refused for *that* instead, and the test would pass with the ticket check gone.
+    test "a project chat's request is refused and reaches no ticket", %{
+      project: project,
+      opener: opener
+    } do
+      {:ok, chat} =
+        Conversations.open(project, "about the repository", actor: {:user, opener.id})
+
+      {:ok, _chat} = Conversations.record_turn(chat, turn_asking(1, %{"to" => "planning"}))
+
+      assert [reason] = refusals(chat)
+      assert reason =~ "no ticket"
+    end
+
+    # The membership guard is `Forge.Operator`'s, and a chat reaching the engine directly would
+    # walk straight past it: the opener's standing is checked when the request is applied, not
+    # when the conversation was opened, so a person removed from the project since cannot still
+    # move its tickets through a conversation they left behind
+    # (`docs/design/identity.md` § Where the guard lives).
+    test "the opener who has since left the project cannot move anything", %{
+      project: project,
+      ticket: ticket,
+      chat: chat,
+      opener: opener
+    } do
+      refinement!(ticket, opener)
+
+      Repo.delete_all(
+        from m in Projects.Member, where: m.project_id == ^project.id and m.user_id == ^opener.id
+      )
+
+      {:ok, _chat} = Conversations.record_turn(chat, turn_asking(1, %{"to" => "planning"}))
+
+      assert Tickets.get!(ticket.id).state == "refining"
+      assert [reason] = refusals(chat)
+      assert reason =~ "no longer a member"
+
+      # Deciding is guarded the same way and at a call site of its own, so it is asked
+      # separately: both go through `Forge.Operator`, and neither reaches `Forge.Engine` direct.
+      pending!(ticket)
+
+      {:ok, _chat} = Conversations.record_turn(chat, turn_asking(2, %{"decision" => "approved"}))
+
+      assert Tickets.get!(ticket.id).state == "refining"
+      assert Tickets.get!(ticket.id).pending_transition["to"] == "planning"
+      assert List.last(refusals(chat)) =~ "no longer a member"
+    end
+
+    # Attribution has nowhere to point: a conversation a Mix task opened would make a
+    # `transition.taken` that claims nobody took it.
+    test "a conversation nobody opened cannot move anything", %{project: project, ticket: ticket} do
+      {:ok, chat} = Conversations.open(project, "from the command line", ticket: ticket)
+
+      {:ok, _chat} = Conversations.record_turn(chat, turn_asking(1, %{"to" => "planning"}))
+
+      assert Tickets.get!(ticket.id).state == "refining"
+      assert [reason] = refusals(chat)
+      assert reason =~ "nobody opened this conversation"
+    end
+
+    # The worker checks the shape, and the platform asks again: what crosses the channel is not
+    # a guard. Each of these is refused with why, and none of them crashes the turn.
+    test "a request that is not one shape or the other is refused", %{ticket: ticket, chat: chat} do
+      requests = [
+        {%{"to" => "planning", "decision" => "approved"}, "both"},
+        {%{}, "must be one JSON object"},
+        {%{"to" => ""}, "must be one JSON object"},
+        {%{"to" => 3}, "must be one JSON object"},
+        {%{"decision" => "maybe"}, "not `approved` or `rejected`"}
+      ]
+
+      for {{request, why}, index} <- Enum.with_index(requests, 1) do
+        assert {:ok, _chat} = Conversations.record_turn(chat, turn_asking(index, request))
+        assert Tickets.get!(ticket.id).state == "refining"
+        assert List.last(refusals(chat)) =~ why
+      end
+
+      # Every one of them was recorded as a turn: a malformed request must not cost the turn
+      # its cost, its commit or its documents.
+      assert length(turn_events(chat)) == length(requests)
+    end
+
+    # The worker could not decode the file, and says so instead of sending a request. The agent
+    # still hears why nothing moved.
+    test "a file the worker refused is reported as a refusal", %{chat: chat} do
+      payload =
+        1
+        |> turn(0.01)
+        |> Map.put("invalid_transition_request", "transition.json is not valid JSON")
+
+      {:ok, _chat} = Conversations.record_turn(chat, payload)
+
+      assert [reason] = refusals(chat)
+      assert reason =~ "not valid JSON"
+    end
+
+    # **The one that cannot be got right by accident.** The worker re-sends an unacked turn for
+    # ever, and a transition asked for twice is not the same thing twice: the second attempt
+    # meets a ticket that has already left the state. Wire the request in beside the
+    # idempotency gate rather than inside it and this is what notices.
+    test "a re-sent turn does not ask for the transition again", %{
+      ticket: ticket,
+      chat: chat,
+      opener: opener
+    } do
+      refinement!(ticket, opener)
+      request = turn_asking(1, %{"to" => "planning"})
+
+      {:ok, _chat} = Conversations.record_turn(chat, request)
+      assert Tickets.get!(ticket.id).state == "planning"
+
+      {:ok, _chat} = Conversations.record_turn(Jobs.get!(chat.id), request)
+
+      assert Tickets.get!(ticket.id).state == "planning"
+      # Had it been attempted again it would have been refused — `planning` declares no edge to
+      # itself — and a refusal is the trace that attempt leaves.
+      assert refusals(chat) == []
+      assert length(turn_events(chat)) == 1
+    end
+
+    # **Finding 1.** The pinning a ticket was admitted with can stop parsing as the validator
+    # moves on, and that ticket is exactly the one a conversation exists to rescue. The apply
+    # path runs after the turn's transaction has committed, so a raise here kills the channel's
+    # handler, the worker re-sends, `recorded?/2` says the turn is recorded, and the request is
+    # gone with nothing said to anybody. Refused instead.
+    test "a ticket whose pinned workflow no longer parses is refused, not raised on", %{
+      ticket: ticket,
+      chat: chat
+    } do
+      unparseable!(ticket)
+
+      {:ok, _chat} = Conversations.record_turn(chat, turn_asking(1, %{"to" => "planning"}))
+
+      assert Tickets.get!(ticket.id).state == "refining"
+      assert [reason] = refusals(chat)
+      assert reason =~ "no longer parses"
+      # The validator's own complaint, so a person knows what to repin.
+      assert reason =~ "is required"
+    end
+
+    # **Finding 3.** Membership is caught by the operator; standing is this path's to ask.
+    # A conversation outlives the standing of whoever opened it and any member may type into
+    # it, so without this an account suspended since would have tickets moved in its name by
+    # somebody else's message.
+    test "an opener suspended or un-approved since cannot move anything", %{
+      project: project,
+      ticket: ticket,
+      chat: chat,
+      opener: opener
+    } do
+      refinement!(ticket, opener)
+
+      suspend!(opener)
+      {:ok, _chat} = Conversations.record_turn(chat, turn_asking(1, %{"to" => "planning"}))
+
+      assert Tickets.get!(ticket.id).state == "refining"
+      assert List.last(refusals(chat)) =~ "suspended"
+
+      # Un-approval is the other half of `User.active?/1`, and reads as its own word.
+      reinstate!(opener)
+      unapprove!(opener)
+      {:ok, _chat} = Conversations.record_turn(chat, turn_asking(2, %{"to" => "planning"}))
+
+      assert Tickets.get!(ticket.id).state == "refining"
+      assert List.last(refusals(chat)) =~ "not an approved account"
+
+      # Standing restored, the same request goes through: it was the standing and nothing else.
+      approve!(opener)
+      {:ok, _chat} = Conversations.record_turn(chat, turn_asking(3, %{"to" => "planning"}))
+
+      assert Tickets.get!(ticket.id).state == "planning"
+      assert Projects.role(project, opener) != nil
+    end
+
+    # **Finding 4.** `apply_request/4` dispatches on the key being present, with no type guard,
+    # so the both-keys refusal must not carry one either: a `to` of the wrong type beside a
+    # `decision` validated as a decision and then dispatched as a transition, and the decision
+    # was silently not made.
+    test "both keys are refused whatever the types are", %{
+      ticket: ticket,
+      chat: chat,
+      opener: opener
+    } do
+      refinement!(ticket, opener)
+      pending!(ticket)
+
+      for {request, index} <- Enum.with_index([%{"to" => 5}, %{"to" => nil}], 1) do
+        asked = Map.put(request, "decision", "approved")
+        {:ok, _chat} = Conversations.record_turn(chat, turn_asking(index, asked))
+
+        assert List.last(refusals(chat)) =~ "both"
+        # Neither taken nor decided: the pending decision is still the ticket's.
+        assert Tickets.get!(ticket.id).state == "refining"
+        assert Tickets.get!(ticket.id).pending_transition["to"] == "planning"
+      end
+    end
+
+    # **A refusal is recorded and says nothing into the conversation.** An earlier attempt sent
+    # it back with `send/3` and a `:system` actor, which `fold/2` projects as `role: :user` —
+    # the person read themselves saying it, `Forge.Queue` dropped the chat back out of their
+    # queue, and `opening/1` made it the next process's prompt. A message is also a turn, so it
+    # would bill one and reset the idle timer § Lifetime measures from the last human message.
+    # This is the test that fails if any of that comes back.
+    test "a refusal is recorded without putting words in the conversation", %{chat: chat} do
+      {:ok, _chat} = Conversations.record_turn(chat, turn_asking(1, %{"decision" => "approved"}))
+
+      assert [_reason] = refusals(chat)
+
+      # The opening message and nothing since: no message of the platform's, and in particular
+      # none projected as the person's.
+      assert [%{role: :user, text: "the plan went wrong"}] = Conversations.transcript(chat.id)
+
+      assert for(%{type: "chat.message", payload: p} <- Events.for_job(chat.id), do: p["text"]) ==
+               ["the plan went wrong"]
+    end
+
+    # **Finding 6.** The branch an earlier comment excused as an equivalent mutant. `events.actor`
+    # is a JSON column with no reference and `open/3` writes the actor straight through, so an id
+    # that never named an account reaches `get_user/1`'s nil in one line — and
+    # `Accounts.delete_unapproved_user/2` can make it happen for real.
+    test "an opener whose account is gone cannot move anything", %{
+      project: project,
+      ticket: ticket
+    } do
+      {:ok, chat} =
+        Conversations.open(project, "who am i",
+          ticket: ticket,
+          actor: {:user, Ecto.UUID.generate()}
+        )
+
+      {:ok, _chat} = Conversations.record_turn(chat, turn_asking(1, %{"to" => "planning"}))
+
+      assert Tickets.get!(ticket.id).state == "refining"
+      assert [reason] = refusals(chat)
+      assert reason =~ "no longer has an account"
+    end
+
+    # **Finding 11.** A frame the worker never sends. Answering it with `:none` answered it with
+    # silence, where every other malformed request is answered with a reason.
+    test "a forged request of the wrong shape is refused, not ignored", %{chat: chat} do
+      for {payload, index} <-
+            Enum.with_index(
+              [
+                %{"transition_request" => "hello"},
+                %{"invalid_transition_request" => 7}
+              ],
+              1
+            ) do
+        turn = Map.merge(turn(index, 0.01), payload)
+        {:ok, _chat} = Conversations.record_turn(chat, turn)
+      end
+
+      assert [first, second] = refusals(chat)
+      assert first =~ "not a JSON object"
+      assert second =~ "was not text"
+    end
+
+    # **Finding 11.** `Dir.transition/1` refuses a non-string comment, so this must too: a frame
+    # the worker would have refused must not be applied here with the comment quietly dropped.
+    test "a comment that is not text is refused, as the worker refuses it", %{
+      ticket: ticket,
+      chat: chat,
+      opener: opener
+    } do
+      refinement!(ticket, opener)
+
+      turn =
+        Map.put(turn(1, 0.01), "transition_request", %{"to" => "planning", "comment" => 7})
+
+      {:ok, _chat} = Conversations.record_turn(chat, turn)
+
+      assert Tickets.get!(ticket.id).state == "refining"
+      assert [reason] = refusals(chat)
+      assert reason =~ "comment that is not text"
+    end
+
+    # **Finding 9.** The worker removes the file unread on a turn that did not end cleanly, where
+    # `subtype` and `is_error` are known. `interrupted` is on the payload the platform already
+    # reads, so the rule does not live on one side of the channel alone.
+    test "an interrupted turn's request is not applied even if it arrives", %{
+      ticket: ticket,
+      chat: chat,
+      opener: opener
+    } do
+      refinement!(ticket, opener)
+
+      turn = Map.put(turn_asking(1, %{"to" => "planning"}), "interrupted", true)
+      {:ok, _chat} = Conversations.record_turn(chat, turn)
+
+      assert Tickets.get!(ticket.id).state == "refining"
+      # Dropped, not refused: nobody asked for it, so there is nothing to tell anyone about.
+      assert refusals(chat) == []
+    end
+
+    # **Finding 9.** The request is echoed into a log § Lifetime keeps for ever, and it arrived
+    # as a file the agent wrote — a mebibyte of it, per refused turn, uncapped.
+    test "a huge request is cut down before it reaches the log", %{chat: chat} do
+      # **Multi-byte, not ASCII.** A byte offset through this text lands inside a character about
+      # as often as not: the result fails `String.valid?/1`, `Jason` refuses it, and the insert
+      # raises *after* the turn's transaction has committed — so the worker re-sends, the turn is
+      # already recorded, and the request vanishes with nothing said to anyone. An ASCII string
+      # cannot see any of that.
+      long = String.duplicate("—", 5_000)
+
+      turn =
+        Map.put(turn(1, 0.01), "transition_request", %{
+          "to" => long,
+          "comment" => long,
+          "padding" => long
+        })
+
+      {:ok, _chat} = Conversations.record_turn(chat, turn)
+
+      assert [%{payload: %{"request" => request}}] =
+               for(
+                 event <- Events.for_job(chat.id),
+                 event.type == "chat.transition_refused",
+                 do: event
+               )
+
+      # Still valid text, which is the whole point: an invalid binary never reaches the column.
+      assert String.valid?(request["to"])
+      assert String.valid?(request["comment"])
+      assert String.length(request["to"]) < 250
+      assert String.length(request["comment"]) < 250
+      # Only the keys the platform reads travel; a key it never looks at is not kept at all.
+      refute Map.has_key?(request, "padding")
+    end
+
+    defp turn_asking(index, request) do
+      index
+      |> turn(0.01 * index)
+      |> Map.put("transition_request", Map.put_new(request, "comment", "as asked"))
+    end
+
+    defp refusals(chat) do
+      for %{type: "chat.transition_refused", payload: payload} <- Events.for_job(chat.id),
+          do: payload["reason"]
+    end
+
+    defp turn_events(chat),
+      do: for(%{type: "chat.turn"} = event <- Events.for_job(chat.id), do: event)
+
+    # A version of the document the `refining` -> `planning` edge approves, so that the edge can
+    # be taken at all.
+    defp refinement!(ticket, user) do
+      {:ok, version} =
+        Forge.Artifacts.record_version(ticket.id, "refinement.md", :document, {:user, user.id}, %{
+          content: "---\noutcome: done\n---\n# Refinement\n"
+        })
+
+      version
+    end
+
+    # The ticket as the engine leaves it when a job's transition needs approving
+    # (`Engine.put_pending_approval/4`). Written here rather than reached through a job run,
+    # which `Forge.FlowTest` already covers end to end.
+    defp pending!(ticket) do
+      ticket
+      |> Forge.Tickets.Ticket.progress_changeset(%{
+        state: ticket.state,
+        status: :active,
+        cost_usd: ticket.cost_usd,
+        pending_transition: %{
+          "from" => "refining",
+          "to" => "planning",
+          "outcome" => nil,
+          "approve" => ["refinement.md"]
+        }
+      })
+      |> Repo.update!()
+    end
+
+    # A pinning that no longer parses: validated at admission, and `%{}` fails every rule the
+    # validator has now.
+    defp unparseable!(ticket) do
+      ticket
+      |> Ecto.Changeset.change(%{workflow: %{}})
+      |> Repo.update!()
+    end
+
+    defp suspend!(user), do: stamp!(user, :suspended_at, DateTime.utc_now(:second))
+    defp reinstate!(user), do: stamp!(user, :suspended_at, nil)
+    defp unapprove!(user), do: stamp!(user, :approved_at, nil)
+    defp approve!(user), do: stamp!(user, :approved_at, DateTime.utc_now(:second))
+
+    defp stamp!(user, field, value) do
+      Forge.Accounts.User
+      |> Repo.get!(user.id)
+      |> Ecto.Changeset.change(%{field => value})
+      |> Repo.update!()
+    end
+
+    defp finish_jobs(ticket) do
+      for job <- Jobs.for_ticket(ticket.id) do
+        job
+        |> Forge.Jobs.Job.progress_changeset(%{status: :finished, outcome: :converged})
+        |> Repo.update!()
+      end
+    end
+  end
+
+  # A second `refining -> planning` edge in the ticket's own pinning, approving `name`, told
+  # apart from the first by its `when`.
+  defp second_edge!(ticket, name) do
+    extra = %{"from" => "refining", "to" => "planning", "approve" => [name], "when" => "redo"}
+
+    workflow =
+      ticket.workflow
+      |> Map.update!("transitions", &(&1 ++ [extra]))
+      |> put_in(["states", "refining", "outcomes"], ["done", "redo"])
+      # The validator wants an approved name produced by that state or an earlier one, so the
+      # dead edge's document is declared and simply never written — which is the case.
+      |> update_in(["states", "refining", "produces"], &(&1 ++ [name]))
+
+    ticket |> Ecto.Changeset.change(%{workflow: workflow}) |> Repo.update!()
   end
 
   defp turn_with_proposals(index, proposals, invalid \\ %{}) do

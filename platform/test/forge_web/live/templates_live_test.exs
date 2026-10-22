@@ -705,6 +705,147 @@ defmodule ForgeWeb.TemplatesLiveTest do
     end
   end
 
+  # A template may follow the mark instead of naming a snapshot, and choosing that has to be as
+  # informed a choice as choosing an id (`docs/design/provisioning.md` § Where a machine comes
+  # from).
+  describe "the snapshot that carries the latest mark" do
+    setup do
+      on_exit(&Forge.Provider.Fake.allow/0)
+      :ok
+    end
+
+    defp marking(id) do
+      Forge.Provider.Fake.listing([
+        %{id: "snap-a", name: "a", build: "aaaaaaaaaaaa", protocol: 1, current: id == "snap-a"},
+        %{id: "snap-b", name: "b", build: "bbbbbbbbbbbb", protocol: 2, current: id == "snap-b"}
+      ])
+    end
+
+    # **Read live from the listing, not hand-typed**: marking the other snapshot changes what the
+    # option says, which is the only thing that proves the page is reading the mark.
+    test "the mark is offered as a choice, naming the snapshot it means", %{conn: conn} do
+      marking("snap-a")
+      {:ok, _view, html} = live(conn, ~p"/templates")
+      assert options_of(html, "template[image]") =~ ~s(<option value="latest">latest · a</option>)
+
+      marking("snap-b")
+      {:ok, _view, html} = live(conn, ~p"/templates")
+      assert options_of(html, "template[image]") =~ ~s(<option value="latest">latest · b</option>)
+    end
+
+    test "the snapshot that carries it says so beside its own labels", %{conn: conn} do
+      marking("snap-b")
+      {:ok, _view, html} = live(conn, ~p"/templates")
+      options = options_of(html, "template[image]")
+
+      assert options =~ "b · build bbbbbbbbbbbb · protocol 2 · carries latest"
+      refute options =~ "a · build aaaaaaaaaaaa · protocol 1 · carries latest"
+    end
+
+    # An account nothing has been built for is exactly where a person needs telling what the word
+    # would mean, so the option is there and says there is nothing behind it yet.
+    test "with nothing marked the choice says so rather than vanishing", %{conn: conn} do
+      Forge.Provider.Fake.listing([%{id: "snap-a", name: "a", build: nil, protocol: nil}])
+      {:ok, _view, html} = live(conn, ~p"/templates")
+
+      assert options_of(html, "template[image]") =~
+               ~s(<option value="latest">latest · none marked yet</option>)
+    end
+
+    # The seed the page writes at save time, from the listing it holds and never from the form's
+    # params. It is not the authority — `Forge.Workers` re-asks at every create — but without it
+    # the row says nothing about which snapshot it is on until its first machine.
+    test "saving a template on the mark records the snapshot it means", %{conn: conn, user: user} do
+      marking("snap-b")
+      {:ok, view, _html} = live(conn, ~p"/templates")
+
+      view
+      |> form("#template-form",
+        template: %{
+          name: "following",
+          provider: "fake",
+          image: "latest",
+          memory: "4GiB",
+          cores: "2",
+          max_workers: "1"
+        }
+      )
+      |> render_submit(%{"template" => %{"resolved_image" => "snap-a"}})
+
+      assert [template] = Provisioning.templates(user)
+
+      assert {template.image, template.resolved_image, template.image_build,
+              template.image_protocol} == {"latest", "snap-b", "bbbbbbbbbbbb", 2}
+    end
+
+    # **The save path the two halves of the rule meet on.** The page seeds `resolved_image` from
+    # whichever snapshot is marked now; the changeset decides what is known of it. Keyed on
+    # `image` — the word, which never changes for such a template — a rename after the mark had
+    # moved wrote the old snapshot's build and protocol onto the new one, and the next machine was
+    # made from an unprobed snapshot on a protocol nobody had verified.
+    test "a rename after the mark moved takes the new snapshot's labels", %{
+      conn: conn,
+      user: user
+    } do
+      marking("snap-a")
+
+      template =
+        template_for(user, %{
+          name: "following",
+          image: "latest",
+          resolved_image: "snap-a",
+          image_build: "aaaaaaaaaaaa",
+          image_protocol: 1
+        })
+
+      # A build happens: the mark moves to a snapshot the catalogue has no labels for.
+      Forge.Provider.Fake.listing([
+        %{id: "snap-a", name: "a", build: "aaaaaaaaaaaa", protocol: 1},
+        %{id: "snap-fresh", name: "fresh", build: nil, protocol: nil, current: true}
+      ])
+
+      {:ok, view, _html} = live(conn, ~p"/templates")
+
+      view
+      |> element(~s(button[phx-click=edit-template][phx-value-id="#{template.id}"]))
+      |> render_click()
+
+      view
+      |> form("#edit-template-#{template.id}",
+        template: %{
+          name: "renamed",
+          provider: "fake",
+          image: "latest",
+          memory: "8GiB",
+          cores: "4",
+          max_workers: "2"
+        }
+      )
+      |> render_submit()
+
+      saved = Forge.Repo.get!(Forge.Provisioning.Template, template.id)
+
+      assert {saved.resolved_image, saved.image_build, saved.image_protocol} ==
+               {"snap-fresh", nil, nil}
+    end
+
+    # A row naming the mark names no snapshot, so it says which one it is resolved to — the row
+    # would otherwise say nothing about which build its next machine comes from.
+    test "a row on the mark says which snapshot it is on", %{conn: conn, user: user} do
+      marking("snap-a")
+
+      following =
+        template_for(user, %{name: "following", image: "latest", resolved_image: "snap-b"})
+
+      pinned = template_for(user, %{name: "pinned", image: "snap-a"})
+
+      {:ok, view, _html} = live(conn, ~p"/templates")
+
+      assert view |> element("#template-#{following.id}") |> render() =~ "latest · now snap-b"
+      refute view |> element("#template-#{pinned.id}") |> render() =~ "now snap-a"
+    end
+  end
+
   # A node built outside Nix knows no build of its own, so a snapshot's build is shown without a
   # hint rather than with an invented one.
   test "a snapshot's build has no hint on a node that knows no build", %{conn: conn} do

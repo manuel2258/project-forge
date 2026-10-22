@@ -20,13 +20,36 @@ commands:
     produces: hetzner-check.log
     timeout: 5m
 
+  # **`4GiB, cpu: 2`, sized against the machines this node actually runs.** `release-build` asked
+  # for `8GiB, cpu: 6` and `hetzner-snapshot` for `6GiB, cpu: 4` — numbers nobody had checked
+  # against a machine, and ticket 8's `release-build` invocation stuck the ticket before anything
+  # was built: no machine serving the project can hold that even when empty, and the scheduler
+  # refuses such a demand rather than queueing it (`docs/design/commands.md` § Resources,
+  # `{:no_template, :none_fit}`). The cores are the operator's figure, two being what a machine
+  # here has; the memory is `check`'s in `common.yml`, the heaviest declaration this fleet is known
+  # to satisfy.
+  #
+  # **Two cores does not make the build run on two.** `cpu` is a reservation and never a quota —
+  # the slice gets `CPUWeight` and no `CPUQuota` (`worker/lib/forge_worker/slice.ex`) — so what it
+  # decides is whether the job places and how much room it holds against other work, not how fast
+  # `nix build` goes. A release that finds its machine idle uses all of it. What a low number
+  # gives up is exclusivity: another job may land beside a 30-minute image build and compete for
+  # the machine's memory.
+  #
+  # `memory` is the opposite and must not be shaved: it is the slice's hard ceiling, where too
+  # small is SIGKILL (status 137) partway through a publish that `publishing` has no retry
+  # transition to recover. Raise it by giving the project a bigger machine.
+  #
+  # Neither script's binding constraint is modelled here: both spool a whole image through
+  # `$TMPDIR` — a ~1.25 GB platform archive, a ~1.8 GiB qcow2 converted to raw — and there is no
+  # `disk` key in the grammar. A failure for want of room says so in the log and is not the gate.
   release-build:
     run: .forge/commands/release-build.sh
     env: default
     secrets: [GHCR_TOKEN]
     produces: release-build.log
     timeout: 30m
-    resources: { memory: 8GiB, cpu: 6 }
+    resources: { memory: 4GiB, cpu: 2 }
 
   hetzner-snapshot:
     run: .forge/commands/hetzner-snapshot.sh
@@ -34,7 +57,7 @@ commands:
     secrets: [HCLOUD_TOKEN, HETZNER_PRIVATE_KEY]
     produces: hetzner-snapshot.log
     timeout: 30m
-    resources: { memory: 6GiB, cpu: 4 }
+    resources: { memory: 4GiB, cpu: 2 }
 
 states:
   refining:

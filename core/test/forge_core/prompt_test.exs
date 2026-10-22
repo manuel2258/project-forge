@@ -740,6 +740,133 @@ defmodule ForgeCore.PromptTest do
       assert manifest =~ "/var/forge/jobs/chat-1/history"
     end
 
+    # `docs/design/conversations.md` § Taking a transition: a ticket chat is told what it may ask
+    # the engine for, with each edge's `approve` list, and that the list is a snapshot.
+    test "about a ticket is told the transitions it may ask for" do
+      spec =
+        chat_spec(%{
+          ticket: %{number: 7, title: "Persist the high score table"},
+          moving: %{
+            "transitions" => [
+              %{"to" => "planning", "approve" => ["refinement.md"]},
+              %{"to" => "verifying", "approve" => []}
+            ],
+            "pending" => nil,
+            "job_live" => false
+          }
+        })
+
+      manifest = Prompt.chat_manifest(spec, "/var/forge/jobs/chat-1")
+      flat = String.replace(manifest, "\n", " ")
+
+      assert manifest =~ "## Moving the ticket"
+      assert manifest =~ "`/var/forge/jobs/chat-1/transition.json`"
+      assert manifest =~ "- `planning` — approves `refinement.md` on the way"
+      assert manifest =~ "- `verifying`"
+      assert flat =~ "as of when this conversation started"
+      # Nothing is pending and no job is live, so neither is claimed.
+      refute manifest =~ "already pending"
+      refute manifest =~ "was running"
+    end
+
+    test "about a ticket with nothing to take says so plainly" do
+      spec =
+        chat_spec(%{
+          ticket: %{number: 7, title: "Done"},
+          moving: %{"transitions" => [], "pending" => nil, "job_live" => false}
+        })
+
+      manifest = Prompt.chat_manifest(spec, "/var/forge/jobs/chat-1")
+
+      assert manifest =~ "## Moving the ticket"
+      assert manifest =~ "No transition is declared out of the ticket's state"
+    end
+
+    test "about a ticket with a decision pending, or a live job, is told" do
+      spec =
+        chat_spec(%{
+          ticket: %{number: 7, title: "Persist"},
+          moving: %{
+            "transitions" => [],
+            "pending" => %{
+              "to" => "planning",
+              "outcome" => "done",
+              "approve" => ["refinement.md"]
+            },
+            "job_live" => true
+          }
+        })
+
+      flat = spec |> Prompt.chat_manifest("/var/forge/jobs/chat-1") |> String.replace("\n", " ")
+
+      assert flat =~ "already pending on this ticket: moving to `planning` on `done`"
+      assert flat =~ "approving `refinement.md`"
+      assert flat =~ "A job of the ticket's state was running"
+      assert flat =~ "cancels the ticket and restores it"
+    end
+
+    # A target two edges reach can never be asked for, because the request names no outcome. Said
+    # so in the list rather than offered as though it could be taken — and said accurately: the
+    # ticket page cannot take one either.
+    test "about a ticket marks a target that cannot be asked for" do
+      spec =
+        chat_spec(%{
+          ticket: %{number: 7, title: "Round and round"},
+          moving: %{
+            "transitions" => [
+              %{"to" => "implementing", "approve" => [], "ambiguous" => true},
+              %{"to" => "verifying", "approve" => [], "ambiguous" => false}
+            ],
+            "pending" => nil,
+            "job_live" => false
+          }
+        })
+
+      manifest = Prompt.chat_manifest(spec, "/var/forge/jobs/chat-1")
+      flat = String.replace(manifest, "\n", " ")
+
+      assert flat =~ "`implementing` — **cannot be asked for**"
+      assert flat =~ "Nor can the ticket page"
+      # The one that can be is still plainly offered.
+      assert manifest =~ "- `verifying`"
+    end
+
+    # A pinning that no longer parses has nothing to offer, and an empty list would read as a
+    # state with no way out — a different problem with a different answer.
+    test "about a ticket whose workflow no longer parses says that instead" do
+      spec =
+        chat_spec(%{
+          ticket: %{number: 7, title: "Stuck"},
+          moving: %{
+            "transitions" => [],
+            "pending" => nil,
+            "job_live" => false,
+            "workflow_broken" => true
+          }
+        })
+
+      manifest = Prompt.chat_manifest(spec, "/var/forge/jobs/chat-1")
+
+      assert manifest =~ "pinned workflow no longer parses"
+      assert manifest =~ "repin"
+      refute manifest =~ "No transition is declared"
+    end
+
+    # A project chat has no ticket and nothing to transition, so it is not handed a section
+    # describing a file it can never usefully write.
+    test "about the repository as a whole is told nothing about moving a ticket" do
+      spec =
+        chat_spec(%{
+          moving: %{
+            "transitions" => [%{"to" => "planning", "approve" => []}],
+            "pending" => nil,
+            "job_live" => true
+          }
+        })
+
+      refute Prompt.chat_manifest(spec, "/var/forge/jobs/chat-1") =~ "Moving the ticket"
+    end
+
     # A reopened conversation is a new process, and the message at the end of its prompt is the
     # next thing the person said. Without this section the agent is handed a file it is never
     # told about and a message it takes for an opening, and it answers as though nothing had

@@ -174,6 +174,8 @@ measure; each route sets its own:
 | `/workers/:id` | 74rem | One machine: its header line and its log, newest first. The workers page's measure, because it is that page's row, looked at alone. |
 | `/templates` | 60rem | Two lists with a form each — provider credentials, then templates. Not one wide table, so narrower than `/workers`; a template row carries its shape, figures, count and actions, and wraps where they do not fit. |
 | `/projects/:name/settings` | 48rem | Forms and tables — tokens, people, mirrors. Narrower loses the row; wider is a rail with nothing to put in it. |
+| `/projects/:name/repo` | 74rem | The repository the project holds: a branch picker, then either its commit list or its file tree, a file's content opened in place. The same reasoning as `…/review` — content needs the width, and there is no rail with anything to put in it, so no second column. |
+| `/projects/:name/repo/commits/:sha` | 74rem | One commit, drawn by the same diff component the review page draws. Its page's measure, for its reason. |
 | `/tickets/:project/:number` | 74rem | A work screen (§ The work screen): 53rem tabbed column plus a 21rem facts rail, divided by a 1px rule. Below `lg` the rail is the details sheet, opened from the context strip. |
 | `…/review` | 74rem | Not a work screen: a page that scrolls, its column beside a 21rem rail at `lg` and above it below. The diff needs the width; the rail carries the evidence. |
 | `…/jobs/:job_id` | 96rem | Laid out as the review page is, wider: its column is the harness stream, whose lines are an agent's paragraphs and commands, and at 74rem the column beside the 21rem rail left them a ribbon. A command's page is the same route and takes the same width, its script in the column. Manifest in the rail, the harness stream in the column — a bounded pane, since no tab body bounds it here — tailed while the job runs (§ Motion and structure). Under the outcome, and only when memory was the trouble, the `warning` line `capacity.md` § Memory describes. A job whose runs held project secrets has a *secrets* row in the manifest, a line per run — *`STRIPE_TEST_KEY` v2, `SENTRY_TOKEN` v1* — by name and version, never a value. |
@@ -305,8 +307,15 @@ Getting these wrong makes the UI lie. They are acceptance criteria, not preferen
 - **Presentations carry no approval slot at all**, so they cannot be misread as approvable.
   Experimental results are advisory and must never read as verified.
 - **The diff is bounded and says where.** Past the page's limit it offers the `git diff` command
-  for the exact range instead of trailing off. The file table above it is never truncated: it is
-  the map of the change. Dollars do not appear here either — the review page is the surface where
+  for the exact range instead of trailing off. **So does a patch that is not valid UTF-8** — a
+  latin-1 source file is diffed in full by git, and those bytes in a rendered page are a response
+  body that is not UTF-8 and, through the socket, a serializer that raises in the transport
+  process and takes every LiveView on the connection down. One rule, two reasons, and the same
+  `git diff` line either way; it holds wherever a change is drawn, which is the review page, both
+  Changes tabs and a repository commit. A *path* that is not UTF-8 is a different answer — it is
+  made printable rather than withheld, because a change whose file list is missing is not a map
+  (`Forge.Git.printable_path/1`). The file table above the patch is never truncated: it is the
+  map of the change. Dollars do not appear here either — the review page is the surface where
   they are most tempting and least useful.
 - A **merge decision** is reached from the queue by a link, never by an answer row. Answering
   never navigates, and the answer row and the Send are the shapes in the queue that commit
@@ -327,26 +336,44 @@ live DOM and re-pushes its change event with what was typed, before the new moun
 applied; a form missing either attribute is not copied, is not replayed, and is drawn empty by
 that render. So the page's handler for the change holds what arrives, and the box is drawn from
 what it holds — see `ForgeWeb.Operator.Drafts` for the cards and
-`ForgeWeb.Operator.QuestionForm` for the question form, which hold it the same way for the same
-reason.
+`ForgeWeb.Operator.QuestionForm` for the question form. Two modules, deliberately: a question
+form holds a structured set of answers it has to validate and send, a card holds the fields of
+one form as they came off the wire, and folding the first into the second would lose the
+structure for the sake of one fewer module.
 
 What this does not reach is a reconnect the framework answers with a hard page refresh, which it
 does when a push times out: there is no DOM left to copy from. That is a reload, and the three
 deliberate cases' rule applies.
 
-**Where the rule holds today.** On every surface a person's unsent work sits on: the
-conversation's composer and the question form docked under it, a document's question form, an
-approval's comment, a proposal's comment and its type, and a human state's document.
-`ForgeWeb.ReconnectTest` walks those pages and fails on a box drawn outside a form carrying
-both attributes, so a new one cannot quietly miss it.
+**Where the rule holds today.** On the conversation's composer and the question form docked
+under it, a document's question form, an approval's comment, a proposal's comment and its type,
+a human state's document, and the two screens that start something — a new ticket and a new
+conversation, which is where the person who reported this said they lost work.
 
-It does **not** hold yet on six forms, counted: a project's members, its secrets and its
-mirrors, a worker's resources, and the two log-in forms. Each carries no `phx-change`, so each
-loses what was typed on a rejoin. That is a gap with a proposal open on it rather than a case
-the rule excuses — and two of them are why a person settles it and not the next agent: a
-secret's value or a password coming back means holding it in page state, which is a decision of
-its own (`docs/design/secrets.md`).
+`ForgeWeb.ReconnectTest` holds the rule two ways: it walks those pages and fails on a box drawn
+outside a form carrying both attributes, and it inventories every form in the web layer that
+holds a box — including the boxes components draw rather than the form itself — so a new one
+that cannot be replayed fails until somebody records why, the way
+`authorization_inventory_test.exs` does for events. What neither reaches is a box drawn in no
+form at all; no page draws one today, and only the walks would catch it if one appeared.
 
+It does **not** hold yet on seven forms, which that inventory is where to read: a project's
+members, its secrets, its mirrors and its default model, a worker's resources, and the two
+log-in forms. Each carries no `phx-change`, so each loses what was typed on a rejoin. That is a
+gap the inventory records rather than one the rule excuses — and two of them are why a person
+settles it and not the next agent: a secret's value or a password coming back means holding it
+in page state, which is a decision of its own (`docs/design/secrets.md`).
+
+**A draft the document moved under is refused once, then saved on purpose.** The box keeps what
+was typed even across a reload, so a Save from it could land on top of a version somebody else
+wrote while it sat there — v5 from text written against v3, with v4's work gone from what the
+workflow reads. The editor sends the version its draft was written against, and the first Save
+after a newer version arrives is refused whole: the flash says which version it is now and that
+the text is still in the box. **Saving again writes it.** The refusal is the warning, and
+repeating the gesture is the decision to write over what arrived — a refusal with no way
+forward would leave the operator told their text was safe and holding no gesture that could
+send it, which is the same dead end as losing it. Nothing goes silently either way: the other
+version is in the document and named in the refusal, and the typed text never leaves the box.
 
 ## The queue item
 
@@ -904,6 +931,10 @@ and a type that does not parse as its reason beside the ones that do. What `.for
 holds that is not a type is listed with why, since it blocks nothing and would otherwise be
 invisible (`ticket-types.md` § The project page).
 
+**It links to the repository it holds** — `Repository ›` in the header, beside Settings. The
+page says what the repository means to the platform; what is actually in it is
+§ The project's repository.
+
 **It lists the project's conversations, live ones first.** The board is the workflow and a
 conversation is not on it — it has no state to be in — so without this a chat is a thing you can
 start from the page and then cannot find from the page. Live first because that is the one that
@@ -1288,6 +1319,114 @@ name.
 Serving raw bytes is what the route does *today*, not what the path means. When the
 margin-questions view lands it takes this route's HTML representation and raw moves behind a
 parameter; the address of a version does not change.
+
+## The project's repository
+
+`/projects/:name/repo` is the repository itself, reached from `Repository ›` in the project
+page's header beside Settings. The project page says what the repository *contains* for the
+platform — the clone URL, the default branch, the workflow it holds — and answered nothing about
+the code: what landed last week, and what the tree looks like now. Reading either meant cloning.
+
+It is membership-scoped like every other project read, through the same
+`ForgeWeb.Access.project_by_name!/2` guard the project page uses, and a non-member gets the miss
+a project that does not exist gets (`design/identity.md` § Projects and members). There is no
+admin distinction: a member may already clone the whole repository with a read token, so a page
+that shows them less would be a lock on the window beside an open door.
+
+**A branch picker chooses what is being looked at**, from `refs/heads/` and nothing else — the
+platform's own refs under `refs/forge/*` are bookkeeping, not somewhere to look. The project's
+default branch is selected on first load. An unknown branch in the address falls back to the
+default rather than failing, so a stale link lands somewhere real. Choosing a branch is all the
+picker does: nothing here creates, moves, deletes or merges one.
+
+**Two tabs, both in the address: Commits and Files.** The branch, the tab and the page are the
+only state the view holds that is not read from the repository, so all three are in the query
+string and every control patches it — the page is bookmarkable at any depth and survives a
+reload.
+
+- **Commits** is the branch's own history, newest first, thirty to a page, with `Older ›` and
+  `‹ Newer`. Thirty because a repository with thousands of commits must never load them all, and
+  paging because every commit still has to be reachable. The page is by position (`--skip`), not
+  by a cursor: a commit landing between two loads shifts what a page points at by one, which is
+  the cost of not holding a cursor the ticket did not ask for.
+- **Files** is the selected branch's head as a tree. A directory is read when it is opened and
+  not before, so a repository with ten thousand files costs the same as one with ten until
+  somebody goes looking; reopening one already read draws it from what the page holds rather than
+  asking git again. It is **plain identifier text** — mono, no colour, no icons — the way the
+  rest of the product draws a path, and a folder is told from a file by the `▸` it carries and
+  nothing else. **One file is open at a time**: opening another replaces it, opening the open one
+  closes it. The page therefore holds directory *names* and exactly one file's content, which
+  the 512 KB bound below then bounds in full — the alternative was a reader's whole afternoon of
+  opened files sitting in the socket's own process.
+
+**A file opens in place, as plain text, and only when it is small enough.** Its size is asked of
+git before its content ever is, so a file at or over **512 KB** says so instead and is never
+partially loaded. A **binary** file is listed by name and its content is never rendered — not
+garbled, not previewed, not offered as a download. Neither limit is a failure the page reports:
+both are the row saying what the file is.
+
+**Binary here means `ForgeCore.Document.text?/1`** — valid UTF-8 with no NUL, over the whole
+file — and not git's own "a NUL in the first 8000 bytes". git's rule is right for git's output
+path and wrong for this one: what the page draws goes out as JSON over the socket, so a latin-1
+source file with no NUL in it at all was drawn garbled, and one whose invalid byte reached the
+rendered HTML made the socket's serializer raise and took every LiveView on that connection
+down. The product already wrote this rule down, for this reason, where a document is read and
+where one is served.
+
+**No syntax colouring, by language or by anything else.** Settled on this ticket by the person who
+answered it, and consistent with § Colour. Five of its six bullets give a hue to something about
+the *work* — a wait, a link or a decision, a job's state, an outcome, an artifact's type — and
+the sixth is about surfaces rather than meaning. None of them is about the text a page draws.
+"This word is a keyword" would be a seventh meaning, spending the only scarce thing § Colour
+has on something that is not a state of anything.
+
+**Opening a commit is its own page**, `/projects/:name/repo/commits/:sha`: the commit's identifier
+line, then the files it changed and the patch in each, drawn by `ForgeWeb.Diff.section/1` — the
+same component the review page draws, so a binary file in a commit already reads *binary* with no
+attempted content. A commit is shown against its first parent, and a root commit against the
+empty tree, so the first commit in a repository opens like any other. Two arbitrary commits are
+not diffed against each other; only a commit's own change. The back link carries the branch and
+the page it was opened from, so returning lands where the reader was rather than at the top.
+
+**Nothing here writes to the repository at all.** The reads are `for-each-ref`, `log`,
+`rev-parse`, `ls-tree`, `cat-file` and `show` on the branch page, and `log`, `rev-parse`,
+`hash-object` and `diff` on a commit's: no worktree, no checkout, no ref touched and no object
+written. `hash-object` is in that list without `-w`: a root commit's diff is read against the
+empty tree, which git carries whether or not the repository holds it, so the tree is *named*
+rather than written. (`Forge.Git.empty_tree/1` still writes it for `create_root_commit/2`, where
+a commit will reference it and `git fsck` would otherwise report it missing for ever.)
+
+The test that holds this records the repository *directory* and not its refs, because the first
+version of this page could write a file into it while every ref stayed exactly where it was.
+
+A path or a branch name from the address is resolved by git against its own trees and refs,
+never against the filesystem, so `..` in either does not escape anything: it matches nothing and
+the page reads it as not found, like any other typo. **That is true of a path and a branch and
+was not true of the sha**, which is the harder half of the same question: git reads any argument
+beginning with `-` as an option wherever it sits, and `log --output=<file>` writes a file, so
+`/projects/:name/repo/commits/--output=config` truncated the project's own `HEAD` with one GET
+and `--output=../../x` wrote outside the repositories directory. Two guards answer it now. The
+general one is `Forge.Git.run/3`, which refuses a value the caller was handed when it begins
+with a dash, marked `{:data, value}` wherever one is passed as a whole argument. **The mark is
+fail-open and that is a known trade-off, not a claim about safety**: a future caller who forgets
+it gets a hole and no error. The alternative — `run/3` refusing *any* dashed argument unless it
+is in a module-level allowlist of the flags this module uses — replaces an obligation at every
+call site with one list, and is the better shape if a third site of this ever appears. What
+keeps the current rule honest is that it is greppable: a value in `Forge.Git` that is not a
+literal and is not marked is visible in review, and the two that are flags' own values
+(`--skip=`, `--max-count=`) are guarded as integers instead, because a flag's value is not a
+position git reads an option in. The particular guard is this page: the address names a commit,
+so only a hex object name is read out of it, and anything else is the ordinary miss before git
+is reached at all.
+
+**A name that is not text is drawn in git's own escaped form.** A repository may hold a file
+called `caf\xE9.txt`, and the platform asks git for paths exactly as they were written — which
+is what makes `résumé.md` readable instead of `"r\303\251sum\303\251.md"`. Those raw bytes in a
+page are the same crash as a non-UTF-8 patch, one layer down and reachable from a *filename*, so
+every path leaves `Forge.Git` through `printable_path/1`: as git printed it when that is text,
+and C-escaped in quotes when it is not. `unquote_path/1` is its exact inverse, so such a file
+still opens and such a directory still expands — the escaped form is what the browser holds, and
+it is read back before git sees it.
 
 ## Not built yet
 

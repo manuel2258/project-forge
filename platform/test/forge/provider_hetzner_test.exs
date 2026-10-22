@@ -592,6 +592,34 @@ defmodule Forge.Provider.HetznerTest do
              ]
     end
 
+    # The mark `bin/hetzner-image` moves onto each snapshot it builds, and what a template naming
+    # `latest` resolves against (`docs/design/provisioning.md` § Where a machine comes from).
+    # **Presence is the whole label**: the value is never read, so an empty one still marks.
+    test "a snapshot says whether it carries the latest mark" do
+      configure(token: "t")
+
+      answering(200, %{
+        "images" => [
+          %{"id" => 1, "description" => "a", "labels" => %{"forge-worker-current" => "1"}},
+          %{"id" => 2, "description" => "b", "labels" => %{"forge-worker-current" => ""}},
+          %{"id" => 3, "description" => "c", "labels" => %{"forge-worker-build" => "x"}},
+          %{"id" => 4, "description" => "d", "labels" => %{}},
+          %{"id" => 5, "description" => "e"}
+        ],
+        "meta" => %{"pagination" => %{"next_page" => nil}}
+      })
+
+      assert {:ok, images} = Hetzner.images(%{"token" => "t"})
+
+      assert Enum.map(images, &{&1.id, &1.current}) == [
+               {"1", true},
+               {"2", true},
+               {"3", false},
+               {"4", false},
+               {"5", false}
+             ]
+    end
+
     test "an account with no snapshot yet is empty rather than an error" do
       configure(token: "t")
       answering(200, %{"images" => [], "meta" => %{"pagination" => %{"next_page" => nil}}})

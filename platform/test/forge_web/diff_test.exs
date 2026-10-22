@@ -16,6 +16,7 @@ defmodule ForgeWeb.DiffTest do
   use ExUnit.Case, async: true
 
   import Forge.GitFixtures
+  import Phoenix.LiveViewTest, only: [render_component: 2]
 
   alias Forge.Git
   alias ForgeWeb.Diff
@@ -71,6 +72,77 @@ defmodule ForgeWeb.DiffTest do
     # The table still names every file, and no row expands to a patch.
     assert diff |> Diff.files() |> length() == 61
     assert diff |> Diff.files() |> Enum.all?(&is_nil(&1.lines))
+  end
+
+  # The third way a patch is too much for the page, and the one that is not about size. git
+  # diffs a file it calls binary as a single line, but a file that is merely not UTF-8 — one
+  # latin-1 byte in an otherwise ordinary source file — it diffs in full, and those bytes then
+  # go into the page. On a GET that is a 200 whose body is not valid UTF-8; through the socket
+  # it is `Jason.EncodeError` raised inside the socket's own process, which takes every
+  # LiveView on that connection with it.
+  test "a patch that is not valid UTF-8 is not drawn, however small it is" do
+    {repo, base, head} = change(%{"latin1.ex" => "def caf" <> <<0xE9>> <> ", do: :ok\n"})
+
+    diff = Diff.build(repo, base, head)
+
+    assert diff.files == [{"latin1.ex", 1, 0}]
+    assert diff.bytes < 512 * 1024
+    refute diff.text
+    refute diff.inline
+    # The map of the change survives; only the patch gives way.
+    assert [%{path: "latin1.ex", lines: nil}] = Diff.files(diff)
+
+    drawn = render_component(&Diff.section/1, diff: diff)
+    assert String.valid?(drawn)
+    assert drawn =~ "not valid UTF-8"
+    assert drawn =~ "latin1.ex"
+  end
+
+  # A *name* that is not text, which the patch guard does not reach: the file table is drawn
+  # from `--numstat` whether or not the patch is, so withholding the patch left the filename
+  # going out raw on all four surfaces that draw a change. A path is made printable rather than
+  # withheld, because a change whose file list is missing is not a map of anything.
+  # A patch naming such a file is never text, since the name is in it — so this is the one case
+  # where both guards fire, and the path's is what keeps the file list readable.
+  test "a path that is not valid UTF-8 is drawn escaped, on both drawings" do
+    {repo, base, head} = change(%{("caf" <> <<0xE9>> <> ".ex") => "def ok, do: :ok\n"})
+
+    diff = Diff.build(repo, base, head)
+
+    escaped = ~s("caf\\351.ex")
+
+    assert diff.files == [{escaped, 1, 0}]
+    # The patch carries the raw name too, so it is not text either and is not drawn — but the
+    # file table is drawn from `--numstat` regardless, which is why the path needed its own
+    # answer rather than the patch guard's.
+    refute diff.text
+    assert [%{path: ^escaped, lines: nil}] = Diff.files(diff)
+
+    for drawn <- [
+          render_component(&Diff.section/1, diff: diff),
+          render_component(&Diff.file_table/1, diff: diff)
+        ] do
+      assert String.valid?(drawn)
+      assert drawn =~ ~s(caf\\351.ex)
+    end
+  end
+
+  # A name git has to quote even with `core.quotePath=false`, in a patch that is otherwise
+  # perfectly good text. This is what makes the printable form load-bearing in two places at
+  # once: `--numstat` names the row and the `+++` line keys the patch, and if only one of them
+  # is made printable the row stops finding its own patch and silently never expands.
+  test "a row whose name git quotes still finds its own patch" do
+    {repo, base, head} = change(%{"nl\nhere.ex" => "def ok, do: :ok\n"})
+
+    diff = Diff.build(repo, base, head)
+
+    # Quoted on both sides and the patch is still text, so unlike the latin-1 case it is drawn.
+    assert diff.text
+    assert diff.inline
+    assert [{~s("nl\\nhere.ex"), 1, 0}] = diff.files
+
+    assert [%{path: ~s("nl\\nhere.ex"), lines: lines}] = Diff.files(diff)
+    assert {:line, "+def ok, do: :ok"} in lines
   end
 
   # And the other way round: one file, well under the file limit, whose patch is past the byte

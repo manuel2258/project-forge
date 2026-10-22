@@ -264,31 +264,42 @@ parents are the old ticket head and the default branch head.
 
 **A conflict still open when the run ends is not squashed.** `reset --soft` refuses on
 `is_merge() || unmerged_cache()` (git's `builtin/reset.c`), so the squash settles the tree before
-it resets, and it asks both halves: `MERGE_HEAD`, and whether the index has an unmerged entry — a
-conflicted cherry-pick, rebase or revert has no `MERGE_HEAD` and dies on the reset just the same.
-Before this the squash died there with a bare git error, the run's work unpushed and nothing but a
+it resets and asks both halves — and the sequencer's heads with them, because a conflicted
+cherry-pick, rebase or revert has no `MERGE_HEAD` and dies on the reset just the same. Before
+this the squash died there with a bare git error, the run's work unpushed and nothing but a
 machine-local line to say so (ticket 11).
 
-**Resolved is judged on the content, not on the index.** `git add` on a conflicted path clears its
-stages without resolving anything, so an index with nothing unmerged says only that the agent
-staged something — and committing that put `<<<<<<< HEAD` on the branch *as the merge's
-resolution*, second parent and all, which is the loss this exists to stop made permanent. So the
-question is git's own detector, `diff --check`, over everything the run would commit: a leftover
-conflict marker, staged or not, is an unresolved conflict. The converse is why it is the right
-question — a resolution edited and not staged is a resolution, and the squash does `add -A`
-anyway, so refusing one would throw away the whole run for a `git add` nothing here teaches. The
-cost is a false positive: a line that looks like a marker at column zero in a file the run touched
-refuses the run and names the file. That is loud and recoverable; a wrong resolution on the branch
-is neither.
+**An unresolved conflict is one the index still holds both sides of.** That is git's own record,
+it is what the reset refuses on, and it is the only question with an answer for every path:
+resolving means editing *and* `git add`, which is what `git status` tells the agent to do.
+**An edit left unstaged is not a resolution here**, and that is a decision. Judging the content
+instead needs a model the operation does not have wherever git will not show a path as text — a
+binary conflict, where git writes no marker, leaves *ours* on disk and nothing but `git add` can
+say the agent chose; a path carrying `-diff` or `binary`, where every text-only reader skips
+exactly the file the markers are in. The cost is a run refused for a `git add` it did not do, and
+the tree is left untouched, so a conversation's next turn can stage it.
 
-Resolved, then: the resolution is staged, a merge is committed — `git commit --no-edit`, which is
-also what makes the second parent above findable — and the squash carries on. Unresolved: nothing
-is staged, committed or pushed, the tree and `MERGE_HEAD` are left exactly as the run left them,
-and the run fails with `{:merge_unresolved, paths}`. **Leaving the tree is worth something only to
-a conversation**, which keeps its worktree from turn to turn and can finish the merge in the next
-one; a workflow job's next attempt clones or resets to the branch head (`Checkout.ensure/1`) and
-the conflict is gone with the tree. What it is worth to both is the reason: the paths, in the
-ticket's error or in the chat, rather than a git error about a soft reset.
+**A tree still carrying conflict markers is refused too, while any operation is open.** `git add`
+on a conflicted path clears the index's record without resolving anything, so staging the markers
+and stopping — the commonest reflex there is — would otherwise commit `<<<<<<< HEAD` *as the
+merge's resolution*, second parent and all, which is the loss this exists to stop made permanent.
+The question is `git grep` over the worktree and its untracked files, which is what `add -A` will
+stage: **all three of git's markers in one file**, because a single line of seven `=` is a
+Markdown heading underline and refusing a run for one would lose a turn's work over a file nothing
+conflicted in. Read with `-a`, so an attribute cannot hide the file, and asked only while an
+operation is open, so a repository whose own notes show a conflict is asked about it exactly when
+it is resolving one.
+
+Resolved, then: the index is staged whole, a merge — and only a merge — is committed with
+`git commit --no-edit`, which is also what makes the second parent above findable, and the squash
+carries on. The sequencer's three have no second parent to keep, so an index with nothing unmerged
+in it is all they need; their own state is the agent's business. Unresolved: nothing is staged,
+committed or pushed, the tree is left exactly as the run left it, and the run fails with
+`{:merge_unresolved, paths}`. **Leaving the tree is worth something only to a conversation**,
+which keeps its worktree from turn to turn; a workflow job's next attempt clones or resets to the
+branch head (`Checkout.ensure/1`) and the conflict goes with the tree. What it is worth to both is
+the reason: the paths, in the ticket's error or in the chat, rather than a git error about a soft
+reset.
 
 The rewrite is also visible: the hook prints a note on stderr, and `git http-backend` relays a
 hook's stderr to the *pushing client* over the smart-HTTP sideband — the "remote: " lines a git

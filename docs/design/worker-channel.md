@@ -485,9 +485,9 @@ with, in between, no managed machine to run anything (`docs/deploy.md` § Upgrad
 0–3 is refused at its join, and a managed one is destroyed there (above); a template whose snapshot
 is labelled older makes no machine until it names another, and one whose snapshot is unlabelled
 makes one, which is refused and marks the image (below). What the floor leaves with nothing to decide is still in the
-code: `Forge.Jobs.protocol/1`'s per-kind protocols (2 for a command, 3 for an agent), and the
-templates page's word for a snapshot that cannot run an agent — every worker it accepts can run
-those. **The protocol dimension of `Workers.fits?/2` and the scheduler's demand decides something
+code: `Forge.Jobs.protocol/1`'s per-kind protocols (2 for a command, 3 for a workflow job), and
+the templates page's word for a snapshot that cannot run an agent. Every worker the floor accepts
+can run those two; a conversation is the kind that now asks for more (protocol 7, below). **The protocol dimension of `Workers.fits?/2` and the scheduler's demand decides something
 again** since protocol 5: an integrating job needs it, a job that names a secret needs 6, and a
 protocol 4 worker is still accepted, so the gate is what keeps such a job off it (above).
 
@@ -740,9 +740,9 @@ already has the framework for.
 
 - **What the protocol floor left behind** (§ What needs a bump, and raising the minimum). With
   every accepted worker at protocol 4 or later, `Forge.Jobs.protocol/1`'s numbers for a command and
-  an agent decide nothing; the protocol dimension of `Workers.fits?/2` and the scheduler's demand
-  stay, because an integrating job needs protocol 5, a job that names a secret needs 6, and the
-  floor is still 4; the workers
+  a workflow job decide nothing; the protocol dimension of `Workers.fits?/2` and the scheduler's
+  demand stay, because an integrating job needs protocol 5, a job that names a secret needs 6, a
+  conversation needs 7, and the floor is still 4; the workers
   page's *no stats — update it*, for a connected machine that spoke no protocol, can no longer be
   drawn; and `Provisioning.holds?/2` still asks only whether a template's image is new enough for
   the job, not whether this platform accepts it, so a project with a small template labelled 3 and

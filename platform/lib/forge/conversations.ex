@@ -815,16 +815,17 @@ defmodule Forge.Conversations do
   @doc """
   The conversation as a person reads it: what each side *said*.
 
-  A turn that only acted and said nothing is left out. It is in `transcript/1`, which is what the
-  page draws; the readers of this one — the queue, the replay a reopened process reads, the
-  push — are asking what was said, and a turn that said nothing said nothing.
+  A turn that only acted and said nothing is left out, and so is every `:notice`, which is the
+  platform's own line and nobody's words. Both are in `transcript/1`, which is what the page
+  draws; the readers of this one — the queue, the replay a reopened process reads, the push — are
+  asking what was said, and a turn that said nothing said nothing.
   """
   @spec messages(String.t()) :: [message()]
   def messages(job_id), do: job_id |> transcript() |> said()
 
   @doc """
-  A transcript without the turns that said nothing: what `messages/1` is, for a caller that
-  already has the transcript. The page asks whether a conversation waits on its person from
+  A transcript without the turns that said nothing and without the platform's own lines: what
+  `messages/1` is, for a caller that already has the transcript. The page asks whether a conversation waits on its person from
   this, which is what the queue asks it from.
   """
   @spec said([message()]) :: [message()]
@@ -960,14 +961,17 @@ defmodule Forge.Conversations do
     end
   end
 
-  # The merge case names the paths, because it is the one a person can do something about: the
-  # work is still on the machine and the next turn can finish the merge. Any other failure — a
+  # The merge case names the paths, because it is the one a person can do something about. What it
+  # does *not* say is that the work is safe: the tree is left as the run left it, so the next turn
+  # of this process commits it, and a conversation reopened on a fresh machine resets the tree and
+  # takes it (`Checkout.ensure/1` is not resuming then). A sentence promising otherwise would go
+  # stale in the transcript where nobody could correct it. Any other failure — a
   # credential refused, a hook, the platform unreachable — is the plain sentence: the turn did not
   # reach the branch, which is the part its person needs either way.
   defp uncommitted(%{"reason" => "merge_unresolved"} = reason) do
     "Nothing from this turn reached the branch: a conflict is unresolved" <>
       conflicted(reason["paths"]) <>
-      ". Its work is still on the machine, and resolving the conflict in the next turn commits it."
+      ". Ask for it to be resolved while this conversation is still on its machine."
   end
 
   defp uncommitted(%{}), do: "Nothing from this turn reached the branch."

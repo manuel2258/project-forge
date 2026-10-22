@@ -63,11 +63,7 @@ defmodule ForgeWeb.Transcript do
 
       <%!-- Neither side's: the platform saying this turn's work is not on the branch, which
             otherwise only the machine's log says (`docs/design/conversations.md` § Commits). --%>
-      <p
-        :if={message.role == :notice}
-        class="chat-uncommitted flex gap-2 text-sm/[1.55] text-warning"
-        data-said="forge"
-      >
+      <p :if={message.role == :notice} class="chat-uncommitted flex gap-2 text-sm/[1.55] text-warning">
         <span aria-hidden="true">⚠</span>
         <span>{message.text}</span>
       </p>

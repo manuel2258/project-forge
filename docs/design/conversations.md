@@ -206,11 +206,12 @@ next merge found the same conflict again, which a production chat resolved three
 (ticket 11). It widens nothing the chat may write — the token's scope is `refs/heads/chat/<id>`
 and the hook refuses the default branch from it, as from any job.
 
-**A turn that ends mid-conflict keeps its work and says so.** Resolved — judged on the content,
-not on what was staged (`git-hosting.md` § Non-fast-forward on a ticket branch) — the squash
-finishes the merge and the turn commits as usual. Still conflicted, nothing is committed or pushed
-and the tree is left as the agent left it, which for a conversation means the next turn can finish
-it: a chat keeps its worktree from turn to turn.
+**A turn that ends mid-conflict keeps its work and says so.** Resolved — staged, as git asks,
+and carrying no conflict marker (`git-hosting.md` § Non-fast-forward on a ticket branch) — the
+squash finishes the merge and the turn commits as usual. Still conflicted, nothing is committed or
+pushed and the tree is left as the agent left it, which for a conversation means the next turn can
+finish it: a chat keeps its worktree from turn to turn, until it is reopened on another machine,
+where the checkout resets the tree and the turn's work goes with it.
 
 **And the turn says so in the conversation.** Its report carries `uncommitted` — the kind of
 failure, and the conflicted paths for the one kind a person can act on — the `chat.turn` event
@@ -768,8 +769,9 @@ Two things it adds are this note's to state:
   **What was said and what was done are two readings of it.** `Conversations.transcript/1` is the
   whole sequence and is what the page draws, including a turn that has so far only acted — which
   is what a live line is. `Conversations.messages/1` is the same fold without the turns that said
-  nothing, because its readers — the queue, the replay a reopened process reads, the reply push —
-  are asking what was *said*: a turn that only acted is not a reply to wait on or to replay. Its
+  nothing and without the platform's own lines (§ Commits), because its readers — the queue, the
+  replay a reopened process reads, the reply push — are asking what was *said*: a turn that only
+  acted is not a reply to wait on or to replay, and a notice is nobody's words. Its
   `text` is the turn's text blocks with a blank line between each, where it used to be the blocks
   run together.
 - **The conversation's job is read on its own page, not the job page's.** The job page is a

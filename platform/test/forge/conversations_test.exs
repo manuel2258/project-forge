@@ -1002,6 +1002,23 @@ defmodule Forge.ConversationsTest do
       assert notice.text =~ "a conflict is unresolved in README.md"
     end
 
+    # Every path, read as a list a person can scan, and no promise that the work is safe: the
+    # tree only lasts as long as this machine does, and a sentence saying otherwise would sit in
+    # the transcript going stale.
+    test "names every conflicted path, and promises nothing about the work", %{chat: chat} do
+      text(chat, "Merging main.")
+
+      uncommitted_turn(chat, 1, %{
+        "reason" => "merge_unresolved",
+        "paths" => ["README.md", "lib/game.ex"]
+      })
+
+      assert [_said, _reply, notice] = Conversations.transcript(chat.id)
+      assert notice.text =~ "unresolved in README.md, lib/game.ex."
+      assert notice.text =~ "while this conversation is still on its machine"
+      refute notice.text =~ "commits it"
+    end
+
     # Once, for a turn a message sent in the middle of it split in two: both halves are the same
     # turn, and two warnings for one turn read as two failures.
     test "is drawn once for a turn split by a message", %{chat: chat} do

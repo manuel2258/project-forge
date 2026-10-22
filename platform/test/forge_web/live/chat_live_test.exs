@@ -64,8 +64,11 @@ defmodule ForgeWeb.ChatLiveTest do
     assert view |> element(".chat-uncommitted") |> render() =~ "Nothing from this turn reached"
 
     # Nobody's reply: it carries neither side's label, which is what `ui.md` § Talk says of a
-    # notice. Drawn as an assistant message it wore "agent · turn 1" over the platform's words.
-    refute view |> element(".chat-uncommitted") |> render() =~ "agent"
+    # notice. Asserted on the whole entry and not on the line, because the label is the entry's
+    # sibling — scoped to the line, the assertion could not see a label however it was drawn.
+    assert render(element(view, "#said-1")) =~ "agent"
+    refute render(element(view, "#said-2")) =~ "agent"
+    assert render(element(view, "#said-2")) =~ "Nothing from this turn reached"
   end
 
   test "it shows what was said, and where it is", %{conn: conn, chat: chat, project: project} do

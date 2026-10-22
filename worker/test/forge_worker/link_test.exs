@@ -4080,7 +4080,7 @@ defmodule ForgeWorker.LinkTest do
 
       {%{"turn" => 2}, _} = take_push("turn")
 
-      # Pushing moves the remote-tracking ref that `Checkout.squash/4` resets to, so turn two
+      # Pushing moves the remote-tracking ref that `Checkout.squash/5` resets to, so turn two
       # is built on turn one rather than replacing it. Both turns' work is on the branch.
       branch = "refs/heads/chat/" <> job_id
       files = git!(nil, ["-C", origin, "ls-tree", "--name-only", branch])

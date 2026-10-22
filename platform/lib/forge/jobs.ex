@@ -688,12 +688,12 @@ defmodule Forge.Jobs do
   @doc """
   The worker protocol a job needs, or 0 for any.
 
-  - **An agent — a workflow job or a conversation — needs protocol 3.** Its questions are a
-    headline and a sentence, and the release that composes its prompt and corrects its outputs is
-    what teaches and checks that. A release from before it teaches `options: [a, b]` and
-    `default:`, which this platform's parser refuses when it records the document — so the job's
-    result could never be recorded, and a chat's question would reach the page as prose
-    (`docs/design/job-prompt.md` § Output format).
+  - **A workflow job needs protocol 3**, and so would a conversation but for its own floor below.
+    Its questions are a headline and a sentence, and the release that composes its prompt and
+    corrects its outputs is what teaches and checks that. A release from before it teaches
+    `options: [a, b]` and `default:`, which this platform's parser refuses when it records the
+    document — so the job's result could never be recorded, and a chat's question would reach the
+    page as prose (`docs/design/job-prompt.md` § Output format).
   - **A command needs protocol 2**, which commands and groups of files arrived in: a release from
     before them would run a command's spec as an agent job's (`docs/design/commands.md`
     § Worker pools). Its output is a script's, not an agent's, so the questions change asks

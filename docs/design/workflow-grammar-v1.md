@@ -861,6 +861,11 @@ is never produced; `answers.md` is platform-managed and never declared.
   that rule and refused by name, so the message says which it is rather than "not produced here".
   `commit-message` is refused **by name even though it passes that rule** — it is one of the
   state's own produced documents — because a merge has nothing to say without it.
+- **A state declaring a choice of outcomes may not have `commit-message` first in `produces`.**
+  The outcome document is the first document there, and this one is a plain git message with no
+  front matter to choose in: the choice could never be made, every job would read `done`, and the
+  state's other edges would be dead. It is a question of order, which is why `.forge/common.yml`
+  keeps `presentation.md!` ahead of it.
 - **A state declaring outcomes other than `done` may not make its outcome document optional.**
   An absent document is `done` and can be nothing else, so excusing the document the choice is
   written in is a way to take the `done` edge by writing nothing — and where `done` is not among

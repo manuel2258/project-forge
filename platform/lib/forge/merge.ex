@@ -499,10 +499,10 @@ defmodule Forge.Merge do
     end
   end
 
-  # Front matter is not part of the message. By convention a `commit-message` carries none — the
-  # prompts say to write a plain git message, and it is never the document a job's outcome is read
-  # from — but it is parsed like every other document, so one written anyway would otherwise reach
-  # the commit as `---` lines.
+  # Front matter is not part of the message. A `commit-message` carries none — the prompts ask for
+  # a plain git message, and a state may not make it the document its outcome is read from
+  # (`ForgeCore.Workflow.Validator`, § Validation) — but it is parsed like every other document,
+  # so one written anyway would otherwise reach the commit as `---` lines.
   defp body_of(text) do
     case Document.parse(text) do
       {:ok, document} -> document.body

@@ -920,6 +920,23 @@ defmodule ForgeCore.Workflow.ParserTest do
              )
     end
 
+    # `commit-message` is specified to carry no front matter, so a state that declares a choice of
+    # outcomes and puts it first in `produces` has made that choice unmakeable: every job reads
+    # `done`, and `plan_invalid` here could never be taken. It is the order that does it.
+    test "the commit message cannot be the document a choice of outcomes is made in", %{map: map} do
+      map =
+        put_in(
+          map,
+          ["states", "implementing", "produces"],
+          ["commit-message", "implementation.md", "changeset"]
+        )
+
+      assert {"states.implementing.outcomes",
+              "declaring outcomes other than done requires a document that can carry one: " <>
+                "commit-message is a plain git message with no front matter, and is first in " <>
+                "produces"} in messages(map)
+    end
+
     # The second half of the same rule: a merge that cannot say anything is as broken as one with
     # nothing to merge, and it is caught here rather than at the merge (§ Validation).
     test "merging needs a state that produces the commit message", %{map: map} do

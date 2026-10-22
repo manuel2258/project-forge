@@ -831,6 +831,16 @@ defmodule ForgeCore.Workflow.Validator do
       declared != [Workflow.default_outcome()] and document != nil and
         State.optional?(state, document)
 
+    # **And not the one document specified to carry no front matter.** `commit-message` is a
+    # plain git message — the prompts ask for one and the merge writes it verbatim — so a state
+    # whose outcome document is that one has declared a choice it can never make: every job would
+    # read `done` out of a message with no front matter, and the state's other edges would be
+    # dead. `State.outcome_document/1` is the *first* document in `produces`, so this is a
+    # question of order, which is why `.forge/common.yml` keeps `presentation.md!` ahead of it.
+    message_document =
+      declared != [Workflow.default_outcome()] and
+        document == Workflow.commit_message_artifact()
+
     List.flatten([
       if(declared == [], do: Error.new(path, "must not be empty"), else: []),
       Enum.map(
@@ -852,6 +862,16 @@ defmodule ForgeCore.Workflow.Validator do
             path,
             "declaring outcomes other than done requires the document that carries the " <>
               "outcome: #{inspect(document)} is optional, and an outcome nobody wrote is done"
+          ),
+        else: []
+      ),
+      if(message_document,
+        do:
+          Error.new(
+            path,
+            "declaring outcomes other than done requires a document that can carry one: " <>
+              "#{Workflow.commit_message_artifact()} is a plain git message with no front " <>
+              "matter, and is first in produces"
           ),
         else: []
       )

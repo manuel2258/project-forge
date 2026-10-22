@@ -209,9 +209,19 @@ and the hook refuses the default branch from it, as from any job.
 **A turn that ends mid-conflict keeps its work and says so.** Resolved — staged, as git asks,
 and carrying no conflict marker (`git-hosting.md` § Non-fast-forward on a ticket branch) — the
 squash finishes the merge and the turn commits as usual. Still conflicted, nothing is committed or
-pushed and the tree is left as the agent left it, which for a conversation means the next turn can
-finish it: a chat keeps its worktree from turn to turn, until it is reopened on another machine,
-where the checkout resets the tree and the turn's work goes with it.
+pushed and the tree is left as the agent left it, which for a conversation means the next turn of
+*this* process can finish it: a chat keeps its worktree from turn to turn while it runs. A reopen
+does not inherit it — a cold start resets the worktree to the branch head and removes what is not
+tracked (`Checkout.ensure/1` resumes only an interrupted run), and on another machine there is no
+worktree to inherit at all — so the turn's work goes with the conflict then.
+
+**What nothing tells the agent is that it has to stage.** Resolving means editing *and*
+`git add`; an integrating job's manifest says so (`job-prompt.md` § Integrating the default
+branch), and a conversation's prompt does not — a chat merges on its own initiative, and nothing
+reaches its agent about a turn that failed to commit (§ Open). So an agent that edited the files
+and stopped believes it resolved the conflict, and the turn is refused again. The person is the
+one told, and what they have to say is *stage it* — which is the gap the proposal on telling the
+agent is about.
 
 **And the turn says so in the conversation.** Its report carries `uncommitted` — the kind of
 failure, and the conflicted paths for the one kind a person can act on — the `chat.turn` event

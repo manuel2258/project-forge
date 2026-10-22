@@ -60,7 +60,7 @@ defmodule ForgeCore.WorkerProtocol do
 
   def recordable?(_protocol), do: false
 
-  @doc "The accepted range as the product says it, `minimum–current`: today `4–7`."
+  @doc "The accepted range as the product says it: `minimum–current`."
   @spec range() :: String.t()
   def range, do: "#{@minimum}–#{@current}"
 end

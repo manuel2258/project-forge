@@ -62,7 +62,8 @@ defmodule ForgeWeb.Transcript do
       />
 
       <%!-- Neither side's: the platform saying this turn's work is not on the branch, which
-            otherwise only the machine's log says (`docs/design/conversations.md` § Commits). --%>
+            otherwise only the machine's log says (`docs/design/conversations.md` § Commits).
+            `chat-uncommitted` carries no styling — it is how a test names this line. --%>
       <p :if={message.role == :notice} class="chat-uncommitted flex gap-2 text-sm/[1.55] text-warning">
         <span aria-hidden="true">⚠</span>
         <span>{message.text}</span>

@@ -152,7 +152,7 @@ Worker → platform:
 | `stats` | `cpu`, `memory_used`, `memory_total`, `disk_used`, `disk_total`, each only when readable | no |
 | `log` | `at`, `type`, `level`, `message`, and `job_id` on a line about a job | no |
 | `event` | `job_id`, normalised harness event | no |
-| `turn` | `job_id`, turn index, commit, the turn's proposals and documents, and a harness summary carrying its cost | yes |
+| `turn` | `job_id`, turn index, commit, `uncommitted` (why there is no commit, when there is none), the turn's proposals and documents, and a harness summary carrying its cost | yes |
 | `result` | `job_id`, `ForgeCore.Job.Result` as JSON — `status` `parked` for an agent that invoked commands, with the invocations and the commit it pushed; a command's with its exit status, duration and log key; either's `blobs` (name → key and size) and `invalid_blobs` (name → why) for its groups of files | yes |
 | `hibernated` | `job_id`, commit sha, reason, the result as far as it got; a chat adds its turn count | yes |
 | `failed` | `job_id`, reason | yes |
@@ -487,9 +487,11 @@ is labelled older makes no machine until it names another, and one whose snapsho
 makes one, which is refused and marks the image (below). What the floor leaves with nothing to decide is still in the
 code: `Forge.Jobs.protocol/1`'s per-kind protocols (2 for a command, 3 for a workflow job), and
 the templates page's word for a snapshot that cannot run an agent. Every worker the floor accepts
-can run those two; a conversation is the kind that now asks for more (protocol 7, below). **The protocol dimension of `Workers.fits?/2` and the scheduler's demand decides something
-again** since protocol 5: an integrating job needs it, a job that names a secret needs 6, and a
-protocol 4 worker is still accepted, so the gate is what keeps such a job off it (above).
+can run those two; a conversation is the kind that now asks for more (protocol 7, below).
+**The protocol dimension of `Workers.fits?/2` and the scheduler's demand decides something
+again** since protocol 5: an integrating job needs it, a job that names a secret needs 6, a
+conversation needs 7, and a protocol 4 worker is still accepted, so the gate is what keeps such a
+job off it (above).
 
 **Protocol 6 is project secrets** (`docs/design/secrets.md` § Delivery): `secrets` on an
 assignment, sealed under a purpose. It is a bump because ignoring it is wrong, not less: an older

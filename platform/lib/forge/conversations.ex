@@ -825,8 +825,8 @@ defmodule Forge.Conversations do
 
   @doc """
   A transcript without the turns that said nothing and without the platform's own lines: what
-  `messages/1` is, for a caller that already has the transcript. The page asks whether a conversation waits on its person from
-  this, which is what the queue asks it from.
+  `messages/1` is, for a caller that already has the transcript. The page asks whether a
+  conversation waits on its person from this, which is what the queue asks it from.
   """
   @spec said([message()]) :: [message()]
   def said(transcript), do: Enum.reject(transcript, &silent?/1)

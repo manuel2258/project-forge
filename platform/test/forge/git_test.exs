@@ -23,6 +23,55 @@ defmodule Forge.GitTest do
     assert {:error, {:unknown_ref, "nope"}} = Git.resolve(repo, "nope")
   end
 
+  # What a caller asks before it reads: `show/3` captures the whole blob, so a bounded slice of an
+  # unbounded file has to be refusable before the bytes are in memory (`ForgeWeb.ReviewLive`).
+  test "blob_size/3 answers a blob's size without reading it", %{repo: repo} do
+    {:ok, sha} = Git.resolve(repo, "main")
+    {:ok, content} = Git.show(repo, sha, ".forge/workflow.yml")
+
+    assert {:ok, byte_size(content)} == Git.blob_size(repo, sha, ".forge/workflow.yml")
+    assert {:error, :not_found} = Git.blob_size(repo, sha, ".forge/missing.yml")
+    assert {:error, :not_found} = Git.blob_size(repo, String.duplicate("b", 40), "x")
+  end
+
+  # **A size and a content of different things is no bound at all.** `cat-file -s` reports the
+  # size of whatever object a path resolves to; `show/3` prints that object. For a `160000`
+  # entry — a gitlink, which an agent can commit on its own branch with `update-index
+  # --cacheinfo`, since the push hook guards refs and not tree content — those disagree by orders
+  # of magnitude: the commit object is a hundred-odd bytes and `show` prints the commit with its
+  # whole diff. So the type is asked first and anything but a blob is `:not_found`.
+  test "blob_size/3 refuses a path that is not a blob", %{repo: repo, scratch: scratch} do
+    {:ok, base} = Git.resolve(repo, "main")
+    :ok = Git.create_branch(repo, "gitlink", base)
+    worktree = Path.join(scratch, "gl")
+    :ok = Git.worktree_add(repo, worktree, "gitlink")
+
+    {:ok, _} = Git.run(worktree, ["update-index", "--add", "--cacheinfo", "160000,#{base},sub"])
+
+    {:ok, _} =
+      Git.run(worktree, [
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@forge",
+        "commit",
+        "-q",
+        "-m",
+        "gitlink"
+      ])
+
+    {:ok, head} = Git.resolve(repo, "gitlink")
+
+    # git answers for it, and the two answers are about different objects: this is the bypass.
+    assert {:ok, shown} = Git.show(repo, head, "sub")
+    assert shown != ""
+    assert {:error, :not_found} = Git.blob_size(repo, head, "sub")
+
+    # And a directory, whose tree has a size too.
+    assert {:ok, _listing} = Git.show(repo, head, ".forge")
+    assert {:error, :not_found} = Git.blob_size(repo, head, ".forge")
+  end
+
   test "branches, worktrees, commits and diffs round-trip", %{repo: repo, scratch: scratch} do
     {:ok, base} = Git.resolve(repo, "main")
     assert :ok = Git.create_branch(repo, "ticket/1", base)

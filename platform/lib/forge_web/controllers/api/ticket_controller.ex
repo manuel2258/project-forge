@@ -98,9 +98,9 @@ defmodule ForgeWeb.Api.TicketController do
   end
 
   @doc """
-  The merge decision as data: the diff, the documents the change was built from, the questions
-  answered and the total cost. The same material the review page draws, because the API is the
-  product surface and the page is one client of it.
+  The merge decision as data: the diff, the documents the change was built from, the presentations
+  an agent wrote about it, the questions answered and the total cost. The same material the review
+  page draws, because the API is the product surface and the page is one client of it.
   """
   def review(conn, _params) do
     %{ticket: ticket, project: project} = conn.assigns

@@ -99,9 +99,10 @@ Only one of them is the operator's.
 
 **The first row is the workflow's, not the engine's.** What happens to a job that ran out is an
 edge in the definition: a self-retry where one is declared, and otherwise wherever
-`when: budget_exhausted` points — forge's own `reviewing` sends it on to `review_ready`, because a
-review that spent its budget on subagents learns nothing from being run again from scratch and a
-person should read whatever report it left. Where the workflow declares no edge at all the ticket
+`when: budget_exhausted` points — forge's own `reviewing` sends it on towards `review_ready`,
+because a review that spent its budget on subagents learns nothing from being run again from
+scratch and a person should read whatever report it left. (It goes by way of `presenting`, which
+every route to `review_ready` takes; that is `ui.md` § Changes, not this note.) Where the workflow declares no edge at all the ticket
 sticks and enters the queue, which is the second row's treatment reached by another road.
 
 **`budget_exhausted` names its ceiling.** The outcome says a job ran out; which of the three

@@ -14,6 +14,7 @@ defmodule ForgeCore.Workflow.Validator do
       names(workflow),
       initial(workflow),
       state_shapes(workflow),
+      optional_outputs(workflow),
       entry_actions(workflow),
       conflict_targets(workflow),
       artifact_names(workflow),
@@ -43,7 +44,7 @@ defmodule ForgeCore.Workflow.Validator do
 
       artifact_errors =
         (state.inputs ++ state.produces)
-        |> Enum.map(&Workflow.group_name/1)
+        |> Enum.map(&Workflow.produced_name/1)
         |> Enum.reject(&valid_name?/1)
         |> Enum.uniq()
         |> Enum.map(
@@ -101,6 +102,7 @@ defmodule ForgeCore.Workflow.Validator do
         model: command.model,
         inputs: command.inputs,
         produces: command.produces,
+        optional: command.optional,
         outcomes: command.outcomes,
         budget: command.budget,
         may_invoke: command.may_invoke,
@@ -125,11 +127,12 @@ defmodule ForgeCore.Workflow.Validator do
   # a state (`docs/design/workflow-grammar-v1.md` § Semantics).
   defp state_shape(path, %State{prompt: nil} = human) do
     changeset =
-      if Enum.any?(human.produces, &(not Workflow.document?(&1))),
+      if Enum.any?(human.produces, &(not Workflow.document?(&1) or Workflow.presentation?(&1))),
         do: [
           Error.new(
             Error.join(path, "produces"),
-            "a human state writes documents, not #{Workflow.changeset_artifact()} or groups of files"
+            "a human state writes documents, not #{Workflow.changeset_artifact()}, " <>
+              "groups of files or presentations"
           )
         ],
         else: []
@@ -139,6 +142,9 @@ defmodule ForgeCore.Workflow.Validator do
         env: human.env,
         model: human.model,
         inputs: human.inputs,
+        # Nothing obliges a person to write a human state's documents, so every one of them is
+        # already optional and saying so declares nothing.
+        optional: human.optional,
         outcomes: human.outcomes,
         budget: human.budget,
         # Nothing runs, so there is nothing to size — and a declaration nothing reads is one the
@@ -349,6 +355,13 @@ defmodule ForgeCore.Workflow.Validator do
     end)
   end
 
+  # Whether `name` is a presentation, either way round: the entry carries the marker, or it names
+  # the artifact a presentation elsewhere in the workflow is recorded under. Without the first,
+  # `inputs: [deck.md!]` and `approve: [deck.md!]` would both find their producer by name and read
+  # as perfectly ordinary ones.
+  defp presents?(workflow, name),
+    do: Workflow.presentation?(name) or Workflow.producers(workflow, name <> "!") != []
+
   defp input_error(workflow, producers_before, path, name, index) do
     producers = Workflow.producers(workflow, name)
 
@@ -361,6 +374,14 @@ defmodule ForgeCore.Workflow.Validator do
 
       reserved = Workflow.reserved_name_error(name) ->
         Error.new(Error.join(path, index), reserved)
+
+      # After the two above, so a reserved name is refused for being reserved rather than for a
+      # presentation someone declared under it: `produce_error/4` orders them the same way.
+      presents?(workflow, name) ->
+        Error.new(
+          Error.join(path, index),
+          "#{inspect(Workflow.produced_name(name))} is a presentation and cannot be an input"
+        )
 
       name == Workflow.ticket_artifact() ->
         nil
@@ -402,6 +423,9 @@ defmodule ForgeCore.Workflow.Validator do
     cond do
       Workflow.group?(name) ->
         group_error(workflow, Error.join(path, index), name, producers)
+
+      Workflow.presentation?(name) ->
+        presentation_error(workflow, Error.join(path, index), name, producers)
 
       name in [Workflow.ticket_artifact(), Workflow.answers_artifact()] ->
         Error.new(Error.join(path, index), "#{inspect(name)} is reserved and cannot be produced")
@@ -450,8 +474,97 @@ defmodule ForgeCore.Workflow.Validator do
     end
   end
 
+  # A presentation is one artifact under one kind, so the name it is recorded under may not also be
+  # something's document — a state's or a command's log — nor a group of files, a state's or a
+  # command's, and it is one job state's (`docs/design/workflow-grammar-v1.md` § Validation). Every
+  # collision is checked from here and only from here: the pass sees the whole workflow, so the
+  # order the two were declared in makes no difference to the answer, and the other side cannot
+  # see this one — `command_outputs_errors/4` matches `deck.md` and `deck.md/*`, neither of which
+  # is the declaration `deck.md!`.
+  #
+  # The order of the branches is what the message says when more than one is true, and is
+  # asserted: a collision is reported as the collision it is, nearest first.
+  defp presentation_error(workflow, path, declared, producers) do
+    name = Workflow.presentation_name(declared)
+
+    cond do
+      reserved = Workflow.document_name_error(name) ->
+        Error.new(path, reserved)
+
+      Workflow.producers(workflow, name) != [] ->
+        Error.new(path, "#{inspect(name)} is also produced as a document")
+
+      Workflow.producers(workflow, name <> "/*") != [] ->
+        Error.new(path, "#{inspect(name)} is also produced as a group of files")
+
+      command_producing(workflow, name <> "/*") != [] ->
+        Error.new(path, "#{inspect(name)} is also produced as a group of files by a command")
+
+      command = Workflow.log_producer(workflow, name) ->
+        Error.new(path, "#{inspect(name)} is also produced by command #{inspect(command)}")
+
+      length(producers) > 1 ->
+        Error.new(
+          path,
+          "#{inspect(declared)} is produced by more than one state: #{Enum.join(Enum.sort(producers), ", ")}"
+        )
+
+      true ->
+        nil
+    end
+  end
+
   defp command_producing(%Workflow{commands: commands}, group) do
     for {name, command} <- commands, group in command.outputs, do: name
+  end
+
+  # -- optional outputs ---------------------------------------------------------------------
+
+  # `docs/design/workflow-grammar-v1.md` § Semantics: a job state's `optional` names its own
+  # produced documents, by the artifact's name and not the declaration's. Checked here rather
+  # than in `produce_error/4` because the entry is not a `produces` entry: it points at one.
+  defp optional_outputs(%Workflow{states: states}) do
+    Enum.flat_map(states, fn {name, state} ->
+      path = Error.join(Error.join("states", name), "optional")
+
+      documents =
+        for entry <- state.produces, Workflow.document?(entry), do: Workflow.produced_name(entry)
+
+      repeated = state.optional -- Enum.uniq(state.optional)
+
+      state.optional
+      |> Enum.with_index()
+      |> Enum.flat_map(&optional_entry(&1, path, state, documents, repeated))
+    end)
+  end
+
+  defp optional_entry({entry, index}, path, state, documents, repeated) do
+    case optional_error(state, entry, documents, repeated) do
+      nil -> []
+      message -> [Error.new(Error.join(path, index), message)]
+    end
+  end
+
+  defp optional_error(state, entry, documents, repeated) do
+    cond do
+      not valid_name?(entry) ->
+        "must be a single path segment: " <> Workflow.name_rule()
+
+      entry in repeated ->
+        "#{inspect(entry)} is listed twice"
+
+      entry in documents ->
+        nil
+
+      entry == Workflow.changeset_artifact() and entry in state.produces ->
+        "#{Workflow.changeset_artifact()} is the diff of the job's commits and cannot be optional"
+
+      Enum.any?(state.produces, &(Workflow.group?(&1) and Workflow.group_name(&1) == entry)) ->
+        "#{inspect(entry)} is a group of files, which has no minimum and cannot be optional"
+
+      true ->
+        "#{inspect(entry)} is not a document this state produces"
+    end
   end
 
   # -- secrets ------------------------------------------------------------------------------
@@ -670,8 +783,19 @@ defmodule ForgeCore.Workflow.Validator do
     conflict = Enum.filter(declared, &(&1 == Workflow.merge_conflict_outcome()))
     duplicates = declared -- Enum.uniq(declared)
 
-    needs_document =
-      declared != [Workflow.default_outcome()] and State.outcome_document(state) == nil
+    document = State.outcome_document(state)
+    needs_document = declared != [Workflow.default_outcome()] and document == nil
+
+    # **And a document that was written.** An absent optional outcome document is `done` and can
+    # be nothing else — there is no front matter to choose with — so a state that declares a
+    # choice and excuses the document the choice is made in has given itself a way to take the
+    # `done` edge by writing nothing. Worse where `done` is not among the outcomes: the job
+    # converges on an outcome no transition can match, and the ticket sticks behind a job that
+    # succeeded. Beside the rule above because it is the same rule: an outcome other than `done`
+    # is chosen in a document, so there has to be one, and it has to be written.
+    unwritten_document =
+      declared != [Workflow.default_outcome()] and document != nil and
+        State.optional?(state, document)
 
     List.flatten([
       if(declared == [], do: Error.new(path, "must not be empty"), else: []),
@@ -686,6 +810,15 @@ defmodule ForgeCore.Workflow.Validator do
       ),
       if(needs_document,
         do: Error.new(path, "declaring outcomes other than done requires a document in produces"),
+        else: []
+      ),
+      if(unwritten_document,
+        do:
+          Error.new(
+            path,
+            "declaring outcomes other than done requires the document that carries the " <>
+              "outcome: #{inspect(document)} is optional, and an outcome nobody wrote is done"
+          ),
         else: []
       )
     ])
@@ -761,6 +894,9 @@ defmodule ForgeCore.Workflow.Validator do
       cond do
         Workflow.group?(artifact) ->
           [Error.new(at, "a group of files cannot be approved")]
+
+        presents?(workflow, artifact) ->
+          [Error.new(at, "a presentation carries no approval")]
 
         Enum.any?(Workflow.producers(workflow, artifact), &MapSet.member?(allowed, &1)) ->
           []

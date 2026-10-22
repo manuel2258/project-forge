@@ -574,6 +574,22 @@ which are best-effort.
 What changes for a node that is already running, where the change is in what the platform does
 with rows it already has. Newest first.
 
+- **A presentation and an optional output need protocol 7, and this project's own workflows use
+  both** (`design/workflow-grammar-v1.md` § Semantics, `design/worker-channel.md` § Versions).
+  Nothing is refused — the minimum stays 4 — but this entry is louder than the one below it:
+  secrets were opt-in per state, and `presenting` is on the **only** path to `review_ready` in
+  both `.forge/workflows/dev.yml` and `bug.yml`, so every new `dev` and `bug` ticket on this
+  project reaches a job that needs 7. **Build a snapshot from this release
+  (`bin/hetzner-image`) and point each template at it before admitting work**, and
+  `bin/worker-update` every permanent machine.
+
+  Until then: a template labelled with a lower protocol makes nothing for such a job and its
+  ticket sticks with *no worker template … runs a worker new enough for it*; an **unlabelled**
+  template is given the benefit of the doubt, makes one machine, learns what it speaks at its
+  join, and sticks from the next pass. Either way it is a *placement* stick, so pointing a
+  template at a new snapshot brings every stuck ticket back without re-admitting anything. A job
+  of any other state still runs on a protocol 4, 5 or 6 machine.
+
 - **Project secrets reach jobs, and a job naming any needs protocol 6**
   (`design/secrets.md` § Delivery, `design/worker-channel.md` § Versions). Nothing is refused: the
   minimum stays 4, and an older machine takes every job that names no secret, exactly as before.

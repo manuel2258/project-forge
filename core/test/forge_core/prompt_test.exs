@@ -155,6 +155,54 @@ defmodule ForgeCore.PromptTest do
                "- `shots/*` -> any number of files in `/j/out/shots/`, each kept as `shots/<file>`"
     end
 
+    # The marker is the declaration, so the manifest must name the path the agent actually writes
+    # and must not read as an ordinary document: nothing downstream consumes it, and the quoting
+    # convention is the only thing the review page needs from the prose
+    # (`docs/design/job-prompt.md` § Presentations).
+    test "a presentation is named by its real path, and said to be read by no later job" do
+      manifest = Prompt.manifest(%{spec() | produces: ["plan.md", "deck.md!"]}, "/j")
+
+      assert manifest =~ "- `deck.md` -> `/j/out/deck.md`: a presentation."
+      assert manifest =~ "read by no later job"
+      assert manifest =~ "`path:42-58`"
+      refute manifest =~ "deck.md!"
+      refute manifest =~ "- `deck.md` -> `/j/out/deck.md`\n"
+    end
+
+    # An agent told nothing about `optional` assumes what a declared output has always meant, and
+    # pads rather than finishing without one.
+    test "an optional output is named as one, and a required one is not" do
+      spec = %{spec() | produces: ["plan.md", "deck.md!"], optional: ["deck.md"]}
+      manifest = Prompt.manifest(spec, "/j")
+
+      assert manifest =~ "Optional: you may finish without writing it"
+      assert manifest =~ "`deck.md` -> `/j/out/deck.md`: a presentation."
+
+      [plan_line, deck_line] =
+        manifest |> String.split("\n") |> Enum.filter(&String.contains?(&1, "/j/out/"))
+
+      assert plan_line =~ "plan.md"
+      refute plan_line =~ "Optional"
+      assert deck_line =~ "Optional"
+    end
+
+    test "a required document says nothing about being optional" do
+      refute Prompt.manifest(spec(), "/j") =~ "Optional"
+    end
+
+    test "a presentation says where the path is from, and that the page draws a few" do
+      manifest = Prompt.manifest(%{spec() | produces: ["deck.md!"]}, "/j")
+
+      assert manifest =~ "the path from the repository root"
+      assert manifest =~ "A handful of quotes are drawn"
+    end
+
+    test "a presentation that is the only document says it carries the outcome" do
+      manifest = Prompt.manifest(%{spec() | produces: ["deck.md!", "changeset"]}, "/j")
+
+      assert manifest =~ "- `deck.md` -> `/j/out/deck.md` (carries the outcome): a presentation."
+    end
+
     test "a job that may not invoke is not told the file exists" do
       manifest = Prompt.manifest(spec(), "/j")
       refute manifest =~ "invoke.json"

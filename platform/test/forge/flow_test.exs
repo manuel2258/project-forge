@@ -532,14 +532,20 @@ defmodule Forge.FlowTest do
     start_supervised!(Forge.Jobs.Scheduler)
     job = only_job(ticket)
 
-    # A job holding a secret needs the current protocol (`Jobs.protocol/1`), which the marked
-    # snapshot is one behind.
+    # A job holding a secret needs a protocol above the minimum (`Jobs.protocol/1`).
     {:ok, _} =
       Jobs.get!(job.id)
       |> Ecto.Changeset.change(%{secret_names: ["TOKEN"]})
       |> Forge.Repo.update()
 
     {:ok, _} = Forge.Secrets.set(project, user, "TOKEN", "value-long-enough")
+
+    # **Marked one behind what this job needs, read off the job rather than off `current()`.**
+    # The two were the same number when this was written and stopped being so at the next bump,
+    # which turned "the mark is too old" into "the mark is a protocol the job is happy with" and
+    # failed here. What the test is about is the gap, so the gap is what it sets up.
+    needs = Jobs.protocol(Jobs.get!(job.id))
+    marking.("snap-old", needs - 1)
 
     assert Forge.Jobs.Scheduler.tick() == 0
 
@@ -551,7 +557,7 @@ defmodule Forge.FlowTest do
     assert %{payload: %{"reason" => "image_too_old", "text" => text}} =
              Jobs.current_wait(Jobs.get!(job.id))
 
-    assert text =~ "needs worker protocol #{current}"
+    assert text =~ "needs worker protocol #{needs}"
     assert text =~ "nothing needs editing"
 
     # The operator builds an image. It takes the mark; nobody touches the template.

@@ -1535,10 +1535,11 @@ defmodule Forge.ConversationsTest do
     end
 
     # **Finding 1 of round 4.** `ForgeCore.Engine.choose/4` counts its candidates straight off
-    # `transitions_from/2`, with no unversioned-artifact filter. So a target reached by two edges
-    # where one is filtered out is *still* refused `{:ambiguous, _}` — and marking it askable
-    # because only one survived would be a guard using a different model from the operation it
-    # guards, in the code written to tell the agent the truth about ambiguity.
+    # `transitions_from/2`, with no unversioned-artifact filter, so marking a target askable
+    # because only one edge survived the filter would be a guard using a different model from the
+    # operation it guards. The count is still over every declared edge for that reason; what
+    # ticket 13 changed underneath it is which of those counts the engine then refuses, which the
+    # last assertion records.
     test "a target stays unaskable when one of its two edges was filtered out", %{
       project: project
     } do
@@ -1561,8 +1562,14 @@ defmodule Forge.ConversationsTest do
 
       assert [%{"to" => "planning", "ambiguous" => true}] = spec["moving"]["transitions"]
 
-      # And the engine really does refuse it, which is what makes the marker honest.
-      assert {:error, {:ambiguous, _outcomes}} =
+      # **And the engine no longer refuses it, so the marker over-marks.** `Engine.choose/4` grew
+      # `default_among/1` in ticket 13 — landed before this test and never run against it — which
+      # takes the bare edge when one of several leads to the target. The marker above counts
+      # declared edges, so it still says unaskable. That is the safe direction (an agent is never
+      # told it may ask for something that would then be refused) but it is not what this test was
+      # written for, and the two cannot both be right. Asserted as it behaves, so that settling it
+      # either way fails here; `proposal-ambiguous-marker.md` is the question.
+      assert {:ok, %ForgeCore.Workflow.Transition{when: nil}} =
                ForgeCore.Engine.choose(Tickets.workflow(ticket), ticket.state, "planning")
     end
 

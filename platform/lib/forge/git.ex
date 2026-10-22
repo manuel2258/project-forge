@@ -143,6 +143,46 @@ defmodule Forge.Git do
     end
   end
 
+  @doc """
+  The size in bytes of the blob at `path` in `sha`, without reading it.
+
+  What `show/3` would return the length of, asked first: a caller that draws a bounded slice of a
+  file has to be able to refuse the file before it is in memory, and `show/3` captures all of it
+  (`ForgeWeb.ReviewLive`). `:not_found` where git can read no object there — a missing path, an
+  unknown sha.
+
+  **And `:not_found` for a path that is not a blob**, because the size and the content would then
+  be of different things. `cat-file -s` reports the size of whatever object the path resolves to:
+  a tree for a directory, and for a gitlink — a `160000` entry, which an agent can commit on its
+  own branch — the *commit* it names, whose size is a hundred-odd bytes while `show/3` prints the
+  commit with its whole diff. A caller that bounded a read by the first number and then took the
+  second would have no bound at all, which is the trap `CLAUDE.md` § Rules describes: the guard
+  has to use the same model as the operation it guards.
+  """
+  @spec blob_size(repo(), sha(), String.t()) :: {:ok, non_neg_integer()} | {:error, :not_found}
+  def blob_size(repo, sha, path) do
+    with {:ok, "blob"} <- object_type(repo, sha, path),
+         {:ok, output} <- cat_file(repo, "-s", sha, path),
+         {bytes, _rest} <- Integer.parse(String.trim(output)) do
+      {:ok, bytes}
+    else
+      _other -> {:error, :not_found}
+    end
+  end
+
+  defp object_type(repo, sha, path) do
+    with {:ok, output} <- cat_file(repo, "-t", sha, path) do
+      {:ok, String.trim(output)}
+    end
+  end
+
+  # `{:data, …}` because the revision is composed of two values a caller was handed, and
+  # `stderr: :separate` because "not a valid object name" on the terminal is noise for a question
+  # whose answer is already `{:error, :not_found}`.
+  defp cat_file(repo, flag, sha, path) do
+    run(repo, ["cat-file", flag, {:data, "#{sha}:#{path}"}], stderr: :separate)
+  end
+
   @spec exists?(repo(), sha(), String.t()) :: boolean()
   def exists?(repo, sha, path), do: match?({:ok, _}, show(repo, sha, path))
 
@@ -387,20 +427,6 @@ defmodule Forge.Git do
 
     with {:ok, out} <- run(repo, args, stderr: :separate) do
       {:ok, out |> String.split("\n", trim: true) |> Enum.sort()}
-    end
-  end
-
-  @doc """
-  How many bytes `path` holds at `sha`.
-
-  Asked before the content ever is, so a file past a caller's limit is never read into memory:
-  the cheapest guarantee that nothing is partially loaded is not to run `show/3` at all.
-  """
-  @spec blob_size(repo(), sha(), String.t()) :: {:ok, non_neg_integer()} | {:error, :not_found}
-  def blob_size(repo, sha, path) do
-    case run(repo, ["cat-file", "-s", {:data, "#{sha}:#{path}"}], stderr: :separate) do
-      {:ok, out} -> {:ok, out |> String.trim() |> String.to_integer()}
-      {:error, _reason} -> {:error, :not_found}
     end
   end
 

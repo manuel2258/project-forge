@@ -11,12 +11,16 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
   `common.yml` derives, the review round-trips it declares fit inside `limits.ticket_cost`, and
   every state a person may be offered can actually be moved to by hand. Each of those is config,
   which is where ticket 13's failure lived and which nothing here read before.
+
+  Ticket 7 added `presenting` between `reviewing` and `review_ready` and the assertions that say
+  so, folding in the file it had added for them: both tickets wanted the same test file, and one
+  of them is enough.
   """
 
   use ExUnit.Case, async: true
 
   alias ForgeCore.{Engine, Workflow}
-  alias ForgeCore.Workflow.{Parser, Transition}
+  alias ForgeCore.Workflow.{Parser, State, Transition}
 
   @root Path.expand("../../../..", __DIR__)
   @forge Path.join(@root, ".forge")
@@ -85,10 +89,27 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
     end
   end
 
-  test "a reviewing run that exhausts its budget goes to review_ready, never back to reviewing" do
+  # Forward and not round again, which is ticket 13's rule; `presenting` and not `review_ready`
+  # directly, which is ticket 7's — every way to `review_ready` goes through the presentation, and
+  # an exhausted review is exactly the diff a person needs narrated.
+  test "a reviewing run that exhausts its budget goes forward to presenting, never back" do
     for {name, workflow} <- reviewing_workflows() do
-      assert edges(workflow, "reviewing", "budget_exhausted") == [{"review_ready", nil}],
-             "#{name}: budget_exhausted must leave reviewing for review_ready, with no retry"
+      assert edges(workflow, "reviewing", "budget_exhausted") == [{"presenting", nil}],
+             "#{name}: budget_exhausted must leave reviewing for presenting, with no retry"
+    end
+  end
+
+  # From `forge_workflows_test.exs`, which this file replaced: a presentation is written before
+  # the person deciding sees the page, so `presenting` is on the way to `review_ready` and not
+  # beside it. An edge reaching `review_ready` from anywhere else would route past it in silence.
+  test "a ticket reaches review only through presenting, which writes a presentation" do
+    for {name, workflow} <- reviewing_workflows() do
+      assert for(t <- workflow.transitions, t.to == "review_ready", do: t.from) == ["presenting"],
+             "#{name}: review_ready is reachable without a presentation"
+
+      presenting = Workflow.state(workflow, "presenting")
+      assert Enum.any?(presenting.produces, &Workflow.presentation?/1), name
+      assert State.optional?(presenting, "presentation.md"), name
     end
   end
 
@@ -147,9 +168,15 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
   defp journey(workflow, loop) do
     List.flatten([
       default_path(workflow, workflow.initial),
-      List.duplicate(default_path(workflow, loop.to), loop.max)
+      List.duplicate(default_path(workflow, loop.to), loop.max),
+      after_review(workflow)
     ])
   end
+
+  # The last review is not the last job to spend: the state its default edge leads to runs once,
+  # after every total above it. Read off the edge rather than named, so a state inserted between
+  # `reviewing` and `review_ready` is priced against the cap here instead of being left out of it.
+  defp after_review(workflow), do: [default_edge(workflow, "reviewing").to]
 
   # The states a ticket passes through going forward from `from` on each one's default outcome,
   # ending at `reviewing`. Raises rather than loops if a state on the way has no default edge,
@@ -190,8 +217,8 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
       assert Enum.all?(refusals, fn {from, to} -> from == to end),
              "#{name}: cannot be moved by hand: #{inspect(refusals)}"
 
-      assert {:ok, %Transition{when: nil}} = Engine.choose(workflow, "reviewing", "review_ready"),
-             "#{name}: a person's move to review_ready takes the bare edge"
+      assert {:ok, %Transition{when: nil}} = Engine.choose(workflow, "reviewing", "presenting"),
+             "#{name}: a person's move out of reviewing takes the bare edge"
     end
   end
 end

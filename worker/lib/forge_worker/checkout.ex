@@ -158,9 +158,8 @@ defmodule ForgeWorker.Checkout do
   # Outside both it is not asked, so a repository whose own files show a conflict — a design note
   # about one — is asked about while it resolves or merges, and not on every run.
   defp settle(dir, base, keep, as) do
-    with {:ok, false} <- unmerged?(dir, as) do
-      settle(dir, base, keep, as, operation(dir, as))
-    else
+    case unmerged?(dir, as) do
+      {:ok, false} -> settle(dir, base, keep, as, operation(dir, as))
       {:ok, true} -> unresolved(dir, as)
       {:error, reason} -> {:error, reason}
     end
@@ -186,9 +185,8 @@ defmodule ForgeWorker.Checkout do
   defp unmarked(_dir, _as, false), do: :ok
 
   defp unmarked(dir, as, true) do
-    with {:ok, false} <- marked?(dir, as) do
-      :ok
-    else
+    case marked?(dir, as) do
+      {:ok, false} -> :ok
       {:ok, true} -> marked(dir, as)
       {:error, reason} -> {:error, reason}
     end

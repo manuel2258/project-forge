@@ -72,7 +72,7 @@ These decisions are settled. They are not to be reopened.
 ## Interface
 
 - A mobile-first web application; a native client is possible later. The API is the product surface.
-- The home screen is a queue, not a dashboard: blocking questions, transition approvals, experiment requests, promotion decisions and review-ready tickets in one ordered list, answerable in sequence.
+- The home screen is a queue, not a dashboard: blocking questions, transition approvals, experiment requests, promotion decisions and review-ready tickets in one ordered list, answerable in sequence. *Widened: beneath those and beneath the digest, in its own group that counts towards nothing and is never pushed, the queue also shows a ticket whose live job is running on a worker or not yet on one — which of the two from the `Job.status` and `worker_id` the row already carries, and never a ticket a pause is holding. No migration and no new column: the age of a running line comes from the run ledger and the pauses from the day's spend and the wait the scheduler recorded, all three of which already serve the ticket page (`docs/design/ui.md` § A job waiting for a machine). A decision is still the only thing in the queue that carries a mark or a count.*
 - Push notification for everything that starts waiting on a human — a blocking question, an
   approval, a stuck ticket, a ticket ready for review, a conversation's completed reply — and
   nothing else; assumptions and the rest are digested. The rule is the queue's own

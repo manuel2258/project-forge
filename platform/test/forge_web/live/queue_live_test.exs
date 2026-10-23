@@ -828,6 +828,202 @@ defmodule ForgeWeb.QueueLiveTest do
     assert has_element?(view, "#queue-end")
   end
 
+  # The group the ticket asks for: whether a ticket's work is on a machine or still waiting for
+  # one, at a glance from the Queue (`docs/design/ui.md` § A job waiting for a machine). Quiet,
+  # below everything, and in no count — so the assertions are on position, on the absence of the
+  # marks, and on the counts not moving.
+  describe "work under way" do
+    defp on_worker(ticket) do
+      {:ok, worker, _token} = Forge.Workers.create(%{provider: "fake"})
+      [job | _] = Jobs.for_ticket(ticket.id)
+
+      {:ok, _running} =
+        Repo.update(
+          Forge.Jobs.Job.progress_changeset(job, %{status: :running, worker_id: worker.id})
+        )
+
+      ticket
+    end
+
+    defp under_way(view), do: view |> element("#queue-under-way") |> render()
+
+    test "a running ticket and a waiting one each get a line, and say which", %{
+      conn: conn,
+      project: project
+    } do
+      running = on_worker(admit(project, "Already on a machine"))
+      on_worker(admit(project, "Also on a machine"))
+      waiting = admit(project, "Still queued for one")
+
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      assert view |> element("#under-way-#{running.id}") |> render() =~ "Running on a worker."
+
+      assert view |> element("#under-way-#{waiting.id}") |> render() =~ "Not yet on a worker."
+
+      # Asymmetric on purpose: with one of each, a sentence that counted the two groups the wrong
+      # way round would read the same and nothing here would notice.
+      assert under_way(view) =~ "2 tickets running on a worker, 1 ticket not yet on one."
+
+      # Each line leads to its ticket, and offers nothing that commits — the digest's rule.
+      assert has_element?(
+               view,
+               ~s(#under-way-#{running.id} a[href="/tickets/#{project.name}/#{running.number}"])
+             )
+
+      refute has_element?(view, "#queue-under-way [phx-click]")
+      refute has_element?(view, "#queue-under-way form")
+    end
+
+    # Below the decisions per the answered question, and below the digest because it is the
+    # quieter of the two things that wait on nobody. Every line is on the page in any order, so
+    # only position tells the arrangement from its reverse.
+    test "the group follows the decisions and the digest", %{conn: conn, project: project} do
+      decision = ask(admit(project, "Stopped"), [blocking("backend", "Which backend?")])
+      assumption = ask(admit(project, "Carried on"), [non_blocking("naming", "Which name?")])
+      moving = on_worker(admit(project, "Already on a machine"))
+
+      {:ok, _view, html} = live(conn, ~p"/")
+
+      [question] = Repo.preload(assumption, :questions).questions
+
+      assert index(html, "item-questions-#{decision.id}") <
+               index(html, "assumption-#{question.id}")
+
+      assert index(html, "assumption-#{question.id}") < index(html, "under-way-#{moving.id}")
+      assert index(html, "under-way-#{moving.id}") < index(html, "queue-end")
+    end
+
+    # Criterion 3. Accent is the queue's mark for an item waiting on a human and is used for
+    # nothing else; neither is `mark/1`'s outline for an approval or a review. A job that is
+    # merely running, or merely held for capacity, is not a decision.
+    test "no line carries a mark or an accent", %{conn: conn, project: project} do
+      on_worker(admit(project, "Already on a machine"))
+      admit(project, "Still queued for one")
+
+      {:ok, view, _html} = live(conn, ~p"/")
+      section = under_way(view)
+
+      for class <- [
+            "bg-accent",
+            "text-accent",
+            "badge-accent",
+            "border-primary",
+            "border-success"
+          ] do
+        refute section =~ class
+      end
+    end
+
+    # Criterion 4. The header and the nav badge count `@items`, which these are not in: a number
+    # that answering nothing ever lowers is not a count of what is waiting.
+    test "neither counts in the header or the nav badge", %{conn: conn, project: project} do
+      ask(admit(project, "Stopped"), [blocking("backend", "Which backend?")])
+
+      {:ok, before_view, _html} = live(conn, ~p"/")
+      before_header = before_view |> element("main header span.font-mono") |> render()
+
+      on_worker(admit(project, "Already on a machine"))
+      admit(project, "Still queued for one")
+
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      assert has_element?(view, "#queue-under-way")
+      assert view |> element("main header span.font-mono") |> render() == before_header
+      assert before_header =~ "1 decision · 1 item"
+    end
+
+    test "a ticket under way alone leaves the badge off entirely", %{
+      conn: conn,
+      project: project
+    } do
+      admit(project, "Still queued for one")
+
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      assert has_element?(view, "#queue-under-way")
+      refute has_element?(view, "span.badge-accent")
+      refute has_element?(view, "main header span.font-mono")
+      assert view |> element("#queue-end") |> render() =~ "Nothing needs you."
+    end
+
+    # Criterion 6. A placement stick leaves the pending job on the row, so without the status
+    # filter this ticket would be drawn twice: once in accent as a decision and once quietly as
+    # though it were only waiting for a machine.
+    test "a stuck ticket is drawn once, as stuck", %{conn: conn, project: project} do
+      ticket = admit(project, "Nothing could hold it")
+      {:ok, _stuck} = Forge.Engine.stick(ticket, "no template could hold it", :placement)
+
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      assert has_element?(view, "#item-stuck-#{ticket.id}")
+      refute has_element?(view, "#under-way-#{ticket.id}")
+      refute has_element?(view, "#queue-under-way")
+    end
+
+    # `docs/design/capacity.md` keeps a paused ticket out of the queue entirely, and the cap is
+    # node-wide: without the drop, every active ticket arrives here at once the moment it trips.
+    test "a spend-paused ticket is not in the group at all", %{conn: conn, project: project} do
+      admit(project, "Held by the cap")
+
+      {:ok, view, _html} = live(conn, ~p"/")
+      assert has_element?(view, "#queue-under-way")
+
+      previous = Application.get_env(:forge, Forge.Spend, [])
+      Application.put_env(:forge, Forge.Spend, daily_cost_usd: 0.0)
+      on_exit(fn -> Application.put_env(:forge, Forge.Spend, previous) end)
+
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      refute has_element?(view, "#queue-under-way")
+      assert view |> element("#queue-end") |> render() =~ "Nothing needs you."
+    end
+
+    # The failure this read was found by: a command state creates no workflow job, so the page
+    # said "Nothing needs you" while the ticket's build was on a machine.
+    test "a ticket whose build is on a machine is listed", %{conn: conn, project: project} do
+      ticket = admit(project, "Checking")
+      [job | _] = Jobs.for_ticket(ticket.id)
+      {:ok, _} = Repo.update(Forge.Jobs.Job.progress_changeset(job, %{status: :parked}))
+      {:ok, worker, _token} = Forge.Workers.create(%{provider: "fake"})
+
+      command =
+        %Forge.Jobs.Job{}
+        |> Forge.Jobs.Job.create_changeset(%{
+          kind: :command,
+          ticket_id: ticket.id,
+          project_id: project.id,
+          state: "check",
+          attempt: 1,
+          spec: %{},
+          worker_id: worker.id,
+          memory_max: Forge.Jobs.default_resources().memory,
+          cores: Forge.Jobs.default_resources().cores
+        })
+        |> Repo.insert!()
+
+      {:ok, _running} =
+        Repo.update(Forge.Jobs.Job.progress_changeset(command, %{status: :running}))
+
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      assert view |> element("#under-way-#{ticket.id}") |> render() =~ "Running on a worker."
+    end
+
+    test "a ticket whose current job has finished has no line", %{conn: conn, project: project} do
+      ticket = admit(project, "Done with that job")
+      [job | _] = Jobs.for_ticket(ticket.id)
+
+      {:ok, _hibernated} =
+        Repo.update(Forge.Jobs.Job.progress_changeset(job, %{status: :hibernated}))
+
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      refute has_element?(view, "#under-way-#{ticket.id}")
+      refute has_element?(view, "#queue-under-way")
+    end
+  end
+
   defp index(html, id) do
     [{position, _length}] = :binary.matches(html, ~s(id="#{id}"))
     position

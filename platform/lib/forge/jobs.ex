@@ -1418,20 +1418,39 @@ defmodule Forge.Jobs do
   Not the job status `:waiting`, which is a job stopped on a question.
   """
   @spec current_wait(Job.t()) :: Event.t() | nil
-  def current_wait(%Job{status: :pending, id: id}) do
-    Repo.one(
-      from e in Event,
-        where: e.job_id == ^id and e.type in ["job.waiting", "job.started"],
-        order_by: [desc: e.seq],
-        limit: 1
-    )
-    |> case do
-      %Event{type: "job.waiting"} = event -> event
-      _started_or_never_waited -> nil
-    end
-  end
+  def current_wait(%Job{status: :pending, id: id}), do: Map.get(current_waits([id]), id)
 
   def current_wait(%Job{}), do: nil
+
+  @doc """
+  `current_wait/1` for many jobs at once, as `%{job_id => Event}`: only the jobs whose latest
+  such event is a wait are in it, so a missing key means "not waiting, or never has".
+
+  One query rather than one per job, for a page that asks about every pending job it can see
+  (`Forge.Queue.worker_status/1`). It does **not** filter by status, because it is given ids and
+  not rows; `current_wait/1` is the clause that holds the `:pending` half of the contract.
+  """
+  @spec current_waits([String.t()]) :: %{String.t() => Event.t()}
+  # An equivalent mutant, kept for the round trip it saves: `job_id in ^[]` selects nothing and
+  # `Map.new([])` is `%{}`, so removing this clause changes nothing a test can see — a page with
+  # no pending job would simply ask the database for the empty set.
+  def current_waits([]), do: %{}
+
+  def current_waits(job_ids) do
+    Repo.all(
+      from e in Event,
+        where: e.job_id in ^job_ids and e.type in ["job.waiting", "job.started"],
+        distinct: e.job_id,
+        # `asc: e.job_id` is an equivalent mutant: Ecto prepends a `distinct` expression to
+        # `order_by` itself (`deps/ecto/lib/ecto/query.ex`), so removing it changes neither the
+        # SQL's meaning nor the rows. It is written out so that Postgres' rule for `DISTINCT ON`
+        # — the leading sort key must be the distinct expression — is visible beside the
+        # `desc: e.seq` that depends on it.
+        order_by: [asc: e.job_id, desc: e.seq]
+    )
+    |> Enum.filter(&(&1.type == "job.waiting"))
+    |> Map.new(&{&1.job_id, &1})
+  end
 
   @doc """
   Records one harness event against its job. Events arrive over the channel and are the

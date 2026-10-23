@@ -72,6 +72,31 @@ defmodule Forge.Jobs.Runs do
     )
   end
 
+  @doc """
+  When each of `job_ids`' open runs started, as `%{job_id => DateTime}` — the start of the run a
+  job is in *now*.
+
+  `jobs.started_at` is not that: `Forge.Jobs.mark_started/3` writes it `job.started_at || now`,
+  so on every run after the first it still holds the first one's start. A job that is not running
+  has no open run and so no key here.
+  """
+  @spec started([String.t()]) :: %{String.t() => DateTime.t()}
+  # An equivalent mutant, kept for the round trip it saves, and matching the clause
+  # `Jobs.current_waits/1` carries for the same reason — `Forge.Queue.worker_status/1` makes both
+  # reads per page and only one of them avoided the empty case. `job_id in ^[]` selects nothing
+  # and `Map.new([])` is `%{}`, so removing this clause changes nothing a test can see: a page
+  # with nothing running would simply ask the database for the empty set.
+  def started([]), do: %{}
+
+  def started(job_ids) do
+    Repo.all(
+      from r in Run,
+        where: r.job_id in ^job_ids and is_nil(r.finished_at),
+        select: {r.job_id, r.started_at}
+    )
+    |> Map.new()
+  end
+
   @doc "What `job_id`'s runs have cost between them, read inside the caller's transaction."
   @spec total(String.t()) :: Decimal.t()
   def total(job_id) do

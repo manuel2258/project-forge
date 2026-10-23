@@ -296,9 +296,10 @@ Getting these wrong makes the UI lie. They are acceptance criteria, not preferen
 - The queue is **one ordered list**, oldest first. No tabs and no filters that can hide an item;
   the operator must be able to reach the end and know they are done. Its decisions come first,
   oldest first; the digest of non-blocking questions follows the last of them, oldest first
-  itself; the end of the queue follows that. The digest is below the decisions rather than
-  sorted in among them because none of it is waiting on anyone, and an age beside a held job
-  would compete with it for the same glance. It is on the same page and behind no control, so
+  itself; the group of tickets whose work is already under way follows that (§ A job waiting for
+  a machine); the end of the queue follows that. Both groups are below the decisions rather than
+  sorted in among them because none of either is waiting on anyone, and an age beside a held job
+  would compete with it for the same glance. Both are on the same page and behind no control, so
   nothing is hidden and the end is still the end.
 - A **human state with outgoing transitions** waits for a person; one without is terminal and
   never enters the queue. The topology glyph is the only thing distinguishing them.
@@ -1226,9 +1227,44 @@ pending, and only the latest reason since the job last started; every change sta
 event stream, where it is a line like any other.
 
 **It is not accent**, even when the answer is a template nobody has assigned. Accent is the
-queue's mark, and a waiting job is not in the queue: a ticket that no template could ever hold
-is stuck, and gets its accent that way. A conversation in the same position waits on a person
-and is drawn quietly all the same — the gap `provisioning.md` § The gate records, not a rule.
+queue's mark for a human decision, and neither a job running nor a job not yet on a machine is
+that: the Queue draws a ticket resting on either quietly, in its own group beneath the decisions
+and beneath the digest — the same shape § Not waiting on you already gives an assumption, counted
+towards nothing and never pushed. Which of the two a ticket is in is `Job.status` and `worker_id`
+on its live job and nothing else; the three rules below say what else the group reads, and what
+for. A ticket that no template could ever hold is stuck instead of merely pending, and
+gets its accent that way; stuck excludes the quiet line rather than sharing it. A conversation in
+the same position waits on a person and is drawn quietly all the same — the gap
+`provisioning.md` § The gate records, not a rule.
+
+Four rules, each of which the group broke first:
+
+- **It is the ticket's live work, and a command is work.** A command state's job *is* a command
+  (`commands.md` § An invocation is a job) and an agent that invoked one parks while it runs, so a
+  read of workflow jobs alone left the Queue saying *Nothing needs you* while a build was on a
+  machine. Nor is it the ticket's newest row: a command is created after the agent that invoked
+  it, and a batch is inserted in declared order, so the newest row is routinely one that has
+  already finished while its siblings run. It is a running job with a worker if the ticket has
+  one, else a pending job — running first, because a ticket is on a machine the moment any of its
+  work is.
+- **A paused ticket is still never here.** The daily spend cap and a rate-limited credential pool
+  both leave a job pending with its ticket active, and `capacity.md` keeps both out of the queue
+  because an item the operator cannot act on is what the queue exists not to contain. The group
+  drops them, asking `Forge.Spend` and the wait the scheduler recorded. The cap is drawn
+  `PAUSED · SPEND` in its place; the rate limit is drawn nowhere at all, because that surface is
+  not built (`capacity.md` § Engine support), so such a ticket is in no operator surface but the
+  reason sentence on its own timeline. **That is a gap, not a treatment** — `capacity.md`'s to
+  close, and not a reason to put a ticket nobody can act on back in the queue. The cap gates a
+  workflow job only: a command takes no spend gate, so a pending one is not dropped.
+- **Neither line names a cause.** *Running on a worker* and *Not yet on a worker* are the two
+  halves of one axis. *Waiting for a worker* named a cause and got it wrong: most of the reasons a
+  job is pending are about getting it a machine, but waiting a turn behind a sibling command is
+  not, and a refused template needs a person. The sentence above is where a cause is stated,
+  because it is the one place that knows which cause.
+- **The age of a running line is the current run's**, from the run ledger — not `jobs.started_at`,
+  which keeps the first run's start for the life of the job, and not the row's age. A job answered
+  at 19:00 after stopping on a question at 09:10 read ten hours old a minute into its second run
+  under either.
 
 ## Documents
 

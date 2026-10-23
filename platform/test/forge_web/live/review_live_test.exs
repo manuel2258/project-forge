@@ -8,6 +8,7 @@ defmodule ForgeWeb.ReviewLiveTest do
 
   import Forge.GitFixtures
   import Forge.MergeFixtures
+  import ForgeWeb.Operator.Components, only: [commit_message_id: 1]
   import Phoenix.LiveViewTest
 
   alias Forge.{Artifacts, Git, Projects, Tickets}
@@ -75,7 +76,8 @@ defmodule ForgeWeb.ReviewLiveTest do
   end
 
   # The operator reads what the merge will commit and then confirms; the text is the agent's and
-  # this page never offers to change it (`docs/design/ui.md` § Changes).
+  # this page never offers to change it (`docs/design/ui.md` § Changes). Inside the approval card,
+  # which is the one place all four approval surfaces share.
   test "draws the commit message above the approval, read only", context do
     %{conn: conn, project: project, ticket: ticket} = context
     sha = commit_on_branch(context, "score.ex", "def persist, do: :ok")
@@ -84,26 +86,33 @@ defmodule ForgeWeb.ReviewLiveTest do
     pend_merge(ticket)
 
     {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
-    block = view |> element("#review-commit-message") |> render()
+    block = view |> element("##{commit_message_id(ticket)}") |> render()
 
     assert block =~ "Persist the scores"
     assert block =~ "They were lost on restart."
     assert block =~ "view only"
     refute block =~ "<textarea"
     refute block =~ "<input"
+    assert has_element?(view, ~s(button[value="approved"]))
   end
 
-  test "says there is nothing to merge yet when nothing wrote a commit message", context do
+  # Approving with nothing written for the commit to say parks the ticket in its merging state,
+  # so the card draws no Approve — a button that cannot work is worse than none
+  # (`docs/design/ui.md` § Changes).
+  test "says there is nothing to merge yet, and offers no approval", context do
     %{conn: conn, project: project, ticket: ticket} = context
     sha = commit_on_branch(context, "score.ex", "def persist, do: :ok")
     changeset!(ticket, sha)
     pend_merge(ticket)
 
     {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
-    block = view |> element("#review-commit-message") |> render()
+    block = view |> element("##{commit_message_id(ticket)}") |> render()
 
     assert block =~ "nothing to merge yet"
     refute block =~ "view only"
+    refute has_element?(view, ~s(button[value="approved"]))
+    # Reject still is: a ticket nobody wrote a message for is one to send back.
+    assert has_element?(view, ~s(button[value="rejected"]))
   end
 
   test "says so plainly when no job has produced a changeset", context do

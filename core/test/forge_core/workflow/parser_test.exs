@@ -958,6 +958,37 @@ defmodule ForgeCore.Workflow.ParserTest do
                map
              )
     end
+
+    # And on a state that does not produce it, the plain reason: excusing a document this state
+    # never writes is a different mistake, and "cannot be optional" sent the author looking for
+    # the wrong one.
+    test "a state that does not produce the commit message is told that instead", %{map: map} do
+      map = put_in(map, ["states", "verifying", "optional"], ["commit-message"])
+
+      assert {"states.verifying.optional[0]",
+              "\"commit-message\" is not a document this state produces"} in messages(map)
+    end
+
+    # The producer rule asks for the *artifact* name, so a state declaring it as a presentation
+    # produces exactly the artifact the merge reads: `Workflow.produced_name/1` is what everything
+    # that records one goes through, and comparing the raw declaration told this workflow its
+    # merge had no message.
+    test "a presentation declaration produces the commit message the merge reads", %{map: map} do
+      map =
+        put_in(
+          map,
+          ["states", "implementing", "produces"],
+          ["implementation.md", "changeset", "commit-message!"]
+        )
+
+      assert {:ok, workflow} = Parser.from_map(map)
+
+      assert workflow.states["implementing"].produces == [
+               "implementation.md",
+               "changeset",
+               "commit-message!"
+             ]
+    end
   end
 
   describe "resources" do

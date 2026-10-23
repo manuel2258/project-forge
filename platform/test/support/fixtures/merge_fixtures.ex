@@ -28,16 +28,17 @@ defmodule Forge.MergeFixtures do
   end
 
   @doc """
-  The same for a conversation, in its own document scope — the ticket's for a ticket chat, its own
-  otherwise, which is where its merge reads one.
+  The same for a conversation: in the scope that name is written in, which for this one is always
+  the conversation's own even on a ticket — asked of `Forge.Conversations.document_scope/2` with
+  the name, because asking without it writes a ticket chat's into the ticket's scope and the
+  merge would never find it.
   """
   def chat_commit_message!(chat, text \\ "Land the conversation's work\n") do
-    scope = Forge.Conversations.document_scope(chat)
+    name = ForgeCore.Workflow.commit_message_artifact()
+    scope = Forge.Conversations.document_scope(chat, name)
 
     {:ok, %{version: version}} =
-      Artifacts.record_version(scope, "commit-message", :document, {:job, chat.id}, %{
-        content: text
-      })
+      Artifacts.record_version(scope, name, :document, {:job, chat.id}, %{content: text})
 
     version
   end

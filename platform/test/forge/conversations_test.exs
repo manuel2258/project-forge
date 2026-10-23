@@ -375,6 +375,29 @@ defmodule Forge.ConversationsTest do
       assert Forge.Artifacts.find({:job, chat.id}, "plan.md") == nil
     end
 
+    # Except `commit-message`, which is what a merge of *this branch* will say and so is the
+    # conversation's own even on a ticket (`docs/design/conversations.md` § Commits). One turn
+    # writing both is what tells the rule from the scope it is an exception to.
+    test "a ticket chat's commit message is its own, not the ticket's", %{project: project} do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+      {:ok, chat} = Conversations.open(project, "rewrite the plan", ticket: ticket)
+
+      {:ok, _chat} =
+        Conversations.record_turn(
+          chat,
+          turn_with_documents(1, %{
+            "plan.md" => "# Plan\n",
+            "commit-message" => "Write the notes down\n"
+          })
+        )
+
+      assert [%{content: "Write the notes down\n"}] =
+               Forge.Artifacts.versions({:job, chat.id}, "commit-message")
+
+      assert Forge.Artifacts.versions(ticket.id, "commit-message") == []
+      assert [%{content: "# Plan\n"}] = Forge.Artifacts.versions(ticket.id, "plan.md")
+    end
+
     # `out/` accumulates, so every turn re-reports every file. A version per turn would be a
     # version per sentence, and each would be the one an approval had to attach to.
     test "the same file every turn is one version, and a changed one is the next", %{

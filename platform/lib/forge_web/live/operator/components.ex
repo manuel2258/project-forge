@@ -289,7 +289,7 @@ defmodule ForgeWeb.Operator.Components do
       <WorkScreen.commit_message
         :if={@merges}
         version={@commit_message}
-        id={"approving-#{@ticket.id}-commit-message"}
+        id={commit_message_id(@ticket)}
       />
 
       <%!-- `id` and `phx-change` are what make the comment survive a reconnect: without both of
@@ -335,6 +335,14 @@ defmodule ForgeWeb.Operator.Components do
     </div>
     """
   end
+
+  @doc """
+  The id of the block an approval card draws the commit message in, from the one definition the
+  card itself draws it under: a test that looked for a second copy of this string would pass
+  while the operator saw nothing.
+  """
+  @spec commit_message_id(map()) :: String.t()
+  def commit_message_id(%{id: id}), do: "approving-#{id}-commit-message"
 
   defp approve_label([]), do: "Approve"
   defp approve_label([pin]), do: "Approve #{pin.name} v#{pin.version}"

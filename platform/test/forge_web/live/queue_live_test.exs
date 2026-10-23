@@ -14,6 +14,8 @@ defmodule ForgeWeb.QueueLiveTest do
 
   import Ecto.Query, only: [from: 2]
   import Forge.GitFixtures
+  import Forge.MergeFixtures
+  import ForgeWeb.Operator.Components, only: [commit_message_id: 1]
   import Phoenix.LiveViewTest
 
   alias Forge.{Artifacts, Jobs, Projects, Repo, Tickets}
@@ -826,6 +828,34 @@ defmodule ForgeWeb.QueueLiveTest do
 
     # Still there, and still usable: the flash is only a friendly error if the page survives it.
     assert has_element?(view, "#queue-end")
+  end
+
+  # The queue is one of the four surfaces that approve a changeset, and approving one is what
+  # merges: the message the merge will commit is on the item, and where nothing has written one
+  # the item offers no Approve (`docs/design/ui.md` § Changes).
+  test "an approval item shows the message its merge would commit", %{
+    conn: conn,
+    project: project
+  } do
+    ticket = admit(project, "Persist scores")
+    changeset!(ticket, seeded_head(project))
+    pend_merge(ticket)
+
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    assert view |> element("##{commit_message_id(ticket)}") |> render() =~ "nothing to merge yet"
+    refute has_element?(view, ~s(button[value="approved"]))
+
+    commit_message!(ticket, "Persist the scores\n")
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    assert view |> element("##{commit_message_id(ticket)}") |> render() =~ "Persist the scores"
+    assert has_element?(view, ~s(button[value="approved"]))
+  end
+
+  defp seeded_head(project) do
+    {:ok, sha} = Forge.Git.resolve(Projects.repo_path(project), "refs/heads/main")
+    sha
   end
 
   defp index(html, id) do

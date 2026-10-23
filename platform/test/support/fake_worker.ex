@@ -382,9 +382,17 @@ defmodule Forge.FakeWorker do
     name = ForgeCore.Workflow.commit_message_artifact()
 
     if name in Spec.document_outputs(spec) and not Map.has_key?(written, name),
-      do: Map.put(written, name, "Land the change\n"),
+      do: Map.put(written, name, commit_message()),
       else: written
   end
+
+  @doc """
+  The placeholder `commit-message` a scenario writes, for a test that names its own `:written`
+  and still needs the state's declared message in it — one text, so a test reads as the fixture
+  behaves.
+  """
+  @spec commit_message() :: String.t()
+  def commit_message, do: "Land the change\n"
 
   # The same split `ForgeWorker.Job.Dir.collect/2` makes: declared documents that parsed,
   # declared ones that did not, declared ones that are missing, and files nobody declared.

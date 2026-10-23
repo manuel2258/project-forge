@@ -440,8 +440,8 @@ states:
 ```
 
 **Which commit a merge merges, and what it says.** Every transition into the merging state names
-the commit it is taken for: the latest `changeset` version at the moment it is taken, read once. For a person that
-is the version their approval of the edge records, in the same act; for the engine's own edge out
+the commit it is taken for: the latest `changeset` version at the moment it is taken, read once.
+For a person that is the version their approval of the edge records, in the same act; for the engine's own edge out
 of a job state it is the version that job's result recorded, since a result is recorded before the
 engine decides where it sends the ticket. The check before the transition is made on that commit,
 `transition.taken` names it (`changeset` and `changeset_version`), and the entry action merges

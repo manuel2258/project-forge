@@ -126,6 +126,7 @@ defmodule Mix.Tasks.Forge.E2e.Chat do
     step("a message sent mid-turn is queued, then delivered", fn -> mid_turn(chat) end)
     step("force ends the turn and the process survives", fn -> survives_interrupt(chat) end)
     step("it commits to its own branch", fn -> commits(chat, project, token) end)
+    step("it writes the message its merge will carry", fn -> writes_commit_message(chat) end)
     step("the queue is not starved by it", fn -> not_starved(project, token) end)
     step("a waiting conversation is in the queue", fn -> in_queue(chat) end)
     step("closing it releases the machine", fn -> closing_releases(chat) end)
@@ -249,10 +250,15 @@ defmodule Mix.Tasks.Forge.E2e.Chat do
   defp commits(chat, project, token) do
     before = turns(chat.id)
 
+    # The commit message in the same turn as the file, because the merge below needs one: nothing
+    # on the default branch may land without it (`docs/design/conversations.md` § Commits), and a
+    # conversation that only wrote NOTES.md reached `merges/2` and failed there with
+    # `:no_commit_message`.
     {:ok, _event} =
       Conversations.send(
         chat,
         "Create a file NOTES.md containing exactly the word #{token}, " <>
+          "write a commit-message document saying what the branch does, " <>
           "then reply with just: written."
       )
 
@@ -276,6 +282,18 @@ defmodule Mix.Tasks.Forge.E2e.Chat do
 
       {:error, _reason} ->
         fail("the branch exists but NOTES.md is not on it; the turn did not commit")
+    end
+  end
+
+  # What the merge below will commit, written by the agent and used as it stands. Asserted here
+  # rather than left to `merges/2`, so a conversation that did not write one says so where the
+  # writing was asked for.
+  defp writes_commit_message(chat) do
+    name = ForgeCore.Workflow.commit_message_artifact()
+
+    case chat |> Conversations.document_scope(name) |> Forge.Artifacts.versions(name) do
+      [] -> fail("the conversation wrote no #{name}, so its merge has nothing to say")
+      versions -> "#{name} v#{List.last(versions).version}"
     end
   end
 
@@ -331,7 +349,8 @@ defmodule Mix.Tasks.Forge.E2e.Chat do
     branch = Jobs.chat_branch(chat)
 
     case Merge.perform_chat(chat, nil) do
-      # `already: true` means the branch was already an ancestor — which is what an empty
+      # `already: true` means this branch has landed already — its head on the default branch, or
+      # a merge of it recorded by `refs/forge/merged/chat/<id>` — which is what an empty
       # conversation looks like, and what this used to accept as a successful merge.
       {:ok, %{already: true}} ->
         fail("there was nothing to merge; the conversation committed nothing")

@@ -409,7 +409,7 @@ worktree, no filesystem cost:
 
 ```
 git merge-tree --write-tree --messages <default head> <approved sha>
-git commit-tree <tree> -p <default head> -m <message>
+git commit-tree <tree> -p <default head> -F <message file>
 git push <bare repo path> <new sha>:refs/heads/<default>
 ```
 
@@ -421,8 +421,10 @@ itself and survives the platform — unaffected by who wrote the message text.
 **The message is an agent's, used as written.** It is the `commit-message` document the workflow
 declares — `presenting` in this project's own workflows, `publishing` in `release.yml`, the chat
 agent's own for a conversation — read at the version the transition into the merging state named
-(`workflow-grammar-v1.md` § Merging) and passed to `commit-tree` unchanged. The approving operator
-sees it above the approve control and does not type or edit it. Nothing generates `Ticket:`,
+(`workflow-grammar-v1.md` § Merging) and passed to `commit-tree` unchanged — in a file rather
+than as `-m`, because Linux caps one argument at 128 KiB and a document may be eight times that,
+so a long message failed with "Argument list too long". The approving operator sees it above the
+approve control and does not type or edit it. Nothing generates `Ticket:`,
 `Changeset:` or `Approved-by:` trailers any more; a merge with no `commit-message` version is
 refused and sticks the ticket, rather than landing under a message nobody wrote.
 

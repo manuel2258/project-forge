@@ -127,9 +127,9 @@ defmodule Forge.Merge do
 
   This is the second route into the default branch, which `pre-receive` exists to keep singular,
   so it is worth being exact: both routes are the platform's own merge, both are guarded by the
-  same hook with `FORGE_INTERNAL`, and neither lets a job write the default branch. What
-  differs is what authorises it — the changeset version a ticket's transition named, or an operator pressing
-  merge on a diff they are looking at.
+  same hook with `FORGE_INTERNAL`, and neither lets a job write the default branch. What differs
+  is what authorises it — the changeset version a ticket's transition named, or an operator
+  pressing merge on a diff they are looking at.
   """
   @spec check_chat(Job.t()) :: :ok | {:conflict, [String.t()]} | {:error, term()}
   def check_chat(%Job{kind: :chat} = chat) do
@@ -341,10 +341,9 @@ defmodule Forge.Merge do
 
   # What a merge needs, whatever authorised it: the repository, where it is going, what is being
   # merged, the ref that keeps it reachable and the ref that records it landed. `message` is
-  # filled in by the two functions that
-  # make a commit and stays nil for the three that only read — a conflict check, "is this merged
-  # already", and dealing with a closed conversation's branch all have an answer whether or not
-  # anybody has written a commit message yet.
+  # filled in by the two functions that make a commit and stays nil for the three that only
+  # read — a conflict check, "is this merged already", and dealing with a closed conversation's
+  # branch all have an answer whether or not anybody has written a commit message yet.
   defp ticket_plan(%Ticket{} = ticket, approved) do
     project = Tickets.project_of(ticket)
     repo = Projects.repo_path(project)

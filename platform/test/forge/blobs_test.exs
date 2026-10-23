@@ -87,7 +87,7 @@ defmodule Forge.BlobsTest do
       "implementation.md" => "---\noutcome: done\n---\n# Done\n",
       # This workflow merges, so a state has to produce `commit-message`; a job of this state
       # that wrote none would be `error` rather than `done`.
-      "commit-message" => "Land the change\n"
+      "commit-message" => FakeWorker.commit_message()
     }
 
     result = FakeWorker.result(assignment, "success", written: written)
@@ -156,7 +156,7 @@ defmodule Forge.BlobsTest do
 
       written = %{
         "implementation.md" => "---\noutcome: done\n---\n# Done\n",
-        "commit-message" => "Land the change\n"
+        "commit-message" => FakeWorker.commit_message()
       }
 
       result = FakeWorker.result(assignment, "success", written: written)

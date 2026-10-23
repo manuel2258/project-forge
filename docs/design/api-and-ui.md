@@ -133,8 +133,8 @@ pending account that a node admin has to approve (`design/identity.md` § Approv
   jobs, artifacts with the latest document rendered, events.
 - `/tickets/:project/:number/review` — the merge decision: the diff, the documents the change was
   built from, whatever an agent presented about it, the message its merge would commit, the
-  questions answered, the total cost, and the approval that pins the changeset by version. Reached by a link from the queue's approval item and
-  from the ticket page.
+  questions answered, the total cost, and the approval that pins the changeset by version.
+  Reached by a link from the queue's approval item and from the ticket page.
 - `/tickets/:project/:number/jobs/:id` — the pinned manifest and the harness events.
 - `/board` — tickets by state per project.
 

@@ -98,7 +98,7 @@ defmodule Forge.LoopBackTest do
     # has a state producing `commit-message`; a job of it that wrote none would be `error`.
     written =
       if job.state == "reviewing",
-        do: Map.put(written, "commit-message", "Land the change\n"),
+        do: Map.put(written, "commit-message", FakeWorker.commit_message()),
         else: written
 
     {:ok, _job} = FakeWorker.run(job, worker, "success", written: written)

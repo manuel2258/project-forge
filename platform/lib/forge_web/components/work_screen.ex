@@ -61,6 +61,7 @@ defmodule ForgeWeb.WorkScreen do
                 :if={@capacity not in [nil, %{}]}
                 capacity={@capacity}
                 prefix="strip"
+                figure={false}
               />
             </span>
             <span class="shrink-0 lg:hidden" aria-hidden="true">details ›</span>

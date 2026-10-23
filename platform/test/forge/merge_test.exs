@@ -215,7 +215,7 @@ defmodule Forge.MergeTest do
 
     # Reachability cannot answer this once a merge leaves one parent: the merged commit is not an
     # ancestor of the default branch, so a second call that read it that way would make a second,
-    # content-identical commit every time (`Forge.Merge.merged_tree/3`).
+    # content-identical commit every time (`Forge.Merge.already_merged?/1`, which a ref answers).
     test "is idempotent, and the branch does not grow a second time", context do
       %{ticket: ticket, bare: bare} = context
       sha = commit_on_branch(context, "feature.txt", "the change")

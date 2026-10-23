@@ -96,13 +96,32 @@ defmodule Forge.Merge do
   end
 
   @doc """
-  The ticket's latest `commit-message` version, or nil. What every approval surface draws above
-  the control that merges, from one definition so that the four of them cannot disagree about
-  which version a merge would commit (`docs/design/ui.md` § Changes).
+  The latest `commit-message` version a merge of this would commit, or nil: the ticket's, or a
+  conversation's own.
+
+  **One definition per side, because several surfaces ask.** Every approval surface draws the
+  ticket's above the control that merges, so the four of them cannot disagree about which version
+  a merge would commit (`docs/design/ui.md` § Changes); a conversation's page draws its own and
+  decides from it whether to offer a merge at all, and `perform_chat/2` reads the same function
+  to commit.
+
+  A conversation's is read in the scope that one document is written in, which is the
+  conversation's own whether or not it has a ticket (`Forge.Conversations.document_scope/2`), and
+  with `List.last/1` and not `List.first/1` because `Artifacts.versions/2` orders ascending: what
+  a merge says is what the conversation last wrote, which is the rule its branch follows too.
   """
-  @spec commit_message(Ticket.t()) :: struct() | nil
+  @spec commit_message(Ticket.t() | Job.t()) :: struct() | nil
   def commit_message(%Ticket{} = ticket),
     do: Artifacts.latest(ticket.id, Workflow.commit_message_artifact())
+
+  def commit_message(%Job{kind: :chat} = chat) do
+    name = Workflow.commit_message_artifact()
+
+    chat
+    |> Conversations.document_scope(name)
+    |> Artifacts.versions(name)
+    |> List.last()
+  end
 
   @doc """
   Whether `sha`, a commit of the ticket's, would merge cleanly into the default branch — at its
@@ -399,9 +418,13 @@ defmodule Forge.Merge do
       # After the push, because it records that the push happened — `plan.pin` before it records
       # only that an attempt was made, which is why that one cannot answer "did this land".
       # Best-effort for the same reason `plan.pin` is: the merge is on the default branch by now
-      # and reporting a failure here would call a landed merge failed. An `update-ref` that fails
-      # in a repository this process has just pushed to leaves `already_merged?/1` falling back to
-      # the ancestry check, which is the answer it gave before this ref existed.
+      # and reporting a failure here would call a landed merge failed. What a lost write costs is
+      # worth being exact about, because it is not nothing: `already_merged?/1` falls back to the
+      # ancestry check, which under one parent says *not merged* for a merge that landed — so a
+      # later `perform/4` on the same source would make a second, content-identical commit and
+      # `merged?/1` would report a landed ticket as unmerged. An `update-ref` in a repository
+      # this process has just pushed to is as close to certain as a filesystem call gets, which
+      # is why that is accepted rather than reported.
       Git.pin(repo, plan.merged, plan.source)
       {:ok, %{sha: sha, already: false}}
     end
@@ -463,12 +486,15 @@ defmodule Forge.Merge do
   # beside the document's, disagreeing with it (`CLAUDE.md` § Rules); `-F` has no bound to
   # disagree with. It also ends the `-m` hazard the old comment here described: nothing about the
   # message reaches `argv` at all, so a message beginning with a dash is no longer a special case.
+  #
+  # The file is `Forge.Git.with_scratch_file/3`'s and not this module's own: the first version
+  # here named it with `System.unique_integer/1` alone, which is unique within one BEAM, so a
+  # second platform node or a second `bin/check` in a sibling worktree could remove this file —
+  # or write its own message into it — between the write and the commit. That helper is where
+  # both git scratch files are made, and where the pid and the exclusive create live.
   defp commit_tree(repo, tree, head, message, user) do
-    file = Path.join(System.tmp_dir!(), "forge-merge-#{System.unique_integer([:positive])}.msg")
-
-    try do
-      with :ok <- File.write(file, message),
-           {:ok, sha} <-
+    Git.with_scratch_file("merge-message", message, fn file ->
+      with {:ok, sha} <-
              Git.run(
                repo,
                ["commit-tree", {:data, tree}, "-p", {:data, head}, "-F", {:data, file}],
@@ -477,9 +503,7 @@ defmodule Forge.Merge do
              ) do
         {:ok, String.trim(sha)}
       end
-    after
-      File.rm(file)
-    end
+    end)
   end
 
   # Who approved is recorded in git itself, so it survives the platform. The *committer* is
@@ -513,20 +537,8 @@ defmodule Forge.Merge do
     |> message_text()
   end
 
-  # The latest, in the scope this document is written in — the conversation's own, whether or not
-  # it has a ticket, from the one definition of that rule
-  # (`Forge.Conversations.document_scope/2`). `List.last/1` and not `List.first/1` because
-  # `Artifacts.versions/2` orders ascending: what a merge says is what the conversation last
-  # wrote, which is the rule its branch follows too.
-  defp chat_commit_message(%Job{} = chat) do
-    name = Workflow.commit_message_artifact()
-
-    chat
-    |> Conversations.document_scope(name)
-    |> Artifacts.versions(name)
-    |> List.last()
-    |> message_text()
-  end
+  # What the conversation last wrote, as its page read it to offer the merge in the first place.
+  defp chat_commit_message(%Job{} = chat), do: chat |> commit_message() |> message_text()
 
   defp message_text(nil), do: {:error, :no_commit_message}
 

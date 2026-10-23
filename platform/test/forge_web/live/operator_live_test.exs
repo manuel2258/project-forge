@@ -6,6 +6,8 @@ defmodule ForgeWeb.OperatorLiveTest do
   import Phoenix.LiveViewTest
   import Forge.GitFixtures
   import Forge.ForgeFixtures, only: [pool!: 2, credential_fixture: 1]
+  import Forge.MergeFixtures, only: [changeset!: 2]
+  import ForgeWeb.Operator.Components, only: [commit_message_id: 1]
 
   alias Forge.{Jobs, Projects, Tickets}
 
@@ -173,6 +175,10 @@ defmodule ForgeWeb.OperatorLiveTest do
       assert pinned =~
                ~s(href="/tickets/#{project.name}/#{ticket.number}/artifacts/refinement.md/1")
 
+      # And nothing about a commit message: this approval does not merge, so the card draws no
+      # box for what a merge would say (`docs/design/ui.md` § Changes).
+      refute has_element?(view, ~s([id="#{commit_message_id(ticket)}"]))
+
       # Read, then approve: the document is between the sentence naming it and the button that
       # pins it, in a box that scrolls inside itself.
       card = view |> element("#approval-#{ticket.id}") |> render()
@@ -218,7 +224,7 @@ defmodule ForgeWeb.OperatorLiveTest do
 
     html =
       render_component(&ForgeWeb.Operator.Components.approval_card/1,
-        ticket: %{id: "t1"},
+        ticket: %Forge.Tickets.Ticket{id: "t1", workflow: %{}},
         pending: %{"to" => "shipping"},
         approve: [pin],
         drafts: %{}
@@ -243,7 +249,7 @@ defmodule ForgeWeb.OperatorLiveTest do
 
     html =
       render_component(&ForgeWeb.Operator.Components.approval_card/1,
-        ticket: %{id: "t1"},
+        ticket: %Forge.Tickets.Ticket{id: "t1", workflow: %{}},
         pending: %{"to" => "shipping"},
         approve: [pin],
         drafts: %{}
@@ -1028,5 +1034,78 @@ defmodule ForgeWeb.OperatorLiveTest do
     assert html =~ "refining"
     assert html =~ "merged"
     assert :binary.match(html, "refining") < :binary.match(html, "merged")
+  end
+
+  # **Whether the card shows the message is the workflow's answer, not the pinned names'.**
+  # Reading it off "does this approval pin the changeset" was right for the three workflows
+  # shipped here and wrong for either shape that can be written beside them
+  # (`ForgeCore.Workflow.merges_on_enter?/2` is what the entry action asks).
+  describe "an approval whose pinned names do not say whether it merges" do
+    setup %{project: project, user: user} do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
+      %{ticket: ticket}
+    end
+
+    defp pending!(ticket, to, approve) do
+      ticket
+      |> Ecto.Changeset.change(
+        state: "review_ready",
+        status: :active,
+        pending_transition: %{
+          "from" => "review_ready",
+          "to" => to,
+          "outcome" => nil,
+          "approve" => approve
+        }
+      )
+      |> Forge.Repo.update!()
+    end
+
+    # It enters the merging state, so the commit it will make is drawn and Approve waits for a
+    # message — whatever the approval happens to pin.
+    test "a merging approval of something else still shows the message", context do
+      %{conn: conn, project: project, ticket: ticket} = context
+
+      {:ok, _version} =
+        Forge.Artifacts.record_version(ticket.id, "refinement.md", :document, :system, %{
+          content: "---\noutcome: done\n---\n# Refinement\n"
+        })
+
+      pending!(ticket, "merged", ["refinement.md"])
+
+      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=decide")
+
+      assert view |> element(~s([id="#{commit_message_id(ticket)}"])) |> render() =~
+               "nothing to merge yet"
+
+      refute has_element?(view, ~s(button[value="approved"]))
+
+      {:ok, _version} =
+        Forge.Artifacts.record_version(ticket.id, "commit-message", :document, :system, %{
+          content: "Persist the scores\n"
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=decide")
+
+      assert view |> element(~s([id="#{commit_message_id(ticket)}"])) |> render() =~
+               "Persist the scores"
+
+      assert has_element?(view, ~s(button[value="approved"]))
+    end
+
+    # And it does not merge, so there is nothing for a message to say and Approve is offered:
+    # withholding it here left the operator nowhere to approve from, since all four surfaces
+    # draw this one card.
+    test "a non-merging approval of the changeset shows none, and still approves", context do
+      %{conn: conn, project: project, ticket: ticket} = context
+      sha = commit_over_http(project, ticket.branch, "score.ex", "def persist, do: :ok")
+      changeset!(ticket, sha)
+      pending!(ticket, "verifying", ["changeset"])
+
+      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=decide")
+
+      refute has_element?(view, ~s([id="#{commit_message_id(ticket)}"]))
+      assert has_element?(view, ~s(button[value="approved"]))
+    end
   end
 end

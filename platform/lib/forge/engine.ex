@@ -447,6 +447,31 @@ defmodule Forge.Engine do
   def awaiting_approval(%Ticket{}), do: []
 
   @doc """
+  Whether approving what the ticket waits on merges: whether the transition's target is a state
+  whose `on_enter` is `merge`.
+
+  **Asked of the workflow, not of what the approval pins.** It was read off the pinned names —
+  "does this approval include `changeset`" — which is a workflow author's choice and not this
+  fact: a merging state reached by an approval of something else would have drawn no commit
+  message and offered Approve anyway, and a non-merging state reached by an approval of the
+  changeset would have withheld Approve for want of a message nothing was going to commit. The
+  operation guarded is the entry action, so the guard asks the same question the entry action
+  does (`CLAUDE.md` § Rules, and `put_source/5` keys on the same `merges_on_enter?/2`).
+
+  False for a ticket waiting on nothing, and for one whose pinned workflow no longer parses —
+  there is no merging state to be sure of, and `enter/4` would not merge either.
+  """
+  @spec approval_merges?(Ticket.t()) :: boolean()
+  def approval_merges?(%Ticket{pending_transition: %{"to" => to}} = ticket) do
+    case Tickets.parsed_workflow(ticket) do
+      {:ok, workflow} -> Workflow.merges_on_enter?(workflow, to)
+      {:error, _errors} -> false
+    end
+  end
+
+  def approval_merges?(%Ticket{}), do: false
+
+  @doc """
   A person takes a declared transition out of the current state: from a human state, or to
   unstick a ticket. Refused while a job for the current state is pending, running or
   waiting, and while a decision on another transition is pending. A transition that requires

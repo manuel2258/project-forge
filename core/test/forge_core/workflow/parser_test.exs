@@ -969,25 +969,44 @@ defmodule ForgeCore.Workflow.ParserTest do
               "\"commit-message\" is not a document this state produces"} in messages(map)
     end
 
-    # The producer rule asks for the *artifact* name, so a state declaring it as a presentation
-    # produces exactly the artifact the merge reads: `Workflow.produced_name/1` is what everything
-    # that records one goes through, and comparing the raw declaration told this workflow its
-    # merge had no message.
-    test "a presentation declaration produces the commit message the merge reads", %{map: map} do
+    # The message is the text of a commit, so it is a plain document and nothing else. A group is
+    # the one that *validated and then broke*: it records `commit-message/<file>` and never
+    # `commit-message`, so every transition into the merging state stuck the ticket for want of a
+    # message no state could ever produce.
+    test "the commit message may not be declared as a group or a presentation", %{map: map} do
+      for marked <- ["commit-message/*", "commit-message!"] do
+        map =
+          put_in(map, ["states", "implementing", "produces"], [
+            "implementation.md",
+            "changeset",
+            marked
+          ])
+
+        # Exactly one error, and it is this one: the producer rule reads the *artifact* name, so
+        # it is satisfied and does not also report a merge with no message — one mistake, one
+        # message saying what to write instead.
+        assert messages(map) == [
+                 {"states.implementing.produces[2]",
+                  "#{inspect(marked)} must be declared as the plain document commit-message: " <>
+                    "it is the text of the merge commit, which is neither a presentation nor a " <>
+                    "group of files"}
+               ]
+      end
+    end
+
+    # Nobody approves the message: the operator reads it above the control that merges and
+    # confirms that (`docs/design/ui.md` § Changes).
+    test "the commit message cannot be what a transition approves", %{map: map} do
       map =
-        put_in(
-          map,
-          ["states", "implementing", "produces"],
-          ["implementation.md", "changeset", "commit-message!"]
-        )
+        put_in(map, ["transitions"], [
+          %{"from" => "review_ready", "to" => "merged", "approve" => ["commit-message"]}
+          | Map.get(map, "transitions", [])
+        ])
 
-      assert {:ok, workflow} = Parser.from_map(map)
-
-      assert workflow.states["implementing"].produces == [
-               "implementation.md",
-               "changeset",
-               "commit-message!"
-             ]
+      assert {"transitions[0].approve[0]",
+              "commit-message is what the merge commit says and is read, not approved"} in messages(
+               map
+             )
     end
   end
 

@@ -82,7 +82,15 @@ defmodule ForgeWeb.ReviewLiveTest do
     %{conn: conn, project: project, ticket: ticket} = context
     sha = commit_on_branch(context, "score.ex", "def persist, do: :ok")
     changeset!(ticket, sha)
-    commit_message!(ticket, "Persist the scores\n\nThey were lost on restart.\n")
+    # Front matter in the version, because what is drawn is the string the commit will
+    # carry — `ForgeCore.Document.body/1`, the one the merge writes — and not the raw text: an
+    # operator who approved one text and found git recording another is the defect
+    # (`docs/design/ui.md` § Changes).
+    commit_message!(
+      ticket,
+      "---\noutcome: done\n---\n\nPersist the scores\n\nThey were lost on restart.\n"
+    )
+
     pend_merge(ticket)
 
     {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
@@ -90,6 +98,8 @@ defmodule ForgeWeb.ReviewLiveTest do
 
     assert block =~ "Persist the scores"
     assert block =~ "They were lost on restart."
+    refute block =~ "outcome: done"
+    refute block =~ "---"
     assert block =~ "view only"
     refute block =~ "<textarea"
     refute block =~ "<input"

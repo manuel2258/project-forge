@@ -236,9 +236,11 @@ it declared has outcome `error`.
 **`commit-message` is the second reserved name, and unlike `changeset` it is a document a job
 writes text into** — declared, written to `out/`, and kept as a version exactly like any other.
 What is reserved about it is what reads it and what it may not be: a workflow that merges must
-have a state producing it (§ Validation), and it may never be declared `optional`, because
-merging has nothing to fall back on if it is absent. The merge's entry action reads it directly,
-the way it reads `changeset`, and it is never pinned as an ordinary job `input` on its account —
+have a state producing it (§ Validation), it is declared as a plain document and never as a
+presentation or a group of files, nobody approves it, and it may never be declared `optional`,
+because merging has nothing to fall back on if it is absent. The merge's entry action reads it
+directly, the way it reads `changeset`, and it is never pinned as an ordinary job `input` on its
+account —
 nothing stops a state from also listing it as an input if a later state wants to read it, and
 nothing requires that either. Its text is what the merge commit says, used as written
 (`git-hosting.md` § The merge).
@@ -861,6 +863,17 @@ is never produced; `answers.md` is platform-managed and never declared.
   that rule and refused by name, so the message says which it is rather than "not produced here".
   `commit-message` is refused **by name even though it passes that rule** — it is one of the
   state's own produced documents — because a merge has nothing to say without it.
+- **`commit-message` is declared as a plain document, and nothing else.** `commit-message/*` and
+  `commit-message!` are refused where they are declared, saying so. A group records one artifact
+  per file — `commit-message/<file>` — and never one called `commit-message`, so a workflow
+  declaring the group form would validate and then stick every ticket that reached its merge, for
+  want of a message no state could produce; a presentation would work and is refused for the
+  premise, since this one is a plain git message nobody views as prose. The rule that a merging
+  workflow has a producer reads the *artifact* name, so such a workflow is told what to write
+  instead rather than also told its merge has no message.
+- **Nothing approves `commit-message`.** A transition's `approve` may not name it: the operator
+  reads it above the control that merges and confirms that (`ui.md` § Changes), and no surface
+  offers to approve or edit it.
 - **A state declaring a choice of outcomes may not have `commit-message` first in `produces`.**
   The outcome document is the first document there, and this one is a plain git message with no
   front matter to choose in: the choice could never be made, every job would read `done`, and the

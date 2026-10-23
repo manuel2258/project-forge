@@ -232,7 +232,11 @@ with the ticket it was one artifact that the ticket's merging state and every ch
 wrote over each other in, so a chat branch landed under a message describing the ticket's whole
 change, and a chat writing one changed what the ticket's own merge would then commit. A ticket
 chat is handed its own in place of the ticket's, because inside a conversation the name means its
-own branch's.
+own branch's. **The cost is that a ticket chat cannot read the ticket's message** — it is handed
+its own or none, never the ticket's — so "tidy up what the merge will say" is a request to make
+of the state that writes it, not of a chat on the ticket. Taking the other side would mean a
+conversation that could rewrite what the ticket's own merge commits, which is the defect this
+scope exists to close.
 
 Pressing merge with no `commit-message` version yet is refused the same way a conflicting branch
 is, and **the page says so rather than offering a button that fails**: where the branch has

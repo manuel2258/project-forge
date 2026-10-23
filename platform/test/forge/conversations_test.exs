@@ -1431,6 +1431,50 @@ defmodule Forge.ConversationsTest do
       assert spec["inputs"] |> Enum.map(& &1["name"]) |> Enum.sort() == ["notes.md", "ticket"]
     end
 
+    # Except the message: a ticket chat is handed the one *it* wrote, because that is what a
+    # merge of its branch would say, and never the ticket's, which is about the whole changeset
+    # (`docs/design/conversations.md` § Commits). Both exist here, so the two cannot be confused.
+    test "a ticket chat is handed its own commit message and not the ticket's", %{
+      project: project
+    } do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+      {:ok, chat} = Conversations.open(project, "about this", ticket: ticket)
+
+      {:ok, _version} =
+        Forge.Artifacts.record_version(ticket.id, "commit-message", :document, :system, %{
+          content: "The ticket's whole change\n"
+        })
+
+      {:ok, _chat} =
+        Conversations.record_turn(
+          chat,
+          Map.put(turn(1, 0.01), "documents", %{"commit-message" => "Just the note\n"})
+        )
+
+      chat = Jobs.get!(chat.id)
+      spec = Jobs.assignment(chat, ticket, project, "token")["spec"]
+
+      assert [%{"content" => "Just the note\n"}] =
+               Enum.filter(spec["inputs"], &(&1["name"] == "commit-message"))
+    end
+
+    # And nothing of the ticket's where the conversation wrote none: there is no message for this
+    # branch yet, which is what the page says and what a merge of it is refused for.
+    test "a ticket chat that wrote no commit message is handed none", %{project: project} do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+      {:ok, chat} = Conversations.open(project, "about this", ticket: ticket)
+
+      {:ok, _version} =
+        Forge.Artifacts.record_version(ticket.id, "commit-message", :document, :system, %{
+          content: "The ticket's whole change\n"
+        })
+
+      chat = Jobs.get!(chat.id)
+      spec = Jobs.assignment(chat, ticket, project, "token")["spec"]
+
+      assert Enum.filter(spec["inputs"], &(&1["name"] == "commit-message")) == []
+    end
+
     # `docs/design/conversations.md` § Taking a transition: what the chat is told it may ask for
     # is the same set a person is offered, with each edge's `approve` list attached, and whether
     # a job of the state was live when the process started.

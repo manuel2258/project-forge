@@ -82,9 +82,15 @@ defmodule ForgeCore.Document do
   read: the merge writes it to the commit, and the review page and the API show it. Reading it
   two ways is how a person approves one text and git records another.
 
-  Text that does not parse comes back as it stands. That is reachable only for a version recorded
-  with `parse: false` — a conversation's documents are (`Forge.Conversations`) — and using it
-  whole is the honest answer: there is no front matter to strip if the delimiters never closed.
+  Text that does not parse comes back as it stands: there is no front matter to strip if the
+  delimiters never closed, so the whole string is the honest answer.
+
+  **That arm is an equivalent mutant, and there is no test for it.** Nothing stored can reach it:
+  a conversation's documents are the only versions recorded with `parse: false`, and
+  `Forge.Conversations.check/4` parses the text and refuses it before storing — every other path
+  parses in `Forge.Artifacts.put_version/7`. It is kept because this function is public and takes
+  any string, and returning `""` for one that does not parse would be a silent truncation; per
+  `CLAUDE.md` § Testing, do not write a test that claims to cover it.
   """
   @spec body(String.t()) :: String.t()
   def body(text) when is_binary(text) do

@@ -237,18 +237,16 @@ defmodule ForgeWeb.Operator.Components do
     # hidden field the change event carries it in, and the lookup the box is drawn from. Three
     # interpolated literals is three chances for the draft to stop coming back, silently.
     #
-    # **Whether this approval merges is read off what it pins**, not passed in, so every page
-    # that draws this card agrees without being told: approving the changeset is what enters the
-    # merging state, and the merge commits text an agent wrote. The card is the one place all
-    # four approval surfaces share — the review page, the queue, Decide and the Changes tab — and
+    # **Whether this approval merges is asked of the ticket's workflow**, not passed in, so every
+    # page that draws this card agrees without being told: the card is the one place all four
+    # approval surfaces share — the review page, the queue, Decide and the Changes tab — and
     # showing the message on one of them meant the other three approved text nobody had seen.
+    # `Forge.Engine.approval_merges?/1` is the one definition, and it asks what the entry action
+    # asks rather than guessing from the names the approval pins.
     assigns =
       assigns
       |> assign(:draft, "approve-#{assigns.ticket.id}")
-      |> assign(
-        :merges,
-        Enum.any?(assigns.approve, &(&1.name == ForgeCore.Workflow.changeset_artifact()))
-      )
+      |> assign(:merges, Forge.Engine.approval_merges?(assigns.ticket))
 
     ~H"""
     <div class="flex flex-col gap-[11px]" id={"approval-#{@ticket.id}"}>

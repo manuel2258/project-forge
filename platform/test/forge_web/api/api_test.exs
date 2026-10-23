@@ -68,9 +68,13 @@ defmodule ForgeWeb.ApiTest do
              |> get(~p"/api/v1/tickets/#{project.name}/#{ticket.number}/review")
              |> json_response(200)
 
-    commit_message!(ticket, "Persist the scores\n")
+    # With front matter, which the payload does not carry: `text` is the string the commit will
+    # say, so a client showing it shows what the page shows and what git will record.
+    commit_message!(ticket, "---\noutcome: done\n---\n\nPersist the scores\n")
 
-    assert %{"commit_message" => %{"version" => 1, "text" => "Persist the scores\n"}} =
+    # The body as the merge writes it — the blank line the front matter left included, since the
+    # shown text and the committed text are the same string and not two readings of one.
+    assert %{"commit_message" => %{"version" => 1, "text" => "\nPersist the scores\n"}} =
              conn
              |> get(~p"/api/v1/tickets/#{project.name}/#{ticket.number}/review")
              |> json_response(200)

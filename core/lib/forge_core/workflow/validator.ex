@@ -429,10 +429,34 @@ defmodule ForgeCore.Workflow.Validator do
         )
   end
 
+  # `commit-message` is the text of the merge commit (`docs/design/workflow-grammar-v1.md`
+  # § Produces), so it has to be declared as a plain document. A group records one artifact per
+  # file — `commit-message/<file>`, never `commit-message` — so a workflow declaring
+  # `commit-message/*` validated and then stuck every ticket that reached its merge, which is
+  # what this rule exists to catch here instead. A presentation would validate and work, and is
+  # refused for the premise rather than for a failure: this one carries no front matter and
+  # nobody views it as prose.
+  defp commit_message_kind_error(path, name) do
+    message = Workflow.commit_message_artifact()
+
+    if name != message and Workflow.produced_name(name) == message do
+      Error.new(
+        path,
+        "#{inspect(name)} must be declared as the plain document #{message}: it is the text of " <>
+          "the merge commit, which is neither a presentation nor a group of files"
+      )
+    end
+  end
+
   defp produce_error(workflow, path, name, index) do
     producers = Workflow.producers(workflow, name)
 
     cond do
+      # **Before the group and presentation branches**, because it is about which of the three
+      # kinds this one name may be declared as.
+      marked = commit_message_kind_error(Error.join(path, index), name) ->
+        marked
+
       Workflow.group?(name) ->
         group_error(workflow, Error.join(path, index), name, producers)
 
@@ -946,6 +970,18 @@ defmodule ForgeCore.Workflow.Validator do
       cond do
         Workflow.group?(artifact) ->
           [Error.new(at, "a group of files cannot be approved")]
+
+        # The operator reads it above the control that merges and confirms; no surface offers to
+        # approve or edit it (`docs/design/ui.md` § Changes), and a transition pinning it would
+        # draw a second element under the id the card already draws the message's block with.
+        artifact == Workflow.commit_message_artifact() ->
+          [
+            Error.new(
+              at,
+              "#{Workflow.commit_message_artifact()} is what the merge commit says and is read, " <>
+                "not approved"
+            )
+          ]
 
         presents?(workflow, artifact) ->
           [Error.new(at, "a presentation carries no approval")]

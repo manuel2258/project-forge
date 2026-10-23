@@ -1243,7 +1243,12 @@ defmodule Forge.Jobs do
   # can read.
   defp chat_inputs(%Job{} = chat, %Ticket{id: ticket_id}) do
     name = Workflow.commit_message_artifact()
-    own = {:job, chat.id} |> Artifacts.latest_documents() |> Enum.filter(&(&1.name == name))
+
+    own =
+      chat
+      |> Conversations.document_scope(name)
+      |> Artifacts.latest_documents()
+      |> Enum.filter(&(&1.name == name))
 
     ticket_id
     |> Artifacts.latest_documents()

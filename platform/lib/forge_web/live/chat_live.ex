@@ -19,7 +19,6 @@ defmodule ForgeWeb.ChatLive do
   import ForgeWeb.Operator.QuestionForm, only: [question_form: 1]
 
   alias Forge.{Artifacts, Conversations, Events, Git, Jobs, Merge, Operator, Projects, Tickets}
-  alias ForgeCore.Workflow
   alias ForgeWeb.{Actions, Diff, Format, JobStream, Transcript, WorkScreen}
 
   @tabs ~w(talk changes docs activity)
@@ -83,14 +82,9 @@ defmodule ForgeWeb.ChatLive do
       diff: chat_diff(project, chat),
       commits: commits(project, chat),
       branch_exists: Git.branch_exists?(repo, branch),
-      # What a merge of this branch would say: the conversation's own latest, in the scope this
-      # one document is written in whether or not the chat has a ticket, and the same version the
-      # merge itself reads (`Forge.Conversations.document_scope/2`).
-      commit_message:
-        chat
-        |> Conversations.document_scope(Workflow.commit_message_artifact())
-        |> Artifacts.versions(Workflow.commit_message_artifact())
-        |> List.last(),
+      # What a merge of this branch would say, from the definition the merge itself reads
+      # (`Forge.Merge.commit_message/1`).
+      commit_message: Merge.commit_message(chat),
       # Where a reopen makes a deleted branch again, from the definition the reopen uses.
       base_branch: Conversations.base_branch(project, ticket),
       merged: Merge.merged_chat?(chat),

@@ -624,28 +624,80 @@ defmodule Forge.Git do
     end
   end
 
-  defp cmd(dir, args, env, :separate) do
-    err = Path.join(System.tmp_dir!(), "forge-git-#{System.unique_integer([:positive])}.err")
+  @doc """
+  Runs `fun` with the path of a scratch file holding `content`, and removes the file afterwards —
+  the stderr of a `:separate` run, or the message of a `commit-tree`, the two places a git call
+  needs a file of its own. `{:error, {:scratch_file, reason}}` when one cannot be made.
 
-    try do
-      # `$0` is the file and `"$@"` git's arguments, so nothing in them is read by the shell.
-      {out, code} =
-        System.cmd("sh", ["-c", ~s(exec git "$@" 2>"$0"), err | args], cd: dir, env: env)
+  **Named by the OS process as well as `System.unique_integer/1`**, which is unique only within
+  one BEAM: two platform nodes on a host, or two `bin/check` runs in sibling worktrees, share the
+  system temp directory and are handed interleaved integers, so the same name recurs within a few
+  allocations. The loser of that race found its file gone — or, where the file carries a commit
+  message, wrote the other merge's text into its commit. `Forge.GitFixtures.tmp_dir/1` carries
+  the pid for the same reason.
 
-      stderr =
-        case File.read(err) do
-          {:ok, text} -> text
-          {:error, _reason} -> ""
+  **Created with `:exclusive`**, so a name somebody put a symlink at first is refused rather than
+  followed: the name is guessable and the system temp directory is world-writable. That flag is
+  an equivalent mutant — the suite cannot create the file the next call will pick, because the
+  name carries a fresh `System.unique_integer/1` — so there is no test for it and none should be
+  written; what is tested is the error it reports when a file cannot be made at all.
+  """
+  @spec with_scratch_file(String.t(), binary(), (String.t() -> result)) ::
+          result | {:error, {:scratch_file, term()}}
+        when result: var
+  def with_scratch_file(label, content, fun) do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "forge-#{label}-#{System.pid()}-#{System.unique_integer([:positive])}"
+      )
+
+    case File.open(path, [:write, :exclusive]) do
+      {:ok, io} ->
+        try do
+          IO.binwrite(io, content)
+          File.close(io)
+          fun.(path)
+        after
+          File.rm(path)
         end
 
-      {out, code, stderr}
-    after
-      File.rm(err)
+      {:error, reason} ->
+        {:error, {:scratch_file, reason}}
+    end
+  end
+
+  defp cmd(dir, args, env, :separate) do
+    case with_scratch_file("git", "", &separated(dir, args, env, &1)) do
+      # No scratch file, so there is nowhere to put the stderr: run it the other way, where git's
+      # stderr goes to stdout. The caller gets the output it would have got with no `:separate`,
+      # which is strictly more than the empty string a failed `File.read` used to give it.
+      #
+      # An equivalent mutant: the label here is fixed, so the suite has no way to make this one
+      # call fail to get a file while the rest of it still runs — a temp directory that has gone
+      # takes the whole run with it. What the clause is for is a machine in that state, where a
+      # git call that would have worked should not fail for want of somewhere to put stderr.
+      {:error, {:scratch_file, _reason}} -> cmd(dir, args, env, :merged)
+      result -> result
     end
   end
 
   defp cmd(dir, args, env, _merged) do
     {out, code} = System.cmd("git", args, cd: dir, stderr_to_stdout: true, env: env)
     {out, code, ""}
+  end
+
+  defp separated(dir, args, env, err) do
+    # `$0` is the file and `"$@"` git's arguments, so nothing in them is read by the shell.
+    {out, code} =
+      System.cmd("sh", ["-c", ~s(exec git "$@" 2>"$0"), err | args], cd: dir, env: env)
+
+    stderr =
+      case File.read(err) do
+        {:ok, text} -> text
+        {:error, _reason} -> ""
+      end
+
+    {out, code, stderr}
   end
 end

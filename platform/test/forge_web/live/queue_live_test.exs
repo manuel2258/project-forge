@@ -853,6 +853,69 @@ defmodule ForgeWeb.QueueLiveTest do
     assert has_element?(view, ~s(button[value="approved"]))
   end
 
+  # **A merge decision is never a one-line summary**, and what makes it one is the state it enters
+  # and not the names it pins: a merging transition that approves something else was offered with
+  # no link to the diff, so the merge was taken without the operator seeing the change
+  # (`Forge.Engine.approval_merges?/1`).
+  test "a merging approval of something else still offers the diff first", %{
+    conn: conn,
+    project: project
+  } do
+    ticket = admit(project, "Persist scores")
+    changeset!(ticket, seeded_head(project))
+    commit_message!(ticket, "Persist the scores\n")
+
+    {:ok, _version} =
+      Artifacts.record_version(ticket.id, "refinement.md", :document, :system, %{
+        content: "---\noutcome: done\n---\n# Refinement\n"
+      })
+
+    pending!(ticket, "merged", ["refinement.md"])
+
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    assert has_element?(
+             view,
+             ~s(a[href="/tickets/#{project.name}/#{ticket.number}/review"]),
+             "Read the change first"
+           )
+  end
+
+  # The queue draws every ticket at once, so one whose pinned workflow no longer parses — the
+  # validator's rules move, and this branch adds three — costs its own detail and not the page.
+  test "a ticket whose pinned workflow no longer parses does not take the queue down", %{
+    conn: conn,
+    project: project
+  } do
+    ticket = admit(project, "Persist scores")
+    changeset!(ticket, seeded_head(project))
+    ticket = ticket |> Ecto.Changeset.change(workflow: %{}) |> Repo.update!()
+    pending!(ticket, "merged", ["changeset"])
+
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    # Drawn, and nothing claimed about a merge it cannot be sure of: Approve is offered and the
+    # commit message's block is not.
+    assert has_element?(view, "#approval-#{ticket.id}")
+    assert has_element?(view, ~s(button[value="approved"]))
+    refute has_element?(view, ~s([id="#{commit_message_id(ticket)}"]))
+  end
+
+  defp pending!(ticket, to, approve) do
+    ticket
+    |> Ecto.Changeset.change(
+      state: "review_ready",
+      status: :active,
+      pending_transition: %{
+        "from" => "review_ready",
+        "to" => to,
+        "outcome" => nil,
+        "approve" => approve
+      }
+    )
+    |> Repo.update!()
+  end
+
   defp seeded_head(project) do
     {:ok, sha} = Forge.Git.resolve(Projects.repo_path(project), "refs/heads/main")
     sha

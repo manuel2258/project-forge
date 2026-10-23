@@ -145,6 +145,39 @@ defmodule ForgeWeb.TicketWorkScreenTest do
       assert has_element?(view, ~s(#decide button[value="approved"]))
     end
 
+    # Same rule on the ticket's own page: the link to the diff is drawn because the decision
+    # enters a state that merges, not because of what it pins
+    # (`Forge.Engine.merge_decision?/2`).
+    test "a merging approval of something else still links to the change", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      changeset!(ticket, head_of(project))
+
+      {:ok, _version} =
+        Artifacts.record_version(ticket.id, "refinement.md", :document, :system, %{
+          content: "---\noutcome: done\n---\n# Refinement\n"
+        })
+
+      ticket
+      |> Ecto.Changeset.change(
+        state: "review_ready",
+        status: :active,
+        pending_transition: %{
+          "from" => "review_ready",
+          "to" => "merged",
+          "outcome" => nil,
+          "approve" => ["refinement.md"]
+        }
+      )
+      |> Forge.Repo.update!()
+
+      {:ok, view, _html} = live(conn, page(project, ticket))
+
+      assert has_element?(view, ~s(a[href="#{page(project, ticket, "/review")}"]))
+    end
+
     # An assumption is in the queue and waits on nobody, so it is in no count of what waits.
     test "does not count an assumption", %{conn: conn, project: project, ticket: ticket} do
       [job] = Jobs.for_ticket(ticket.id)

@@ -1229,7 +1229,8 @@ defmodule Forge.Jobs do
   # Its proposals are its own too, and are left out: they are backlog, not documents, and an open
   # one is already in `tickets/index.md`.
   defp chat_inputs(%Job{} = chat, nil) do
-    {:job, chat.id}
+    chat
+    |> Conversations.document_scope()
     |> Artifacts.latest_documents()
     |> Enum.reject(&Workflow.proposal?(&1.name))
     |> Enum.map(&as_input/1)

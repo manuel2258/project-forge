@@ -462,14 +462,35 @@ defmodule Forge.Engine do
   there is no merging state to be sure of, and `enter/4` would not merge either.
   """
   @spec approval_merges?(Ticket.t()) :: boolean()
-  def approval_merges?(%Ticket{pending_transition: %{"to" => to}} = ticket) do
+  def approval_merges?(%Ticket{pending_transition: %{}} = ticket) do
     case Tickets.parsed_workflow(ticket) do
-      {:ok, workflow} -> Workflow.merges_on_enter?(workflow, to)
+      {:ok, workflow} -> merge_decision?(ticket, workflow)
       {:error, _errors} -> false
     end
   end
 
   def approval_merges?(%Ticket{}), do: false
+
+  @doc """
+  Whether the decision in front of the operator merges: the pending approval's target state, or —
+  for a ticket resting with nothing pending — any of the transitions out of the state it rests in.
+
+  **The same question as `approval_merges?/1`, for a caller that already holds the workflow**, and
+  the one definition of "is this a merge decision" for every surface that asks. Four asked it as
+  "does the decision pin `changeset`", which is a workflow author's choice and not this fact: a
+  merging transition that approves something else was offered as a one-line summary with no link
+  to the diff, so the merge was taken without the operator seeing the change — which is exactly
+  what those surfaces exist to prevent.
+  """
+  @spec merge_decision?(Ticket.t(), Workflow.t()) :: boolean()
+  def merge_decision?(%Ticket{pending_transition: %{"to" => to}}, %Workflow{} = workflow),
+    do: Workflow.merges_on_enter?(workflow, to)
+
+  def merge_decision?(%Ticket{state: state}, %Workflow{} = workflow) do
+    workflow
+    |> Workflow.transitions_from(state)
+    |> Enum.any?(&Workflow.merges_on_enter?(workflow, &1.to))
+  end
 
   @doc """
   A person takes a declared transition out of the current state: from a human state, or to

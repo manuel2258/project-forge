@@ -1018,16 +1018,10 @@ defmodule ForgeWeb.TicketLive do
 
   defp waiting_clause(_assigns), do: nil
 
-  # A decision that pins the changeset is a merge decision, which has a page of its own — whether
-  # it is waiting as a pending approval or as the transition out of the state the ticket rests in.
-  defp reviewable?(%{pending_transition: pending} = ticket, _workflow) when is_map(pending),
-    do: Workflow.changeset_artifact() in Engine.awaiting_approval(ticket)
-
-  defp reviewable?(ticket, workflow) do
-    workflow
-    |> Workflow.transitions_from(ticket.state)
-    |> Enum.any?(&(Workflow.changeset_artifact() in &1.approve))
-  end
+  # A merge decision has a page of its own — whether it is waiting as a pending approval or as the
+  # transition out of the state the ticket rests in, and whatever it pins: what makes it one is
+  # that the state it enters merges (`Forge.Engine.merge_decision?/2`).
+  defp reviewable?(ticket, workflow), do: Engine.merge_decision?(ticket, workflow)
 
   defp approve_pins(project, ticket, artifacts) do
     for name <- Engine.awaiting_approval(ticket),

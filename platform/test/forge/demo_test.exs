@@ -147,7 +147,7 @@ defmodule Forge.DemoTest do
     assert %{blob_uri: "git:" <> ^head} = Artifacts.latest(ticket.id, "changeset")
 
     # verifying — converges, and the ticket comes to rest in a human state where a person looks at
-    # it. The queue marks it reviewable, because the way out of it pins the changeset.
+    # it. The queue marks it reviewable, because the way out of it enters a state that merges.
     run(worker, "success", "report.md")
     ticket = Tickets.get!(ticket.id)
     assert ticket.state == "review_ready"

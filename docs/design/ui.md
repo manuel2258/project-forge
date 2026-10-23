@@ -1024,20 +1024,27 @@ controls: what was spent through them is still attributed to them.
 ## The capacity gauge in the top bar
 
 The laptop header carries a small gauge for the five-hour and the weekly window, first in the
-header's right-hand group: per window — `5h`, `week` — ten ticks of mean utilization and a mono
-countdown to the soonest reset, each only when there is something truthful to draw
-(`design/capacity.md` § Two objects). Neutral, never accent, because it is resolved by time. Its
-title says what it averages — *5h window: 95% used on average, 2 of 2 credentials reporting,
-soonest reset Fri 14:00 UTC* — and whose they are is the page's: a project's pool on a page about
-that project (the project, its settings, a ticket, its review, a job, a conversation), the
-viewer's own everywhere else (`design/credentials.md` § Showing the windows). A set in which
-nothing has reported a window draws nothing at all, rather than an empty gauge. It is redrawn
-every minute while the page is open, since the countdown is to a moment.
+header's right-hand group: per window — `5h`, `week` — the mean utilization written as a
+percentage beside ten ticks of it, and a mono countdown to the soonest reset, each only when there
+is something truthful to draw (`design/capacity.md` § Two objects). Neutral, never accent, because
+it is resolved by time. **The number is on the bar, not only in the tooltip**: a figure the
+operator has to go looking for is one they do not read. Its title is the same figure with what it
+averages — *5h window: 95% used on average, 2 of 2 credentials reporting, soonest reset Fri 14:00
+UTC* — so hover adds the count and the reset rather than a second percentage; whose credentials
+they are is the page's: a project's pool on a page about that project (the project, its settings,
+a ticket, its review, a job, a conversation), the viewer's own everywhere else
+(`design/credentials.md` § Showing the windows). A set in which nothing has reported a window
+draws nothing at all, rather than an empty gauge. It is redrawn every minute while the page is
+open, since the countdown is to a moment.
 
 **On a phone it is the first thing in the More sheet**, and there its title is written out as a
-line of text under each window, because a phone has no hover and a figure whose meaning lives in
-a tooltip is a figure without one there. The work screen's context strip carries the compact
-form (§ The work screen).
+line of text under each window, because a phone has no hover and what a tooltip alone carries is
+carried nowhere there. **The gauge above that sentence draws no number**: the sentence is about to
+give the percentage in words, and the same digits twice, two lines apart, is exactly what writing
+the title out is for. So the figure is said once on every surface — as a number where the title is
+a tooltip, in the sentence where it is written out. The ticket and the chat details rails write it
+out the same way; the work screen's context strip carries the compact form, number included
+(§ The work screen).
 
 ## The workers page
 

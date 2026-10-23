@@ -23,6 +23,13 @@ defmodule ForgeWeb.PhoneTest do
 
   setup :register_and_log_in_user
 
+  # What a person reads inside an element, attributes excluded: the capacity gauge's `title` and
+  # its ticks' `aria-label` carry the percentage whether or not it is drawn, so the markup as a
+  # string cannot tell a number on the screen from one on hover.
+  defp drawn(view, selector) do
+    view |> element(selector) |> render() |> LazyHTML.from_fragment() |> LazyHTML.text()
+  end
+
   describe "the bar" do
     test "carries Queue, Board, Chats and More", %{conn: conn} do
       {:ok, view, _html} = live(conn, ~p"/")
@@ -128,6 +135,12 @@ defmodule ForgeWeb.PhoneTest do
       assert has_element?(view, "#more-capacity-five_hour")
       assert has_element?(view, "#more-capacity p", "5h window: 90% used on average")
 
+      # Said once. The sentence states the percentage, so the gauge above it draws its ticks and
+      # its countdown and no number — the same digits twice, two lines apart, is what writing
+      # the title out is for (`docs/design/ui.md` § The capacity gauge in the top bar). Read as
+      # text, because the gauge's `title` and its ticks' `aria-label` carry the figure either way.
+      refute drawn(view, "#more-capacity-five_hour") =~ "%"
+
       # A work screen draws no More sheet; its details sheet carries the written-out gauge for
       # the strip's compact one.
       {:ok, chat_view, _html} = live(conn, ~p"/chats/#{job.id}")
@@ -140,6 +153,11 @@ defmodule ForgeWeb.PhoneTest do
 
       for view <- [chat_view, ticket_view] do
         assert has_element?(view, "#context-strip #strip-five_hour")
+
+        # And it draws the number: the strip is the second surface the ticket names, and it gets
+        # the number from `figure`'s default rather than from anything it says. Without this,
+        # `figure={false}` on the strip's own call would pass the whole suite.
+        assert drawn(view, "#context-strip #strip-five_hour") =~ "90%"
       end
     end
   end

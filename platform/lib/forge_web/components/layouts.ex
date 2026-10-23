@@ -289,10 +289,10 @@ defmodule ForgeWeb.Layouts do
   attr :class, :any, default: nil
 
   @doc """
-  The gauge with its title written out as a line under each window: a phone has no hover, and a
-  figure whose meaning lives in a tooltip is a figure without one there (`docs/design/ui.md`
-  § The capacity gauge in the top bar). The More sheet draws it, and so does a work screen's
-  details sheet, whose strip carries the gauge in its compact form.
+  The gauge with its title written out as a line under each window: a phone has no hover, and what
+  a tooltip alone carries is carried nowhere there (`docs/design/ui.md` § The capacity gauge in the
+  top bar). The More sheet draws it, and so does a work screen's details sheet, whose strip
+  carries the gauge in its compact form.
 
   The sentence states the percentage, so the gauge above it is drawn without its own number:
   `figure={false}`. The same digits twice, two lines apart, is what writing the title out is for.

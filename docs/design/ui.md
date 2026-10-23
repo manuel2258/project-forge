@@ -1038,9 +1038,13 @@ draws nothing at all, rather than an empty gauge. It is redrawn every minute whi
 open, since the countdown is to a moment.
 
 **On a phone it is the first thing in the More sheet**, and there its title is written out as a
-line of text under each window, because a phone has no hover and a figure whose meaning lives in
-a tooltip is a figure without one there. The work screen's context strip carries the compact
-form (§ The work screen).
+line of text under each window, because a phone has no hover and what a tooltip alone carries is
+carried nowhere there. **The gauge above that sentence draws no number**: the sentence is about to
+give the percentage in words, and the same digits twice, two lines apart, is exactly what writing
+the title out is for. So the figure is said once on every surface — as a number where the title is
+a tooltip, in the sentence where it is written out. The ticket and the chat details rails write it
+out the same way; the work screen's context strip carries the compact form, number included
+(§ The work screen).
 
 ## The workers page
 

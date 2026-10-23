@@ -128,6 +128,19 @@ defmodule ForgeWeb.PhoneTest do
       assert has_element?(view, "#more-capacity-five_hour")
       assert has_element?(view, "#more-capacity p", "5h window: 90% used on average")
 
+      # Said once. The sentence states the percentage, so the gauge above it draws its ticks and
+      # its countdown and no number — the same digits twice, two lines apart, is what writing
+      # the title out is for (`docs/design/ui.md` § The capacity gauge in the top bar). Read as
+      # text, because the gauge's `title` and its ticks' `aria-label` carry the figure either way.
+      written =
+        view
+        |> element("#more-capacity-five_hour")
+        |> render()
+        |> LazyHTML.from_fragment()
+        |> LazyHTML.text()
+
+      refute written =~ "%"
+
       # A work screen draws no More sheet; its details sheet carries the written-out gauge for
       # the strip's compact one.
       {:ok, chat_view, _html} = live(conn, ~p"/chats/#{job.id}")

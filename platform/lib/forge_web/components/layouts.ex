@@ -293,11 +293,14 @@ defmodule ForgeWeb.Layouts do
   figure whose meaning lives in a tooltip is a figure without one there (`docs/design/ui.md`
   § The capacity gauge in the top bar). The More sheet draws it, and so does a work screen's
   details sheet, whose strip carries the gauge in its compact form.
+
+  The sentence states the percentage, so the gauge above it is drawn without its own number:
+  `figure={false}`. The same digits twice, two lines apart, is what writing the title out is for.
   """
   def capacity_written(assigns) do
     ~H"""
     <div id={@prefix} class={@class}>
-      <.capacity_gauge capacity={@capacity} prefix={@prefix} />
+      <.capacity_gauge capacity={@capacity} prefix={@prefix} figure={false} />
       <p
         :for={{type, label} <- windows()}
         :if={@capacity[type]}
@@ -330,6 +333,10 @@ defmodule ForgeWeb.Layouts do
   attr :capacity, :map, required: true
   attr :prefix, :string, default: "capacity", doc: "the ids' prefix: one gauge per prefix"
 
+  attr :figure, :boolean,
+    default: true,
+    doc: "draw the percentage as a number; false where a sentence beneath says it in words"
+
   @doc """
   Per window, five-hour then weekly: the mean utilization as a percentage and as ten ticks when
   any credential reported one, and a countdown to the soonest reset whenever a window is known.
@@ -337,11 +344,13 @@ defmodule ForgeWeb.Layouts do
   objects). What it averages over is in the title, because a mean over the credentials that
   happened to report is a different claim from one over all of them.
 
-  The number and the title's figure are the same expression, so the gauge cannot read one way and
-  its tooltip another. The ticks keep their `aria-label`, which means a screen reader hears the
-  percentage twice — the same figure, rather than a contradiction.
+  The number, the ticks' `aria-label` and the title's figure are one `percent/1` call, so no two
+  of them can disagree. A screen reader does hear the percentage twice — once as the number's
+  text, once as that label — which is the same figure said twice rather than a contradiction.
 
   The top bar draws it, and so does a work screen's context strip, in the same compact form.
+  Where the title is written out beneath it instead, `figure={false}` drops the number, because
+  the sentence is about to give it (`capacity_written/1`).
   """
   def capacity_gauge(assigns) do
     ~H"""
@@ -357,11 +366,11 @@ defmodule ForgeWeb.Layouts do
         <%!-- The figure as a number, beside the ticks and not nested in them: the ticks span is
         addressed as the gauge's one `[aria-label]`, and a child of it would read as an
         eleventh tick. --%>
-        <span :if={@capacity[type].mean}>{round(@capacity[type].mean * 100)}%</span>
+        <span :if={@figure && @capacity[type].mean}>{percent(@capacity[type])}</span>
         <span
           :if={@capacity[type].mean}
           class="flex gap-px"
-          aria-label={"#{round(@capacity[type].mean * 100)}%"}
+          aria-label={percent(@capacity[type])}
         >
           <span
             :for={tick <- 1..10}
@@ -380,8 +389,14 @@ defmodule ForgeWeb.Layouts do
     """
   end
 
+  # The mean as the one percentage every surface reads: the visible number, the ticks'
+  # `aria-label` and this sentence are all this call, so criterion 2's "the two can never
+  # disagree" is structural rather than a habit. The ticks' own fill is `mean * 10` and stays its
+  # own expression — it is a count of tenths, not a percentage.
+  defp percent(%{mean: mean}), do: "#{round(mean * 100)}%"
+
   defp gauge_title(label, window) do
-    figure = if window.mean, do: "#{round(window.mean * 100)}% used on average, ", else: ""
+    figure = if window.mean, do: "#{percent(window)} used on average, ", else: ""
 
     "#{label} window: #{figure}#{window.reporting} of #{window.known} credentials reporting, " <>
       "soonest reset #{Calendar.strftime(window.soonest, "%a %H:%M")} UTC"

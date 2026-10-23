@@ -82,6 +82,18 @@ defmodule ForgeWeb.CapacityGaugeTest do
     |> LazyHTML.text()
   end
 
+  # Every `aria-label` the window carries, which is the ticks span's and nothing else's.
+  # `LazyHTML.attribute/2` reads the fragment's root nodes only, so the label has to be queried
+  # for first — the window span's own `title` is what `attribute/2` above reaches.
+  defp labels(view, type) do
+    view
+    |> element("#capacity-#{type}")
+    |> render()
+    |> LazyHTML.from_fragment()
+    |> LazyHTML.query("[aria-label]")
+    |> LazyHTML.attribute("aria-label")
+  end
+
   test "the queue draws the viewer's own credentials", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/")
 
@@ -104,6 +116,12 @@ defmodule ForgeWeb.CapacityGaugeTest do
 
     # And the same figure in text, beside the ticks rather than only in the title.
     assert shown(view, "five_hour") =~ "90%"
+
+    # The ticks' label is that same figure and not a second opinion of it, and there is exactly
+    # one of it. A single `percent/1` call feeds the number, this label and the title, so what
+    # this catches is a later edit giving one of them an expression of its own — which is how the
+    # gauge would come to read `90%` while a screen reader was told something else.
+    assert labels(view, "five_hour") == ["90%"]
   end
 
   # Every page about one project — the project, its settings, a ticket, its review, a job, a

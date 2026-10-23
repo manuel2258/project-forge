@@ -17,6 +17,18 @@ cd "$(dirname "$0")/.."
 # exported before it is sourced, which is how `bin/measure` calls it too.
 FORGE_M_ROOT=$(pwd)
 export FORGE_M_ROOT
+
+# This runs `mix` in the repository too (`mix forge.e2e.chat`), so it agrees with `bin/check`
+# about where Mix's home is — on a machine where only the gate has ever run, Hex is in
+# `.mix-home/` and `~/.mix` is empty. **Only when the gate has built them**, which is the
+# difference from `bin/check`: that script creates them, this one only borrows them, and
+# `forge_mix_cache_borrow` is the half of `bin/lib/mix-cache.sh` that asks Hex itself before
+# exporting anything.
+#
+# shellcheck source=bin/lib/mix-cache.sh
+. bin/lib/mix-cache.sh
+forge_mix_cache_borrow "$PWD"
+
 # shellcheck source=measure/lib/common.sh
 . measure/lib/common.sh
 

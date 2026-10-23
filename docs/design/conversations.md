@@ -190,11 +190,47 @@ end; a conversation has none until a person says so, so each turn is committed a
 the platform records the branch head the moment it hears about a turn, and work that is not on the
 branch is work a lost machine takes with it.
 
-That this accumulates rather than amends was measured, not read: `Checkout.squash/4` resets to
+That this accumulates rather than amends was measured, not read: `Checkout.squash/5` resets to
 `origin/<branch>` before committing, which looks as though every turn would rewrite the last into
 one squashed commit. Pushing moves that remote-tracking ref, so turn two is built on turn one. The
 opposite reading is equally plausible from the code and would quietly lose each turn's history,
 which is why it is written down here with the reason.
+
+**A conversation may merge the default branch itself, and the merge survives the turn.** It is
+the one job kind whose agent fetches and merges on its own initiative — nobody routes a chat to an
+integrating state — so its assignment carries `default_branch` the way an integrating job's does
+(`git-hosting.md` § The job's own git), its checkout fetches `origin/<default>`, and the turn's
+squash keeps that merge as the commit's second parent. Without it every turn flattened the agent's
+merge into one ordinary commit: the branch lost that the default branch was ever merged, and the
+next merge found the same conflict again, which a production chat resolved three times over
+(ticket 11). It widens nothing the chat may write — the token's scope is `refs/heads/chat/<id>`
+and the hook refuses the default branch from it, as from any job.
+
+**A turn that ends mid-conflict keeps its work and says so.** Resolved — staged, as git asks,
+and carrying no conflict marker (`git-hosting.md` § Non-fast-forward on a ticket branch) — the
+squash finishes the merge and the turn commits as usual. Still conflicted, nothing is committed or
+pushed and the tree is left as the agent left it, which for a conversation means the next turn of
+*this* process can finish it: a chat keeps its worktree from turn to turn while it runs. A reopen
+does not inherit it — a cold start resets the worktree to the branch head and removes what is not
+tracked (`Checkout.ensure/1` resumes only an interrupted run), and on another machine there is no
+worktree to inherit at all — so the turn's work goes with the conflict then.
+
+**What nothing tells the agent is that it has to stage.** Resolving means editing *and*
+`git add`; an integrating job's manifest says so (`job-prompt.md` § Integrating the default
+branch), and a conversation's prompt does not — a chat merges on its own initiative, and nothing
+reaches its agent about a turn that failed to commit (§ Open). So an agent that edited the files
+and stopped believes it resolved the conflict, and the turn is refused again. The person is the
+one told, and what they have to say is *stage it* — which is the gap the proposal on telling the
+agent is about.
+
+**And the turn says so in the conversation.** Its report carries `uncommitted` — the kind of
+failure, and the conflicted paths for the one kind a person can act on — the `chat.turn` event
+keeps it, and the page draws a line of the platform's own where that turn stands (`ui.md` § Talk).
+**Every turn that did not reach the branch draws one**, not only a conflicted one: a refused
+credential, a hook, a platform that was not there all say the same first thing, which is the part
+its person needs. The machine's log says it too (`turn.uncommitted`), but that log is read off the
+machine by its owner and not by the person in the chat, who used to be told nothing at all: the
+turn looked committed, and the work went with the machine.
 
 This keeps a conversation's work out of a ticket's branch, which matters most for a ticket chat:
 the ticket's branch is written by its jobs, and a chat writing the same ref would race them and
@@ -901,8 +937,9 @@ Two things it adds are this note's to state:
   **What was said and what was done are two readings of it.** `Conversations.transcript/1` is the
   whole sequence and is what the page draws, including a turn that has so far only acted — which
   is what a live line is. `Conversations.messages/1` is the same fold without the turns that said
-  nothing, because its readers — the queue, the replay a reopened process reads, the reply push —
-  are asking what was *said*: a turn that only acted is not a reply to wait on or to replay. Its
+  nothing and without the platform's own lines (§ Commits), because its readers — the queue, the
+  replay a reopened process reads, the reply push — are asking what was *said*: a turn that only
+  acted is not a reply to wait on or to replay, and a notice is nobody's words. Its
   `text` is the turn's text blocks with a blank line between each, where it used to be the blocks
   run together.
 - **The conversation's job is read on its own page, not the job page's.** The job page is a

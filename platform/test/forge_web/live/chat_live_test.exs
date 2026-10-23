@@ -44,6 +44,33 @@ defmodule ForgeWeb.ChatLiveTest do
       })
   end
 
+  # The one thing the page says about a turn that neither side said: its work is not on the
+  # branch, because a merge is still open. Before this it was a line in the machine's log only,
+  # which the person in the conversation never sees (ticket 11).
+  test "a turn that could not commit says so in the conversation", %{conn: conn, chat: chat} do
+    text(chat, "Merging main.")
+
+    {:ok, _chat} =
+      Conversations.record_turn(chat, %{
+        "turn" => 1,
+        "commit" => nil,
+        "uncommitted" => %{"reason" => "merge_unresolved", "paths" => ["README.md"]},
+        "harness" => %{"turns" => 1, "cost_usd" => 0.01, "subtype" => "success"}
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+    assert has_element?(view, ".chat-uncommitted", "README.md")
+    assert view |> element(".chat-uncommitted") |> render() =~ "Nothing from this turn reached"
+
+    # Nobody's reply: it carries neither side's label, which is what `ui.md` § Talk says of a
+    # notice. Asserted on the whole entry and not on the line, because the label is the entry's
+    # sibling — scoped to the line, the assertion could not see a label however it was drawn.
+    assert render(element(view, "#said-1")) =~ "agent"
+    refute render(element(view, "#said-2")) =~ "agent"
+    assert render(element(view, "#said-2")) =~ "Nothing from this turn reached"
+  end
+
   test "it shows what was said, and where it is", %{conn: conn, chat: chat, project: project} do
     {:ok, _view, html} = live(conn, ~p"/chats/#{chat.id}")
 

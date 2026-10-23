@@ -396,6 +396,25 @@ defmodule Forge.GitFixtures do
     end
   end
 
+  @doc """
+  Runs git in `dir` as a job's own client would — the name says whose client, because this module
+  has a `git!/2` of its own and `GitHttpTest` a `git/3` — an identity of its own, no signing, no terminal
+  — and hands back `{output, status}` rather than raising, for a test about what git *refuses*.
+
+  **No `FORGE_INTERNAL`**, which is what makes it usable for a test of the hook's branch
+  discipline: `MergeFixtures`'s own git sets it, bypassing the guard such a test exists to prove
+  (`docs/design/git-hosting.md` § The per-job token).
+  """
+  def job_git(dir, args) do
+    System.cmd(
+      "git",
+      ["-c", "user.name=job", "-c", "user.email=job@forge", "-c", "commit.gpgsign=false" | args],
+      cd: dir,
+      stderr_to_stdout: true,
+      env: [{"GIT_TERMINAL_PROMPT", "0"}]
+    )
+  end
+
   defp git!(dir, args) do
     {:ok, _} = Git.run(dir, args)
   end

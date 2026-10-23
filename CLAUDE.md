@@ -107,6 +107,29 @@ irrelevant. It goes when the run does.
 writes to a checkout: it can rewrite `mix.lock` where `mix.exs` has moved on. None of them
 relaxes a check — the suite runs against a real database either way.
 
+It also points `MIX_HOME` and `HEX_HOME` at `.mix-home/` and `.hex-home/` inside the checkout,
+so that Hex is installed and the registry fetched once per ticket rather than once per job: a
+job's `HOME` is its own and goes with the job, while an ignored directory in the checkout is
+carried in the ticket's volume from one of its **agent** jobs to the next on the same machine
+(`docs/design/worker-tier.md` § The ticket volume). A command job — which is what runs the gate
+automatically — snapshots that volume and promotes nothing, so it reads a warm cache and never
+leaves one; an agent job running the gate by hand is what fills it. Exported for the gate's own
+processes only; your `~/.mix` is not read and not written.
+
+**Export the same two before running `mix` by hand**, which is also how an agent job leaves the
+caches warm for the next one:
+
+```
+export MIX_HOME="$PWD/.mix-home" HEX_HOME="$PWD/.hex-home"
+```
+
+**What a warm job still recompiles** is its own sources, not its dependencies. Mix puts the
+working directory into its compile manifest's cache key and a job's worktree is a new absolute
+path every job, so the carried `_build/` keeps every Hex dependency compiled and rebuilds
+`forge_core`, `forge` and `forge_worker` — 13 seconds for `platform` against 122 from fetched
+deps. `worker-tier.md` § The ticket volume has the figures and why no build script can close the
+rest.
+
 `platform/priv/git-hooks/` holds the generated git hooks; the gate lints them with the rest of the
 shell.
 

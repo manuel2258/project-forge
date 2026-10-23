@@ -35,6 +35,7 @@ defmodule Forge.Jobs do
   alias Forge.Events.Event
   alias Forge.Git.{Tokens, Url}
   alias Forge.Jobs.{Blobs, Commands, Job, Runs}
+  alias Forge.Projects.Project
   alias Forge.Tickets.Ticket
   alias Forge.Workers.Worker
   alias ForgeCore.Job.{Result, Spec}
@@ -51,6 +52,7 @@ defmodule Forge.Jobs do
   @integration_protocol 5
   @secrets_protocol 6
   @optional_outputs_protocol 7
+  @merge_protocol 8
 
   # How many of the merges that landed on the default branch since a ticket's base an integrating
   # job is told about by name; the rest are counted (`docs/design/job-prompt.md` § Integrating the
@@ -74,9 +76,9 @@ defmodule Forge.Jobs do
   `came_back: true` says a transition is creating the job, as opposed to a person asking for the
   state again. The engine passes it on every transition, a state's first entry included, and
   whether there is anything to come back to is `forkable/4`'s: a new attempt forks its
-  predecessor's harness session when that one finished with an outcome it declared, left a
-  session to fork, and was given the same instructions (`docs/design/claude-code-events.md`
-  § Resume).
+  predecessor's harness session when that one finished with an outcome it declared or by running
+  out of budget, left a session to fork, and was given the same instructions
+  (`docs/design/claude-code-events.md` § Resume).
   """
   @spec put_create(
           Multi.t(),
@@ -294,8 +296,17 @@ defmodule Forge.Jobs do
   end
 
   # The previous attempt of the state, if it is one a new attempt may fork: it finished having
-  # converged — its agent declared an outcome — and left a session and the file to restore it
-  # from. An attempt that ended any other way is not carried on from.
+  # converged — its agent declared an outcome — or having run out of budget, and left a session
+  # and the file to restore it from. An attempt that ended any other way is not carried on from.
+  #
+  # **A budget stop is carried on from; `error`, `did_not_converge` and `cancelled` are not.**
+  # Each of those three says something about the work — the run broke, the agent could not reach
+  # an outcome, a person stopped it — and forking one carries that into the attempt meant to
+  # escape it. A budget stop says nothing about the work: the instructions were the same and the
+  # agent concluded nothing, it only ran out of room, so the fork's rule below still holds and
+  # the context the first attempt paid for is the thing worth keeping
+  # (`docs/design/claude-code-events.md` § Resume). What bounds a second attempt spending a
+  # second budget the same way is `max: 1` on the `budget_exhausted` self-loop, not this.
   #
   # **And it was given the same instructions.** A fork remembers the prompt its session began
   # with and is told its instructions are the ones it was given, so a re-pin that moved the
@@ -306,7 +317,7 @@ defmodule Forge.Jobs do
   defp forkable(repo, ticket_id, state_name, %Spec{attempt: attempt} = spec) do
     from(j in previous_attempt(ticket_id, state_name, attempt),
       where:
-        j.status == :finished and j.outcome == :converged and
+        j.status == :finished and j.outcome in [:converged, :budget_exhausted] and
           not is_nil(j.harness_session_id) and not is_nil(j.session_blob),
       select: j.id
     )
@@ -688,12 +699,12 @@ defmodule Forge.Jobs do
   @doc """
   The worker protocol a job needs, or 0 for any.
 
-  - **An agent — a workflow job or a conversation — needs protocol 3.** Its questions are a
-    headline and a sentence, and the release that composes its prompt and corrects its outputs is
-    what teaches and checks that. A release from before it teaches `options: [a, b]` and
-    `default:`, which this platform's parser refuses when it records the document — so the job's
-    result could never be recorded, and a chat's question would reach the page as prose
-    (`docs/design/job-prompt.md` § Output format).
+  - **A workflow job needs protocol 3**, and so would a conversation but for its own floor below.
+    Its questions are a headline and a sentence, and the release that composes its prompt and
+    corrects its outputs is what teaches and checks that. A release from before it teaches
+    `options: [a, b]` and `default:`, which this platform's parser refuses when it records the
+    document — so the job's result could never be recorded, and a chat's question would reach the
+    page as prose (`docs/design/job-prompt.md` § Output format).
   - **A command needs protocol 2**, which commands and groups of files arrived in: a release from
     before them would run a command's spec as an agent job's (`docs/design/commands.md`
     § Worker pools). Its output is a script's, not an agent's, so the questions change asks
@@ -712,6 +723,10 @@ defmodule Forge.Jobs do
     document is required, because the note that says otherwise is new with this, so it nags for
     an optional one the agent skipped and ends the job `error` on a state with no `error` edge
     (`docs/design/worker-channel.md` § Versions). A state that declares neither asks nothing more.
+  - **A conversation needs protocol 8**: it is now told the default branch, and a release from
+    before 8 acts on that without being able to squash a merge that is still open — the turn dies
+    on `reset --soft` and every turn after it does too, which is a trap a chat could not reach
+    while nothing told it the branch (ticket 11, `docs/design/worker-channel.md` § Versions).
   """
   @spec protocol(Job.t()) :: non_neg_integer()
   def protocol(%Job{} = job),
@@ -738,7 +753,7 @@ defmodule Forge.Jobs do
     if spec(job).integration, do: @integration_protocol, else: @questions_protocol
   end
 
-  defp kind_protocol(%Job{kind: :chat}), do: @questions_protocol
+  defp kind_protocol(%Job{kind: :chat}), do: @merge_protocol
   defp kind_protocol(%Job{}), do: 0
 
   @doc "How many of `parent_id`'s invocations of `command` are running now."
@@ -790,7 +805,7 @@ defmodule Forge.Jobs do
           "branch" => branch(job, ticket),
           "base" => ticket && ticket.base_commit
         }
-        |> put_default_branch(job),
+        |> put_default_branch(job, project),
       "store" =>
         %{
           "transcript_key" => transcript,
@@ -1188,16 +1203,31 @@ defmodule Forge.Jobs do
 
   defp chat_transitions(%Ticket{}, {:error, _errors}), do: []
 
-  # An integrating job's checkout fetches the default branch too; every other job's does not
-  # (`docs/design/git-hosting.md` § The job's own git).
-  defp put_default_branch(git, %Job{kind: :workflow} = job) do
+  # An integrating job's checkout fetches the default branch too, and so does a conversation's;
+  # every other job's does not (`docs/design/git-hosting.md` § The job's own git).
+  #
+  # **A conversation is told the project's, not a spec's.** It has no state and no `integration`,
+  # and it is the one job kind whose agent fetches and merges the default branch on its own
+  # initiative — which it could not do at all without this, and whose merge the squash dropped
+  # because nothing named a branch to keep (ticket 11, `docs/design/conversations.md` § Commits).
+  # Reading is all it adds: the chat's token writes `refs/heads/chat/<id>` and nothing else
+  # (`Forge.Git.Tokens.issue_for_job/3`), and `pre-receive` refuses the default branch from it.
+  defp put_default_branch(git, %Job{kind: :workflow} = job, _project) do
     case spec(job).integration do
       %{"default_branch" => branch} -> Map.put(git, "default_branch", branch)
       nil -> git
     end
   end
 
-  defp put_default_branch(git, %Job{}), do: git
+  # The struct, not a map with the key: `assignment/4` is given a `Project.t()`, and a clause that
+  # matched anything with a `default_branch` would let a partial one fall through to the catch-all
+  # and hand a conversation no default branch at all — this ticket's own failure, silently. An
+  # equivalent mutant, since every caller passes the struct: loosening it is caught by nothing,
+  # which is the reason to write the tight one rather than a test for it.
+  defp put_default_branch(git, %Job{kind: :chat}, %Project{default_branch: branch}),
+    do: Map.put(git, "default_branch", branch)
+
+  defp put_default_branch(git, %Job{}, _project), do: git
 
   @doc """
   What this job runs on: the most specific thing that says so.
@@ -1405,20 +1435,39 @@ defmodule Forge.Jobs do
   Not the job status `:waiting`, which is a job stopped on a question.
   """
   @spec current_wait(Job.t()) :: Event.t() | nil
-  def current_wait(%Job{status: :pending, id: id}) do
-    Repo.one(
-      from e in Event,
-        where: e.job_id == ^id and e.type in ["job.waiting", "job.started"],
-        order_by: [desc: e.seq],
-        limit: 1
-    )
-    |> case do
-      %Event{type: "job.waiting"} = event -> event
-      _started_or_never_waited -> nil
-    end
-  end
+  def current_wait(%Job{status: :pending, id: id}), do: Map.get(current_waits([id]), id)
 
   def current_wait(%Job{}), do: nil
+
+  @doc """
+  `current_wait/1` for many jobs at once, as `%{job_id => Event}`: only the jobs whose latest
+  such event is a wait are in it, so a missing key means "not waiting, or never has".
+
+  One query rather than one per job, for a page that asks about every pending job it can see
+  (`Forge.Queue.worker_status/1`). It does **not** filter by status, because it is given ids and
+  not rows; `current_wait/1` is the clause that holds the `:pending` half of the contract.
+  """
+  @spec current_waits([String.t()]) :: %{String.t() => Event.t()}
+  # An equivalent mutant, kept for the round trip it saves: `job_id in ^[]` selects nothing and
+  # `Map.new([])` is `%{}`, so removing this clause changes nothing a test can see — a page with
+  # no pending job would simply ask the database for the empty set.
+  def current_waits([]), do: %{}
+
+  def current_waits(job_ids) do
+    Repo.all(
+      from e in Event,
+        where: e.job_id in ^job_ids and e.type in ["job.waiting", "job.started"],
+        distinct: e.job_id,
+        # `asc: e.job_id` is an equivalent mutant: Ecto prepends a `distinct` expression to
+        # `order_by` itself (`deps/ecto/lib/ecto/query.ex`), so removing it changes neither the
+        # SQL's meaning nor the rows. It is written out so that Postgres' rule for `DISTINCT ON`
+        # — the leading sort key must be the distinct expression — is visible beside the
+        # `desc: e.seq` that depends on it.
+        order_by: [asc: e.job_id, desc: e.seq]
+    )
+    |> Enum.filter(&(&1.type == "job.waiting"))
+    |> Map.new(&{&1.job_id, &1})
+  end
 
   @doc """
   Records one harness event against its job. Events arrive over the channel and are the

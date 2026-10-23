@@ -296,9 +296,10 @@ Getting these wrong makes the UI lie. They are acceptance criteria, not preferen
 - The queue is **one ordered list**, oldest first. No tabs and no filters that can hide an item;
   the operator must be able to reach the end and know they are done. Its decisions come first,
   oldest first; the digest of non-blocking questions follows the last of them, oldest first
-  itself; the end of the queue follows that. The digest is below the decisions rather than
-  sorted in among them because none of it is waiting on anyone, and an age beside a held job
-  would compete with it for the same glance. It is on the same page and behind no control, so
+  itself; the group of tickets whose work is already under way follows that (§ A job waiting for
+  a machine); the end of the queue follows that. Both groups are below the decisions rather than
+  sorted in among them because none of either is waiting on anyone, and an age beside a held job
+  would compete with it for the same glance. Both are on the same page and behind no control, so
   nothing is hidden and the end is still the end.
 - A **human state with outgoing transitions** waits for a person; one without is terminal and
   never enters the queue. The topology glyph is the only thing distinguishing them.
@@ -563,6 +564,14 @@ composer, the now line, and any open question's form.
   Any result with `is_error` is in error colour with its excerpt shown. A retry or a rate limit is
   not a line: it is what the now line says (below). Notices, `control` and `delivered` are not
   drawn, per § Motion and structure.
+- **A line of the platform's own, where the turn it is about stands.** The transcript is what
+  the two sides said, with one exception: a turn whose work did not reach the branch
+  (`conversations.md` § Commits). One warning-coloured line, `⚠` and a sentence, unboxed, after
+  that turn's last box — and wearing **neither speaker's micro label**, because the platform said
+  it and a turn that only acted has no box of its own to put it under. It is not a harness
+  `notice` event, which is still not drawn. It can only appear on a turn that has *ended* — it is
+  what closing the turn found — so it never interrupts a reply being spoken; and it ends the
+  agent's run of boxes, so whatever the agent says next is labelled again.
 - **Live, every line; finished, each run folded.** While a turn is open its action lines appear as
   their events arrive. When it ends, each run of actions between two text boxes folds into one
   line — *11 actions · edited parser.ex, lexer.ex · mix test ✗→✓* — that expands in place. An
@@ -1028,20 +1037,27 @@ controls: what was spent through them is still attributed to them.
 ## The capacity gauge in the top bar
 
 The laptop header carries a small gauge for the five-hour and the weekly window, first in the
-header's right-hand group: per window — `5h`, `week` — ten ticks of mean utilization and a mono
-countdown to the soonest reset, each only when there is something truthful to draw
-(`design/capacity.md` § Two objects). Neutral, never accent, because it is resolved by time. Its
-title says what it averages — *5h window: 95% used on average, 2 of 2 credentials reporting,
-soonest reset Fri 14:00 UTC* — and whose they are is the page's: a project's pool on a page about
-that project (the project, its settings, a ticket, its review, a job, a conversation), the
-viewer's own everywhere else (`design/credentials.md` § Showing the windows). A set in which
-nothing has reported a window draws nothing at all, rather than an empty gauge. It is redrawn
-every minute while the page is open, since the countdown is to a moment.
+header's right-hand group: per window — `5h`, `week` — the mean utilization written as a
+percentage beside ten ticks of it, and a mono countdown to the soonest reset, each only when there
+is something truthful to draw (`design/capacity.md` § Two objects). Neutral, never accent, because
+it is resolved by time. **The number is on the bar, not only in the tooltip**: a figure the
+operator has to go looking for is one they do not read. Its title is the same figure with what it
+averages — *5h window: 95% used on average, 2 of 2 credentials reporting, soonest reset Fri 14:00
+UTC* — so hover adds the count and the reset rather than a second percentage; whose credentials
+they are is the page's: a project's pool on a page about that project (the project, its settings,
+a ticket, its review, a job, a conversation), the viewer's own everywhere else
+(`design/credentials.md` § Showing the windows). A set in which nothing has reported a window
+draws nothing at all, rather than an empty gauge. It is redrawn every minute while the page is
+open, since the countdown is to a moment.
 
 **On a phone it is the first thing in the More sheet**, and there its title is written out as a
-line of text under each window, because a phone has no hover and a figure whose meaning lives in
-a tooltip is a figure without one there. The work screen's context strip carries the compact
-form (§ The work screen).
+line of text under each window, because a phone has no hover and what a tooltip alone carries is
+carried nowhere there. **The gauge above that sentence draws no number**: the sentence is about to
+give the percentage in words, and the same digits twice, two lines apart, is exactly what writing
+the title out is for. So the figure is said once on every surface — as a number where the title is
+a tooltip, in the sentence where it is written out. The ticket and the chat details rails write it
+out the same way; the work screen's context strip carries the compact form, number included
+(§ The work screen).
 
 ## The workers page
 
@@ -1106,7 +1122,7 @@ card and no box, in this order:
   `current` or `other build` (below); and, on the right, *Log* — on every row, destroyed ones
   too — and the control that ends it.
 - **A refusal line**, when the machine's last join spoke a protocol this platform does not
-  accept, in `error`: *refused: protocol 3, this platform accepts 4–5 — update it*. It is drawn
+  accept, in `error`: *refused: protocol 3, this platform accepts 4–8 — update it*. It is drawn
   from the protocol the row recorded and the range the platform accepts now, so it cannot say
   something the next join would not.
 - **An unhealthy line**, when the machine said its systemd stopped answering, in `error`:
@@ -1223,9 +1239,44 @@ pending, and only the latest reason since the job last started; every change sta
 event stream, where it is a line like any other.
 
 **It is not accent**, even when the answer is a template nobody has assigned. Accent is the
-queue's mark, and a waiting job is not in the queue: a ticket that no template could ever hold
-is stuck, and gets its accent that way. A conversation in the same position waits on a person
-and is drawn quietly all the same — the gap `provisioning.md` § The gate records, not a rule.
+queue's mark for a human decision, and neither a job running nor a job not yet on a machine is
+that: the Queue draws a ticket resting on either quietly, in its own group beneath the decisions
+and beneath the digest — the same shape § Not waiting on you already gives an assumption, counted
+towards nothing and never pushed. Which of the two a ticket is in is `Job.status` and `worker_id`
+on its live job and nothing else; the three rules below say what else the group reads, and what
+for. A ticket that no template could ever hold is stuck instead of merely pending, and
+gets its accent that way; stuck excludes the quiet line rather than sharing it. A conversation in
+the same position waits on a person and is drawn quietly all the same — the gap
+`provisioning.md` § The gate records, not a rule.
+
+Four rules, each of which the group broke first:
+
+- **It is the ticket's live work, and a command is work.** A command state's job *is* a command
+  (`commands.md` § An invocation is a job) and an agent that invoked one parks while it runs, so a
+  read of workflow jobs alone left the Queue saying *Nothing needs you* while a build was on a
+  machine. Nor is it the ticket's newest row: a command is created after the agent that invoked
+  it, and a batch is inserted in declared order, so the newest row is routinely one that has
+  already finished while its siblings run. It is a running job with a worker if the ticket has
+  one, else a pending job — running first, because a ticket is on a machine the moment any of its
+  work is.
+- **A paused ticket is still never here.** The daily spend cap and a rate-limited credential pool
+  both leave a job pending with its ticket active, and `capacity.md` keeps both out of the queue
+  because an item the operator cannot act on is what the queue exists not to contain. The group
+  drops them, asking `Forge.Spend` and the wait the scheduler recorded. The cap is drawn
+  `PAUSED · SPEND` in its place; the rate limit is drawn nowhere at all, because that surface is
+  not built (`capacity.md` § Engine support), so such a ticket is in no operator surface but the
+  reason sentence on its own timeline. **That is a gap, not a treatment** — `capacity.md`'s to
+  close, and not a reason to put a ticket nobody can act on back in the queue. The cap gates a
+  workflow job only: a command takes no spend gate, so a pending one is not dropped.
+- **Neither line names a cause.** *Running on a worker* and *Not yet on a worker* are the two
+  halves of one axis. *Waiting for a worker* named a cause and got it wrong: most of the reasons a
+  job is pending are about getting it a machine, but waiting a turn behind a sibling command is
+  not, and a refused template needs a person. The sentence above is where a cause is stated,
+  because it is the one place that knows which cause.
+- **The age of a running line is the current run's**, from the run ledger — not `jobs.started_at`,
+  which keeps the first run's start for the life of the job, and not the row's age. A job answered
+  at 19:00 after stopping on a question at 09:10 read ten hours old a minute into its second run
+  under either.
 
 ## Documents
 

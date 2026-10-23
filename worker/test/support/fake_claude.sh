@@ -225,6 +225,22 @@ case "${FAKE_SCENARIO:-success}" in
         git commit --quiet -m "turn $turns" >&2
       fi
 
+      # A conversation merging the default branch itself, which is the one job kind whose agent
+      # does that on its own initiative (`docs/design/conversations.md` § Commits). The merge
+      # conflicts; RESOLVE stages the resolution and stops short of committing it, which is where
+      # a turn that ran out of things to say leaves the tree.
+      case "$text" in
+        *MERGE*)
+          git merge --quiet origin/main >&2 || true
+          case "$text" in
+            *RESOLVE*)
+              printf '# Game, both\n' > README.md
+              git add README.md >&2
+              ;;
+          esac
+          ;;
+      esac
+
       # A conversation writing a document, which it means to keep by leaving it in `out/`.
       case "$text" in
         *WRITE*)
@@ -286,6 +302,13 @@ case "${FAKE_SCENARIO:-success}" in
     # In the worktree, which is where the agent's actual work goes: the job directory is the
     # interface, the worktree is the change.
     printf 'edited by the agent\n' > CHANGED.md
+    emit "$result_success"
+    ;;
+  # A run told to integrate that merges and stops with the conflict open: the ending that used to
+  # die on `reset --soft` and leave the ticket in `error` with a bare git error (ticket 11).
+  conflicted_merge)
+    printf -- '---\noutcome: done\n---\n# Report\n\nMerged.\n' > "$doc"
+    git merge --quiet origin/main >&2 || true
     emit "$result_success"
     ;;
   # A run that ends with work in the tree it never committed: the mutation lens of ticket 1,

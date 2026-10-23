@@ -392,6 +392,10 @@ defmodule Forge.Conversations do
         "turn" => turn,
         "session_id" => harness["session_id"],
         "commit" => payload["commit"],
+        # Why there is no commit, when there is none: the worker's reason, kept so the page can
+        # say it in the conversation rather than leaving it in the machine's log, which the
+        # person in the chat does not read (`docs/design/conversations.md` § Commits).
+        "uncommitted" => payload["uncommitted"],
         "interrupted" => payload["interrupted"] == true,
         "cost_usd" => harness["cost_usd"],
         "subtype" => harness["subtype"],
@@ -1114,6 +1118,11 @@ defmodule Forge.Conversations do
   One entry in a conversation. A `:user` message carries the state of its delivery; an
   `:assistant` message is one turn: its `items` in the order they happened, and its `text`, which
   is only what it said — the text blocks, a blank line between each.
+
+  **A `:notice` is the platform's own line in the conversation**, and the only entry neither side
+  said: a turn whose work did not reach the branch, standing where that turn is
+  (`docs/design/conversations.md` § Commits, `ui.md` § Talk). It is not in `messages/1`, because
+  nobody said it.
   """
   @type message ::
           %{role: :user, text: String.t(), at: DateTime.t(), delivered: boolean(), id: String.t()}
@@ -1124,6 +1133,7 @@ defmodule Forge.Conversations do
               at: DateTime.t(),
               turn: pos_integer() | nil
             }
+          | %{role: :notice, text: String.t(), at: DateTime.t(), turn: pos_integer() | nil}
 
   @typedoc """
   One thing in a turn: a block of what the agent said, or something it did.
@@ -1148,22 +1158,24 @@ defmodule Forge.Conversations do
   @doc """
   The conversation as a person reads it: what each side *said*.
 
-  A turn that only acted and said nothing is left out. It is in `transcript/1`, which is what the
-  page draws; the readers of this one — the queue, the replay a reopened process reads, the
-  push — are asking what was said, and a turn that said nothing said nothing.
+  A turn that only acted and said nothing is left out, and so is every `:notice`, which is the
+  platform's own line and nobody's words. Both are in `transcript/1`, which is what the page
+  draws; the readers of this one — the queue, the replay a reopened process reads, the push — are
+  asking what was said, and a turn that said nothing said nothing.
   """
   @spec messages(String.t()) :: [message()]
   def messages(job_id), do: job_id |> transcript() |> said()
 
   @doc """
-  A transcript without the turns that said nothing: what `messages/1` is, for a caller that
-  already has the transcript. The page asks whether a conversation waits on its person from
-  this, which is what the queue asks it from.
+  A transcript without the turns that said nothing and without the platform's own lines: what
+  `messages/1` is, for a caller that already has the transcript. The page asks whether a
+  conversation waits on its person from this, which is what the queue asks it from.
   """
   @spec said([message()]) :: [message()]
   def said(transcript), do: Enum.reject(transcript, &silent?/1)
 
   defp silent?(%{role: :assistant, text: ""}), do: true
+  defp silent?(%{role: :notice}), do: true
   defp silent?(_message), do: false
 
   @doc """
@@ -1261,7 +1273,11 @@ defmodule Forge.Conversations do
 
     %{
       state
-      | done: state.done |> flush(state.open) |> Enum.map(stamp),
+      | done:
+          state.done
+          |> flush(state.open)
+          |> Enum.map(stamp)
+          |> notice(event, turn),
         open: nil,
         round: round + 1
     }
@@ -1273,6 +1289,41 @@ defmodule Forge.Conversations do
     do: %{state | done: flush(state.done, state.open), open: nil, round: state.round + 1}
 
   defp fold(%Event{}, state), do: state
+
+  # **The platform's own line, once per turn that could not commit.** Prepended — `done` is
+  # newest first — so it stands after the reply of the turn it belongs to, and it is an entry of
+  # its own rather than something added to that reply: the words are the platform's, a turn that
+  # only acted has no reply to put them on, and a turn split by a message sent in the middle of it
+  # has two. A conversation's person is told where they are, rather than only in the machine's
+  # log, which is read off the machine by its owner and not by them
+  # (`docs/design/conversations.md` § Commits).
+  defp notice(done, %Event{payload: payload} = event, turn) do
+    case uncommitted(payload["uncommitted"]) do
+      nil -> done
+      text -> [%{role: :notice, text: text, at: event.inserted_at, turn: turn} | done]
+    end
+  end
+
+  # The merge case names the paths, because it is the one a person can do something about. What it
+  # does *not* say is that the work is safe: the tree is left as the run left it, so the next turn
+  # of this process commits it, and a conversation reopened on a fresh machine resets the tree and
+  # takes it (`Checkout.ensure/1` is not resuming then). A sentence promising otherwise would go
+  # stale in the transcript where nobody could correct it. Any other failure — a
+  # credential refused, a hook, the platform unreachable — is the plain sentence: the turn did not
+  # reach the branch, which is the part its person needs either way.
+  defp uncommitted(%{"reason" => "merge_unresolved"} = reason) do
+    "Nothing from this turn reached the branch: a conflict is unresolved" <>
+      conflicted(reason["paths"]) <>
+      ". Ask for it to be resolved while this conversation is still on its machine."
+  end
+
+  defp uncommitted(%{}), do: "Nothing from this turn reached the branch."
+  defp uncommitted(_none), do: nil
+
+  defp conflicted(paths) when is_list(paths) and paths != [],
+    do: " in " <> Enum.map_join(paths, ", ", &string/1)
+
+  defp conflicted(_none), do: ""
 
   @doc """
   One tool call as the transcript holds it, from a `tool_use` event's payload. The agent wrote the

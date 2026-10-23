@@ -71,22 +71,57 @@ defmodule ForgeWeb.CapacityGaugeTest do
     value
   end
 
+  # The window's text as a person sees it, attributes excluded: the title and the ticks'
+  # `aria-label` carry the percentage too, and reading the markup as a string could not tell a
+  # visible figure from a hover-only one.
+  defp shown(view, type) do
+    view
+    |> element("#capacity-#{type}")
+    |> render()
+    |> LazyHTML.from_fragment()
+    |> LazyHTML.text()
+  end
+
+  # Every `aria-label` the window carries, which is the ticks span's and nothing else's.
+  # `LazyHTML.attribute/2` reads the fragment's root nodes only, so the label has to be queried
+  # for first — the window span's own `title` is what `attribute/2` above reaches.
+  defp labels(view, type) do
+    view
+    |> element("#capacity-#{type}")
+    |> render()
+    |> LazyHTML.from_fragment()
+    |> LazyHTML.query("[aria-label]")
+    |> LazyHTML.attribute("aria-label")
+  end
+
   test "the queue draws the viewer's own credentials", %{conn: conn} do
     {:ok, view, _html} = live(conn, ~p"/")
 
     assert title(view) =~ "90% used on average, 1 of 1 credentials reporting"
 
-    # Ten ticks, one per tenth, filled up to the figure: nine of them at 90%.
+    # Ten ticks, one per tenth, filled up to the figure: nine of them at 90%. `List.first/2`
+    # rather than `hd/1`, so a child of the ticks span that carries no class — the percentage,
+    # were it nested there — is counted as the eleventh tick it would be, instead of crashing
+    # this before the count is compared.
     ticks =
       view
       |> element("#capacity-five_hour")
       |> render()
       |> LazyHTML.from_fragment()
       |> LazyHTML.query("[aria-label] > span")
-      |> Enum.map(&(&1 |> LazyHTML.attribute("class") |> hd()))
+      |> Enum.map(&(&1 |> LazyHTML.attribute("class") |> List.first("")))
 
     assert length(ticks) == 10
     assert Enum.count(ticks, &String.ends_with?(&1, "bg-base-content")) == 9
+
+    # And the same figure in text, beside the ticks rather than only in the title.
+    assert shown(view, "five_hour") =~ "90%"
+
+    # The ticks' label is that same figure and not a second opinion of it, and there is exactly
+    # one of it. A single `percent/1` call feeds the number, this label and the title, so what
+    # this catches is a later edit giving one of them an expression of its own — which is how the
+    # gauge would come to read `90%` while a screen reader was told something else.
+    assert labels(view, "five_hour") == ["90%"]
   end
 
   # Every page about one project — the project, its settings, a ticket, its review, a job, a
@@ -126,6 +161,19 @@ defmodule ForgeWeb.CapacityGaugeTest do
     send(view.pid, :capacity_tick)
 
     assert title(view) =~ "70% used on average, 2 of 2 credentials reporting"
+  end
+
+  # A window that is known but has no figure in it draws neither ticks nor a percentage: the
+  # countdown is all there is to say truthfully (`docs/design/capacity.md` § Two objects).
+  test "a known window with no figure draws no percentage", %{conn: conn, project: project} do
+    other = user_fixture()
+    reports!(project, credential_fixture(other), "allowed", nil)
+
+    {:ok, view, _html} = live(log_in_user(conn, other), ~p"/")
+
+    assert has_element?(view, "#capacity-five_hour")
+    refute has_element?(view, "#capacity-five_hour [aria-label]")
+    refute shown(view, "five_hour") =~ "%"
   end
 
   test "nothing reported draws nothing", %{conn: conn} do

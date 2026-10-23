@@ -152,7 +152,7 @@ Worker → platform:
 | `stats` | `cpu`, `memory_used`, `memory_total`, `disk_used`, `disk_total`, each only when readable | no |
 | `log` | `at`, `type`, `level`, `message`, and `job_id` on a line about a job | no |
 | `event` | `job_id`, normalised harness event | no |
-| `turn` | `job_id`, turn index, commit, the turn's proposals and documents, any `transition.json` it wrote (`conversations.md` § Taking a transition), and a harness summary carrying its cost | yes |
+| `turn` | `job_id`, turn index, commit, `uncommitted` (why there is no commit, when there is none), the turn's proposals and documents, any `transition.json` it wrote (`conversations.md` § Taking a transition), and a harness summary carrying its cost | yes |
 | `result` | `job_id`, `ForgeCore.Job.Result` as JSON — `status` `parked` for an agent that invoked commands, with the invocations and the commit it pushed; a command's with its exit status, duration and log key; either's `blobs` (name → key and size) and `invalid_blobs` (name → why) for its groups of files | yes |
 | `hibernated` | `job_id`, commit sha, reason, the result as far as it got; a chat adds its turn count | yes |
 | `failed` | `job_id`, reason | yes |
@@ -485,11 +485,14 @@ with, in between, no managed machine to run anything (`docs/deploy.md` § Upgrad
 0–3 is refused at its join, and a managed one is destroyed there (above); a template whose snapshot
 is labelled older makes no machine until it names another, and one whose snapshot is unlabelled
 makes one, which is refused and marks the image (below). What the floor leaves with nothing to decide is still in the
-code: `Forge.Jobs.protocol/1`'s per-kind protocols (2 for a command, 3 for an agent), and the
-templates page's word for a snapshot that cannot run an agent — every worker it accepts can run
-those. **The protocol dimension of `Workers.fits?/2` and the scheduler's demand decides something
-again** since protocol 5: an integrating job needs it, a job that names a secret needs 6, and a
-protocol 4 worker is still accepted, so the gate is what keeps such a job off it (above).
+code: `Forge.Jobs.protocol/1`'s per-kind protocols (2 for a command, 3 for a workflow job), and
+the templates page's word for a snapshot that cannot run an agent. Every worker the floor accepts
+can run those two; a conversation is the kind that now asks for more (protocol 8, below).
+**The protocol dimension of `Workers.fits?/2` and the scheduler's demand decides something
+again** since protocol 5: an integrating job needs it, a job that names a secret needs 6, a state
+that declares a presentation or an optional output needs 7, a conversation needs 8, and a
+protocol 4 worker is still accepted, so the gate is what keeps such a
+job off it (above).
 
 **Protocol 6 is project secrets** (`docs/design/secrets.md` § Delivery): `secrets` on an
 assignment, sealed under a purpose. It is a bump because ignoring it is wrong, not less: an older
@@ -521,6 +524,26 @@ and `bug.yml`. Until a template's snapshot speaks 7, such a job sticks its ticke
 or, from an unlabelled template, makes one machine, learns 6 at its join and sticks from the next
 pass. It is a placement stick, so pointing a template at a new snapshot brings every stuck ticket
 back; `docs/deploy.md` § Upgrading is where the operator reads that.
+
+**Protocol 8 is a conversation that merges the default branch** (`conversations.md` § Commits):
+`default_branch` in a *chat's* assignment's `git`, and a squash that settles a conflict the run
+left open instead of dying on `reset --soft` (`git-hosting.md` § Non-fast-forward on a ticket
+branch). It is a bump because the first without the second is worse than neither. A protocol 5, 6 or
+7 worker fetches the branch and keeps a committed merge — that half was never kind-aware — but
+its squash cannot survive a merge the turn left open, so the turn dies with a bare git error and
+so does every turn after it, a trap no chat could reach while nothing told it the branch. So a
+conversation needs protocol 8 (`Forge.Jobs.protocol/1`), a protocol 4-7 worker keeps taking every
+workflow job and command, and the minimum stays 4.
+
+**What this leaves exposed, named rather than claimed closed**: an *integrating* job still asks
+only for 5, and on a 5, 6 or 7 worker a run of it that ends mid-conflict fails the way forge#2 did.
+That is the bug being fixed, not a misread of anything new the platform sends, and raising that
+floor would strand tickets on machines that can still do everything else such a job needs. It
+closes when the templates move, as every protocol does.
+
+**`uncommitted` on a turn rides along without a bump.** An older worker never sends it, and an
+older platform builds the `chat.turn` payload key by key (`Conversations.record_turn/2`) and so
+drops it: the turn is recorded as it was before, with no commit and no reason.
 
 What rides along without a bump, because an older side may ignore it: `job.harness.memory`
 events and the `memory` a `starting` event carries (`docs/design/claude-code-events.md` § Memory),
@@ -742,9 +765,10 @@ already has the framework for.
 
 - **What the protocol floor left behind** (§ What needs a bump, and raising the minimum). With
   every accepted worker at protocol 4 or later, `Forge.Jobs.protocol/1`'s numbers for a command and
-  an agent decide nothing; the protocol dimension of `Workers.fits?/2` and the scheduler's demand
-  stay, because an integrating job needs protocol 5, a job that names a secret needs 6, and the
-  floor is still 4; the workers
+  a workflow job decide nothing; the protocol dimension of `Workers.fits?/2` and the scheduler's
+  demand stay, because an integrating job needs protocol 5, a job that names a secret needs 6, a
+  state that declares a presentation or an optional output needs 7, a conversation needs 8, and
+  the floor is still 4; the workers
   page's *no stats — update it*, for a connected machine that spoke no protocol, can no longer be
   drawn; and `Provisioning.holds?/2` still asks only whether a template's image is new enough for
   the job, not whether this platform accepts it, so a project with a small template labelled 3 and

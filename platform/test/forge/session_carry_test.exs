@@ -34,6 +34,8 @@ defmodule Forge.SessionCarryTest do
     - { from: implementing,  to: reviewing }
     - { from: reviewing,     to: review_ready }
     - { from: reviewing,     to: implementing, when: changes_requested, max: 3 }
+    - { from: implementing,  to: implementing, when: budget_exhausted,   max: 1 }
+    - { from: implementing,  to: implementing, when: did_not_converge,   max: 1 }
   limits:
     ticket_cost: 25.00
   """
@@ -216,6 +218,85 @@ defmodule Forge.SessionCarryTest do
       assert again["fork_session"] == false
     end
 
+    # The retry lap: a state's own `budget_exhausted` self-loop sends the ticket back into the
+    # state it just ran out of budget in, and the second attempt starts with the first's
+    # conversation instead of paying again for the reading that produced it. `dev.yml` declares
+    # one for `refining`, `planning`, `implementing` and `presenting` — not for every prompted
+    # state: `reviewing` sends a budget stop on to `presenting` instead, and `integrating` has a
+    # budget of its own and no self-loop, so a budget stop there sticks the ticket. A fork is a
+    # state's previous attempt either way, so the edge back out of another state reaches none of
+    # this. The three outcomes that still start fresh are the tests below and after.
+    test "after one that ran out of budget forks its session", context do
+      assignment = context.ticket |> pending() |> FakeWorker.assign(context.worker)
+
+      {:ok, first} =
+        FakeWorker.finish(assignment, "max_budget", harness: uploaded(assignment, "sess-impl"))
+
+      assert first.outcome == :budget_exhausted
+
+      ticket = Tickets.get!(context.ticket.id)
+      assert %{state: "implementing", status: :active} = ticket
+
+      second = pending(ticket)
+      assert second.attempt == 2
+      assert second.resume_from_id == first.id
+
+      resumed = FakeWorker.assign(second, context.worker)
+      assert resumed["resume_session"] == "sess-impl"
+      assert resumed["fork_session"] == true
+      assert resumed["session"]["key"] == assignment["store"]["session_prefix"] <> "1.jsonl"
+    end
+
+    # The self-loop's `max: 1` is what bounds a budget stop that repeats, and it is the bound the
+    # fork rule leans on rather than replacing: the second attempt running out too is stuck, not
+    # a third fork.
+    test "that ran out of budget twice is not given a third", context do
+      assignment = context.ticket |> pending() |> FakeWorker.assign(context.worker)
+      {:ok, _first} = FakeWorker.finish(assignment, "max_budget", harness: uploaded(assignment))
+
+      second = Tickets.get!(context.ticket.id) |> pending() |> FakeWorker.assign(context.worker)
+      {:ok, _second} = FakeWorker.finish(second, "max_budget", harness: uploaded(second))
+
+      assert %{state: "implementing", status: :stuck} = Tickets.get!(context.ticket.id)
+    end
+
+    # The sibling self-loop, and the line budget stops are on the other side of: `dev.yml` sends a
+    # state back into itself on `did_not_converge` too, and that attempt starts cold. The agent
+    # reached no outcome, so whatever stopped it reaching one is in the session a fork would
+    # carry.
+    test "after one that reported it did not converge starts fresh", context do
+      assignment = context.ticket |> pending() |> FakeWorker.assign(context.worker)
+      written = %{"implementation.md" => "---\noutcome: did_not_converge\n---\n# I\n"}
+
+      {:ok, first} =
+        FakeWorker.finish(assignment, "success",
+          written: written,
+          harness: uploaded(assignment, "sess-impl")
+        )
+
+      assert first.outcome == :did_not_converge
+      assert Jobs.get!(first.id).session_blob, "there was a session to fork, and it was not"
+
+      ticket = Tickets.get!(context.ticket.id)
+      assert %{state: "implementing", status: :active} = ticket
+      assert pending(ticket).resume_from_id == nil
+    end
+
+    # The last of the three that stay out, and the only one no test above reaches by running a
+    # job: `cancelled` has no came_back path of its own — a cancelled ticket is restored `stuck`,
+    # and *Run again* does not fork — so writing the row is the only way to put `forkable/4` in
+    # front of one. The other two are driven rather than written — `did_not_converge` by the test
+    # just above, `error` by "after an attempt that ended in an error starts fresh" below.
+    test "after one recorded cancelled starts fresh", context do
+      {ticket, first, _} = run(context.ticket, context.worker, "implementation.md", "done")
+      first |> Ecto.Changeset.change(outcome: :cancelled) |> Repo.update!()
+
+      {ticket, _review, _} = run(ticket, context.worker, "review.md", "changes_requested")
+
+      assert ticket.state == "implementing"
+      assert pending(ticket).resume_from_id == nil
+    end
+
     # A fork remembers the instructions its session began with, and is told they are its own. A
     # re-pin that moved the state's prompt, or a platform upgrade that changed the preamble, makes
     # that untrue, so the new attempt starts fresh.
@@ -283,7 +364,7 @@ defmodule Forge.SessionCarryTest do
       assert FakeWorker.assign(again, worker)["resume_session"] == nil
     end
 
-    test "after an attempt that did not converge starts fresh", context do
+    test "after an attempt that ended in an error starts fresh", context do
       {ticket, _impl, _} = run(context.ticket, context.worker, "implementation.md", "done")
       assignment = ticket |> pending() |> FakeWorker.assign(context.worker)
 
@@ -300,7 +381,7 @@ defmodule Forge.SessionCarryTest do
       assert pending(ticket).resume_from_id == nil
     end
 
-    # Only the attempt just before: a third after a second that did not converge does not reach
+    # Only the attempt just before: a third after a second that ended in an error does not reach
     # back past it to the first, whose session is two rounds out of date.
     test "after a failed attempt, does not fork the one before it", context do
       {ticket, _impl, _} = run(context.ticket, context.worker, "implementation.md", "done")

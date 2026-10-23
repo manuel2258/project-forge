@@ -56,10 +56,11 @@ defmodule ForgeWorker.Checkout do
   user's. A clone is the worker's own — into an empty directory nothing of a job has touched,
   whether the caller made it or git does — and the caller gives it to the user afterwards.
 
-  `default` names the project's default branch, for an integrating job: it is fetched as well, on
-  every run, into `origin/<default>`, so the job can merge it (`docs/design/job-prompt.md`
-  § Integrating the default branch). Fetching is all: the job's token still writes nothing but
-  its own branch.
+  `default` names the project's default branch, for an integrating job or a conversation: it is
+  fetched as well, on every run, into `origin/<default>`, so the run can merge it
+  (`docs/design/job-prompt.md` § Integrating the default branch,
+  `docs/design/conversations.md` § Commits). Fetching is all: the job's token still writes nothing
+  but its own branch.
   """
   @spec ensure(opts()) :: :ok | {:error, term()}
   def ensure(opts) do
@@ -100,24 +101,224 @@ defmodule ForgeWorker.Checkout do
   machine. `decisions.md` asks for one commit per run rather than an agent's keystrokes, and
   this is where that happens.
 
-  **`keep` names a branch the run may have merged** — an integrating job's `origin/<default>`. When
+  **`keep` names a branch the run may have merged** — an integrating job's or a conversation's
+  `origin/<default>`. When
   the run's head contains history of it that `base` does not — their merge base is no ancestor of
-  `base` — that merge base is the squashed commit's second parent, so the squash keeps the merge: one parent would put the merged tree on the branch while losing
-  that the default branch was merged, and the next `merge-tree` would start from the old merge
-  base and find the same conflict (`docs/design/git-hosting.md` § Non-fast-forward on a ticket
-  branch). The merge base and not `keep` itself, because a run resumed after the default branch
-  moved has fetched a newer head than the one it merged. `base` stays the first parent whatever the
+  `base` — that merge base is the squashed commit's second parent, so the squash keeps the merge:
+  one parent would put the merged tree on the branch while losing that the default branch was
+  merged, and the next `merge-tree` would start from the old merge base and find the same conflict
+  (`docs/design/git-hosting.md` § Non-fast-forward on a ticket branch). The merge base and not
+  `keep` itself, because a run resumed after the default branch moved has fetched a newer head
+  than the one it merged. `base` stays the first parent whatever the
   run did, so a run that rebased instead of merging still leaves the commit before it an ancestor.
+
+  **A conflict the run left in the tree is dealt with before the reset**, which git refuses
+  outright while one is open — the squash used to die on it with the run's work neither committed
+  nor explained (ticket 11). See `settle/4`: resolved — staged, as git asks, and carrying no
+  conflict marker anywhere a run that merged would commit one — a merge is committed, so
+  `merged/4` sees the default branch in the run's history as it would have. Unresolved,
+  `{:error, {:merge_unresolved, paths}}`, and nothing is staged, committed or reset.
   """
   @spec squash(String.t(), String.t(), String.t(), ForgeWorker.Slice.as(), keyword()) ::
           {:ok, boolean()} | {:error, term()}
   def squash(dir, base, message, as, opts \\ []) do
-    with {:ok, merged} <- merged(dir, base, Keyword.get(opts, :keep), as),
+    keep = Keyword.get(opts, :keep)
+
+    with :ok <- settle(dir, base, keep, as),
+         {:ok, merged} <- merged(dir, base, keep, as),
          {:ok, _out} <- git(dir, ["reset", "--soft", base], as: as),
          {:ok, _out} <- git(dir, ["add", "-A"], as: as) do
       commit(dir, base, merged, message, as)
     end
   end
+
+  # **Leaves the tree in a state `reset --soft` will accept, or refuses to touch it.**
+  #
+  # git refuses the reset on `is_merge() || unmerged_cache()` (`builtin/reset.c`), so both halves
+  # are asked, and the sequencer's own state with them: a conflicted cherry-pick, rebase or revert
+  # has no `MERGE_HEAD` and dies on the reset just the same, with the bare git error ticket 11 is
+  # about.
+  #
+  # **An unresolved conflict is one the index still holds both sides of.** That is git's own
+  # record, the thing the reset refuses on, and the only question that has an answer for every
+  # path: resolving means editing *and* `git add`, which is what `git status` tells the agent to
+  # do. **An edit left unstaged is not a resolution here**, deliberately — judging the content
+  # instead needs a model the operation does not have for every path git will not show as text (a
+  # binary conflict, a `-diff` or `binary` attribute), and reaches into files no conflict touched.
+  # The cost is a run refused for a `git add` it did not do; the tree is untouched, so a
+  # conversation's next turn can stage it, and the paths are named either way.
+  #
+  # **A tree carrying conflict markers is refused as well**, because `git add` on a conflicted
+  # path clears the index's record without resolving anything: staging the markers and stopping is
+  # the commonest reflex there is, and committing that put `<<<<<<< HEAD` on the branch *as the
+  # merge's resolution*, second parent and all, which is the loss ticket 11 exists to stop made
+  # permanent. **Asked whenever the run has a conflict open or a merge this squash will keep** —
+  # the second half because `git commit` is what closes an operation, so an agent that committed
+  # its markers leaves nothing open, and the worst case would be the one case never looked at.
+  # Outside both it is not asked, so a repository whose own files show a conflict — a design note
+  # about one — is asked about while it resolves or merges, and not on every run.
+  defp settle(dir, base, keep, as) do
+    case unmerged?(dir, as) do
+      {:ok, false} -> settle(dir, base, keep, as, operation(dir, as))
+      {:ok, true} -> unresolved(dir, as)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp settle(dir, base, keep, as, operation) do
+    with {:ok, keeping?} <- keeping?(dir, base, keep, as, operation),
+         :ok <- unmarked(dir, as, operation != :none or keeping?) do
+      commit_merge(dir, as, operation)
+    end
+  end
+
+  # Whether this squash would keep a merge as a second parent, which is the other reason to ask
+  # for markers. Asked only when nothing is open, because an open operation opens that gate by
+  # itself; `merged/4` is asked again after `settle/4` because committing the merge is what makes
+  # it findable at all.
+  defp keeping?(_dir, _base, _keep, _as, operation) when operation != :none, do: {:ok, true}
+
+  defp keeping?(dir, base, keep, as, _none) do
+    with {:ok, merged} <- merged(dir, base, keep, as), do: {:ok, merged != nil}
+  end
+
+  defp unmarked(_dir, _as, false), do: :ok
+
+  defp unmarked(dir, as, true) do
+    case marked?(dir, as) do
+      {:ok, false} -> :ok
+      {:ok, true} -> marked(dir, as)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp unresolved(dir, as) do
+    with {:ok, paths} <- unmerged_paths(dir, as), do: {:error, {:merge_unresolved, paths}}
+  end
+
+  defp marked(dir, as) do
+    with {:ok, paths} <- marked_paths(dir, as), do: {:error, {:merge_unresolved, paths}}
+  end
+
+  # The merge is committed because that commit is what `merged/4` reads the merged history from,
+  # and what `reset --soft` needs gone. Nothing is staged first: `settle/5` is only reached with an
+  # index that has nothing unmerged in it, so the resolution is already in there.
+  defp commit_merge(dir, as, :merge) do
+    with {:ok, _out} <- git(dir, ["commit", "--no-edit", "--quiet"], as: as), do: :ok
+  end
+
+  # A cherry-pick, a rebase or a revert has no second parent to keep, so an index with nothing
+  # unmerged in it is the whole of what the reset needs from it; their own state is the agent's
+  # business. Committing for these as well would be an **equivalent mutant** — the squash throws
+  # that commit's tree away with its own `reset --soft` and keeps no second parent for it — so no
+  # test can tell, and none should be written for it.
+  defp commit_merge(_dir, _as, _sequencer), do: :ok
+
+  # Which operation the tree is in the middle of. A merge is apart from the other three because it
+  # is the only one with a second parent to keep.
+  #
+  # **A rebase is asked for by its directory, not by `REBASE_HEAD`.** That ref outlives the rebase:
+  # `git rebase --continue` finishes, `git status` says the branch is clean, and the ref is still
+  # there — `reset --soft` clears `CHERRY_PICK_HEAD` and `REVERT_HEAD` but not that one. Asking it
+  # said an operation was open for the rest of a worktree's life, which for a conversation is
+  # every remaining turn: one file carrying all three markers — a `mergetool` `.orig`, a note about
+  # a conflict — and nothing would ever be committed again. `.git/rebase-merge` and
+  # `.git/rebase-apply` are git's own in-progress test (`wt_status_get_state`), and they go when
+  # the rebase does.
+  @sequencer ["CHERRY_PICK_HEAD", "REVERT_HEAD"]
+
+  defp operation(dir, as) do
+    cond do
+      head?(dir, as, "MERGE_HEAD") -> :merge
+      Enum.any?(@sequencer, &head?(dir, as, &1)) -> :sequencer
+      rebasing?(dir, as) -> :sequencer
+      true -> :none
+    end
+  end
+
+  defp head?(dir, as, ref),
+    do: match?({:ok, _sha}, git(dir, ["rev-parse", "-q", "--verify", ref], as: as))
+
+  # The paths are git's own, from `--git-path`; the stat is the worker's, and it is the one thing
+  # here that runs no program the job's user could have written, which is what `as` is for
+  # everywhere else.
+  defp rebasing?(dir, as) do
+    case git(dir, ["rev-parse", "--git-path", "rebase-merge", "--git-path", "rebase-apply"],
+           as: as
+         ) do
+      {:ok, out} ->
+        out |> String.split("\n", trim: true) |> Enum.any?(&File.dir?(Path.expand(&1, dir)))
+
+      {:error, _reason} ->
+        false
+    end
+  end
+
+  # **A verdict is an exit status; a name is for the message.** `git/3` folds stderr into stdout,
+  # so whatever git chatters — a `core.fsmonitor` that writes there, a file in the tree it cannot
+  # stat — arrives mixed into the answer. An exit status cannot be polluted that way, so every
+  # decision below is one, and the names are read out of the same output only for the reason a
+  # person reads: a line git wrote to stderr costs a name there and can change nothing else.
+  defp unmerged?(dir, as) do
+    case git(dir, ["diff", "--quiet", "--diff-filter=U"], as: as) do
+      {:ok, _none} -> {:ok, false}
+      {:error, {1, _some}} -> {:ok, true}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # **All three of git's markers, in one file**: a single line of seven `=` is a Markdown heading
+  # underline, and refusing a run for one would lose a turn's work over a file nothing conflicted
+  # in. Asked of the worktree *and* its untracked files, which is what `add -A` will stage and so
+  # the bytes the commit would carry — `git mergetool` leaves its `.orig` untracked, and a path
+  # staged as deleted is still on disk.
+  #
+  # **`-G` because the dialect would otherwise be the repository's to choose.** `grep.patternType`
+  # is read from a config the job's user writes, and `fixed` turns every pattern here into a
+  # literal — `^` included — so nothing matched and a conflicted tree was called resolved. A value
+  # git itself refuses still fails the run, which is a refusal that says why rather than a pass.
+  # Nothing else is passed: `-a` *looked* load-bearing and is not, because `-l` lists a binary file
+  # it matched either way — what would hide a path is `-I`, and that is not passed.
+  @markers ["-e", "^<<<<<<< ", "-e", "^=======", "-e", "^>>>>>>> "]
+  @grep ["grep", "-G", "--untracked", "--all-match"]
+
+  defp marked?(dir, as) do
+    case git(dir, @grep ++ ["--quiet"] ++ @markers, as: as) do
+      {:ok, _found} -> {:ok, true}
+      {:error, {1, _none}} -> {:ok, false}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # Sorted, which **no test can tell** from its absence: `git grep` has printed these in byte
+  # order in every arrangement tried — tracked beside untracked, upper case beside lower — so it
+  # is an equivalent mutant. It stays because the order a person reads should not rest on that,
+  # and because the list beside it is sorted for a reason that is written down.
+  defp marked_paths(dir, as) do
+    with {:ok, out} <- git(dir, @grep ++ ["-l", "-z"] ++ @markers, as: as) do
+      {:ok, out |> records() |> Enum.filter(&path?/1) |> Enum.sort()}
+    end
+  end
+
+  # One path per conflict, out of the three stages the index holds it at. `-z`, because `ls-files`
+  # quotes a path with a newline in it otherwise and this one is printed for a person to read. The
+  # sort here *is* an equivalent mutant — the index is ordered by path, byte for byte as
+  # `Enum.sort/1` is — and it stays so that both lists read the same way.
+  @stage ~r/\A\d+ [0-9a-f]+ [123]\t(?<path>.+)\z/s
+
+  defp unmerged_paths(dir, as) do
+    with {:ok, out} <- git(dir, ["ls-files", "-z", "--unmerged"], as: as) do
+      {:ok, out |> records() |> Enum.flat_map(&stage_path/1) |> Enum.uniq() |> Enum.sort()}
+    end
+  end
+
+  defp records(out), do: String.split(out, <<0>>, trim: true)
+
+  defp stage_path(record), do: Regex.run(@stage, record, capture: ["path"]) || []
+
+  # A path git printed, as against a line it chattered into the same stream: `-z` ends a path with
+  # a NUL and nothing else, so a record carrying a newline is not one.
+  defp path?(record), do: record != "" and not String.contains?(record, "\n")
 
   # The commit to keep as a second parent, or nil: the newest of `keep`'s history the run's head
   # contains, when `base` does not contain it. Asked before the reset, while `HEAD` is the run's.

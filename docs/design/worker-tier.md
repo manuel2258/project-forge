@@ -636,8 +636,9 @@ runs in:
   never a failed run: warmth is not correctness.
 
 **Promotion happens only after the run committed and pushed**, and that is what makes the template
-safe to snapshot without cleaning. `Checkout.squash/4` does `reset --soft origin/<branch>` then
-`add -A`, so after a successful run every untracked file that was not ignored has been committed,
+safe to snapshot without cleaning. `Checkout.squash/5` settles a conflict the run left open and
+then does `reset --soft origin/<branch>` and `add -A`, so after a successful run every untracked
+file that was not ignored has been committed,
 and what is left beside the checkout is the ignored build output the whole mechanism is for. A run
 that failed before it pushed keeps its worktree's untracked debris, and promoting that would hand
 the next job exactly the inheritance the clean rule exists to prevent. So a failed run promotes
@@ -679,6 +680,35 @@ no shared cache between jobs beyond these, and no key that declares one: the fir
 this measured 343 MB fetched per job. Pointing the cache at a
 directory outside the checkout, which is the obvious fix, is the one that loses it — nothing
 outside the checkout and the Nix store survives a job.
+
+Forge itself is the worked example, in `bin/lib/mix-cache.sh`: Mix installs Hex into `MIX_HOME`
+and Hex caches the registry and every tarball it downloads in `HEX_HOME`, both under `$HOME` by
+default, so each job reinstalled Hex and refetched the registry however warm its `deps/` was. The
+gate exports both into the checkout — `.mix-home/` and `.hex-home/`, ignored beside the build
+directories — for its own processes only, so an operator's `~/.mix` is neither read nor written.
+Every script here that runs `mix` sources that one file instead of exporting the pair itself, so
+they cannot disagree about where Mix's home is: `bin/check` owns the caches and installs Hex when
+they answer nothing, and `bin/e2e-chat` only borrows what the gate built and so asks first — with
+`mix hex.info`, in the environment it would export, because a `.mix-home/` that exists and holds
+no archive would otherwise take an operator with a warm `~/.mix` to no Hex at all. Asking whether
+the directory is there instead is the validate-then-act trap `CLAUDE.md` § Rules names: the guard
+has to ask the question the operation asks.
+
+**What a carried `_build` does and does not save**, since the path changes every job and § Volumes
+and the seed's 1.34× is the only figure this note had. `Mix.Tasks.Compile.Elixir` puts
+`File.cwd!()` into its manifest's `cache_key` and `Mix.Compilers.Elixir` recompiles the app when
+that key differs, and a job's worktree is `worktrees/<job_id>` — a new absolute path every job. So
+**every dependency survives and the project's own sources do not**: at a new path with the volume's
+`_build` in place, `platform` recompiles `forge_core`'s 29 files and its own 182 and leaves all
+sixty-odd Hex dependencies alone, 13 seconds against 122 to build the same thing from fetched deps;
+`core` and `worker` together, 3 seconds against 23. Measured here, and the tests pass on the result.
+
+The residue is real but small — of the order of fifteen seconds a job across the three projects —
+and nothing a build script can reach: the key is the working directory, not the build path, so
+`MIX_BUILD_PATH` and `MIX_BUILD_ROOT` miss it, and a symlink misses it too because `File.cwd!()`
+resolves to the physical path. Closing it means *giving* the job a stable absolute path — a bind
+mount, or a worktree keyed on the ticket rather than the job — which changes the job slice rather
+than a cache. Worth knowing before anyone reads a per-job recompile as the volume having failed.
 
 What this deliberately does not do is move warmth *between* tickets. When a ticket merges, its
 volume is the best possible starting point for the next ticket on that machine, and promoting it

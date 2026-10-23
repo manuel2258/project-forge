@@ -371,7 +371,7 @@ defmodule ForgeWorker.Job.Conversation do
   # pushes before it reports — the platform records the branch head as the changeset the moment
   # it hears from us, and work that is not on the branch is work that was lost.
   def handle_info({:turn, _job_id, index, event}, state) do
-    head = commit_turn(state, index)
+    {head, uncommitted} = commit_turn(state, index)
 
     # Every turn, not at the end. `out/` is never committed, so a proposal or a document
     # reported only when the conversation closes is one a lost machine takes with it — and a
@@ -396,6 +396,10 @@ defmodule ForgeWorker.Job.Conversation do
            "job_id" => state.job_id,
            "turn" => index,
            "commit" => head,
+           # Why the turn has no commit, when it has none: the machine's log is off the machine
+           # and the person in the chat never reads it, so this is the only way they learn that
+           # what the turn did is not on the branch (`docs/design/conversations.md` § Commits).
+           "uncommitted" => uncommitted,
            "interrupted" => event.payload[:interrupted] == true,
            "proposals" =>
              Map.new(proposals.proposals, fn {file, p} ->
@@ -507,7 +511,7 @@ defmodule ForgeWorker.Job.Conversation do
 
   # -- the work -------------------------------------------------------------------------------
 
-  # One commit per turn, and they accumulate: `Checkout.squash/4` resets to `origin/<branch>`,
+  # One commit per turn, and they accumulate: `Checkout.squash/5` resets to `origin/<branch>`,
   # and pushing moves that remote-tracking ref, so turn two is built on turn one rather than
   # replacing it. That was measured before it was relied on, because the opposite reading —
   # every turn rewriting the last into a single amended commit — is equally plausible from the
@@ -521,11 +525,12 @@ defmodule ForgeWorker.Job.Conversation do
 
     case Workspace.commit_and_push(state.assignment, state.worktree, message, state.user) do
       {:ok, head} ->
-        head
+        {head, nil}
 
       # The turn is still reported, with no commit: its reply and its cost happened whether or
-      # not its work reached the branch. What went wrong is a line in the machine's log, because
-      # nothing else carries it off the machine (`docs/design/worker-log.md`).
+      # not its work reached the branch. What went wrong is a line in the machine's log, and —
+      # since ticket 11 — a word with the turn itself, because the machine's log is not read by
+      # the person in the chat (`docs/design/worker-log.md`, `conversations.md` § Commits).
       {:error, reason} ->
         Log.line(
           "turn.uncommitted",
@@ -539,9 +544,17 @@ defmodule ForgeWorker.Job.Conversation do
           job_id: state.job_id
         )
 
-        nil
+        {nil, uncommitted(reason)}
     end
   end
+
+  # What the turn carries about the commit it did not make: the kind of failure, and for the one
+  # kind a person can act on — a merge the turn left conflicted — the paths it is open in. The
+  # words are the platform's, which is where the person reads them; this says which words.
+  defp uncommitted({:merge_unresolved, paths}),
+    do: %{"reason" => "merge_unresolved", "paths" => paths}
+
+  defp uncommitted(_other), do: %{"reason" => "not_committed"}
 
   defp commit_message(state, index),
     do: "chat: turn #{index}\n\nConversation #{state.job_id}.\n"

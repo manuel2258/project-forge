@@ -538,12 +538,62 @@ defmodule Forge.QueueTest do
     # Criterion 5, which the read now keeps by construction: a job that has finished is not
     # loaded, so nothing a ticket once did can be mistaken for what it is doing. Widen the status
     # filter by one and this ticket is reported as running on a worker forever.
+    # One job of each ending, because they are different statuses and the group has to reject
+    # both: `:finished` is where every completed job stops — keeping the `worker_id` it ran on —
+    # and `:hibernated` is where one that will be resumed waits. A fixture with only the second
+    # left the first undefended, and widening the read to it drew *Running on a worker* for a
+    # ticket that was doing nothing, forever.
     test "a job that has finished is never the ticket's work, however it ended", context do
       ticket = ticket_fixture(%{project: context.project})
-      job_fixture(%{ticket: ticket, worker_id: worker!().id, status: :hibernated})
-      job_fixture(%{ticket: ticket, status: :waiting, attempt: 2})
+      done = job_fixture(%{ticket: ticket, worker_id: worker!().id})
+
+      {:ok, _finished} =
+        Repo.update(
+          Forge.Jobs.Job.progress_changeset(done, %{status: :finished, outcome: :converged})
+        )
+
+      job_fixture(%{ticket: ticket, worker_id: worker!().id, status: :hibernated, attempt: 2})
+      job_fixture(%{ticket: ticket, status: :waiting, attempt: 3})
 
       assert under_way(context.user, ticket) == []
+    end
+
+    # A conversation is not the ticket's work. It is already in the queue above, as a `:chat`
+    # decision for as long as it waits on a person (`docs/design/conversations.md` § In the
+    # queue), and a second line down here would draw one ticket twice — once as something waiting
+    # on you and once as work on a machine.
+    test "a conversation on the ticket is not its work", context do
+      ticket = ticket_fixture(%{project: context.project})
+
+      chat =
+        chat_fixture(%{
+          ticket_id: ticket.id,
+          project: context.project,
+          worker_id: worker!().id,
+          status: :running
+        })
+
+      # Spoken last by the agent, which is what puts it in the queue above as a decision. Both
+      # halves are asserted here, because "the ticket would be drawn twice" is the reason for
+      # the exclusion and is worth showing rather than claiming.
+      :ok =
+        Jobs.record_harness_event(chat.id, %{type: "job.harness.text", payload: %{text: "well?"}})
+
+      {:ok, _chat} =
+        Forge.Conversations.record_turn(chat, %{
+          "turn" => 1,
+          "harness" => %{"turns" => 1, "cost_usd" => 0.01, "subtype" => "success"}
+        })
+
+      assert [%{kind: :chat}] =
+               Enum.filter(Queue.items(context.user), &(&1.ticket && &1.ticket.id == ticket.id))
+
+      assert under_way(context.user, ticket) == []
+
+      # And the ticket is otherwise in range: give it a workflow job on a worker and it appears,
+      # so the absence above is the kind filter and not the fixture.
+      job_fixture(%{ticket: ticket, worker_id: worker!().id, status: :running})
+      assert [%{kind: :on_worker}] = under_way(context.user, ticket)
     end
 
     # Finding A of the second review. A command is created *after* the agent that invoked it, so

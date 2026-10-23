@@ -183,6 +183,10 @@ defmodule Forge.Queue do
     Repo.all(
       from j in Job,
         where: j.ticket_id in ^ticket_ids,
+        # A conversation is not the ticket's work. It is already in the queue above as a `:chat`
+        # decision while it waits on a person (`docs/design/conversations.md` § In the queue),
+        # and drawing the ticket again down here would say the same ticket was both waiting on
+        # you and on a machine.
         where: j.kind in [:workflow, :command],
         where: j.status in @live_statuses,
         select: %{
@@ -226,14 +230,16 @@ defmodule Forge.Queue do
   # and `Commands.put_resume/3` return a job to `:pending` without clearing it. Matching
   # `worker_id: nil` there would show nothing for exactly the tickets a person had just unblocked.
   # **Widening a status here is an equivalent mutant; narrowing one is not.** Admitting
-  # `:hibernated` to the running clause changes nothing observable, because `live_jobs/1`'s
-  # `where` never loaded such a row — and admitting it to `@live_statuses` alone changes nothing
-  # either, because this clause rejects it. Criterion 5 rests on the pair, and the test that
-  # fails when *both* move is "a job that has finished is never the ticket's work". Dropping a
-  # status is a different matter and is caught on both sides: take `:pending` out of
-  # `@live_statuses` and twelve tests fail, drop this clause's `== :pending` and a job running on
-  # no worker is drawn as waiting for one. `@live_statuses` is named above so that a widening has
-  # one place to be made rather than two that must agree.
+  # `:finished` to the running clause changes nothing observable, because `live_jobs/1`'s `where`
+  # never loaded such a row — and admitting it to `@live_statuses` alone changes nothing either,
+  # because this clause rejects it. Criterion 5 rests on the pair, and the test that fails when
+  # *both* move is "a job that has finished is never the ticket's work, however it ended", whose
+  # fixture carries one job of each ending — `:finished`, which is where every completed job
+  # stops and which keeps its `worker_id`, and `:hibernated`, which is where one that will be
+  # resumed waits. Dropping a status is a different matter and is caught on both sides: take
+  # `:pending` out of `@live_statuses` and the batch and command tests fail, drop this clause's
+  # `== :pending` and a job running on no worker is drawn as waiting for one. `@live_statuses`
+  # is named above so that a widening has one place to be made rather than two that must agree.
   defp live_job(jobs) do
     running = for job <- jobs, job.status == :running, not is_nil(job.worker_id), do: job
     pending = for job <- jobs, job.status == :pending, do: job
@@ -281,8 +287,10 @@ defmodule Forge.Queue do
     %{
       kind: kind,
       ticket: ticket,
-      # `fetch!`, not a lazy refetch: `projects` is built from the same ids the ticket query
-      # filters on, so a missing key would mean this read had changed under itself.
+      # An equivalent mutant — `Projects.get!/1` here fetches the identical struct and every
+      # test stays green — and `fetch!` all the same: `projects` is built from the same ids the
+      # ticket query filters on, so a missing key would mean this read had changed under itself,
+      # and the map is a cache rather than a lookup that can legitimately miss.
       project: Map.fetch!(projects, ticket.project_id),
       since: since(kind, job, runs),
       question: nil,

@@ -535,14 +535,18 @@ defmodule Forge.QueueTest do
       assert under_way(context.user, ticket) == []
     end
 
-    # Criterion 5, which the read now keeps by construction: a job that has finished is not
-    # loaded, so nothing a ticket once did can be mistaken for what it is doing. Widen the status
-    # filter by one and this ticket is reported as running on a worker forever.
-    # One job of each ending, because they are different statuses and the group has to reject
-    # both: `:finished` is where every completed job stops — keeping the `worker_id` it ran on —
-    # and `:hibernated` is where one that will be resumed waits. A fixture with only the second
-    # left the first undefended, and widening the read to it drew *Running on a worker* for a
-    # ticket that was doing nothing, forever.
+    # Criterion 5, which the read keeps by construction: a job that is not live is never loaded,
+    # so nothing a ticket once did can be mistaken for what it is doing. Widen the status filter
+    # and the ticket is reported as running on a worker forever.
+    #
+    # **One job in every status that is not live, each carrying the `worker_id` it ran on**, which
+    # is what makes each one catchable: `live_job/1` rejects a row with no worker whatever the
+    # status filter says, so a defanged row in the fixture defends nothing. `:finished` is where
+    # every completed job stops, `:hibernated` where one that will be resumed waits, `:waiting`
+    # where one stopped on a blocking question sits, and `:parked` where an agent waits for the
+    # commands it invoked. This fixture was extended one status at a time as each was found
+    # undefended; it is all four now, so the claim at `live_job/1` holds for every status rather
+    # than for the two that had been looked at.
     test "a job that has finished is never the ticket's work, however it ended", context do
       ticket = ticket_fixture(%{project: context.project})
       done = job_fixture(%{ticket: ticket, worker_id: worker!().id})
@@ -553,7 +557,8 @@ defmodule Forge.QueueTest do
         )
 
       job_fixture(%{ticket: ticket, worker_id: worker!().id, status: :hibernated, attempt: 2})
-      job_fixture(%{ticket: ticket, status: :waiting, attempt: 3})
+      job_fixture(%{ticket: ticket, worker_id: worker!().id, status: :waiting, attempt: 3})
+      job_fixture(%{ticket: ticket, worker_id: worker!().id, status: :parked, attempt: 4})
 
       assert under_way(context.user, ticket) == []
     end
@@ -590,8 +595,13 @@ defmodule Forge.QueueTest do
 
       assert under_way(context.user, ticket) == []
 
+      # The chat carries a worker, which is what the mutation-sensitivity of this test rests on:
+      # with a nil one, dropping the kind filter would answer `:none` rather than `:on_worker`
+      # and the assertion above would pass against the broken code.
+      assert Repo.get(Forge.Jobs.Job, chat.id).worker_id
+
       # And the ticket is otherwise in range: give it a workflow job on a worker and it appears,
-      # so the absence above is the kind filter and not the fixture.
+      # so the absence above is the kind filter and not the ticket being out of reach.
       job_fixture(%{ticket: ticket, worker_id: worker!().id, status: :running})
       assert [%{kind: :on_worker}] = under_way(context.user, ticket)
     end

@@ -234,12 +234,15 @@ defmodule Forge.Queue do
   # never loaded such a row — and admitting it to `@live_statuses` alone changes nothing either,
   # because this clause rejects it. Criterion 5 rests on the pair, and the test that fails when
   # *both* move is "a job that has finished is never the ticket's work, however it ended", whose
-  # fixture carries one job of each ending — `:finished`, which is where every completed job
-  # stops and which keeps its `worker_id`, and `:hibernated`, which is where one that will be
-  # resumed waits. Dropping a status is a different matter and is caught on both sides: take
-  # `:pending` out of `@live_statuses` and the batch and command tests fail, drop this clause's
-  # `== :pending` and a job running on no worker is drawn as waiting for one. `@live_statuses`
-  # is named above so that a widening has one place to be made rather than two that must agree.
+  # fixture carries a job in each of the four statuses that are not live — `:finished`,
+  # `:hibernated`, `:waiting` and `:parked` — every one of them holding the `worker_id` it ran
+  # on, because a row without one is rejected here whatever the status filter says.
+  #
+  # Dropping a status is a different matter and is caught on both sides: take `:pending` out of
+  # `@live_statuses` and the whole pending half of this group disappears, failing tests in both
+  # queue test files; drop this clause's `== :pending` and a job running on no worker is drawn as
+  # waiting for one. `@live_statuses` is named above so that a widening has one place to be made
+  # rather than two that must agree.
   defp live_job(jobs) do
     running = for job <- jobs, job.status == :running, not is_nil(job.worker_id), do: job
     pending = for job <- jobs, job.status == :pending, do: job

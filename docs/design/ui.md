@@ -1220,7 +1220,7 @@ pending, and only the latest reason since the job last started; every change sta
 event stream, where it is a line like any other.
 
 **It is not accent**, even when the answer is a template nobody has assigned. Accent is the
-queue's mark for a human decision, and neither a job running nor a job waiting for one is that:
+queue's mark for a human decision, and neither a job running nor a job waiting to start is that:
 the Queue draws a ticket resting on either quietly, in its own group beneath the decisions and
 beneath the digest, read from `Job.status` and `worker_id` on the ticket's current job alone —
 the same shape § Not waiting on you already gives an assumption, counted towards nothing and
@@ -1228,6 +1228,23 @@ never pushed. A ticket that no template could ever hold is stuck instead of mere
 gets its accent that way; stuck excludes the quiet line rather than sharing it. A conversation in
 the same position waits on a person and is drawn quietly all the same — the gap
 `provisioning.md` § The gate records, not a rule.
+
+Three things that group gets right, each of which it got wrong first:
+
+- **The current job is the ticket's work, not only its workflow job.** A command state creates no
+  workflow job at all (`commands.md` § A command state) and an agent that invoked a command parks
+  while it runs, so a read of workflow jobs alone left the Queue saying *Nothing needs you* while
+  a build was on a machine. It is the last of the ticket's workflow jobs and its commands by
+  creation — the same `work` the ticket's own page builds.
+- **A paused ticket is still never here.** The daily spend cap and a rate-limited credential pool
+  both leave a job pending with its ticket active, and `capacity.md` keeps both out of the queue
+  because an item the operator cannot act on is what the queue exists not to contain. The group
+  drops them, asking `Forge.Spend` and the wait the scheduler recorded — the same two things that
+  draw `PAUSED` elsewhere.
+- **The pending line names no cause.** It says *Waiting to start*, not *waiting for a worker*:
+  most of the reasons a job is pending are about getting it a machine, but waiting a turn behind
+  a sibling command is not, and a refused template needs a person. The sentence above is where a
+  cause is stated, because it is the one place that knows which cause.
 
 ## Documents
 

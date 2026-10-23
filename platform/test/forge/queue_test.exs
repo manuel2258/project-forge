@@ -429,10 +429,49 @@ defmodule Forge.QueueTest do
       ticket = ticket_fixture(%{project: context.project})
       job = job_fixture(%{ticket: ticket, worker_id: worker!().id, status: :running})
 
-      assert [%{kind: :on_worker, since: since, detail: %{job_id: job_id}}] =
-               under_way(context.user, ticket)
-
+      assert [%{kind: :on_worker, detail: %{job_id: job_id}}] = under_way(context.user, ticket)
       assert job_id == job.id
+    end
+
+    # The age beside *Running on a worker* is the run's, not the row's. A job made at 09:00 and
+    # held for room until 19:00 reads "10h" five minutes into its run if `inserted_at` is used
+    # for both kinds, and one column then means two different things on two adjacent lines.
+    test "a running job is aged from when its run started", context do
+      ticket = ticket_fixture(%{project: context.project})
+      job = job_fixture(%{ticket: ticket, worker_id: worker!().id, status: :running})
+      started = DateTime.add(DateTime.utc_now(:second), -60, :second)
+      {:ok, job} = Repo.update(Ecto.Changeset.change(job, started_at: started))
+
+      refute DateTime.compare(job.inserted_at, started) == :eq
+      assert [%{since: ^started}] = under_way(context.user, ticket)
+    end
+
+    # The fallback under that rule. `Jobs.mark_started/3` writes `started_at` in the same update
+    # as the status, so production has no `:running` row without one — but a changeset written by
+    # hand does, and a `since` of nil takes the sort and the page down rather than losing a line.
+    test "a running row with no start time is aged from its creation", context do
+      ticket = ticket_fixture(%{project: context.project})
+      job = job_fixture(%{ticket: ticket, worker_id: worker!().id, status: :running})
+
+      assert is_nil(job.started_at)
+      assert [%{since: since}] = under_way(context.user, ticket)
+      assert since == job.inserted_at
+    end
+
+    # A pending job is aged from its creation — how long the ticket has been held, the number the
+    # operator came to the queue for. A job that ran, stopped and was resumed is pending *with* a
+    # `started_at`, and that is a run that has ended: aging the line from it would say the ticket
+    # had been waiting since a run that is over.
+    test "a pending job is aged from when it was created, even once it has run", context do
+      ticket = ticket_fixture(%{project: context.project})
+      job = job_fixture(%{ticket: ticket, worker_id: worker!().id, status: :waiting})
+      started = DateTime.add(DateTime.utc_now(:second), -60, :second)
+      {:ok, job} = Repo.update(Ecto.Changeset.change(job, started_at: started))
+      {:ok, job} = Jobs.resume(job)
+
+      assert job.status == :pending
+      refute is_nil(job.started_at)
+      assert [%{since: since}] = under_way(context.user, ticket)
       assert since == job.inserted_at
     end
 
@@ -478,6 +517,33 @@ defmodule Forge.QueueTest do
       assert under_way(context.user, ticket) == []
     end
 
+    # A command state creates no workflow job at all, and an agent that invoked a command parks
+    # while it runs, so a read of workflow jobs alone left the group empty — and the page saying
+    # "Nothing needs you" — while a build was on a machine. The ticket's own page gets this right
+    # from the same two reads, which is the pair this follows.
+    test "a command running on a worker puts its ticket on a worker", context do
+      ticket = ticket_fixture(%{project: context.project})
+      job_fixture(%{ticket: ticket, status: :hibernated})
+
+      job_fixture(%{
+        ticket: ticket,
+        kind: :command,
+        state: "check",
+        worker_id: worker!().id,
+        status: :running
+      })
+
+      assert [%{kind: :on_worker}] = under_way(context.user, ticket)
+    end
+
+    test "a command still waiting for a machine leaves its ticket waiting", context do
+      ticket = ticket_fixture(%{project: context.project})
+      job_fixture(%{ticket: ticket, status: :parked})
+      job_fixture(%{ticket: ticket, kind: :command, state: "check"})
+
+      assert [%{kind: :awaiting_worker}] = under_way(context.user, ticket)
+    end
+
     test "a ticket with no jobs at all is in neither", context do
       ticket = ticket_fixture(%{project: context.project})
 
@@ -499,6 +565,70 @@ defmodule Forge.QueueTest do
       # And it is in the queue proper, as the accent item: the ticket is visible, just not here.
       assert [%{kind: :stuck}] =
                Enum.filter(Queue.items(context.user), &(&1.ticket.id == ticket.id))
+    end
+
+    # `docs/design/capacity.md` keeps a paused ticket **out of the queue entirely**: it is drawn
+    # `PAUSED · SPEND` where it lives, and an item in the queue the operator cannot act on is the
+    # failure that note is written against. The cap is node-wide, so without this every active
+    # ticket on the node arrives in the group at once, under a sentence about workers, with the
+    # workers idle.
+    test "the daily spend cap keeps a waiting ticket out of the group", context do
+      ticket = ticket_fixture(%{project: context.project})
+      job_fixture(%{ticket: ticket})
+      assert [%{kind: :awaiting_worker}] = under_way(context.user, ticket)
+
+      pause_spend!()
+      assert Forge.Spend.paused?()
+      assert under_way(context.user, ticket) == []
+    end
+
+    # The cap stops the *next* job from starting; it does not stop the one already on a machine,
+    # and a line saying so is not an item anybody is being asked to act on.
+    test "the daily spend cap leaves a running ticket alone", context do
+      ticket = ticket_fixture(%{project: context.project})
+      job_fixture(%{ticket: ticket, worker_id: worker!().id, status: :running})
+
+      pause_spend!()
+      assert [%{kind: :on_worker}] = under_way(context.user, ticket)
+    end
+
+    # The other pause `capacity.md` keeps out of the queue, and the one that is per project
+    # rather than node-wide: the scheduler records it on the job, and that record is what is read
+    # — the same one the ticket's own timeline prints.
+    test "a rate-limited credential pool keeps a waiting ticket out of the group", context do
+      ticket = ticket_fixture(%{project: context.project})
+      job = job_fixture(%{ticket: ticket})
+      assert [%{kind: :awaiting_worker}] = under_way(context.user, ticket)
+
+      :ok = Jobs.record_wait(job, "limited", "Waiting for a limit to reset: ...")
+      assert under_way(context.user, ticket) == []
+    end
+
+    # Only the pauses. A job held for want of room is exactly what this group is for, and a
+    # denylist that swallowed every recorded reason would empty it.
+    test "a wait for room is still in the group", context do
+      ticket = ticket_fixture(%{project: context.project})
+      job = job_fixture(%{ticket: ticket})
+      :ok = Jobs.record_wait(job, "at_capacity", "Waiting for room: ...")
+
+      assert [%{kind: :awaiting_worker}] = under_way(context.user, ticket)
+    end
+
+    # The *latest* reason, not the first: a job passed over for a limit and then, once the limit
+    # reset, for want of room is waiting for room.
+    test "the reason read is the last one recorded", context do
+      ticket = ticket_fixture(%{project: context.project})
+      job = job_fixture(%{ticket: ticket})
+      :ok = Jobs.record_wait(job, "limited", "Waiting for a limit to reset: ...")
+      :ok = Jobs.record_wait(job, "at_capacity", "Waiting for room: ...")
+
+      assert [%{kind: :awaiting_worker}] = under_way(context.user, ticket)
+    end
+
+    defp pause_spend! do
+      previous = Application.get_env(:forge, Forge.Spend, [])
+      Application.put_env(:forge, Forge.Spend, daily_cost_usd: 0.0)
+      ExUnit.Callbacks.on_exit(fn -> Application.put_env(:forge, Forge.Spend, previous) end)
     end
 
     test "a finished ticket is in neither, whatever its last job says", context do

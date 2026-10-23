@@ -17,11 +17,13 @@ defmodule ForgeWeb.QueueLive do
   question is in that document's form instead, optional (§ Answering questions).
 
   Beneath that again is the work already **under way**: a ticket whose current job is running on
-  a worker, or still pending. Same register as the digest and for the same reason —
-  neither is a decision, so neither carries a mark, an accent or a place in a count
-  (`docs/design/ui.md` § A job waiting for a machine). It is the one group on this page read from
-  `Queue.worker_status/1` rather than `Queue.items/1`, and it never enters `group/1` or
-  `decorate/1`, which exist for the decision cards.
+  a worker, or still pending. Same register as the digest and for the same reason — neither is a
+  decision, so neither carries a mark, an accent or a place in a count (`docs/design/ui.md` § A
+  job waiting for a machine). It is the one group on this page read from `Queue.worker_status/1`
+  rather than `Queue.items/1`, and it never enters `group/1` or `decorate/1`, which exist for the
+  decision cards. A ticket the spend cap or a rate-limited credential pool is holding is in
+  neither group: `worker_status/1` drops it, because `docs/design/capacity.md` keeps a paused
+  ticket out of the queue entirely.
   """
 
   use ForgeWeb, :live_view
@@ -58,10 +60,10 @@ defmodule ForgeWeb.QueueLive do
   # question's form instead, optional, because it was asked in the same breath
   # (docs/design/ui.md § Answering questions).
   defp load(socket) do
+    user = socket.assigns.current_scope.user
+
     {waiting, assumed} =
-      Queue.items(socket.assigns.current_scope.user)
-      |> Enum.map(&Map.put(&1, :project, &1.project.name))
-      |> Enum.split_with(&Queue.waiting?/1)
+      user |> Queue.items() |> named_projects() |> Enum.split_with(&Queue.waiting?/1)
 
     {joined, digest} =
       waiting
@@ -76,16 +78,14 @@ defmodule ForgeWeb.QueueLive do
       # Counted from `items` and nothing else, which is what keeps the header and the nav badge
       # out of reach of `under_way` below it.
       decisions: Enum.sum(Enum.map(items, & &1.decisions)),
-      under_way: under_way(socket.assigns.current_scope.user),
+      under_way: user |> Queue.worker_status() |> named_projects(),
       now: DateTime.utc_now()
     )
   end
 
-  defp under_way(user) do
-    user
-    |> Queue.worker_status()
-    |> Enum.map(&Map.put(&1, :project, &1.project.name))
-  end
+  # Every list this page draws takes the project as its name: `destination/1` and the identifier
+  # line want the string, and nothing here wants the struct.
+  defp named_projects(items), do: Enum.map(items, &Map.put(&1, :project, &1.project.name))
 
   # One job, stopped, against one artifact version, carrying N questions. Everything else is
   # already one interruption on its own. `load/1` only passes an assumption here when a blocking
@@ -324,10 +324,7 @@ defmodule ForgeWeb.QueueLive do
         </ul>
       </section>
 
-      <%!-- Prose again, and for the digest's reason: a job on a machine and a job waiting for one
-            are both waiting on nobody, so no mark, no accent, no answer row, and no number
-            anywhere else on the page counts them — docs/design/ui.md § A job waiting for a
-            machine. --%>
+      <%!-- The digest's register, for the digest's reason — see the moduledoc. --%>
       <section
         :if={@under_way != []}
         id="queue-under-way"
@@ -473,17 +470,20 @@ defmodule ForgeWeb.QueueLive do
     |> String.slice(0, 160)
   end
 
-  # What the line says is which of the two the ticket is in, and nothing else. *Why* a pending
-  # job could not be placed is the sentence on the ticket's own timeline (`docs/design/ui.md`
-  # § A job waiting for a machine) and is not restated here.
+  # What the line says is which of the two the ticket is in, and nothing else. **Not "waiting for
+  # a worker"**, which would name a cause this read does not know: of the reasons the scheduler
+  # records for a pending job most are about getting it a machine, but waiting its turn behind a
+  # sibling command is not, and a template the platform refused needs a person rather than room.
+  # *Why* it is waiting is the sentence on the ticket's own timeline (`docs/design/ui.md` § A job
+  # waiting for a machine), which is where a cause can be stated accurately.
   defp under_way_line(%{kind: :on_worker}), do: "Running on a worker."
-  defp under_way_line(%{kind: :awaiting_worker}), do: "Waiting for a worker."
+  defp under_way_line(%{kind: :awaiting_worker}), do: "Waiting to start."
 
   # Both counts when there are both: telling the two apart at a glance is what this group is for,
   # and one total would hide it.
   defp under_way_sentence(items) do
     {running, waiting} = Enum.split_with(items, &(&1.kind == :on_worker))
-    clauses = [tickets(running, "running on a worker"), tickets(waiting, "waiting for a worker")]
+    clauses = [tickets(running, "running on a worker"), tickets(waiting, "waiting to start")]
 
     Enum.join(Enum.reject(clauses, &is_nil/1), ", ") <> "."
   end

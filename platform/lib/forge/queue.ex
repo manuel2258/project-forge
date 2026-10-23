@@ -13,7 +13,7 @@ defmodule Forge.Queue do
   what is waiting (`docs/design/ui.md` § Not waiting on you).
 
   `worker_status/1` is a second list, read by the Queue page alone: the tickets whose current job
-  is running on a worker or still waiting for one. It is not in `items/1` and nothing counts it —
+  is running on a worker or still waiting to start. It is not in `items/1` and nothing counts it —
   see its own doc.
   """
 
@@ -22,8 +22,9 @@ defmodule Forge.Queue do
   require Logger
 
   alias Forge.Accounts.User
-  alias Forge.{Artifacts, Conversations, Engine, Jobs, Projects, Repo, Tickets}
+  alias Forge.{Artifacts, Conversations, Engine, Jobs, Projects, Repo, Spend, Tickets}
   alias Forge.Artifacts.Question
+  alias Forge.Events.Event
   alias Forge.Jobs.Job
   alias Forge.Tickets.Ticket
   alias ForgeCore.Workflow
@@ -106,15 +107,23 @@ defmodule Forge.Queue do
 
   def waiting?(%{kind: _kind}), do: true
 
+  # The wait reasons `Forge.Jobs.Scheduler` records for a pause that *time* resolves rather than
+  # a machine: the node's daily spend cap, and a project whose every credential is rate-limited.
+  # A ticket held by one of these is **never in the queue** (`docs/design/capacity.md` § Four
+  # exhaustions, three treatments) — it is drawn `PAUSED` where it lives and nowhere else,
+  # because an item in the queue the operator cannot act on is the failure that note is written
+  # against.
+  @paused_waits ~w(spend_paused limited)
+
   @doc """
   The tickets whose work is already moving, or would be if a machine were free: the current job
   of each, as `:on_worker` when it is running on an assigned worker and `:awaiting_worker` when
   it is still pending. Oldest first, as one group.
 
-  Active tickets only. A stuck one keeps the accent flag `items/1` gives it rather than a second,
-  quieter line, which is why the status is narrowed in the query and not afterwards.
-
-  `worker_id` separates the two kinds on the running side only. See `under_way_item/1`.
+  Active tickets only, and never one the node's spend cap or a rate-limited credential pool is
+  holding — see `@paused_waits` and `under_way_item/2`. A stuck ticket keeps the accent flag
+  `items/1` gives it rather than a second, quieter line, which is why the status is narrowed in
+  the query and not afterwards.
 
   Deliberately not part of `items/1`. That list is what the JSON API, the CLI and the push digest
   are built on, and each of them matches its kinds exhaustively — `Forge.CLI.queue_line/1` has no
@@ -122,10 +131,12 @@ defmodule Forge.Queue do
   whose readers are entitled to assume one (`docs/design/ui.md` § A job waiting for a machine).
   """
   @spec worker_status(User.t()) :: [item()]
-  def worker_status(%User{} = user),
-    do: under_way(Enum.map(Projects.list(user), & &1.id))
+  def worker_status(%User{} = user) do
+    projects = Projects.list(user)
+    under_way(Enum.map(projects, & &1.id), Map.new(projects, &{&1.id, &1}))
+  end
 
-  defp under_way(project_ids) do
+  defp under_way(project_ids, projects) do
     Repo.all(
       from t in Ticket,
         # `:active`, not `@open`. A stuck ticket can legitimately hold a job that still reads
@@ -136,14 +147,21 @@ defmodule Forge.Queue do
         where: t.status == :active,
         where: ^visible(project_ids)
     )
-    |> Enum.flat_map(&under_way_item/1)
+    |> Enum.flat_map(&under_way_item(&1, projects))
+    |> drop_paused()
     |> oldest_first()
   end
 
-  # Only the ticket's *current* workflow job, which is the last one `Jobs.for_ticket/1` returns —
-  # the same read the ticket's own page calls current. A ticket whose latest job has finished,
-  # parked or stopped on a question matches neither clause and contributes nothing; so does one
-  # with no job at all.
+  # The ticket's *current* job, which is the last of its workflow jobs and its commands by
+  # creation — `work` on the ticket's own page, built from the same two reads
+  # (`ForgeWeb.TicketLive`). A command counts because a command state creates no workflow job at
+  # all (`docs/design/commands.md` § A command state) and an agent that invoked one parks while
+  # it runs: reading only `Jobs.for_ticket/1` left the group empty while a build was on a
+  # machine. Where a batch runs several commands at once this reads the last of them to be
+  # created, so a ticket is listed while that one is live rather than until the whole batch is.
+  #
+  # A ticket whose current job has finished, parked or stopped on a question matches neither
+  # clause and contributes nothing; so does one with no job at all.
   #
   # `worker_id` is checked on the running clause and deliberately not on the pending one, because
   # the column says where the job's *last* run was and not what is holding it: `Jobs.resume/1`
@@ -151,33 +169,67 @@ defmodule Forge.Queue do
   # job is pending on a worker id that is not a reservation. It is waiting for a machine like any
   # other pending job, and matching `worker_id: nil` here would show nothing for exactly the
   # tickets a person had just unblocked.
-  defp under_way_item(%Ticket{} = ticket) do
-    case ticket.id |> Jobs.for_ticket() |> List.last() do
+  defp under_way_item(%Ticket{} = ticket, projects) do
+    case current_job(ticket) do
       %Job{status: :running, worker_id: worker_id} = job when not is_nil(worker_id) ->
-        [under_way_entry(ticket, job, :on_worker)]
+        [under_way_entry(ticket, job, :on_worker, projects)]
 
       %Job{status: :pending} = job ->
-        [under_way_entry(ticket, job, :awaiting_worker)]
+        [under_way_entry(ticket, job, :awaiting_worker, projects)]
 
       _other ->
         []
     end
   end
 
-  # `since` is when this job was created, not when the ticket last changed: the ticket's
-  # `updated_at` moves for reasons that have nothing to do with the job it is running. It is
-  # deliberately the plainest of the three candidates — `started_at` is null on a job that has
-  # never run, and `updated_at` moves on every turn a running job reports, so neither reads as an
-  # age of anything. For a first attempt still pending, which is the common case, it is how long
-  # the ticket has been held; for a job that ran, stopped on a question and was resumed, it is
-  # older than the current wait, and why the job is waiting stays the sentence on its own
-  # timeline (`docs/design/ui.md` § A job waiting for a machine).
-  defp under_way_entry(%Ticket{} = ticket, %Job{} = job, kind) do
+  defp current_job(%Ticket{id: id}) do
+    (Jobs.for_ticket(id) ++ Jobs.commands_for_ticket(id))
+    |> Enum.sort_by(& &1.inserted_at, DateTime)
+    |> List.last()
+  end
+
+  # **The pauses, dropped after the fact and not in the query**, because neither is a column on
+  # anything this read loads: the daily cap is a sum over the node's runs, and a rate-limited pool
+  # is a reason the scheduler wrote on the job. Both are asked of the same thing that decided
+  # them — the one `Forge.Spend` the `PAUSED · SPEND` chip reads, and the wait the ticket's own
+  # timeline prints — so a ticket cannot read paused in one place and merely slow here.
+  #
+  # Only `:awaiting_worker` is dropped. A job already running on a machine is running whatever the
+  # cap says; the cap stops the *next* one from starting.
+  defp drop_paused(entries) do
+    pending = for %{kind: :awaiting_worker, detail: %{job_id: id}} <- entries, do: id
+
+    # Both reads are taken once for the whole page, outside the reject: `Spend.paused?/0` sums
+    # the node's runs and `current_waits/1` is one query for every pending job at once, and a
+    # predicate that asked either per entry would ask N times for one answer. `pending != []`
+    # is an equivalent mutant — with nothing to drop the answer is unused either way — and is
+    # there only so that a page with no pending job does not sum the node's spend to find out.
+    capped? = pending != [] and Spend.paused?()
+    waits = Jobs.current_waits(pending)
+
+    Enum.reject(entries, fn entry ->
+      entry.kind == :awaiting_worker and
+        (capped? or paused_wait?(waits[entry.detail.job_id]))
+    end)
+  end
+
+  defp paused_wait?(%Event{payload: %{"reason" => reason}}), do: reason in @paused_waits
+  defp paused_wait?(_no_wait_recorded), do: false
+
+  # `since` is when the thing the line describes began, which is not the same column for the two
+  # kinds. A running job has a `started_at` — `Jobs.mark_started/3` writes it in the same update
+  # as the status — and that is when the run started; its `inserted_at` could be ten hours
+  # earlier if it waited that long for room, and "10h" beside *Running on a worker* would be a
+  # lie. A pending job has no start, and its `inserted_at` is how long the ticket has been held.
+  # The fallback is for a `:running` row written without one, which only a direct changeset does;
+  # a `since` of nil would take the sort and the page down with it.
+  defp under_way_entry(%Ticket{} = ticket, %Job{} = job, kind, projects) do
     %{
       kind: kind,
       ticket: ticket,
-      project: Projects.get!(ticket.project_id),
-      since: job.inserted_at,
+      project:
+        Map.get_lazy(projects, ticket.project_id, fn -> Projects.get!(ticket.project_id) end),
+      since: (kind == :on_worker && job.started_at) || job.inserted_at,
       question: nil,
       detail: %{job_id: job.id}
     }

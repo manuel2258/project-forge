@@ -859,12 +859,11 @@ defmodule ForgeWeb.QueueLiveTest do
 
       assert view |> element("#under-way-#{running.id}") |> render() =~ "Running on a worker."
 
-      assert view |> element("#under-way-#{waiting.id}") |> render() =~
-               "Waiting for a worker."
+      assert view |> element("#under-way-#{waiting.id}") |> render() =~ "Waiting to start."
 
       # Asymmetric on purpose: with one of each, a sentence that counted the two groups the wrong
       # way round would read the same and nothing here would notice.
-      assert under_way(view) =~ "2 tickets running on a worker, 1 ticket waiting for a worker."
+      assert under_way(view) =~ "2 tickets running on a worker, 1 ticket waiting to start."
 
       # Each line leads to its ticket, and offers nothing that commits — the digest's rule.
       assert has_element?(
@@ -960,6 +959,55 @@ defmodule ForgeWeb.QueueLiveTest do
       assert has_element?(view, "#item-stuck-#{ticket.id}")
       refute has_element?(view, "#under-way-#{ticket.id}")
       refute has_element?(view, "#queue-under-way")
+    end
+
+    # `docs/design/capacity.md` keeps a paused ticket out of the queue entirely, and the cap is
+    # node-wide: without the drop, every active ticket arrives here at once the moment it trips.
+    test "a spend-paused ticket is not in the group at all", %{conn: conn, project: project} do
+      admit(project, "Held by the cap")
+
+      {:ok, view, _html} = live(conn, ~p"/")
+      assert has_element?(view, "#queue-under-way")
+
+      previous = Application.get_env(:forge, Forge.Spend, [])
+      Application.put_env(:forge, Forge.Spend, daily_cost_usd: 0.0)
+      on_exit(fn -> Application.put_env(:forge, Forge.Spend, previous) end)
+
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      refute has_element?(view, "#queue-under-way")
+      assert view |> element("#queue-end") |> render() =~ "Nothing needs you."
+    end
+
+    # The failure this read was found by: a command state creates no workflow job, so the page
+    # said "Nothing needs you" while the ticket's build was on a machine.
+    test "a ticket whose build is on a machine is listed", %{conn: conn, project: project} do
+      ticket = admit(project, "Checking")
+      [job | _] = Jobs.for_ticket(ticket.id)
+      {:ok, _} = Repo.update(Forge.Jobs.Job.progress_changeset(job, %{status: :parked}))
+      {:ok, worker, _token} = Forge.Workers.create(%{provider: "fake"})
+
+      command =
+        %Forge.Jobs.Job{}
+        |> Forge.Jobs.Job.create_changeset(%{
+          kind: :command,
+          ticket_id: ticket.id,
+          project_id: project.id,
+          state: "check",
+          attempt: 1,
+          spec: %{},
+          worker_id: worker.id,
+          memory_max: Forge.Jobs.default_resources().memory,
+          cores: Forge.Jobs.default_resources().cores
+        })
+        |> Repo.insert!()
+
+      {:ok, _running} =
+        Repo.update(Forge.Jobs.Job.progress_changeset(command, %{status: :running}))
+
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      assert view |> element("#under-way-#{ticket.id}") |> render() =~ "Running on a worker."
     end
 
     test "a ticket whose current job has finished has no line", %{conn: conn, project: project} do

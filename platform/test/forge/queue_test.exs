@@ -436,7 +436,35 @@ defmodule Forge.QueueTest do
     # The age beside *Running on a worker* is the run's, not the row's. A job made at 09:00 and
     # held for room until 19:00 reads "10h" five minutes into its run if `inserted_at` is used
     # for both kinds, and one column then means two different things on two adjacent lines.
-    test "a running job is aged from when its run started", context do
+    # The *current* run's start, which is the run ledger's and not `jobs.started_at`:
+    # `Jobs.mark_started/3` writes that column `job.started_at || now` and nothing rewrites it, so
+    # from the second run on it holds the first run's start. A job answered at 19:00 after
+    # stopping on a question at 09:10 read ten hours old a minute into its second run.
+    test "a running job is aged from the run it is in, not the run it first had", context do
+      ticket = ticket_fixture(%{project: context.project})
+      worker = worker!()
+      job = job_fixture(%{ticket: ticket, worker_id: worker.id, status: :running})
+      first = DateTime.add(DateTime.utc_now(:second), -36_000, :second)
+      now = DateTime.add(DateTime.utc_now(:second), -60, :second)
+      {:ok, job} = Repo.update(Ecto.Changeset.change(job, started_at: first))
+
+      # The run that ended, and the one it is in. The ledger keeps both; the column keeps one.
+      Repo.insert!(%Forge.Jobs.Run{
+        job_id: job.id,
+        worker_id: worker.id,
+        started_at: first,
+        finished_at: DateTime.add(first, 600, :second)
+      })
+
+      Repo.insert!(%Forge.Jobs.Run{job_id: job.id, worker_id: worker.id, started_at: now})
+
+      assert [%{since: ^now}] = under_way(context.user, ticket)
+    end
+
+    # The first fallback: a running row whose run the ledger does not have — which production
+    # cannot produce, since `Runs.open/5` is in the transaction that marks a job running, but a
+    # changeset written by hand can and the suite does.
+    test "a running job with no open run falls back to its own start", context do
       ticket = ticket_fixture(%{project: context.project})
       job = job_fixture(%{ticket: ticket, worker_id: worker!().id, status: :running})
       started = DateTime.add(DateTime.utc_now(:second), -60, :second)
@@ -507,14 +535,96 @@ defmodule Forge.QueueTest do
       assert under_way(context.user, ticket) == []
     end
 
-    # Criterion 5, and the mutation that matters most: read the first job instead of the last and
-    # this ticket is reported as running on a worker forever.
-    test "only the current job counts, not an earlier one", context do
+    # Criterion 5, which the read now keeps by construction: a job that has finished is not
+    # loaded, so nothing a ticket once did can be mistaken for what it is doing. Widen the status
+    # filter by one and this ticket is reported as running on a worker forever.
+    test "a job that has finished is never the ticket's work, however it ended", context do
       ticket = ticket_fixture(%{project: context.project})
-      job_fixture(%{ticket: ticket, worker_id: worker!().id, status: :running})
+      job_fixture(%{ticket: ticket, worker_id: worker!().id, status: :hibernated})
       job_fixture(%{ticket: ticket, status: :waiting, attempt: 2})
 
       assert under_way(context.user, ticket) == []
+    end
+
+    # Finding A of the second review. A command is created *after* the agent that invoked it, so
+    # the newest row is the command — and once that command finished and the agent resumed, the
+    # newest row was a finished command and the ticket left the group for the rest of its state.
+    # `implementing` in this repository may invoke ten of them.
+    test "an agent resumed after its command finished is back on its worker", context do
+      ticket = ticket_fixture(%{project: context.project})
+      agent = job_fixture(%{ticket: ticket, worker_id: worker!().id, status: :parked})
+      command = job_fixture(%{ticket: ticket, kind: :command, state: "check"})
+
+      {:ok, _done} =
+        Repo.update(
+          Forge.Jobs.Job.progress_changeset(command, %{status: :finished, outcome: :converged})
+        )
+
+      {:ok, _running} =
+        Repo.update(Forge.Jobs.Job.progress_changeset(agent, %{status: :running}))
+
+      assert [%{kind: :on_worker, detail: %{job_id: id}}] = under_way(context.user, ticket)
+      assert id == agent.id
+    end
+
+    # Finding D, the half that drew a false line. A batch is inserted in declared order, so the
+    # newest row of `invoke: [lint, build]` is `build` — and with machines scarce `lint` runs
+    # while `build` is still pending. Reading the newest row said *not yet on a worker* for a
+    # ticket that was on one.
+    test "a batch running one command and waiting on another is on a worker", context do
+      ticket = ticket_fixture(%{project: context.project})
+      job_fixture(%{ticket: ticket, status: :parked})
+
+      running =
+        job_fixture(%{
+          ticket: ticket,
+          kind: :command,
+          state: "lint",
+          worker_id: worker!().id,
+          status: :running
+        })
+
+      job_fixture(%{ticket: ticket, kind: :command, state: "build"})
+
+      assert [%{kind: :on_worker, detail: %{job_id: id}}] = under_way(context.user, ticket)
+      assert id == running.id
+    end
+
+    # Finding D, the half that drew no line: `build` exits in five seconds while `lint` runs for
+    # twenty minutes, and the finished one is the newest row.
+    test "a batch whose newest command has finished is still on a worker", context do
+      ticket = ticket_fixture(%{project: context.project})
+      job_fixture(%{ticket: ticket, status: :parked})
+
+      job_fixture(%{
+        ticket: ticket,
+        kind: :command,
+        state: "lint",
+        worker_id: worker!().id,
+        status: :running
+      })
+
+      done = job_fixture(%{ticket: ticket, kind: :command, state: "build"})
+
+      {:ok, _} =
+        Repo.update(
+          Forge.Jobs.Job.progress_changeset(done, %{status: :finished, outcome: :converged})
+        )
+
+      assert [%{kind: :on_worker}] = under_way(context.user, ticket)
+    end
+
+    # Within the winning class the newest is the one the line describes: of two commands waiting
+    # for room, the line is about the later. Not a rule anybody can act on, but the age beside it
+    # is read, so which row it comes from is not arbitrary.
+    test "the newest of the waiting jobs is the one described", context do
+      ticket = ticket_fixture(%{project: context.project})
+      job_fixture(%{ticket: ticket, status: :parked})
+      job_fixture(%{ticket: ticket, kind: :command, state: "lint"})
+      newer = job_fixture(%{ticket: ticket, kind: :command, state: "build"})
+
+      assert [%{kind: :awaiting_worker, detail: %{job_id: id}}] = under_way(context.user, ticket)
+      assert id == newer.id
     end
 
     # A command state creates no workflow job at all, and an agent that invoked a command parks
@@ -588,8 +698,30 @@ defmodule Forge.QueueTest do
       ticket = ticket_fixture(%{project: context.project})
       job_fixture(%{ticket: ticket, worker_id: worker!().id, status: :running})
 
+      # A second ticket with a pending job, so that there is something for the cap to drop. The
+      # version of this test without it could not fail: with nothing pending the page never asked
+      # whether it was capped, and dropping the rule that spares a running ticket changed nothing.
+      held = ticket_fixture(%{project: context.project})
+      job_fixture(%{ticket: held})
+
       pause_spend!()
+
       assert [%{kind: :on_worker}] = under_way(context.user, ticket)
+      assert under_way(context.user, held) == []
+    end
+
+    # **A command takes no spend gate.** `Jobs.assign_command/2` says so in as many words and
+    # never calls `spend_gate/2`, so the scheduler places a pending command at the next pass
+    # whatever the cap says. Dropping one would hide a ticket that is only waiting for room, for
+    # as long as the cap lasts.
+    test "the daily spend cap does not hide a ticket waiting on a command", context do
+      ticket = ticket_fixture(%{project: context.project})
+      job_fixture(%{ticket: ticket, status: :parked})
+      job_fixture(%{ticket: ticket, kind: :command, state: "check"})
+
+      pause_spend!()
+
+      assert [%{kind: :awaiting_worker}] = under_way(context.user, ticket)
     end
 
     # The other pause `capacity.md` keeps out of the queue, and the one that is per project

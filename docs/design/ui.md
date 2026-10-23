@@ -1220,31 +1220,44 @@ pending, and only the latest reason since the job last started; every change sta
 event stream, where it is a line like any other.
 
 **It is not accent**, even when the answer is a template nobody has assigned. Accent is the
-queue's mark for a human decision, and neither a job running nor a job waiting to start is that:
-the Queue draws a ticket resting on either quietly, in its own group beneath the decisions and
-beneath the digest, read from `Job.status` and `worker_id` on the ticket's current job alone —
-the same shape § Not waiting on you already gives an assumption, counted towards nothing and
-never pushed. A ticket that no template could ever hold is stuck instead of merely pending, and
+queue's mark for a human decision, and neither a job running nor a job not yet on a machine is
+that: the Queue draws a ticket resting on either quietly, in its own group beneath the decisions
+and beneath the digest — the same shape § Not waiting on you already gives an assumption, counted
+towards nothing and never pushed. Which of the two a ticket is in is `Job.status` and `worker_id`
+on its live job and nothing else; the three rules below say what else the group reads, and what
+for. A ticket that no template could ever hold is stuck instead of merely pending, and
 gets its accent that way; stuck excludes the quiet line rather than sharing it. A conversation in
 the same position waits on a person and is drawn quietly all the same — the gap
 `provisioning.md` § The gate records, not a rule.
 
-Three things that group gets right, each of which it got wrong first:
+Four rules, each of which the group broke first:
 
-- **The current job is the ticket's work, not only its workflow job.** A command state creates no
-  workflow job at all (`commands.md` § A command state) and an agent that invoked a command parks
-  while it runs, so a read of workflow jobs alone left the Queue saying *Nothing needs you* while
-  a build was on a machine. It is the last of the ticket's workflow jobs and its commands by
-  creation — the same `work` the ticket's own page builds.
+- **It is the ticket's live work, and a command is work.** A command state's job *is* a command
+  (`commands.md` § An invocation is a job) and an agent that invoked one parks while it runs, so a
+  read of workflow jobs alone left the Queue saying *Nothing needs you* while a build was on a
+  machine. Nor is it the ticket's newest row: a command is created after the agent that invoked
+  it, and a batch is inserted in declared order, so the newest row is routinely one that has
+  already finished while its siblings run. It is a running job with a worker if the ticket has
+  one, else a pending job — running first, because a ticket is on a machine the moment any of its
+  work is.
 - **A paused ticket is still never here.** The daily spend cap and a rate-limited credential pool
   both leave a job pending with its ticket active, and `capacity.md` keeps both out of the queue
   because an item the operator cannot act on is what the queue exists not to contain. The group
-  drops them, asking `Forge.Spend` and the wait the scheduler recorded — the same two things that
-  draw `PAUSED` elsewhere.
-- **The pending line names no cause.** It says *Waiting to start*, not *waiting for a worker*:
-  most of the reasons a job is pending are about getting it a machine, but waiting a turn behind
-  a sibling command is not, and a refused template needs a person. The sentence above is where a
-  cause is stated, because it is the one place that knows which cause.
+  drops them, asking `Forge.Spend` and the wait the scheduler recorded. The cap is drawn
+  `PAUSED · SPEND` in its place; the rate limit is drawn nowhere at all, because that surface is
+  not built (`capacity.md` § Engine support), so such a ticket is in no operator surface but the
+  reason sentence on its own timeline. **That is a gap, not a treatment** — `capacity.md`'s to
+  close, and not a reason to put a ticket nobody can act on back in the queue. The cap gates a
+  workflow job only: a command takes no spend gate, so a pending one is not dropped.
+- **Neither line names a cause.** *Running on a worker* and *Not yet on a worker* are the two
+  halves of one axis. *Waiting for a worker* named a cause and got it wrong: most of the reasons a
+  job is pending are about getting it a machine, but waiting a turn behind a sibling command is
+  not, and a refused template needs a person. The sentence above is where a cause is stated,
+  because it is the one place that knows which cause.
+- **The age of a running line is the current run's**, from the run ledger — not `jobs.started_at`,
+  which keeps the first run's start for the life of the job, and not the row's age. A job answered
+  at 19:00 after stopping on a question at 09:10 read ten hours old a minute into its second run
+  under either.
 
 ## Documents
 

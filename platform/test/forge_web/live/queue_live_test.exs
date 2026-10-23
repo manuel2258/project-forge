@@ -859,11 +859,11 @@ defmodule ForgeWeb.QueueLiveTest do
 
       assert view |> element("#under-way-#{running.id}") |> render() =~ "Running on a worker."
 
-      assert view |> element("#under-way-#{waiting.id}") |> render() =~ "Waiting to start."
+      assert view |> element("#under-way-#{waiting.id}") |> render() =~ "Not yet on a worker."
 
       # Asymmetric on purpose: with one of each, a sentence that counted the two groups the wrong
       # way round would read the same and nothing here would notice.
-      assert under_way(view) =~ "2 tickets running on a worker, 1 ticket waiting to start."
+      assert under_way(view) =~ "2 tickets running on a worker, 1 ticket not yet on one."
 
       # Each line leads to its ticket, and offers nothing that commits — the digest's rule.
       assert has_element?(

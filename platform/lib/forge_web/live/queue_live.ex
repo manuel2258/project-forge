@@ -23,7 +23,7 @@ defmodule ForgeWeb.QueueLive do
   rather than `Queue.items/1`, and it never enters `group/1` or `decorate/1`, which exist for the
   decision cards. A ticket the spend cap or a rate-limited credential pool is holding is in
   neither group: `worker_status/1` drops it, because `docs/design/capacity.md` keeps a paused
-  ticket out of the queue entirely.
+  ticket out of the queue entirely — see that function for what is and is not drawn in its place.
   """
 
   use ForgeWeb, :live_view
@@ -470,20 +470,20 @@ defmodule ForgeWeb.QueueLive do
     |> String.slice(0, 160)
   end
 
-  # What the line says is which of the two the ticket is in, and nothing else. **Not "waiting for
-  # a worker"**, which would name a cause this read does not know: of the reasons the scheduler
-  # records for a pending job most are about getting it a machine, but waiting its turn behind a
-  # sibling command is not, and a template the platform refused needs a person rather than room.
-  # *Why* it is waiting is the sentence on the ticket's own timeline (`docs/design/ui.md` § A job
-  # waiting for a machine), which is where a cause can be stated accurately.
+  # The two halves of one axis — on a machine, or not yet — which is the distinction the ticket
+  # asked for. **Neither names a cause.** "Waiting for a worker" did, and got it wrong: of the
+  # reasons the scheduler records for a pending job most are about getting it a machine, but
+  # waiting a turn behind a sibling command is not, and a template the platform refused needs a
+  # person rather than room. *Why* it is waiting is the sentence on the ticket's own timeline
+  # (`docs/design/ui.md` § A job waiting for a machine), which is the one place that knows.
   defp under_way_line(%{kind: :on_worker}), do: "Running on a worker."
-  defp under_way_line(%{kind: :awaiting_worker}), do: "Waiting to start."
+  defp under_way_line(%{kind: :awaiting_worker}), do: "Not yet on a worker."
 
   # Both counts when there are both: telling the two apart at a glance is what this group is for,
   # and one total would hide it.
   defp under_way_sentence(items) do
     {running, waiting} = Enum.split_with(items, &(&1.kind == :on_worker))
-    clauses = [tickets(running, "running on a worker"), tickets(waiting, "waiting to start")]
+    clauses = [tickets(running, "running on a worker"), tickets(waiting, "not yet on one")]
 
     Enum.join(Enum.reject(clauses, &is_nil/1), ", ") <> "."
   end

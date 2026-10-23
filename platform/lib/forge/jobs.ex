@@ -1432,6 +1432,11 @@ defmodule Forge.Jobs do
       from e in Event,
         where: e.job_id in ^job_ids and e.type in ["job.waiting", "job.started"],
         distinct: e.job_id,
+        # `asc: e.job_id` is an equivalent mutant: Ecto prepends a `distinct` expression to
+        # `order_by` itself (`deps/ecto/lib/ecto/query.ex`), so removing it changes neither the
+        # SQL's meaning nor the rows. It is written out so that Postgres' rule for `DISTINCT ON`
+        # — the leading sort key must be the distinct expression — is visible beside the
+        # `desc: e.seq` that depends on it.
         order_by: [asc: e.job_id, desc: e.seq]
     )
     |> Enum.filter(&(&1.type == "job.waiting"))

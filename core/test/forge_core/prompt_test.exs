@@ -1079,6 +1079,48 @@ defmodule ForgeCore.PromptTest do
       assert manifest == Prompt.manifest(spec, "/var/forge/jobs/job-1")
     end
 
+    # A `budget_exhausted` self-loop sends the state back to itself, so there is no "went on and
+    # came back" to tell it about — and the one thing worth telling it is why a second budget
+    # exists at all (`docs/design/claude-code-events.md` § Resume).
+    test "for a new attempt after a budget stop says that, not that the ticket went on" do
+      entered = %{"from" => "planning", "outcome" => "budget_exhausted", "by" => "engine"}
+      spec = %{resumed_spec() | attempt: 2, entered: entered}
+      prompt = Prompt.continuation(spec, "/var/forge/jobs/job-1", "c0ffee", fork: true)
+
+      assert String.starts_with?(prompt, "# A new attempt of `planning`")
+      assert prompt =~ "ran out of budget before it reached an outcome"
+      assert prompt =~ "**reach a declared outcome inside it.**"
+      refute prompt =~ "The ticket went on from here"
+
+      # It is still a new attempt, so the outputs paragraph stands: what the stopped run wrote
+      # was kept as a version of its own and is not in this attempt's `out/`.
+      assert prompt =~ "**Nothing you wrote last time counts for this attempt.**"
+    end
+
+    # The same outcome out of *another* state is an ordinary way back: that state ran out of
+    # budget and the workflow sent the ticket here, which did go on from here and come back.
+    test "for a new attempt whose budget stop was another state's reads as coming back" do
+      entered = %{"from" => "reviewing", "outcome" => "budget_exhausted", "by" => "engine"}
+      spec = %{resumed_spec() | attempt: 2, entered: entered}
+      prompt = Prompt.continuation(spec, "/var/forge/jobs/job-1", "c0ffee", fork: true)
+
+      assert prompt =~ "The ticket went on from here and has come back"
+      refute prompt =~ "ran out of budget"
+    end
+
+    # And the other half of the same rule: a self-loop that is *not* a budget stop. `dev.yml`
+    # sends a state back into itself on `did_not_converge` too, so a same-state arrival alone
+    # does not mean the budget ran out — and telling that attempt it did would name the wrong
+    # thing to watch. Only the two together read as a budget stop.
+    test "for a new attempt sent back to itself on another outcome reads as coming back" do
+      entered = %{"from" => "planning", "outcome" => "did_not_converge", "by" => "engine"}
+      spec = %{resumed_spec() | attempt: 2, entered: entered}
+      prompt = Prompt.continuation(spec, "/var/forge/jobs/job-1", "c0ffee", fork: true)
+
+      assert prompt =~ "The ticket went on from here and has come back"
+      refute prompt =~ "ran out of budget"
+    end
+
     test "for a resume of the same attempt says nothing of a new one" do
       prompt = Prompt.continuation(resumed_spec(), "/var/forge/jobs/job-1", "c0ffee", fork: false)
 

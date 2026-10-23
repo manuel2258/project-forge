@@ -447,18 +447,41 @@ is silently a fresh session handed a continuation prompt it has no memory to con
 
 **A new attempt that came back resumes its predecessor as a fork.** When a transition sends the
 ticket back into a state it has run before — `reviewing` returning work to `implementing`, a
-tester sending a build back — and that state's previous attempt ended with an outcome its agent
-declared (`converged`), the new job records the previous one as `jobs.resume_from_id`. Its first
-run restores the previous attempt's session and adds `--fork-session`, so it begins with its
-predecessor's conversation under a session id of its own, and the old one's file is untouched. Its
-continuation says it is a new attempt that came back, and why; `out/` is empty and every output is
-written again. A person's *Run again* never forks — it is a request to redo, and it is what a
-person reaches for after a failure — and neither does an attempt after one that ended `error`,
-`did_not_converge`, `budget_exhausted` or `cancelled`, which is started fresh so as not to carry
-on from whatever went wrong. No state forks another's session: a reviewer does not share the
-implementer's memory. Nor does an attempt fork one that was given other instructions — another
-prompt, after a re-pin moved it, or another preamble, after the platform's changed: the fork would
-remember the old ones and be told they were its own.
+tester sending a build back, a state's own `budget_exhausted` self-loop sending it back to itself
+— and that state's previous attempt ended either with an outcome its agent declared (`converged`)
+or by running out of budget (`budget_exhausted`), the new job records the previous one as
+`jobs.resume_from_id`. Its first run restores the previous attempt's session and adds
+`--fork-session`, so it begins with its predecessor's conversation under a session id of its own,
+and the old one's file is untouched. Its continuation says it is a new attempt that came back, and
+why; `out/` is empty and every output is written again. A person's *Run again* never forks — it is
+a request to redo, and it is what a person reaches for after a failure — and neither does an
+attempt after one that ended `error`, `did_not_converge` or `cancelled`, which is started fresh so
+as not to carry on from whatever went wrong. No state forks another's session: a reviewer does
+not share the implementer's memory. Nor does an attempt fork one that was given other
+instructions — another prompt, after a re-pin moved it, or another preamble, after the platform's
+changed: the fork would remember the old ones and be told they were its own.
+
+**A budget stop is the one failure worth carrying on from**, and it is here because of what it is
+not: the three that start fresh each say something about the *work* — the agent could not reach an
+outcome, the run broke, a person stopped it — and a fork of one carries whatever went wrong into
+the attempt meant to escape it. A budget stop says nothing about the work at all. The
+instructions never changed and the agent never concluded anything; it simply ran out of room to
+act on them, which is exactly the rule the fork depends on — that it is told its session's
+instructions are its own. Carrying the context is also the whole point: a cold second attempt
+re-reads the code and re-derives the findings the first one already paid for, which is the
+expense that pays for a state's budget twice. The risk this leaves open is the one the other
+three are kept out for: an attempt that spends its budget the same way twice makes no progress
+but costs a second budget. The `max: 1` on every `budget_exhausted` self-loop in
+`.forge/workflows/` is what bounds that, not this rule.
+
+**So the continuation says so.** A self-loop sends the state from itself to itself, which is not
+the ticket going on and coming back, and the fork's opening paragraph said it was. An attempt
+whose way in was its own state on `budget_exhausted` is told instead that the last attempt ran out
+before it reached an outcome, that the budget below is a fresh one a workflow allows only so many
+of, and to reach a declared outcome inside it rather than read again what it remembers reading.
+The same outcome out of *another* state is an ordinary way back and reads as one. The outputs
+paragraph is unchanged either way: a run that wrote a document before the harness stopped it had
+that document kept as a version like any other, and this attempt's `out/` is still empty.
 
 A forked resume that is refused is the same re-queue as any other: `resume_refused?/2` asks whether
 the run was a resume, and the re-queue clears the fork with the session, so it is tried once.

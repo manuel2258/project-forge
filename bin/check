@@ -14,21 +14,18 @@ echo "==> shell"
 # a command state invokes those scripts, and one of them decides whether the gate itself is
 # judged to have run (`.forge/commands/check.sh`). It was the only shell here nothing linted.
 shellcheck -x bin/check bin/measure bin/release bin/worker-update bin/e2e-chat bin/hetzner-image \
-  measure/lib/*.sh measure/workloads/*.sh .forge/commands/*.sh \
+  bin/lib/*.sh measure/lib/*.sh measure/workloads/*.sh .forge/commands/*.sh \
   platform/priv/git-hooks/* worker/test/support/*.sh nix/worker-health/*.sh nix/worker-health/jobs/*.sh
 shfmt -d -i 2 -ci -sr bin measure .forge/commands platform/priv/git-hooks worker/test/support nix/worker-health
 
-# A machine that has never run this — a command pool's, not an operator's — has an empty
-# MIX_HOME, and `mix check` goes straight to compiling: no alias in any project installs Hex or
-# fetches deps, so Mix dies asking for Hex before a single check runs. Hex and rebar are
-# installed when they are absent and left alone when they are not; `mix deps.get` below runs
-# every time, in every project, because a lock the deps do not match is the same cold-machine
-# failure one commit later. Nothing here relaxes a check.
-if ! mix hex.info > /dev/null 2>&1; then
-  echo "==> hex"
-  mix local.hex --force > /dev/null
-  mix local.rebar --force > /dev/null
-fi
+# Mix's caches live in ignored directories inside the checkout, so a ticket's next agent job
+# inherits them instead of reinstalling Hex and refetching the registry. This script owns them:
+# it creates them when they are cold, which is the one thing `bin/e2e-chat` must not do.
+# `bin/lib/mix-cache.sh` has the why and is the only place either path is written.
+#
+# shellcheck source=bin/lib/mix-cache.sh
+. bin/lib/mix-cache.sh
+forge_mix_cache_ensure "$PWD"
 
 # The platform's tests need a postgres on localhost:5432 (`platform/config/test.exs`), and a
 # command pool's machine has the binaries from the devshell and no server, so `mix check` in

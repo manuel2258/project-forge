@@ -67,6 +67,32 @@ defmodule ForgeWorker.Job.WorkspaceTest do
     assert File.read!(Path.join(dir, "README.md")) == "# Game\n"
   end
 
+  # The other side of the same `git clean`, and the flag the whole carry rests on: `-fd` and not
+  # `-fdx`. The test above says untracked debris goes; this says an *ignored* directory stays,
+  # because that is what `deps/`, `_build/`, `.mix-home/` and `.hex-home/` are. Add `-x` to
+  # `Checkout.maybe_clean/3` and a run resuming onto its own worktree wipes every one of them.
+  test "a cold start onto an existing worktree keeps the ignored build output", context do
+    %{origin: origin, root: root} = context
+    job = assignment(origin)
+    {:ok, dir} = Workspace.prepare(job, root, @direct)
+
+    # Tracked on the branch, so the second checkout has the rules before it cleans.
+    File.write!(Path.join(dir, ".gitignore"), ".mix-home/\nbuild/\n")
+    {:ok, _head} = Workspace.commit_and_push(job, dir, "planning: attempt 1", @direct)
+
+    File.mkdir_p!(Path.join(dir, ".mix-home/archives"))
+    File.write!(Path.join(dir, ".mix-home/archives/hex.app"), "installed once")
+    File.mkdir_p!(Path.join(dir, "build"))
+    File.write!(Path.join(dir, "build/warm.o"), "compiled once")
+    File.write!(Path.join(dir, "debris.txt"), "from the run that was killed")
+
+    assert {:ok, ^dir} = Workspace.prepare(job, root, @direct)
+
+    assert File.read!(Path.join(dir, ".mix-home/archives/hex.app")) == "installed once"
+    assert File.read!(Path.join(dir, "build/warm.o")) == "compiled once"
+    refute File.exists?(Path.join(dir, "debris.txt"))
+  end
+
   # What a state that produces no `changeset` reports instead of a push. `head/2` would name the
   # agent's own commit, which is on no ref anybody else can fetch; a parked run's commands would
   # then be dispatched at it.
@@ -1009,6 +1035,37 @@ defmodule ForgeWorker.Job.WorkspaceTest do
 
       assert {:ok, third} = Workspace.prepare(assignment(origin, job_id: uuid()), root, @direct)
       assert File.read!(Path.join(third, "build/warm.o")) == "second"
+    end
+
+    # What `bin/check` points MIX_HOME and HEX_HOME at: a dependency cache, hidden, at the
+    # checkout root. Carried with its contents and not merely present — "warm" means the archive
+    # Hex installed is still the archive Hex installed — and, the half no test above covers,
+    # *untracked*. `add -A -f` in `Checkout.squash/5` is a mutation only this test fails on: the
+    # `build/warm.o` tests would pass while every run pushed its own Hex cache onto the ticket
+    # branch, which is the way putting a cache in the checkout goes wrong rather than merely
+    # cold. (A snapshot that dropped hidden files is *not* what this adds over them: it would
+    # drop `.git` too, and they all fail on it already.)
+    test "a hidden dependency cache at the checkout root is carried, and not committed",
+         context do
+      %{origin: origin, root: root} = context
+      first = assignment(origin, job_id: uuid())
+      {:ok, dir} = Workspace.prepare(first, root, @direct)
+
+      File.write!(Path.join(dir, ".gitignore"), ".mix-home/\n")
+      File.mkdir_p!(Path.join(dir, ".mix-home/archives/hex-2.5.3"))
+      File.write!(Path.join(dir, ".mix-home/archives/hex-2.5.3/hex.app"), "installed once")
+      {:ok, _head} = Workspace.commit_and_push(first, dir, "first", @direct)
+      :ok = Workspace.promote(first, root, dir)
+      :ok = Workspace.discard(first, root)
+
+      assert {:ok, second} = Workspace.prepare(assignment(origin, job_id: uuid()), root, @direct)
+
+      assert File.read!(Path.join(second, ".mix-home/archives/hex-2.5.3/hex.app")) ==
+               "installed once"
+
+      # The other half of putting a cache in the checkout: the squash's `add -A` must not have
+      # committed it onto the ticket branch. `add -Af` would, and this is what would notice.
+      assert git!(second, ["ls-files", ".mix-home"]) == ""
     end
 
     # The promotion happens after the push, and this is what that buys: `add -A` has already

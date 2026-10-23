@@ -22,7 +22,7 @@ defmodule ForgeWeb.TicketLive do
   import ForgeWeb.Operator.QuestionForm, only: [question_form: 1]
 
   alias Forge.{Artifacts, Conversations, Engine, Events, Git, Jobs, Projects, Proposals, Queue}
-  alias Forge.{Spend, Tickets}
+  alias Forge.{Merge, Spend, Tickets}
   alias ForgeCore.Workflow
   alias ForgeWeb.{Diff, FileType, Format, Indicators, JobStream, WorkScreen}
   alias ForgeWeb.Operator.Actions
@@ -133,6 +133,7 @@ defmodule ForgeWeb.TicketLive do
       proposals: Proposals.open_for_ticket(ticket.id),
       reviewable: reviewable?(ticket, workflow),
       approve: approve_pins(project, ticket, artifacts),
+      commit_message: Merge.commit_message(ticket),
       changeset: Artifacts.latest(ticket.id, Workflow.changeset_artifact()),
       paused: ticket.status == :active and Spend.paused?(),
       until_midnight: until_midnight(),
@@ -459,6 +460,7 @@ defmodule ForgeWeb.TicketLive do
           pending={@ticket.pending_transition}
           approve={@approve}
           drafts={@drafts}
+          commit_message={@commit_message}
         />
 
         <.link
@@ -735,6 +737,7 @@ defmodule ForgeWeb.TicketLive do
           pending={@ticket.pending_transition}
           approve={@approve}
           drafts={@drafts}
+          commit_message={@commit_message}
         />
       </div>
     </section>

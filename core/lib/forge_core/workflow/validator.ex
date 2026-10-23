@@ -229,8 +229,8 @@ defmodule ForgeCore.Workflow.Validator do
       Enum.flat_map(states, &entry_action_shape/1),
       merge_count(merging),
       merge_not_initial(merging, initial),
-      merge_needs_changeset(merging, workflow),
-      merge_needs_commit_message(merging, workflow)
+      merge_needs_artifact(merging, workflow, Workflow.changeset_artifact()),
+      merge_needs_artifact(merging, workflow, Workflow.commit_message_artifact())
     ])
   end
 
@@ -266,35 +266,29 @@ defmodule ForgeCore.Workflow.Validator do
     end
   end
 
-  defp merge_needs_changeset([], _workflow), do: []
+  # Both reserved names a merge reads, by one rule: without the changeset there is nothing to
+  # merge and without the message there is nothing for the commit to say, and a third name of the
+  # shape would come here rather than beside here (`CLAUDE.md` § Rules).
+  #
+  # **Asked of the produced name, not the declaration.** `produces` entries carry markers — a
+  # presentation ends `!` — and everything that records an artifact goes through
+  # `Workflow.produced_name/1`, so a state declaring `commit-message!` does produce the artifact
+  # the merge reads and comparing the raw entry told it the merge had no producer.
+  defp merge_needs_artifact([], _workflow, _name), do: []
 
-  defp merge_needs_changeset([name | _rest], %Workflow{states: states}) do
-    changeset = Workflow.changeset_artifact()
+  defp merge_needs_artifact([state_name | _rest], %Workflow{states: states}, name) do
+    produced? =
+      Enum.any?(states, fn {_n, state} ->
+        Enum.any?(state.produces, &(Workflow.produced_name(&1) == name))
+      end)
 
-    if Enum.any?(states, fn {_n, state} -> changeset in state.produces end) do
+    if produced? do
       []
     else
       [
         Error.new(
-          Error.join(Error.join("states", name), "on_enter"),
-          "merge needs a state that produces #{changeset}"
-        )
-      ]
-    end
-  end
-
-  defp merge_needs_commit_message([], _workflow), do: []
-
-  defp merge_needs_commit_message([name | _rest], %Workflow{states: states}) do
-    message = Workflow.commit_message_artifact()
-
-    if Enum.any?(states, fn {_n, state} -> message in state.produces end) do
-      []
-    else
-      [
-        Error.new(
-          Error.join(Error.join("states", name), "on_enter"),
-          "merge needs a state that produces #{message}"
+          Error.join(Error.join("states", state_name), "on_enter"),
+          "merge needs a state that produces #{name}"
         )
       ]
     end
@@ -584,7 +578,11 @@ defmodule ForgeCore.Workflow.Validator do
       # documents, so "it is a document this state produces" would excuse it like any other.
       # Merging has nothing to fall back on when it is absent, which is what makes it the one
       # produced document a state may not be let off writing.
-      entry == Workflow.commit_message_artifact() ->
+      #
+      # `entry in documents` as well, so that a state which does not produce it is told *that*
+      # instead by the last clause. Excusing a document the state never writes is a different
+      # mistake and saying "cannot be optional" sent the author looking for the wrong one.
+      entry == Workflow.commit_message_artifact() and entry in documents ->
         "#{Workflow.commit_message_artifact()} is what the merge commit says and cannot be optional"
 
       entry in documents ->

@@ -22,7 +22,6 @@ defmodule ForgeWeb.ReviewLive do
   alias ForgeWeb.Operator.Actions
   alias ForgeWeb.Operator.Board
   alias ForgeWeb.Operator.Drafts
-  alias ForgeWeb.WorkScreen
 
   # A file and a line or range quoted in backticks, which the prose that quotes it has drawn
   # beneath it (`docs/design/ui.md` § Changes). No colon, backtick or space in the path, because
@@ -99,7 +98,7 @@ defmodule ForgeWeb.ReviewLive do
       ticket: ticket,
       workflow: workflow,
       changeset: changeset,
-      commit_message: Artifacts.latest(ticket.id, Workflow.commit_message_artifact()),
+      commit_message: Merge.commit_message(ticket),
       merged: Merge.merged?(ticket),
       diff: diff(project, ticket, changeset),
       documents: documents(ticket, artifacts),
@@ -386,13 +385,14 @@ defmodule ForgeWeb.ReviewLive do
         id="merge-decision"
       >
         <h2 class="font-mono text-[11px] tracking-[.14em] uppercase text-accent">Waiting on you</h2>
-        <%!-- Above the approve control, read-only: the operator sees what the merge commit will
-              say before confirming, and never types or edits it (`docs/design/ui.md` § Changes). --%>
         <div class="mt-3">
-          <WorkScreen.commit_message version={@commit_message} id="review-commit-message" />
-        </div>
-        <div class="mt-3">
-          <.approval_card ticket={@ticket} pending={@pending} approve={@approve} drafts={@drafts} />
+          <.approval_card
+            ticket={@ticket}
+            pending={@pending}
+            approve={@approve}
+            drafts={@drafts}
+            commit_message={@commit_message}
+          />
         </div>
       </section>
 

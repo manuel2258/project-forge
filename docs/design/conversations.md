@@ -220,10 +220,19 @@ separately, by each of the two functions that make one (below).
 **A conversation may write `commit-message`, and its merge needs one.** It is an ordinary
 document — the name is not reserved against a chat the way `changeset` is, and it is written,
 versioned and re-reported every turn like any other (below) — but it is the one the merge reads:
-`Merge.perform_chat/2` resolves its latest version in the conversation's own document scope at the
-moment merge is pressed, and the commit says exactly that, with nobody editing it. The chat agent
-writes it, is told to keep it describing the whole branch rather than the last turn, and front
-matter it carries is not part of the message.
+`Merge.perform_chat/2` resolves its latest version at the moment merge is pressed, and the commit
+says exactly that, with nobody editing it. The chat agent writes it, is told to keep it describing
+the whole branch rather than the last turn, and front matter it carries is not part of the
+message.
+
+**It is the one document a ticket chat keeps against itself rather than against its ticket**, and
+so the one exception to the scope rule below (`Conversations.document_scope/2`). It says what a
+merge of *this branch* commits, and a ticket chat's branch is not the ticket's changeset: shared
+with the ticket it was one artifact that the ticket's merging state and every chat on that ticket
+wrote over each other in, so a chat branch landed under a message describing the ticket's whole
+change, and a chat writing one changed what the ticket's own merge would then commit. A ticket
+chat is handed its own in place of the ticket's, because inside a conversation the name means its
+own branch's.
 
 Pressing merge with no `commit-message` version yet is refused the same way a conflicting branch
 is, and **the page says so rather than offering a button that fails**: where the branch has
@@ -633,7 +642,7 @@ have moved, which is why a refusal says so rather than the manifest pretending t
 
   | The branch, when the ending is recorded | What happens |
   |---|---|
-  | its head is on the default branch | pinned at `refs/forge/chat/<id>`, then deleted — § Commits' order, for its reason |
+  | a merge of it has landed | pinned at `refs/forge/chat/<id>`, then deleted — § Commits' order, for its reason |
   | unmerged, and it would merge cleanly | deleted, with nothing pinned: its commits become collectable |
   | it would not merge cleanly | kept |
   | already gone | nothing |

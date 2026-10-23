@@ -205,10 +205,12 @@ defmodule ForgeWeb.Api.Render do
     }
   end
 
+  # `text` is the body the merge commits (`ForgeCore.Document.body/1`), not the version's raw
+  # content: a client that showed the raw text would show front matter the commit will not carry.
   defp review_commit_message(%Ticket{} = ticket) do
-    case Forge.Artifacts.latest(ticket.id, ForgeCore.Workflow.commit_message_artifact()) do
+    case Forge.Merge.commit_message(ticket) do
       nil -> nil
-      version -> %{version: version.version, text: version.content}
+      version -> %{version: version.version, text: ForgeCore.Document.body(version.content)}
     end
   end
 

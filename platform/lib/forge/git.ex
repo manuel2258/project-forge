@@ -447,19 +447,6 @@ defmodule Forge.Git do
     end
   end
 
-  @doc """
-  The tree `sha` holds, or an error. What `Forge.Merge` compares a merged tree against to tell
-  "merging this changes nothing" from "this makes a commit", now that a merge leaves one parent
-  and reachability no longer answers it.
-  """
-  @spec tree(repo(), sha()) :: {:ok, sha()} | {:error, term()}
-  def tree(repo, sha) do
-    case run(repo, ["rev-parse", "--verify", "--quiet", {:data, sha <> "^{tree}"}]) do
-      {:ok, tree} -> {:ok, String.trim(tree)}
-      {:error, _reason} -> {:error, {:unknown_ref, sha}}
-    end
-  end
-
   @doc "Whether `ancestor` is reachable from `descendant`."
   @spec ancestor?(repo(), String.t(), String.t()) :: boolean()
   def ancestor?(repo, ancestor, descendant),

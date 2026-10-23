@@ -131,6 +131,11 @@ the same way as any other. It is the message the merge commit carries, used exac
 the merge button reads whatever its latest version says, and nobody edits it. A summary line, a
 blank line, then body paragraphs if there is more to say; no front matter and no trailers.
 
+It describes **this conversation's branch**, not the ticket's change, even in a conversation about
+a ticket: this one document is kept against the conversation rather than the ticket, so what you
+write here is what a merge of *your* branch commits and it cannot be mistaken for the message the
+ticket's own merge will use.
+
 Keep it current as the branch grows: it describes the whole branch, not the last turn. Until one
 exists the page says there is nothing to merge yet and offers no merge, so a conversation whose
 work is worth keeping writes one.

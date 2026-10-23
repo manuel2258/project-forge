@@ -120,10 +120,12 @@ defmodule ForgeWeb.QueueLive do
           version = Artifacts.latest(ticket.id, name),
           do: pinned(item.project, ticket, name, version)
 
-    Map.put(item, :approve, approve)
+    item
+    |> Map.put(:approve, approve)
+    |> Map.put(:commit_message, Forge.Merge.commit_message(ticket))
   end
 
-  defp put_approve(item), do: Map.put(item, :approve, [])
+  defp put_approve(item), do: item |> Map.put(:approve, []) |> Map.put(:commit_message, nil)
 
   # A ticket carries its own pinned workflow; one that no longer parses has no topology to read,
   # and a conversation has no workflow at all.
@@ -246,6 +248,7 @@ defmodule ForgeWeb.QueueLive do
             pending={item.detail}
             approve={item.approve}
             drafts={@drafts}
+            commit_message={item.commit_message}
           />
 
           <%!-- A link, never an answer row: answering never navigates, and the answer row and the

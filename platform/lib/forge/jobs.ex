@@ -1235,9 +1235,20 @@ defmodule Forge.Jobs do
     |> Enum.map(&as_input/1)
   end
 
-  defp chat_inputs(%Job{}, %Ticket{id: ticket_id}) do
+  # The ticket's documents, except that `commit-message` is the conversation's own: it says what a
+  # merge of *this branch* would commit, so a ticket chat writes it in its own scope
+  # (`Forge.Conversations.document_scope/2`) and must be handed back the one it wrote rather than
+  # the one the ticket's merging state wrote about the whole changeset. Replaced and not appended:
+  # a job's inputs are by name, and two documents called `commit-message` is not a list anything
+  # can read.
+  defp chat_inputs(%Job{} = chat, %Ticket{id: ticket_id}) do
+    name = Workflow.commit_message_artifact()
+    own = {:job, chat.id} |> Artifacts.latest_documents() |> Enum.filter(&(&1.name == name))
+
     ticket_id
     |> Artifacts.latest_documents()
+    |> Enum.reject(&(&1.name == name))
+    |> Enum.concat(own)
     |> Enum.map(&as_input/1)
   end
 

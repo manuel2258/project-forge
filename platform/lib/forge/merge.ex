@@ -17,8 +17,9 @@ defmodule Forge.Merge do
   the default branch's ancestry afterwards, and what keeps the approved commit itself reachable is
   the `refs/forge/*` pin every attempt writes. See `docs/design/git-hosting.md` § The merge.
 
-  `perform/4` is idempotent: it makes no second commit when merging would change nothing, which
-  is asked of the merged tree rather than of reachability — see `merged_tree/3`.
+  `perform/4` is idempotent: a source this module has already landed is left alone, which a ref
+  written after the push records rather than anything inferred from the branch as it stands now —
+  see `already_merged?/1`.
 
   **What a ticket's merge merges, and what it says, are both named by its caller**, never read
   here as "the latest version": the transition into the merging state names the changeset commit
@@ -88,11 +89,20 @@ defmodule Forge.Merge do
   """
   @spec commit_message_version(Ticket.t()) :: pos_integer() | nil
   def commit_message_version(%Ticket{} = ticket) do
-    case Artifacts.latest(ticket.id, Workflow.commit_message_artifact()) do
+    case commit_message(ticket) do
       nil -> nil
       row -> row.version
     end
   end
+
+  @doc """
+  The ticket's latest `commit-message` version, or nil. What every approval surface draws above
+  the control that merges, from one definition so that the four of them cannot disagree about
+  which version a merge would commit (`docs/design/ui.md` § Changes).
+  """
+  @spec commit_message(Ticket.t()) :: struct() | nil
+  def commit_message(%Ticket{} = ticket),
+    do: Artifacts.latest(ticket.id, Workflow.commit_message_artifact())
 
   @doc """
   Whether `sha`, a commit of the ticket's, would merge cleanly into the default branch — at its
@@ -194,8 +204,9 @@ defmodule Forge.Merge do
   What closing a conversation does to its branch. `docs/design/conversations.md` § Lifetime has
   the rule and the reasons; in short:
 
-  - **merged** — its head is on the default branch: pinned at `refs/forge/chat/<id>`, then
-    deleted, in the order `perform_chat/2` uses and for its reason;
+  - **merged** — a merge of this branch has landed, which `refs/forge/merged/chat/<id>` records:
+    pinned at `refs/forge/chat/<id>`, then deleted, in the order `perform_chat/2` uses and for its
+    reason;
   - **unmerged, and it would merge cleanly** — deleted, with nothing pinned. This is the abandon:
     the person had a merge that worked and ended the conversation instead, and the commits
     become collectable;
@@ -221,8 +232,8 @@ defmodule Forge.Merge do
     end
   end
 
-  defp abandon(%{repo: repo, head: head, source: source} = plan, branch) do
-    if already_merged?(repo, head, source) do
+  defp abandon(%{repo: repo, source: source} = plan, branch) do
+    if already_merged?(plan) do
       # Pin, then delete. Which comes first is not something a test can see — both have happened
       # by the time anything looks — so swapping them is an equivalent mutant as far as the suite
       # can tell. It matters to a `git gc` that runs between the two, which is the case § Commits
@@ -274,33 +285,34 @@ defmodule Forge.Merge do
     %{repo: repo, head: head, source: source} = plan
     Git.pin(repo, plan.pin, source)
 
-    case merged_tree(repo, head, source) do
-      :already -> {:ok, %{sha: head, already: true}}
-      {:ok, tree} -> merge(plan, tree, user)
-      conflict_or_error -> conflict_or_error
+    if already_merged?(plan) do
+      {:ok, %{sha: head, already: true}}
+    else
+      with {:ok, tree} <- merge_tree(repo, head, source), do: merge(plan, tree, user)
     end
   end
 
-  # **What a merge would land, or `:already` when it would land nothing.**
+  # **Has this source already landed?** A ref says so, written after the push that landed it.
   #
-  # Reachability used to answer this — a merged commit had the source as its second parent, so
-  # `Git.ancestor?(repo, source, head)` was true afterwards. One parent ends that: a commit this
-  # module has just merged is reachable only through its `refs/forge/*` pin, and asking whether it
-  # is an ancestor of the default branch would answer "no" for ever, so every retried `perform/4`
-  # would make another content-identical commit.
+  # Reachability used to answer it: a merged commit had the source as its second parent, so
+  # `Git.ancestor?(repo, source, head)` was true afterwards. One parent ends that — a commit this
+  # module merged is reachable only through its `refs/forge/*` pins — so the first version of this
+  # asked the merge instead, calling a landed source one whose three-way merge resolved to the
+  # head's own tree. **That fact expires.** As soon as the default branch takes a change
+  # overlapping the landed one, `merge-tree` conflicts and the question answers "no" for a ticket
+  # that is merged: `merged?/1` and `merged_chat?/1` would call it unmerged, `abandon_chat/1`
+  # would keep a merged conversation's branch with no pin, and a second `perform/4` on the same
+  # source would route an already-landed ticket to `on_conflict`. It also paid for a full
+  # three-way merge on every page load, leaving an unreferenced tree object each time.
   #
-  # The merged tree answers it instead, and answers it for both shapes at once: merging changes
-  # nothing exactly when the three-way merge resolves to the head's own tree — true when `source`
-  # is a literal ancestor, which is every ticket merged under the old two-parent shape and needs
-  # no migration, and true when `source`'s whole diff already landed as one squash commit.
-  defp merged_tree(repo, head, source) do
-    case merge_tree(repo, head, source) do
-      {:ok, tree} -> if Git.tree(repo, head) == {:ok, tree}, do: :already, else: {:ok, tree}
-      conflict_or_error -> conflict_or_error
-    end
+  # `refs/forge/merged/…` is the fact instead, at the source it merged, written once the push has
+  # been accepted. Nothing later can make it false: the default branch is fast-forward only
+  # (`pre-receive`), so a merge that landed stays landed. The ancestry check remains beside it for
+  # the shape that predates this — every ticket merged as a two-parent commit, where `source`
+  # really is in the branch's history — so no migration is needed.
+  defp already_merged?(%{repo: repo, head: head, source: source} = plan) do
+    Git.resolve(repo, plan.merged) == {:ok, source} or Git.ancestor?(repo, source, head)
   end
-
-  defp already_merged?(repo, head, source), do: merged_tree(repo, head, source) == :already
 
   defp default_head(repo, %Project{default_branch: default}),
     do: Git.resolve(repo, "refs/heads/" <> default)
@@ -309,8 +321,8 @@ defmodule Forge.Merge do
   @spec merged?(Ticket.t()) :: boolean()
   def merged?(%Ticket{} = ticket) do
     with {:ok, %{sha: sha}} <- changeset(ticket),
-         {:ok, %{repo: repo, head: head, source: source}} <- ticket_plan(ticket, sha) do
-      already_merged?(repo, head, source)
+         {:ok, plan} <- ticket_plan(ticket, sha) do
+      already_merged?(plan)
     else
       {:error, _reason} -> false
     end
@@ -320,7 +332,7 @@ defmodule Forge.Merge do
   @spec merged_chat?(Job.t()) :: boolean()
   def merged_chat?(%Job{kind: :chat} = chat) do
     case chat_plan(chat) do
-      {:ok, %{repo: repo, head: head, source: source}} -> already_merged?(repo, head, source)
+      {:ok, plan} -> already_merged?(plan)
       {:error, _reason} -> false
     end
   end
@@ -328,7 +340,8 @@ defmodule Forge.Merge do
   # -- internals -------------------------------------------------------------------------------
 
   # What a merge needs, whatever authorised it: the repository, where it is going, what is being
-  # merged, and the ref that keeps it reachable. `message` is filled in by the two functions that
+  # merged, the ref that keeps it reachable and the ref that records it landed. `message` is
+  # filled in by the two functions that
   # make a commit and stays nil for the three that only read — a conflict check, "is this merged
   # already", and dealing with a closed conversation's branch all have an answer whether or not
   # anybody has written a commit message yet.
@@ -345,6 +358,7 @@ defmodule Forge.Merge do
          head: head,
          source: source,
          pin: "refs/forge/approved/#{ticket.number}",
+         merged: "refs/forge/merged/ticket/#{ticket.number}",
          message: nil
        }}
     end
@@ -364,6 +378,7 @@ defmodule Forge.Merge do
          head: head,
          source: source,
          pin: "refs/forge/chat/#{chat.id}",
+         merged: "refs/forge/merged/chat/#{chat.id}",
          message: nil
        }}
     end
@@ -382,6 +397,13 @@ defmodule Forge.Merge do
   defp merge(%{repo: repo, project: project, head: head} = plan, tree, user) do
     with {:ok, sha} <- commit_tree(repo, tree, head, plan.message, user),
          :ok <- push(repo, project, sha) do
+      # After the push, because it records that the push happened — `plan.pin` before it records
+      # only that an attempt was made, which is why that one cannot answer "did this land".
+      # Best-effort for the same reason `plan.pin` is: the merge is on the default branch by now
+      # and reporting a failure here would call a landed merge failed. An `update-ref` that fails
+      # in a repository this process has just pushed to leaves `already_merged?/1` falling back to
+      # the ancestry check, which is the answer it gave before this ref existed.
+      Git.pin(repo, plan.merged, plan.source)
       {:ok, %{sha: sha, already: false}}
     end
   end
@@ -434,15 +456,30 @@ defmodule Forge.Merge do
   # approved commit reachable instead is `refs/forge/approved/<n>` — or `refs/forge/chat/<id>` for
   # a conversation — which `attempt/2` writes before it merges (`docs/design/git-hosting.md`
   # § The merge).
+  #
+  # **The message goes in a file, not in `argv`.** `-m` makes it one argument, and Linux caps a
+  # single argument at `MAX_ARG_STRLEN`, 128 KiB — an eighth of the 1 MiB `ForgeCore.Document`
+  # allows — so a long message failed with "Argument list too long", which reached the operator
+  # as the stuck reason `could not merge: {7, ""}`. Guarding it would have meant a second bound
+  # beside the document's, disagreeing with it (`CLAUDE.md` § Rules); `-F` has no bound to
+  # disagree with. It also ends the `-m` hazard the old comment here described: nothing about the
+  # message reaches `argv` at all, so a message beginning with a dash is no longer a special case.
   defp commit_tree(repo, tree, head, message, user) do
-    # Every standalone argument is marked; `message` is not, because `-m` consumes the argument
-    # after it whatever it begins with, and an agent's message may legitimately start with a dash
-    # (`Forge.Git.run/3`).
-    args = ["commit-tree", {:data, tree}, "-p", {:data, head}, "-m", message]
+    file = Path.join(System.tmp_dir!(), "forge-merge-#{System.unique_integer([:positive])}.msg")
 
-    case Git.run(repo, args, env: author(user), stderr: :separate) do
-      {:ok, sha} -> {:ok, String.trim(sha)}
-      {:error, reason} -> {:error, reason}
+    try do
+      with :ok <- File.write(file, message),
+           {:ok, sha} <-
+             Git.run(
+               repo,
+               ["commit-tree", {:data, tree}, "-p", {:data, head}, "-F", {:data, file}],
+               env: author(user),
+               stderr: :separate
+             ) do
+        {:ok, String.trim(sha)}
+      end
+    after
+      File.rm(file)
     end
   end
 
@@ -477,12 +514,17 @@ defmodule Forge.Merge do
     |> message_text()
   end
 
-  # The latest, in the conversation's own document scope — the ticket's for a ticket chat, its own
-  # otherwise, from the one definition of that rule (`Forge.Conversations.document_scope/1`).
+  # The latest, in the scope this document is written in — the conversation's own, whether or not
+  # it has a ticket, from the one definition of that rule
+  # (`Forge.Conversations.document_scope/2`). `List.last/1` and not `List.first/1` because
+  # `Artifacts.versions/2` orders ascending: what a merge says is what the conversation last
+  # wrote, which is the rule its branch follows too.
   defp chat_commit_message(%Job{} = chat) do
+    name = Workflow.commit_message_artifact()
+
     chat
-    |> Conversations.document_scope()
-    |> Artifacts.versions(Workflow.commit_message_artifact())
+    |> Conversations.document_scope(name)
+    |> Artifacts.versions(name)
     |> List.last()
     |> message_text()
   end
@@ -491,25 +533,11 @@ defmodule Forge.Merge do
 
   defp message_text(version) do
     with {:ok, text} <- Artifacts.content(version),
-         body = body_of(text),
+         body = Document.body(text),
          false <- String.trim(body) == "" do
       {:ok, body}
     else
       _blank_or_unreadable -> {:error, :no_commit_message}
-    end
-  end
-
-  # Front matter is not part of the message. A `commit-message` carries none — the prompts ask for
-  # a plain git message, and a state may not make it the document its outcome is read from
-  # (`ForgeCore.Workflow.Validator`, § Validation) — but it is parsed like every other document,
-  # so one written anyway would otherwise reach the commit as `---` lines.
-  defp body_of(text) do
-    case Document.parse(text) do
-      {:ok, document} -> document.body
-      # A version that does not parse is used as written rather than raising here. Reachable only
-      # for one recorded with `parse: false`, since `Artifacts.put_version/5` parses a document
-      # before it keeps one.
-      {:error, _errors} -> text
     end
   end
 

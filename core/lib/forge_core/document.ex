@@ -75,6 +75,25 @@ defmodule ForgeCore.Document do
     end
   end
 
+  @doc """
+  `text` less its front matter, for the places that need the prose and not the declaration.
+
+  Shared because what a `commit-message` version *says* must be the same string wherever it is
+  read: the merge writes it to the commit, and the review page and the API show it. Reading it
+  two ways is how a person approves one text and git records another.
+
+  Text that does not parse comes back as it stands. That is reachable only for a version recorded
+  with `parse: false` — a conversation's documents are (`Forge.Conversations`) — and using it
+  whole is the honest answer: there is no front matter to strip if the delimiters never closed.
+  """
+  @spec body(String.t()) :: String.t()
+  def body(text) when is_binary(text) do
+    case parse(text) do
+      {:ok, document} -> document.body
+      {:error, _errors} -> text
+    end
+  end
+
   @spec parse(String.t(), opts()) :: {:ok, t()} | {:error, [Error.t()]}
   def parse(text, opts \\ []) when is_binary(text) do
     text = String.replace_prefix(text, "\uFEFF", "")

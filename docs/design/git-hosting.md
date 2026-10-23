@@ -443,11 +443,20 @@ already writes for the unrelated reason in § Non-fast-forward on a ticket branc
 this one too.
 
 `perform/4` is idempotent, and reachability can no longer tell it so: a commit it has just merged
-is not an ancestor of the default branch at all. It asks the merge instead — merging changes
-nothing exactly when the three-way merge resolves to the default head's own tree — which answers
-for both shapes at once, a commit that is a literal ancestor (every ticket merged under the old
-two-parent shape, so no migration) and one whose whole diff already landed as a squash commit.
-Safe to call twice, safe to retry.
+is not an ancestor of the default branch at all. **A ref records it instead.**
+`refs/forge/merged/ticket/<n>` — `refs/forge/merged/chat/<id>` for a conversation — is written at
+the source it merged, once the push has been accepted, and that is what "already merged" is asked
+of. Unlike `refs/forge/approved/<n>`, which each attempt writes *before* it merges and which
+therefore says only that an attempt was made, this one is written after and says the merge landed.
+
+It has to be a recorded fact rather than an inference. Comparing the merge's resulting tree with
+the default branch's own answers correctly only until the branch takes a change overlapping the
+one that landed: `merge-tree` then conflicts, and a merged ticket reads as unmerged — reported as
+such on its pages, its conversation's branch kept unpinned, and a second `perform/4` on the same
+source routed to `on_conflict` for work already on `main`. A ref cannot expire that way: the
+default branch is fast-forward only, so a merge that landed stays landed. The ancestry check is
+kept beside it for the shape that predates this — every ticket merged as a two-parent commit — so
+no migration is needed. Safe to call twice, safe to retry.
 
 ### Where it runs, and what a conflict does
 

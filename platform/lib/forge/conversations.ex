@@ -27,6 +27,10 @@ defmodule Forge.Conversations do
 
   require Logger
 
+  # Matched in a function head, so it is the name itself and not a call to the one definition of
+  # it; this is where the two are tied together.
+  @commit_message ForgeCore.Workflow.commit_message_artifact()
+
   @doc """
   Opens a conversation about a project, or about one of its tickets, and queues it.
 
@@ -734,24 +738,32 @@ defmodule Forge.Conversations do
   # re-sends an unacked turn for ever — so a document that could not be stored would be a
   # conversation whose spending was never recorded again. The worker made the name and file
   # checks already; they are asked again because what crosses the channel is not a guard.
+  # Each document goes to the scope its *name* says (`document_scope/2`), which for every name but
+  # one is the conversation's single scope. `held` is a rule about the ticket's documents, so it
+  # applies only to what is written there: the conversation's own scope has nothing waiting on it,
+  # which is why a project chat is handed `%{}` already.
   defp documents(chat, payload) do
-    scope = document_scope(chat)
     held = held(chat)
+    own = document_scope(chat)
 
     checked =
       (payload["documents"] || %{})
       |> Enum.sort()
-      |> Enum.map(fn {name, raw} -> {name, raw, check(scope, held, name, raw)} end)
+      |> Enum.map(fn {name, raw} ->
+        scope = document_scope(chat, name)
+        holds = if scope == own, do: held, else: %{}
+        {scope, name, raw, check(scope, holds, name, raw)}
+      end)
 
     write =
-      for {name, raw, {:ok, meta}} <- checked,
+      for {scope, name, raw, {:ok, meta}} <- checked,
           not unchanged?(scope, name, raw, chat),
-          do: {name, raw, meta}
+          do: {scope, name, raw, meta}
 
     refused =
-      for {name, _raw, {:refused, reason}} <- checked, into: %{}, do: {name, reason}
+      for {_scope, name, _raw, {:refused, reason}} <- checked, into: %{}, do: {name, reason}
 
-    {{scope, write}, Map.merge(payload["invalid_documents"] || %{}, refused)}
+    {write, Map.merge(payload["invalid_documents"] || %{}, refused)}
   end
 
   @doc """
@@ -759,12 +771,23 @@ defmodule Forge.Conversations do
   because that is the work it is about; the conversation itself for a project chat, which has
   nothing else to belong to (`docs/design/conversations.md` § Commits).
 
-  Public because `Forge.Merge` reads one of those documents — `commit-message`, what a merge of
-  this conversation's branch says — and the rule which scope to look in has one definition.
+  **`commit-message` is the exception, and is always the conversation's own.** It says what the
+  merge of *this branch* will commit, and a ticket chat's branch is not the ticket's changeset.
+  Scoped to the ticket it was one artifact shared by the ticket's own merging state and every
+  chat on that ticket, which went wrong in both directions: a chat branch landed under a message
+  describing the ticket's whole change, and a chat writing one bumped the version the ticket's
+  own merge would then pin and commit. Nothing holds it while a merge approval is pending —
+  `Forge.Engine.awaiting_approval/1` is what the transition approves, the changeset — so there
+  was no guard to lean on either.
+
+  Public because `Forge.Merge` and the conversation's page both read that document, and which
+  scope to look in has one definition.
   """
-  @spec document_scope(Job.t()) :: Forge.Artifacts.scope()
-  def document_scope(%Job{ticket_id: nil, id: id}), do: {:job, id}
-  def document_scope(%Job{ticket_id: ticket_id}), do: {:ticket, ticket_id}
+  @spec document_scope(Job.t(), String.t() | nil) :: Forge.Artifacts.scope()
+  def document_scope(chat, name \\ nil)
+  def document_scope(%Job{id: id}, @commit_message), do: {:job, id}
+  def document_scope(%Job{ticket_id: nil, id: id}, _name), do: {:job, id}
+  def document_scope(%Job{ticket_id: ticket_id}, _name), do: {:ticket, ticket_id}
 
   # Whether this can be recorded as `name` in `scope`: `{:ok, front_matter}`, or refused with
   # why. The workflow's rules where they apply, each with its one definition: the name, the text,
@@ -851,8 +874,8 @@ defmodule Forge.Conversations do
   # in a chat's document became a question on the ticket — a blocking one held a waiting job on
   # something nobody had been asked. The block was still checked by `check/4`, which is also where
   # the front matter kept as the version's `meta` comes from (§ Commits).
-  defp put_documents(multi, chat, {scope, write}) do
-    Enum.reduce(write, multi, fn {name, raw, meta}, multi ->
+  defp put_documents(multi, chat, write) do
+    Enum.reduce(write, multi, fn {scope, name, raw, meta}, multi ->
       Forge.Artifacts.put_version(
         multi,
         {:document, name},

@@ -316,9 +316,11 @@ defmodule Forge.MergeConflictTest do
 
       assert ticket.state == "merged"
       assert ticket.status == :done
+      # What landed, and that it was this commit's content: the pin alone would hold even for a
+      # merge that failed after pinning, since `attempt/2` writes it before it commits.
       {:ok, main} = Git.resolve(bare, "refs/heads/main")
-      assert {:ok, ^integrated} = Git.resolve(bare, "refs/forge/approved/#{ticket.number}")
-      assert {:ok, ^integrated} = Git.resolve(bare, "refs/forge/approved/#{ticket.number}")
+      assert {:ok, "both versions\n"} = Git.show(bare, main, "README.md")
+      assert {:ok, ^integrated} = Git.resolve(bare, "refs/forge/merged/ticket/#{ticket.number}")
 
       assert %{"to" => "merged", "changeset" => ^integrated, "changeset_version" => 2} =
                latest_payload(ticket, "transition.taken")
@@ -481,7 +483,8 @@ defmodule Forge.MergeConflictTest do
       assert ticket.state == "merged"
       assert ticket.status == :done
       {:ok, main} = Git.resolve(bare, "refs/heads/main")
-      assert {:ok, ^integrated} = Git.resolve(bare, "refs/forge/approved/#{ticket.number}")
+      assert {:ok, "both versions\n"} = Git.show(bare, main, "README.md")
+      assert {:ok, ^integrated} = Git.resolve(bare, "refs/forge/merged/ticket/#{ticket.number}")
     end
 
     # The option the check hands the transition: what it names is the version that was checked,
@@ -531,7 +534,8 @@ defmodule Forge.MergeConflictTest do
       assert ticket.state == "merged"
       assert ticket.status == :done
       {:ok, main} = Git.resolve(bare, "refs/heads/main")
-      assert {:ok, ^integrated} = Git.resolve(bare, "refs/forge/approved/#{ticket.number}")
+      assert {:ok, "both versions\n"} = Git.show(bare, main, "README.md")
+      assert {:ok, ^integrated} = Git.resolve(bare, "refs/forge/merged/ticket/#{ticket.number}")
       assert [%{decision: :approved}] = Artifacts.approvals(changeset_version(ticket, 2).id)
     end
 

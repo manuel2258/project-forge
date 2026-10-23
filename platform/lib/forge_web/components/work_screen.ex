@@ -283,6 +283,10 @@ defmodule ForgeWeb.WorkScreen do
   approves — `commit-message` is an ordinary document and not a presentation artifact, so it is
   this component and not the presentation one. Absent, it says there is nothing to merge yet
   instead of drawing an empty box.
+
+  **It shows the string the commit will carry**, which is the version's body and not its raw
+  text: `ForgeCore.Document.body/1`, the one the merge writes, so that an operator cannot approve
+  one text and find git recording another. By convention there is no front matter to strip.
   """
   attr :version, :any, required: true, doc: "the `commit-message` version, or nil"
   attr :id, :string, default: "commit-message"
@@ -302,7 +306,7 @@ defmodule ForgeWeb.WorkScreen do
           <span class="opacity-60">v{@version.version}</span>
           <span class="tracking-[.14em] uppercase opacity-50">view only</span>
         </header>
-        <pre class="mt-1 overflow-x-auto whitespace-pre-wrap font-mono text-[12.5px]/[1.55]">{@version.content}</pre>
+        <pre class="mt-1 overflow-x-auto whitespace-pre-wrap font-mono text-[12.5px]/[1.55]">{ForgeCore.Document.body(@version.content)}</pre>
       </div>
       <p :if={is_nil(@version)} class="mt-2 text-sm/[1.55] opacity-70">
         Nothing has written the message this merge would carry, so there is nothing to merge yet.

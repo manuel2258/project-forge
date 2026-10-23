@@ -83,11 +83,12 @@ defmodule ForgeWeb.ChatLive do
       diff: chat_diff(project, chat),
       commits: commits(project, chat),
       branch_exists: Git.branch_exists?(repo, branch),
-      # What a merge of this branch would say. Read in the conversation's own document scope, the
-      # same one its turns write in, and the same version the merge itself would read.
+      # What a merge of this branch would say: the conversation's own latest, in the scope this
+      # one document is written in whether or not the chat has a ticket, and the same version the
+      # merge itself reads (`Forge.Conversations.document_scope/2`).
       commit_message:
         chat
-        |> Conversations.document_scope()
+        |> Conversations.document_scope(Workflow.commit_message_artifact())
         |> Artifacts.versions(Workflow.commit_message_artifact())
         |> List.last(),
       # Where a reopen makes a deleted branch again, from the definition the reopen uses.

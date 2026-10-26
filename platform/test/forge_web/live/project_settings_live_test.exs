@@ -206,6 +206,48 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
     assert Projects.get!(project.id).model == "claude-sonnet-5"
   end
 
+  # Free text and not a dropdown, because nothing discovers the levels — the form takes whatever
+  # is typed, and `docs/design/workflow-grammar-v1.md` § Effort says why nothing here checks it.
+  test "the default effort is a box that saves what is typed", %{conn: conn, project: project} do
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+
+    refute has_element?(view, ~s(select#project_effort))
+
+    view
+    |> form("#effort-form", %{"project" => %{"effort" => "xhigh"}})
+    |> render_submit()
+
+    assert Projects.get!(project.id).effort == "xhigh"
+  end
+
+  # Saving one dial must not disturb the other: the two forms post separate params, and a
+  # changeset that cast both from one would clear whichever was not on the page.
+  test "saving the effort leaves the model alone, and the other way round", %{
+    conn: conn,
+    project: project
+  } do
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+
+    # Free text, because no worker is connected to offer anything.
+    view
+    |> form("#model-form", %{"project" => %{"model" => "a-model-no-worker-has"}})
+    |> render_submit()
+
+    view
+    |> form("#effort-form", %{"project" => %{"effort" => "max"}})
+    |> render_submit()
+
+    assert %{model: "a-model-no-worker-has", effort: "max"} = Projects.get!(project.id)
+
+    # And back the other way: the model form posts no `effort`, so a changeset casting both from
+    # one set of params would clear it here.
+    view
+    |> form("#model-form", %{"project" => %{"model" => "a-model-no-worker-has"}})
+    |> render_submit()
+
+    assert %{model: "a-model-no-worker-has", effort: "max"} = Projects.get!(project.id)
+  end
+
   # The worker holding it may be asleep rather than gone, and a form that silently dropped it
   # would change a setting nobody touched — docs/design/workflow-grammar-v1.md § Model.
   test "a model nothing currently offers stays selected rather than being dropped", %{

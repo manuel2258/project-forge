@@ -22,6 +22,7 @@ defmodule ForgeCore.Workflow.State do
     :prompt,
     :env,
     :model,
+    :effort,
     :budget,
     :outcomes,
     :resources,
@@ -52,6 +53,10 @@ defmodule ForgeCore.Workflow.State do
           # `docs/design/workflow-grammar-v1.md` § Model for why it is per state and why its
           # value is not validated against a list.
           model: String.t() | nil,
+          # How hard this state's job thinks. Nil means the project's, then the machine's — see
+          # `docs/design/workflow-grammar-v1.md` § Effort for why it is a dial of its own and why
+          # its value is not validated against a list.
+          effort: String.t() | nil,
           budget: Budget.t() | nil,
           inputs: [String.t()],
           produces: [String.t()],

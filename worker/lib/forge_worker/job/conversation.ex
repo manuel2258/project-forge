@@ -262,6 +262,7 @@ defmodule ForgeWorker.Job.Conversation do
       |> Keyword.merge(ForgeWorker.Link.resume_opts(assignment))
       |> put_max_cost(assignment)
       |> put_model(spec)
+      |> put_effort(spec)
       |> then(&Session.restore(assignment, job_dir(state), state.worktree, &1, harness))
 
     harness_opts = ForgeWorker.Job.Credential.put(harness_opts, assignment, harness.driver())
@@ -304,6 +305,13 @@ defmodule ForgeWorker.Job.Conversation do
     do: Keyword.put(opts, :model, model)
 
   defp put_model(opts, _spec), do: opts
+
+  # The effort the conversation was opened with, or the project's — resolved by the platform, as
+  # the model is. A spec that names none leaves the machine's alone.
+  defp put_effort(opts, %ForgeCore.Job.Spec{effort: effort}) when is_binary(effort),
+    do: Keyword.put(opts, :effort, effort)
+
+  defp put_effort(opts, _spec), do: opts
 
   defp git_env(%{"git" => %{"url" => url, "token" => token}}) when is_binary(token),
     do: [{"FORGE_GIT_URL", url}, {"FORGE_GIT_TOKEN", {:secret, token}}]

@@ -487,7 +487,11 @@ defmodule Forge.WorkersTest do
         Forge.Jobs,
         Keyword.merge(jobs,
           platform_url: "http://platform.example:4000",
-          harness_opts: [model: "claude-opus-5", credential: {:oauth, "sk-oauth-node"}]
+          harness_opts: [
+            model: "claude-opus-5",
+            effort: "high",
+            credential: {:oauth, "sk-oauth-node"}
+          ]
         )
       )
 
@@ -495,11 +499,33 @@ defmodule Forge.WorkersTest do
       env = env(text)
 
       assert Map.keys(env) |> Enum.sort() ==
-               ~w(FORGE_CLAUDE_MODEL FORGE_PLATFORM_URL FORGE_WORKER_ID FORGE_WORKER_TOKEN)
+               ~w(FORGE_CLAUDE_EFFORT FORGE_CLAUDE_MODEL FORGE_PLATFORM_URL FORGE_WORKER_ID
+                  FORGE_WORKER_TOKEN)
 
       assert env["FORGE_PLATFORM_URL"] == "http://platform.example:4000"
       assert env["FORGE_CLAUDE_MODEL"] == "claude-opus-5"
+      assert env["FORGE_CLAUDE_EFFORT"] == "high"
       refute text =~ "sk-oauth-node"
+    end
+
+    # Each dial is minted only where the node has an opinion. A variable set to nothing would read
+    # on the machine as "the empty effort", which is not the harness's own default.
+    test "a dial the node has no opinion about is not minted at all", context do
+      %{owner: owner} = context
+      jobs = Application.get_env(:forge, Forge.Jobs, [])
+      on_exit(fn -> Application.put_env(:forge, Forge.Jobs, jobs) end)
+
+      Application.put_env(
+        :forge,
+        Forge.Jobs,
+        Keyword.merge(jobs, harness_opts: [model: "claude-opus-5"])
+      )
+
+      assert {:ok, _worker, text} = Workers.mint(owner)
+      env = env(text)
+
+      assert env["FORGE_CLAUDE_MODEL"] == "claude-opus-5"
+      refute Map.has_key?(env, "FORGE_CLAUDE_EFFORT")
     end
 
     test "into a project its owner is in, it serves that project", context do

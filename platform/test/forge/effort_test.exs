@@ -1,0 +1,192 @@
+defmodule Forge.EffortTest do
+  @moduledoc """
+  How hard the work thinks.
+
+  The second dial beside the model, and the chain is again the whole feature: a workflow state's,
+  then the project's, then the machine's. Tested from the outside — `effort_for/1` is what the
+  assignment asks — because the failure mode is the same silent one: a job that thinks at the
+  wrong effort produces work, just not the work that was asked for.
+  """
+
+  use Forge.DataCase, async: false
+
+  import Forge.ForgeFixtures
+  import Forge.GitFixtures
+
+  alias Forge.{Conversations, Jobs, Projects}
+  alias Forge.Jobs.Job
+
+  setup do
+    {:ok, project} =
+      register_owned!(%{
+        name: "effort-#{System.unique_integer([:positive])}",
+        repo_path: seeded_repo()
+      })
+
+    %{project: project}
+  end
+
+  describe "a project's default" do
+    test "is set and cleared, and empty means cleared", %{project: project} do
+      assert {:ok, project} = Projects.set_effort(project, "high")
+      assert project.effort == "high"
+
+      # Not "the effort named empty string": cleared, which resolves to the machine's.
+      assert {:ok, project} = Projects.set_effort(project, "   ")
+      assert is_nil(project.effort)
+    end
+
+    # The stored value is what reaches `--effort` on a command line, so the padding a box or a
+    # paste leaves is taken off here rather than failing the job on the machine. Ecto's own cast
+    # already nils a value that is *only* whitespace; trimming one that is not is this code's.
+    test "a padded level is stored without its padding", %{project: project} do
+      assert {:ok, project} = Projects.set_effort(project, "  high  ")
+      assert project.effort == "high"
+    end
+
+    # The levels belong to the harness, and this ticket exists so they can reach harnesses the
+    # platform does not know. A validator holding Claude Code's five would refuse the sixth.
+    test "any non-empty level is accepted, including one no harness has", %{project: project} do
+      assert {:ok, project} = Projects.set_effort(project, "ponder-for-a-week")
+      assert project.effort == "ponder-for-a-week"
+    end
+
+    # Each dial is set on its own: saving one must not clear the other, which a shared changeset
+    # field or a shared setter would do.
+    test "setting one dial leaves the other alone", %{project: project} do
+      {:ok, project} = Projects.set_model(project, "opus")
+      {:ok, project} = Projects.set_effort(project, "max")
+
+      assert project.model == "opus"
+      assert project.effort == "max"
+
+      {:ok, project} = Projects.set_model(project, "haiku")
+      assert project.effort == "max"
+    end
+  end
+
+  describe "a conversation" do
+    test "runs at the effort it was opened with", %{project: project} do
+      {:ok, _project} = Projects.set_effort(project, "low")
+      {:ok, chat} = Conversations.open(project, "hello", effort: "max")
+
+      assert chat.effort == "max"
+      assert Jobs.effort_for(chat) == "max"
+    end
+
+    test "falls back to the project's when it named none", %{project: project} do
+      {:ok, project} = Projects.set_effort(project, "low")
+      {:ok, chat} = Conversations.open(project, "hello")
+
+      assert is_nil(chat.effort)
+      assert Jobs.effort_for(chat) == "low"
+    end
+
+    # Nil at the end of the chain is not "no effort": it is the machine's, and a machine with no
+    # `FORGE_CLAUDE_EFFORT` passes no flag at all, leaving the harness its own default.
+    test "falls through to the machine's when nothing says", %{project: project} do
+      {:ok, chat} = Conversations.open(project, "hello")
+
+      assert is_nil(Jobs.effort_for(chat))
+    end
+
+    test "an empty choice is the project's, not an effort named nothing", %{project: project} do
+      {:ok, project} = Projects.set_effort(project, "medium")
+      {:ok, chat} = Conversations.open(project, "hello", effort: "  ")
+
+      assert is_nil(chat.effort)
+      assert Jobs.effort_for(chat) == "medium"
+    end
+
+    # The two are chosen together and are not the same choice: a conversation opened with one of
+    # them must not acquire the other's value.
+    test "its model and its effort are chosen independently", %{project: project} do
+      {:ok, chat} = Conversations.open(project, "hello", model: "opus")
+
+      assert chat.model == "opus"
+      assert is_nil(chat.effort)
+    end
+  end
+
+  # Everything that already existed keeps working, and keeps thinking at the machine's effort.
+  # Both columns are nullable and null is the bottom of the chain, so a row written before any of
+  # this resolves exactly as it did.
+  describe "what was already there" do
+    test "a spec stored before the field existed has no effort, and no opinion", %{
+      project: project
+    } do
+      ticket = ticket_fixture(%{project: project})
+
+      # Exactly the shape on disk for every job created before this: no `effort` key at all.
+      job = job_fixture(%{ticket: ticket, spec: %{"prompt" => "agents/refine.md"}})
+
+      assert is_nil(Jobs.spec(job).effort)
+      assert is_nil(Jobs.effort_for(job))
+    end
+
+    test "a project written before the column existed reads as no default", %{project: project} do
+      assert is_nil(project.effort)
+      assert is_nil(Jobs.effort_for(chat_fixture(%{project: project})))
+    end
+
+    # A workflow pinned before `effort` was a key still parses: it is stored as the raw map and
+    # re-parsed, so a key nothing ever set is simply absent. Stripped from the map here, because
+    # that is exactly what every workflow pinned before this change looks like.
+    test "a workflow pinned before the key existed still parses", %{project: project} do
+      ticket = ticket_fixture(%{project: project})
+
+      without_effort =
+        update_in(ticket.workflow, ["states"], fn states ->
+          Map.new(states, fn {name, state} -> {name, Map.delete(state, "effort")} end)
+        end)
+
+      assert {:ok, workflow} = ForgeCore.Workflow.Parser.from_map(without_effort)
+      assert Enum.all?(Map.values(workflow.states), &is_nil(&1.effort))
+    end
+  end
+
+  describe "a workflow job" do
+    test "runs at its state's effort, over the project's", %{project: project} do
+      {:ok, _project} = Projects.set_effort(project, "low")
+      ticket = ticket_fixture(%{project: project})
+      job = job_fixture(%{ticket: ticket, spec: %{"effort" => "max"}})
+
+      assert Jobs.effort_for(job) == "max"
+    end
+
+    test "falls back to the project's when its state named none", %{project: project} do
+      {:ok, _project} = Projects.set_effort(project, "low")
+      ticket = ticket_fixture(%{project: project})
+      job = job_fixture(%{ticket: ticket, spec: %{}})
+
+      assert Jobs.effort_for(job) == "low"
+    end
+
+    # The stored spec keeps what the *state* declared, which is pinned with the workflow. The
+    # project's default is not pinned, so it is read when the job runs rather than when it was
+    # created — a job made a week ago should use the project's answer now.
+    test "the project's answer is read when the job runs, not when it was created", %{
+      project: project
+    } do
+      ticket = ticket_fixture(%{project: project})
+      job = job_fixture(%{ticket: ticket, spec: %{}})
+
+      assert is_nil(Jobs.effort_for(job))
+
+      {:ok, _project} = Projects.set_effort(project, "xhigh")
+
+      assert Jobs.effort_for(Repo.get!(Job, job.id)) == "xhigh"
+    end
+
+    # `effort_for/1` reads the project's column and not the model's. Two single-column queries
+    # that differ by one field are exactly where a copy goes wrong silently.
+    test "reads the project's effort, not its model", %{project: project} do
+      {:ok, _project} = Projects.set_model(project, "opus")
+      ticket = ticket_fixture(%{project: project})
+      job = job_fixture(%{ticket: ticket, spec: %{}})
+
+      assert is_nil(Jobs.effort_for(job))
+      assert Jobs.model_for(job) == "opus"
+    end
+  end
+end

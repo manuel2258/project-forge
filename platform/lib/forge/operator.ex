@@ -335,6 +335,13 @@ defmodule Forge.Operator do
     with :ok <- allow(project, user, :manage), do: Projects.set_model(project, model)
   end
 
+  @doc "Sets the project's default effort."
+  @spec set_effort(Project.t(), User.t(), String.t() | nil) ::
+          {:ok, Project.t()} | {:error, term()}
+  def set_effort(%Project{} = project, %User{} = user, effort) do
+    with :ok <- allow(project, user, :manage), do: Projects.set_effort(project, effort)
+  end
+
   @doc """
   Sets one of the project's secrets: a new one, or a new version of the live one with that name.
   A project admin's (`docs/design/secrets.md` § What a secret is).

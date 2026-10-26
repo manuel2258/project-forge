@@ -1041,6 +1041,7 @@ defmodule ForgeWorker.Link do
       Application.get_env(:forge_worker, :harness_opts, [])
       |> Keyword.merge(resume_opts(assignment))
       |> put_model(spec)
+      |> put_effort(spec)
 
     # Before the credential goes in: the check asks the harness its version, and that needs none.
     {harness_opts, session} =
@@ -1112,6 +1113,14 @@ defmodule ForgeWorker.Link do
     do: Keyword.put(opts, :model, model)
 
   defp put_model(opts, _spec), do: opts
+
+  # The same chain and the same precedence for the second dial: the spec's effort over the
+  # machine's `FORGE_CLAUDE_EFFORT`, and a spec naming none leaves the machine's alone.
+  @spec put_effort(keyword(), ForgeCore.Job.Spec.t()) :: keyword()
+  defp put_effort(opts, %ForgeCore.Job.Spec{effort: effort}) when is_binary(effort),
+    do: Keyword.put(opts, :effort, effort)
+
+  defp put_effort(opts, _spec), do: opts
 
   # Long enough that a job an operator is still thinking about survives, short enough that a
   # machine running for months does not keep every run it ever made. A week.

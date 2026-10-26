@@ -60,6 +60,27 @@ defmodule ForgeWorker.Harness.ClaudeCodeTest do
       refute "--resume" in args
     end
 
+    # The second dial beside `--model`, on both invocation shapes: a conversation wants it as
+    # much as a workflow state does, and the driver adds it in one place for both
+    # (`docs/design/claude-code-events.md`). Passed through unexamined — the levels are the CLI's.
+    test "adds the resolved effort as a flag, on either shape, and only when one was resolved" do
+      {_exe, args, _env} = ClaudeCode.command(spec(), "/jobs/j", effort: "xhigh")
+      assert Enum.take(args, -2) == ["--effort", "xhigh"]
+
+      {_exe, args, _env} =
+        ClaudeCode.command(spec(), "/jobs/j", mode: :streaming, effort: "low", model: "haiku")
+
+      assert Enum.take(args, -4) == ["--model", "haiku", "--effort", "low"]
+
+      # No effort resolved means no flag, which leaves the harness its own default rather than
+      # pinning one the platform invented.
+      {_exe, args, _env} = ClaudeCode.command(spec(), "/jobs/j", model: "haiku")
+      refute "--effort" in args
+
+      {_exe, args, _env} = ClaudeCode.command(spec(), "/jobs/j", mode: :streaming)
+      refute "--effort" in args
+    end
+
     # A conversation has no turn ceiling — it ends when a person stops talking — and no state to
     # take a cost ceiling from, so the caller passes what is left of the day instead.
     test "streaming mode takes messages on stdin and drops the turn ceiling" do

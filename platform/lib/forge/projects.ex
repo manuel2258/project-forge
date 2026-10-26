@@ -473,6 +473,23 @@ defmodule Forge.Projects do
     end
   end
 
+  @doc """
+  Sets the project's default effort, or clears it when given nothing.
+
+  Cleared is not "no effort": it is the machine's, as a cleared model is. The value is not checked
+  against a list of levels — see `docs/design/workflow-grammar-v1.md` § Effort.
+  """
+  @spec set_effort(Project.t(), String.t() | nil) :: {:ok, Project.t()} | {:error, term()}
+  def set_effort(%Project{} = project, effort) do
+    with {:ok, project} <- project |> Project.changeset(%{effort: effort}) |> Repo.update() do
+      Events.append("project.effort_set", :system, %{
+        payload: %{"project" => project.name, "effort" => project.effort}
+      })
+
+      {:ok, project}
+    end
+  end
+
   @doc "Every mirror this project pushes to, with what the hook last said about each."
   @spec list_mirrors(Project.t()) :: [map()]
   def list_mirrors(%Project{} = project), do: Hooks.list_mirrors(repo_path(project))

@@ -95,6 +95,8 @@ defmodule Forge.Conversations do
         # starts, so changing it later means a new process. A conversation that wants a different
         # one is a conversation you close and open again.
         model: model(opts),
+        # The second dial, chosen and fixed with the model and for the same reason.
+        effort: effort(opts),
         memory_max: Keyword.fetch!(opts, :memory),
         cores: Keyword.fetch!(opts, :cores),
         # Fixed for the life of every process it has, as the model is; a reopened conversation
@@ -133,10 +135,14 @@ defmodule Forge.Conversations do
   end
 
   # Empty is not a choice: it resolves to the project's, which is what nil already means.
-  defp model(opts) do
-    case opts |> Keyword.get(:model) |> to_string() |> String.trim() do
+  defp model(opts), do: chosen(opts, :model)
+
+  defp effort(opts), do: chosen(opts, :effort)
+
+  defp chosen(opts, key) do
+    case opts |> Keyword.get(key) |> to_string() |> String.trim() do
       "" -> nil
-      model -> model
+      value -> value
     end
   end
 

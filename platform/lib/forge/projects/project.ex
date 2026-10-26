@@ -16,6 +16,9 @@ defmodule Forge.Projects.Project do
     # What this project's work runs on when a state does not say. Nil means the machine's, which
     # is the platform-wide setting — `docs/design/workflow-grammar-v1.md` § Model.
     field :model, :string
+    # How hard this project's work thinks when a state does not say. Nil means the machine's, the
+    # same bottom of the same chain — `docs/design/workflow-grammar-v1.md` § Effort.
+    field :effort, :string
 
     has_many :tickets, Forge.Tickets.Ticket
 
@@ -24,7 +27,7 @@ defmodule Forge.Projects.Project do
 
   def changeset(project, attrs) do
     project
-    |> cast(attrs, [:name, :repo_path, :default_branch, :seed_id, :model])
+    |> cast(attrs, [:name, :repo_path, :default_branch, :seed_id, :model, :effort])
     |> validate_required([:name, :repo_path, :default_branch])
     |> validate_format(:name, ~r/\A[a-z0-9][a-z0-9_-]*\z/,
       message: "lowercase letters, digits, - or _"
@@ -48,6 +51,10 @@ defmodule Forge.Projects.Project do
     # validator that knew them would refuse a model released last week. Emptiness is the only
     # thing that is certainly wrong — it would read as "set" and resolve to nothing.
     |> update_change(:model, &blank_to_nil/1)
+    # Effort is unchecked for a stronger reason: the levels are the harness's and the platform is
+    # meant to carry them to harnesses it does not know yet (§ Effort). Emptiness again is the
+    # only thing certainly wrong.
+    |> update_change(:effort, &blank_to_nil/1)
     |> unique_constraint(:name)
   end
 
@@ -71,8 +78,8 @@ defmodule Forge.Projects.Project do
 
   defp blank_to_nil(nil), do: nil
 
-  defp blank_to_nil(model) do
-    case String.trim(model) do
+  defp blank_to_nil(value) do
+    case String.trim(value) do
       "" -> nil
       trimmed -> trimmed
     end

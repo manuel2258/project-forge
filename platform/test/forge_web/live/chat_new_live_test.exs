@@ -186,6 +186,41 @@ defmodule ForgeWeb.ChatNewLiveTest do
       assert Jobs.model_for(chat) == "sonnet"
     end
 
+    # The effort is chosen on the same form and resolves through the same chain. Free text
+    # whatever is connected, because nothing discovers the levels.
+    test "an effort chosen on the form is the conversation's", %{conn: conn, project: project} do
+      {:ok, view, _html} = live(conn, ~p"/chats/new?project=#{project.name}")
+
+      view
+      |> form("#chat-form", %{"chat" => %{"text" => "hello", "effort" => "high"}})
+      |> render_submit()
+
+      assert [chat] = Jobs.chats_for_project(project.id)
+      assert chat.effort == "high"
+      assert Jobs.effort_for(chat) == "high"
+    end
+
+    test "an empty effort is the project's, and the model stays its own choice", %{
+      conn: conn,
+      project: project
+    } do
+      connected_worker(%{"aliases" => ["opus"]})
+      {:ok, project} = Projects.set_effort(project, "low")
+
+      {:ok, view, _html} = live(conn, ~p"/chats/new?project=#{project.name}")
+
+      view
+      |> form("#chat-form", %{
+        "chat" => %{"text" => "hello", "model" => "opus", "effort" => ""}
+      })
+      |> render_submit()
+
+      assert [chat] = Jobs.chats_for_project(project.id)
+      assert is_nil(chat.effort)
+      assert chat.model == "opus"
+      assert Jobs.effort_for(chat) == "low"
+    end
+
     # A select with one empty option would make configuring a project before starting a machine
     # impossible, and that is the order a new operator does it in.
     test "with nothing connected it is free text and still takes a name", %{

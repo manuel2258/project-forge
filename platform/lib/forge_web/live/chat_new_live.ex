@@ -48,7 +48,12 @@ defmodule ForgeWeb.ChatNewLive do
        # is only put in the box: nothing starts until Start (`docs/design/ui.md` § Changes).
        form:
          to_form(
-           %{"project" => project && project.name, "text" => text(params["text"]), "model" => ""},
+           %{
+             "project" => project && project.name,
+             "text" => text(params["text"]),
+             "model" => "",
+             "effort" => ""
+           },
            as: :chat
          )
      )}
@@ -118,16 +123,20 @@ defmodule ForgeWeb.ChatNewLive do
 
     with {:ok, memory} <- memory(params["memory"]),
          {:ok, cores} <- cores(params["cores"]) do
-      start(socket, project, ticket, String.trim(params["text"]), params["model"], memory, cores)
+      start(socket, project, ticket, String.trim(params["text"]), memory, cores,
+        model: params["model"],
+        effort: params["effort"]
+      )
     else
       {:error, message} -> {:noreply, assign(socket, error: message)}
     end
   end
 
-  defp start(socket, project, ticket, text, model, memory, cores) do
+  defp start(socket, project, ticket, text, memory, cores, chosen) do
     case Operator.open_chat(project, socket.assigns.current_scope.user, text,
            ticket: ticket,
-           model: model,
+           model: chosen[:model],
+           effort: chosen[:effort],
            memory: memory,
            cores: cores,
            secrets: picked(socket.assigns.form.params["secrets"])
@@ -268,12 +277,18 @@ defmodule ForgeWeb.ChatNewLive do
           label="First thing to say"
         />
 
-        <%!-- Optional, and only here: the model is fixed when the harness process starts, so a
-              conversation that wants a different one is one you close and open again. --%>
+        <%!-- Both optional, and only here: the model and the effort are fixed when the harness
+              process starts, so a conversation that wants different ones is one you close and
+              open again. --%>
         <ForgeWeb.Operator.Components.model_field
           field={@form[:model]}
           offered={@offered}
           fallback={(@project && @project.model) || "the platform's"}
+        />
+
+        <ForgeWeb.Operator.Components.effort_field
+          field={@form[:effort]}
+          fallback={(@project && @project.effort) || "the platform's"}
         />
 
         <%!-- What the gate reserves for it, and what its slice is capped at. Blank is the

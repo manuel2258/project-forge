@@ -21,7 +21,8 @@ claude -p \
   --max-turns <spec.budget.turns> \
   --max-budget-usd <spec.budget.cost> \
   --permission-mode bypassPermissions \
-  --model <configured>
+  --model <configured> \
+  --effort <configured>
 ```
 
 **Streaming**, for a conversation (`conversations.md`). Stdin stays open: the composed prompt,
@@ -37,7 +38,8 @@ claude -p \
   --input-format stream-json --replay-user-messages \
   --max-budget-usd <assignment.max_cost_usd> \
   --permission-mode bypassPermissions \
-  --model <configured>
+  --model <configured> \
+  --effort <configured>
 ```
 
 No `--max-turns`: a conversation ends when a person stops talking. `--max-budget-usd` is what was
@@ -47,7 +49,9 @@ left of the day when the conversation was assigned, and is absent when the day h
 once it has been reopened with a session carried (§ Resume).
 
 In both, `--model` is the model the platform resolved into the spec, else the machine's
-`FORGE_CLAUDE_MODEL`, and is absent when neither names one. A workflow job whose assignment
+`FORGE_CLAUDE_MODEL`, and is absent when neither names one. `--effort` is the same thing one dial
+over — the spec's, else `FORGE_CLAUDE_EFFORT`, else no flag, leaving the harness its own default
+(`workflow-grammar-v1.md` § Effort). A workflow job whose assignment
 carries a session also gets `--resume <session_id>` (§ Resume), and its `<spec.budget.cost>` is the
 budget it was assigned, which the platform may have lowered to whichever cap binds first
 (`capacity.md` § Spend caps).

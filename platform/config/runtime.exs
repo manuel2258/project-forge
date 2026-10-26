@@ -55,7 +55,8 @@ harness_opts =
   Enum.reject(
     [
       executable: System.get_env("FORGE_CLAUDE_EXECUTABLE"),
-      model: System.get_env("FORGE_CLAUDE_MODEL")
+      model: System.get_env("FORGE_CLAUDE_MODEL"),
+      effort: System.get_env("FORGE_CLAUDE_EFFORT")
     ],
     fn {_key, value} -> is_nil(value) end
   )

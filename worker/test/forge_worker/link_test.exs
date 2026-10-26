@@ -2624,6 +2624,30 @@ defmodule ForgeWorker.LinkTest do
     refute args =~ "the-machines"
   end
 
+  # `effort` travels the workflow path beside `model` and is resolved by the platform the same
+  # way, so it needs the same proof on the same path: without one, removing the workflow path's
+  # effort handling would fail nothing.
+  test "a job runs at the effort its spec names, over the machine's", context do
+    %{client: client, origin: origin, root: root} = context
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    Application.put_env(:forge_worker, :harness_opts,
+      executable: fake_executable(),
+      effort: "the-machines"
+    )
+
+    job = assignment(origin)
+    spec = Map.put(job["spec"], "effort", "the-specs")
+    push(client, @topic, "assign", Map.put(job, "spec", spec))
+
+    {%{"result" => _result}, _events} = take_push("result")
+
+    args = File.read!(Path.join([root, "jobs", spec["job_id"], "fake-args.txt"]))
+    assert args =~ "--effort the-specs"
+    refute args =~ "the-machines"
+  end
+
   # The job's credential, sealed for this machine and this job the way the platform seals it
   # (`ForgeCore.Job.Credential`), with this machine's token configured to open it.
   defp with_credential(job, secret, kind \\ "oauth", sealed_for \\ nil) do
@@ -3824,6 +3848,48 @@ defmodule ForgeWorker.LinkTest do
 
       assert File.read!(Path.join([root, "jobs", job_id, "fake-args.txt"])) =~
                "--model the-machines"
+    end
+
+    test "the spec's effort reaches the harness, over the machine's", context do
+      %{client: client, origin: origin, root: root} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      Application.put_env(:forge_worker, :harness_opts,
+        executable: fake_executable(),
+        effort: "the-machines"
+      )
+
+      job = chat(origin)
+      job_id = job["job_id"]
+      spec = Map.put(job["spec"], "effort", "the-specs")
+      push(client, @topic, "assign", Map.put(job, "spec", spec))
+
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      args = File.read!(Path.join([root, "jobs", job_id, "fake-args.txt"]))
+      assert args =~ "--effort the-specs"
+      refute args =~ "the-machines"
+    end
+
+    test "a spec that names no effort leaves the machine's alone", context do
+      %{client: client, origin: origin, root: root} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      Application.put_env(:forge_worker, :harness_opts,
+        executable: fake_executable(),
+        effort: "the-machines"
+      )
+
+      job = chat(origin)
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      assert File.read!(Path.join([root, "jobs", job_id, "fake-args.txt"])) =~
+               "--effort the-machines"
     end
 
     # The conversation starts its runner through a path of its own (`Conversation.runner_opts/1`),

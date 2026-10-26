@@ -1599,9 +1599,18 @@ defmodule Forge.Workers do
   # node's variables are not read at all. `executable` is not here either: it is a path on this
   # host, and the worker image has its own.
   defp harness_env do
-    case Keyword.get(Forge.Jobs.config(:harness_opts, []), :model) do
-      model when is_binary(model) -> [{"FORGE_CLAUDE_MODEL", model}]
-      _other -> []
+    opts = Forge.Jobs.config(:harness_opts, [])
+
+    harness_pair(opts, :model, "FORGE_CLAUDE_MODEL") ++
+      harness_pair(opts, :effort, "FORGE_CLAUDE_EFFORT")
+  end
+
+  # Only what the node actually has an opinion about: a variable set to nothing would read on the
+  # machine as "the empty model", which is a different thing from the harness's own default.
+  defp harness_pair(opts, key, name) do
+    case Keyword.get(opts, key) do
+      value when is_binary(value) -> [{name, value}]
+      _unset -> []
     end
   end
 

@@ -27,15 +27,16 @@ defmodule ForgeCore.Workflow.ParserTest do
                prompt: "agents/implement.md",
                env: "implement",
                model: "opus",
+               effort: "high",
                inputs: ["plan.md"],
                produces: ["implementation.md", "changeset"],
                outcomes: ["done", "plan_invalid"],
                budget: %Budget{turns: 200, cost: 10.0}
              } = workflow.states["implementing"]
 
-      # A state that names none says nothing, rather than saying "the default": what fills the
+      # A state that names neither says nothing, rather than saying "the default": what fills the
       # gap is the project's, and then the machine's, and neither is core's to know.
-      assert %State{model: nil} = workflow.states["refining"]
+      assert %State{model: nil, effort: nil} = workflow.states["refining"]
 
       assert %Transition{
                from: "verifying",
@@ -226,6 +227,22 @@ defmodule ForgeCore.Workflow.ParserTest do
              ]
     end
 
+    # `docs/design/workflow-grammar-v1.md` § Effort states the same rule for the second dial, and
+    # for a stronger reason: the levels are the harness's, and `effort` is meant to reach
+    # harnesses this platform does not know. Emptiness is all it checks.
+    test "an effort, where present, may not be empty", %{map: map} do
+      assert messages(put_in(map, ["states", "refining", "effort"], "")) == [
+               {"states.refining.effort", "must be a non-empty string"}
+             ]
+    end
+
+    test "any non-empty effort is accepted, including one no harness has today", %{map: map} do
+      assert {:ok, workflow} =
+               Parser.from_map(put_in(map, ["states", "refining", "effort"], "ponder-for-a-week"))
+
+      assert workflow.states["refining"].effort == "ponder-for-a-week"
+    end
+
     test "limits are required", %{map: map} do
       assert messages(Map.delete(map, "limits")) == [
                {"limits", "must be a mapping with ticket_cost"}
@@ -274,12 +291,14 @@ defmodule ForgeCore.Workflow.ParserTest do
           "env" => "x",
           "inputs" => ["ticket"],
           "model" => "opus",
+          "effort" => "high",
           "resources" => %{"memory" => "1GiB"}
         })
 
-      # A human state runs no job, so naming a model or resources for it is naming them for
-      # nothing.
+      # A human state runs no job, so naming a model, an effort or resources for it is naming
+      # them for nothing.
       assert messages(map) == [
+               {"states.merged.effort", "not allowed on a human state (no prompt)"},
                {"states.merged.env", "not allowed on a human state (no prompt)"},
                {"states.merged.inputs", "not allowed on a human state (no prompt)"},
                {"states.merged.model", "not allowed on a human state (no prompt)"},

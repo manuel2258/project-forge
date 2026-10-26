@@ -28,7 +28,8 @@ defmodule ForgeWorker.Harness.ClaudeCode do
     args =
       ["-p", "--output-format", "stream-json", "--verbose"] ++
         mode_args(spec, opts) ++
-        ["--permission-mode", "bypassPermissions"] ++ model_args(opts) ++ resume_args(opts)
+        ["--permission-mode", "bypassPermissions"] ++
+        model_args(opts) ++ effort_args(opts) ++ resume_args(opts)
 
     credential = resolve(Keyword.get(opts, :credential))
     {executable, args, [{"FORGE_JOB", job_dir} | credential_env(credential)]}
@@ -60,6 +61,17 @@ defmodule ForgeWorker.Harness.ClaudeCode do
     case Keyword.get(opts, :model) do
       nil -> []
       model -> ["--model", model]
+    end
+  end
+
+  # Passed through unexamined: `--effort` takes `low`, `medium`, `high`, `xhigh` or `max`, and
+  # which of them are current is the CLI's business rather than this driver's
+  # (`docs/design/workflow-grammar-v1.md` § Effort). A level it does not know fails the run with
+  # its own message. Nil is no flag at all, which leaves the harness its own default.
+  defp effort_args(opts) do
+    case Keyword.get(opts, :effort) do
+      nil -> []
+      effort -> ["--effort", effort]
     end
   end
 

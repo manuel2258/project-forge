@@ -201,6 +201,7 @@ defmodule Forge.Jobs do
          prompt_path: state.prompt,
          env: state.env,
          model: state.model,
+         effort: state.effort,
          commit: ticket.workflow_commit,
          branch: ticket.branch,
          budget: %{turns: state.budget.turns, cost: state.budget.cost},
@@ -557,7 +558,7 @@ defmodule Forge.Jobs do
     {:error, reason}
   end
 
-  # A command carries no harness, no credential, no model and no budget
+  # A command carries no harness, no credential, no model, no effort and no budget
   # (`docs/design/commands.md` § An invocation is a job): no spend gate, no pick from the pool, and
   # a git token that can read and not write (§ How a command gets the code).
   defp assign_command(%Job{} = job, %Worker{} = worker) do
@@ -1089,6 +1090,7 @@ defmodule Forge.Jobs do
       inputs: chat_inputs(job, ticket),
       preamble_hash: ForgeCore.Prompt.chat_preamble_hash(),
       model: model_for(job),
+      effort: effort_for(job),
       produces: [],
       outcomes: [],
       moving: moving(ticket)
@@ -1099,11 +1101,17 @@ defmodule Forge.Jobs do
   end
 
   defp runtime_spec(%Job{} = job, %Ticket{id: ticket_id} = ticket) do
-    # The model is resolved here rather than frozen into the stored spec at creation. The spec
-    # carries what the *state* declared, which is pinned with the workflow and right to keep;
-    # the project's default is not pinned, and a job created a week before it ran should use the
-    # project's answer now rather than the one it had then.
-    spec = %{spec(job) | answered_keys: Artifacts.answered_keys(ticket_id), model: model_for(job)}
+    # The model and the effort are resolved here rather than frozen into the stored spec at
+    # creation. The spec carries what the *state* declared, which is pinned with the workflow and
+    # right to keep; the project's defaults are not pinned, and a job created a week before it ran
+    # should use the project's answers now rather than the ones it had then.
+    spec = %{
+      spec(job)
+      | answered_keys: Artifacts.answered_keys(ticket_id),
+        model: model_for(job),
+        effort: effort_for(job)
+    }
+
     spec = lower_budget(spec, job, ticket)
     {results, _logs} = Commands.results(job)
     {entered, _logs} = Commands.entered(job)
@@ -1248,6 +1256,27 @@ defmodule Forge.Jobs do
 
   defp project_model(project_id) do
     Repo.one(from p in Projects.Project, where: p.id == ^project_id, select: p.model)
+  end
+
+  @doc """
+  How hard this job thinks: the most specific thing that says so.
+
+  The same chain as `model_for/1`, link for link — a state's effort, then the project's, then nil
+  for the machine's, which is the platform-wide setting the worker was built with. A conversation
+  has no state, so the first link is the effort it was opened with.
+
+  Resolved here and carried in the spec for the same reason: the platform knows the state and the
+  project, and a machine knows neither.
+  """
+  @spec effort_for(Job.t()) :: String.t() | nil
+  def effort_for(%Job{kind: :chat} = job), do: job.effort || project_effort(job.project_id)
+
+  def effort_for(%Job{} = job), do: spec(job).effort || project_effort(job.project_id)
+
+  defp project_effort(nil), do: nil
+
+  defp project_effort(project_id) do
+    Repo.one(from p in Projects.Project, where: p.id == ^project_id, select: p.effort)
   end
 
   # A ticket chat gets every document on the ticket, which is more than any one of its jobs is

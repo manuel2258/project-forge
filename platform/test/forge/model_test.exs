@@ -13,7 +13,8 @@ defmodule Forge.ModelTest do
   import Forge.ForgeFixtures
   import Forge.GitFixtures
 
-  alias Forge.{Conversations, Jobs, Projects}
+  alias Forge.{Conversations, Jobs, Operator, Projects}
+  alias Forge.Events.Event
   alias Forge.Jobs.Job
 
   setup do
@@ -76,7 +77,71 @@ defmodule Forge.ModelTest do
       assert is_nil(chat.model)
       assert Jobs.model_for(chat) == "haiku"
     end
+
+    # Ecto's `cast` folds a whitespace-only value to nil by itself, so the case above passes
+    # without `chosen/2`'s trim. This is the one that does not.
+    test "a padded choice is stored without its padding", %{project: project} do
+      {:ok, chat} = Conversations.open(project, "hello", model: "  opus  ")
+
+      assert chat.model == "opus"
+    end
+
+    # The same guard, on the dial that had the hole first: a map crashed `to_string/1` and a list
+    # was joined into a name nobody typed.
+    test "a parameter that is not a string is refused rather than joined or crashed", %{
+      project: project
+    } do
+      {:ok, project} = Projects.set_model(project, "haiku")
+
+      assert {:ok, chat} = Conversations.open(project, "hello", model: ["op", "us"])
+      assert is_nil(chat.model)
+      assert Jobs.model_for(chat) == "haiku"
+
+      assert {:ok, chat} = Conversations.open(project, "hello", model: %{"x" => "1"})
+      assert is_nil(chat.model)
+    end
   end
+
+  # `model_for/1` had the same gap `effort_for/1` was found with: resolving a value is not the
+  # same claim as handing it over, and deleting `model: model_for(job)` from `runtime_spec/2`
+  # failed nothing. `effort_test.exs` asserts both dials on the assignment; this is the model's
+  # own named case, so a reader of this file is not left thinking nothing covers it.
+  test "the assignment a worker is handed carries the resolved model", %{project: project} do
+    ticket = ticket_fixture(%{project: project})
+
+    job =
+      job_fixture(%{
+        ticket: ticket,
+        spec: %{"prompt" => "agents/refine.md", "budget" => %{"turns" => 10, "cost" => 1.0}}
+      })
+
+    {:ok, token, _row} = Forge.Git.Tokens.issue_for_job(job, ticket, project)
+    {:ok, _project} = Projects.set_model(project, "opus")
+
+    assert Jobs.assignment(job, ticket, project, token)["spec"]["model"] == "opus"
+  end
+
+  # Who sets what a project's jobs run on is who sets what it spends, so the log names them.
+  describe "the audit log" do
+    test "names the person who set the model, not the system", %{project: project} do
+      admin = Forge.AccountsFixtures.user_fixture()
+      join!(project, admin)
+
+      assert {:ok, _project} = Operator.set_model(project, admin, "opus")
+
+      assert [event] = events("project.model_set")
+      assert event.actor == %{"kind" => "user", "id" => admin.id}
+    end
+
+    test "says system when no person did it", %{project: project} do
+      assert {:ok, _project} = Projects.set_model(project, "opus")
+
+      assert [event] = events("project.model_set")
+      assert event.actor == %{"kind" => "system", "id" => nil}
+    end
+  end
+
+  defp events(type), do: Repo.all(from e in Event, where: e.type == ^type, order_by: e.seq)
 
   # Everything that already existed keeps working, and keeps running on the machine's model.
   # Both columns are nullable and null is the bottom of the chain, so a row written before any of

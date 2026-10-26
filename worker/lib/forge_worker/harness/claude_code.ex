@@ -57,21 +57,23 @@ defmodule ForgeWorker.Harness.ClaudeCode do
     end
   end
 
-  defp model_args(opts) do
-    case Keyword.get(opts, :model) do
-      nil -> []
-      model -> ["--model", model]
-    end
-  end
+  defp model_args(opts), do: flag_args(opts, :model, "--model")
 
   # Passed through unexamined: `--effort` takes `low`, `medium`, `high`, `xhigh` or `max`, and
   # which of them are current is the CLI's business rather than this driver's
   # (`docs/design/workflow-grammar-v1.md` § Effort). A level it does not know fails the run with
-  # its own message. Nil is no flag at all, which leaves the harness its own default.
-  defp effort_args(opts) do
-    case Keyword.get(opts, :effort) do
-      nil -> []
-      effort -> ["--effort", effort]
+  # its own message. Nothing resolved is no flag at all, leaving the harness its own default.
+  defp effort_args(opts), do: flag_args(opts, :effort, "--effort")
+
+  # Nil and the empty string are both "nobody resolved one", and the empty string is the one that
+  # has to be said: a node's `FORGE_CLAUDE_EFFORT` can be present and empty, and this is the last
+  # place that can refuse it before it becomes `--effort ''` on a command line and fails the run.
+  # Unexamined otherwise — the value is one argv slot and never a shell word, so a level the
+  # harness rejects fails in the harness's own words.
+  defp flag_args(opts, key, flag) do
+    case Keyword.get(opts, key) do
+      value when is_binary(value) and value != "" -> [flag, value]
+      _unset_or_empty -> []
     end
   end
 

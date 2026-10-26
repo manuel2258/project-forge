@@ -528,6 +528,26 @@ defmodule Forge.WorkersTest do
       refute Map.has_key?(env, "FORGE_CLAUDE_EFFORT")
     end
 
+    # An empty string is not an opinion either: minting `FORGE_CLAUDE_EFFORT=` would make every
+    # machine from this node pass `--effort ''` and fail every job on it.
+    test "a dial the node names as nothing is not minted either", context do
+      %{owner: owner} = context
+      jobs = Application.get_env(:forge, Forge.Jobs, [])
+      on_exit(fn -> Application.put_env(:forge, Forge.Jobs, jobs) end)
+
+      Application.put_env(
+        :forge,
+        Forge.Jobs,
+        Keyword.merge(jobs, harness_opts: [model: "", effort: ""])
+      )
+
+      assert {:ok, _worker, text} = Workers.mint(owner)
+      env = env(text)
+
+      refute Map.has_key?(env, "FORGE_CLAUDE_MODEL")
+      refute Map.has_key?(env, "FORGE_CLAUDE_EFFORT")
+    end
+
     test "into a project its owner is in, it serves that project", context do
       %{owner: owner, project: project} = context
 

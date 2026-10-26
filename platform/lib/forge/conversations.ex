@@ -139,10 +139,31 @@ defmodule Forge.Conversations do
 
   defp effort(opts), do: chosen(opts, :effort)
 
+  # **Only a string is a choice**, and that is a guard rather than a formality: these values come
+  # off a form, and `chat[model][x]=1` or `chat[model][]=hi&chat[model][]=gh` arrives as a map or
+  # a list. `to_string/1` raised `Protocol.UndefinedError` on the first — a crafted submit crashing
+  # the LiveView instead of being refused — and quietly returned `"high"` for the second, opening
+  # a conversation at a level nobody typed. Anything that is not a string resolves to nil, which
+  # is the project's default: the same answer as naming nothing, which is what it is.
+  #
+  # `chat_new_live.ex` guards the `text` param the same way and says why; this is the same lesson
+  # one field over, and it covers the model dial as much as the effort one.
+  #
+  # The trim is load-bearing too: the stored value reaches `--model`/`--effort` as one argv slot,
+  # so `"  high  "` from a paste has to lose its padding here rather than fail on the machine.
+  # Ecto's `cast` folds a *whitespace-only* value to nil on its own, so only the padded-but-real
+  # case proves this line — which is what `effort_test.exs` and `model_test.exs` each assert.
   defp chosen(opts, key) do
-    case opts |> Keyword.get(key) |> to_string() |> String.trim() do
+    case Keyword.get(opts, key) do
+      value when is_binary(value) -> blank_to_nil(value)
+      _absent_or_not_a_string -> nil
+    end
+  end
+
+  defp blank_to_nil(value) do
+    case String.trim(value) do
       "" -> nil
-      value -> value
+      trimmed -> trimmed
     end
   end
 

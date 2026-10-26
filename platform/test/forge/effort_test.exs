@@ -13,7 +13,9 @@ defmodule Forge.EffortTest do
   import Forge.ForgeFixtures
   import Forge.GitFixtures
 
-  alias Forge.{Conversations, Jobs, Projects}
+  alias Forge.{Conversations, Jobs, Operator, Projects}
+  alias Forge.Events.Event
+  alias Forge.Git.Tokens
   alias Forge.Jobs.Job
 
   setup do
@@ -96,6 +98,37 @@ defmodule Forge.EffortTest do
 
       assert is_nil(chat.effort)
       assert Jobs.effort_for(chat) == "medium"
+    end
+
+    # The padded case is the only one that proves `chosen/2`'s trim: Ecto's `cast` folds a
+    # whitespace-only value to nil on its own, so `"   "` above would pass without this code.
+    # What reaches `--effort` is one argv slot, so padding has to come off before the machine.
+    test "a padded choice is stored without its padding", %{project: project} do
+      {:ok, chat} = Conversations.open(project, "hello", effort: "  high  ", model: "  opus  ")
+
+      assert chat.effort == "high"
+      assert chat.model == "opus"
+    end
+
+    # **A form parameter is not a string until something says so.** `chat[effort][x]=1` arrives
+    # as a map and `chat[effort][]=hi&chat[effort][]=gh` as a list; `to_string/1` raised on the
+    # first and silently returned `"high"` for the second, which is a conversation running at a
+    # level nobody typed. Anything that is not a string is nobody's choice, so it resolves to the
+    # project's — the same answer as naming nothing.
+    test "a parameter that is not a string is refused rather than joined or crashed", %{
+      project: project
+    } do
+      {:ok, project} = Projects.set_effort(project, "low")
+
+      assert {:ok, chat} = Conversations.open(project, "hello", effort: ["hi", "gh"])
+      assert is_nil(chat.effort)
+      assert Jobs.effort_for(chat) == "low"
+
+      assert {:ok, chat} = Conversations.open(project, "hello", effort: %{"x" => "1"})
+      assert is_nil(chat.effort)
+
+      assert {:ok, chat} = Conversations.open(project, "hello", model: ["hai", "ku"])
+      assert is_nil(chat.model)
     end
 
     # The two are chosen together and are not the same choice: a conversation opened with one of
@@ -189,4 +222,83 @@ defmodule Forge.EffortTest do
       assert Jobs.model_for(job) == "opus"
     end
   end
+
+  # **Resolving it is not the same claim as handing it over.** Every test above calls
+  # `effort_for/1`; none of them asked whether anything *uses* it, and deleting the line in
+  # `runtime_spec/2` that puts it into the spec left all 2535 platform tests green. The
+  # assignment is what a worker is handed, so this is where both dials have to be asserted.
+  describe "the assignment a worker is handed" do
+    # A budget, because `runtime_spec/2` lowers one just after it resolves the dials: a spec with
+    # none raises on `spec.budget.cost` before any caller sees the assignment, so these tests
+    # would never get to look at the field they are about.
+    @spec_with_budget %{
+      "prompt" => "agents/refine.md",
+      "budget" => %{"turns" => 10, "cost" => 1.0}
+    }
+
+    setup %{project: project} do
+      ticket = ticket_fixture(%{project: project})
+      job = job_fixture(%{ticket: ticket, spec: @spec_with_budget})
+      {:ok, token, _row} = Tokens.issue_for_job(job, ticket, project)
+
+      %{ticket: ticket, job: job, token: token}
+    end
+
+    test "carries the resolved effort, and the resolved model beside it", context do
+      %{project: project, ticket: ticket, job: job, token: token} = context
+      {:ok, _project} = Projects.set_effort(project, "xhigh")
+      {:ok, _project} = Projects.set_model(project, "opus")
+
+      spec = Jobs.assignment(job, ticket, project, token)["spec"]
+
+      assert spec["effort"] == "xhigh"
+      assert spec["model"] == "opus"
+    end
+
+    # A state's own wins over the project's here too. The resolution is the same function either
+    # way; that the assignment calls *that* function is the part nothing checked.
+    test "prefers the state's effort over the project's", context do
+      %{project: project, ticket: ticket, token: token} = context
+      {:ok, _project} = Projects.set_effort(project, "low")
+
+      job =
+        job_fixture(%{
+          ticket: ticket,
+          attempt: 2,
+          spec: Map.put(@spec_with_budget, "effort", "max")
+        })
+
+      assert Jobs.assignment(job, ticket, project, token)["spec"]["effort"] == "max"
+    end
+
+    test "carries no effort when nothing in the chain names one", context do
+      %{project: project, ticket: ticket, job: job, token: token} = context
+
+      assert is_nil(Jobs.assignment(job, ticket, project, token)["spec"]["effort"])
+    end
+  end
+
+  # Who turned a project's effort up is who turned its spend up, so the log has to name them.
+  describe "the audit log" do
+    test "names the person who set the effort, not the system", %{project: project} do
+      admin = Forge.AccountsFixtures.user_fixture()
+      join!(project, admin)
+
+      assert {:ok, _project} = Operator.set_effort(project, admin, "high")
+
+      assert [event] = events("project.effort_set")
+      assert event.actor == %{"kind" => "user", "id" => admin.id}
+      assert event.payload == %{"project" => project.name, "effort" => "high"}
+    end
+
+    # The platform setting one on its own still has an actor, and it is not a person.
+    test "says system when no person did it", %{project: project} do
+      assert {:ok, _project} = Projects.set_effort(project, "low")
+
+      assert [event] = events("project.effort_set")
+      assert event.actor == %{"kind" => "system", "id" => nil}
+    end
+  end
+
+  defp events(type), do: Repo.all(from e in Event, where: e.type == ^type, order_by: e.seq)
 end

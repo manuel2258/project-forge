@@ -332,14 +332,14 @@ defmodule Forge.Operator do
   @spec set_model(Project.t(), User.t(), String.t() | nil) ::
           {:ok, Project.t()} | {:error, term()}
   def set_model(%Project{} = project, %User{} = user, model) do
-    with :ok <- allow(project, user, :manage), do: Projects.set_model(project, model)
+    with :ok <- allow(project, user, :manage), do: Projects.set_model(project, model, user)
   end
 
   @doc "Sets the project's default effort."
   @spec set_effort(Project.t(), User.t(), String.t() | nil) ::
           {:ok, Project.t()} | {:error, term()}
   def set_effort(%Project{} = project, %User{} = user, effort) do
-    with :ok <- allow(project, user, :manage), do: Projects.set_effort(project, effort)
+    with :ok <- allow(project, user, :manage), do: Projects.set_effort(project, effort, user)
   end
 
   @doc """

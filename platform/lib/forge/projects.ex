@@ -97,6 +97,9 @@ defmodule Forge.Projects do
 
   defp actor(%User{id: id}), do: {:user, id}
 
+  # The platform acting on its own, and the only other thing `by` can be.
+  defp actor(:system), do: :system
+
   @doc """
   Adds a member with no capability check, for the host.
 
@@ -461,11 +464,17 @@ defmodule Forge.Projects do
 
   Cleared is not "no model": it is the machine's, which is the platform-wide setting. The value
   is not checked against a list of models — see `docs/design/workflow-grammar-v1.md` § Model.
+
+  `by` is who is doing it, and it reaches the event: a setting that decides what every job on the
+  project runs on — and so what it spends — is one the log has to be able to attribute.
+  `Operator.set_model/3` passes the person it already checked; `:system` is for the platform
+  acting on its own, and a test setting a default up front.
   """
-  @spec set_model(Project.t(), String.t() | nil) :: {:ok, Project.t()} | {:error, term()}
-  def set_model(%Project{} = project, model) do
+  @spec set_model(Project.t(), String.t() | nil, User.t() | :system) ::
+          {:ok, Project.t()} | {:error, term()}
+  def set_model(%Project{} = project, model, by \\ :system) do
     with {:ok, project} <- project |> Project.changeset(%{model: model}) |> Repo.update() do
-      Events.append("project.model_set", :system, %{
+      Events.append("project.model_set", actor(by), %{
         payload: %{"project" => project.name, "model" => project.model}
       })
 
@@ -478,11 +487,15 @@ defmodule Forge.Projects do
 
   Cleared is not "no effort": it is the machine's, as a cleared model is. The value is not checked
   against a list of levels — see `docs/design/workflow-grammar-v1.md` § Effort.
+
+  `by` reaches the event, as `set_model/3`'s does and for the same reason: turning a project's
+  effort up turns its spend up.
   """
-  @spec set_effort(Project.t(), String.t() | nil) :: {:ok, Project.t()} | {:error, term()}
-  def set_effort(%Project{} = project, effort) do
+  @spec set_effort(Project.t(), String.t() | nil, User.t() | :system) ::
+          {:ok, Project.t()} | {:error, term()}
+  def set_effort(%Project{} = project, effort, by \\ :system) do
     with {:ok, project} <- project |> Project.changeset(%{effort: effort}) |> Repo.update() do
-      Events.append("project.effort_set", :system, %{
+      Events.append("project.effort_set", actor(by), %{
         payload: %{"project" => project.name, "effort" => project.effort}
       })
 

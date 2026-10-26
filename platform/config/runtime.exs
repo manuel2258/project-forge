@@ -58,7 +58,9 @@ harness_opts =
       model: System.get_env("FORGE_CLAUDE_MODEL"),
       effort: System.get_env("FORGE_CLAUDE_EFFORT")
     ],
-    fn {_key, value} -> is_nil(value) end
+    # Unset and set-to-nothing are the same statement: this node has no opinion. Without the
+    # second, `FORGE_CLAUDE_MODEL=` reaches the driver as `--model ''` and fails every run.
+    fn {_key, value} -> value in [nil, ""] end
   )
 
 # Web push needs VAPID keys; generate them once with `mix generate.vapid.keys`.

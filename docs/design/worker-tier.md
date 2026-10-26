@@ -314,8 +314,10 @@ the assignment carries it sealed for that worker and that job; the machine holds
 jobs.
 
 What is still injected at creation is what is still the machine's: the worker token and the
-platform's address, and the model, which is an operator setting until the workflow grammar says
-otherwise. The executable is not: the platform's is a path on the platform's host, and the image
+platform's address, and the model and the effort, each of which is an operator setting a
+workflow state, and then a project, can override — the bottom of the chain in
+`workflow-grammar-v1.md` § Model and § Effort. Each is injected only when the node names one,
+and a node naming it empty names nothing. The executable is not: the platform's is a path on the platform's host, and the image
 has its own. `Forge.Workers.mint/2` returns the same set for a machine its owner is provisioning
 by hand, and the workers page and both host commands show what it returns.
 

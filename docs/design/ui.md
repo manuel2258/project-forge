@@ -44,7 +44,8 @@ and those files differ, this note wins — it is the one that tracks what was bu
   so a question form swallows Enter from its inputs. The composer is the one box Enter sends from,
   on a fine pointer (§ Talk), because there the box is the whole form. The create forms still
   submit on Enter — a ticket's title, a conversation's limits, and a new conversation's first
-  message, which is the composer's box on a form that also holds its project, model and limits;
+  message, which is the composer's box on a form that also holds its project, model, effort and
+  limits;
   this rule is written for decisions, and has not been carried to them.
 - **Flag** — filled, uppercase, sharp corners. A label, never a control.
 
@@ -358,9 +359,9 @@ that cannot be replayed fails until somebody records why, the way
 `authorization_inventory_test.exs` does for events. What neither reaches is a box drawn in no
 form at all; no page draws one today, and only the walks would catch it if one appeared.
 
-It does **not** hold yet on seven forms, which that inventory is where to read: a project's
-members, its secrets, its mirrors and its default model, a worker's resources, and the two
-log-in forms. Each carries no `phx-change`, so each loses what was typed on a rejoin. That is a
+It does **not** hold yet on eight forms, which that inventory is where to read: a project's
+members, its secrets, its mirrors, its default model and its default effort, a worker's
+resources, and the two log-in forms. Each carries no `phx-change`, so each loses what was typed on a rejoin. That is a
 gap the inventory records rather than one the rule excuses — and two of them are why a person
 settles it and not the next agent: a secret's value or a password coming back means holding it
 in page state, which is a decision of its own (`docs/design/secrets.md`).
@@ -836,8 +837,8 @@ every conversation in every project you are in, so it is the one surface with no
 and the only place a create affordance has to ask. A conversation is still never started from
 nowhere; the asking moved to the one page that does not know.
 
-**A conversation's secrets are boxes, none ticked**, below the model and the resources, and only
-when the project has any: each secret's name, and two sentences saying what ticking one means —
+**A conversation's secrets are boxes, none ticked**, below the model, the effort and the
+resources, and only when the project has any: each secret's name, and two sentences saying what ticking one means —
 *Set in its environment by name. Anyone in this project can ask it what they are*
 (`secrets.md` § Conversations). A name deleted
 between drawing the page and submitting it is refused by name, and the conversation is not
@@ -978,12 +979,12 @@ machines. They are the audit trail: what was issued, to what scope, and whether 
 by the address of an approved account, as `member` or `admin`, and removed; an address with no
 account and one whose account is still pending get the same answer, *No approved account for
 that address*, and a suspended account is named as suspended — its
-default model, its default branch as a fact, and its mirrors: a table of what each last push
-said, and the only place a mirror is set or removed (`git-hosting.md` § What the mirrors say about
-themselves). Tokens, people, mirrors and the model are drawn only for a project admin; the
-branch is drawn for every member. Saving the model is refused without the admin capability —
-`Operator.set_model/3` is the guard, not the form — and the form is not offered to anyone the
-guard would refuse.
+default model, its default effort, its default branch as a fact, and its mirrors: a table of what
+each last push said, and the only place a mirror is set or removed (`git-hosting.md` § What the
+mirrors say about themselves). Tokens, people, mirrors, the model and the effort are drawn only
+for a project admin; the branch is drawn for every member. Saving the model or the effort is
+refused without the admin capability — `Operator.set_model/3` and `set_effort/3` are the guards,
+not the forms — and neither form is offered to anyone the guard would refuse.
 
 **Its secrets are listed for every member and set only by an admin** (`secrets.md` § Surfaces).
 A member reads the names, because a workflow's author needs them; each row is a name, its version,

@@ -249,15 +249,12 @@
       workerConfiguration = system: nixpkgs.lib.nixosSystem {
         inherit system;
         modules = [
+          # No `allowUnfreePredicate` here any more: the image allowed exactly `claude-code`
+          # and contained nothing else unfree, and it no longer contains that either — the
+          # machine installs Claude Code for itself at first boot (nix/worker-image.nix).
           (import ./nix/worker-image.nix {
             workerPackage = self.packages.${system}.forge-worker;
             version = nixpkgs.lib.fileContents ./VERSION;
-          })
-          ({ lib, ... }: {
-            # Claude Code is unfree; the image allows exactly that package, as the platform
-            # host does (docs/deploy.md).
-            nixpkgs.config.allowUnfreePredicate = pkg:
-              builtins.elem (lib.getName pkg) [ "claude-code" ];
           })
         ];
       };

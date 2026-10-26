@@ -572,6 +572,31 @@ defmodule ForgeWeb.WorkersLive do
   end
 
   attr :worker, :map, required: true
+
+  # The machine installs or updates its own Claude Code before it reports `ready`
+  # (`docs/design/worker-tier.md` § Updating a worker), so the version on the line above is what
+  # that attempt left behind and this is whether the attempt worked. **Quiet unless it failed**:
+  # `succeeded` and `skipped` are both a machine that is fine, and the one loud thing in the
+  # interface is an item waiting on a human (`docs/design/ui.md` § Colour). A machine whose image
+  # predates the unit reports nothing, and nothing is drawn — the same treatment an absent `cores`
+  # gets, and the reason the worker omits the key rather than sending a null.
+  defp claude_update(%{worker: %{harness: %{"update" => %{"outcome" => outcome}}}} = assigns)
+       when is_binary(outcome) do
+    assigns = assign(assigns, update: assigns.worker.harness["update"])
+
+    ~H"""
+    <div
+      id={"claude-update-#{@worker.id}"}
+      class={["font-mono", (@update["outcome"] == "failed" && "text-error") || "opacity-50"]}
+    >
+      claude update {@update["outcome"]}<span :if={@update["error"]}>: {@update["error"]}</span>
+    </div>
+    """
+  end
+
+  defp claude_update(assigns), do: ~H""
+
+  attr :worker, :map, required: true
   attr :connected, :boolean, required: true
   attr :current_build, :string, default: nil
 
@@ -760,6 +785,7 @@ defmodule ForgeWeb.WorkersLive do
           >
             login {@row.worker.harness["login"]}
           </div>
+          <.claude_update worker={@row.worker} />
           <%!-- A release that does not take the job's credential from the assignment is given no
                 inference job at all (`Workers.runs?/2`), so a machine that looks healthy
                 everywhere else takes no work — which is the thing to say. --%>

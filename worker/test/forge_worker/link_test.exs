@@ -435,6 +435,27 @@ defmodule ForgeWorker.LinkTest do
 
       assert %{"memory_budget" => 0} = Link.ready_payload(socket)
     end
+
+    # The machine's Claude Code install-or-update attempt rides the harness map, which is the
+    # whole of what reaches the operator: nothing else on the wire carries it
+    # (`docs/design/worker-tier.md` § Updating a worker).
+    test "the update attempt's status rides the harness map", %{socket: socket, root: root} do
+      File.write!(
+        Path.join(root, "claude-code-update.json"),
+        ~s|{"outcome":"failed","error":"curl: (6) could not resolve host"}|
+      )
+
+      assert %{"harness" => %{"update" => update}} = Link.ready_payload(socket)
+      assert update == %{"outcome" => "failed", "error" => "curl: (6) could not resolve host"}
+    end
+
+    # Absent, not null, exactly as `accepts` is: an image older than the unit attempted no update
+    # and has nothing to say, and the page draws nothing for a machine that says nothing.
+    test "a machine that attempted no update says nothing about one", %{socket: socket} do
+      assert %{"harness" => harness} = Link.ready_payload(socket)
+
+      refute Map.has_key?(harness, "update")
+    end
   end
 
   # `seeds` and `root` are the rest of the self-report and both were asserted only as an empty

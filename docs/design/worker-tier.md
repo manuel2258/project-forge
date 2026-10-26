@@ -189,8 +189,9 @@ A NixOS image, built by the flake, that boots unchanged both locally and — aft
 - btrfs root, so the volume layer below has subvolumes to snapshot.
 - The Nix daemon, with the binary cache configured, so `nix develop` on the project's flake is a
   download rather than a build.
-- Claude Code, which is unfree and needs the same `allowUnfreePredicate` the platform module
-  already carries (`docs/deploy.md`).
+- No Claude Code: the machine installs its own at first boot, into a path it owns, because the
+  packaged one cannot be updated in place (§ Updating a worker). That is also why the image needs
+  no `allowUnfreePredicate` where the platform module still does (`docs/deploy.md`).
 - The `forge_worker` release, started by a systemd unit that reads the worker id, token and
   platform address `forge-worker-config.service` found.
 - No project toolchain. The workload is a parameter: the environment comes from the project's own
@@ -770,8 +771,39 @@ throw away — not the one that was designed.
 ## Updating a worker
 
 The image is an appliance and a worker is replaced rather than updated — that is the rule, and
-it stays the rule for the base: NixOS, Claude Code, the Nix settings, the unit that fetches the
+it stays the rule for most of the base: NixOS, the Nix settings, the unit that fetches the
 identity. Those change rarely and no-drift is worth having.
+
+**Claude Code is the exception, and it is not in the image at all.** The rule failed for it in
+one direction: Claude Code ships often enough that a fleet on a month-old snapshot is a fleet
+that cannot reach the current models, and the only lever was rebuilding the image. So the machine
+installs its own, at first boot, with Claude's own installer, into `/var/lib/forge/.local/bin` —
+writable, and the same move `release` above is. It could not have been the nixpkgs package
+updated in place: that one is wrapped with `DISABLE_AUTOUPDATER=1` *set* rather than set-default,
+so no environment turns it back on, around a binary read-only in `/nix/store`, so there is no
+file to replace. `environment.ldso` is what makes a binary nobody patched runnable on NixOS.
+
+`claude-code-update.service` is the unit. It is ordered `before` `forge-worker.service`, which
+`requires` it, so the attempt has finished — succeeded, failed or skipped — before the worker can
+report `ready` and so before it can be given a job, exactly as `nix-store-register.service`
+already withholds it until the store is usable. **It cannot stop the worker starting**: the
+fetch is bounded by a `timeout` of its own, every failure is written down rather than left to an
+exit code, and the script ends in `exit 0` — a machine with no route out reaches `ready` with the
+attempt recorded as failed. The unit's own `TimeoutStartSec` is the longer backstop, and both sit
+inside the three minutes `nix/worker-image-boots.nix` gives the image to reach a login prompt.
+
+What it leaves behind is `claude-code-update.json` under the root: an outcome, the version it
+ended up with, and the error when there is one. `ForgeWorker.ClaudeUpdate.status/1` reads it and
+the worker merges it into the `harness` map at `ready`, which the platform keeps verbatim, so the
+outcome is on the workers page beside the version rather than only in the machine's journal. A
+missing or malformed file is no report and no key — an image older than the unit says nothing,
+and nothing is drawn.
+
+**Once per boot, and systemd's unit lifecycle is what enforces it** rather than anything the row
+remembers: the unit is a oneshot with `RemainAfterExit`, so a restart of `forge-worker.service`
+pulls in a unit that is already active and does nothing. A reconnect never repeats it. That is
+also the answer for a permanent machine an operator wants a later Claude Code on: reboot it, or
+replace it. There is no mid-life re-update, idle or busy.
 
 **It is the wrong mechanism for the release, and the numbers say so.** The image is 1.8 GiB; the
 worker release's own store path, which is all that changes on a code edit, is 24 MiB. On a

@@ -18,7 +18,7 @@ defmodule ForgeWorker.Link do
   alias ForgeCore.Job.Result
   alias ForgeCore.WorkerProtocol
   alias ForgeCore.Workflow.Resources
-  alias ForgeWorker.{Checkout, Config, Health, Log, Slice, Stats, Store}
+  alias ForgeWorker.{Checkout, ClaudeUpdate, Config, Health, Log, Slice, Stats, Store}
 
   alias ForgeWorker.Job.{
     Blobs,
@@ -149,6 +149,8 @@ defmodule ForgeWorker.Link do
   which is what a general-purpose worker means and what every worker meant before the keys
   existed (`docs/design/provisioning.md` § What a worker offers). `memory_budget` is always
   sent, because there not knowing is itself an instruction — see `ForgeWorker.Config.cores/0`.
+  `harness["update"]` is left out the same way, and for the same reason: an image that never
+  tried to update its Claude Code has nothing to say about it.
 
   Public because it is the part of joining that can be checked without a socket, in the same
   spirit as `ForgeWorker.Slice.Systemd.flags/1`.
@@ -159,7 +161,7 @@ defmodule ForgeWorker.Link do
       "memory_budget" => Config.memory_budget(),
       "seeds" => Seed.present(socket.assigns.root),
       "root" => socket.assigns.root,
-      "harness" => harness_offer()
+      "harness" => harness_offer(socket.assigns.root)
     }
     |> put_unless_nil("cores", Config.cores())
     |> put_unless_nil("accepts", Config.accepts())
@@ -1198,7 +1200,19 @@ defmodule ForgeWorker.Link do
   # (`docs/design/credentials.md` § What a worker offers now). The driver's name is said even when
   # the probe raises, which is why it is a callback of its own: a machine whose harness cannot
   # describe itself can still run it.
-  defp harness_offer do
+  #
+  # **`update` rides the same map**, and so reaches the operator without a schema of its own:
+  # `Workers.record_ready/2` keeps `harness` verbatim. It sits beside the version because the two
+  # answer one question together — which Claude Code this machine ended up running, and whether
+  # the attempt that got it there worked (`docs/design/worker-tier.md` § Updating a worker). It is
+  # merged outside the probe's `rescue` so that a machine whose harness cannot describe itself —
+  # which is what a failed install looks like — still says why.
+  defp harness_offer(root) do
+    probed_offer()
+    |> put_unless_nil("update", ClaudeUpdate.status(root))
+  end
+
+  defp probed_offer do
     harness = harness()
     opts = Application.get_env(:forge_worker, :harness_opts, [])
 

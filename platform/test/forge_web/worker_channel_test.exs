@@ -408,7 +408,8 @@ defmodule ForgeWeb.WorkerChannelTest do
             "driver" => "claude_code",
             "version" => "2.1.220",
             "credential" => "per_job",
-            "aliases" => ["opus"]
+            "aliases" => ["opus"],
+            "efforts" => ["low", "max"]
           }
         })
 
@@ -418,6 +419,7 @@ defmodule ForgeWeb.WorkerChannelTest do
       assert recorded.harness["version"] == "2.1.220"
       assert Workers.runs?(recorded, "claude_code")
       assert Workers.offered(nil).aliases == ["opus"]
+      assert Workers.offered(nil).efforts == ["low", "max"]
     end
 
     # Kept as the channel's registry value and nowhere else: not a heartbeat, so the row is not

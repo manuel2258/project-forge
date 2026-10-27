@@ -28,7 +28,8 @@ defmodule ForgeWorker.LinkTest.CrashingHarness do
   def driver, do: "claude_code"
 
   @impl true
-  def probe(_opts), do: %{driver: "claude_code", name: "Crashing", version: nil, aliases: []}
+  def probe(_opts),
+    do: %{driver: "claude_code", name: "Crashing", version: nil, aliases: [], efforts: []}
 end
 
 defmodule ForgeWorker.LinkTest.RaisingHarness do
@@ -700,6 +701,10 @@ defmodule ForgeWorker.LinkTest do
     assert harness["driver"] == "claude_code"
     assert harness["version"] == "9.9.9"
     assert harness["credential"] == "per_job"
+    # Levels and aliases are what the platform's dropdowns are made of; the probe's answer must
+    # reach the wire whole.
+    assert harness["efforts"] == ~w(low medium high xhigh max)
+    assert harness["aliases"] == ~w(opus sonnet haiku fable)
     refute Map.has_key?(harness, "login")
     refute Map.has_key?(harness, "models")
 

@@ -2746,6 +2746,70 @@ defmodule Forge.WorkersTest do
       assert Enum.sort(aliases) == ~w(a b shared)
     end
 
+    # Levels travel as aliases do, and are an offer for the same reason. The order is the
+    # harness's (weakest first), not alphabetical: `Enum.sort` would put `high` before `low`. The
+    # two live reports agree on order, so the result does not hang on which row is read first.
+    test "the effort levels are the union of the live workers', in the harness's order, each once" do
+      {:ok, one, _t1} = Workers.create(%{provider: "fake"})
+      {:ok, two, _t2} = Workers.create(%{provider: "fake"})
+      {:ok, gone, _t3} = Workers.create(%{provider: "fake"})
+
+      {:ok, _one} =
+        Workers.ready(one, %{
+          "memory_budget" => 8_000,
+          "harness" => %{"efforts" => ~w(low medium high)}
+        })
+
+      {:ok, _two} =
+        Workers.ready(two, %{
+          "memory_budget" => 8_000,
+          "harness" => %{"efforts" => ~w(low medium high xhigh max)}
+        })
+
+      {:ok, gone} =
+        Workers.ready(gone, %{"memory_budget" => 8_000, "harness" => %{"efforts" => ~w(dead)}})
+
+      {:ok, _gone} = Workers.status(gone, :destroyed)
+
+      assert Workers.offered(nil).efforts == ~w(low medium high xhigh max)
+    end
+
+    # A build older than this change reports aliases and no levels. That is a worker offering
+    # none, not an error.
+    test "a worker that reports no levels offers none" do
+      {:ok, old, _t} = Workers.create(%{provider: "fake"})
+
+      {:ok, _old} =
+        Workers.ready(old, %{"memory_budget" => 8_000, "harness" => %{"aliases" => ~w(opus)}})
+
+      offered = Workers.offered(nil)
+      assert offered.efforts == []
+      assert offered.aliases == ["opus"]
+    end
+
+    # What a worker sends is whatever it sent. A string where a list belongs used to raise for
+    # aliases, which took down every page that asks what is offered.
+    test "a report that is not a list of strings is read as less, never raised on" do
+      {:ok, one, _t1} = Workers.create(%{provider: "fake"})
+      {:ok, two, _t2} = Workers.create(%{provider: "fake"})
+
+      {:ok, _one} =
+        Workers.ready(one, %{
+          "memory_budget" => 8_000,
+          "harness" => %{"efforts" => "high", "aliases" => "opus"}
+        })
+
+      {:ok, _two} =
+        Workers.ready(two, %{
+          "memory_budget" => 8_000,
+          "harness" => %{"efforts" => ["high", 3, nil, "", "<b>x</b>"], "aliases" => ["", "opus"]}
+        })
+
+      offered = Workers.offered(nil)
+      assert offered.efforts == ["high", "<b>x</b>"]
+      assert offered.aliases == ["opus"]
+    end
+
     # **The models are the accounts', not the machines'.** A machine holds no credential, so
     # which models may be called is read from the credentials in the project's pool — the set a
     # job there will actually run under (`docs/design/credentials.md` § Checked on save). What a

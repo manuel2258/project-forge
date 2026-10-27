@@ -324,14 +324,15 @@ defmodule ForgeWorker.Harness.ClaudeCodeTest do
     # token could use and whether it logged in; a machine holds no token now, and both questions
     # are the platform's, asked once per credential when it is saved (`docs/design/credentials.md`
     # § Checked on save). What is left makes no request and so cannot fail on the network.
-    test "reports the harness, its version and its aliases, and nothing about an account" do
+    test "reports the harness, its version, its aliases and its effort levels, and nothing about an account" do
       offer = ClaudeCode.probe(executable: fake_executable(), credential: {:oauth, "tok"})
 
       assert offer == %{
                driver: "claude_code",
                name: "Claude Code",
                version: "9.9.9",
-               aliases: ~w(opus sonnet haiku fable)
+               aliases: ~w(opus sonnet haiku fable),
+               efforts: ~w(low medium high xhigh max)
              }
     end
 
@@ -343,6 +344,7 @@ defmodule ForgeWorker.Harness.ClaudeCodeTest do
       assert offer.version == nil
       assert offer.driver == "claude_code"
       assert offer.aliases == ~w(opus sonnet haiku fable)
+      assert offer.efforts == ~w(low medium high xhigh max)
     end
 
     test "names its driver on its own, for when the probe cannot" do

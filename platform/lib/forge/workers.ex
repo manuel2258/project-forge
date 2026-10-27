@@ -564,25 +564,28 @@ defmodule Forge.Workers do
   defp accepts_from(_accepts), do: nil
 
   @doc """
-  What a person may pick from for a job in `project_id`: the aliases the harness resolves, and the
-  models the credentials in that project's pool may use.
+  What a person may pick from for a job in `project_id`: the aliases the harness resolves, the
+  effort levels it takes, and the models the credentials in that project's pool may use.
 
   Two lists rather than one, because they are different kinds of name. An alias floats — `opus`
   is whatever the harness resolves it to today, which is usually what a workflow wants — and an
   id is exact and pins. A form shows them apart so that choosing between them is deliberate.
 
-  **The aliases are the machines'; the models are the accounts'.** An alias is a name the harness
-  binary resolves, so it is read from the live workers, the union across them — a union that is
-  not a single set is an image rollout half done. Which models may be called is a property of a
+  **The aliases and the levels are the machines'; the models are the accounts'.** An alias is a
+  name the harness binary resolves, and an effort level is one it takes, so both are read from the
+  live workers, the union across them in the order the reports are read — a union that is not a single set
+  is an image rollout half done. A worker built before levels were reported omits them and offers
+  none. Both are an offer and not a gate (`docs/design/workflow-grammar-v1.md` § Effort). Which models may be called is a property of a
   credential and not of a machine, which holds none, so it is read from the project's pool
   (`docs/design/credentials.md` § Checked on save): the set a job there will actually run under.
 
-  Both empty when nothing is connected and nothing is pooled, which is a form with nothing to
+  All empty when nothing is connected and nothing is pooled, which is a form with nothing to
   offer and never a reason to stop one being submitted — `docs/design/workflow-grammar-v1.md`
   § Model.
   """
   @spec offered(String.t() | nil) :: %{
           aliases: [String.t()],
+          efforts: [String.t()],
           models: [%{id: String.t(), name: String.t()}]
         }
   def offered(project_id) do
@@ -593,13 +596,25 @@ defmodule Forge.Workers do
           select: w.harness
       )
 
-    %{aliases: aliases(harnesses), models: Forge.Credentials.models(project_id)}
+    %{
+      aliases: union(harnesses, "aliases"),
+      efforts: union(harnesses, "efforts"),
+      models: Forge.Credentials.models(project_id)
+    }
   end
 
-  defp aliases(harnesses) do
+  # What a worker reports is whatever it sent, so a value that is not a list counts as nothing and
+  # a member that is not a non-empty string is dropped: `""` would collide with a select's empty
+  # choice. Repeats go, keeping the first.
+  defp union(harnesses, key) do
     harnesses
-    |> Enum.flat_map(&(&1["aliases"] || []))
-    |> Enum.filter(&is_binary/1)
+    |> Enum.flat_map(fn harness ->
+      case harness[key] do
+        list when is_list(list) -> list
+        _ -> []
+      end
+    end)
+    |> Enum.filter(&(is_binary(&1) and &1 != ""))
     |> Enum.uniq()
   end
 

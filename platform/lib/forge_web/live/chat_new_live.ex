@@ -93,7 +93,8 @@ defmodule ForgeWeb.ChatNewLive do
       project = Enum.find(socket.assigns.projects, &(&1.name == params["project"]))
 
       # The models are the chosen project's pool's, and the secrets its own, so choosing another
-      # project changes both.
+      # project changes both. The effort levels are the workers', not the project's, but they are
+      # read in the same call, so they are as fresh as the model list is.
       {:noreply,
        assign(socket,
          project: project,
@@ -288,6 +289,7 @@ defmodule ForgeWeb.ChatNewLive do
 
         <ForgeWeb.Operator.Components.effort_field
           field={@form[:effort]}
+          offered={@offered}
           fallback={(@project && @project.effort) || "the platform's"}
         />
 

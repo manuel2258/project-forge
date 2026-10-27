@@ -75,10 +75,11 @@ defmodule ForgeWorker.Harness.ClaudeCode do
 
   defp model_args(opts), do: flag_args(opts, :model, "--model")
 
-  # Passed through unexamined: `--effort` takes `low`, `medium`, `high`, `xhigh` or `max`, and
-  # which of them are current is the CLI's business rather than this driver's
-  # (`docs/design/workflow-grammar-v1.md` § Effort). A level it does not know fails the run with
-  # its own message. Nothing resolved is no flag at all, leaving the harness its own default.
+  # Passed through unexamined: which levels are current is the CLI's business rather than this
+  # driver's (`docs/design/workflow-grammar-v1.md` § Effort). `@efforts` is what the platform
+  # offers a person, an offer and not a check, so a level it does not list still reaches the CLI,
+  # which fails the run with its own message if it does not know it. Nothing resolved is no flag
+  # at all, leaving the harness its own default.
   defp effort_args(opts), do: flag_args(opts, :effort, "--effort")
 
   # Nil and the empty string are both "nobody resolved one", and the empty string is the one that
@@ -132,6 +133,10 @@ defmodule ForgeWorker.Harness.ClaudeCode do
   # by the platform when a credential is saved (`docs/design/credentials.md` § Checked on save).
   @aliases ~w(opus sonnet haiku fable)
 
+  # Documented in `claude --help` under `--effort`, weakest first, and likewise declared rather
+  # than discovered. The order is the one a dropdown shows.
+  @efforts ~w(low medium high xhigh max)
+
   @impl true
   def driver, do: "claude_code"
 
@@ -146,7 +151,8 @@ defmodule ForgeWorker.Harness.ClaudeCode do
       driver: driver(),
       name: "Claude Code",
       version: version(Keyword.get(opts, :executable, "claude")),
-      aliases: @aliases
+      aliases: @aliases,
+      efforts: @efforts
     }
   end
 

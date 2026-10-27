@@ -22,7 +22,7 @@ defmodule ForgeWorker.Job.RunnerStreamingTest.NoStreaming do
   def driver, do: "none"
 
   @impl true
-  def probe(_opts), do: %{driver: "none", name: "None", version: nil, aliases: []}
+  def probe(_opts), do: %{driver: "none", name: "None", version: nil, aliases: [], efforts: []}
 end
 
 defmodule ForgeWorker.Job.RunnerStreamingTest do

@@ -206,18 +206,133 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
     assert Projects.get!(project.id).model == "claude-sonnet-5"
   end
 
-  # Free text and not a dropdown, because nothing discovers the levels — the form takes whatever
-  # is typed, and `docs/design/workflow-grammar-v1.md` § Effort says why nothing here checks it.
-  test "the default effort is a box that saves what is typed", %{conn: conn, project: project} do
-    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+  defp connected_worker(offer) do
+    {:ok, worker, _token} = Workers.create(%{provider: "fake"})
+    {:ok, worker} = Workers.ready(worker, %{"memory_budget" => 8_000, "harness" => offer})
+    worker
+  end
+
+  # A box because no worker is connected to offer a level, so a project can be configured before a
+  # machine exists. `docs/design/workflow-grammar-v1.md` § Effort says why nothing here checks it.
+  test "the default effort is a box that saves what is typed while nothing is offered", %{
+    conn: conn,
+    project: project
+  } do
+    {:ok, view, html} = live(conn, ~p"/projects/#{project.name}/settings")
 
     refute has_element?(view, ~s(select#project_effort))
+    assert html =~ "No connected worker offers a level"
 
     view
     |> form("#effort-form", %{"project" => %{"effort" => "xhigh"}})
     |> render_submit()
 
     assert Projects.get!(project.id).effort == "xhigh"
+  end
+
+  test "the default effort is a dropdown of the levels the workers offer", %{
+    conn: conn,
+    project: project
+  } do
+    connected_worker(%{"efforts" => ~w(low high)})
+    {:ok, project} = Projects.set_effort(project, "low")
+
+    {:ok, view, html} = live(conn, ~p"/projects/#{project.name}/settings")
+
+    refute has_element?(view, ~s(input#project_effort))
+    assert html =~ "Offered by the workers connected now"
+
+    assert has_element?(
+             view,
+             ~s(select#project_effort option[value=""]),
+             "— the machine's —"
+           )
+
+    assert has_element?(view, ~s(select#project_effort option[value="low"][selected]))
+    assert has_element?(view, ~s(select#project_effort option[value="high"]))
+
+    view |> form("#effort-form", %{"project" => %{"effort" => "high"}}) |> render_submit()
+    assert Projects.get!(project.id).effort == "high"
+
+    view |> form("#effort-form", %{"project" => %{"effort" => ""}}) |> render_submit()
+    assert is_nil(Projects.get!(project.id).effort)
+  end
+
+  # Decided on the levels reported, not on what the select would hold: a stored level counts as an
+  # option to keep, and a select of one stored value cannot be typed over.
+  test "a stored level with no one offering levels is still a box", %{
+    conn: conn,
+    project: project
+  } do
+    {:ok, project} = Projects.set_effort(project, "turbo")
+
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+    assert has_element?(view, ~s(input#project_effort[type=text][value=turbo]))
+    refute has_element?(view, ~s(select#project_effort))
+
+    # Likewise a worker that reports aliases and no levels.
+    connected_worker(%{"aliases" => ["opus"]})
+    {:ok, view, html} = live(conn, ~p"/projects/#{project.name}/settings")
+    assert has_element?(view, ~s(input#project_effort[type=text][value=turbo]))
+    refute has_element?(view, ~s(select#project_effort))
+    assert html =~ "No connected worker offers a level"
+  end
+
+  # The worker with the level may be asleep, or a later harness may have dropped it. A form that
+  # dropped it would change a setting nobody touched, so saving unchanged must keep it.
+  test "a stored level nothing offers stays selected, marked Set, and survives an unchanged save",
+       %{
+         conn: conn,
+         project: project
+       } do
+    connected_worker(%{"efforts" => ~w(low high)})
+    {:ok, project} = Projects.set_effort(project, "turbo")
+
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+
+    assert has_element?(
+             view,
+             ~s(select#project_effort optgroup[label="Set"] option[value=turbo][selected])
+           )
+
+    view |> form("#effort-form") |> render_submit()
+
+    assert Projects.get!(project.id).effort == "turbo"
+  end
+
+  test "an offered level is not also drawn as Set", %{conn: conn, project: project} do
+    connected_worker(%{"efforts" => ~w(low high)})
+    {:ok, project} = Projects.set_effort(project, "high")
+
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+
+    assert has_element?(view, ~s(select#project_effort option[value=high][selected]))
+    refute has_element?(view, ~s(select#project_effort optgroup[label="Set"]))
+  end
+
+  # The select is the browser's protection and not the platform's: a harness newer than the
+  # workers may take a level they never reported.
+  test "a level nobody offers is still stored", %{conn: conn, project: project} do
+    connected_worker(%{"efforts" => ~w(low high)})
+
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+    assert has_element?(view, ~s(select#project_effort))
+
+    render_submit(view, "effort", %{"project" => %{"effort" => "ultra"}})
+
+    assert Projects.get!(project.id).effort == "ultra"
+  end
+
+  # Escaped because HEEx escapes: adding `raw` to the option label is what the `refute` guards
+  # against. The option assertion also fails if a reported level stops reaching the select.
+  test "a level with markup in it is shown as text", %{conn: conn, project: project} do
+    connected_worker(%{"efforts" => ["<b>x</b>"]})
+
+    {:ok, view, html} = live(conn, ~p"/projects/#{project.name}/settings")
+
+    assert has_element?(view, ~s(select#project_effort option), "<b>x</b>")
+    refute has_element?(view, ~s(select#project_effort b))
+    assert html =~ "&lt;b&gt;x&lt;/b&gt;"
   end
 
   # Saving one dial must not disturb the other: the two forms post separate params, and a
@@ -266,6 +381,22 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
              view,
              ~s(select#project_model option[value="a-model-no-worker-has"][selected])
            )
+  end
+
+  # The model field shares `kept/2` with the effort field. A stored alias or model id that is
+  # offered is in its own group and must not be drawn a second time under "Set".
+  test "an offered alias or model id is not also drawn as Set", %{conn: conn, project: project} do
+    owner = Forge.AccountsFixtures.user_fixture()
+    pool!(project, credential_fixture(owner, models: [%{"id" => "claude-sonnet-5"}]))
+    connected_worker(%{"aliases" => ["opus"]})
+
+    for stored <- ["opus", "claude-sonnet-5"] do
+      {:ok, project} = Projects.set_model(project, stored)
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+
+      assert has_element?(view, ~s(select#project_model option[value="#{stored}"][selected]))
+      refute has_element?(view, ~s(select#project_model optgroup[label="Set"]))
+    end
   end
 
   test "it requires a logged-in operator", %{project: project} do

@@ -38,7 +38,8 @@ defmodule ForgeWorker.Harness do
 
   @typedoc """
   What this machine can offer, as `ready` reports it: which harness, which version, and the
-  aliases its CLI resolves. See `docs/design/worker-channel.md` § What a worker offers.
+  aliases its CLI resolves and the effort levels it takes. See `docs/design/worker-channel.md`
+  § What a worker offers.
 
   **Nothing about an account.** It used to carry `login` and `models`, both answered with the
   machine's own token; a machine holds none now, and the platform asks the provider once per
@@ -48,7 +49,8 @@ defmodule ForgeWorker.Harness do
           driver: String.t(),
           name: String.t(),
           version: String.t() | nil,
-          aliases: [String.t()]
+          aliases: [String.t()],
+          efforts: [String.t()]
         }
 
   @doc """

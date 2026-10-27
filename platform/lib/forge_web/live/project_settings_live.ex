@@ -610,7 +610,8 @@ defmodule ForgeWeb.ProjectSettingsLive do
       </section>
 
       <%!-- The second dial, and behind `@manage` for the same reason: `Operator.set_effort/3`
-            refuses a plain member. Free text, because nothing discovers the levels. --%>
+            refuses a plain member. A dropdown of the levels the connected workers offer, and a box
+            while none does, as the model field beside it is. --%>
       <section :if={@manage} class="mt-10">
         <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Effort</h2>
         <p class="mt-2 text-sm/[1.55] opacity-70">
@@ -626,6 +627,7 @@ defmodule ForgeWeb.ProjectSettingsLive do
         >
           <ForgeWeb.Operator.Components.effort_field
             field={@effort_form[:effort]}
+            offered={@offered}
             label="Default effort"
             fallback="the machine's"
           />

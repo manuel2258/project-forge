@@ -448,10 +448,18 @@ down here would be both stale and wrong for everything but Claude Code. What is 
 is a non-empty string. A level the harness does not recognise fails the job with the harness's own
 message, which is better than one the platform invents.
 
-**The product may one day offer a list; the grammar still will not.** Nothing discovers levels
-today — a worker reports the models its credential may use, and effort is a property of neither a
-credential nor a machine — so every surface that picks one is free text. If a surface ever does
-offer a list, it will be the surface's and not this file's, exactly as the model dropdown is.
+**The product offers a list; the grammar still does not.** The harness driver declares its levels
+as it declares its model aliases, and a worker reports them when it becomes ready
+(`docs/design/worker-channel.md` § What a worker offers). A surface where a person picks an effort
+is a dropdown of the union across the workers connected now, in the order of the reports (workers
+built from one image agree, so that is the harness's own). Like the model field, it is **free text when no connected worker offers a level** — including when
+a level is already stored — so a project can be configured before a machine exists. A stored level
+that nothing offers stays in the list, selected and marked "Set", so saving the form unchanged
+never alters it. And the list is an offer, not a gate: a level that is not in it is still stored,
+which is what lets a harness newer than its workers keep working.
+
+Parsing this file reaches no worker, so the rule above is what the grammar checks, and it is
+unchanged. A workflow may name any level; only the form has a list.
 
 ## Merging
 

@@ -186,9 +186,9 @@ defmodule ForgeWeb.ChatNewLiveTest do
       assert Jobs.model_for(chat) == "sonnet"
     end
 
-    # The effort is chosen on the same form and resolves through the same chain. Free text
-    # whatever is connected, because nothing discovers the levels.
-    test "an effort chosen on the form is the conversation's", %{conn: conn, project: project} do
+    # The effort is chosen on the same form and resolves through the same chain. A box here,
+    # because no worker is connected to offer a level.
+    test "an effort typed on the form is the conversation's", %{conn: conn, project: project} do
       {:ok, view, _html} = live(conn, ~p"/chats/new?project=#{project.name}")
 
       view
@@ -219,6 +219,50 @@ defmodule ForgeWeb.ChatNewLiveTest do
       assert is_nil(chat.effort)
       assert chat.model == "opus"
       assert Jobs.effort_for(chat) == "low"
+    end
+
+    test "the effort is a dropdown of the levels the workers offer, and the empty choice names the project's",
+         %{conn: conn, project: project} do
+      connected_worker(%{"efforts" => ~w(low high)})
+      {:ok, project} = Projects.set_effort(project, "low")
+
+      {:ok, view, _html} = live(conn, ~p"/chats/new?project=#{project.name}")
+
+      assert has_element?(view, ~s(select#chat_effort option[value=""]), "low")
+      assert has_element?(view, ~s(select#chat_effort option[value="high"]))
+      refute has_element?(view, ~s(input#chat_effort))
+
+      view
+      |> form("#chat-form", %{"chat" => %{"text" => "hello", "effort" => "high"}})
+      |> render_submit()
+
+      assert [chat] = Jobs.chats_for_project(project.id)
+      assert chat.effort == "high"
+    end
+
+    # A worker that reports aliases and no levels is a build older than this field: a box, with
+    # the hint saying why. Decided on the levels, so a model alias being offered changes nothing.
+    test "a worker that offers no levels leaves the effort a box", %{conn: conn, project: project} do
+      connected_worker(%{"aliases" => ["opus"]})
+
+      {:ok, view, _html} = live(conn, ~p"/chats/new?project=#{project.name}")
+
+      assert has_element?(view, ~s(input#chat_effort[type=text]))
+      refute has_element?(view, ~s(select#chat_effort))
+      assert render(view) =~ "No connected worker offers a level"
+    end
+
+    # The list is an offer. A harness newer than the workers may take a level they never
+    # reported, and the form's select is the browser's protection and not the platform's.
+    test "a level nobody offers is still stored", %{conn: conn, project: project} do
+      connected_worker(%{"efforts" => ~w(low high)})
+
+      {:ok, view, _html} = live(conn, ~p"/chats/new?project=#{project.name}")
+
+      render_submit(view, "open", %{"chat" => %{"text" => "hello", "effort" => "ultra"}})
+
+      assert [chat] = Jobs.chats_for_project(project.id)
+      assert chat.effort == "ultra"
     end
 
     # A select with one empty option would make configuring a project before starting a machine
@@ -308,6 +352,43 @@ defmodule ForgeWeb.ChatNewLiveTest do
 
       assert has_element?(view, ~s(select#chat_model option[value="second-projects"]))
       refute has_element?(view, ~s(select#chat_model option[value="first-projects"]))
+    end
+
+    # What was typed and chosen is the form's, not the project's: changing the project re-reads
+    # both lists and must leave the message, the model and the level where they were put.
+    test "choosing another project keeps the text, the model and the effort", %{
+      conn: conn,
+      user: user,
+      project: project
+    } do
+      connected_worker(%{"aliases" => ["opus"], "efforts" => ~w(low high)})
+
+      {:ok, elsewhere} =
+        Projects.register(
+          %{name: "zz-keep-#{System.unique_integer([:positive])}", repo_path: seeded_repo()},
+          user
+        )
+
+      {:ok, view, _html} = live(conn, ~p"/chats/new")
+
+      view
+      |> form("#chat-form", %{
+        "chat" => %{
+          "project" => project.name,
+          "text" => "half a thought",
+          "model" => "opus",
+          "effort" => "high"
+        }
+      })
+      |> render_change()
+
+      view
+      |> form("#chat-form", %{"chat" => %{"project" => elsewhere.name}})
+      |> render_change()
+
+      assert has_element?(view, ~s(select#chat_effort option[value="high"][selected]))
+      assert has_element?(view, ~s(select#chat_model option[value="opus"][selected]))
+      assert view |> element("#chat_text") |> render() =~ "half a thought"
     end
 
     # The select offers only the projects you are in, so a name that is not in it is a project

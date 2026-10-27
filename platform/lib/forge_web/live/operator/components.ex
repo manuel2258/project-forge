@@ -71,26 +71,52 @@ defmodule ForgeWeb.Operator.Components do
   @doc """
   The field that picks an effort, wherever one is picked.
 
-  **Always free text, and that is not an oversight.** Nothing discovers the levels: a worker
-  reports the models its credential may use, and effort belongs to neither a credential nor a
-  machine — so there is nothing to put in a dropdown, and a list written down here would be the
-  staleness `workflow-grammar-v1.md` § Effort refuses for `model`. The levels Claude Code takes
-  today are named in the hint below the box rather than enforced, because the next harness's will
-  differ.
+  **The same shape as `model_field/1`, from the same source.** The harness driver declares the
+  levels it takes and each worker reports them with its aliases
+  (`docs/design/worker-channel.md` § What a worker offers); this shows the union across the
+  workers connected now, in the order the harness gave them. None is written here, so the next
+  harness's levels need no change to a form.
 
-  Empty means the next link in the chain, which is what `fallback` says in words.
+  **Free text when no connected worker offers a level.** That is decided by the levels reported
+  and not by the option list, so a stored level does not turn the box into a select holding only
+  itself: with nothing to choose between, a select is a box that cannot be typed in, and a project
+  could not be configured before a machine exists.
+
+  A value already set that nothing currently offers stays in the list, selected and marked "Set".
+  The worker that has it may be asleep, or a later harness may have dropped it, and a form that
+  silently dropped it would change a setting nobody touched.
+
+  **An offer, not a gate.** The server stores a level that is not in the list
+  (`docs/design/workflow-grammar-v1.md` § Effort), which is what lets a harness newer than its
+  workers keep working. Empty means the next link in the chain, which is what `fallback` says in
+  words.
   """
   attr :field, Phoenix.HTML.FormField, required: true
+  attr :offered, :map, required: true, doc: "as `Forge.Workers.offered/1`"
   attr :label, :string, default: "Effort"
   attr :fallback, :string, required: true, doc: "what an empty choice means, in words"
 
   def effort_field(assigns) do
+    levels = assigns.offered.efforts
+    kept = group("Set", kept(levels, assigns.field.value))
+
+    assigns =
+      assigns
+      |> assign(:free_text, levels == [])
+      |> assign(:options, [{"— #{assigns.fallback} —", ""} | levels] ++ kept)
+
     ~H"""
     <div>
-      <.input field={@field} type="text" label={@label} autocomplete="off" />
+      <.input :if={@free_text} field={@field} type="text" label={@label} autocomplete="off" />
+
+      <.input :if={!@free_text} field={@field} type="select" label={@label} options={@options} />
 
       <p class="mt-1.5 text-[12.5px] opacity-60">
-        How hard it thinks. Claude Code takes low, medium, high, xhigh or max. Leave it for {@fallback}.
+        <%= if @free_text do %>
+          How hard it thinks. No connected worker offers a level, so there is nothing to offer. Type one, or leave it for {@fallback}.
+        <% else %>
+          How hard it thinks. Offered by the workers connected now.
+        <% end %>
       </p>
     </div>
     """
@@ -103,16 +129,16 @@ defmodule ForgeWeb.Operator.Components do
     aliases = Enum.map(offered.aliases, &{&1, &1})
     models = Enum.map(offered.models, &{&1.name, &1.id})
 
-    group("Aliases", aliases) ++ group("Models", models) ++ group("Set", kept(offered, value))
+    group("Aliases", aliases) ++
+      group("Models", models) ++
+      group("Set", kept(offered.aliases ++ Enum.map(offered.models, & &1.id), value))
   end
 
   defp group(_name, []), do: []
   defp group(name, options), do: [{name, options}]
 
   defp kept(offered, value) when is_binary(value) and value != "" do
-    if value in offered.aliases or Enum.any?(offered.models, &(&1.id == value)),
-      do: [],
-      else: [{value, value}]
+    if value in offered, do: [], else: [{value, value}]
   end
 
   defp kept(_offered, _value), do: []

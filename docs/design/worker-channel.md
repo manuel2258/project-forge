@@ -220,7 +220,8 @@ Three things about them that the code depends on and a reader would not guess.
   "version": "2.1.220",
   "capabilities": {"resume": true, "streaming_input": true, "...": true},
   "credential": "per_job",
-  "aliases": ["opus", "sonnet", "haiku", "fable"]
+  "aliases": ["opus", "sonnet", "haiku", "fable"],
+  "efforts": ["low", "medium", "high", "xhigh", "max"]
 }
 ```
 
@@ -243,8 +244,10 @@ session per candidate name — a billed turn each, to learn something one free u
 already answers.
 
 **What is left is free and cannot fail on the network.** `claude --version` says the binary is
-there and which one, and the aliases are declared by the driver rather than discovered. A binary
-that is missing reports a `null` version and still reports the rest; the probe always answers.
+there and which one, and both the aliases and the effort levels (`--effort` in its help text) are
+declared by the driver rather than discovered. A binary that is missing reports a `null` version
+and still reports the rest; the probe always answers. A release older than `efforts` omits the key;
+the platform reads that as offering none, and no protocol bump is needed.
 
 **`"credential": "per_job"` is the worker saying it takes its credential from the assignment**,
 and the gate reads it (`Forge.Workers.runs?/2`). It is added by the link rather than by the
@@ -258,8 +261,9 @@ The probe runs at join, not at boot, so a rejoin re-reads it — a `bin/worker-u
 the harness binary is picked up on the next connection rather than on the next machine.
 
 **More than one worker.** The platform keeps each worker's answer on its own row and offers the
-**union** of the live ones' aliases. Workers built from one image answer identically; a union that
-is not a single set means an image rollout is half done. Union rather than intersection because
+**union** of the live ones' aliases and of their effort levels, without repeats, in the order the
+reports are read. Workers built from one image answer identically, so they agree on that order too;
+a union that is not a single set means an image rollout is half done. Union rather than intersection because
 the list is an offer, not a gate — see `docs/design/workflow-grammar-v1.md` § Semantics, under
 **Model**, for why naming a model the platform has never heard of stays legal.
 

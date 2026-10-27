@@ -24,7 +24,7 @@ defmodule ForgeWeb.ReconnectTest do
   import Phoenix.LiveViewTest
   import Forge.GitFixtures
 
-  alias Forge.{Conversations, Jobs, Projects, Tickets}
+  alias Forge.{Conversations, Jobs, Projects, Tickets, Workers}
   alias ForgeWeb.Operator.Drafts
 
   setup :register_and_log_in_user
@@ -174,6 +174,47 @@ defmodule ForgeWeb.ReconnectTest do
 
       assert view |> element("#approval-#{ticket.id} textarea[name=comment]") |> render() =~
                "pinned at the wrong one"
+    end
+
+    # The list can change while a socket is away: the worker that offered `max` was replaced by one
+    # that does not. What was picked is still in the form, and the new mount must still show it
+    # rather than a select that falls back to the empty choice.
+    test "keeps a picked effort the workers no longer offer, and the text beside it", %{
+      conn: conn,
+      project: project
+    } do
+      ready = fn levels ->
+        {:ok, worker, _token} = Workers.create(%{provider: "fake"})
+
+        {:ok, worker} =
+          Workers.ready(worker, %{
+            "memory_budget" => 8_000,
+            "harness" => %{"efforts" => levels}
+          })
+
+        worker
+      end
+
+      first = ready.(~w(low max))
+      {:ok, _view, html} = live(conn, ~p"/chats/new?project=#{project.name}")
+      assert html =~ ~s(<option value="max")
+
+      {:ok, _first} = Workers.status(first, :destroyed)
+      ready.(~w(low))
+
+      {:ok, view, _html} = live(conn, ~p"/chats/new?project=#{project.name}")
+
+      view
+      |> render_change("validate", %{
+        "chat" => %{"text" => "half", "model" => "", "effort" => "max"}
+      })
+
+      assert has_element?(
+               view,
+               ~s(select#chat_effort optgroup[label="Set"] option[value=max][selected])
+             )
+
+      assert view |> element("#chat_text") |> render() =~ "half"
     end
 
     # The three `render_component` tests below hand `drafts` in ready-made, so the path from a
@@ -568,7 +609,8 @@ defmodule ForgeWeb.ReconnectTest do
       {"live/project_settings_live.ex", "add-mirror"} => "a mirror's url, user and token",
       {"live/workers_live.ex", "save"} => "a worker's memory and cores",
       {"live/project_settings_live.ex", "model"} => "a model name, while no worker is connected",
-      {"live/project_settings_live.ex", "effort"} => "an effort level, which is always a box",
+      {"live/project_settings_live.ex", "effort"} =>
+        "an effort level, while no worker offers one",
       {"live/user_live/login.ex", "submit_magic"} => "an email, to be sent a link",
       {"live/user_live/login.ex", "submit_password"} => "an email and a password"
     }

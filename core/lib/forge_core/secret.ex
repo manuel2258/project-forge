@@ -14,15 +14,19 @@ defmodule ForgeCore.Secret do
   **Two sources, kept apart so each can be checked against its own.**
 
   - **Ours**: every prefix the platform, the harness, Nix, git, npm and TLS read, and every name
-    a job's environment already carries — `ForgeWorker.Job.Exec`'s allowlist and what the runner
-    adds. The worker's suite asserts the allowlist stays inside this list.
-  - **The harness's own**, copied verbatim from `claude-code` 2.1.266, the version nixpkgs builds
-    into the worker image: the variables it strips from a shell's environment, the search-path
-    variables it lists beside them, and the 188 names and the patterns it treats as making a
-    program run code. A name our format already refuses — lower case, a leading underscore — is
-    kept, so the next version's lists can be compared with these line for line. **When the
-    package moves, read them again**: they are the list's provenance, and a harness that learns a
-    new one has found a name this list is missing.
+    a job's environment already carries — `ForgeWorker.Job.Exec`'s allowlist, what the runner adds,
+    and what the harness driver sets for its own process. The worker's suite asserts that both the
+    allowlist and the driver's names stay inside this list.
+  - **The harness's own**, copied verbatim from `claude-code` 2.1.266: the variables it strips
+    from a shell's environment, the search-path variables it lists beside them, and the 188 names
+    and the patterns it treats as making a program run code. A name our format already refuses —
+    lower case, a leading underscore — is kept, so the next version's lists can be compared with
+    these line for line. **2.1.266 is a version somebody read, not a version anything pins**: the
+    worker image no longer carries a Claude Code at all, and each machine installs whatever
+    `claude.ai/install.sh` gives it at first boot (`docs/design/worker-tier.md` § Updating a
+    worker), so what a worker runs now moves without this repository changing. Read the lists
+    again when it has: they are this list's provenance, and a harness that learns a new name has
+    found one this list is missing.
 
   Nothing claims the result is complete. It is every name either source knows to redirect a job
   or load code into it.
@@ -38,7 +42,12 @@ defmodule ForgeCore.Secret do
 
   @ours_prefixes ~w(FORGE_ ANTHROPIC_ CLAUDE_ NODE_ BUN_ NPM_CONFIG_ NIX_ GIT_ SSL_ BASH_)
 
-  @ours_names ~w(PATH HOME USER LOGNAME SHELL TERM HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY)
+  # `DISABLE_AUTOUPDATER` is here because the worker sets it on every harness process
+  # (`ForgeWorker.Harness.ClaudeCode.command/3`) to stop a job's Claude Code replacing itself with
+  # a build nothing has reported. A secret of that name would be loaded after it and win, which is
+  # the one way a project could turn it back on.
+  @ours_names ~w(PATH HOME USER LOGNAME SHELL TERM HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY
+                 DISABLE_AUTOUPDATER)
 
   @harness_prefixes ~w(
     LD_ DYLD_ BASH_FUNC_ __BASH_FUNC< LC_ DOTNET_ COMPLUS_ COR_ CORECLR_ APPDOMAIN_MANAGER_

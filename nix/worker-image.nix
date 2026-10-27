@@ -1,8 +1,9 @@
 # NixOS module for the forge worker image: a machine that boots, learns who it is and where the
 # platform is from a config disk or a metadata service, and runs the forge_worker release. A
 # btrfs root for the volume layer to snapshot, a Nix daemon pointed at the binary cache, Claude
-# Code, and a shell's worth of general tools for the agent (jobTools below). No project
-# toolchain: that comes from the workload's own flake through `nix develop`.
+# Code — installed at first boot rather than carried, see claudeExecutable below — and a shell's
+# worth of general tools for the agent (jobTools below). No project toolchain: that comes from
+# the workload's own flake through `nix develop`.
 #
 # See docs/design/worker-tier.md § The worker image. The image pins nothing about any
 # particular project, and it is meant to boot unchanged on a provider later.
@@ -23,9 +24,65 @@ let
   releaseLink = "${root}/release";
   gcRoot = "/nix/var/nix/gcroots/forge-worker-release";
 
+  # Claude Code, and the one piece of this image's base that does not wait for a replaced image:
+  # see docs/design/worker-tier.md § Updating a worker. **Not `pkgs.claude-code`.** nixpkgs wraps
+  # that one with `DISABLE_AUTOUPDATER=1` set rather than set-default — no caller's environment
+  # can turn it back on — around a binary that sits read-only in `/nix/store` owned by root, so
+  # there is no file a self-update could replace even if it ran. So the image carries no Claude
+  # Code at all and installs one at first boot, with Claude's own installer, into a path the
+  # worker owns: the same move `releaseLink` above makes, and for the same reason.
+  claudeExecutable = "${claudeHome}/bin/claude";
+  claudeInstaller = "https://claude.ai/install.sh";
+
+  # What goes on a `systemd.services.<name>.path`, which is **not** a list of directories: NixOS
+  # runs it through `makeBinPath`, so each entry gets `/bin` and `/sbin` appended. A literal
+  # `${root}/.local/bin` there becomes `${root}/.local/bin/bin` and the install is not on the
+  # PATH at all. So the prefix is the entry and `claudeExecutable` above adds the `/bin` itself.
+  claudeHome = "${root}/.local";
+
+  # What claude-code-update.service writes and `ForgeWorker.ClaudeUpdate.status/1` reads: the one
+  # thing the attempt leaves behind, so the outcome reaches the operator over the channel rather
+  # than only into this machine's journal (criterion 5 of the ticket; worker-tier.md § Updating a
+  # worker).
+  claudeUpdateStatus = "${root}/claude-code-update.json";
+
+  # What the attempt is allowed to take. The inner bounds are the ones that have to fire, because
+  # a script killed by its own `timeout` still writes "failed" where one killed by
+  # `TimeoutStartSec` writes nothing at all — and under `Wants=` below, nothing at all is a row
+  # that silently says the last boot's outcome.
+  #
+  # **Each is `timeout -k`, and the unit's bound is computed from them rather than guessed.** A
+  # plain `timeout` sends SIGTERM and then waits for ever: `timeout 2 bash -c 'trap "" TERM; sleep
+  # 8'` returns after eight seconds, not two, so an installer that ignores TERM is unbounded. `-k`
+  # is what makes each one a bound. And the first version of this hard-coded 150 against a script
+  # whose own worst case was 160 — two probes and a fetch — so the unit's bound was the one that
+  # fired, which is exactly backwards. The sum below is the arithmetic, so it cannot drift again.
+  claudeProbeTimeout = 20;
+  claudeTimeout = 120;
+  claudeKill = 5;
+
+  # Two probes, one fetch, each at most its bound plus the kill delay, plus margin for `jq`, the
+  # shell and the installer's own writes. 205 seconds, which is **longer than the 180 that
+  # nix/worker-image-boots.nix waits for a login prompt, and deliberately so**: that check greps
+  # the console and returns the moment the prompt appears, and `serial-getty@ttyS0` is ordered
+  # behind nothing of ours — this unit's only `Before=` is forge-worker.service. So the login
+  # prompt does not wait on the attempt and the two windows are unrelated. A 120-second fetch is
+  # the figure worth protecting, because a short one on a slow link is a worker with no Claude
+  # Code at all. **If anything ever orders a getty behind this unit, this arithmetic has to come
+  # back under that 180.**
+  claudeUnitTimeout =
+    2 * (claudeProbeTimeout + claudeKill) + (claudeTimeout + claudeKill) + 30;
+
   # What the worker itself needs to do its work and to confine a job: git for the clone and the
   # push, nix for `nix develop`, btrfs-progs for the volume layer, tar and gzip for the seed,
-  # shadow and systemd for the per-job user and its transient unit, and Claude Code itself.
+  # shadow and systemd for the per-job user and its transient unit. Claude Code is not here —
+  # it is installed to claudeExecutable above, and `claudeHome` joins this list on the unit's
+  # `path` below. `claudeHome` and not `claudeHome/bin`, for the reason its own comment gives.
+  #
+  # bubblewrap and socat are, and they were not before: `pkgs.claude-code`'s wrapper put them on
+  # a PATH only the binary it wrapped could see, and dropping the package would have taken them
+  # off the machine along with it. They are what Claude Code's own sandbox reaches for, and this
+  # change is about where Claude Code comes from rather than about what it can do.
   servicePath = [
     pkgs.git
     pkgs.bash
@@ -37,7 +94,8 @@ let
     pkgs.util-linux
     config.nix.package
     config.systemd.package
-    pkgs.claude-code
+    pkgs.bubblewrap
+    pkgs.socat
   ];
 
   # What the *agent* reaches for in its own shell, as opposed to what the worker needs. A job's
@@ -331,6 +389,174 @@ in
   networking.useNetworkd = true;
   systemd.network.wait-online.anyInterface = true;
 
+  # -- Claude Code ----------------------------------------------------------------------------
+
+  # Claude Code's native install is a generic dynamically-linked ELF — `interpreter
+  # /lib64/ld-linux-x86-64.so.2` — and a stock NixOS has no such file, so the binary does not run
+  # at all until something puts one there. `pkgs.claude-code` closed that gap with
+  # `autoPatchelfHook`; a binary the machine installs for itself has nobody to close it, so the
+  # machine does, with glibc's own loader. This is the one line that makes the install runnable.
+  environment.ldso = pkgs.stdenv.cc.bintools.dynamicLinker;
+
+  # Install or update Claude Code once, before the worker can report `ready`. Modelled on
+  # forge-worker-config.service above, and ordered the same way: `before` the release, which is
+  # `after` it, so the attempt has finished — succeeded, failed or skipped — before any job can be
+  # taken (docs/design/worker-tier.md § Updating a worker).
+  #
+  # **The release `wants` this unit and does not `require` it.** `After=` alone is what delivers
+  # the ordering, and ordering is the whole of what withholding `ready` needs. `Requires=` added
+  # something else: a unit that ends `failed` — which `TimeoutStartSec` firing makes it, script or
+  # no script — aborts the start job of everything that requires it, so `Restart = on-failure`
+  # never applies and nothing retries before a reboot. That is the machine-that-never-starts
+  # criterion 4 forbids, reachable on the reboot path the design note recommends for getting a
+  # newer Claude Code onto a permanent worker. A no-Claude-Code worker that runs is strictly
+  # better than one that does not boot, and which it is, is on the workers page.
+  #
+  # **`RemainAfterExit` is what makes it once rather than once per start of the release.** A
+  # oneshot that does not remain goes back to inactive when it finishes, and forge-worker's
+  # `Restart = on-failure` would pull it in again on every restart — a re-install mid-life, which
+  # is out of scope on this ticket. Staying active (exited) makes the second pull a no-op, and a
+  # reboot the only thing that runs it again.
+  systemd.services.claude-code-update = {
+    description = "Install or update this worker's Claude Code";
+    wantedBy = [ "multi-user.target" ];
+    before = [ "forge-worker.service" ];
+    after = [ "network-online.target" ];
+    wants = [ "network-online.target" ];
+
+    # A shell's worth of what a third-party installer script expects to find, since this one is
+    # fetched rather than vendored and nothing here pins what it reaches for: `curl`, `grep`,
+    # `sed`, `cut`, `head`, `tr`, `mkdir`, `rm`, `chmod`, `uname`, and `sha256sum` from coreutils,
+    # which is the load-bearing one — it is how the installer verifies what it downloaded.
+    # `claudeHome` is last so that the installer's own `command -v claude` finds what it just
+    # wrote; the update branch below does not need it, because it names `claudeExecutable`
+    # absolutely.
+    path = [
+      pkgs.bash
+      pkgs.coreutils
+      pkgs.curl
+      pkgs.gnugrep
+      pkgs.gnused
+      pkgs.gawk
+      pkgs.gnutar
+      pkgs.gzip
+      pkgs.jq
+      # Both optional to the installer and both worth having: with `jq` it reads the release
+      # manifest rather than its own fallback parser, and with `zstd` it fetches the compressed
+      # binary rather than the whole one — which is the difference that matters against the
+      # timeout above.
+      pkgs.zstd
+      claudeHome
+    ];
+
+    environment = {
+      HOME = root;
+      SSL_CERT_FILE = "/etc/ssl/certs/ca-certificates.crt";
+    };
+
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      TimeoutStartSec = "${toString claudeUnitTimeout}s";
+    };
+
+    # **Every failure is caught here and written to the status file rather than left to the exit
+    # code, and the script ends in `exit 0`.** That is what makes the status file the thing the
+    # operator reads rather than the unit's state: criterion 4 and 5 of the ticket, and the reason
+    # `set -e` is deliberately not on. The release's ordering on this unit is `After=` without
+    # `Requires=`, so the exit code cannot stop a worker starting either way.
+    script = ''
+      # **`set +e`, deliberately.** NixOS puts `set -e` above this script, and errexit is the one
+      # thing that would defeat the design: a `grep` that matches nothing or a `mktemp` that
+      # fails would kill the script before it could write its outcome, which is the
+      # machine-that-never-starts this unit exists not to produce.
+      set +e
+      set -uo pipefail
+
+      # umask 022, not the config unit's 077: a job runs as its own Unix user and execs the
+      # binary the installer is about to write, so what it writes under ${root} has to be
+      # readable by someone who is not root. ${root} itself is 0711 (systemd.tmpfiles.rules
+      # below) — traversable, not listable — which is what lets that work without opening the
+      # directories beside it.
+      umask 022
+
+      # **Last boot's answer goes before this boot's attempt**, so that a `jq` or a `mv` that
+      # does not happen leaves no file rather than a stale one. `ClaudeUpdate.status/1` reads an
+      # absent file as "nothing to say", which is true; reading a previous boot's `succeeded` as
+      # this boot's would not be.
+      rm -f ${claudeUpdateStatus}
+
+      # The installed version, or nothing at all. A binary that is not there, or that the loader
+      # refuses, or that hangs, has to read as "nothing installed" rather than stop the script.
+      #
+      # It asks `--version` and nothing more, which is as far as a probe can see: a build whose
+      # loader is satisfied here and fails on a library it only dlopens at real use would be
+      # recorded as installed. worker-tier.md § Updating a worker says so.
+      installed() {
+        [ -x ${claudeExecutable} ] || return 0
+        timeout -k ${toString claudeKill} ${toString claudeProbeTimeout} \
+          ${claudeExecutable} --version 2> /dev/null | head -1 || true
+      }
+
+      log=$(mktemp)
+      before=$(installed)
+      status=0
+
+      if [ -n "$before" ]; then
+        echo "claude-code-update: updating $before"
+        timeout -k ${toString claudeKill} ${toString claudeTimeout} \
+          ${claudeExecutable} update > "$log" 2>&1 || status=$?
+      else
+        echo "claude-code-update: installing from ${claudeInstaller}"
+        # `--proto`/`--proto-redir` so a redirect cannot walk this off https, and curl's own
+        # `--max-time` as well as the outer `timeout`, because the outer one bounds the whole
+        # pipeline and this one bounds the fetch. What is *not* here is a version pin or a
+        # checksum of the installer: see worker-tier.md § Updating a worker, which records the
+        # trade rather than pretending there is none.
+        timeout -k ${toString claudeKill} ${toString claudeTimeout} bash -c \
+          'curl -fsSL --proto "=https" --proto-redir "=https" --max-time 90 "$1" | bash' \
+          bash ${claudeInstaller} > "$log" 2>&1 || status=$?
+      fi
+
+      after=$(installed)
+
+      # **The exit status decides, not the version comparison alone.** Reading only the versions
+      # made a reboot with no route out say `skipped` — "already current" — which is the one thing
+      # this ticket exists to stop a fleet believing. `skipped` now means what it says: the
+      # command succeeded and had nothing to do, which is the common case on a reboot and never
+      # the case on a first boot, where `before` is always empty.
+      if [ -z "$after" ] || [ "$status" -ne 0 ]; then
+        outcome=failed
+      elif [ "$after" != "$before" ]; then
+        outcome=succeeded
+      else
+        outcome=skipped
+      fi
+
+      # Gathered whenever something went wrong, which is not the same as whenever `after` is
+      # empty: an update that failed on a machine that still has a working Claude Code has both a
+      # version to report and a reason.
+      error=""
+      if [ "$outcome" = failed ]; then
+        error=$(grep -v '^[[:space:]]*$' "$log" | tail -3 | tr '\n' ' ' | cut -c 1-400 || true)
+        [ -n "$error" ] || error="exit status $status, and it said nothing"
+      fi
+
+      # jq rather than printf: the error is whatever curl or the installer said, and a quote or a
+      # backslash in it must not be able to produce a file `ClaudeUpdate.status/1` cannot read.
+      if jq -n --arg outcome "$outcome" --arg version "$after" --arg error "$error" \
+        '{ outcome: $outcome }
+           + (if $version == "" then {} else { version: $version } end)
+           + (if $error == "" then {} else { error: $error } end)' > "$log.json"; then
+        mv "$log.json" ${claudeUpdateStatus}
+      fi
+
+      rm -f "$log" "$log.json"
+      echo "claude-code-update: $outcome ''${after:-none}"
+      exit 0
+    '';
+  };
+
   # -- the release ----------------------------------------------------------------------------
 
   # Modelled on nix/module.nix's systemd.services.forge. It is ordered after the unit that
@@ -346,17 +572,29 @@ in
       "nix-daemon.service"
       "nix-store-register.service"
       "forge-worker-config.service"
+      "claude-code-update.service"
     ];
 
-    wants = [ "network-online.target" ];
+    # `wants` rather than `requires` for the update, so the pairing is this unit's own and does
+    # not rest on both happening to be `wantedBy = multi-user.target`: `Wants=` pulls it in and
+    # ignores how it ends, `After=` orders behind it. A restart pulls in a unit that
+    # `RemainAfterExit` has left active, which is a no-op — criterion 7.
+    wants = [ "network-online.target" "claude-code-update.service" ];
+
+    # claude-code-update.service is in `after` and `wants` above and deliberately *not* here: the ordering is
+    # what withholds `ready` until the attempt has finished, and a `Requires=` on it would let a
+    # unit that ended `failed` stop this one from ever starting (see that unit's own comment).
+    # The two that are here are different — a release with no identity or an unregistered store
+    # cannot do anything useful, so failing with them is right.
     requires = [ "nix-store-register.service" "forge-worker-config.service" ];
 
     # Belt as well as braces: a config unit that succeeded without writing anything would
     # otherwise start a release with no identity, which only fails once it tries to dial.
     unitConfig.ConditionPathExists = envFile;
 
-    # The worker's tools and the agent's: a job inherits this PATH.
-    path = servicePath ++ jobTools;
+    # The worker's tools and the agent's: a job inherits this PATH. `claudeHome` is where Claude
+    # Code now lives, so an agent's own `claude` resolves the way its `git` does.
+    path = servicePath ++ jobTools ++ [ claudeHome ];
 
     environment = {
       LANG = "C.UTF-8";
@@ -373,7 +611,14 @@ in
       # seed, and costs nothing until the job writes to it.
       FORGE_VOLUME = "btrfs";
       FORGE_NIX_ENV = "1";
-      FORGE_CLAUDE_EXECUTABLE = lib.getExe pkgs.claude-code;
+      FORGE_CLAUDE_EXECUTABLE = claudeExecutable;
+      # **This covers the worker's own invocations and nothing else.** `ForgeWorker.Job.Exec`
+      # composes a job's environment from an allowlist and `env -i`, so nothing set here reaches a
+      # job — an earlier attempt's comment claimed it did, and it did not. What a job gets is set
+      # by the driver, in `ForgeWorker.Harness.ClaudeCode.command/3`. This one is for the
+      # `--version` probe the worker runs itself: the only other Claude Code this unit starts.
+      # `claude-code-update.service` deliberately does not set it — it runs `claude update`.
+      DISABLE_AUTOUPDATER = "1";
       SSL_CERT_FILE = "/etc/ssl/certs/ca-certificates.crt";
       NIX_SSL_CERT_FILE = "/etc/ssl/certs/ca-certificates.crt";
     };
@@ -426,6 +671,12 @@ in
   # among them: how the config unit reads a metadata service, and how the measurement harness
   # fetches a seed from inside the guest.
   environment.systemPackages = servicePath ++ jobTools;
+
+  # And Claude Code, which is not a package and so cannot be in the list above. pam_env puts this
+  # on every login shell's PATH, which is where `pkgs.claude-code` used to reach an operator who
+  # ssh'd in. Written out in full, unlike a unit's `path` above: `sessionVariables` is joined with
+  # `:` as given and nothing appends `/bin` to it.
+  environment.sessionVariables.PATH = [ "${claudeHome}/bin" ];
 
   # Nothing on this machine is worth keeping: it is created for a ticket and destroyed when it
   # has had nothing to do for a while.

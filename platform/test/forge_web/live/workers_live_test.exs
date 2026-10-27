@@ -21,6 +21,21 @@ defmodule ForgeWeb.WorkersLiveTest do
     :ok
   end
 
+  defp view_row(conn, worker) do
+    {:ok, view, _html} = live(conn, ~p"/workers")
+    view |> element("#worker-#{worker.id}") |> render()
+  end
+
+  # Rendered HTML as the words an operator reads, whitespace collapsed: what a line *says*, which
+  # is the assertion that notices a stray separator a class-name match would not.
+  defp text(html) do
+    html
+    |> Floki.parse_fragment!()
+    |> Floki.text()
+    |> String.replace(~r/\s+/, " ")
+    |> String.trim()
+  end
+
   # Owned by the logged-in operator, because the page shows its viewer's own machines and nobody
   # else's (`docs/design/identity.md` § Workers).
   # A repository of the test's own, removed when it ends: `Projects.register/2` creates one on
@@ -300,6 +315,173 @@ defmodule ForgeWeb.WorkersLiveTest do
 
     assert view |> element("#worker-#{old.id}") |> render() =~ "takes no agent job"
     refute view |> element("#worker-#{current.id}") |> render() =~ "takes no agent job"
+  end
+
+  # The machine installs or updates its own Claude Code before it reports `ready`, and a failed
+  # attempt is a machine that may be running nothing at all — which the operator has to be able
+  # to see here rather than in a journal on the machine (`docs/design/worker-tier.md` § Updating
+  # a worker).
+  test "a worker whose Claude Code update failed says so, with what went wrong", %{
+    conn: conn,
+    user: user
+  } do
+    w = worker(user)
+
+    {:ok, _w} =
+      Workers.ready(w, %{
+        "memory_budget" => 8_000,
+        "harness" => %{
+          "driver" => "claude_code",
+          "credential" => "per_job",
+          "update" => %{
+            "outcome" => "failed",
+            "error" => "curl: (6) could not resolve host"
+          }
+        }
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/workers")
+
+    line = view |> element("#claude-update-#{w.id}") |> render()
+
+    assert line =~ "claude update failed"
+    assert line =~ "could not resolve host"
+    # The one state here that is a fault, and the only one drawn in error (`ui.md` § Colour).
+    assert line =~ "text-error"
+  end
+
+  # An attempt that worked is still drawn — the operator asked whether it succeeded, not only
+  # whether it failed — and quietly, because the one loud thing in the interface is an item
+  # waiting on a human (`docs/design/ui.md` § Colour).
+  test "an update that succeeded is shown without being loud", %{conn: conn, user: user} do
+    w = worker(user)
+
+    {:ok, _w} =
+      Workers.ready(w, %{
+        "memory_budget" => 8_000,
+        "harness" => %{
+          "driver" => "claude_code",
+          "credential" => "per_job",
+          "version" => "2.1.270",
+          "update" => %{"outcome" => "succeeded", "version" => "2.1.270"}
+        }
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/workers")
+    line = view |> element("#claude-update-#{w.id}") |> render()
+
+    # The whole of what the line says, so a stray empty `: ` from an error that is not there
+    # fails here rather than being read as a success with a colon.
+    assert text(line) == "claude update succeeded"
+    # Not in accent and not in error: a machine that is fine says so quietly. Asserted on this
+    # line alone, because the block around it carries a Destroy button that is `text-error` by
+    # right.
+    assert line =~ "opacity-50"
+    refute line =~ "text-error"
+  end
+
+  # A machine whose image predates the unit reports no `update` key, and the line is not drawn at
+  # all — the same treatment an absent `cores` gets. The mutation this is aimed at is a component
+  # that renders whatever it was given: that one draws a bare "claude update" here.
+  test "a worker that attempted no update has no line about one", %{conn: conn, user: user} do
+    w = worker(user)
+
+    {:ok, _w} =
+      Workers.ready(w, %{
+        "memory_budget" => 8_000,
+        "harness" => %{"driver" => "claude_code", "credential" => "per_job"}
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/workers")
+
+    assert has_element?(view, "#worker-#{w.id}")
+    refute has_element?(view, "#claude-update-#{w.id}")
+    refute view |> element("#worker-#{w.id}") |> render() =~ "claude update"
+  end
+
+  # **A machine can push anything into `harness`, and one release pushing a map where a string
+  # belongs took this page down for good**: `Phoenix.HTML.Safe` is not implemented for a map, the
+  # value is persisted in the jsonb column, and every later mount crashed on it again — for every
+  # operator who could see that row, not just the one who provoked it. `harness_text/1` is the
+  # guard. The mutation it is aimed at is dropping that call from any of the five fields.
+  describe "a harness map with the wrong types in it" do
+    @malformed %{
+      "name" => %{"not" => "a string"},
+      "driver" => ["claude_code"],
+      "version" => %{"major" => 2},
+      "login" => %{"status" => "invalid"},
+      "credential" => "per_job",
+      "update" => %{"outcome" => "failed", "error" => %{"why" => "a map"}}
+    }
+
+    test "renders the row instead of taking the page down", %{conn: conn, user: user} do
+      w = worker(user)
+      {:ok, _w} = Workers.ready(w, %{"memory_budget" => 8_000, "harness" => @malformed})
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+
+      # The row is here at all, which is the whole assertion: before the guard this raised.
+      assert has_element?(view, "#worker-#{w.id}")
+      # The outcome is a string and is drawn; the error is not one and is dropped, rather than
+      # being drawn as `%{"why" => "a map"}` or raising on the way.
+      line = view |> element("#claude-update-#{w.id}") |> render()
+      assert text(line) == "claude update failed"
+      # A `login` that is not a string is not an unhealthy login, it is an unreadable one.
+      refute view |> element("#worker-#{w.id}") |> render() =~ "login"
+    end
+
+    # Numbers are the one non-string worth drawing: a version that arrived unquoted is a
+    # malformed report, not a reason to show the operator nothing where the version goes.
+    test "still shows a number, which is malformed but readable", %{conn: conn, user: user} do
+      w = worker(user)
+
+      {:ok, _w} =
+        Workers.ready(w, %{
+          "memory_budget" => 8_000,
+          "harness" => %{"driver" => "claude_code", "credential" => "per_job", "version" => 2.1}
+        })
+
+      assert view_row(conn, w) =~ "2.1"
+    end
+  end
+
+  # The `update` value itself, not the strings inside it. The review that sent this back found the
+  # guard on `claude_update/1`'s head was untested and a comment claimed no test could reach it —
+  # these two are the test. Each would pass against a head relaxed to `%{"update" => _}` only if
+  # the page then drew nothing, and it does not: the first raises in `Access.get/3` and the second
+  # draws a line out of a number.
+  test "an update that is not a map at all draws nothing", %{conn: conn, user: user} do
+    w = worker(user)
+
+    {:ok, _w} =
+      Workers.ready(w, %{
+        "memory_budget" => 8_000,
+        "harness" => %{"driver" => "claude_code", "credential" => "per_job", "update" => "oops"}
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/workers")
+
+    assert has_element?(view, "#worker-#{w.id}")
+    refute has_element?(view, "#claude-update-#{w.id}")
+  end
+
+  test "an outcome that is not a string draws nothing", %{conn: conn, user: user} do
+    w = worker(user)
+
+    {:ok, _w} =
+      Workers.ready(w, %{
+        "memory_budget" => 8_000,
+        "harness" => %{
+          "driver" => "claude_code",
+          "credential" => "per_job",
+          "update" => %{"outcome" => 3}
+        }
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/workers")
+
+    assert has_element?(view, "#worker-#{w.id}")
+    refute has_element?(view, "#claude-update-#{w.id}")
   end
 
   # A worker running a release older than the probe reports no harness at all, and is still a

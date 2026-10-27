@@ -14,6 +14,8 @@ defmodule ForgeWeb.QueueLiveTest do
 
   import Ecto.Query, only: [from: 2]
   import Forge.GitFixtures
+  import Forge.MergeFixtures
+  import ForgeWeb.Operator.Components, only: [commit_message_id: 1]
   import Phoenix.LiveViewTest
 
   alias Forge.{Artifacts, Jobs, Projects, Repo, Tickets}
@@ -826,6 +828,97 @@ defmodule ForgeWeb.QueueLiveTest do
 
     # Still there, and still usable: the flash is only a friendly error if the page survives it.
     assert has_element?(view, "#queue-end")
+  end
+
+  # The queue is one of the four surfaces that approve a changeset, and approving one is what
+  # merges: the message the merge will commit is on the item, and where nothing has written one
+  # the item offers no Approve (`docs/design/ui.md` § Changes).
+  test "an approval item shows the message its merge would commit", %{
+    conn: conn,
+    project: project
+  } do
+    ticket = admit(project, "Persist scores")
+    changeset!(ticket, seeded_head(project))
+    pend_merge(ticket)
+
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    assert view |> element("##{commit_message_id(ticket)}") |> render() =~ "nothing to merge yet"
+    refute has_element?(view, ~s(button[value="approved"]))
+
+    commit_message!(ticket, "Persist the scores\n")
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    assert view |> element("##{commit_message_id(ticket)}") |> render() =~ "Persist the scores"
+    assert has_element?(view, ~s(button[value="approved"]))
+  end
+
+  # **A merge decision is never a one-line summary**, and what makes it one is the state it enters
+  # and not the names it pins: a merging transition that approves something else was offered with
+  # no link to the diff, so the merge was taken without the operator seeing the change
+  # (`Forge.Engine.approval_merges?/1`).
+  test "a merging approval of something else still offers the diff first", %{
+    conn: conn,
+    project: project
+  } do
+    ticket = admit(project, "Persist scores")
+    changeset!(ticket, seeded_head(project))
+    commit_message!(ticket, "Persist the scores\n")
+
+    {:ok, _version} =
+      Artifacts.record_version(ticket.id, "refinement.md", :document, :system, %{
+        content: "---\noutcome: done\n---\n# Refinement\n"
+      })
+
+    pending!(ticket, "merged", ["refinement.md"])
+
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    assert has_element?(
+             view,
+             ~s(a[href="/tickets/#{project.name}/#{ticket.number}/review"]),
+             "Read the change first"
+           )
+  end
+
+  # The queue draws every ticket at once, so one whose pinned workflow no longer parses — the
+  # validator's rules move, and this branch adds three — costs its own detail and not the page.
+  test "a ticket whose pinned workflow no longer parses does not take the queue down", %{
+    conn: conn,
+    project: project
+  } do
+    ticket = admit(project, "Persist scores")
+    changeset!(ticket, seeded_head(project))
+    ticket = ticket |> Ecto.Changeset.change(workflow: %{}) |> Repo.update!()
+    pending!(ticket, "merged", ["changeset"])
+
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    # Drawn, and nothing claimed about a merge it cannot be sure of: Approve is offered and the
+    # commit message's block is not.
+    assert has_element?(view, "#approval-#{ticket.id}")
+    assert has_element?(view, ~s(button[value="approved"]))
+    refute has_element?(view, ~s([id="#{commit_message_id(ticket)}"]))
+  end
+
+  defp pending!(ticket, to, approve) do
+    ticket
+    |> Ecto.Changeset.change(
+      state: "review_ready",
+      status: :active,
+      pending_transition: %{
+        "from" => "review_ready",
+        "to" => to,
+        "outcome" => nil,
+        "approve" => approve
+      }
+    )
+    |> Repo.update!()
+  end
+
+  defp seeded_head(project) do
+    {:ok, sha} = Forge.Git.resolve(Projects.repo_path(project), "refs/heads/main")
+    sha
   end
 
   # The group the ticket asks for: whether a ticket's work is on a machine or still waiting for

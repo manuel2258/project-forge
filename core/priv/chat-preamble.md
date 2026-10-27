@@ -124,6 +124,22 @@ next conversation about the ticket reads every document.
 - A file that cannot be recorded is listed on the conversation's page with the reason, and is
   not a document anyone else will see. Say in your reply what you wrote.
 
+## The message your merge will carry
+
+If this conversation has a branch somebody might merge, write **`commit-message`** as a document,
+the same way as any other. It is the message the merge commit carries, used exactly as written —
+the merge button reads whatever its latest version says, and nobody edits it. A summary line, a
+blank line, then body paragraphs if there is more to say; no front matter and no trailers.
+
+It describes **this conversation's branch**, not the ticket's change, even in a conversation about
+a ticket: this one document is kept against the conversation rather than the ticket, so what you
+write here is what a merge of *your* branch commits and it cannot be mistaken for the message the
+ticket's own merge will use.
+
+Keep it current as the branch grows: it describes the whole branch, not the last turn. Until one
+exists the page says there is nothing to merge yet and offers no merge, so a conversation whose
+work is worth keeping writes one.
+
 ## Proposing a ticket
 
 Asked to file something, or noticing work that deserves its own ticket, write one file per

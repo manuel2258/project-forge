@@ -5,6 +5,7 @@ defmodule ForgeWeb.ApiTest do
 
   import Forge.AccountsFixtures
   import Forge.GitFixtures
+  import Forge.MergeFixtures
 
   alias Forge.{Accounts, Jobs, Projects, Tickets}
 
@@ -50,6 +51,33 @@ defmodule ForgeWeb.ApiTest do
     {name, doc} = Process.get(:scenario, {"success", "plan.md"})
     {:ok, job} = Forge.FakeWorker.run(job, Process.get(:worker), name, doc: doc)
     job
+  end
+
+  # The merge decision as data has to carry what the page draws above the approve control, or a
+  # client deciding the same thing decides on less (`docs/design/ui.md` § Changes).
+  test "the review payload carries the message the merge would commit", %{
+    conn: conn,
+    project: project
+  } do
+    {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+    sha = commit_over_http(project, ticket.branch, "score.ex", "def persist, do: :ok")
+    changeset!(ticket, sha)
+
+    assert %{"commit_message" => nil} =
+             conn
+             |> get(~p"/api/v1/tickets/#{project.name}/#{ticket.number}/review")
+             |> json_response(200)
+
+    # With front matter, which the payload does not carry: `text` is the string the commit will
+    # say, so a client showing it shows what the page shows and what git will record.
+    commit_message!(ticket, "---\noutcome: done\n---\n\nPersist the scores\n")
+
+    # The body as the merge writes it — the blank line the front matter left included, since the
+    # shown text and the committed text are the same string and not two readings of one.
+    assert %{"commit_message" => %{"version" => 1, "text" => "\nPersist the scores\n"}} =
+             conn
+             |> get(~p"/api/v1/tickets/#{project.name}/#{ticket.number}/review")
+             |> json_response(200)
   end
 
   # Admitting is a member's work, not an admin's: `Operator.admit/3` asks `:use`. And the

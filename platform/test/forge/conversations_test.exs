@@ -376,6 +376,29 @@ defmodule Forge.ConversationsTest do
       assert Forge.Artifacts.find({:job, chat.id}, "plan.md") == nil
     end
 
+    # Except `commit-message`, which is what a merge of *this branch* will say and so is the
+    # conversation's own even on a ticket (`docs/design/conversations.md` § Commits). One turn
+    # writing both is what tells the rule from the scope it is an exception to.
+    test "a ticket chat's commit message is its own, not the ticket's", %{project: project} do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+      {:ok, chat} = Conversations.open(project, "rewrite the plan", ticket: ticket)
+
+      {:ok, _chat} =
+        Conversations.record_turn(
+          chat,
+          turn_with_documents(1, %{
+            "plan.md" => "# Plan\n",
+            "commit-message" => "Write the notes down\n"
+          })
+        )
+
+      assert [%{content: "Write the notes down\n"}] =
+               Forge.Artifacts.versions({:job, chat.id}, "commit-message")
+
+      assert Forge.Artifacts.versions(ticket.id, "commit-message") == []
+      assert [%{content: "# Plan\n"}] = Forge.Artifacts.versions(ticket.id, "plan.md")
+    end
+
     # `out/` accumulates, so every turn re-reports every file. A version per turn would be a
     # version per sentence, and each would be the one an approval had to attach to.
     test "the same file every turn is one version, and a changed one is the next", %{
@@ -1544,6 +1567,50 @@ defmodule Forge.ConversationsTest do
       spec = Jobs.assignment(chat, ticket, project, "token")["spec"]
 
       assert spec["inputs"] |> Enum.map(& &1["name"]) |> Enum.sort() == ["notes.md", "ticket"]
+    end
+
+    # Except the message: a ticket chat is handed the one *it* wrote, because that is what a
+    # merge of its branch would say, and never the ticket's, which is about the whole changeset
+    # (`docs/design/conversations.md` § Commits). Both exist here, so the two cannot be confused.
+    test "a ticket chat is handed its own commit message and not the ticket's", %{
+      project: project
+    } do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+      {:ok, chat} = Conversations.open(project, "about this", ticket: ticket)
+
+      {:ok, _version} =
+        Forge.Artifacts.record_version(ticket.id, "commit-message", :document, :system, %{
+          content: "The ticket's whole change\n"
+        })
+
+      {:ok, _chat} =
+        Conversations.record_turn(
+          chat,
+          Map.put(turn(1, 0.01), "documents", %{"commit-message" => "Just the note\n"})
+        )
+
+      chat = Jobs.get!(chat.id)
+      spec = Jobs.assignment(chat, ticket, project, "token")["spec"]
+
+      assert [%{"content" => "Just the note\n"}] =
+               Enum.filter(spec["inputs"], &(&1["name"] == "commit-message"))
+    end
+
+    # And nothing of the ticket's where the conversation wrote none: there is no message for this
+    # branch yet, which is what the page says and what a merge of it is refused for.
+    test "a ticket chat that wrote no commit message is handed none", %{project: project} do
+      {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, :system)
+      {:ok, chat} = Conversations.open(project, "about this", ticket: ticket)
+
+      {:ok, _version} =
+        Forge.Artifacts.record_version(ticket.id, "commit-message", :document, :system, %{
+          content: "The ticket's whole change\n"
+        })
+
+      chat = Jobs.get!(chat.id)
+      spec = Jobs.assignment(chat, ticket, project, "token")["spec"]
+
+      assert Enum.filter(spec["inputs"], &(&1["name"] == "commit-message")) == []
     end
 
     # `docs/design/conversations.md` § Taking a transition: what the chat is told it may ask for

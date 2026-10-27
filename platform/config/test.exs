@@ -8,17 +8,23 @@ config :pbkdf2_elixir, :rounds, 1
 # The MIX_TEST_PARTITION environment variable can be used
 # to provide built-in test partitioning in CI environment.
 # Run `mix help test` for more information.
-# The password is read from the environment so that a server nobody owns can be given one nobody
-# can look up: `bin/check` starts a throwaway postgres with a password made per run, and a
-# committed one would be readable by every job on a shared machine (`CLAUDE.md` § Quality gate).
-# An operator with their own postgres sets nothing and gets the usual development password.
+# Where the server is comes from the environment, because on a machine that is not an operator's
+# there is no server until `bin/check` starts one: it makes a postgres for the length of the run,
+# on a unix socket in a directory only that run can read, and names the directory here. Nothing
+# else on a shared machine can reach that socket, so there is no password in this file for a job
+# with a checkout to read, and nothing holding 5432 can be mistaken for it (`CLAUDE.md`
+# § Quality gate). An operator with their own postgres sets nothing and gets localhost and the
+# usual development password.
 config :forge, Forge.Repo,
   username: "postgres",
-  password: System.get_env("FORGE_TEST_DB_PASSWORD", "postgres"),
-  hostname: "localhost",
   database: "forge_test#{System.get_env("MIX_TEST_PARTITION")}",
   pool: Ecto.Adapters.SQL.Sandbox,
   pool_size: System.schedulers_online() * 2
+
+case System.get_env("FORGE_TEST_DB_SOCKET_DIR") do
+  nil -> config :forge, Forge.Repo, hostname: "localhost", password: "postgres"
+  dir -> config :forge, Forge.Repo, socket_dir: dir
+end
 
 # The server runs during test, because a job now reaches its repository over the platform's own
 # git endpoint: a real `git clone` against a real socket is the only honest proof of it. Tests

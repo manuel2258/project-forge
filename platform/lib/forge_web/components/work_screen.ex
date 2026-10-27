@@ -274,6 +274,47 @@ defmodule ForgeWeb.WorkScreen do
     """
   end
 
+  @doc """
+  What the merge commit will say, read-only, directly above the control that merges
+  (`docs/design/ui.md` § Changes).
+
+  An agent's text, used as written: there is no editor here and never will be one. Drawn dashed
+  and `view only` like a presentation, which is the closest existing treatment for prose nobody
+  approves — `commit-message` is an ordinary document and not a presentation artifact, so it is
+  this component and not the presentation one. Absent, it says there is nothing to merge yet
+  instead of drawing an empty box.
+
+  **It shows the string the commit will carry**, which is the version's body and not its raw
+  text: `ForgeCore.Document.body/1`, the one the merge writes, so that an operator cannot approve
+  one text and find git recording another. By convention there is no front matter to strip.
+  """
+  attr :version, :any, required: true, doc: "the `commit-message` version, or nil"
+  attr :id, :string, default: "commit-message"
+
+  def commit_message(assigns) do
+    ~H"""
+    <section id={@id}>
+      <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
+        The commit it will make
+      </h2>
+      <div
+        :if={@version}
+        class="mt-2 min-w-0 rounded-box border border-dashed border-base-300 px-4 py-3"
+      >
+        <header class="flex min-h-[46px] flex-wrap items-center gap-x-3 font-mono text-[12.5px]">
+          <span class="min-w-0 break-all">commit-message</span>
+          <span class="opacity-60">v{@version.version}</span>
+          <span class="tracking-[.14em] uppercase opacity-50">view only</span>
+        </header>
+        <pre class="mt-1 overflow-x-auto whitespace-pre-wrap font-mono text-[12.5px]/[1.55]">{ForgeCore.Document.body(@version.content)}</pre>
+      </div>
+      <p :if={is_nil(@version)} class="mt-2 text-sm/[1.55] opacity-70">
+        Nothing has written the message this merge would carry, so there is nothing to merge yet.
+      </p>
+    </section>
+    """
+  end
+
   # What the harness says about itself rather than about the work: Claude Code turns every
   # `system` message into one of these, and `thinking_tokens` alone can outnumber everything else
   # in a job. Recorded, and hidden behind their count (`docs/design/ui.md` § Motion and structure).

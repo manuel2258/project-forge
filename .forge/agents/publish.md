@@ -25,3 +25,17 @@ the snapshot's verdict and either its name/build/protocol from `hetzner-snapshot
 was skipped or failed, and the reminder that pointing a template at a new snapshot is still the
 operator's own action on `/templates` — and the changeset, now that there is something worth
 approving.
+
+Produce **`commit-message`** too — and **do not write a new one**. `release-notes.md`, in your
+inputs, already carries the message this release's commit should use, and a human approved that
+document before anything was built (`agents/release-plan.md`). Copy it out: the `Version X.Y.Z`
+subject, the blank line, the `Since v<last>: …` body, the worker protocol line and migrations as
+the notes have them. No front matter and no trailers.
+
+Writing your own instead is how `git log --grep '^Version'` came to find nothing: the version a
+person approved stayed in a document and never reached git. Where the notes and what you actually
+built disagree — a snapshot that was skipped, say — correct that line and say so in
+`publish-report.md`, rather than composing the message afresh.
+
+It is written to the commit exactly as you leave it, nobody edits it, and it is never optional, so
+a run that finishes without it sticks the ticket here.

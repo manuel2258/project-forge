@@ -259,7 +259,7 @@ defmodule Forge.GitFixtures do
     states:
       implementing:
         prompt: agents/implement.md
-        produces: [implementation.md, changeset]
+        produces: [implementation.md, changeset, commit-message]
         outcomes: [done, engine_merges]
         budget: { turns: 10, cost: 1.00 }
       review_ready: {}

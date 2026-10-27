@@ -12,6 +12,7 @@ defmodule ForgeWeb.TicketWorkScreenTest do
   import Phoenix.LiveViewTest
   import Forge.GitFixtures
   import Forge.MergeFixtures
+  import ForgeWeb.Operator.Components, only: [commit_message_id: 1]
 
   alias Forge.{Artifacts, Conversations, Jobs, Projects, Tickets}
 
@@ -59,6 +60,9 @@ defmodule ForgeWeb.TicketWorkScreenTest do
     {:ok, job} = job |> Jobs.Job.progress_changeset(%{status: :running}) |> Forge.Repo.update()
     job
   end
+
+  defp head_of(project),
+    do: elem(Forge.Git.resolve(Projects.repo_path(project), "refs/heads/main"), 1)
 
   defp tool(job, id, command),
     do:
@@ -115,6 +119,63 @@ defmodule ForgeWeb.TicketWorkScreenTest do
       pend_merge(ticket)
       {:ok, view, _html} = live(conn, page(project, ticket))
       assert view |> element("#tab-decide") |> render() =~ ~r/>\s*1\s*</
+    end
+
+    # Decide is the third of the four surfaces an approval card is drawn on, and approving the
+    # changeset here merges as it does anywhere else (`docs/design/ui.md` § Changes).
+    test "shows the message the merge would commit, and no Approve without one", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      changeset!(ticket, head_of(project))
+      pend_merge(ticket)
+
+      {:ok, view, _html} = live(conn, page(project, ticket))
+
+      assert view |> element("##{commit_message_id(ticket)}") |> render() =~
+               "nothing to merge yet"
+
+      refute has_element?(view, ~s(#decide button[value="approved"]))
+
+      commit_message!(ticket, "Persist the scores\n")
+      {:ok, view, _html} = live(conn, page(project, ticket))
+
+      assert view |> element("##{commit_message_id(ticket)}") |> render() =~ "Persist the scores"
+      assert has_element?(view, ~s(#decide button[value="approved"]))
+    end
+
+    # Same rule on the ticket's own page: the link to the diff is drawn because the decision
+    # enters a state that merges, not because of what it pins
+    # (`Forge.Engine.merge_decision?/2`).
+    test "a merging approval of something else still links to the change", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      changeset!(ticket, head_of(project))
+
+      {:ok, _version} =
+        Artifacts.record_version(ticket.id, "refinement.md", :document, :system, %{
+          content: "---\noutcome: done\n---\n# Refinement\n"
+        })
+
+      ticket
+      |> Ecto.Changeset.change(
+        state: "review_ready",
+        status: :active,
+        pending_transition: %{
+          "from" => "review_ready",
+          "to" => "merged",
+          "outcome" => nil,
+          "approve" => ["refinement.md"]
+        }
+      )
+      |> Forge.Repo.update!()
+
+      {:ok, view, _html} = live(conn, page(project, ticket))
+
+      assert has_element?(view, ~s(a[href="#{page(project, ticket, "/review")}"]))
     end
 
     # An assumption is in the queue and waits on nobody, so it is in no count of what waits.
@@ -328,14 +389,29 @@ defmodule ForgeWeb.TicketWorkScreenTest do
 
       {:ok, view, _html} = live(conn, page(project, ticket, "?tab=changes"))
 
+      # Nothing has written what the merge would say, so this surface offers no Approve either
+      # (`docs/design/ui.md` § Changes).
+      assert has_element?(view, "#changes-approval ##{commit_message_id(ticket)}")
+      refute has_element?(view, ~s(#changes-approval button[value="approved"]))
+
+      commit_message!(ticket, "Persist the scores\n")
+      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=changes"))
+
       assert has_element?(
                view,
                "#changes-approval #approval-#{ticket.id}",
                "Approve changeset v1"
              )
 
+      # The operator reads what the merge will commit on this surface too, not only on the
+      # review page.
+      assert view |> element("#changes-approval ##{commit_message_id(ticket)}") |> render() =~
+               "Persist the scores"
+
       # The card draws a pinned document, not a changeset: the diff above it is its rendering.
-      refute has_element?(view, "#approval-#{ticket.id} section")
+      # The commit message's own block is the other section in the card, so this asks for the
+      # box a pin would be drawn in by its own id.
+      refute has_element?(view, "#approving-#{ticket.id}-changeset")
 
       assert has_element?(view, ~s(#changes a[href="#{page(project, ticket, "/review")}"]))
     end

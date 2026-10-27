@@ -619,6 +619,18 @@ What the branch holds against its base, bounded per § Semantics that must not b
   A ticket's changeset approval is here too, *when it is what is waiting*: the same approval card
   Decide draws, from the same component and the same event, at the foot of the diff it approves.
   Reading a change and approving it are adjacent; they are still two gestures.
+- **What the merge commit will say sits directly above whichever of those controls is drawn**, on
+  a conversation's page and above every approval card that merges, from one component — the card
+  itself draws it, so the review page, the queue, Decide and the Changes tab cannot disagree about
+  whether the operator saw it. Where the approval would merge and no version exists, the card says
+  there is nothing to merge yet and **draws no Approve**, as the conversation draws no merge. It is
+  the `commit-message` document, an agent's text used as written, so it is drawn **read-only** —
+  dashed and `VIEW ONLY`, the presentation kind's treatment, which is the closest existing pattern
+  for prose nobody approves even though `commit-message` is an ordinary document and not a
+  presentation artifact. **It is never an editor**: the operator reads it and confirms, and no
+  surface offers to change it. Absent, it says there is nothing to merge yet rather than drawing
+  an empty box — and on a conversation, where no version means the merge would be refused, the
+  merge button is not drawn at all.
 - The review page stays: it is where *what it was built from* and *questions answered* sit beside
   the diff, and the queue's review items link there. Changes links to it when the ticket has a
   changeset.

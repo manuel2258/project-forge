@@ -464,6 +464,7 @@ defmodule ForgeWeb.ChatLiveTest do
     chat: chat,
     project: project
   } do
+    wrote(chat, 1, %{"commit-message" => "Nothing to see here\n"})
     {:ok, _result} = Forge.Merge.perform_chat(chat)
     refute Forge.Git.branch_exists?(Projects.repo_path(project), "chat/" <> chat.id)
     {:ok, _chat} = Conversations.ended(chat, nil, "idle")
@@ -738,6 +739,58 @@ defmodule ForgeWeb.ChatLiveTest do
     row = view |> element("#unrecorded li") |> render()
     assert row =~ "ticket"
     assert row =~ "reserved"
+  end
+
+  # `docs/design/conversations.md` § Commits: what the merge commit says is the conversation's own
+  # `commit-message`, so the page draws it above the merge control read-only and draws no button
+  # until one exists — pressing merge without it is refused, and a button that would fail is worse
+  # than none.
+  test "the merge waits for a commit message and shows the one it would use", %{
+    conn: conn,
+    chat: chat,
+    project: project
+  } do
+    commit_on_chat(project, chat, "NOTES.md", "from a conversation\n")
+
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}?tab=changes")
+
+    assert view |> element("#chat-commit-message") |> render() =~ "nothing to merge yet"
+    refute has_element?(view, ~s(button[phx-click="merge"]))
+
+    wrote(chat, 1, %{"commit-message" => "Write the notes down\n"})
+
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}?tab=changes")
+    block = view |> element("#chat-commit-message") |> render()
+
+    assert block =~ "Write the notes down"
+    assert block =~ "view only"
+    assert has_element?(view, ~s(button[phx-click="merge"]))
+  end
+
+  # Stands in for the worker, which pushes with a token scoped to exactly this ref: the hook
+  # refuses an uncredentialed push, which is the point of it.
+  defp commit_on_chat(project, chat, path, content) do
+    repo = Projects.repo_path(project)
+    branch = Jobs.chat_branch(chat)
+    work = tmp_dir("chat-work")
+    {_out, 0} = System.cmd("git", ["clone", "--quiet", "--branch", branch, repo, work])
+    File.write!(Path.join(work, path), content)
+
+    for args <- [
+          ["config", "user.name", "chat"],
+          ["config", "user.email", "chat@forge"],
+          ["add", "."],
+          ["commit", "--quiet", "-m", "from the conversation"],
+          ["push", "--quiet", "origin", "HEAD:refs/heads/" <> branch]
+        ] do
+      {_out, 0} =
+        System.cmd("git", ["-C", work] ++ args,
+          stderr_to_stdout: true,
+          env: [{"FORGE_INTERNAL", "1"}]
+        )
+    end
+
+    :ok
   end
 
   test "it requires a logged-in operator", %{chat: chat} do

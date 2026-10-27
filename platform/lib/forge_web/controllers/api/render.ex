@@ -192,6 +192,10 @@ defmodule ForgeWeb.Api.Render do
     %{
       ticket: ticket(ticket, project.name),
       changeset: %{version: changeset.version, commit: head, base: ticket.base_commit},
+      # What the merge commit will say, beside the diff it is about: the page draws it above the
+      # approve control, so a client deciding the same thing has it too. Null where nothing has
+      # written one, which is a merge with nothing to say.
+      commit_message: review_commit_message(ticket),
       merged: Forge.Merge.merged?(ticket),
       diff: diff(repo, ticket.base_commit, head, changeset.blob_uri),
       documents: review_artifacts(ticket, :document),
@@ -199,6 +203,15 @@ defmodule ForgeWeb.Api.Render do
       answers: review_answers(ticket),
       cost_usd: Decimal.to_string(ticket.cost_usd)
     }
+  end
+
+  # `text` is the body the merge commits (`ForgeCore.Document.body/1`), not the version's raw
+  # content: a client that showed the raw text would show front matter the commit will not carry.
+  defp review_commit_message(%Ticket{} = ticket) do
+    case Forge.Merge.commit_message(ticket) do
+      nil -> nil
+      version -> %{version: version.version, text: ForgeCore.Document.body(version.content)}
+    end
   end
 
   # Nil where the stored uri is not a commit, as `ReviewLive.diff/3` and `Merge.changeset/1` both

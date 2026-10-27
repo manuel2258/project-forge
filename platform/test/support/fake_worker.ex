@@ -233,7 +233,7 @@ defmodule Forge.FakeWorker do
     # `:written` names exactly what the agent left in `out/`, for an outcome no scenario writes.
     written =
       Keyword.get_lazy(opts, :written, fn ->
-        written(scenario, Keyword.get(opts, :doc, "plan.md"))
+        scenario |> written(Keyword.get(opts, :doc, "plan.md")) |> with_commit_message(spec)
       end)
 
     run =
@@ -369,6 +369,30 @@ defmodule Forge.FakeWorker do
 
   defp written(scenario, _name),
     do: raise(ArgumentError, "unknown fake worker scenario #{inspect(scenario)}")
+
+  # A workflow that merges has a state producing `commit-message`, and that state may not excuse
+  # it (`docs/design/workflow-grammar-v1.md` § Validation), so a scenario that wrote anything at
+  # all writes that too wherever the state declares it: the fixtures that merge are about the
+  # loop, not about an agent that forgot the message. A scenario that wrote nothing still writes
+  # nothing — that is the case those scenarios exist for — and an explicit `:written` is left
+  # exactly as the caller gave it, because it names what the agent left.
+  defp with_commit_message(written, _spec) when map_size(written) == 0, do: written
+
+  defp with_commit_message(written, %Spec{} = spec) do
+    name = ForgeCore.Workflow.commit_message_artifact()
+
+    if name in Spec.document_outputs(spec) and not Map.has_key?(written, name),
+      do: Map.put(written, name, commit_message()),
+      else: written
+  end
+
+  @doc """
+  The placeholder `commit-message` a scenario writes, for a test that names its own `:written`
+  and still needs the state's declared message in it — one text, so a test reads as the fixture
+  behaves.
+  """
+  @spec commit_message() :: String.t()
+  def commit_message, do: "Land the change\n"
 
   # The same split `ForgeWorker.Job.Dir.collect/2` makes: declared documents that parsed,
   # declared ones that did not, declared ones that are missing, and files nobody declared.

@@ -8,6 +8,7 @@ defmodule ForgeWeb.ReviewLiveTest do
 
   import Forge.GitFixtures
   import Forge.MergeFixtures
+  import ForgeWeb.Operator.Components, only: [commit_message_id: 1]
   import Phoenix.LiveViewTest
 
   alias Forge.{Artifacts, Git, Projects, Tickets}
@@ -55,8 +56,10 @@ defmodule ForgeWeb.ReviewLiveTest do
 
   test "the approval pins the changeset version and merges", context do
     %{conn: conn, project: project, ticket: ticket, bare: bare} = context
+    {:ok, before} = Git.resolve(bare, "refs/heads/main")
     sha = commit_on_branch(context, "score.ex", "def persist, do: :ok")
     changeset!(ticket, sha)
+    commit_message!(ticket, "Persist the scores\n")
     pend_merge(ticket)
 
     {:ok, view, html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
@@ -68,7 +71,58 @@ defmodule ForgeWeb.ReviewLiveTest do
 
     assert Tickets.get!(ticket.id).state == "merged"
     {:ok, head} = Git.resolve(bare, "refs/heads/main")
-    assert Git.ancestor?(bare, sha, head)
+    assert {:ok, ^before} = Git.resolve(bare, head <> "^1")
+    assert {:ok, "def persist, do: :ok\n"} = Git.show(bare, head, "score.ex")
+  end
+
+  # The operator reads what the merge will commit and then confirms; the text is the agent's and
+  # this page never offers to change it (`docs/design/ui.md` § Changes). Inside the approval card,
+  # which is the one place all four approval surfaces share.
+  test "draws the commit message above the approval, read only", context do
+    %{conn: conn, project: project, ticket: ticket} = context
+    sha = commit_on_branch(context, "score.ex", "def persist, do: :ok")
+    changeset!(ticket, sha)
+    # Front matter in the version, because what is drawn is the string the commit will
+    # carry — `ForgeCore.Document.body/1`, the one the merge writes — and not the raw text: an
+    # operator who approved one text and found git recording another is the defect
+    # (`docs/design/ui.md` § Changes).
+    commit_message!(
+      ticket,
+      "---\noutcome: done\n---\n\nPersist the scores\n\nThey were lost on restart.\n"
+    )
+
+    pend_merge(ticket)
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+    block = view |> element("##{commit_message_id(ticket)}") |> render()
+
+    assert block =~ "Persist the scores"
+    assert block =~ "They were lost on restart."
+    refute block =~ "outcome: done"
+    refute block =~ "---"
+    assert block =~ "view only"
+    refute block =~ "<textarea"
+    refute block =~ "<input"
+    assert has_element?(view, ~s(button[value="approved"]))
+  end
+
+  # Approving with nothing written for the commit to say parks the ticket in its merging state,
+  # so the card draws no Approve — a button that cannot work is worse than none
+  # (`docs/design/ui.md` § Changes).
+  test "says there is nothing to merge yet, and offers no approval", context do
+    %{conn: conn, project: project, ticket: ticket} = context
+    sha = commit_on_branch(context, "score.ex", "def persist, do: :ok")
+    changeset!(ticket, sha)
+    pend_merge(ticket)
+
+    {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+    block = view |> element("##{commit_message_id(ticket)}") |> render()
+
+    assert block =~ "nothing to merge yet"
+    refute block =~ "view only"
+    refute has_element?(view, ~s(button[value="approved"]))
+    # Reject still is: a ticket nobody wrote a message for is one to send back.
+    assert has_element?(view, ~s(button[value="rejected"]))
   end
 
   test "says so plainly when no job has produced a changeset", context do

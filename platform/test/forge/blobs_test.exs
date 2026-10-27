@@ -25,7 +25,7 @@ defmodule Forge.BlobsTest do
   states:
     implementing:
       prompt: agents/implement.md
-      produces: [implementation.md, changeset, shots/*]
+      produces: [implementation.md, changeset, commit-message, shots/*]
       budget: { turns: 20, cost: 2.00 }
     packaging:
       invoke: [package]
@@ -82,7 +82,14 @@ defmodule Forge.BlobsTest do
 
   defp finish_agent(assignment, blobs, invalid \\ %{}) do
     FakeWorker.put_transcript(assignment)
-    written = %{"implementation.md" => "---\noutcome: done\n---\n# Done\n"}
+
+    written = %{
+      "implementation.md" => "---\noutcome: done\n---\n# Done\n",
+      # This workflow merges, so a state has to produce `commit-message`; a job of this state
+      # that wrote none would be `error` rather than `done`.
+      "commit-message" => FakeWorker.commit_message()
+    }
+
     result = FakeWorker.result(assignment, "success", written: written)
     Jobs.complete(assignment["job_id"], %{result | blobs: blobs, invalid_blobs: invalid})
   end
@@ -147,7 +154,11 @@ defmodule Forge.BlobsTest do
       assignment = FakeWorker.assign(job, context.worker)
       {:ok, _info} = Storage.put("job/someone-else/transcript-1.jsonl", "theirs")
 
-      written = %{"implementation.md" => "---\noutcome: done\n---\n# Done\n"}
+      written = %{
+        "implementation.md" => "---\noutcome: done\n---\n# Done\n",
+        "commit-message" => FakeWorker.commit_message()
+      }
+
       result = FakeWorker.result(assignment, "success", written: written)
 
       {:ok, _job} =

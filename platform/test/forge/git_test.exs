@@ -442,4 +442,54 @@ defmodule Forge.GitTest do
       assert %{name: "agents", path: ".forge/agents", kind: :tree} in entries
     end
   end
+
+  describe "with_scratch_file/3" do
+    test "holds the content while it runs, and is gone afterwards" do
+      assert {:ok, path} =
+               Git.with_scratch_file("test", "the message\n", fn path ->
+                 assert File.read!(path) == "the message\n"
+                 {:ok, path}
+               end)
+
+      refute File.exists?(path)
+    end
+
+    test "is gone even when what ran raised" do
+      path =
+        try do
+          Git.with_scratch_file("test", "x", fn path -> raise RuntimeError, message: path end)
+        rescue
+          error in RuntimeError -> error.message
+        end
+
+      refute File.exists?(path)
+    end
+
+    # **The name carries the OS process**, because `System.unique_integer/1` is unique only
+    # within one BEAM: two platform nodes on a host, or two `bin/check` runs in sibling
+    # worktrees, are handed interleaved integers out of the same system temp directory. One took
+    # the other's file away between the write and the `commit-tree`, and could have written its
+    # own message into it.
+    test "its name is this OS process's, so another BEAM's cannot be it" do
+      {:ok, mine} = Git.with_scratch_file("test", "x", &{:ok, &1})
+
+      assert Path.basename(mine) =~ "-#{System.pid()}-"
+
+      {other, 0} =
+        System.cmd("elixir", [
+          "-e",
+          ~s|IO.write(Path.join(System.tmp_dir!(), "forge-test-\#{System.pid()}-1"))|
+        ])
+
+      refute other == Path.join(System.tmp_dir!(), "forge-test-#{System.pid()}-1")
+      assert String.starts_with?(other, Path.join(System.tmp_dir!(), "forge-test-"))
+    end
+
+    # A file it cannot make is reported, not raised: the merge that asks for one sticks its
+    # ticket with a reason, which is what every other failure on that path does.
+    test "says so when no file can be made" do
+      assert {:error, {:scratch_file, :enoent}} =
+               Git.with_scratch_file("no-such-dir/test", "x", &{:ok, &1})
+    end
+  end
 end

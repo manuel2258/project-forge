@@ -98,6 +98,7 @@ defmodule ForgeWeb.ReviewLive do
       ticket: ticket,
       workflow: workflow,
       changeset: changeset,
+      commit_message: Merge.commit_message(ticket),
       merged: Merge.merged?(ticket),
       diff: diff(project, ticket, changeset),
       documents: documents(ticket, artifacts),
@@ -385,7 +386,13 @@ defmodule ForgeWeb.ReviewLive do
       >
         <h2 class="font-mono text-[11px] tracking-[.14em] uppercase text-accent">Waiting on you</h2>
         <div class="mt-3">
-          <.approval_card ticket={@ticket} pending={@pending} approve={@approve} drafts={@drafts} />
+          <.approval_card
+            ticket={@ticket}
+            pending={@pending}
+            approve={@approve}
+            drafts={@drafts}
+            commit_message={@commit_message}
+          />
         </div>
       </section>
 

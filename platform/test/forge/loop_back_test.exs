@@ -41,7 +41,7 @@ defmodule Forge.LoopBackTest do
     reviewing:
       prompt: agents/review.md
       inputs: [plan.md, implementation.md, changeset]
-      produces: [review.md]
+      produces: [review.md, commit-message]
       outcomes: [done, changes_requested]
       budget: { turns: 60, cost: 3.00 }
     human_testing:
@@ -93,6 +93,14 @@ defmodule Forge.LoopBackTest do
   defp run(ticket, worker, name, outcome \\ "done") do
     job = pending(ticket)
     written = %{name => "---\noutcome: #{outcome}\n---\n# #{name}\n\nFrom #{job.state}.\n"}
+
+    # `reviewing` is where this workflow satisfies the rule that a workflow with a merging state
+    # has a state producing `commit-message`; a job of it that wrote none would be `error`.
+    written =
+      if job.state == "reviewing",
+        do: Map.put(written, "commit-message", FakeWorker.commit_message()),
+        else: written
+
     {:ok, _job} = FakeWorker.run(job, worker, "success", written: written)
     Tickets.get!(ticket.id)
   end

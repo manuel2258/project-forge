@@ -59,6 +59,31 @@ defmodule Forge.QueueTest do
 
   defp of(ticket), do: Enum.filter(Queue.items(), &(&1.ticket && &1.ticket.id == ticket.id))
 
+  # **What makes a decision a merge decision is the state it enters**, not the names it pins: the
+  # queue holds `reviewable` so every reader offers the diff first, and a merging transition that
+  # approves something else was offered without it (`Forge.Engine.merge_decision?/2`).
+  test "a resting ticket whose way out merges is reviewable, whatever it approves" do
+    ticket = ticket_fixture()
+
+    transitions =
+      Enum.map(ticket.workflow["transitions"], fn
+        %{"from" => "review_ready", "to" => "merged"} = transition ->
+          %{transition | "approve" => ["refinement.md"]}
+
+        transition ->
+          transition
+      end)
+
+    merging = Map.put(ticket.workflow, "transitions", transitions)
+
+    ticket =
+      ticket
+      |> Ecto.Changeset.change(state: "review_ready", status: :active, workflow: merging)
+      |> Repo.update!()
+
+    assert [%{kind: :review, detail: %{reviewable: true}}] = of(ticket)
+  end
+
   test "a non-blocking question is an assumption, never a question" do
     ticket = ticket_fixture()
     job = job_fixture(%{ticket: ticket})

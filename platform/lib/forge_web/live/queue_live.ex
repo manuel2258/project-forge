@@ -32,7 +32,6 @@ defmodule ForgeWeb.QueueLive do
   import ForgeWeb.Operator.QuestionForm, only: [question_form: 1]
 
   alias Forge.{Artifacts, Events, Push, Queue, Tickets}
-  alias ForgeCore.Workflow
   alias ForgeWeb.Format
   alias ForgeWeb.Operator.Actions
   alias ForgeWeb.Operator.Board
@@ -136,10 +135,12 @@ defmodule ForgeWeb.QueueLive do
           version = Artifacts.latest(ticket.id, name),
           do: pinned(item.project, ticket, name, version)
 
-    Map.put(item, :approve, approve)
+    item
+    |> Map.put(:approve, approve)
+    |> Map.put(:commit_message, Forge.Merge.commit_message(ticket))
   end
 
-  defp put_approve(item), do: Map.put(item, :approve, [])
+  defp put_approve(item), do: item |> Map.put(:approve, []) |> Map.put(:commit_message, nil)
 
   # A ticket carries its own pinned workflow; one that no longer parses has no topology to read,
   # and a conversation has no workflow at all.
@@ -262,6 +263,7 @@ defmodule ForgeWeb.QueueLive do
             pending={item.detail}
             approve={item.approve}
             drafts={@drafts}
+            commit_message={item.commit_message}
           />
 
           <%!-- A link, never an answer row: answering never navigates, and the answer row and the
@@ -410,11 +412,13 @@ defmodule ForgeWeb.QueueLive do
   defp item_id(%{kind: :chat} = item), do: "item-chat-#{item.detail.chat_id}"
   defp item_id(item), do: "item-#{item.kind}-#{item.ticket.id}"
 
-  # A decision that pins the changeset is a merge decision, and a merge decision is not one the
-  # operator should take from a one-line summary. It arrives either as a pending approval or, when
-  # the workflow leaves the ticket resting in a human state, as the transition out of it.
-  defp reviewable?(%{kind: :approval, approve: approve}),
-    do: Enum.any?(approve, &(&1.name == Workflow.changeset_artifact()))
+  # A merge decision is not one the operator should take from a one-line summary. It arrives
+  # either as a pending approval — asked of the workflow, since what the approval pins does not
+  # say whether entering its target merges (`Forge.Engine.approval_merges?/1`) — or, when the
+  # workflow leaves the ticket resting in a human state, as the transition out of it, which
+  # `Forge.Queue` has already asked the same way.
+  defp reviewable?(%{kind: :approval, ticket: ticket}),
+    do: Forge.Engine.approval_merges?(ticket)
 
   defp reviewable?(%{kind: kind, detail: detail}) when kind in [:review, :stuck],
     do: Map.get(detail, :reviewable, false)

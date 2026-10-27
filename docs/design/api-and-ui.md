@@ -84,7 +84,7 @@ and audited like any other.
 | `POST /projects/:name/tickets` | Admit `{title, body, ticket_type}`; `ticket_type` is required when the project has more than one (`ticket-types.md`) |
 | `GET /tickets/:project/:number` | Ticket with jobs, artifacts, open questions, pending transition |
 | `GET /tickets/:project/:number/events` | The event timeline |
-| `GET /tickets/:project/:number/review` | The merge decision: diff, documents, presentations, answers, cost |
+| `GET /tickets/:project/:number/review` | The merge decision: diff, documents, presentations, the commit message, answers, cost |
 | `GET /tickets/:project/:number/jobs/:job_id` | Job with its spec and harness events |
 | `GET /tickets/:project/:number/artifacts/:name[?version=n]` | A version with content |
 | `POST /tickets/:project/:number/artifacts/:name` | New version `{content}` |
@@ -132,9 +132,9 @@ pending account that a node admin has to approve (`design/identity.md` § Approv
 - `/tickets/:project/:number` — timeline: state, cost, pending decision, open questions,
   jobs, artifacts with the latest document rendered, events.
 - `/tickets/:project/:number/review` — the merge decision: the diff, the documents the change was
-  built from, whatever an agent presented about it, the questions answered, the total cost, and the
-  approval that pins the changeset by version. Reached by a link from the queue's approval item and
-  from the ticket page.
+  built from, whatever an agent presented about it, the message its merge would commit, the
+  questions answered, the total cost, and the approval that pins the changeset by version.
+  Reached by a link from the queue's approval item and from the ticket page.
 - `/tickets/:project/:number/jobs/:id` — the pinned manifest and the harness events.
 - `/board` — tickets by state per project.
 

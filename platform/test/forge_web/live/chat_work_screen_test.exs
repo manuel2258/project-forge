@@ -14,6 +14,7 @@ defmodule ForgeWeb.ChatWorkScreenTest do
 
   import Phoenix.LiveViewTest
   import Forge.GitFixtures
+  import Forge.MergeFixtures
 
   alias Forge.{Conversations, Jobs, Projects}
 
@@ -696,6 +697,8 @@ defmodule ForgeWeb.ChatWorkScreenTest do
     } do
       commit_over_http(project, Jobs.chat_branch(chat), "README.md", "the branch's version")
       diverge_main(project, "README.md", "the trunk's version")
+      # The page draws no merge button until something has written what the commit would say.
+      chat_commit_message!(chat)
 
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}?tab=changes")
       view |> element(~s(button[phx-click="merge"])) |> render_click()
@@ -706,6 +709,7 @@ defmodule ForgeWeb.ChatWorkScreenTest do
     end
 
     test "carries the merge", %{conn: conn, chat: chat} do
+      chat_commit_message!(chat)
       {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}?tab=changes")
 
       assert has_element?(view, ~s(#changes button[phx-click="merge"]))

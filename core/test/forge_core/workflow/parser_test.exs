@@ -28,7 +28,7 @@ defmodule ForgeCore.Workflow.ParserTest do
                env: "implement",
                model: "opus",
                inputs: ["plan.md"],
-               produces: ["implementation.md", "changeset"],
+               produces: ["implementation.md", "changeset", "commit-message"],
                outcomes: ["done", "plan_invalid"],
                budget: %Budget{turns: 200, cost: 10.0}
              } = workflow.states["implementing"]
@@ -671,7 +671,7 @@ defmodule ForgeCore.Workflow.ParserTest do
         map
         |> put_in(
           ["states", "implementing", "produces"],
-          ["implementation.md", "changeset", "notes.md"]
+          ["implementation.md", "changeset", "commit-message", "notes.md"]
         )
         |> put_in(["states", "verifying", "inputs"], ["plan.md", "notes.md"])
 
@@ -736,6 +736,9 @@ defmodule ForgeCore.Workflow.ParserTest do
       assert messages(map) == [
                {"states.implementing.outcomes",
                 "declaring outcomes other than done requires a document in produces"},
+               # `implementing` is also where the fixture produces `commit-message`, so leaving it
+               # `changeset` alone leaves the workflow's merge with nothing to say.
+               {"states.merged.on_enter", "merge needs a state that produces commit-message"},
                {"states.planning.outcomes", "\"done\" is declared more than once"},
                {"states.planning.outcomes",
                 "\"error\" is an engine outcome and cannot be declared"}
@@ -913,6 +916,95 @@ defmodule ForgeCore.Workflow.ParserTest do
         |> Map.update!("transitions", &(&1 ++ [%{"from" => "review_ready", "to" => "merged"}]))
 
       assert {"states.merged.on_enter", "merge needs a state that produces changeset"} in messages(
+               map
+             )
+    end
+
+    # `commit-message` is specified to carry no front matter, so a state that declares a choice of
+    # outcomes and puts it first in `produces` has made that choice unmakeable: every job reads
+    # `done`, and `plan_invalid` here could never be taken. It is the order that does it.
+    test "the commit message cannot be the document a choice of outcomes is made in", %{map: map} do
+      map =
+        put_in(
+          map,
+          ["states", "implementing", "produces"],
+          ["commit-message", "implementation.md", "changeset"]
+        )
+
+      assert {"states.implementing.outcomes",
+              "declaring outcomes other than done requires a document that can carry one: " <>
+                "commit-message is a plain git message with no front matter, and is first in " <>
+                "produces"} in messages(map)
+    end
+
+    # The second half of the same rule: a merge that cannot say anything is as broken as one with
+    # nothing to merge, and it is caught here rather than at the merge (§ Validation).
+    test "merging needs a state that produces the commit message", %{map: map} do
+      map =
+        put_in(map, ["states", "implementing", "produces"], ["implementation.md", "changeset"])
+
+      assert {"states.merged.on_enter", "merge needs a state that produces commit-message"} in messages(
+               map
+             )
+    end
+
+    # On the state that does produce it, which is the case the rule is for: "it is a document this
+    # state produces" would otherwise excuse it like any other.
+    test "the commit message may not be optional", %{map: map} do
+      map = put_in(map, ["states", "implementing", "optional"], ["commit-message"])
+
+      assert {"states.implementing.optional[0]",
+              "commit-message is what the merge commit says and cannot be optional"} in messages(
+               map
+             )
+    end
+
+    # And on a state that does not produce it, the plain reason: excusing a document this state
+    # never writes is a different mistake, and "cannot be optional" sent the author looking for
+    # the wrong one.
+    test "a state that does not produce the commit message is told that instead", %{map: map} do
+      map = put_in(map, ["states", "verifying", "optional"], ["commit-message"])
+
+      assert {"states.verifying.optional[0]",
+              "\"commit-message\" is not a document this state produces"} in messages(map)
+    end
+
+    # The message is the text of a commit, so it is a plain document and nothing else. A group is
+    # the one that *validated and then broke*: it records `commit-message/<file>` and never
+    # `commit-message`, so every transition into the merging state stuck the ticket for want of a
+    # message no state could ever produce.
+    test "the commit message may not be declared as a group or a presentation", %{map: map} do
+      for marked <- ["commit-message/*", "commit-message!"] do
+        map =
+          put_in(map, ["states", "implementing", "produces"], [
+            "implementation.md",
+            "changeset",
+            marked
+          ])
+
+        # Exactly one error, and it is this one: the producer rule reads the *artifact* name, so
+        # it is satisfied and does not also report a merge with no message — one mistake, one
+        # message saying what to write instead.
+        assert messages(map) == [
+                 {"states.implementing.produces[2]",
+                  "#{inspect(marked)} must be declared as the plain document commit-message: " <>
+                    "it is the text of the merge commit, which is neither a presentation nor a " <>
+                    "group of files"}
+               ]
+      end
+    end
+
+    # Nobody approves the message: the operator reads it above the control that merges and
+    # confirms that (`docs/design/ui.md` § Changes).
+    test "the commit message cannot be what a transition approves", %{map: map} do
+      map =
+        put_in(map, ["transitions"], [
+          %{"from" => "review_ready", "to" => "merged", "approve" => ["commit-message"]}
+          | Map.get(map, "transitions", [])
+        ])
+
+      assert {"transitions[0].approve[0]",
+              "commit-message is what the merge commit says and is read, not approved"} in messages(
                map
              )
     end

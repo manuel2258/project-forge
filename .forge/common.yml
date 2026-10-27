@@ -78,10 +78,20 @@ states:
   # every ticket writes `optional: []` in the state that extends this — `extends` merges the
   # template's keys under the state's own, so a state that omits the key inherits this one. Then
   # add an edge out of `presenting` on `error`, or a ticket whose agent writes nothing sticks.
+  #
+  # **`commit-message` is required here and cannot be made optional** (the validator refuses it):
+  # it is what the merge commit says, and a merge has nothing to fall back on without one
+  # (`docs/design/workflow-grammar-v1.md` § Merging). So this state is the one on the way out that
+  # a ticket cannot pass by writing nothing, and `presenting` still has no edge on `error` — an
+  # agent that writes no commit message sticks the ticket in `presenting`, where a person can run
+  # the state again. `presentation.md!` stays first in `produces` because the first *document*
+  # there is the one whose front matter carries the outcome
+  # (`ForgeCore.Workflow.outcome_document/1`); `commit-message` is a plain git message with no
+  # front matter.
   presenting:
     prompt: agents/present.md
     env: default
-    produces: [presentation.md!]
+    produces: [presentation.md!, commit-message]
     optional: [presentation.md]
     # Turns at 60 for the same reason as `dev.yml`'s `refining`, which carries it: on a state
     # costing a few dollars the cost ceiling is the one meant to bind, because a turn buys no

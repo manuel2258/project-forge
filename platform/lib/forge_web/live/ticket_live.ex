@@ -22,7 +22,7 @@ defmodule ForgeWeb.TicketLive do
   import ForgeWeb.Operator.QuestionForm, only: [question_form: 1]
 
   alias Forge.{Artifacts, Conversations, Engine, Events, Git, Jobs, Projects, Proposals, Queue}
-  alias Forge.{Spend, Tickets}
+  alias Forge.{Merge, Spend, Tickets}
   alias ForgeCore.Workflow
   alias ForgeWeb.{Diff, FileType, Format, Indicators, JobStream, WorkScreen}
   alias ForgeWeb.Operator.Actions
@@ -133,6 +133,7 @@ defmodule ForgeWeb.TicketLive do
       proposals: Proposals.open_for_ticket(ticket.id),
       reviewable: reviewable?(ticket, workflow),
       approve: approve_pins(project, ticket, artifacts),
+      commit_message: Merge.commit_message(ticket),
       changeset: Artifacts.latest(ticket.id, Workflow.changeset_artifact()),
       paused: ticket.status == :active and Spend.paused?(),
       until_midnight: until_midnight(),
@@ -459,6 +460,7 @@ defmodule ForgeWeb.TicketLive do
           pending={@ticket.pending_transition}
           approve={@approve}
           drafts={@drafts}
+          commit_message={@commit_message}
         />
 
         <.link
@@ -735,6 +737,7 @@ defmodule ForgeWeb.TicketLive do
           pending={@ticket.pending_transition}
           approve={@approve}
           drafts={@drafts}
+          commit_message={@commit_message}
         />
       </div>
     </section>
@@ -1015,16 +1018,10 @@ defmodule ForgeWeb.TicketLive do
 
   defp waiting_clause(_assigns), do: nil
 
-  # A decision that pins the changeset is a merge decision, which has a page of its own — whether
-  # it is waiting as a pending approval or as the transition out of the state the ticket rests in.
-  defp reviewable?(%{pending_transition: pending} = ticket, _workflow) when is_map(pending),
-    do: Workflow.changeset_artifact() in Engine.awaiting_approval(ticket)
-
-  defp reviewable?(ticket, workflow) do
-    workflow
-    |> Workflow.transitions_from(ticket.state)
-    |> Enum.any?(&(Workflow.changeset_artifact() in &1.approve))
-  end
+  # A merge decision has a page of its own — whether it is waiting as a pending approval or as the
+  # transition out of the state the ticket rests in, and whatever it pins: what makes it one is
+  # that the state it enters merges (`Forge.Engine.merge_decision?/2`).
+  defp reviewable?(ticket, workflow), do: Engine.merge_decision?(ticket, workflow)
 
   defp approve_pins(project, ticket, artifacts) do
     for name <- Engine.awaiting_approval(ticket),

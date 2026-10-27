@@ -249,8 +249,35 @@ by the same hook with `FORGE_INTERNAL`, and neither lets a job write the default
 differs is what authorises it — the changeset version a ticket's transition into its merging state
 named (`workflow-grammar-v1.md` § Merging), or an operator pressing
 merge on a diff they are looking at. It is one implementation with two callers, not two: the
-ticket's functions and the chat's both build the same plan — repository, destination, source, the
-ref that keeps it reachable, and what the commit should say — and hand it to the same merge.
+ticket's functions and the chat's both build the same plan — repository, destination, source and
+the ref that keeps it reachable — and hand it to the same merge. What the commit says is read
+separately, by each of the two functions that make one (below).
+
+**A conversation may write `commit-message`, and its merge needs one.** It is an ordinary
+document — the name is not reserved against a chat the way `changeset` is, and it is written,
+versioned and re-reported every turn like any other (below) — but it is the one the merge reads:
+`Merge.perform_chat/2` resolves its latest version at the moment merge is pressed, and the commit
+says exactly that, with nobody editing it. The chat agent writes it, is told to keep it describing
+the whole branch rather than the last turn, and front matter it carries is not part of the
+message.
+
+**It is the one document a ticket chat keeps against itself rather than against its ticket**, and
+so the one exception to the scope rule below (`Conversations.document_scope/2`). It says what a
+merge of *this branch* commits, and a ticket chat's branch is not the ticket's changeset: shared
+with the ticket it was one artifact that the ticket's merging state and every chat on that ticket
+wrote over each other in, so a chat branch landed under a message describing the ticket's whole
+change, and a chat writing one changed what the ticket's own merge would then commit. A ticket
+chat is handed its own in place of the ticket's, because inside a conversation the name means its
+own branch's. **The cost is that a ticket chat cannot read the ticket's message** — it is handed
+its own or none, never the ticket's — so "tidy up what the merge will say" is a request to make
+of the state that writes it, not of a chat on the ticket. Taking the other side would mean a
+conversation that could rewrite what the ticket's own merge commits, which is the defect this
+scope exists to close.
+
+Pressing merge with no `commit-message` version yet is refused the same way a conflicting branch
+is, and **the page says so rather than offering a button that fails**: where the branch has
+something to merge, the message sits above the merge control read-only, and where no version
+exists the page says there is nothing to merge yet and draws no button.
 
 **What the chat's merge takes is the branch as it is when merge is pressed, not the diff the page
 drew.** `Merge.perform_chat/2` resolves `chat/<id>` at the click. A conversation that is still
@@ -655,7 +682,7 @@ have moved, which is why a refusal says so rather than the manifest pretending t
 
   | The branch, when the ending is recorded | What happens |
   |---|---|
-  | its head is on the default branch | pinned at `refs/forge/chat/<id>`, then deleted — § Commits' order, for its reason |
+  | a merge of it has landed | pinned at `refs/forge/chat/<id>`, then deleted — § Commits' order, for its reason |
   | unmerged, and it would merge cleanly | deleted, with nothing pinned: its commits become collectable |
   | it would not merge cleanly | kept |
   | already gone | nothing |

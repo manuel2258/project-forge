@@ -75,6 +75,34 @@ defmodule ForgeCore.Document do
     end
   end
 
+  @doc """
+  `text` less its front matter, for the places that need the prose and not the declaration.
+
+  Shared because what a `commit-message` version *says* must be the same string wherever it is
+  read: the merge writes it to the commit, and the review page and the API show it. Reading it
+  two ways is how a person approves one text and git records another.
+
+  Text that does not parse comes back as it stands: there is no front matter to strip if the
+  delimiters never closed, so the whole string is the honest answer.
+
+  **That arm is an equivalent mutant, and there is no test for it.** Nothing this function is
+  given can reach it: its three callers — the merge, and the two surfaces that show what the merge
+  will say — all read a `commit-message` version, and a `commit-message` is only ever written
+  through a path that parses the text and refuses what does not (`Forge.Conversations.check/4` for
+  a conversation's, `Forge.Artifacts.put_version/7` otherwise). It is not that nothing is stored
+  unparsed: `parse: false` is used for a ticket's body, `answers.md` and a proposal's raw text as
+  well, and none of those is read here. The arm is kept because this function is public and takes
+  any string, and returning `""` for one that does not parse would be a silent truncation; per
+  `CLAUDE.md` § Testing, do not write a test that claims to cover it.
+  """
+  @spec body(String.t()) :: String.t()
+  def body(text) when is_binary(text) do
+    case parse(text) do
+      {:ok, document} -> document.body
+      {:error, _errors} -> text
+    end
+  end
+
   @spec parse(String.t(), opts()) :: {:ok, t()} | {:error, [Error.t()]}
   def parse(text, opts \\ []) when is_binary(text) do
     text = String.replace_prefix(text, "\uFEFF", "")

@@ -98,7 +98,8 @@ states:
       build: { max: 40 }
       test: { max: 20, concurrent: 4 }
     inputs: [plan.md]
-    produces: [implementation.md, changeset]   # notes on what was done, and the diff
+    # Notes on what was done, the diff, and what the merge commit will say (§ Merging).
+    produces: [implementation.md, changeset, commit-message]
     outcomes: [done, plan_invalid]
     budget: { turns: 200, cost: 10.00 }
 
@@ -231,6 +232,18 @@ of the job's branch against the ticket's base. A name ending `/*` is a group of 
 and a name ending `!` is a presentation (below). Every other name is a document the job writes to
 the platform's artifact store. A job that finishes without producing a document or the changeset
 it declared has outcome `error`.
+
+**`commit-message` is the second reserved name, and unlike `changeset` it is a document a job
+writes text into** — declared, written to `out/`, and kept as a version exactly like any other.
+What is reserved about it is what reads it and what it may not be: a workflow that merges must
+have a state producing it (§ Validation), it is declared as a plain document and never as a
+presentation or a group of files, nobody approves it, and it may never be declared `optional`,
+because merging has nothing to fall back on if it is absent. The merge's entry action reads it
+directly, the way it reads `changeset`, and it is never pinned as an ordinary job `input` on its
+account —
+nothing stops a state from also listing it as an input if a later state wants to read it, and
+nothing requires that either. Its text is what the merge commit says, used as written
+(`git-hosting.md` § The merge).
 
 **A name ending `/*` is a group of files** — `package/*`, `screenshots/*` — for what is not a
 document: a build to try, a screenshot, anything whose bytes are not text. The job writes any
@@ -428,9 +441,9 @@ states:
     on_conflict: integrating     # a job state or a human state of this workflow
 ```
 
-**Which commit a merge merges.** Every transition into the merging state names the commit it is
-taken for: the latest `changeset` version at the moment it is taken, read once. For a person that
-is the version their approval of the edge records, in the same act; for the engine's own edge out
+**Which commit a merge merges, and what it says.** Every transition into the merging state names
+the commit it is taken for: the latest `changeset` version at the moment it is taken, read once.
+For a person that is the version their approval of the edge records, in the same act; for the engine's own edge out
 of a job state it is the version that job's result recorded, since a result is recorded before the
 engine decides where it sends the ticket. The check before the transition is made on that commit,
 `transition.taken` names it (`changeset` and `changeset_version`), and the entry action merges
@@ -448,6 +461,15 @@ why the rule is stated rather than left to the code:
 It replaces "the latest version, whenever the merge reads it", which was harmless only while every
 merge followed a person's approval in the same request. With the engine merging on its own (route
 (b), below) the read and the approval would have been minutes apart, and nothing tied them.
+
+**The same rule for the message.** The transition also names the latest `commit-message` version
+at the moment it is taken; `transition.taken` carries it as `commit_message_version`, and the
+entry action uses *that* version and never the latest again. The version alone is on the event and
+not the text, because the text is read back from the artifact rather than duplicated into the log.
+It closes the same race the changeset's rule closes: a conversation rewriting `commit-message`
+after the approval but before the entry action runs would otherwise change what the commit says.
+A transition that names a changeset and no `commit-message` reaches the merge with nothing for the
+commit to say, and sticks the ticket in the merging state saying so.
 
 `refs/forge/approved/<n>` is written by each merge attempt, at the commit it merges, whoever's
 transition named it — on route (b) nobody approved anything and the engine's attempt writes it. The
@@ -483,7 +505,8 @@ terminal state there is. A late failure that is not a conflict, a push the hook 
 sticks the ticket in the merging state. `on_conflict` adds no transition: nobody chooses it and no
 outcome selects it, so a merging state with no transitions out is as terminal as it was. If the
 move cannot be made — the target's job cannot be created — the ticket is stuck in the merging
-state saying so, rather than left reading `done`.
+state saying so, rather than left reading `done`. So does a merge with no `commit-message` version
+to read.
 
 **The target is a job state or a human state, with a transition out.** A job state is the usual
 case, and a job state that is some merging state's `on_conflict` is an *integrating* state: its
@@ -840,6 +863,24 @@ is never produced; `answers.md` is platform-managed and never declared.
 - `optional`, where present, is on a job state and lists names, each the artifact name of one of
   that state's own produced documents, none twice. `changeset` and a group of files are refused by
   that rule and refused by name, so the message says which it is rather than "not produced here".
+  `commit-message` is refused **by name even though it passes that rule** — it is one of the
+  state's own produced documents — because a merge has nothing to say without it.
+- **`commit-message` is declared as a plain document, and nothing else.** `commit-message/*` and
+  `commit-message!` are refused where they are declared, saying so. A group records one artifact
+  per file — `commit-message/<file>` — and never one called `commit-message`, so a workflow
+  declaring the group form would validate and then stick every ticket that reached its merge, for
+  want of a message no state could produce; a presentation would work and is refused for the
+  premise, since this one is a plain git message nobody views as prose. The rule that a merging
+  workflow has a producer reads the *artifact* name, so such a workflow is told what to write
+  instead rather than also told its merge has no message.
+- **Nothing approves `commit-message`.** A transition's `approve` may not name it: the operator
+  reads it above the control that merges and confirms that (`ui.md` § Changes), and no surface
+  offers to approve or edit it.
+- **A state declaring a choice of outcomes may not have `commit-message` first in `produces`.**
+  The outcome document is the first document there, and this one is a plain git message with no
+  front matter to choose in: the choice could never be made, every job would read `done`, and the
+  state's other edges would be dead. It is a question of order, which is why `.forge/common.yml`
+  keeps `presentation.md!` ahead of it.
 - **A state declaring outcomes other than `done` may not make its outcome document optional.**
   An absent document is `done` and can be nothing else, so excusing the document the choice is
   written in is a way to take the `done` edge by writing nothing — and where `done` is not among
@@ -849,7 +890,8 @@ is never produced; `answers.md` is platform-managed and never declared.
   written.
 - Every `on_enter` entry is a known action (`merge` alone in v1); `on_enter` is absent from every
   job state and every command state; at most one state in a workflow merges; `initial` does not merge; and a workflow that
-  merges has a state producing `changeset`.
+  merges has a state producing `changeset` and a state producing `commit-message`, the second
+  never `optional`.
 - `on_conflict`, where present, is on the state that merges, and names another state of the
   workflow that is a job state or a human state with a transition out — never a command state,
   and never the merging state itself; a job state it names is the `to` of no transition

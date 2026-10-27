@@ -504,18 +504,15 @@ defmodule Forge.Queue do
     end
   end
 
-  # Whether a decision from here pins the changeset — that is, whether it is a merge decision, and
-  # so whether the operator should be offered the diff before taking it. Held on the item rather
-  # than recomputed by the page, so the API serves the same fact.
+  # Whether the decision in front of the operator merges, and so whether they should be offered
+  # the diff before taking it — asked of the workflow by `Engine.merge_decision?/2` rather than of
+  # what the decision pins, which is not the same question (one definition for the four surfaces
+  # that ask). Held on the item rather than recomputed by the page, so the API serves the same
+  # fact.
   defp reviewable?(%Ticket{} = ticket) do
     case Tickets.parsed_workflow(ticket) do
-      {:ok, workflow} ->
-        workflow
-        |> Workflow.transitions_from(ticket.state)
-        |> Enum.any?(&(Workflow.changeset_artifact() in &1.approve))
-
-      {:error, errors} ->
-        unparseable(ticket, errors, false)
+      {:ok, workflow} -> Engine.merge_decision?(ticket, workflow)
+      {:error, errors} -> unparseable(ticket, errors, false)
     end
   end
 

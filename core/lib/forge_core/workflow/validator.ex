@@ -229,7 +229,8 @@ defmodule ForgeCore.Workflow.Validator do
       Enum.flat_map(states, &entry_action_shape/1),
       merge_count(merging),
       merge_not_initial(merging, initial),
-      merge_needs_changeset(merging, workflow)
+      merge_needs_artifact(merging, workflow, Workflow.changeset_artifact()),
+      merge_needs_artifact(merging, workflow, Workflow.commit_message_artifact())
     ])
   end
 
@@ -265,18 +266,29 @@ defmodule ForgeCore.Workflow.Validator do
     end
   end
 
-  defp merge_needs_changeset([], _workflow), do: []
+  # Both reserved names a merge reads, by one rule: without the changeset there is nothing to
+  # merge and without the message there is nothing for the commit to say, and a third name of the
+  # shape would come here rather than beside here (`CLAUDE.md` § Rules).
+  #
+  # **Asked of the produced name, not the declaration.** `produces` entries carry markers — a
+  # presentation ends `!` — and everything that records an artifact goes through
+  # `Workflow.produced_name/1`, so a state declaring `commit-message!` does produce the artifact
+  # the merge reads and comparing the raw entry told it the merge had no producer.
+  defp merge_needs_artifact([], _workflow, _name), do: []
 
-  defp merge_needs_changeset([name | _rest], %Workflow{states: states}) do
-    changeset = Workflow.changeset_artifact()
+  defp merge_needs_artifact([state_name | _rest], %Workflow{states: states}, name) do
+    produced? =
+      Enum.any?(states, fn {_n, state} ->
+        Enum.any?(state.produces, &(Workflow.produced_name(&1) == name))
+      end)
 
-    if Enum.any?(states, fn {_n, state} -> changeset in state.produces end) do
+    if produced? do
       []
     else
       [
         Error.new(
-          Error.join(Error.join("states", name), "on_enter"),
-          "merge needs a state that produces #{changeset}"
+          Error.join(Error.join("states", state_name), "on_enter"),
+          "merge needs a state that produces #{name}"
         )
       ]
     end
@@ -417,10 +429,34 @@ defmodule ForgeCore.Workflow.Validator do
         )
   end
 
+  # `commit-message` is the text of the merge commit (`docs/design/workflow-grammar-v1.md`
+  # § Produces), so it has to be declared as a plain document. A group records one artifact per
+  # file — `commit-message/<file>`, never `commit-message` — so a workflow declaring
+  # `commit-message/*` validated and then stuck every ticket that reached its merge, which is
+  # what this rule exists to catch here instead. A presentation would validate and work, and is
+  # refused for the premise rather than for a failure: this one carries no front matter and
+  # nobody views it as prose.
+  defp commit_message_kind_error(path, name) do
+    message = Workflow.commit_message_artifact()
+
+    if name != message and Workflow.produced_name(name) == message do
+      Error.new(
+        path,
+        "#{inspect(name)} must be declared as the plain document #{message}: it is the text of " <>
+          "the merge commit, which is neither a presentation nor a group of files"
+      )
+    end
+  end
+
   defp produce_error(workflow, path, name, index) do
     producers = Workflow.producers(workflow, name)
 
     cond do
+      # **Before the group and presentation branches**, because it is about which of the three
+      # kinds this one name may be declared as.
+      marked = commit_message_kind_error(Error.join(path, index), name) ->
+        marked
+
       Workflow.group?(name) ->
         group_error(workflow, Error.join(path, index), name, producers)
 
@@ -552,6 +588,26 @@ defmodule ForgeCore.Workflow.Validator do
 
       entry in repeated ->
         "#{inspect(entry)} is listed twice"
+
+      true ->
+        optional_target_error(state, entry, documents)
+    end
+  end
+
+  # What a well-formed, unrepeated entry points at: nil where it is one of the state's own
+  # documents and may be excused, otherwise why it may not be.
+  defp optional_target_error(state, entry, documents) do
+    cond do
+      # Before the clause below, not after it: `commit-message` is one of the state's own
+      # documents, so "it is a document this state produces" would excuse it like any other.
+      # Merging has nothing to fall back on when it is absent, which is what makes it the one
+      # produced document a state may not be let off writing.
+      #
+      # `entry in documents` as well, so that a state which does not produce it is told *that*
+      # instead by the last clause. Excusing a document the state never writes is a different
+      # mistake and saying "cannot be optional" sent the author looking for the wrong one.
+      entry == Workflow.commit_message_artifact() and entry in documents ->
+        "#{Workflow.commit_message_artifact()} is what the merge commit says and cannot be optional"
 
       entry in documents ->
         nil
@@ -797,6 +853,16 @@ defmodule ForgeCore.Workflow.Validator do
       declared != [Workflow.default_outcome()] and document != nil and
         State.optional?(state, document)
 
+    # **And not the one document specified to carry no front matter.** `commit-message` is a
+    # plain git message — the prompts ask for one and the merge writes it verbatim — so a state
+    # whose outcome document is that one has declared a choice it can never make: every job would
+    # read `done` out of a message with no front matter, and the state's other edges would be
+    # dead. `State.outcome_document/1` is the *first* document in `produces`, so this is a
+    # question of order, which is why `.forge/common.yml` keeps `presentation.md!` ahead of it.
+    message_document =
+      declared != [Workflow.default_outcome()] and
+        document == Workflow.commit_message_artifact()
+
     List.flatten([
       if(declared == [], do: Error.new(path, "must not be empty"), else: []),
       Enum.map(
@@ -818,6 +884,16 @@ defmodule ForgeCore.Workflow.Validator do
             path,
             "declaring outcomes other than done requires the document that carries the " <>
               "outcome: #{inspect(document)} is optional, and an outcome nobody wrote is done"
+          ),
+        else: []
+      ),
+      if(message_document,
+        do:
+          Error.new(
+            path,
+            "declaring outcomes other than done requires a document that can carry one: " <>
+              "#{Workflow.commit_message_artifact()} is a plain git message with no front " <>
+              "matter, and is first in produces"
           ),
         else: []
       )
@@ -894,6 +970,18 @@ defmodule ForgeCore.Workflow.Validator do
       cond do
         Workflow.group?(artifact) ->
           [Error.new(at, "a group of files cannot be approved")]
+
+        # The operator reads it above the control that merges and confirms; no surface offers to
+        # approve or edit it (`docs/design/ui.md` § Changes), and a transition pinning it would
+        # draw a second element under the id the card already draws the message's block with.
+        artifact == Workflow.commit_message_artifact() ->
+          [
+            Error.new(
+              at,
+              "#{Workflow.commit_message_artifact()} is what the merge commit says and is read, " <>
+                "not approved"
+            )
+          ]
 
         presents?(workflow, artifact) ->
           [Error.new(at, "a presentation carries no approval")]

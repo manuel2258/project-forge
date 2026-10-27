@@ -13,6 +13,7 @@ defmodule ForgeWeb.Operator.Components do
   import ForgeWeb.Indicators
 
   alias ForgeWeb.Operator.Drafts
+  alias ForgeWeb.WorkScreen
 
   @doc """
   The field that picks a model, wherever one is picked.
@@ -227,11 +228,25 @@ defmodule ForgeWeb.Operator.Components do
   attr :approve, :list, default: [], doc: "what the approval pins, each built by `pinned/4`"
   attr :drafts, :map, required: true, doc: "the page's `:drafts` assign"
 
+  attr :commit_message, :any,
+    default: nil,
+    doc: "the `commit-message` version a merging approval will commit, or nil when there is none"
+
   def approval_card(assigns) do
     # One name for the draft, because three places have to agree on it: the form's `id`, the
     # hidden field the change event carries it in, and the lookup the box is drawn from. Three
     # interpolated literals is three chances for the draft to stop coming back, silently.
-    assigns = assign(assigns, :draft, "approve-#{assigns.ticket.id}")
+    #
+    # **Whether this approval merges is asked of the ticket's workflow**, not passed in, so every
+    # page that draws this card agrees without being told: the card is the one place all four
+    # approval surfaces share — the review page, the queue, Decide and the Changes tab — and
+    # showing the message on one of them meant the other three approved text nobody had seen.
+    # `Forge.Engine.approval_merges?/1` is the one definition, and it asks what the entry action
+    # asks rather than guessing from the names the approval pins.
+    assigns =
+      assigns
+      |> assign(:draft, "approve-#{assigns.ticket.id}")
+      |> assign(:merges, Forge.Engine.approval_merges?(assigns.ticket))
 
     ~H"""
     <div class="flex flex-col gap-[11px]" id={"approval-#{@ticket.id}"}>
@@ -267,6 +282,14 @@ defmodule ForgeWeb.Operator.Components do
         </div>
       </section>
 
+      <%!-- What the merge will commit, read-only, directly above the control that approves it
+            (`docs/design/ui.md` § Changes). --%>
+      <WorkScreen.commit_message
+        :if={@merges}
+        version={@commit_message}
+        id={commit_message_id(@ticket)}
+      />
+
       <%!-- `id` and `phx-change` are what make the comment survive a reconnect: without both of
             them the client has no form to copy and replay, and the new mount draws the box
             empty (`ForgeWeb.Operator.Drafts`). --%>
@@ -287,6 +310,7 @@ defmodule ForgeWeb.Operator.Components do
           aria-label="Comment on this approval"
         />
         <button
+          :if={not (@merges and is_nil(@commit_message))}
           type="submit"
           name="decision"
           value="approved"
@@ -309,6 +333,14 @@ defmodule ForgeWeb.Operator.Components do
     </div>
     """
   end
+
+  @doc """
+  The id of the block an approval card draws the commit message in, from the one definition the
+  card itself draws it under: a test that looked for a second copy of this string would pass
+  while the operator saw nothing.
+  """
+  @spec commit_message_id(map()) :: String.t()
+  def commit_message_id(%{id: id}), do: "approving-#{id}-commit-message"
 
   defp approve_label([]), do: "Approve"
   defp approve_label([pin]), do: "Approve #{pin.name} v#{pin.version}"

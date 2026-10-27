@@ -347,7 +347,7 @@ defmodule ForgeCore.WorkflowTest do
         reviewing:
           prompt: v.md
           inputs: [plan.md, implementation.md, changeset]
-          produces: [review.md]
+          produces: [review.md, commit-message]
           outcomes: [done, changes_requested]
           budget: { turns: 1, cost: 1 }
         human_testing:

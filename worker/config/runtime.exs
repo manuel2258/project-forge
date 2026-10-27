@@ -17,10 +17,18 @@ if config_env() != :test do
         model: System.get_env("FORGE_CLAUDE_MODEL"),
         effort: System.get_env("FORGE_CLAUDE_EFFORT")
       ],
-      # Unset and set-to-nothing are the same statement: this machine has no opinion. As on the
-      # platform's side, the dials are also guarded downstream and `executable` is not: an empty
-      # one becomes `--command ""` and fails every job here (`platform/config/runtime.exs` has
-      # the long version, and the test that holds it).
+      # Unset and set-to-nothing are the same statement: this machine has no opinion.
+      #
+      # **`executable` is why this filter cannot be pruned**, and this is the file where that is
+      # true. `ForgeWorker.Harness.ClaudeCode.command/3` reads it as
+      # `Keyword.get(opts, :executable, "claude")`, which hands back `""` for a key that is
+      # present and empty — so a machine booted with `FORGE_CLAUDE_EXECUTABLE=` spawned
+      # `nix develop … --command "" …` and failed every job on it. The fallback to `claude` only
+      # happens if the key is absent, which is what this line makes it.
+      #
+      # The two dials are refused again downstream (`flag_args/3`), so for them this is defence
+      # in depth; `executable` has nothing after it. `runtime_config_test.exs` beside this
+      # release holds the rule.
       fn {_key, value} -> value in [nil, ""] end
     )
 

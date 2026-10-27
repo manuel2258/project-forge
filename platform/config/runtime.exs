@@ -60,13 +60,13 @@ harness_opts =
     ],
     # Unset and set-to-nothing are the same statement: this node has no opinion.
     #
-    # **`executable` is why this filter cannot be pruned.** For the two dials it is defence in
-    # depth — `Workers.harness_pair/3` and the driver's `flag_args/3` each refuse `""` on their
-    # own — but nothing downstream refuses an empty executable: `Keyword.get(opts, :executable,
-    # "claude")` returns `""` for a key that is present and empty, so a node with
-    # `FORGE_CLAUDE_EXECUTABLE=` spawned `nix develop … --command "" …` and failed every job on
-    # the machine. Dropping the `""` here restores that, which is what
-    # `runtime_config_test.exs` holds this line to.
+    # **Defence in depth here, and only that.** The platform spawns no harness: the only reader
+    # of this key is `Workers.harness_env/0`, which forwards `model` and `effort` to a machine it
+    # provisions and leaves `executable` behind on purpose (its own comment, above). Both dials
+    # are refused again downstream — `Workers.harness_pair/3` and the driver's `flag_args/3` each
+    # reject `""` — so removing the `""` from this line changes nothing a job can see.
+    # `executable` is read on the *worker*, and `worker/config/runtime.exs` is where the same
+    # filter is load-bearing and where the test for it lives.
     fn {_key, value} -> value in [nil, ""] end
   )
 

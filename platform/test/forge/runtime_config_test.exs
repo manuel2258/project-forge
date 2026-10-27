@@ -124,11 +124,16 @@ defmodule Forge.RuntimeConfigTest do
     refute inspect(release(), limit: :infinity) =~ "sk-ant-oat01-node"
   end
 
-  # **A variable that is present and empty is not a setting.** Two of the three names here are
-  # guarded again downstream, so the one that proves this filter is `executable`: nothing below
-  # refuses an empty one, `Keyword.get(opts, :executable, "claude")` hands back `""` for a key
-  # that is present, and the spawn becomes `nix develop … --command "" …` — every job on the
-  # machine failing. Removing the `""` from the filter in `config/runtime.exs` makes this fail.
+  # **A variable that is present and empty is not a setting.** What this file can say is that
+  # the platform's own release reads none of the three: `harness_env/0` forwards `model` and
+  # `effort` to a machine it provisions, so an empty one would be minted into that machine, and
+  # it never forwards `executable` at all.
+  #
+  # The broken spawn an empty `executable` causes belongs to the *worker's* release, which reads
+  # the key — `ForgeWorker.Harness.ClaudeCode.command/3` — and
+  # `worker/test/forge_worker/runtime_config_test.exs` is the test that holds that rule. Round
+  # three of this ticket's review found this comment claiming the behaviour for the file it is
+  # not in.
   test "a harness variable set to nothing configures nothing" do
     System.put_env("FORGE_CLAUDE_EXECUTABLE", "")
     System.put_env("FORGE_CLAUDE_MODEL", "")

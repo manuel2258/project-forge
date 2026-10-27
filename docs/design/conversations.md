@@ -439,9 +439,11 @@ refusal back into the conversation with `Conversations.send/3` and a `:system` a
 looks right and is wrong three times over:
 
 - `fold/2` hard-codes `role: :user` for every `chat.message` whatever its actor, so the person
-  read *themselves* saying their request was refused. The one existing `:system` sender,
-  `Operator.answer_chat/4`, sends text that really is the person's answers — which is why nothing
-  had needed the distinction before.
+  read *themselves* saying their request was refused. Nothing had needed the distinction before,
+  because every `chat.message` is a person's: `Operator.answer_chat/4` sends text that really is
+  the person's answers, and both it and `send_chat/4` now name whoever that was. The actor is for
+  the log — two members share a conversation and it says which of them said what — and it changes
+  no surface, because of this same hard-coding.
 - `Forge.Queue` lists a conversation only when its last message is the agent's, so the reply put
   the chat in the person's queue and the refusal landed after it and took it out again: the
   notification led to nothing waiting.
@@ -614,6 +616,19 @@ have moved, which is why a refusal says so rather than the manifest pretending t
   a decision nobody took. `reopen/1` answers `{:error, :live}` and `close/2`
   `{:error, :not_live}`, through `Forge.Operator` as everything a person does, and the page says
   so rather than acting.
+
+  **Who ended it is recorded where they acted, which is not always where it ended.** A
+  `:running` conversation is ended by its worker: the platform asks, the worker finishes its turn
+  and reports, and `chat.ended` is written from that report — the machine's act, with `:system`
+  as its actor, because by then nobody else is doing anything. The person's act is the asking, and
+  it is logged as `chat.close_requested` with them as its actor, at the moment they ask. For a
+  conversation with no machine to tell there is one event and the person is on it, because asking
+  and ending are the same step.
+
+  Two rows rather than one, and each true: the log can say who asked even when the worker never
+  reports back, which is what happens when the machine is lost between the request and the turn
+  ending. `chat.close_requested` is not projected into the conversation — `fold/2` ignores it, as
+  it ignores everything that is not what somebody said (§ What a conversation is).
 
   **Whether a close has anyone to tell is the status too, not the worker.** `close/2` asks the
   worker to end a `:running` conversation and records the ending itself for a `:pending` one. It

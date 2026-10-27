@@ -136,8 +136,14 @@ defmodule Forge.Conversations do
 
   # Who caused the event, for every event this module logs. `:system` is the honest default and
   # the common case — a worker reporting, or the platform acting on a machine that is gone — and
-  # a person is named by the caller that checked them (`Operator`'s `open_chat/4`,
-  # `close_chat/3`, `reopen_chat/2`, `send_chat/4`).
+  # a person is named by the caller that checked them: every `Operator` entry point that holds a
+  # `%User{}` sets it, and each sets it outright rather than with `put_new`, so nothing off the
+  # wire can propose an actor of its own.
+  #
+  # A `chat.message`'s actor is the person who typed it, and changes no surface: `fold/2`
+  # hard-codes `role: :user` whatever it is (`docs/design/conversations.md` § What a conversation
+  # is). It is for the log, which otherwise could not say who said what in a chat two members
+  # share.
   defp actor(opts), do: Keyword.get(opts, :actor, :system)
 
   # Empty is not a choice: it resolves to the project's, which is what nil already means.
@@ -324,11 +330,23 @@ defmodule Forge.Conversations do
   `opts` carries `:actor` — who is ending it, for the event. A person closing their own
   conversation and a machine reporting that it stopped are different facts, and only the caller
   that authorised the person can tell them apart (`Operator.close_chat/3`).
+
+  **A running conversation is ended by its worker, so the request is logged here and the ending
+  there.** The platform cannot write `chat.ended` on this path: the worker finishes its turn
+  first and reports, and that report is the machine's act and says so. Asking is the person's
+  act, and `chat.close_requested` is where the log keeps it — which is also the only record if
+  the worker never reports back (§ Ending one).
   """
   @spec close(Job.t(), String.t(), keyword()) :: :ok | {:error, :not_live} | {:error, term()}
   def close(%Job{kind: :chat} = chat, reason \\ "closed", opts \\ []) do
     case Repo.one(from j in Job, where: j.id == ^chat.id, select: {j.status, j.worker_id}) do
       {:running, worker_id} when is_binary(worker_id) ->
+        Events.append("chat.close_requested", actor(opts), %{
+          ticket_id: chat.ticket_id,
+          job_id: chat.id,
+          payload: %{"reason" => reason}
+        })
+
         deliver(worker_id, chat.id, "close", %{"reason" => reason})
 
       {status, _worker_id} ->
@@ -345,7 +363,7 @@ defmodule Forge.Conversations do
   defp ended_here(chat, seen, reason, opts) do
     case ended(chat, nil, reason, Keyword.merge(opts, expect: seen)) do
       {:ok, _chat} -> :ok
-      {:error, {:row, {:changed, _now}}} -> close(chat, reason)
+      {:error, {:row, {:changed, _now}}} -> close(chat, reason, opts)
       {:error, _reason} = error -> error
     end
   end

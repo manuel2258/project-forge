@@ -259,7 +259,11 @@ defmodule Forge.Operator do
           {:ok, Job.t()} | {:error, term()}
   def open_chat(%Project{} = project, %User{} = user, text, opts \\ []) do
     with :ok <- allow(project, user, :use) do
-      Conversations.open(project, text, Keyword.put_new(opts, :actor, {:user, user.id}))
+      # Set outright, not `put_new`: this function has just checked who the person is, and an
+      # actor a caller proposed would be the one thing in the event nobody verified. No path
+      # reaches it with one today — both LiveViews build these opts from literals — which is why
+      # this is a principle rather than a fix.
+      Conversations.open(project, text, Keyword.put(opts, :actor, {:user, user.id}))
     end
   end
 
@@ -272,7 +276,8 @@ defmodule Forge.Operator do
   """
   @spec send_chat(Job.t(), User.t(), String.t(), keyword()) :: {:ok, term()} | {:error, term()}
   def send_chat(%Job{kind: :chat} = chat, %User{} = user, text, opts \\ []) do
-    with :ok <- allow(chat, user, :use), do: Conversations.send(chat, text, opts)
+    with :ok <- allow(chat, user, :use),
+         do: Conversations.send(chat, text, Keyword.put(opts, :actor, {:user, user.id}))
   end
 
   @doc """
@@ -290,7 +295,7 @@ defmodule Forge.Operator do
            (reply != nil and Conversations.reply_ref(messages) == reply) || {:error, :stale},
          {:ok, text} <-
            Conversations.answer_text(Conversations.questions(List.last(messages)), answers) do
-      Conversations.send(chat, text)
+      Conversations.send(chat, text, actor: {:user, user.id})
     end
   end
 

@@ -68,6 +68,34 @@ defmodule ForgeWeb.Operator.Components do
     """
   end
 
+  @doc """
+  The field that picks an effort, wherever one is picked.
+
+  **Always free text, and that is not an oversight.** Nothing discovers the levels: a worker
+  reports the models its credential may use, and effort belongs to neither a credential nor a
+  machine — so there is nothing to put in a dropdown, and a list written down here would be the
+  staleness `workflow-grammar-v1.md` § Effort refuses for `model`. The levels Claude Code takes
+  today are named in the hint below the box rather than enforced, because the next harness's will
+  differ.
+
+  Empty means the next link in the chain, which is what `fallback` says in words.
+  """
+  attr :field, Phoenix.HTML.FormField, required: true
+  attr :label, :string, default: "Effort"
+  attr :fallback, :string, required: true, doc: "what an empty choice means, in words"
+
+  def effort_field(assigns) do
+    ~H"""
+    <div>
+      <.input field={@field} type="text" label={@label} autocomplete="off" />
+
+      <p class="mt-1.5 text-[12.5px] opacity-60">
+        How hard it thinks. Claude Code takes low, medium, high, xhigh or max. Leave it for {@fallback}.
+      </p>
+    </div>
+    """
+  end
+
   # Grouped for `options_for_select`, which renders a list of `{group, options}` as `<optgroup>`.
   # The set one is last and appears only when the fleet no longer offers it: it is not a group
   # anyone picks from, it is the reason the current value is still there to be seen.

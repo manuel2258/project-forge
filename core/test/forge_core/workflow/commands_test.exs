@@ -566,6 +566,7 @@ defmodule ForgeCore.Workflow.CommandsTest do
           Map.merge(state, %{
             "env" => "build",
             "model" => "opus",
+            "effort" => "high",
             "inputs" => ["ticket"],
             "produces" => ["x.md"],
             "outcomes" => ["done"],
@@ -575,6 +576,7 @@ defmodule ForgeCore.Workflow.CommandsTest do
 
       assert messages(map) == [
                {"states.checking.budget", "not allowed on a command state"},
+               {"states.checking.effort", "not allowed on a command state"},
                {"states.checking.env", "not allowed on a command state"},
                {"states.checking.inputs", "not allowed on a command state"},
                {"states.checking.model", "not allowed on a command state"},

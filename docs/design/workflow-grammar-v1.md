@@ -94,6 +94,7 @@ states:
     prompt: agents/implement.md
     env: implement
     model: opus                       # optional; falls back to the project's, then the machine's
+    effort: high                      # optional; the same chain, for how hard it thinks
     may_invoke:
       build: { max: 40 }
       test: { max: 20, concurrent: 4 }
@@ -432,6 +433,26 @@ Parsing this file reaches no worker at all — `forge_core` has no network and n
 rule above is what the grammar checks, and it is unchanged. A workflow may name any model; only
 the form has a list.
 
+**Effort.** `effort` names how hard the harness thinks on this state's job — for Claude Code,
+one of `low`, `medium`, `high`, `xhigh`, `max`. It is optional, and the gap is filled by the same
+chain `model` walks: the state's, then the project's, then whatever the machine was built with.
+
+It is per state for the same reason `model` is, and it is a second dial rather than a facet of
+the first: the model is which mind does the work and the effort is how long it is given to think,
+and a workflow routinely wants a small model thinking hard or a large one answering quickly. A
+grammar that folded them together could not say either.
+
+**Not validated against a list of levels.** The levels belong to the harness, not to this
+platform, and `effort` is meant to reach harnesses that do not exist here yet — so a list written
+down here would be both stale and wrong for everything but Claude Code. What is checked is that it
+is a non-empty string. A level the harness does not recognise fails the job with the harness's own
+message, which is better than one the platform invents.
+
+**The product may one day offer a list; the grammar still will not.** Nothing discovers levels
+today — a worker reports the models its credential may use, and effort is a property of neither a
+credential nor a machine — so every surface that picks one is free text. If a surface ever does
+offer a list, it will be the surface's and not this file's, exactly as the model dropdown is.
+
 ## Merging
 
 ```yaml
@@ -650,8 +671,8 @@ parameter declaration to validate against, and the exact vector is recorded on t
 because it is no longer derivable from this file.
 
 **`invoke` makes a command state.** It lists commands to run on entry, and the state has no
-`prompt`, `inputs`, `produces`, `outcomes`, `budget`, `model`, `env`, `may_invoke` or `secrets` —
-each command brings its own environment, and its own secrets. It may carry `resources`, which its commands fall back to (§ Resources).
+`prompt`, `inputs`, `produces`, `outcomes`, `budget`, `model`, `effort`, `env`, `may_invoke` or
+`secrets` — each command brings its own environment, and its own secrets. It may carry `resources`, which its commands fall back to (§ Resources).
 Commands in the list run concurrently, at the ticket branch's head when the state was entered, and
 the state waits for all of them.
 
@@ -822,11 +843,12 @@ merges: re-pinning takes the default branch, never the ticket's own.
 - `version` is `1`; `initial` names a job state; every state name is unique.
 - A job state has `prompt` and `budget`, and neither `invoke` nor `exit`. A command state has
   `invoke` and `exit` and none of `prompt`, `inputs`, `produces`, `optional`, `outcomes`,
-  `budget`, `model`, `env`, `may_invoke` or `secrets`. A human state has
+  `budget`, `model`, `effort`, `env`, `may_invoke` or `secrets`. A human state has
   none of those but `produces`, and no `invoke` either; `on_enter` and `produces` are the keys it
   may carry, and what it produces is documents — never `changeset`, a group of files or a
   presentation, and never `optional`, which is a job state's.
 - `model`, where present, is a non-empty string. Its value is not checked against anything.
+- `effort`, where present, is a non-empty string, and likewise unchecked (§ Model).
 - State and artifact names are single path segments: letters, digits, `.`, `_`, `-`.
 - Every `inputs` entry is `ticket`, a command's log, or produced by a state that can run before the
 consumer; every `produces` entry other than `changeset` is produced by exactly one state. `ticket`

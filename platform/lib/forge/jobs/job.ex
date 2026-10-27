@@ -27,6 +27,9 @@ defmodule Forge.Jobs.Job do
     # A conversation's model, chosen when it was opened. A workflow job has none: its model is
     # its state's, which is in the pinned workflow rather than on the row.
     field :model, :string
+    # A conversation's effort, chosen with its model and fixed the same way. A workflow job has
+    # none, for the same reason: its effort is its state's.
+    field :effort, :string
     field :state, :string
     field :attempt, :integer
     field :spec, :map
@@ -104,6 +107,7 @@ defmodule Forge.Jobs.Job do
       :spec,
       :worker_id,
       :model,
+      :effort,
       :memory_max,
       :cores,
       :secret_names

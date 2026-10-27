@@ -439,7 +439,8 @@ can name somebody else; the host's two ways — `mix forge.worker.new --owner` a
 `Forge.Release.new_worker/2` — name an account, because a shell is past every gate there is. All
 three are `Forge.Workers.mint/2`, which takes the owner and an optional project and returns the
 row and the environment its machine needs — what a driver injects into a machine it makes: the
-worker's id and token, the platform's address and the model. The Mix task adds the project's seed
+worker's id and token, the platform's address, and the model and the effort the node names, if
+it names either. The Mix task adds the project's seed
 and a token for it, which only the measurement harness reads.
 
 **The owner is an account that may act**, read again when the machine is minted rather than
@@ -534,8 +535,8 @@ What that comes to:
 - **`member`** is most of the product: the queue and board, every project, ticket, review, job,
   chat and artifact page, all fifteen ticket and proposal endpoints of the JSON API, and every
   conversation write.
-- **`manage`** is the settings actions — the model, minting a git token and revoking one,
-  membership, and mirrors. Those tokens are admin-only to *read* as well, because the token list
+- **`manage`** is the settings actions — the model, the effort, the project's secrets, minting a
+  git token and revoking one, membership, and mirrors. Those tokens are admin-only to *read* as well, because the token list
   names the ids the revoke button needs.
 - **`approved`** is three: `/workers`, registering a project, and listing the projects you are
   in. `/workers` lists the caller's own machines only, because a row names the projects its

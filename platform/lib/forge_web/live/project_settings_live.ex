@@ -58,6 +58,7 @@ defmodule ForgeWeb.ProjectSettingsLive do
 
     assign(socket,
       model_form: to_form(%{"model" => project.model || ""}, as: :project),
+      effort_form: to_form(%{"effort" => project.effort || ""}, as: :project),
       offered: Workers.offered(project.id),
       tokens: Enum.map(tokens, &decorate(&1, now)),
       live_count: Enum.count(tokens, &Tokens.live?(&1, now)),
@@ -114,6 +115,16 @@ defmodule ForgeWeb.ProjectSettingsLive do
 
   def handle_event("model", %{"project" => %{"model" => model}}, socket) do
     case Operator.set_model(socket.assigns.project, socket.assigns.current_scope.user, model) do
+      {:ok, project} ->
+        {:noreply, socket |> assign(project: project) |> put_flash(:info, "Saved.") |> load()}
+
+      {:error, _changeset} ->
+        {:noreply, put_flash(socket, :error, "Could not save that.")}
+    end
+  end
+
+  def handle_event("effort", %{"project" => %{"effort" => effort}}, socket) do
+    case Operator.set_effort(socket.assigns.project, socket.assigns.current_scope.user, effort) do
       {:ok, project} ->
         {:noreply, socket |> assign(project: project) |> put_flash(:info, "Saved.") |> load()}
 
@@ -587,6 +598,35 @@ defmodule ForgeWeb.ProjectSettingsLive do
             field={@model_form[:model]}
             offered={@offered}
             label="Default model"
+            fallback="the machine's"
+          />
+          <button
+            type="submit"
+            class="min-h-[52px] rounded-field bg-base-content px-4 text-sm font-medium text-base-100"
+          >
+            Save it
+          </button>
+        </.form>
+      </section>
+
+      <%!-- The second dial, and behind `@manage` for the same reason: `Operator.set_effort/3`
+            refuses a plain member. Free text, because nothing discovers the levels. --%>
+      <section :if={@manage} class="mt-10">
+        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Effort</h2>
+        <p class="mt-2 text-sm/[1.55] opacity-70">
+          How hard this project's work thinks when a workflow state does not name an effort of its
+          own. Left empty, it is the machine's — the platform-wide setting.
+        </p>
+
+        <.form
+          for={@effort_form}
+          id="effort-form"
+          phx-submit="effort"
+          class="mt-4 flex flex-col gap-4"
+        >
+          <ForgeWeb.Operator.Components.effort_field
+            field={@effort_form[:effort]}
+            label="Default effort"
             fallback="the machine's"
           />
           <button

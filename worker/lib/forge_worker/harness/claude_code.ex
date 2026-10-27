@@ -28,7 +28,8 @@ defmodule ForgeWorker.Harness.ClaudeCode do
     args =
       ["-p", "--output-format", "stream-json", "--verbose"] ++
         mode_args(spec, opts) ++
-        ["--permission-mode", "bypassPermissions"] ++ model_args(opts) ++ resume_args(opts)
+        ["--permission-mode", "bypassPermissions"] ++
+        model_args(opts) ++ effort_args(opts) ++ resume_args(opts)
 
     credential = resolve(Keyword.get(opts, :credential))
 
@@ -72,10 +73,28 @@ defmodule ForgeWorker.Harness.ClaudeCode do
     end
   end
 
-  defp model_args(opts) do
-    case Keyword.get(opts, :model) do
-      nil -> []
-      model -> ["--model", model]
+  defp model_args(opts), do: flag_args(opts, :model, "--model")
+
+  # Passed through unexamined: `--effort` takes `low`, `medium`, `high`, `xhigh` or `max`, and
+  # which of them are current is the CLI's business rather than this driver's
+  # (`docs/design/workflow-grammar-v1.md` § Effort). A level it does not know fails the run with
+  # its own message. Nothing resolved is no flag at all, leaving the harness its own default.
+  defp effort_args(opts), do: flag_args(opts, :effort, "--effort")
+
+  # Nil and the empty string are both "nobody resolved one", and the empty string is the one that
+  # has to be said: a node's `FORGE_CLAUDE_EFFORT` can be present and empty, and this is the last
+  # place that can refuse it before it becomes `--effort ''` on a command line and fails the run.
+  # Unexamined otherwise — the value is one argv slot and never a shell word, so a level the
+  # harness rejects fails in the harness's own words.
+  #
+  # The guard also drops a value that is not a string at all, where the older `case` would have
+  # put it in argv. **That half is an equivalent mutant and must not have a test written for it**:
+  # `put_model/2` and `put_effort/2` admit only binaries, and `runtime.exs` yields a string or
+  # nil, so no caller can reach this clause with anything else.
+  defp flag_args(opts, key, flag) do
+    case Keyword.get(opts, key) do
+      value when is_binary(value) and value != "" -> [flag, value]
+      _unset_or_empty -> []
     end
   end
 

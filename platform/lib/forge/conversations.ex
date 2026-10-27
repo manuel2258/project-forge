@@ -84,7 +84,7 @@ defmodule Forge.Conversations do
 
   defp insert(project, text, opts) do
     ticket = Keyword.get(opts, :ticket)
-    actor = Keyword.get(opts, :actor, :system)
+    actor = actor(opts)
     id = Ecto.UUID.generate()
 
     Multi.new()
@@ -99,6 +99,8 @@ defmodule Forge.Conversations do
         # starts, so changing it later means a new process. A conversation that wants a different
         # one is a conversation you close and open again.
         model: model(opts),
+        # The second dial, chosen and fixed with the model and for the same reason.
+        effort: effort(opts),
         memory_max: Keyword.fetch!(opts, :memory),
         cores: Keyword.fetch!(opts, :cores),
         # Fixed for the life of every process it has, as the model is; a reopened conversation
@@ -136,11 +138,58 @@ defmodule Forge.Conversations do
     end
   end
 
+  # Who caused the event, for every event this module logs. `:system` is the honest default and
+  # the common case — a worker reporting, or the platform acting on a machine that is gone — and
+  # a person is named by the caller that checked them: every `Operator` entry point that holds a
+  # `%User{}` sets it, and each sets it outright rather than with `put_new`, so nothing off the
+  # wire can propose an actor of its own.
+  #
+  # A `chat.message`'s actor is the person who typed it *through `Operator`*; `mix forge.chat`
+  # names nobody, because a shell has no account to name. It is for the log, which otherwise
+  # could not say who said what in a chat two members share.
+  #
+  # **It is not invisible, though no page changes.** `fold/2` hard-codes `role: :user` whatever
+  # the actor, so the conversation and the queue read as before — but
+  # `ForgeWeb.Api.Render.event/1` emits `actor` verbatim, so the ticket and job event endpoints
+  # return the member's id where a second message used to say `system`
+  # (`docs/design/conversations.md` § Taking a transition, under the refusal's three reasons).
+  defp actor(opts), do: Keyword.get(opts, :actor, :system)
+
   # Empty is not a choice: it resolves to the project's, which is what nil already means.
-  defp model(opts) do
-    case opts |> Keyword.get(:model) |> to_string() |> String.trim() do
+  defp model(opts), do: chosen(opts, :model)
+
+  defp effort(opts), do: chosen(opts, :effort)
+
+  # **Only a string is a choice**, and that is a guard rather than a formality: these values come
+  # off a form, and `chat[model][x]=1` or `chat[model][]=hi&chat[model][]=gh` arrives as a map or
+  # a list. `to_string/1` raised `Protocol.UndefinedError` on the first — a crafted submit crashing
+  # the LiveView instead of being refused — and quietly returned `"high"` for the second, opening
+  # a conversation at a level nobody typed. Anything that is not a string resolves to nil, which
+  # is the project's default: the same answer as naming nothing, which is what it is.
+  #
+  # `chat_new_live.ex` guards the `text` param the same way and says why; this is the same lesson
+  # one field over, and one `chosen/2` covers both dials.
+  #
+  # `Projects.Project` has its own copy of `blank_to_nil/1` for the same reason on the settings
+  # path. Not shared: one is a schema's changeset step and the other a context's reading of
+  # caller options, and a six-line pure function is a worse thing to couple two layers over than
+  # to write twice.
+  #
+  # The trim is load-bearing too: the stored value reaches `--model`/`--effort` as one argv slot,
+  # so `"  high  "` from a paste has to lose its padding here rather than fail on the machine.
+  # Ecto's `cast` folds a *whitespace-only* value to nil on its own, so only the padded-but-real
+  # case proves this line — which is what `effort_test.exs` and `model_test.exs` each assert.
+  defp chosen(opts, key) do
+    case Keyword.get(opts, key) do
+      value when is_binary(value) -> blank_to_nil(value)
+      _absent_or_not_a_string -> nil
+    end
+  end
+
+  defp blank_to_nil(value) do
+    case String.trim(value) do
       "" -> nil
-      model -> model
+      trimmed -> trimmed
     end
   end
 
@@ -233,7 +282,7 @@ defmodule Forge.Conversations do
   end
 
   defp do_send(%Job{kind: :chat} = chat, text, opts) do
-    actor = Keyword.get(opts, :actor, :system)
+    actor = actor(opts)
 
     Multi.new()
     |> Events.log(:message, "chat.message", actor, %{
@@ -286,15 +335,41 @@ defmodule Forge.Conversations do
   ending itself, which is what the worker's report would have caused anyway. It used to ask
   whether the row named a worker, and a pending row can name one: `Jobs.assign/2` puts a row back
   to `:pending` when the assignment cannot be pushed, and leaves the worker it chose.
+
+  `opts` carries `:actor` — who is ending it, for the event. A person closing their own
+  conversation and a machine reporting that it stopped are different facts, and only the caller
+  that authorised the person can tell them apart (`Operator.close_chat/3`).
+
+  **A running conversation is ended by its worker, so the request is logged here and the ending
+  there.** The platform cannot write `chat.ended` on this path: the worker finishes its turn
+  first and reports, and that report is the machine's act and says so. Asking is the person's
+  act, and `chat.close_requested` is where the log keeps it — which is also the only record if
+  the worker never reports back (§ Ending one).
   """
-  @spec close(Job.t(), String.t()) :: :ok | {:error, :not_live} | {:error, term()}
-  def close(%Job{kind: :chat} = chat, reason \\ "closed") do
+  @spec close(Job.t(), String.t(), keyword()) :: :ok | {:error, :not_live} | {:error, term()}
+  def close(%Job{kind: :chat} = chat, reason \\ "closed", opts \\ []) do
     case Repo.one(from j in Job, where: j.id == ^chat.id, select: {j.status, j.worker_id}) do
       {:running, worker_id} when is_binary(worker_id) ->
+        # Told, like every other event this module writes. Without it two members with the
+        # conversation open see nothing until something else forces a reload — and the case that
+        # never self-heals is the machine-lost one this event exists for, where no turn is coming
+        # to redraw the page.
+        {:ok, event} =
+          Events.append("chat.close_requested", actor(opts), %{
+            ticket_id: chat.ticket_id,
+            job_id: chat.id,
+            payload: %{"reason" => reason}
+          })
+
+        Events.notify_job(chat.id, event)
+        Events.notify(chat.ticket_id)
+
         deliver(worker_id, chat.id, "close", %{"reason" => reason})
 
       {status, _worker_id} ->
-        if live?(status), do: ended_here(chat, status, reason), else: {:error, :not_live}
+        if live?(status),
+          do: ended_here(chat, status, reason, opts),
+          else: {:error, :not_live}
     end
   end
 
@@ -302,10 +377,10 @@ defmodule Forge.Conversations do
   # between, and then there is a worker to tell instead, so it is asked again. The retry is out
   # of a test's reach — it needs a pass to commit between the read above and the lock in
   # `ended/4`, two statements apart in this process — so `ended/4`'s refusal is what is tested.
-  defp ended_here(chat, seen, reason) do
-    case ended(chat, nil, reason, expect: seen) do
+  defp ended_here(chat, seen, reason, opts) do
+    case ended(chat, nil, reason, Keyword.merge(opts, expect: seen)) do
       {:ok, _chat} -> :ok
-      {:error, {:row, {:changed, _now}}} -> close(chat, reason)
+      {:error, {:row, {:changed, _now}}} -> close(chat, reason, opts)
       {:error, _reason} = error -> error
     end
   end
@@ -966,7 +1041,7 @@ defmodule Forge.Conversations do
       )
     )
     |> Runs.close(chat.id, DateTime.utc_now(:second))
-    |> Events.log(:ended, "chat.ended", :system, %{
+    |> Events.log(:ended, "chat.ended", actor(opts), %{
       ticket_id: chat.ticket_id,
       job_id: chat.id,
       payload: said_refused(%{"reason" => reason, "commit" => commit}, forget?)
@@ -1057,9 +1132,11 @@ defmodule Forge.Conversations do
   the ticket's, as it stands now — and in the same transaction, the way `open/3` does: a worker
   handed a branch that does not exist refuses the conversation minutes later. Closing deletes a
   conversation's branch and a merge does too, and neither makes it one that cannot be reopened.
+
+  `opts` carries `:actor`, as `close/3` does: reopening is a person's act, and the log says whose.
   """
-  @spec reopen(Job.t()) :: {:ok, Job.t()} | {:error, :live} | {:error, term()}
-  def reopen(%Job{kind: :chat} = chat) do
+  @spec reopen(Job.t(), keyword()) :: {:ok, Job.t()} | {:error, :live} | {:error, term()}
+  def reopen(%Job{kind: :chat} = chat, opts \\ []) do
     Multi.new()
     |> Multi.run(:dormant, fn repo, _changes -> dormant(repo, chat) end)
     |> Multi.update(:job, fn %{dormant: row} ->
@@ -1072,7 +1149,7 @@ defmodule Forge.Conversations do
       })
     end)
     |> Multi.run(:branch, fn _repo, _changes -> restore_branch(chat) end)
-    |> Events.log(:reopened, "chat.reopened", :system, fn %{branch: branch} ->
+    |> Events.log(:reopened, "chat.reopened", actor(opts), fn %{branch: branch} ->
       %{ticket_id: chat.ticket_id, job_id: chat.id, payload: %{"branch" => branch}}
     end)
     |> Repo.transaction()

@@ -1588,9 +1588,10 @@ defmodule Forge.Workers do
     end
   end
 
-  # What the machine is given for its harness at creation, as `{name, value}` pairs: the model,
-  # when the node names one, and nothing else. The driver injects it, and `mint/2` returns it for a
-  # machine its owner provisions by hand, which needs exactly what the driver would have given it.
+  # What the machine is given for its harness at creation, as `{name, value}` pairs: the model and
+  # the effort, each when the node names one, and nothing else. The driver injects it, and `mint/2`
+  # returns it for a machine its owner provisions by hand, which needs exactly what the driver
+  # would have given it.
   #
   # **No credential, and that is the design rather than an omission.** A machine used to boot with
   # the node's `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` in its environment and spend it on
@@ -1599,9 +1600,20 @@ defmodule Forge.Workers do
   # node's variables are not read at all. `executable` is not here either: it is a path on this
   # host, and the worker image has its own.
   defp harness_env do
-    case Keyword.get(Forge.Jobs.config(:harness_opts, []), :model) do
-      model when is_binary(model) -> [{"FORGE_CLAUDE_MODEL", model}]
-      _other -> []
+    opts = Forge.Jobs.config(:harness_opts, [])
+
+    harness_pair(opts, :model, "FORGE_CLAUDE_MODEL") ++
+      harness_pair(opts, :effort, "FORGE_CLAUDE_EFFORT")
+  end
+
+  # Only what the node actually has an opinion about. An empty string is *not* an opinion: it
+  # reads on the machine as "the empty model", the machine passes `--model ''`, and every job
+  # there fails. `FORGE_CLAUDE_MODEL=` in a compose file or a unit is how that happens — the
+  # variable is present and empty — so emptiness is rejected here and not only nil.
+  defp harness_pair(opts, key, name) do
+    case Keyword.get(opts, key) do
+      value when is_binary(value) and value != "" -> [{name, value}]
+      _unset_or_empty -> []
     end
   end
 

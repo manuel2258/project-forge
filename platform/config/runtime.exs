@@ -55,9 +55,19 @@ harness_opts =
   Enum.reject(
     [
       executable: System.get_env("FORGE_CLAUDE_EXECUTABLE"),
-      model: System.get_env("FORGE_CLAUDE_MODEL")
+      model: System.get_env("FORGE_CLAUDE_MODEL"),
+      effort: System.get_env("FORGE_CLAUDE_EFFORT")
     ],
-    fn {_key, value} -> is_nil(value) end
+    # Unset and set-to-nothing are the same statement: this node has no opinion.
+    #
+    # **Defence in depth here, and only that.** The platform spawns no harness: the only reader
+    # of this key is `Workers.harness_env/0`, which forwards `model` and `effort` to a machine it
+    # provisions and leaves `executable` behind on purpose (its own comment, above). Both dials
+    # are refused again downstream — `Workers.harness_pair/3` and the driver's `flag_args/3` each
+    # reject `""` — so removing the `""` from this line changes nothing a job can see.
+    # `executable` is read on the *worker*, and `worker/config/runtime.exs` is where the same
+    # filter is load-bearing and where the test for it lives.
+    fn {_key, value} -> value in [nil, ""] end
   )
 
 # Web push needs VAPID keys; generate them once with `mix generate.vapid.keys`.

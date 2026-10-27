@@ -20,6 +20,7 @@ states:
     prompt: agents/implement.md
     env: implement
     model: opus
+    effort: high
     inputs: [plan.md]
     produces: [implementation.md, changeset, commit-message]
     outcomes: [done, plan_invalid]

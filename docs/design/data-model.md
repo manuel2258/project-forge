@@ -11,8 +11,8 @@ Times are UTC.
 **project** — `name`, `repo_path` (bare repository on the orchestrator; the API only ever
 sets `<repos_dir>/<name>.git`, an arbitrary path needs the command line), `default_branch`,
 `seed_id` (the seed a worker fetches for this project, set by `mix forge.seed.publish`; null means
-none was ever published and the job clones cold — `design/storage.md`), `model` (the project's
-default when a state names none; null means the machine's).
+none was ever published and the job clones cold — `design/storage.md`), `model` and `effort` (the
+project's defaults when a state names neither; null means the machine's).
 A mirror is deliberately **not** a column: it lives in the repository's own `git config` under
 `forge.mirror.<name>.url`, because the `post-receive` hook is what pushes it and a hook can read
 only git config. See `design/git-hosting.md`.
@@ -48,9 +48,9 @@ on another machine puts back; `design/claude-code-events.md` § Resume), `resume
 previous attempt of the state whose session a new attempt forks, set when the ticket came back to
 a state that attempt finished in, and cleared when a resume is refused), `worker_id` (nullable),
 `credential_id` (the inference credential its current or last run spent, nullable until it first
-starts), `model` (a conversation's, chosen when it was opened; a workflow job's is its state's and
-is not on the row), `memory_max` and `cores` (what the scheduler gates on, resolved once at creation
-and never rewritten — `design/provisioning.md` § What a job asks for), `secret_names` (the project
+starts), `model` and `effort` (a conversation's, chosen when it was opened; a workflow job's are
+its state's and are not on the row), `memory_max` and `cores` (what the scheduler gates on,
+resolved once at creation and never rewritten — `design/provisioning.md` § What a job asks for), `secret_names` (the project
 secrets it asks for: its state's or command's `secrets`, or what was picked for a conversation —
 names only, resolved to values at each assignment; `design/secrets.md` § Delivery), `started_at`,
 `finished_at`.

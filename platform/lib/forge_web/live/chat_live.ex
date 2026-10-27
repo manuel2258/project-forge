@@ -657,6 +657,7 @@ defmodule ForgeWeb.ChatLive do
       <.fact label="project" value={@project.name} />
       <.fact :if={@ticket} label="ticket" value={"##{@ticket.number} #{@ticket.title}"} />
       <.fact label="model" value={Jobs.model_for(@chat) || "the platform's"} />
+      <.fact label="effort" value={Jobs.effort_for(@chat) || "the platform's"} />
       <.fact label="turns" value={to_string(@chat.turns)} />
       <.fact label="spent" value={Format.windows(@chat.cost_usd) || "—"} />
       <.fact label="branch" value={"chat/" <> @chat.id} />

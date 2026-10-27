@@ -31,6 +31,34 @@ defmodule ForgeWeb.ChatLiveTest do
     %{project: project, chat: chat}
   end
 
+  # The rail is the one surface that shows a job's resolved model, so it is the one that has to
+  # show the resolved effort beside it (`refinement.md`). Both are the chain's answer, not the
+  # row's: this chat named neither, so both read as the project's.
+  test "the rail shows the resolved model and effort together", %{
+    conn: conn,
+    project: project,
+    chat: chat
+  } do
+    {:ok, _project} = Projects.set_model(project, "opus")
+    {:ok, _project} = Projects.set_effort(project, "xhigh")
+
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+    assert has_element?(view, "dt", "model")
+    assert has_element?(view, "dt", "effort")
+    assert has_element?(view, "dd", "opus")
+    assert has_element?(view, "dd", "xhigh")
+  end
+
+  # Nothing anywhere in the chain means the harness's own default, which the page says in words
+  # rather than drawing an empty row.
+  test "an effort nothing resolved reads as the platform's", %{conn: conn, chat: chat} do
+    {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+    assert has_element?(view, "dt", "effort")
+    assert has_element?(view, "dd", "the platform's")
+  end
+
   defp text(chat, text),
     do:
       :ok =

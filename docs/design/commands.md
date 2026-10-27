@@ -115,10 +115,11 @@ The cost is row count: forty builds on a ticket is forty rows. That is the right
 each a real execution with a real result — and the surfaces group them under the job that invoked
 them.
 
-A command job carries no harness, no credential, no model and no budget in turns or dollars. Its
-spec is the script, the argv, the env, the commit, the resources and the timeout. What it reports
-is its exit status, mapped by the invoking state's `exit` map when a state invoked it, and returned
-raw to the agent when an agent did; its own outcome says only whether it ran to one (below).
+A command job carries no harness, no credential, no model, no effort and no budget in turns or
+dollars. Its spec is the script, the argv, the env, the commit, the resources and the timeout.
+What it reports is its exit status, mapped by the invoking state's `exit` map when a state invoked
+it, and returned raw to the agent when an agent did; its own outcome says only whether it ran to
+one (below).
 
 **What the row holds, as built.** Its `state` is the invoking state's — the command state's own
 name, or the agent's — so `Jobs.live?/2`, which refuses a person's transition while the state has

@@ -549,9 +549,10 @@ defmodule ForgeWeb.ReconnectTest do
   # `authorization_inventory_test.exs`: a claim in a note with a way to fail.
   #
   # A form's box is often not written in the form: `message_box/1` draws the operator's,
-  # `open_question/1` the question form's, `model_field/1` and `template_fields/1` the settings
-  # ones. The first version of this scan read only a form's own body and so saw none of them —
-  # which is how a seventh form lost what was typed while the note said six. It now asks which
+  # `open_question/1` the question form's, `model_field/1`, `effort_field/1` and
+  # `template_fields/1` the settings ones. The first version of this scan read only a form's own
+  # body and so saw none of them — which is how a seventh form lost what was typed while the
+  # note said six. It now asks which
   # components draw a box, to a fixpoint, and counts a call to one of those.
   #
   # What it still does not reach is a box drawn outside a form altogether. No page draws one
@@ -567,6 +568,7 @@ defmodule ForgeWeb.ReconnectTest do
       {"live/project_settings_live.ex", "add-mirror"} => "a mirror's url, user and token",
       {"live/workers_live.ex", "save"} => "a worker's memory and cores",
       {"live/project_settings_live.ex", "model"} => "a model name, while no worker is connected",
+      {"live/project_settings_live.ex", "effort"} => "an effort level, which is always a box",
       {"live/user_live/login.ex", "submit_magic"} => "an email, to be sent a link",
       {"live/user_live/login.ex", "submit_password"} => "an email and a password"
     }

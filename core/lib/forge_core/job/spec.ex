@@ -21,6 +21,14 @@ defmodule ForgeCore.Job.Spec do
   # to be threaded through `Dir.prepare/3`, `Dir.collect/2`, `Prompt.compose/2`, `Slice.prepare/1`
   # and the whole wire format, to distinguish two things that are the same job everywhere else.
   @enforce_keys [:job_id, :branch]
+  # `effort` is this struct's 32nd field, and at 32 the BEAM stores a struct as a hashmap rather
+  # than a flatmap — which is what `Credo.Check.Warning.StructFieldAmount` is about. Suppressed
+  # here and nowhere else: one of these exists per running job, so the cost is bytes, and the
+  # alternative is folding `model` and `effort` into a nested harness field — a change to the
+  # wire format and to every site that reads either, which is a ticket of its own rather than a
+  # thing to do on the way past. Raising the check's limit for the whole project would hide the
+  # next struct to cross the line, which is the one that might deserve the warning.
+  # credo:disable-for-next-line Credo.Check.Warning.StructFieldAmount
   defstruct [
     :job_id,
     :ticket,
@@ -33,6 +41,10 @@ defmodule ForgeCore.Job.Spec do
     # for whatever the machine was built with. The worker does not re-decide it — the platform
     # knows the state and the project, and the machine knows neither.
     :model,
+    # How hard this job thinks, already resolved the same way `model` is: the state's effort, else
+    # the project's, else nil for whatever the machine was built with. The worker does not
+    # re-decide it either.
+    :effort,
     :commit,
     :branch,
     :budget,
@@ -141,6 +153,7 @@ defmodule ForgeCore.Job.Spec do
           prompt_path: String.t() | nil,
           env: String.t() | nil,
           model: String.t() | nil,
+          effort: String.t() | nil,
           commit: String.t(),
           branch: String.t(),
           # At run time also `ticket_left` and `ticket_limit`, and `declared` and `lowered_by`
@@ -271,6 +284,7 @@ defmodule ForgeCore.Job.Spec do
       prompt_path: get.(:prompt_path),
       env: get.(:env),
       model: get.(:model),
+      effort: get.(:effort),
       commit: get.(:commit),
       branch: get.(:branch),
       budget: budget_from_map(get.(:budget)),

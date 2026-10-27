@@ -90,6 +90,49 @@ defmodule ForgeWorker.Harness.ClaudeCodeTest do
       refute "--resume" in args
     end
 
+    # The second dial beside `--model`, on both invocation shapes: a conversation wants it as
+    # much as a workflow state does, and the driver adds it in one place for both
+    # (`docs/design/claude-code-events.md`). Passed through unexamined — the levels are the CLI's.
+    test "adds the resolved effort as a flag, on either shape, and only when one was resolved" do
+      {_exe, args, _env} = ClaudeCode.command(spec(), "/jobs/j", effort: "xhigh")
+      assert Enum.take(args, -2) == ["--effort", "xhigh"]
+
+      {_exe, args, _env} =
+        ClaudeCode.command(spec(), "/jobs/j", mode: :streaming, effort: "low", model: "haiku")
+
+      assert Enum.take(args, -4) == ["--model", "haiku", "--effort", "low"]
+
+      # No effort resolved means no flag, which leaves the harness its own default rather than
+      # pinning one the platform invented.
+      {_exe, args, _env} = ClaudeCode.command(spec(), "/jobs/j", model: "haiku")
+      refute "--effort" in args
+
+      {_exe, args, _env} = ClaudeCode.command(spec(), "/jobs/j", mode: :streaming)
+      refute "--effort" in args
+    end
+
+    # **An empty value is an unset one.** `is_binary("")` is true, so the earlier guard let
+    # `--effort ''` and `--model ''` through, and a node whose `FORGE_CLAUDE_EFFORT=` is present
+    # but empty minted that into every machine it made — failing every run there, while
+    # `docs/design/claude-code-events.md` promised "else no flag". This driver is the last place
+    # that can refuse it before it is a command line.
+    test "an empty model or effort is no flag at all, on either shape" do
+      {_exe, args, _env} = ClaudeCode.command(spec(), "/jobs/j", model: "", effort: "")
+      refute "--model" in args
+      refute "--effort" in args
+
+      {_exe, args, _env} =
+        ClaudeCode.command(spec(), "/jobs/j", mode: :streaming, model: "", effort: "")
+
+      refute "--model" in args
+      refute "--effort" in args
+
+      # And a real value either side of an empty one still arrives.
+      {_exe, args, _env} = ClaudeCode.command(spec(), "/jobs/j", model: "", effort: "high")
+      assert Enum.take(args, -2) == ["--effort", "high"]
+      refute "--model" in args
+    end
+
     # A conversation has no turn ceiling — it ends when a person stops talking — and no state to
     # take a cost ceiling from, so the caller passes what is left of the day instead.
     test "streaming mode takes messages on stdin and drops the turn ceiling" do

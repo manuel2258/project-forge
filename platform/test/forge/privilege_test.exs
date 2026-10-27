@@ -71,6 +71,18 @@ defmodule Forge.PrivilegeTest do
       assert Projects.get!(project.id).model == "claude-opus-5"
     end
 
+    # The second dial needs its own guard, not the first one's: a setter reached without one is
+    # a member turning the whole project's spend up.
+    test "a member cannot change the effort", %{project: project, member: member} do
+      assert {:error, :forbidden} = Operator.set_effort(project, member, "max")
+      assert Projects.get!(project.id).effort == nil
+    end
+
+    test "an admin can change the effort", %{project: project, admin: admin} do
+      assert {:ok, _project} = Operator.set_effort(project, admin, "high")
+      assert Projects.get!(project.id).effort == "high"
+    end
+
     test "a member cannot mint a git token", %{project: project, member: member} do
       assert {:error, :forbidden} = Operator.issue_token(project, member, [])
       assert Forge.Git.Tokens.list(project) == []

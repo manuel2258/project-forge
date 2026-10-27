@@ -26,6 +26,126 @@ defmodule Forge.ConversationsTest do
     %{project: project}
   end
 
+  # **Who ended it, and who brought it back.** Both events recorded `:system` while the caller
+  # that authorised the person was holding them — the same shape `project.model_set` had, and the
+  # same module already showed the fix in `chat.opened`. A member can end another member's
+  # conversation, so a log that cannot say whose hand it was cannot answer the one question
+  # anybody would ask of it.
+  describe "attribution" do
+    # A plain member, not an admin: closing and reopening need `:use`, which is what the finding
+    # this describe exists for is about — one member ending another's conversation. The setup used
+    # to take `join!/3`'s `:admin` default and so proved less than the comment claimed.
+    setup %{project: project} do
+      person = Forge.AccountsFixtures.user_fixture()
+      join!(project, person, :member)
+
+      %{person: person}
+    end
+
+    test "ending one by hand names the person who did it", context do
+      %{project: project, person: person} = context
+      chat = chat_fixture(%{project: project})
+
+      assert :ok = Forge.Operator.close_chat(chat, person, "closed")
+
+      events = Events.for_job(chat.id)
+
+      assert [ended] = Enum.filter(events, &(&1.type == "chat.ended"))
+      assert ended.actor == %{"kind" => "user", "id" => person.id}
+
+      # One event on this path, which is what the note claims: asking and ending are the same
+      # step when there is no machine to tell. Appending the request here too would pass every
+      # other assertion and make that false.
+      assert Enum.filter(events, &(&1.type == "chat.close_requested")) == []
+    end
+
+    test "reopening one names the person who did it", context do
+      %{project: project, person: person} = context
+      chat = chat_fixture(%{project: project})
+      {:ok, _ended} = Conversations.ended(chat, nil, "idle")
+
+      assert {:ok, _chat} = Forge.Operator.reopen_chat(chat, person)
+
+      assert [reopened] = Enum.filter(Events.for_job(chat.id), &(&1.type == "chat.reopened"))
+      assert reopened.actor == %{"kind" => "user", "id" => person.id}
+    end
+
+    # **The common case, and the one the last round missed.** `mark_started/3` sets `:running` and
+    # a `worker_id` in one changeset, so every conversation anybody is actually talking to has a
+    # machine — and on that path the platform cannot write `chat.ended` at all: it asks the
+    # worker, which reports later, and that report is the machine's act. The person's act is the
+    # asking, and `chat.close_requested` is where the log keeps it. The earlier test used a
+    # `:pending` fixture and so only ever exercised the branch with no machine.
+    test "asking a running conversation to end names the person who asked", context do
+      %{project: project, person: person} = context
+      {:ok, worker, _token} = Forge.Workers.create(%{provider: "fake"})
+      chat = chat_fixture(%{project: project, status: :running, worker_id: worker.id})
+
+      assert :ok = Forge.Operator.close_chat(chat, person, "closed")
+
+      events = Events.for_job(chat.id)
+
+      assert [requested] = Enum.filter(events, &(&1.type == "chat.close_requested"))
+      assert requested.actor == %{"kind" => "user", "id" => person.id}
+      assert requested.payload == %{"reason" => "closed"}
+
+      # And the ending itself is still the worker's to report: nothing here pretends it happened.
+      assert Enum.filter(events, &(&1.type == "chat.ended")) == []
+    end
+
+    # The default is not a shortcut: a worker reporting that its conversation stopped, and the
+    # platform ending one whose machine is gone, are the platform's own acts and say so.
+    test "a machine's own report is still the system's", %{project: project} do
+      chat = chat_fixture(%{project: project})
+
+      {:ok, _ended} = Conversations.ended(chat, nil, "machine_lost")
+
+      assert [ended] = Enum.filter(Events.for_job(chat.id), &(&1.type == "chat.ended"))
+      assert ended.actor == %{"kind" => "system", "id" => nil}
+    end
+
+    # **Answering a question is the other half, and it was threaded without being shown.** The
+    # one existing test that reaches `answer_chat/4` stops at its `{:error, :stale}` return and
+    # never gets to the send, so reverting that line failed nothing: round four of this ticket's
+    # review ran 284 tests across six files against the revert and got none.
+    test "an answer to a question names whoever answered it", context do
+      %{project: project, person: person} = context
+      {:ok, chat} = Conversations.open(project, "which?")
+
+      text(chat, "```question\nkey: rows\ntext: How many rows?\n```\n")
+      {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.01))
+      reply = chat.id |> Conversations.messages() |> Conversations.reply_ref()
+
+      assert {:ok, _sent} =
+               Forge.Operator.answer_chat(chat, person, reply, %{"rows" => %{text: "ten"}})
+
+      answered =
+        Events.for_job(chat.id) |> Enum.filter(&(&1.type == "chat.message")) |> List.last()
+
+      assert answered.actor == %{"kind" => "user", "id" => person.id}
+      assert answered.payload["text"] =~ "ten"
+    end
+
+    # Every message after the first recorded `:system` while `Operator` held the person who typed
+    # it. No page changes — `fold/2` hard-codes `role: :user` whatever the actor — but the JSON
+    # API's event endpoints emit it, and it is the only thing that lets the log say which of two
+    # members said what.
+    test "a message names whoever typed it", context do
+      %{project: project, person: person} = context
+      chat = chat_fixture(%{project: project})
+
+      {:ok, _sent} = Forge.Operator.send_chat(chat, person, "and another thing")
+
+      # One, not two: `chat_fixture/1` inserts the row rather than going through `open/3`, so
+      # there is no opening message here — this is the second-message path, which is the one
+      # that recorded `:system`.
+      assert [typed] = Events.for_job(chat.id) |> Enum.filter(&(&1.type == "chat.message"))
+
+      assert typed.actor == %{"kind" => "user", "id" => person.id}
+      assert typed.payload == %{"text" => "and another thing"}
+    end
+  end
+
   describe "opening one" do
     test "a project chat gets a branch off the default branch", %{project: project} do
       assert {:ok, chat} = Conversations.open(project, "what is this repository?")

@@ -259,7 +259,11 @@ defmodule Forge.Operator do
           {:ok, Job.t()} | {:error, term()}
   def open_chat(%Project{} = project, %User{} = user, text, opts \\ []) do
     with :ok <- allow(project, user, :use) do
-      Conversations.open(project, text, Keyword.put_new(opts, :actor, {:user, user.id}))
+      # Set outright, not `put_new`: this function has just checked who the person is, and an
+      # actor a caller proposed would be the one thing in the event nobody verified. No path
+      # reaches it with one today — `chat_new_live.ex` is the only caller and builds these opts
+      # from literals — which is why this is a principle rather than a fix.
+      Conversations.open(project, text, Keyword.put(opts, :actor, {:user, user.id}))
     end
   end
 
@@ -272,7 +276,8 @@ defmodule Forge.Operator do
   """
   @spec send_chat(Job.t(), User.t(), String.t(), keyword()) :: {:ok, term()} | {:error, term()}
   def send_chat(%Job{kind: :chat} = chat, %User{} = user, text, opts \\ []) do
-    with :ok <- allow(chat, user, :use), do: Conversations.send(chat, text, opts)
+    with :ok <- allow(chat, user, :use),
+         do: Conversations.send(chat, text, Keyword.put(opts, :actor, {:user, user.id}))
   end
 
   @doc """
@@ -290,7 +295,7 @@ defmodule Forge.Operator do
            (reply != nil and Conversations.reply_ref(messages) == reply) || {:error, :stale},
          {:ok, text} <-
            Conversations.answer_text(Conversations.questions(List.last(messages)), answers) do
-      Conversations.send(chat, text)
+      Conversations.send(chat, text, actor: {:user, user.id})
     end
   end
 
@@ -303,13 +308,15 @@ defmodule Forge.Operator do
   @doc "Ends a conversation."
   @spec close_chat(Job.t(), User.t(), String.t()) :: :ok | {:error, term()}
   def close_chat(%Job{kind: :chat} = chat, %User{} = user, reason \\ "closed") do
-    with :ok <- allow(chat, user, :use), do: Conversations.close(chat, reason)
+    with :ok <- allow(chat, user, :use),
+         do: Conversations.close(chat, reason, actor: {:user, user.id})
   end
 
   @doc "Reopens an ended conversation."
   @spec reopen_chat(Job.t(), User.t()) :: {:ok, Job.t()} | {:error, term()}
   def reopen_chat(%Job{kind: :chat} = chat, %User{} = user) do
-    with :ok <- allow(chat, user, :use), do: Conversations.reopen(chat)
+    with :ok <- allow(chat, user, :use),
+         do: Conversations.reopen(chat, actor: {:user, user.id})
   end
 
   @doc "Merges a conversation's branch."
@@ -332,7 +339,14 @@ defmodule Forge.Operator do
   @spec set_model(Project.t(), User.t(), String.t() | nil) ::
           {:ok, Project.t()} | {:error, term()}
   def set_model(%Project{} = project, %User{} = user, model) do
-    with :ok <- allow(project, user, :manage), do: Projects.set_model(project, model)
+    with :ok <- allow(project, user, :manage), do: Projects.set_model(project, model, user)
+  end
+
+  @doc "Sets the project's default effort."
+  @spec set_effort(Project.t(), User.t(), String.t() | nil) ::
+          {:ok, Project.t()} | {:error, term()}
+  def set_effort(%Project{} = project, %User{} = user, effort) do
+    with :ok <- allow(project, user, :manage), do: Projects.set_effort(project, effort, user)
   end
 
   @doc """

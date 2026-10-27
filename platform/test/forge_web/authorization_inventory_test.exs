@@ -162,9 +162,10 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"project_settings_live.ex", "issue"} => :manage,
     {"project_settings_live.ex", "revoke"} => :manage,
     {"project_settings_live.ex", "model"} => :manage,
+    {"project_settings_live.ex", "effort"} => :manage,
     {"project_settings_live.ex", "add-member"} => :manage,
     {"project_settings_live.ex", "remove-member"} => :manage,
-    # Same check as `issue`/`revoke`/`model`/`add-member`/`remove-member` above:
+    # Same check as `issue`/`revoke`/`model`/`effort`/`add-member`/`remove-member` above:
     # `Projects.put_mirror/5` and `delete_mirror/3` both call `manageable/2`.
     # The version id is the client's; `Operator.accept_proposal/4` and `decline_proposal/3` resolve
     # it to its project and refuse a non-member (`allow_proposal/2`).

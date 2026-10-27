@@ -11,7 +11,7 @@ defmodule ForgeWorker.Harness do
 
   @typedoc """
   Options a runner passes through: `:executable`, `:credential`, `:resume_session`, `:model`,
-  `:mode` and `:max_cost`. `:credential` is `{:api_key, value}`, `{:oauth, value}`, or a
+  `:effort`, `:mode` and `:max_cost`. `:credential` is `{:api_key, value}`, `{:oauth, value}`, or a
   zero-arity function returning one, so the secret never sits in process state or crash reports —
   which is how a job's own credential arrives, sealed until the function runs
   (`ForgeWorker.Job.Credential`).

@@ -14,9 +14,22 @@ if config_env() != :test do
     Enum.reject(
       [
         executable: System.get_env("FORGE_CLAUDE_EXECUTABLE"),
-        model: System.get_env("FORGE_CLAUDE_MODEL")
+        model: System.get_env("FORGE_CLAUDE_MODEL"),
+        effort: System.get_env("FORGE_CLAUDE_EFFORT")
       ],
-      fn {_key, value} -> is_nil(value) end
+      # Unset and set-to-nothing are the same statement: this machine has no opinion.
+      #
+      # **`executable` is why this filter cannot be pruned**, and this is the file where that is
+      # true. `ForgeWorker.Harness.ClaudeCode.command/3` reads it as
+      # `Keyword.get(opts, :executable, "claude")`, which hands back `""` for a key that is
+      # present and empty — so a machine booted with `FORGE_CLAUDE_EXECUTABLE=` spawned
+      # `nix develop … --command "" …` and failed every job on it. The fallback to `claude` only
+      # happens if the key is absent, which is what this line makes it.
+      #
+      # The two dials are refused again downstream (`flag_args/3`), so for them this is defence
+      # in depth; `executable` has nothing after it. `runtime_config_test.exs` beside this
+      # release holds the rule.
+      fn {_key, value} -> value in [nil, ""] end
     )
 
   config :forge_worker,

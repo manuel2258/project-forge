@@ -190,9 +190,11 @@ sources, kept apart so each can be checked against its own:
 
 - **Ours**: the prefixes `FORGE_`, `ANTHROPIC_`, `CLAUDE_`, `NODE_`, `BUN_`, `NPM_CONFIG_`,
   `NIX_`, `GIT_`, `SSL_` and `BASH_`, and the names `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`,
-  `TERM` and the four proxy variables — everything the platform, the harness and the worker set
-  or read, and every name the job's environment already carries. The worker's suite asserts that
-  `ForgeWorker.Job.Exec`'s allowlist stays inside it.
+  `TERM`, `DISABLE_AUTOUPDATER` and the four proxy variables — everything the platform, the
+  harness and the worker set or read, and every name the job's environment already carries. The
+  worker's suite asserts that `ForgeWorker.Job.Exec`'s allowlist and every name the harness driver
+  sets both stay inside it. `DISABLE_AUTOUPDATER` is the driver's
+  (`worker-tier.md` § Updating a worker): a secret of that name would be loaded after it and win.
 - **The harness's own**, copied verbatim from `claude-code` 2.1.266 — a version somebody read,
   and no longer one anything pins: the image carries no Claude Code and each machine installs its
   own (`worker-tier.md` § Updating a worker), so a worker's version moves without this repository

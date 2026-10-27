@@ -836,6 +836,14 @@ loader is satisfied there and fails on a library it only dlopens at real use is 
 installed. That is the boundary of what a boot-time probe can establish; a run that then fails is
 a job's failure, reported as one.
 
+**And what the outcome assumes.** It now reads `claude update`'s exit status, and nothing here
+knows that command's conventions — no Claude Code has been installed on a real worker yet. Two
+ways it could be wrong, both observable only on a machine: a non-zero exit when already current
+would make every reboot report `failed`, and a zero exit after failing to reach the network would
+bring back the `skipped`-means-stuck misreport by another route. The version comparison is still
+there beside the status, so the first would be a false alarm on a row rather than a worker that
+does not run; the second is the one worth checking first on a real machine.
+
 **What this trades away, said plainly.** The install is `curl … | bash` run as root on first boot.
 It is pinned to no version — pinning one would defeat the point of the ticket — and the installer
 itself is verified by nothing, though it does verify the binary it fetches against its own
@@ -844,11 +852,23 @@ fetch off TLS, and curl has its own `--max-time` inside the unit's bound. The al
 was the nixpkgs package, which is the thing that cannot be updated at all; this is the cost of the
 answer *stop using the nixpkgs package*, not an oversight.
 
-`DISABLE_AUTOUPDATER=1` is set on `forge-worker.service`, and so inherited by every job. The
-nixpkgs wrapper forced it on and dropping the wrapper quietly removed it, which left each agent
-job with a live auto-updater and a fresh `HOME` of its own — free to fetch its own build and run a
-Claude Code other than the one on the row. The row's version is only honest if the one thing
-allowed to move the install is the unit above.
+**`DISABLE_AUTOUPDATER=1` is set by the harness driver**, in
+`ForgeWorker.Harness.ClaudeCode.command/3`, so every harness process gets it — a workflow job and
+a conversation alike, since both reach a process through that one function. The nixpkgs wrapper
+forced it on and dropping the wrapper quietly removed it, which left each agent job with a live
+auto-updater and a `HOME` of its own.
+
+**Setting it on `forge-worker.service` does not reach a job, and this note said twice that it
+did.** `ForgeWorker.Job.Exec` composes a job's environment from an allowlist and `env -i`, so
+nothing of the worker's own environment arrives unless the allowlist names it; the variable on the
+unit reaches the worker's own invocations — the `--version` probe — and stops there. It is kept
+for those and the driver covers jobs. `ForgeCore.Secret` reserves the name, because a project
+secret is loaded after the driver's environment and would otherwise win.
+
+What is at risk is not the install: it is root-owned under a directory no job's user may list, so
+no job can move it. What a job's own auto-updater can do is fetch a build into its own `HOME` and
+run *that*, so the job runs a Claude Code other than the one the worker probed and the operator
+sees on the row.
 
 **Once per boot, and systemd's unit lifecycle is what enforces it** rather than anything the row
 remembers: the unit is a oneshot with `RemainAfterExit`, so a restart of `forge-worker.service`

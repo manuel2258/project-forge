@@ -31,8 +31,24 @@ defmodule ForgeWorker.Harness.ClaudeCode do
         ["--permission-mode", "bypassPermissions"] ++ model_args(opts) ++ resume_args(opts)
 
     credential = resolve(Keyword.get(opts, :credential))
-    {executable, args, [{"FORGE_JOB", job_dir} | credential_env(credential)]}
+
+    {executable, args,
+     [{"FORGE_JOB", job_dir}, {"DISABLE_AUTOUPDATER", "1"} | credential_env(credential)]}
   end
+
+  # **`DISABLE_AUTOUPDATER` belongs to the driver, not to the machine's environment.** Claude Code
+  # is installed to a writable path the worker owns and updated once per boot by a unit of its own
+  # (`docs/design/worker-tier.md` § Updating a worker); nixpkgs' wrapper used to force this
+  # variable on, and dropping the wrapper dropped it. Without it every job's Claude Code has a
+  # live auto-updater and a `HOME` of its own, so a job can fetch its own build into that `HOME`
+  # and run a version other than the one the worker probed and the operator sees on the row.
+  #
+  # Setting it on `forge-worker.service` does **not** reach a job and an earlier attempt's claim
+  # that it did was wrong: `ForgeWorker.Job.Exec` composes a job's environment from an allowlist
+  # and `env -i`, so nothing of the worker's own environment arrives unless it is named there. It
+  # is set here because this is the module that knows the name means anything, and because every
+  # route to a harness process — a workflow job and a conversation alike — comes through
+  # `command/3`. `ForgeCore.Secret` reserves the name, so a project secret cannot set it back.
 
   # A conversation has no turn ceiling — it ends when a person stops talking — and its cost
   # ceiling is the day's remaining allowance rather than a state's budget, because a chat has no

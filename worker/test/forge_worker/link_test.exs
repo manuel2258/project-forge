@@ -2688,6 +2688,27 @@ defmodule ForgeWorker.LinkTest do
   defp with_secrets(job, secrets),
     do: Map.put(job, "secrets", sealed_secrets(secrets, job["job_id"]).sealed)
 
+  # **The variable reaches the process, which is the half an earlier attempt asserted and did not
+  # check.** `DISABLE_AUTOUPDATER` was set on `forge-worker.service` and a review found it never
+  # arrived: `ForgeWorker.Job.Exec` composes a job's environment from an allowlist and `env -i`, so
+  # the worker's own environment is not a route to a job at all. It is the driver's now
+  # (`ForgeWorker.Harness.ClaudeCode.command/3`), and this asserts the whole path — driver,
+  # `Runner`'s composition, the slice — rather than any one link of it: `slice.env` is the
+  # environment the process is actually given. A chat is asserted separately, under
+  # `describe "a conversation"`.
+  test "the auto-updater is off in the environment a job's process is given", context do
+    %{client: client, origin: origin} = context
+    Application.put_env(:forge_worker, :slice, RecordingSlice)
+    Application.put_env(:forge_worker, :slice_reporter, self())
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    push(client, @topic, "assign", assignment(origin, scenario: "hang"))
+
+    assert_receive {:slice, slice}
+    assert {"DISABLE_AUTOUPDATER", "1"} in slice.env
+  end
+
   # **What a job holds, it holds in its environment; what it prints is masked on the way out**
   # (`docs/design/secrets.md` § Delivery, § Masking). The value has a quote in it, so the line the
   # harness writes carries it escaped; a reserved name the platform should never have sent is
@@ -3647,6 +3668,24 @@ defmodule ForgeWorker.LinkTest do
                       body}
 
       assert body =~ "\"type\":"
+    end
+
+    # A chat takes its own route to the runner (`Conversation.runner_opts/1`) and asks the driver
+    # for a `mode: :streaming` command, so the workflow job's test of this proves nothing about it
+    # — the same reason the push credential is asserted twice, just below. `CLAUDE.md` § Rules.
+    test "the auto-updater is off in a chat's environment too", context do
+      %{client: client, origin: origin} = context
+      Application.put_env(:forge_worker, :slice, RecordingSlice)
+      Application.put_env(:forge_worker, :slice_reporter, self())
+
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      push(client, @topic, "assign", chat(origin))
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      assert_receive {:slice, slice}
+      assert {"DISABLE_AUTOUPDATER", "1"} in slice.env
     end
 
     # The second of the two places the push credential is marked `{:secret, _}`. A conversation

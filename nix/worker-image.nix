@@ -612,12 +612,12 @@ in
       FORGE_VOLUME = "btrfs";
       FORGE_NIX_ENV = "1";
       FORGE_CLAUDE_EXECUTABLE = claudeExecutable;
-      # **This left with `pkgs.claude-code` and has to come back.** The nixpkgs wrapper forced it
-      # on, and dropping the wrapper handed every agent job a live auto-updater and a fresh `HOME`
-      # of its own — so a job could fetch its own build at start and run a Claude Code other than
-      # the one `claude-code-update.service` installed and the workers page shows. The row's
-      # version is only honest if the install does not move under it, and the one thing allowed to
-      # move it is that unit. A job's environment inherits this (`ForgeWorker.Job.Exec`).
+      # **This covers the worker's own invocations and nothing else.** `ForgeWorker.Job.Exec`
+      # composes a job's environment from an allowlist and `env -i`, so nothing set here reaches a
+      # job — an earlier attempt's comment claimed it did, and it did not. What a job gets is set
+      # by the driver, in `ForgeWorker.Harness.ClaudeCode.command/3`. This one is for the
+      # `--version` probe the worker runs itself: the only other Claude Code this unit starts.
+      # `claude-code-update.service` deliberately does not set it — it runs `claude update`.
       DISABLE_AUTOUPDATER = "1";
       SSL_CERT_FILE = "/etc/ssl/certs/ca-certificates.crt";
       NIX_SSL_CERT_FILE = "/etc/ssl/certs/ca-certificates.crt";

@@ -20,9 +20,39 @@ defmodule ForgeWorker.Harness.ClaudeCodeTest do
 
       assert env == [
                {"FORGE_JOB", "/jobs/j"},
+               {"DISABLE_AUTOUPDATER", "1"},
                {"ANTHROPIC_API_KEY", {:secret, "k"}},
                {"CLAUDE_CODE_OAUTH_TOKEN", false}
              ]
+    end
+
+    # **The auto-updater is off for every harness process, and it is off here rather than on the
+    # unit.** Claude Code is installed to a writable path and moved once per boot by a unit of its
+    # own (`docs/design/worker-tier.md` § Updating a worker); with a live updater and a `HOME` of
+    # its own a job can fetch its own build and run a version nothing reported. An earlier attempt
+    # set this on `forge-worker.service` and asserted a job inherited it — it does not, because
+    # `ForgeWorker.Job.Exec` composes a job's environment from an allowlist and `env -i`.
+    test "turns the auto-updater off, whatever else the options say" do
+      for opts <- [
+            [],
+            [credential: {:oauth, "t"}],
+            [model: "opus", resume_session: "s", mode: :streaming]
+          ] do
+        {_exe, _args, env} = ClaudeCode.command(spec(), "/jobs/j", opts)
+        assert {"DISABLE_AUTOUPDATER", "1"} in env, inspect(opts)
+      end
+    end
+
+    # The same rule `ForgeWorker.Job.ExecTest` holds over the inherited allowlist, over the names
+    # the driver sets instead: a project secret of any of these names is loaded after the driver's
+    # environment and would win. Written as a loop over what `command/3` actually returns, so a
+    # name added there later is covered without anyone remembering to come back.
+    test "no project secret can take a name the driver sets" do
+      {_exe, _args, env} = ClaudeCode.command(spec(), "/jobs/j", credential: {:api_key, "k"})
+
+      for {name, _value} <- env do
+        assert ForgeCore.Secret.validate_name(name) != :ok, name
+      end
     end
 
     test "adds model and resume flags when asked, and sets exactly one credential" do

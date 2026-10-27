@@ -44,27 +44,69 @@ states:
   # they declare prices out the same:
   #
   #     22 + 35                        =  57    the way in, then the first review
-  #     3 × (15 + 0 + 35)              = 150    three `issues_found` round-trips at `max: 3`
+  #     5 × (15 + 0 + 35)              = 250    five `issues_found` round-trips at `max: 5`
   #     3                              =   3    `presenting`, once, on the way out
   #                                      ---
-  #                                      210    of which 207 is spent before `presenting` starts
+  #                                      310    of which 307 is spent before `presenting` starts
   #
   # At a $120 cap and this $35 the third round-trip stopped mid-loop, after $15 of implementing
   # that was then never checked or reviewed, and `max: 3` on `reviewing → implementing` could not
-  # be reached at all. $210 clears it, the $172 before the last review and the $207 before the
-  # presentation included — the cap is read before a job starts, against what is spent already,
-  # so a journey whose total is the cap exactly still runs to the end.
+  # be reached at all. $310 clears the loop as it now stands, the $272 before the last review and
+  # the $307 before the presentation included — the cap is read before a job starts, against what
+  # is spent already, so a journey whose total is the cap exactly still runs to the end.
   #
-  # **That is the declared review loop and not the worst journey**, which is not a finite number:
-  # the edge that sends `implementing` back to be planned again — `plan_invalid` in `dev.yml`,
-  # `diagnosis_invalid` in `bug.yml` — carries no `max`, so the two can alternate without bound
-  # and no cap clears them. Bounding exactly that is what a cap is for.
-  # `project_workflows_test.exs` prices the review loop out of the files themselves, so these
-  # numbers and the caps cannot drift apart.
+  # **The bound is five round-trips and not three because three was being reached**, which is the
+  # operator's report of these workflows in use and not a figure measured here. An exhausted `max`
+  # is `{:stuck, {:max_exceeded, _}}` (`ForgeCore.Engine.step/4`), so the ticket stops for a person
+  # to move by hand rather than going forward — which is the right backstop for a review that will
+  # not converge and the wrong one for a review that was still converging.
+  #
+  # Two more rounds cost $100 of ceiling, which is a ceiling and not a spend: what makes a later
+  # round cheap is that it is scoped to what changed (`agents/review.md` § A later round is not
+  # the first round again) and that its bar rises each time (§ The bar rises each round), so the
+  # rounds this bound adds are the cheap ones. If three was being reached on findings that the
+  # raised bar would have dropped, this pair of edits is the fix; if it was being reached on real
+  # defects, five rounds is a ticket a person should look at, and `max_exceeded` is still how it
+  # arrives there.
+  #
+  # **That is the declared review loop and not the worst journey**, which is larger — but it is
+  # now finite. The edge that sends `implementing` back to be planned again carried no `max` and
+  # now carries `max: 2` in both workflows (`plan_invalid` in `dev.yml`, `diagnosis_invalid` in
+  # `bug.yml`), so `planning` and `implementing` can no longer alternate without bound. What that
+  # buys is not a smaller cap: it is a ticket that sticks after two re-plans, for a person who can
+  # see that the plan and the code disagree, instead of one that quietly spends $19 a lap until
+  # the cap stops it with nothing to show.
+  #
+  # The cap still binds, and is still the outer backstop. The `issues_found` loop alone prices at
+  # $310, which is the cap exactly; the worst journey is that loop *plus* two re-plan laps and
+  # every `budget_exhausted` and `did_not_converge` retry, so it is strictly greater and the cap
+  # is what stops it. The bounds shape the ordinary path; the cap catches the pathological one.
+  #
+  # `project_workflows_test.exs` prices the review loop out of the files themselves, and asserts
+  # separately that every cycle in either workflow carries a `max` somewhere — so these numbers
+  # and the caps cannot drift apart, and a new unbounded loop fails the gate rather than a ticket.
   reviewing:
     prompt: agents/review.md
     env: default
     model: opus
+    # **`high` and not the harness's own default, because the default is not this file's to know.**
+    # Absent `effort` the dial falls to the project's setting and then to whatever the machine was
+    # built with (`docs/design/workflow-grammar-v1.md` § Effort) — so a project set to `low` would
+    # quietly buy a cheap review of a diff nobody else reads critically. Naming it here is what
+    # makes the state's thinking a property of the workflow rather than of the node it lands on.
+    # It is not `max`: the lenses are dispatched as subagents, three of the four on `sonnet` by
+    # their own prompt (`agents/review.md` § The lenses, and the model each runs on), and a later
+    # round runs two lenses rather than four. So what this dial buys is the one lens left on this
+    # model — correctness and security — plus the top-level reading that decides which lens sees
+    # what, reproduces the sharpest findings and writes the verdict.
+    #
+    # **And this is the state that does not get cheaper while `implementing` is on sonnet.** Both
+    # workflows now execute their plan on the smaller model, which only works if what checks the
+    # result stays on the larger one: cutting the writer and the reader in the same edit is not a
+    # cost cut, it is a quality cut with a cost cut's arithmetic. The round count out of this
+    # state is also the meter for that change — rounds of `issues_found` staying at zero or one
+    # says the cheaper `implementing` held, and rounds climbing says it did not, at $35 each.
+    effort: high
     produces: [report.md]
     outcomes: [done, issues_found]
     budget: { turns: 120, cost: 35.00 }
@@ -91,6 +133,15 @@ states:
   presenting:
     prompt: agents/present.md
     env: default
+    # **The cheapest state on the way out, and the one that runs on the smaller model.** Everything
+    # it writes is a retelling of documents that are already on the page: `refinement.md`,
+    # `plan.md`/`diagnosis.md`, `implementation.md` and `report.md`, plus the diff. Nothing reads
+    # the presentation and nobody approves it (`agents/present.md`), so a weaker reading costs a
+    # person a duller paragraph and never costs the ticket a decision. `commit-message`, which the
+    # merge does read, is a summary line and a paragraph about work somebody else has already
+    # described. `medium` for the same reason: this is composition, not judgement.
+    model: sonnet
+    effort: medium
     produces: [presentation.md!, commit-message]
     optional: [presentation.md]
     # Turns at 60 for the same reason as `dev.yml`'s `refining`, which carries it: on a state
@@ -106,5 +157,9 @@ states:
     prompt: agents/integrate.md
     env: default
     model: opus
+    # Resolving a conflict by keeping both sides' intent is the judgement this state exists for,
+    # and getting it wrong loses behaviour silently in work a person has already approved. Named
+    # rather than inherited, for the reason `reviewing` above gives.
+    effort: high
     produces: [integration.md, changeset]
     budget: { turns: 100, cost: 8.00 }

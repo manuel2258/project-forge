@@ -182,6 +182,49 @@ test is not finished, and neither is one whose tests pass against the broken ver
 - **A new test file is not a substitute for a failing mutation.** Coverage counts lines executed.
   Only a mutation says whether anything would notice them changing.
 
+## Commit messages
+
+**Conventional commits**, for every commit that survives onto `main`:
+
+```
+<type>(<scope>)!: <subject>
+```
+
+`type` is one of `feat` (something an operator or a job can see that is new or different), `fix`
+(a defect), `docs` (notes and prose only), `refactor` (no behaviour change), `test` (tests only),
+`build` (the flake, nix, a dependency, release plumbing) or `chore` (everything else). `scope` is
+optional, and is the project or the area: `core`, `platform`, `worker`, `measure`, `workflow`,
+`release`. `!` marks a breaking change, which here means a migration or a worker protocol bump,
+and takes a `BREAKING CHANGE:` footer saying what breaks.
+
+The subject is imperative, under 72 characters including the prefix, and carries no trailing full
+stop. Then a blank line, then the body: what changed and why, in prose rather than a list of the
+commits that were squashed, including why a dependency was added. Keep the attribution trailers a
+session requires on a commit you make yourself. **A `commit-message` document carries none at
+all** — the platform writes it to the merge commit exactly as it stands, and both the prompt that
+asks a ticket for one (`.forge/agents/present.md`) and the one that asks a conversation
+(`core/priv/chat-preamble.md` § The message your merge will carry) say no front matter and no
+trailers.
+
+**The commits this governs are the ones that survive**, because the rest do not: a branch lands as
+one squashed commit (§ Landing), and a conversation's turn is squashed into one by the platform.
+So it is the merge commit an agent writes as `commit-message`, the squash `land` writes, and the
+release commit — not a job's working commits, which are thrown away.
+
+**A release is `chore(release): X.Y.Z`**, and that subject is also a marker several places parse.
+Anything looking for the last release must match it *and* the `Version X.Y.Z` subject used up to
+0.15.0, or the first conventional release leaves every later one computing its diff from 0.15.0:
+
+```
+git log -1 --format=%h --grep='^chore(release): [0-9]' --grep='^Version [0-9]'
+```
+
+Multiple `--grep` are OR'd, and the parentheses are literal in git's default basic regex — both
+checked against a throwaway repository rather than assumed. **The marker does not decide the
+bump**: that stays the diff of `platform/priv/repo/migrations` and the worker protocol
+(`.claude/skills/release/SKILL.md` § Steps), because a guard must use the same model as the
+operation it guards and a `!` in a subject is a claim.
+
 ## Reviewing
 
 Work that is committed but not landed gets a pass by reviewers who did not write it: the

@@ -19,10 +19,13 @@ someone who did the work telling them what matters in it.
   the last place it can be said before the change lands.
 
 Also write **`commit-message`**: the message the merge commit will carry, for the whole changeset
-and not just one run. A summary line under about 70 characters, then a blank line, then body
-paragraphs if there is more worth saying. No front matter, no trailers — nothing generates
-`Ticket:` or `Approved-by:` lines any more, and *who* approved is recorded in the commit's author
-field by git itself. **Nobody edits it.** It is drawn read-only above the approve control, and the
+and not just one run. **A conventional-commits subject** — `<type>(<scope>): <subject>`, under 72
+characters including the prefix, imperative, no trailing full stop — then a blank line, then body
+paragraphs if there is more worth saying. `CLAUDE.md` § Commit messages has the types and the
+scopes; pick the type for what the ticket *did*, not for the largest thing it touched, and mark it
+`!` with a `BREAKING CHANGE:` footer if it carries a migration or a worker protocol bump. No front
+matter, no trailers — nothing generates `Ticket:` or `Approved-by:` lines any more, and *who*
+approved is recorded in the commit's author field by git itself. **Nobody edits it.** It is drawn read-only above the approve control, and the
 merge writes it exactly as you left it, so write it as a git message and not as a note to the
 operator.
 

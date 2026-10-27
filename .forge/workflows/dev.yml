@@ -7,6 +7,14 @@ states:
   refining:
     prompt: agents/refine.md
     env: default
+    # **The one judgement state on the smaller model, and it is the one a human approves.** What
+    # `agents/refine.md` asks for is a restatement of the ticket, a list of criteria and a list of
+    # non-goals, read out of the ticket and the notes it touches — and a person reads the result
+    # and approves it before `planning` ever runs (`transitions` below). So a weaker reading is
+    # caught by the approval that already exists, which is not true of any later state. `high`
+    # because deciding what is out of scope is the part that is not transcription.
+    model: sonnet
+    effort: high
     inputs: [ticket]
     produces: [refinement.md]
     # Turns at 60 and not 40, as on every state here whose budget is a few dollars: a turn buys
@@ -21,6 +29,15 @@ states:
   planning:
     prompt: agents/plan.md
     env: default
+    # **The dial this workflow leans hardest on, and the cheapest state to lean on.** Nobody
+    # approves `plan.md` and `implementing` starts on it as written, so this reading is the last
+    # one before code is written against it — and at $4 it is the one place where buying more
+    # thinking is nearly free. `xhigh` is deliberately above `implementing`'s `high`: the
+    # groundwork is worth more here than there, because a plan that is wrong is paid for twice —
+    # once in `implementing`, again in the `plan_invalid` round-trip — and that round-trip is now
+    # bounded at two, so a third wrong plan sticks the ticket rather than buying another lap.
+    model: opus
+    effort: xhigh
     inputs: [ticket, refinement.md, implementation.md]
     produces: [plan.md]
     budget: { turns: 80, cost: 4.00 }
@@ -28,13 +45,34 @@ states:
   implementing:
     prompt: agents/implement.md
     env: default
-    model: opus
+    # **Sonnet, which is the largest single saving in this file, and the one to undo first if
+    # quality moves.** `planning` above is on opus at `xhigh` precisely so that this state is
+    # executing a decided plan rather than making the decisions itself, and `implementing` already
+    # has the three things that make a cheaper model workable here: a plan it did not write, a gate
+    # it can run ten times (`may_invoke` below), and `plan_invalid` for a plan that does not
+    # survive contact with the code.
+    #
+    # **But `high` and not `low`, which is the part worth not getting wrong.** What this state does
+    # is long: read a plan, change files, run `bin/check`, watch a new test fail and put the code
+    # back (`CLAUDE.md` § Testing), fix what the gate says, go round again. A low-effort run's
+    # failure mode is stopping early — skipping the mutation it was told to watch, calling a gate
+    # run it has not read a pass — and that failure is not caught here, it is caught in `reviewing`
+    # at $35 a round. Saving $10 on this state by spending $35 on another review round, twice, is
+    # how a cost cut becomes a cost rise. So: cheap model, still thinking hard, and the review loop
+    # is the meter that says whether that held.
+    #
+    # Turns go to 300 with the model, not as a separate judgement: $15 buys several times the
+    # tokens on sonnet that it bought on opus, so at 200 the turn ceiling would quietly become the
+    # binding limit — and a job its turn ceiling stops throws away everything it spent, which is
+    # the rule `refining` above states and this would have broken silently.
+    model: sonnet
+    effort: high
     may_invoke:
       check: { max: 10 }
     inputs: [ticket, refinement.md, plan.md, report.md]
     produces: [implementation.md, changeset]
     outcomes: [done, plan_invalid]
-    budget: { turns: 200, cost: 15.00 }
+    budget: { turns: 300, cost: 15.00 }
 
   checking:
     extends: checking
@@ -57,9 +95,13 @@ states:
   merged:
     extends: merged
 
+  # `refinement.md` because `agents/integrate.md` asks for a resolution that still satisfies the
+  # acceptance criteria rather than one that merely merges, and until it was listed here the
+  # prompt named a document the state was never handed. Found by reading the prompt against the
+  # workflow; the validator cannot catch it, because an input a prompt mentions is prose.
   integrating:
     extends: integrating
-    inputs: [plan.md, changeset]
+    inputs: [refinement.md, plan.md, changeset]
 
 # The work of the ticket, then the edges for the engine's own outcomes. `bug.yml`'s transitions
 # carry the reasoning; it is the same here, for the same states.
@@ -67,11 +109,11 @@ transitions:
   - { from: refining,     to: planning,     approve: [refinement.md] }
   - { from: planning,     to: implementing }
   - { from: implementing, to: checking }
-  - { from: implementing, to: planning,     when: plan_invalid }
+  - { from: implementing, to: planning,     when: plan_invalid,      max: 2 }
   - { from: checking,     to: reviewing }
   - { from: checking,     to: implementing, when: checks_failed,     max: 3 }
   - { from: reviewing,    to: presenting }
-  - { from: reviewing,    to: implementing, when: issues_found,      max: 3 }
+  - { from: reviewing,    to: implementing, when: issues_found,      max: 5 }
   - { from: presenting,   to: review_ready }
   - { from: review_ready, to: merged,       approve: [changeset] }
   - { from: integrating,  to: checking }
@@ -89,7 +131,8 @@ transitions:
   - { from: presenting,   to: presenting,   when: did_not_converge,  max: 1 }
 
 limits:
-  # $210 and not $120 because `reviewing` costs $35: the cap is what the review loop has to fit
-  # inside, and `.forge/common.yml` derives the figure beside the budget it follows from.
+  # $310 and not $120 because `reviewing` costs $35 and its loop runs five times: the cap is what
+  # the review loop has to fit inside, and `.forge/common.yml` derives the figure beside the budget
+  # and the bound it follows from.
   # `project_workflows_test.exs` computes it from this file rather than trusting the comment.
-  ticket_cost: 210.00
+  ticket_cost: 310.00

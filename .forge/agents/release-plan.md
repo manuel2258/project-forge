@@ -9,10 +9,12 @@ their logs on resume. A failed `ghcr-check` is fatal — end with `did_not_conve
 writing no `release-notes.md`. A failed `hetzner-check` is only fatal if the verdict below would
 be Required.
 
-**What is being released.** The last release is the last `Version` commit:
+**What is being released.** The last release is the last release commit — `chore(release): X.Y.Z`
+now, `Version X.Y.Z` up to 0.15.0, and **both patterns are needed** or this finds 0.15.0 for ever
+(`CLAUDE.md` § Commit messages):
 
 ```
-last=$(git log -1 --format=%h --grep='^Version [0-9]')
+last=$(git log -1 --format=%h --grep='^chore(release): [0-9]' --grep='^Version [0-9]')
 git log --format='%h %s%n%b' "$last"..HEAD
 git diff --stat "$last"..HEAD
 ```
@@ -41,6 +43,9 @@ Required (the protocol moved or its minimum rose), Recommended (worker-side code
 protocol did not), or Not needed (only `platform/`, docs, `bin/` or `measure/` changed).
 
 Write `release-notes.md`: the target version and why that bump, the Hetzner verdict and its
-reason, and the commit message `publishing` should use (subject `Version X.Y.Z`, body
-`Since v<last>: …` in prose, the worker protocol line, migrations if any — following
-`git log --grep '^Version' -3`). A human approves this document before anything is built.
+reason, and the commit message `publishing` should use — subject **`chore(release): X.Y.Z`**, body
+`Since v<last>: …` in prose, the worker protocol line, migrations if any. Earlier ones read
+`Version X.Y.Z`; follow their body and not their subject
+(`git log --grep '^chore(release): ' --grep '^Version ' -3`), because the subject is the convention
+`CLAUDE.md` § Commit messages now sets and the marker the command above looks for. A human
+approves this document before anything is built.

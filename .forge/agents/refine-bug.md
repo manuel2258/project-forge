@@ -19,5 +19,13 @@ before writing any of this — a fix that would contradict a settled decision is
 human, not a criterion. Ask a blocking question next to the criterion or non-goal it concerns
 whenever the ticket leaves it ambiguous.
 
+**Where the symptom is something a person sees, the criteria say what they see once it is
+fixed** — on which surface, as which kind of user, and with nothing to show as well as with
+something. `docs/design/ui.md` is the standard for that and worth reading before writing those
+criteria; `agents/refine.md` lists what a surface owes beyond the happy path, and the same list
+applies to a fix. It matters most for the regression test: a test that proves the function beneath
+the page now returns the right value does not prove the page draws it, and a criterion written
+about the function is how a bug gets closed while the person still sees it.
+
 A human approves this document before `diagnosing` runs. Do not describe the cause or the fix
 here — only what's wrong and what "fixed" means.

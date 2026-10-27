@@ -7,6 +7,10 @@ states:
   refining:
     prompt: agents/refine-bug.md
     env: default
+    # Sonnet and `high`, for the reason `dev.yml`'s `refining` carries: it is the same state, and
+    # it is the only one whose document a person approves before anything runs on it.
+    model: sonnet
+    effort: high
     inputs: [ticket]
     produces: [refinement.md]
     # Turns at 60: `dev.yml`'s `refining` carries why, and it is the same state.
@@ -19,6 +23,13 @@ states:
   diagnosing:
     prompt: agents/diagnose.md
     env: default
+    # Finding why something is wrong rather than where it surfaced, and then every other site with
+    # the same defect (`agents/diagnose.md`, `CLAUDE.md` § Rules), is the judgement this workflow
+    # is for. Nobody approves `diagnosis.md`, and `implementing` fixes what this names and nothing
+    # else. Opus at `xhigh`, for the reason `dev.yml`'s `planning` carries: at $4 this is the
+    # cheapest place in the workflow to buy thinking, and a wrong diagnosis is paid for twice.
+    model: opus
+    effort: xhigh
     inputs: [ticket, refinement.md, implementation.md]
     produces: [diagnosis.md]
     budget: { turns: 80, cost: 4.00 }
@@ -26,13 +37,17 @@ states:
   implementing:
     prompt: agents/implement-bug.md
     env: default
-    model: opus
+    # Sonnet at `high` and 300 turns, all three for the reasons `dev.yml`'s `implementing` carries
+    # at length: it is the same state, `diagnosing` above does the thinking this one executes, and
+    # `diagnosis_invalid` is its edge for a diagnosis that does not survive the code.
+    model: sonnet
+    effort: high
     may_invoke:
       check: { max: 10 }
     inputs: [ticket, refinement.md, diagnosis.md, report.md]
     produces: [implementation.md, changeset]
     outcomes: [done, diagnosis_invalid]
-    budget: { turns: 200, cost: 15.00 }
+    budget: { turns: 300, cost: 15.00 }
 
   checking:
     extends: checking
@@ -55,9 +70,11 @@ states:
   merged:
     extends: merged
 
+  # `refinement.md` for the reason `dev.yml`'s `integrating` carries: the prompt is written against
+  # the acceptance criteria and did not get them.
   integrating:
     extends: integrating
-    inputs: [diagnosis.md, changeset]
+    inputs: [refinement.md, diagnosis.md, changeset]
 
 # The work of the ticket, first. Then the edges for the engine's own outcomes, which exist
 # because a job that runs out of budget or stops without an answer used to leave the ticket
@@ -79,6 +96,8 @@ states:
 # at $3 it cannot repeat what exhausted the review. It carries no `max`, which is safe only while
 # nothing routes back into `reviewing` from there: `max: nil` never exhausts, so an edge from
 # `review_ready` towards `implementing` would make this an uncapped loop and would have to cap it.
+# That is no longer left to whoever adds the edge: `project_workflows_test.exs` asserts that the
+# graph of unbounded edges is acyclic, so such an edge fails the gate.
 # `did_not_converge` keeps its retry: that is a review that had the budget and no answer, which
 # another attempt can change.
 #
@@ -90,11 +109,11 @@ transitions:
   - { from: refining,     to: diagnosing,   approve: [refinement.md] }
   - { from: diagnosing,   to: implementing }
   - { from: implementing, to: checking }
-  - { from: implementing, to: diagnosing,   when: diagnosis_invalid }
+  - { from: implementing, to: diagnosing,   when: diagnosis_invalid, max: 2 }
   - { from: checking,     to: reviewing }
   - { from: checking,     to: implementing, when: checks_failed,     max: 3 }
   - { from: reviewing,    to: presenting }
-  - { from: reviewing,    to: implementing, when: issues_found,      max: 3 }
+  - { from: reviewing,    to: implementing, when: issues_found,      max: 5 }
   - { from: presenting,   to: review_ready }
   - { from: review_ready, to: merged,       approve: [changeset] }
   - { from: integrating,  to: checking }
@@ -112,7 +131,8 @@ transitions:
   - { from: presenting,   to: presenting,   when: did_not_converge,  max: 1 }
 
 limits:
-  # $210 and not $120 because `reviewing` costs $35: the cap is what the review loop has to fit
-  # inside, and `.forge/common.yml` derives the figure beside the budget it follows from.
+  # $310 and not $120 because `reviewing` costs $35 and its loop runs five times: the cap is what
+  # the review loop has to fit inside, and `.forge/common.yml` derives the figure beside the budget
+  # and the bound it follows from.
   # `project_workflows_test.exs` computes it from this file rather than trusting the comment.
-  ticket_cost: 210.00
+  ticket_cost: 310.00

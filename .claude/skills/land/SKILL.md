@@ -55,10 +55,13 @@ stands — it is on `main` either way.
    ```
 
    Write the message for the landed change as a whole, not a list of the squashed commits:
-   a subject under 72 characters and a body saying what changed and why, including why any
-   dependency was added. Keep the attribution trailers the session requires. Read the
-   squashed messages first (`git log origin/main..HEAD@{1}`) so nothing they explained is
-   lost.
+   a **conventional-commits** subject — `<type>(<scope>): <subject>`, under 72 characters
+   including the prefix — and a body saying what changed and why, including why any
+   dependency was added. `CLAUDE.md` § Commit messages has the types, the scopes and the `!`
+   rule for a migration or a protocol bump. Keep the attribution trailers the session
+   requires. Read the squashed messages first (`git log origin/main..HEAD@{1}`) so nothing
+   they explained is lost — a branch's own commits need not follow the convention, since they
+   are what the squash discards.
 
 5. **Fast-forward main.**
 

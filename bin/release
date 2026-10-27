@@ -21,7 +21,9 @@
 # registry already holds stops the run before anything is built. It used to be a git tag,
 # `v<version>`, made and pushed first; a release runs unattended now (the `land` skill), from
 # machines that may push branches and not tags, so the guard moved to the registry it protects.
-# In git, the `Version X.Y.Z` commit on `main` is what marks a release.
+# In git, the `chore(release): X.Y.Z` commit on `main` is what marks a release — `Version X.Y.Z`
+# up to 0.15.0, so anything looking for the last one matches both (`CLAUDE.md` § Commit messages).
+# Nothing in this script parses it; the two places that do are prose.
 #
 # There is deliberately no `--version`. There was, and it set the registry tag while `nix build`
 # went on reading `VERSION` — so `--version 1.2.3` on a `0.1.1` tree pushed an image labelled

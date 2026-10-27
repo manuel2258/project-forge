@@ -34,7 +34,9 @@ of them under a comment asserting that the ordering "is asserted". Every one of 
 comparison against the diff, and none of them needed a reviewer to find.
 
 So before you write the outcome, dispatch a **`sonnet` subagent** over your own diff and
-`implementation.md`, and wait for it in the same turn. Give it exactly this to do, and nothing
+`implementation.md`, and wait for it in the same turn. What it buys is not a bigger or a smaller
+mind — this job runs on `sonnet` too — it is a reader who did not write the diff and has no memory
+of having meant something by it, which is the whole reason the `review` skill exists at all. Give it exactly this to do, and nothing
 else — it is not a reviewer and must not fix anything:
 
 - Every factual claim in `implementation.md` and in each design note this branch edited: is it
@@ -52,3 +54,8 @@ catches costs a round trip.
 Produce `implementation.md` — what the defect was, what fixed it, and which other sites were or
 were not touched — and the changeset. End on outcome `diagnosis_invalid` instead, with why, if
 the diagnosis does not survive contact with the code.
+
+**That outcome is bounded at two** (`bug.yml`), so it is for a cause that is not the cause — not
+for a fix that turned out to need more files than the diagnosis listed, which is yours to do and
+to record. Say what you found that contradicts it, because `diagnosing` reads this and has two
+tries.

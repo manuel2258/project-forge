@@ -28,14 +28,18 @@ approving.
 
 Produce **`commit-message`** too — and **do not write a new one**. `release-notes.md`, in your
 inputs, already carries the message this release's commit should use, and a human approved that
-document before anything was built (`agents/release-plan.md`). Copy it out: the `Version X.Y.Z`
-subject, the blank line, the `Since v<last>: …` body, the worker protocol line and migrations as
-the notes have them. No front matter and no trailers.
+document before anything was built (`agents/release-plan.md`). Copy it out: the
+`chore(release): X.Y.Z` subject, the blank line, the `Since v<last>: …` body, the worker protocol
+line and migrations as the notes have them. No front matter and no trailers.
 
-Writing your own instead is how `git log --grep '^Version'` came to find nothing: the version a
-person approved stayed in a document and never reached git. Where the notes and what you actually
-built disagree — a snapshot that was skipped, say — correct that line and say so in
-`publish-report.md`, rather than composing the message afresh.
+Writing your own instead is how the release finder came to find nothing: the version a person
+approved stayed in a document and never reached git. **The subject is load-bearing** — it is what
+the next release greps for to decide what has changed since
+(`agents/release-plan.md`, `CLAUDE.md` § Commit messages) — so a subject of your own composition
+does not merely read differently, it makes the next release compute the wrong range.
+
+Where the notes and what you actually built disagree — a snapshot that was skipped, say — correct
+that line and say so in `publish-report.md`, rather than composing the message afresh.
 
 It is written to the commit exactly as you leave it, nobody edits it, and it is never optional, so
 a run that finishes without it sticks the ticket here.

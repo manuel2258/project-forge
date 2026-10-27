@@ -133,6 +133,71 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
     end
   end
 
+  # **Every cycle carries a `max` somewhere, which is what makes a ticket's cost finite.**
+  # `limits.ticket_cost` is the outer backstop and not the only one: a loop with no bound spends
+  # to the cap and stops there with nothing to show, which is what `implementing → planning` on
+  # `plan_invalid` did until it was given `max: 2`. The property is per *cycle* and not per edge —
+  # one bounded edge is enough, and `planning → implementing` is deliberately unbounded — so what
+  # is asserted is that the graph of unbounded edges alone is acyclic. A new loop whose every edge
+  # is unbounded fails here, which is cheaper than finding it on a ticket.
+  #
+  # Every workflow, not only the two with a `reviewing` state: `release.yml` has the property too
+  # and a fourth workflow would have to.
+  test "every loop in every workflow is bounded somewhere" do
+    for path <- workflow_files() do
+      workflow = load!(path)
+
+      unbounded =
+        Enum.group_by(
+          Enum.filter(workflow.transitions, &(&1.max == nil)),
+          & &1.from,
+          & &1.to
+        )
+
+      cycles =
+        for state <- Enum.sort(Map.keys(workflow.states)),
+            reaches?(unbounded, state, state),
+            do: state
+
+      assert cycles == [],
+             "#{Path.basename(path)}: #{inspect(cycles)} sit on a cycle of unbounded edges"
+    end
+  end
+
+  # Can `to` be reached from `from` over **one or more** edges of `graph`? One or more, so a state
+  # counts as reachable from itself only when it genuinely sits on a cycle — which is why the walk
+  # starts from `from`'s successors rather than from `from`.
+  defp reaches?(graph, from, to), do: walk(graph, Map.get(graph, from, []), MapSet.new(), to)
+
+  defp walk(_graph, [], _seen, _to), do: false
+
+  defp walk(graph, [state | rest], seen, to) do
+    cond do
+      state == to -> true
+      MapSet.member?(seen, state) -> walk(graph, rest, seen, to)
+      true -> walk(graph, Map.get(graph, state, []) ++ rest, MapSet.put(seen, state), to)
+    end
+  end
+
+  # **The bound and the prose that states it, asserted together.** `agents/review.md` § The bar
+  # rises each round tells the reviewer it has five rounds and that reaching the bound is a
+  # failure of the state, and it reasons from that number: which findings a later round may raise
+  # at all depends on there being a late round. A bound changed in the workflow and not in the
+  # prompt is `CLAUDE.md` § Rules' defect exactly — a claim nothing checks — and it is invisible,
+  # because both files still parse and the reviewer simply counts against a number that is no
+  # longer there. So the number is read out of the workflow and looked for in the prompt.
+  test "the review loop's bound is five rounds, and agents/review.md says so" do
+    for {name, workflow} <- reviewing_workflows() do
+      assert edges(workflow, "reviewing", "issues_found") == [{"implementing", 5}],
+             "#{name}: issues_found must send the ticket back to implementing, five times at most"
+    end
+
+    prompt = File.read!(Path.join(@forge, "agents/review.md"))
+
+    assert prompt =~ "at most five times",
+           "agents/review.md no longer states the bound the workflows declare"
+  end
+
   # The check ticket 13 was asked for and a plan got wrong by doing it on end totals.
   # `within_ticket_budget?/2` is asked *before* a job starts, against what the ticket has spent
   # already, so a journey fits only if every one of its running totals is under the cap — and the

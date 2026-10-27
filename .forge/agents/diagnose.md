@@ -16,4 +16,8 @@ output, but why it's wrong — and write `diagnosis.md`:
   or state and the specific wrong output, concrete enough that watching it fail is unambiguous.
 
 No code here. If this diagnosis doesn't survive contact with the code, `implementing` ends with
-outcome `diagnosis_invalid` and says why, and this state runs again.
+outcome `diagnosis_invalid` and says why, and this state runs again — **twice at most**, because
+that round-trip is bounded at `max: 2` in `bug.yml` and a third sticks the ticket for a person. A
+re-diagnosis reads `implementation.md` to find out why the last one failed; if what it says is
+that the defect is not where either of you looked, widen the search rather than re-deriving the
+same cause from the same place.

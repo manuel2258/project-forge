@@ -5,13 +5,18 @@ description: Cut a forge release from main without stopping to ask — decide th
 
 # release
 
-A release is a `Version X.Y.Z` commit on `main` that changes `VERSION` and nothing else, and the
-platform image at `ghcr.io/manuel2258/forge:X.Y.Z` — which `ghcr.io/manuel2258/forge:latest` then
-names too. There is no git tag: the `Version` commit marks a release in git, and `bin/release`
-refuses a version the registry already holds, which is what the tag used to enforce. (Releases up
-to 0.7.0 also carry a `vX.Y.Z` tag.) `bin/release` does the build and the push; this skill decides
-what goes into `VERSION` first and, when the worker changed, builds the Hetzner snapshot with
-`bin/hetzner-image`.
+A release is a `chore(release): X.Y.Z` commit on `main` that changes `VERSION` and nothing else,
+and the platform image at `ghcr.io/manuel2258/forge:X.Y.Z` — which
+`ghcr.io/manuel2258/forge:latest` then names too. There is no git tag: the release commit marks a
+release in git, and `bin/release` refuses a version the registry already holds, which is what the
+tag used to enforce. (Releases up to 0.7.0 also carry a `vX.Y.Z` tag.)
+
+**The subject changed at 0.16.0**, from `Version X.Y.Z` to the conventional form (`CLAUDE.md`
+§ Commit messages). Every search for the last release therefore carries both patterns, and
+dropping the old one would make every release after the first conventional one diff from 0.15.0.
+
+`bin/release` does the build and the push; this skill decides what goes into `VERSION` first and,
+when the worker changed, builds the Hetzner snapshot with `bin/hetzner-image`.
 
 **It runs unattended.** The `land` skill runs it after every landing, and the human's request to
 land is the request to release: nothing below waits for a yes. It stops and reports only when
@@ -86,10 +91,12 @@ devshell — `nix develop --command bash` for a shell, or prefix a command with
      `git switch main && git merge --ff-only origin/main`. Remember the working branch for
      step 9.
 
-1. **What is being released.** The last release is the last `Version` commit:
+1. **What is being released.** The last release is the last release commit, matched on both
+   subjects — multiple `--grep` are OR'd and the parentheses are literal in git's default basic
+   regex:
 
    ```
-   last=$(git log -1 --format=%h --grep='^Version [0-9]')
+   last=$(git log -1 --format=%h --grep='^chore(release): [0-9]' --grep='^Version [0-9]')
    git log --format='%h %s%n%b' "$last"..HEAD
    git diff --stat "$last"..HEAD
    ```
@@ -144,10 +151,11 @@ devshell — `nix develop --command bash` for a shell, or prefix a command with
    - **Not needed** — only `platform/`, docs, `bin/` or `measure/` changed. `/templates` will show
      the snapshot's build as not current; that is the version string, not behaviour.
 
-4. **Write the message.** It follows the earlier ones (`git log --grep '^Version' -3`): subject
-   `Version X.Y.Z`, body `Since v<last>: …` — what changed for the operator, in prose, not a list
-   of commits — then the worker protocol (unchanged at N, or bumped to N) and whether there are
-   migrations. Keep the attribution trailers the session requires. Nobody approves it; write it
+4. **Write the message.** Subject `chore(release): X.Y.Z`, body `Since v<last>: …` — what changed
+   for the operator, in prose, not a list of commits — then the worker protocol (unchanged at N,
+   or bumped to N) and whether there are migrations. The body follows the earlier ones
+   (`git log --grep '^chore(release): ' --grep '^Version ' -3`); their subject does not, being
+   pre-0.16.0. Keep the attribution trailers the session requires. Nobody approves it; write it
    as if someone will read it in `git log` a year from now, because that is who reads it.
 
 5. **Bump and push.**

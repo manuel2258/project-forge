@@ -63,6 +63,15 @@ states:
   refining:
     prompt: agents/release-plan.md
     env: default
+    # **Sonnet, because every decision here has a written rule and a right answer.**
+    # `agents/release-plan.md` states each of them with the command that answers it: the bump is
+    # minor or patch by what the diff since the last `Version` commit touches, the Hetzner verdict
+    # is one of three by the diff of named paths, and the two credential checks are commands that
+    # pass or fail. `high` because the release notes are prose for whoever reads `git log` a year
+    # on, and because `release-notes.md` is what a person approves before `publishing` runs — so a
+    # weak reading is caught here and nowhere later.
+    model: sonnet
+    effort: high
     may_invoke:
       ghcr-check: { max: 3 }
       hetzner-check: { max: 3 }
@@ -76,6 +85,13 @@ states:
   publishing:
     prompt: agents/publish.md
     env: default
+    # **No retry transition at all** (below), which it shares only with `common.yml`'s
+    # `integrating`, and for a different reason: this one pushes an image to GHCR and writes a
+    # Hetzner snapshot, so a run that stops halfway has already written outside the repository.
+    # Opus and `high`, named rather than inherited, because a project default set low would buy a
+    # cheap reading of exactly the job whose mistakes cannot be undone by running it again.
+    model: opus
+    effort: high
     may_invoke:
       release-build: { max: 3 }
       hetzner-snapshot: { max: 2 }

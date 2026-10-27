@@ -20,6 +20,53 @@ What a later round still owes the person: say which findings are closed and how 
 which survived, and what the new work brought with it. A closed finding is worth a line, not a
 re-litigation.
 
+## The bar rises each round
+
+`reviewing → implementing` on `issues_found` runs at most five times, and then the ticket sticks
+for a person to unstick by hand. **Reaching that bound is a failure of this state, not a safety
+net.** It was reached at three often enough to raise it, and the rounds it was reached on were
+not rounds that kept finding defects — they were rounds that kept finding something.
+
+Which round you are on, count from `$FORGE_JOB/history/reviewing/`: one folder per attempt that
+has already run. Then:
+
+**Round one is the full width of this prompt.** All four lenses, the whole changeset, everything
+below.
+
+**Round two and after, only a defect is a finding.** The list is short and it does not grow:
+
+- Wrong behaviour, with the concrete inputs or state that produce it and the specific wrong
+  output.
+- A security, authorisation, scoping or redaction hole — anything that lets a request reach what
+  it must not, or shows a person what they must not see.
+- Data loss, a crash, or a path that leaves something half-written and unrecoverable.
+- A test that cannot fail, proven by mutating the code it covers and re-running it. The mutation
+  is the finding; without it there is nothing to report.
+- A claim nothing checks: a `docs/design/` note, a moduledoc, a comment or a commit message that
+  says something the code does not do. `CLAUDE.md` makes the notes the standard, so this stays a
+  defect at every round and is not a documentation nit.
+- An acceptance criterion in `refinement.md` that the change does not meet.
+
+**Everything else stops being a finding after round one.** Naming, where a function lives, how it
+is factored, two copies of a short thing, a comment that could be clearer, a `@spec` that could
+be tighter, a test that could also assert something else, a structure you would have built
+differently. Round one may say each of those once. A later round may not say any of them at all —
+not a new one, and above all not one an earlier round already raised and `implementing` chose not
+to take. That choice is made; re-raising it is how a review loop becomes an argument and spends
+five rounds on it.
+
+**And a defect is flagged however late it is found.** On round five, on the last round the bound
+allows, on code the earlier rounds read and passed: if it is on the list above, it goes in
+`report.md` and the verdict is `issues_found`. A ticket stuck in `reviewing` with a known bug
+named in its report is a ticket a person can fix in a minute. A ticket merged with the same bug
+unmentioned because the loop was nearly out of rounds is the one thing this state must never
+produce. The bound bounds the loop; it does not lower this bar.
+
+So by round two or three, `issues_found` should mean one thing: a defect from that list is still
+open. If what is left is anything else, the verdict is `done` — and say in the report what you
+are leaving and why, as the verdict rule below already requires, rather than letting it drop
+silently.
+
 ## The lenses, and the model each runs on
 
 Four lenses: the skill's three — correctness and security; whether the new tests can fail, proven
@@ -28,14 +75,35 @@ by mutating the code and re-running them; DRY, KISS and design-note fidelity —
 and still missing what it was asked for is a finding.
 
 How many reviewers that is, the skill's step 1 decides from the size of the diff, and it still
-does. Below a few hundred lines, one reviewer carries correctness, DRY/design-fidelity and the
-criteria together; past that, split them.
+does — but the split follows the models and not only the size, because a reviewer cannot run on
+two. Below a few hundred lines: **two reviewers**, one on `sonnet` carrying all three comparisons
+(mutation, design fidelity, the criteria) and one on this job's model carrying correctness and
+security alone. Past that, split the `sonnet` one into its three lenses; correctness stays its own
+either way, and the mutation lens stays its own whenever it is not the small-diff case, because its
+evidence is a command's output rather than a reading.
 
-**Two of the four lenses run on `sonnet`, and for the same reason: their answer is a comparison,
-not a judgement.**
+**And on a later round it is two lenses, not four.** § The bar rises each round already says a
+later round reviews what changed since the commit the last `report.md` named; the lens list has to
+follow, or "scoped" means reading the same 3,000 lines through four lenses again — which is what
+ticket 7's $21.96 second round was. So, from round two:
 
-- *The mutation lens, always its own reviewer.* Breaking a line, re-running the tests it covers
-  and reporting which noticed is mechanical, with a right answer the output shows.
+- *Correctness and security over the new commits*, on this job's model. Always.
+- *The mutation lens over the tests the new commits add*, on `sonnet`. Always, because each round
+  brings new tests and they are the claim this round has to defend.
+- *DRY, KISS and design-note fidelity, and the criteria* — **only if the new commits touched a
+  `docs/design/` note, a moduledoc or comment that asserts something, or the subject of a
+  criterion.** `git diff --stat <last reviewed commit>..HEAD -- docs/design` answers the first
+  part in one command. If nothing did, say in the report that the lens was not needed and why —
+  which is different from not run, and the verdict rule below is about the second.
+
+Verifying the previous round's findings is not a lens and is not delegated: it is yours, by hand,
+a command each, as § A later round is not the first round again and the skill's step 4 both say.
+
+**Three of the four lenses run on `sonnet`, and for the same reason: their answer is a
+comparison, not a judgement.**
+
+- *The mutation lens.* Breaking a line, re-running the tests it covers and reporting which
+  noticed is mechanical, with a right answer the output shows.
 - *DRY, KISS and design-note fidelity.* Whether a note still describes the code is read off the
   two texts. Ticket 7's rounds are the evidence: every finding this lens produced was a
   comparison anyone could check — the stated reason for a protocol bump backwards in both the
@@ -43,12 +111,23 @@ not a judgement.**
   13,107 as tens of thousands), a stale comment three lines from the one it had corrected. None
   of them needed the larger model to see, and paying for it on all four lenses is how a review
   reaches $29.69.
+- *`refinement.md`'s acceptance criteria.* A criterion is written to be checkable without asking
+  its author what it meant — that is the standard `agents/refine.md` holds `refining` to — so
+  checking one is a comparison between a list and a diff, with the same right answer the other two
+  have. **A criterion about a surface is checked against the surface**: the template, and the test
+  that renders it. A context function returning the right value is not a page drawing it, and
+  `refining` is now asked for criteria about the empty state, the refused state, the phone and
+  what survives a reconnect — each of which is satisfied in a template or a LiveView test or
+  nowhere. **What stands behind the criteria is the human approval on `refinement.md`**, not the model
+  that reads them here: `refining` runs on `sonnet` too, and a person approves that document before
+  `planning` ever runs, which is the one gate in the workflow this lens is downstream of.
 
-**Correctness and security, and `refinement.md`'s acceptance criteria, stay on this job's model.**
-Those are the readings where judgement is the whole value, and they are where this state earns
-its budget: the three findings on ticket 7 that a person would otherwise have lived with — a
-binary file taking the merge page down through the JSON encoder, `optional` letting a job discard
-the outcome it declared, a 1 MiB cap bypassed through a gitlink — all came from them.
+**Correctness and security stays on this job's model, alone.** That is the reading where judgement
+is the whole value, and it is where this state earns its budget: the three findings on ticket 7
+that a person would otherwise have lived with — a binary file taking the merge page down through
+the JSON encoder, `optional` letting a job discard the outcome it declared, a 1 MiB cap bypassed
+through a gitlink — all came from it. It is also the lens that now carries the weight of
+`implementing` running on `sonnet`: the writer got cheaper and this reader did not.
 
 **The mutation lens reads the changeset's guards, not the suite.** Point it at the authorisation,
 scoping, ordering, redaction and "must never" checks *this diff adds or touches*, and at the tests

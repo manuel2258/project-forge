@@ -48,8 +48,15 @@ defmodule Forge.ConversationsTest do
 
       assert :ok = Forge.Operator.close_chat(chat, person, "closed")
 
-      assert [ended] = Enum.filter(Events.for_job(chat.id), &(&1.type == "chat.ended"))
+      events = Events.for_job(chat.id)
+
+      assert [ended] = Enum.filter(events, &(&1.type == "chat.ended"))
       assert ended.actor == %{"kind" => "user", "id" => person.id}
+
+      # One event on this path, which is what the note claims: asking and ending are the same
+      # step when there is no machine to tell. Appending the request here too would pass every
+      # other assertion and make that false.
+      assert Enum.filter(events, &(&1.type == "chat.close_requested")) == []
     end
 
     test "reopening one names the person who did it", context do
@@ -97,9 +104,32 @@ defmodule Forge.ConversationsTest do
       assert ended.actor == %{"kind" => "system", "id" => nil}
     end
 
+    # **Answering a question is the other half, and it was threaded without being shown.** The
+    # one existing test that reaches `answer_chat/4` stops at its `{:error, :stale}` return and
+    # never gets to the send, so reverting that line failed nothing: round four of this ticket's
+    # review ran 284 tests across six files against the revert and got none.
+    test "an answer to a question names whoever answered it", context do
+      %{project: project, person: person} = context
+      {:ok, chat} = Conversations.open(project, "which?")
+
+      text(chat, "```question\nkey: rows\ntext: How many rows?\n```\n")
+      {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.01))
+      reply = chat.id |> Conversations.messages() |> Conversations.reply_ref()
+
+      assert {:ok, _sent} =
+               Forge.Operator.answer_chat(chat, person, reply, %{"rows" => %{text: "ten"}})
+
+      answered =
+        Events.for_job(chat.id) |> Enum.filter(&(&1.type == "chat.message")) |> List.last()
+
+      assert answered.actor == %{"kind" => "user", "id" => person.id}
+      assert answered.payload["text"] =~ "ten"
+    end
+
     # Every message after the first recorded `:system` while `Operator` held the person who typed
-    # it. Changes no surface — `fold/2` hard-codes `role: :user` whatever the actor — and is the
-    # only thing that lets the log say which of two members said what.
+    # it. No page changes — `fold/2` hard-codes `role: :user` whatever the actor — but the JSON
+    # API's event endpoints emit it, and it is the only thing that lets the log say which of two
+    # members said what.
     test "a message names whoever typed it", context do
       %{project: project, person: person} = context
       chat = chat_fixture(%{project: project})

@@ -144,9 +144,6 @@ defmodule Forge.RuntimeConfigTest do
     refute Keyword.has_key?(harness_opts, :executable)
     refute Keyword.has_key?(harness_opts, :model)
     refute Keyword.has_key?(harness_opts, :effort)
-
-    # And the fallback the absent key buys: a present-but-empty one used to win over it.
-    assert Keyword.get(harness_opts, :executable, "claude") == "claude"
   end
 
   # The other half of the same rule: a variable that does say something is still read.

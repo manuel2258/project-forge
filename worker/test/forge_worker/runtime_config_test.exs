@@ -22,8 +22,11 @@ defmodule ForgeWorker.RuntimeConfigTest do
 
   # Cleared for the duration, or whatever is in the shell that ran the suite decides what this
   # reads — and all three are what is under test.
+  # `FORGE_VOLUME` is here because the same file *raises* on a value it does not know, so an
+  # operator with a typo'd one exported fails all three of these from inside the config.
   @cleared ~w(FORGE_CLAUDE_EXECUTABLE FORGE_CLAUDE_MODEL FORGE_CLAUDE_EFFORT
-              FORGE_NIX_ENV FORGE_SLICE)
+              FORGE_NIX_ENV FORGE_SLICE FORGE_VOLUME
+              ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN)
 
   setup do
     previous = Map.new(@cleared, &{&1, System.get_env(&1)})
@@ -77,13 +80,10 @@ defmodule ForgeWorker.RuntimeConfigTest do
   # gone): a job brings its own in the assignment. A machine upgraded with either variable still
   # set must not have it reach the harness.
   test "no machine-wide agent credential is read, whatever the environment says" do
+    # Both are in `@cleared`, so `setup` has snapshotted them and will put back whatever the
+    # operator's shell had — deleting them here would take an operator's own variables away.
     System.put_env("ANTHROPIC_API_KEY", "sk-ant-api03-machine")
     System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-machine")
-
-    on_exit(fn ->
-      System.delete_env("ANTHROPIC_API_KEY")
-      System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
-    end)
 
     config = Config.Reader.read!(@runtime, env: :prod)
 

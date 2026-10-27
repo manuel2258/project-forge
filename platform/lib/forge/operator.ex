@@ -261,8 +261,8 @@ defmodule Forge.Operator do
     with :ok <- allow(project, user, :use) do
       # Set outright, not `put_new`: this function has just checked who the person is, and an
       # actor a caller proposed would be the one thing in the event nobody verified. No path
-      # reaches it with one today — both LiveViews build these opts from literals — which is why
-      # this is a principle rather than a fix.
+      # reaches it with one today — `chat_new_live.ex` is the only caller and builds these opts
+      # from literals — which is why this is a principle rather than a fix.
       Conversations.open(project, text, Keyword.put(opts, :actor, {:user, user.id}))
     end
   end

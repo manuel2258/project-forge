@@ -140,10 +140,15 @@ defmodule Forge.Conversations do
   # `%User{}` sets it, and each sets it outright rather than with `put_new`, so nothing off the
   # wire can propose an actor of its own.
   #
-  # A `chat.message`'s actor is the person who typed it, and changes no surface: `fold/2`
-  # hard-codes `role: :user` whatever it is (`docs/design/conversations.md` § What a conversation
-  # is). It is for the log, which otherwise could not say who said what in a chat two members
-  # share.
+  # A `chat.message`'s actor is the person who typed it *through `Operator`*; `mix forge.chat`
+  # names nobody, because a shell has no account to name. It is for the log, which otherwise
+  # could not say who said what in a chat two members share.
+  #
+  # **It is not invisible, though no page changes.** `fold/2` hard-codes `role: :user` whatever
+  # the actor, so the conversation and the queue read as before — but
+  # `ForgeWeb.Api.Render.event/1` emits `actor` verbatim, so the ticket and job event endpoints
+  # return the member's id where a second message used to say `system`
+  # (`docs/design/conversations.md` § Taking a transition, under the refusal's three reasons).
   defp actor(opts), do: Keyword.get(opts, :actor, :system)
 
   # Empty is not a choice: it resolves to the project's, which is what nil already means.
@@ -341,11 +346,19 @@ defmodule Forge.Conversations do
   def close(%Job{kind: :chat} = chat, reason \\ "closed", opts \\ []) do
     case Repo.one(from j in Job, where: j.id == ^chat.id, select: {j.status, j.worker_id}) do
       {:running, worker_id} when is_binary(worker_id) ->
-        Events.append("chat.close_requested", actor(opts), %{
-          ticket_id: chat.ticket_id,
-          job_id: chat.id,
-          payload: %{"reason" => reason}
-        })
+        # Told, like every other event this module writes. Without it two members with the
+        # conversation open see nothing until something else forces a reload — and the case that
+        # never self-heals is the machine-lost one this event exists for, where no turn is coming
+        # to redraw the page.
+        {:ok, event} =
+          Events.append("chat.close_requested", actor(opts), %{
+            ticket_id: chat.ticket_id,
+            job_id: chat.id,
+            payload: %{"reason" => reason}
+          })
+
+        Events.notify_job(chat.id, event)
+        Events.notify(chat.ticket_id)
 
         deliver(worker_id, chat.id, "close", %{"reason" => reason})
 

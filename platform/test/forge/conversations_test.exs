@@ -26,6 +26,52 @@ defmodule Forge.ConversationsTest do
     %{project: project}
   end
 
+  # **Who ended it, and who brought it back.** Both events recorded `:system` while the caller
+  # that authorised the person was holding them — the same shape `project.model_set` had, and the
+  # same module already showed the fix in `chat.opened`. A member can end another member's
+  # conversation, so a log that cannot say whose hand it was cannot answer the one question
+  # anybody would ask of it.
+  describe "attribution" do
+    setup %{project: project} do
+      person = Forge.AccountsFixtures.user_fixture()
+      join!(project, person)
+
+      %{person: person}
+    end
+
+    test "ending one by hand names the person who did it", context do
+      %{project: project, person: person} = context
+      chat = chat_fixture(%{project: project})
+
+      assert :ok = Forge.Operator.close_chat(chat, person, "closed")
+
+      assert [ended] = Enum.filter(Events.for_job(chat.id), &(&1.type == "chat.ended"))
+      assert ended.actor == %{"kind" => "user", "id" => person.id}
+    end
+
+    test "reopening one names the person who did it", context do
+      %{project: project, person: person} = context
+      chat = chat_fixture(%{project: project})
+      {:ok, _ended} = Conversations.ended(chat, nil, "idle")
+
+      assert {:ok, _chat} = Forge.Operator.reopen_chat(chat, person)
+
+      assert [reopened] = Enum.filter(Events.for_job(chat.id), &(&1.type == "chat.reopened"))
+      assert reopened.actor == %{"kind" => "user", "id" => person.id}
+    end
+
+    # The default is not a shortcut: a worker reporting that its conversation stopped, and the
+    # platform ending one whose machine is gone, are the platform's own acts and say so.
+    test "a machine's own report is still the system's", %{project: project} do
+      chat = chat_fixture(%{project: project})
+
+      {:ok, _ended} = Conversations.ended(chat, nil, "machine_lost")
+
+      assert [ended] = Enum.filter(Events.for_job(chat.id), &(&1.type == "chat.ended"))
+      assert ended.actor == %{"kind" => "system", "id" => nil}
+    end
+  end
+
   describe "opening one" do
     test "a project chat gets a branch off the default branch", %{project: project} do
       assert {:ok, chat} = Conversations.open(project, "what is this repository?")

@@ -13,6 +13,7 @@ defmodule Forge.EffortTest do
   import Forge.ForgeFixtures
   import Forge.GitFixtures
 
+  alias Forge.Accounts.User
   alias Forge.{Conversations, Jobs, Operator, Projects}
   alias Forge.Events.Event
   alias Forge.Git.Tokens
@@ -297,6 +298,32 @@ defmodule Forge.EffortTest do
 
       assert [event] = events("project.effort_set")
       assert event.actor == %{"kind" => "system", "id" => nil}
+    end
+
+    # **The log is part of the write.** `Events.append/3`'s result used to be discarded, so a
+    # rejected event left the effort changed, nothing logged, and `{:ok, project}` returned —
+    # the one outcome a function about attribution must not have. A `%User{}` with no id is the
+    # reachable way to make the event's changeset fail: it passes the head's guard and
+    # `encode_actor/1` turns it into an actor the `Event` changeset refuses.
+    test "a rejected event rejects the change", %{project: project} do
+      {:ok, project} = Projects.set_effort(project, "low")
+
+      assert {:error, _reason} = Projects.set_effort(project, "max", %User{})
+
+      assert Projects.get!(project.id).effort == "low"
+      assert [_only_the_first] = events("project.effort_set")
+    end
+
+    # The same property from the other side, and the scenario the review named: a `by` that is
+    # neither a user nor the system raises in `actor/1`, and because that happens while the
+    # `Multi` is built the setting is untouched. Under the old non-transactional shape the update
+    # had already committed by then, which this would catch.
+    test "an actor that cannot be encoded leaves the setting alone", %{project: project} do
+      {:ok, project} = Projects.set_effort(project, "low")
+
+      assert_raise FunctionClauseError, fn -> Projects.set_effort(project, "max", :nobody) end
+
+      assert Projects.get!(project.id).effort == "low"
     end
   end
 

@@ -34,6 +34,7 @@ defmodule Forge.RuntimeConfigTest do
   @cleared ~w(FORGE_HTTP_IP PORT PHX_HOST FORGE_VAPID_PUBLIC_KEY SSL_CERT_FILE
               FORGE_MAX_WORKERS FORGE_MAIL_FROM FORGE_MAIL_FROM_NAME
               ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN
+              FORGE_CLAUDE_EXECUTABLE FORGE_CLAUDE_MODEL FORGE_CLAUDE_EFFORT
               FORGE_SMTP_HOST FORGE_SMTP_PORT FORGE_SMTP_TLS FORGE_SMTP_CACERTFILE
               FORGE_SMTP_USERNAME FORGE_SMTP_PASSWORD
               FORGE_OIDC_PROVIDERS
@@ -121,6 +122,39 @@ defmodule Forge.RuntimeConfigTest do
     refute Keyword.has_key?(harness_opts, :credential)
     refute inspect(release(), limit: :infinity) =~ "sk-ant-api03-node"
     refute inspect(release(), limit: :infinity) =~ "sk-ant-oat01-node"
+  end
+
+  # **A variable that is present and empty is not a setting.** Two of the three names here are
+  # guarded again downstream, so the one that proves this filter is `executable`: nothing below
+  # refuses an empty one, `Keyword.get(opts, :executable, "claude")` hands back `""` for a key
+  # that is present, and the spawn becomes `nix develop … --command "" …` — every job on the
+  # machine failing. Removing the `""` from the filter in `config/runtime.exs` makes this fail.
+  test "a harness variable set to nothing configures nothing" do
+    System.put_env("FORGE_CLAUDE_EXECUTABLE", "")
+    System.put_env("FORGE_CLAUDE_MODEL", "")
+    System.put_env("FORGE_CLAUDE_EFFORT", "")
+
+    harness_opts = get_in(release(), [:forge, Forge.Jobs, :harness_opts]) || []
+
+    refute Keyword.has_key?(harness_opts, :executable)
+    refute Keyword.has_key?(harness_opts, :model)
+    refute Keyword.has_key?(harness_opts, :effort)
+
+    # And the fallback the absent key buys: a present-but-empty one used to win over it.
+    assert Keyword.get(harness_opts, :executable, "claude") == "claude"
+  end
+
+  # The other half of the same rule: a variable that does say something is still read.
+  test "a harness variable that names something is configured" do
+    System.put_env("FORGE_CLAUDE_EXECUTABLE", "/bin/claude")
+    System.put_env("FORGE_CLAUDE_MODEL", "opus")
+    System.put_env("FORGE_CLAUDE_EFFORT", "high")
+
+    harness_opts = get_in(release(), [:forge, Forge.Jobs, :harness_opts]) || []
+
+    assert harness_opts[:executable] == "/bin/claude"
+    assert harness_opts[:model] == "opus"
+    assert harness_opts[:effort] == "high"
   end
 
   # `FORGE_MAX_WORKERS` was read into `Forge.Workers, :max_workers` long after its last reader

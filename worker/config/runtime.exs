@@ -17,8 +17,10 @@ if config_env() != :test do
         model: System.get_env("FORGE_CLAUDE_MODEL"),
         effort: System.get_env("FORGE_CLAUDE_EFFORT")
       ],
-      # Unset and set-to-nothing are the same statement: this machine has no opinion. Without the
-      # second, `FORGE_CLAUDE_MODEL=` reaches the driver as `--model ''` and fails every run.
+      # Unset and set-to-nothing are the same statement: this machine has no opinion. As on the
+      # platform's side, the dials are also guarded downstream and `executable` is not: an empty
+      # one becomes `--command ""` and fails every job here (`platform/config/runtime.exs` has
+      # the long version, and the test that holds it).
       fn {_key, value} -> value in [nil, ""] end
     )
 

@@ -70,6 +70,11 @@ defmodule ForgeWorker.Harness.ClaudeCode do
   # place that can refuse it before it becomes `--effort ''` on a command line and fails the run.
   # Unexamined otherwise — the value is one argv slot and never a shell word, so a level the
   # harness rejects fails in the harness's own words.
+  #
+  # The guard also drops a value that is not a string at all, where the older `case` would have
+  # put it in argv. **That half is an equivalent mutant and must not have a test written for it**:
+  # `put_model/2` and `put_effort/2` admit only binaries, and `runtime.exs` yields a string or
+  # nil, so no caller can reach this clause with anything else.
   defp flag_args(opts, key, flag) do
     case Keyword.get(opts, key) do
       value when is_binary(value) and value != "" -> [flag, value]

@@ -51,7 +51,9 @@ once it has been reopened with a session carried (§ Resume).
 In both, `--model` is the model the platform resolved into the spec, else the machine's
 `FORGE_CLAUDE_MODEL`, and is absent when neither names one. `--effort` is the same thing one dial
 over — the spec's, else `FORGE_CLAUDE_EFFORT`, else no flag, leaving the harness its own default
-(`workflow-grammar-v1.md` § Effort). A workflow job whose assignment
+(`workflow-grammar-v1.md` § Effort). **A variable that is present and empty names nothing**, and
+is refused rather than passed on as `--model ''`: an empty flag fails the run, which is not what
+"the machine's setting" can mean (`worker-tier.md` § How a machine learns what it is). A workflow job whose assignment
 carries a session also gets `--resume <session_id>` (§ Resume), and its `<spec.budget.cost>` is the
 budget it was assigned, which the platform may have lowered to whichever cap binds first
 (`capacity.md` § Spend caps).

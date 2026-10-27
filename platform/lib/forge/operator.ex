@@ -303,13 +303,15 @@ defmodule Forge.Operator do
   @doc "Ends a conversation."
   @spec close_chat(Job.t(), User.t(), String.t()) :: :ok | {:error, term()}
   def close_chat(%Job{kind: :chat} = chat, %User{} = user, reason \\ "closed") do
-    with :ok <- allow(chat, user, :use), do: Conversations.close(chat, reason)
+    with :ok <- allow(chat, user, :use),
+         do: Conversations.close(chat, reason, actor: {:user, user.id})
   end
 
   @doc "Reopens an ended conversation."
   @spec reopen_chat(Job.t(), User.t()) :: {:ok, Job.t()} | {:error, term()}
   def reopen_chat(%Job{kind: :chat} = chat, %User{} = user) do
-    with :ok <- allow(chat, user, :use), do: Conversations.reopen(chat)
+    with :ok <- allow(chat, user, :use),
+         do: Conversations.reopen(chat, actor: {:user, user.id})
   end
 
   @doc "Merges a conversation's branch."

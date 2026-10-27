@@ -468,18 +468,19 @@ defmodule Forge.Projects do
   `by` is who is doing it, and it reaches the event: a setting that decides what every job on the
   project runs on — and so what it spends — is one the log has to be able to attribute.
   `Operator.set_model/3` passes the person it already checked; `:system` is for the platform
-  acting on its own, and a test setting a default up front.
+  acting on its own, and a test setting a default up front. `actor/1` is total for those two
+  shapes only, so anything else raises — and raises before the transaction opens, which is why
+  there is no separate guard on this head: one would be an equivalent mutant (see `set_dial/5`).
+
+  **The event is part of the write, not a side effect of it.** Both go in one transaction, so a
+  rejected event is a rejected change rather than a setting that took effect with nothing in the
+  log: attribution is this function's whole point, and a log that can silently miss a row is one
+  nobody can reason from. `Events.append/3`'s result used to be discarded here.
   """
   @spec set_model(Project.t(), String.t() | nil, User.t() | :system) ::
           {:ok, Project.t()} | {:error, term()}
   def set_model(%Project{} = project, model, by \\ :system) do
-    with {:ok, project} <- project |> Project.changeset(%{model: model}) |> Repo.update() do
-      Events.append("project.model_set", actor(by), %{
-        payload: %{"project" => project.name, "model" => project.model}
-      })
-
-      {:ok, project}
-    end
+    set_dial(project, :model, model, "project.model_set", by)
   end
 
   @doc """
@@ -489,17 +490,36 @@ defmodule Forge.Projects do
   against a list of levels — see `docs/design/workflow-grammar-v1.md` § Effort.
 
   `by` reaches the event, as `set_model/3`'s does and for the same reason: turning a project's
-  effort up turns its spend up.
+  effort up turns its spend up. Same guard, same transaction — see `set_model/3`.
   """
   @spec set_effort(Project.t(), String.t() | nil, User.t() | :system) ::
           {:ok, Project.t()} | {:error, term()}
   def set_effort(%Project{} = project, effort, by \\ :system) do
-    with {:ok, project} <- project |> Project.changeset(%{effort: effort}) |> Repo.update() do
-      Events.append("project.effort_set", actor(by), %{
-        payload: %{"project" => project.name, "effort" => project.effort}
-      })
+    set_dial(project, :effort, effort, "project.effort_set", by)
+  end
 
-      {:ok, project}
+  # One shape for both dials: update the column and log who did it, or do neither. The payload
+  # reads the *updated* row, so it says what the setting became rather than what was asked for —
+  # a blank value, which the changeset stores as nil, is logged as nil.
+  #
+  # **A `by` that is neither a user nor `:system` raises before anything is written**, because
+  # `actor(by)` is evaluated while this `Multi` is being built and the transaction has not opened
+  # yet. That is what makes a guard on the two public heads an equivalent mutant: adding one
+  # moves the same `FunctionClauseError` a few microseconds earlier and changes nothing a caller
+  # or the database can see. It was observable before this function was transactional, when
+  # `Repo.update()` had already committed by the time the actor was encoded.
+  defp set_dial(project, field, value, type, by) do
+    Multi.new()
+    |> Multi.update(:project, Project.changeset(project, %{field => value}))
+    |> Events.log(:event, type, actor(by), fn %{project: project} ->
+      %{
+        payload: %{"project" => project.name, Atom.to_string(field) => Map.fetch!(project, field)}
+      }
+    end)
+    |> Repo.transaction()
+    |> case do
+      {:ok, %{project: project}} -> {:ok, project}
+      {:error, _step, reason, _changes} -> {:error, reason}
     end
   end
 

@@ -58,8 +58,15 @@ harness_opts =
       model: System.get_env("FORGE_CLAUDE_MODEL"),
       effort: System.get_env("FORGE_CLAUDE_EFFORT")
     ],
-    # Unset and set-to-nothing are the same statement: this node has no opinion. Without the
-    # second, `FORGE_CLAUDE_MODEL=` reaches the driver as `--model ''` and fails every run.
+    # Unset and set-to-nothing are the same statement: this node has no opinion.
+    #
+    # **`executable` is why this filter cannot be pruned.** For the two dials it is defence in
+    # depth — `Workers.harness_pair/3` and the driver's `flag_args/3` each refuse `""` on their
+    # own — but nothing downstream refuses an empty executable: `Keyword.get(opts, :executable,
+    # "claude")` returns `""` for a key that is present and empty, so a node with
+    # `FORGE_CLAUDE_EXECUTABLE=` spawned `nix develop … --command "" …` and failed every job on
+    # the machine. Dropping the `""` here restores that, which is what
+    # `runtime_config_test.exs` holds this line to.
     fn {_key, value} -> value in [nil, ""] end
   )
 

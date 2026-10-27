@@ -580,6 +580,11 @@ defmodule ForgeWeb.WorkersLive do
   # interface is an item waiting on a human (`docs/design/ui.md` § Colour). A machine whose image
   # predates the unit reports nothing, and nothing is drawn — the same treatment an absent `cores`
   # gets, and the reason the worker omits the key rather than sending a null.
+  #
+  # **Relaxing this head's pattern alone is an equivalent mutant**, and no test can catch it: the
+  # clause below still answers `~H""` for anything that does not match, so widening what matches
+  # here changes nothing a page shows. What a test does catch is deleting that clause — which is
+  # the mutation watched failing, and why it is written down here rather than tested for.
   defp claude_update(%{worker: %{harness: %{"update" => %{"outcome" => outcome}}}} = assigns)
        when is_binary(outcome) do
     assigns = assign(assigns, update: assigns.worker.harness["update"])

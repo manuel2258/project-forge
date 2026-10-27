@@ -21,6 +21,11 @@ defmodule ForgeWeb.WorkersLiveTest do
     :ok
   end
 
+  defp view_row(conn, worker) do
+    {:ok, view, _html} = live(conn, ~p"/workers")
+    view |> element("#worker-#{worker.id}") |> render()
+  end
+
   # Rendered HTML as the words an operator reads, whitespace collapsed: what a line *says*, which
   # is the assertion that notices a stray separator a class-name match would not.
   defp text(html) do
@@ -392,6 +397,91 @@ defmodule ForgeWeb.WorkersLiveTest do
     assert has_element?(view, "#worker-#{w.id}")
     refute has_element?(view, "#claude-update-#{w.id}")
     refute view |> element("#worker-#{w.id}") |> render() =~ "claude update"
+  end
+
+  # **A machine can push anything into `harness`, and one release pushing a map where a string
+  # belongs took this page down for good**: `Phoenix.HTML.Safe` is not implemented for a map, the
+  # value is persisted in the jsonb column, and every later mount crashed on it again — for every
+  # operator who could see that row, not just the one who provoked it. `harness_text/1` is the
+  # guard. The mutation it is aimed at is dropping that call from any of the five fields.
+  describe "a harness map with the wrong types in it" do
+    @malformed %{
+      "name" => %{"not" => "a string"},
+      "driver" => ["claude_code"],
+      "version" => %{"major" => 2},
+      "login" => %{"status" => "invalid"},
+      "credential" => "per_job",
+      "update" => %{"outcome" => "failed", "error" => %{"why" => "a map"}}
+    }
+
+    test "renders the row instead of taking the page down", %{conn: conn, user: user} do
+      w = worker(user)
+      {:ok, _w} = Workers.ready(w, %{"memory_budget" => 8_000, "harness" => @malformed})
+
+      {:ok, view, _html} = live(conn, ~p"/workers")
+
+      # The row is here at all, which is the whole assertion: before the guard this raised.
+      assert has_element?(view, "#worker-#{w.id}")
+      # The outcome is a string and is drawn; the error is not one and is dropped, rather than
+      # being drawn as `%{"why" => "a map"}` or raising on the way.
+      line = view |> element("#claude-update-#{w.id}") |> render()
+      assert text(line) == "claude update failed"
+      # A `login` that is not a string is not an unhealthy login, it is an unreadable one.
+      refute view |> element("#worker-#{w.id}") |> render() =~ "login"
+    end
+
+    # Numbers are the one non-string worth drawing: a version that arrived unquoted is a
+    # malformed report, not a reason to show the operator nothing where the version goes.
+    test "still shows a number, which is malformed but readable", %{conn: conn, user: user} do
+      w = worker(user)
+
+      {:ok, _w} =
+        Workers.ready(w, %{
+          "memory_budget" => 8_000,
+          "harness" => %{"driver" => "claude_code", "credential" => "per_job", "version" => 2.1}
+        })
+
+      assert view_row(conn, w) =~ "2.1"
+    end
+  end
+
+  # The `update` value itself, not the strings inside it. The review that sent this back found the
+  # guard on `claude_update/1`'s head was untested and a comment claimed no test could reach it —
+  # these two are the test. Each would pass against a head relaxed to `%{"update" => _}` only if
+  # the page then drew nothing, and it does not: the first raises in `Access.get/3` and the second
+  # draws a line out of a number.
+  test "an update that is not a map at all draws nothing", %{conn: conn, user: user} do
+    w = worker(user)
+
+    {:ok, _w} =
+      Workers.ready(w, %{
+        "memory_budget" => 8_000,
+        "harness" => %{"driver" => "claude_code", "credential" => "per_job", "update" => "oops"}
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/workers")
+
+    assert has_element?(view, "#worker-#{w.id}")
+    refute has_element?(view, "#claude-update-#{w.id}")
+  end
+
+  test "an outcome that is not a string draws nothing", %{conn: conn, user: user} do
+    w = worker(user)
+
+    {:ok, _w} =
+      Workers.ready(w, %{
+        "memory_budget" => 8_000,
+        "harness" => %{
+          "driver" => "claude_code",
+          "credential" => "per_job",
+          "update" => %{"outcome" => 3}
+        }
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/workers")
+
+    assert has_element?(view, "#worker-#{w.id}")
+    refute has_element?(view, "#claude-update-#{w.id}")
   end
 
   # A worker running a release older than the probe reports no harness at all, and is still a

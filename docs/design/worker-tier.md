@@ -783,21 +783,72 @@ updated in place: that one is wrapped with `DISABLE_AUTOUPDATER=1` *set* rather 
 so no environment turns it back on, around a binary read-only in `/nix/store`, so there is no
 file to replace. `environment.ldso` is what makes a binary nobody patched runnable on NixOS.
 
-`claude-code-update.service` is the unit. It is ordered `before` `forge-worker.service`, which
-`requires` it, so the attempt has finished — succeeded, failed or skipped — before the worker can
-report `ready` and so before it can be given a job, exactly as `nix-store-register.service`
-already withholds it until the store is usable. **It cannot stop the worker starting**: the
-fetch is bounded by a `timeout` of its own, every failure is written down rather than left to an
-exit code, and the script ends in `exit 0` — a machine with no route out reaches `ready` with the
-attempt recorded as failed. The unit's own `TimeoutStartSec` is the longer backstop, and both sit
-inside the three minutes `nix/worker-image-boots.nix` gives the image to reach a login prompt.
+`claude-code-update.service` is the unit. `forge-worker.service` is `After=` it and `Wants=` it,
+so the attempt has finished — succeeded, failed or skipped — before the worker can report `ready`
+and so before it can be given a job, exactly as `nix-store-register.service` already withholds it
+until the store is usable.
+
+**`Wants=` and not `Requires=`, and that distinction is the whole of "it cannot stop the worker
+starting".** The first version of this wrote `Requires=`, and `Requires=` on a unit that ends
+`failed` aborts the start job of everything requiring it: `Restart = on-failure` never applies and
+nothing retries before a reboot. A script that catches every failure is not enough to make that
+safe, because `TimeoutStartSec` firing fails the unit whatever the script would have done —
+systemd kills the cgroup, so no status file is written either. Ordering is all that withholding
+`ready` needs, and `After=` gives it without the coupling. **A worker with no Claude Code that
+runs is strictly better than one that does not boot**, and which one it is, is on the workers page.
+
+The bounds are nested and each one is real. `timeout -k`, not plain `timeout`: a plain one sends
+SIGTERM and then waits for ever, so an installer that ignores TERM is unbounded —
+`timeout 2 bash -c 'trap "" TERM; sleep 8'` returns after eight seconds. Two version probes and
+one fetch, each `-k`-bounded, and the unit's `TimeoutStartSec` is *computed* from them in
+`nix/worker-image.nix` rather than written down beside them: the first version hard-coded 150
+against a script whose worst case was 160, so the unit's bound was the one that fired, which is
+exactly backwards.
+
+The sum is 205 seconds, which is **longer** than the 180 `nix/worker-image-boots.nix` waits for a
+login prompt, and that is not a conflict: the check greps the console and returns the moment the
+prompt appears, and no getty is ordered behind this unit — its only `Before=` is
+`forge-worker.service`. The attempt delays `ready`, not the console. The 120 seconds the fetch gets
+is the figure worth protecting, since a bound too short on a slow link is a worker with no Claude
+Code at all. Should anything ever order a getty behind this unit, the arithmetic has to come back
+under that 180.
 
 What it leaves behind is `claude-code-update.json` under the root: an outcome, the version it
-ended up with, and the error when there is one. `ForgeWorker.ClaudeUpdate.status/1` reads it and
-the worker merges it into the `harness` map at `ready`, which the platform keeps verbatim, so the
-outcome is on the workers page beside the version rather than only in the machine's journal. A
-missing or malformed file is no report and no key — an image older than the unit says nothing,
-and nothing is drawn.
+ended up with, and the error when there is one. **The outcome reads the command's exit status, not
+just the version either side of it.** Comparing versions alone made a reboot with no route out
+say `skipped` — "already current" — which is precisely the fleet-stuck-on-an-old-Claude-Code this
+whole section exists to surface. `skipped` now means the command succeeded and had nothing to do:
+common on a reboot, impossible on a first boot, where there is no version to start from. The file
+is removed before the attempt, so a boot that writes nothing reports nothing rather than reporting
+the last boot's answer.
+
+`ForgeWorker.ClaudeUpdate.status/1` reads it and the worker merges it into the `harness` map at
+`ready`, which the platform keeps verbatim, so the outcome is on the workers page beside the
+version rather than only in the machine's journal. A missing or malformed file is no report and no
+key — an image older than the unit says nothing, and nothing is drawn. Every string out of that
+map goes through `ForgeWeb.WorkersLive.harness_text/1` before it is drawn: the map is whatever
+some release pushed, it is kept in a jsonb column, and a map where a string belongs took the
+workers page down for every operator who could see the row, permanently, because the value
+persists and each later mount raised on it again.
+
+**What the probe cannot see.** `installed()` asks `--version` and nothing more, so a build whose
+loader is satisfied there and fails on a library it only dlopens at real use is recorded as
+installed. That is the boundary of what a boot-time probe can establish; a run that then fails is
+a job's failure, reported as one.
+
+**What this trades away, said plainly.** The install is `curl … | bash` run as root on first boot.
+It is pinned to no version — pinning one would defeat the point of the ticket — and the installer
+itself is verified by nothing, though it does verify the binary it fetches against its own
+manifest's sha256. `--proto '=https' --proto-redir '=https'` keeps a redirect from walking the
+fetch off TLS, and curl has its own `--max-time` inside the unit's bound. The alternative on offer
+was the nixpkgs package, which is the thing that cannot be updated at all; this is the cost of the
+answer *stop using the nixpkgs package*, not an oversight.
+
+`DISABLE_AUTOUPDATER=1` is set on `forge-worker.service`, and so inherited by every job. The
+nixpkgs wrapper forced it on and dropping the wrapper quietly removed it, which left each agent
+job with a live auto-updater and a fresh `HOME` of its own — free to fetch its own build and run a
+Claude Code other than the one on the row. The row's version is only honest if the one thing
+allowed to move the install is the unit above.
 
 **Once per boot, and systemd's unit lifecycle is what enforces it** rather than anything the row
 remembers: the unit is a oneshot with `RemainAfterExit`, so a restart of `forge-worker.service`

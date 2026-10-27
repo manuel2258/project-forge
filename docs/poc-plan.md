@@ -192,8 +192,9 @@ Probes: question representation under real use, message reliability.
 - Provider driver with one implementation: local VMs (QEMU) created from the worker image
   and destroyed. Nothing outside the driver knows the provider; the Hetzner implementation
   is the closing step's job.
-- NixOS worker image: btrfs root, Nix daemon with the binary cache, Claude Code, the worker
-  release started with the token the config disk carries. The same image boots locally and, later, on
+- NixOS worker image: btrfs root, Nix daemon with the binary cache, the worker
+  release started with the token the config disk carries. Claude Code is *not* in the image — each
+  machine installs its own at first boot (`docs/design/worker-tier.md` § Updating a worker). The same image boots locally and, later, on
   the provider.
 - Worker connects out over a channel. Platform schedules a job only when its slice fits the
   remaining memory budget.

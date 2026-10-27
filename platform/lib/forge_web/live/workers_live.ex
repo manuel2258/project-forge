@@ -581,25 +581,46 @@ defmodule ForgeWeb.WorkersLive do
   # predates the unit reports nothing, and nothing is drawn — the same treatment an absent `cores`
   # gets, and the reason the worker omits the key rather than sending a null.
   #
-  # **Relaxing this head's pattern alone is an equivalent mutant**, and no test can catch it: the
-  # clause below still answers `~H""` for anything that does not match, so widening what matches
-  # here changes nothing a page shows. What a test does catch is deleting that clause — which is
-  # the mutation watched failing, and why it is written down here rather than tested for.
+  # **The pattern is the guard and it is tested, not asserted.** `outcome` has to be a string
+  # because it is drawn, and `update` has to be a map because `outcome` is read out of it: a
+  # release that sends `"update" => "oops"` would otherwise raise in `Access.get/3`, and one that
+  # sends a number for `outcome` would draw a line out of it. Both are covered, so relaxing this
+  # head fails a test rather than passing quietly.
   defp claude_update(%{worker: %{harness: %{"update" => %{"outcome" => outcome}}}} = assigns)
        when is_binary(outcome) do
-    assigns = assign(assigns, update: assigns.worker.harness["update"])
+    update = assigns.worker.harness["update"]
+    assigns = assign(assigns, outcome: outcome, error: harness_text(update["error"]))
 
     ~H"""
     <div
       id={"claude-update-#{@worker.id}"}
-      class={["font-mono", (@update["outcome"] == "failed" && "text-error") || "opacity-50"]}
+      class={["font-mono", (@outcome == "failed" && "text-error") || "opacity-50"]}
     >
-      claude update {@update["outcome"]}<span :if={@update["error"]}>: {@update["error"]}</span>
+      claude update {@outcome}<span :if={@error}>: {@error}</span>
     </div>
     """
   end
 
   defp claude_update(assigns), do: ~H""
+
+  @doc """
+  A string a machine sent about itself, or `nil` for anything that is not one.
+
+  **Every value out of `harness` goes through here before it is drawn.** The map is whatever a
+  worker pushed at `ready`, kept verbatim in a jsonb column (`Forge.Workers.record_ready/2`), and
+  `Phoenix.HTML.Safe` is not implemented for a map or a list — so one release sending
+  `%{"login" => %{...}}` took `/workers` down permanently for every operator who could see that
+  row, the value being persisted and every later mount crashing on it again. This image cannot
+  send one (`jq --arg` always writes a string) but any other release on the channel can, which is
+  the whole reason a guard is here rather than a comment saying it cannot happen.
+
+  Numbers are rendered rather than dropped: a version or an outcome arriving unquoted is a
+  malformed report, not a reason to show the operator nothing.
+  """
+  @spec harness_text(term()) :: String.t() | nil
+  def harness_text(value) when is_binary(value), do: value
+  def harness_text(value) when is_number(value), do: to_string(value)
+  def harness_text(_other), do: nil
 
   attr :worker, :map, required: true
   attr :connected, :boolean, required: true
@@ -776,19 +797,24 @@ defmodule ForgeWeb.WorkersLive do
         <div class="flex min-w-0 flex-col gap-1">
           <%!-- What the machine said at `ready`: which harness and which version. The login line
                 is only drawn for a row an older release wrote. A machine that reported no harness
-                takes no agent job (`docs/design/credentials.md` § What a worker offers now). --%>
+                takes no agent job (`docs/design/credentials.md` § What a worker offers now).
+
+                Every one of these four goes through `harness_text/1`, which is the guard: the map
+                is whatever some release pushed, and a non-string in any of them used to take this
+                page down for good. --%>
           <div class="font-mono">
             <span :if={is_nil(@row.worker.harness)} class="opacity-40">no harness reported</span>
             <span :if={@row.worker.harness}>
-              {@row.worker.harness["name"] || @row.worker.harness["driver"]}
-              <span class="opacity-50">{@row.worker.harness["version"]}</span>
+              {harness_text(@row.worker.harness["name"]) ||
+                harness_text(@row.worker.harness["driver"])}
+              <span class="opacity-50">{harness_text(@row.worker.harness["version"])}</span>
             </span>
           </div>
           <div
-            :if={@row.worker.harness && @row.worker.harness["login"] not in [nil, "ok"]}
+            :if={@row.worker.harness && harness_text(@row.worker.harness["login"]) not in [nil, "ok"]}
             class="font-mono text-error"
           >
-            login {@row.worker.harness["login"]}
+            login {harness_text(@row.worker.harness["login"])}
           </div>
           <.claude_update worker={@row.worker} />
           <%!-- A release that does not take the job's credential from the assignment is given no

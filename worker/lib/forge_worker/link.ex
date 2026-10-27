@@ -1204,9 +1204,14 @@ defmodule ForgeWorker.Link do
   # **`update` rides the same map**, and so reaches the operator without a schema of its own:
   # `Workers.record_ready/2` keeps `harness` verbatim. It sits beside the version because the two
   # answer one question together — which Claude Code this machine ended up running, and whether
-  # the attempt that got it there worked (`docs/design/worker-tier.md` § Updating a worker). It is
-  # merged outside the probe's `rescue` so that a machine whose harness cannot describe itself —
-  # which is what a failed install looks like — still says why.
+  # the attempt that got it there worked (`docs/design/worker-tier.md` § Updating a worker).
+  #
+  # It is merged outside `probed_offer/0` so that it survives that function's `rescue` as well as
+  # its happy path. **Not because a failed install goes through the rescue** — it does not:
+  # `ClaudeCode.version/1` catches its own failures and answers `nil`, so a missing binary is a
+  # probe that returns an offer with no version, not one that raises. The rescue is for a harness
+  # module whose `probe/1` itself blows up. Either way the update outcome is the only thing on the
+  # wire that says *why* there is no version, which is why it must not be inside either path.
   defp harness_offer(root) do
     probed_offer()
     |> put_unless_nil("update", ClaudeUpdate.status(root))

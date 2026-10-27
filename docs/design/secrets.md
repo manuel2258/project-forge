@@ -193,8 +193,10 @@ sources, kept apart so each can be checked against its own:
   `TERM` and the four proxy variables — everything the platform, the harness and the worker set
   or read, and every name the job's environment already carries. The worker's suite asserts that
   `ForgeWorker.Job.Exec`'s allowlist stays inside it.
-- **The harness's own**, copied verbatim from `claude-code` 2.1.266, the version the worker image
-  is built with: the variables it strips from a shell's environment (`SHELLOPTS`, `PS4`, `IFS`,
+- **The harness's own**, copied verbatim from `claude-code` 2.1.266 — a version somebody read,
+  and no longer one anything pins: the image carries no Claude Code and each machine installs its
+  own (`worker-tier.md` § Updating a worker), so a worker's version moves without this repository
+  changing. The variables it strips from a shell's environment (`SHELLOPTS`, `PS4`, `IFS`,
   `GCONV_PATH`, `LD_` and `LC_` among them), the search-path variables it lists beside them, and
   the 188 names and the patterns it treats as making a program run code (`MAKEFLAGS`, `PAGER`,
   `JAVA_TOOL_OPTIONS`, `RUSTC_WRAPPER`, any name ending `_PAGER` or `_EDITOR`, and the rest). When

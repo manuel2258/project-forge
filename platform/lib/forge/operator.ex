@@ -32,6 +32,7 @@ defmodule Forge.Operator do
   alias Forge.Projects
   alias Forge.Projects.Project
   alias Forge.Proposals
+  alias Forge.Repo
   alias Forge.Tickets
   alias Forge.Tickets.Ticket
 
@@ -321,6 +322,44 @@ defmodule Forge.Operator do
   def close_chat(%Job{kind: :chat} = chat, %User{} = user, reason \\ "closed") do
     with :ok <- allow(chat, user, :use),
          do: Conversations.close(chat, reason, actor: {:user, user.id})
+  end
+
+  @doc """
+  Accepts a chat step: the person ends the step their conversation is, and the ticket takes the
+  edge for `outcome` (`Forge.Engine.accept/5`, `docs/design/conversations.md` § A conversation
+  that is a step).
+
+  **Who may press it is who may decide a transition by hand** (`:use` on the project), and **the
+  standing of the person is read from the database when it is pressed**, not taken from the
+  struct the page mounted with: a suspension since the page drew is a refusal. `seen` is the
+  version of each document as the page drew it.
+  """
+  @spec accept_step(Job.t(), User.t(), String.t() | nil, %{String.t() => pos_integer()}) ::
+          {:ok, Ticket.t()} | {:error, term()}
+  def accept_step(%Job{kind: :chat} = chat, %User{id: user_id}, outcome, seen) do
+    with {:ok, user} <- standing(user_id),
+         :ok <- allow(chat, user, :use),
+         {:ok, chat} <- step_chat(chat),
+         {:ok, ticket} <-
+           Engine.accept(Tickets.get!(chat.ticket_id), chat, user.id, outcome, seen) do
+      notify(ticket)
+    end
+  end
+
+  defp standing(user_id) do
+    case Forge.Accounts.get_user(user_id) do
+      %User{} = user ->
+        if User.active?(user), do: {:ok, user}, else: {:error, User.standing(user)}
+
+      nil ->
+        {:error, :forbidden}
+    end
+  end
+
+  # The row as it is now: the struct a page holds was read when it mounted.
+  defp step_chat(%Job{id: id}) do
+    chat = Repo.get!(Job, id)
+    if Job.step?(chat), do: {:ok, chat}, else: {:error, :not_a_step}
   end
 
   @doc "Reopens an ended conversation."

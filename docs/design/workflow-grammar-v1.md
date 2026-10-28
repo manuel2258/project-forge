@@ -150,7 +150,8 @@ limits:
 
 ## Semantics
 
-**States** come in three kinds. A *job state* has a `prompt` and runs one agent job per entry. A
+**States** come in three kinds. A *job state* has a `prompt` and runs one agent job per entry, unless it is marked `chat: true`, when
+it opens a conversation instead (§ Chat steps). A
 *command state* has `invoke` and runs the commands it names, with no agent and no prompt; its
 outcome comes from their exit statuses rather than from a document. A *human state* has neither;
 the ticket waits there, holding no process, until a transition is taken by a human or by the
@@ -397,7 +398,9 @@ ticket allowance and meets the daily cap alone, as `capacity.md` § Spend caps a
 `conversations.md` § Spend already say. The allowance exists to stop a runaway workflow, and a
 person asking why a ticket is stuck is not one — a cap that stopped them investigating would
 work against its own purpose. A chat's spend is still recorded, on the conversation and its own
-runs rather than on `ticket.cost_usd`.
+runs rather than on `ticket.cost_usd` — **but for a chat step's** (§ Chat steps), whose turns add
+to `ticket.cost_usd`: the step is the ticket's own work, the next job's cap sees it, and nothing
+the cap finds ends the conversation.
 
 **Environment.** `env` is a devShell name in the project's `flake.nix`; the job runs inside
 `nix develop .#<env>`. Absent `env` means no toolchain beyond the harness.
@@ -460,6 +463,50 @@ which is what lets a harness newer than its workers keep working.
 
 Parsing this file reaches no worker, so the rule above is what the grammar checks, and it is
 unchanged. A workflow may name any level; only the form has a list.
+
+## Chat steps
+
+**A job state marked `chat: true` is a conversation, not a one-shot job.** It keeps everything a
+conversation can use — `prompt`, `inputs`, `produces` (documents only), `outcomes`, `env`,
+`model`, `effort`, `resources`, `secrets` — and gains one difference: when a ticket enters it, no
+job runs. A ticket conversation opens on the ticket (`conversations.md` § A conversation that is
+a step) and the ticket waits for a person. The documents the step declares are written as the
+conversation goes; when the person is satisfied they press **Accept**, pick the outcome when the
+step declares more than one, and the ticket takes the edge for that outcome as after a job. Until
+then it stays in the step.
+
+```yaml
+states:
+  refining:
+    chat: true
+    prompt: agents/refine.md
+    inputs: [ticket]
+    produces: [refinement.md]
+    outcomes: [done, needs_more]    # the person picks; no outcome is preselected
+```
+
+- **The person alone chooses the outcome.** An `outcome:` in a document's front matter is ignored
+  and the agent is not offered `transition.json` for this ticket in this step. An edge on an
+  engine outcome (`error`, `did_not_converge`, …) never fires from a chat step: nothing in it ends
+  without a person.
+- **Accept is the approval.** When the edge Accept takes has `approve`, Accept approves those
+  documents, as a by-hand approval would, with no second decision. **Every document it records or
+  approves is pinned to the version the person was shown**: the step's own `produces`, and the
+  documents that edge approves, which may be an earlier state's. The page lists each and sends its
+  version back; a newer one recorded since — by the step's agent, another conversation or a person
+  through the API — refuses Accept and redraws the page, so nothing is approved unseen. An edge
+  approving a document nobody has written yet is drawn as blocked (`Engine.offered_edges/2` does
+  not offer it either) and says to ask the agent for it, which the step may write.
+- **No ceiling.** `budget` is refused. The node's daily cap and the idle timeout still pause or
+  end the conversation, and the ticket stays in the step. Its spend is added to the ticket's
+  cost and is seen by the cap on later jobs; the cap never ends the chat (§ `limits.ticket_cost`).
+- **A visit is one conversation.** A ticket returning to the step over a backward edge opens a
+  new one, which is told it is a return. Reopening a dormant conversation is not a new visit.
+- **Not a changeset step.** A chat commits to its own branch, so `changeset` and `commit-message`
+  are not produced here; what a step conversation commits never reaches the ticket's branch.
+- **Every other rule applies unchanged** (reachability, each outcome having an edge, `approve`
+  produced by `from` or earlier, `max` on edges): a chat step is a job state to the engine's
+  graph, and `ForgeCore.Engine.step/4` treats it as one.
 
 ## Merging
 
@@ -868,12 +915,17 @@ merges: re-pinning takes the default branch, never the ticket's own.
 ## Validation (rejects the file, never partially runs it)
 
 - `version` is `1`; `initial` names a job state; every state name is unique.
-- A job state has `prompt` and `budget`, and neither `invoke` nor `exit`. A command state has
+- A job state has `prompt` and `budget` (a chat step has no `budget`; § Chat steps), and neither `invoke` nor `exit`. A command state has
   `invoke` and `exit` and none of `prompt`, `inputs`, `produces`, `optional`, `outcomes`,
   `budget`, `model`, `effort`, `env`, `may_invoke` or `secrets`. A human state has
   none of those but `produces`, and no `invoke` either; `on_enter` and `produces` are the keys it
   may carry, and what it produces is documents — never `changeset`, a group of files or a
   presentation, and never `optional`, which is a job state's.
+- `chat`, where present, is `true` or `false`. A chat step is a job state with a `prompt` and has
+  no `budget` (it has no ceiling), no `may_invoke`, no `changeset` or `commit-message` in
+  `produces` (a chat commits to its own branch), no group of files or presentation in `produces`,
+  and no `optional` naming its outcome document. Each is refused by name, with the reason. Command
+  and human states cannot be chat steps. Every other rule of a job state holds.
 - `model`, where present, is a non-empty string. Its value is not checked against anything.
 - `effort`, where present, is a non-empty string, and likewise unchecked (§ Model).
 - State and artifact names are single path segments: letters, digits, `.`, `_`, `-`.

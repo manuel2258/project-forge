@@ -2390,7 +2390,7 @@ defmodule Forge.Workers do
 
   `slice_bytes/0` is M3's *cold build* peak, and a chat inherited it for no better reason than
   being the one job kind with nothing to declare — `resources` is a workflow state's grammar
-  and a chat has no state. So opening a conversation reserved 2210 MiB to run an agent that
+  and a plain chat has no state. So opening a conversation reserved 2210 MiB to run an agent that
   talks, which is the figure that put a 2 GiB machine out of reach of a chat.
 
   **An estimate, and deliberately a crude one.** Nothing has measured an agent: M3 measured

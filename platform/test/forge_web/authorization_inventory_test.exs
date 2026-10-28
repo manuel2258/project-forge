@@ -272,7 +272,17 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"operator/question_form.ex", "form:change"} => :local,
     {"operator/question_form.ex", "form:open"} => :local,
     {"operator/question_form.ex", "questions:send"} => :member,
-    {"operator/question_form.ex", "chat:questions:send"} => :member
+    {"operator/question_form.ex", "chat:questions:send"} => :member,
+    # A chat step's Accept area. The two pages dispatch every `step:` event to
+    # `ForgeWeb.Operator.StepAccept`; picking and the confirm are the page's alone, and the press
+    # is `Operator.accept_step/4`, which asks for the project's `:use` and the person's standing
+    # as it is when pressed.
+    {"chat_live.ex", "step:"} => :member,
+    {"ticket_live.ex", "step:"} => :member,
+    {"operator/step_accept.ex", "step:pick"} => :local,
+    {"operator/step_accept.ex", "step:review"} => :local,
+    {"operator/step_accept.ex", "step:cancel"} => :local,
+    {"operator/step_accept.ex", "step:accept"} => :member
   }
 
   # Worker channel messages. Each addresses a job by an id off the wire, so each must resolve it

@@ -27,7 +27,7 @@ defmodule Forge.JobsChatTest do
       assert is_nil(chat.spec)
     end
 
-    test "a chat carrying a state or a spec is refused" do
+    test "a chat carrying a state without a ticket, or a spec, is refused" do
       project = project_fixture()
 
       assert {:error, changeset} =
@@ -40,7 +40,28 @@ defmodule Forge.JobsChatTest do
                  })
                )
 
-      assert "belongs to a workflow job, not a conversation" in errors_on(changeset).state
+      assert "a conversation is a step only of a ticket" in errors_on(changeset).state
+
+      assert {:error, changeset} =
+               Repo.insert(
+                 Job.create_changeset(%Job{}, %{
+                   kind: :chat,
+                   project_id: project.id,
+                   attempt: 1,
+                   spec: %{"x" => 1}
+                 })
+               )
+
+      assert "belongs to a workflow job, not a conversation" in errors_on(changeset).spec
+    end
+
+    test "the database refuses a chat that names a state and no ticket" do
+      project = project_fixture()
+      chat = chat_fixture(%{project: project})
+
+      assert_raise Postgrex.Error, ~r/jobs_kind_shape/, fn ->
+        Repo.update_all(Ecto.Query.from(j in Job, where: j.id == ^chat.id), set: [state: "x"])
+      end
     end
 
     test "a workflow job still requires its ticket, state and spec" do

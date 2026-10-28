@@ -227,6 +227,15 @@ defmodule Forge.Engine do
     })
   end
 
+  # A chat step's entry opens a conversation instead of a job: no job, no budget, no outcome from
+  # the harness (`docs/design/workflow-grammar-v1.md` § Chat steps). Before the clause below
+  # because a chat step has a prompt too.
+  defp put_follow_up(multi, _ticket, workflow, transition, %State{chat: true}, false, entered) do
+    Multi.merge(multi, fn %{ticket: ticket} ->
+      put_step_chat(Multi.new(), :next_job, ticket, workflow, transition.to, entered)
+    end)
+  end
+
   defp put_follow_up(multi, _ticket, workflow, transition, %State{prompt: prompt}, false, entered)
        when is_binary(prompt) do
     Multi.merge(multi, fn %{ticket: ticket} ->
@@ -256,6 +265,17 @@ defmodule Forge.Engine do
 
   defp put_follow_up(multi, _ticket, _workflow, _transition, _human_state, false, _entered),
     do: multi
+
+  # The conversation a ticket entering a chat step gets, and its branch, cut from the ticket's.
+  # (`Forge.Tickets.put_admit/5` does the same for a first state with the pieces from `Jobs`,
+  # because the ticket's own branch is cut after the first state is entered.)
+  defp put_step_chat(multi, key, ticket, workflow, state_name, entered) do
+    multi
+    |> Jobs.put_create_step(key, ticket, workflow, state_name, entered)
+    |> Multi.merge(fn changes ->
+      Jobs.put_step_branch(Multi.new(), {key, :branch}, changes[key], ticket)
+    end)
+  end
 
   # Out of a command state, the job is handed what its commands said — whoever took the edge, so
   # a person moving a stuck ticket on sends the log with it (`docs/design/job-prompt.md` § How
@@ -526,8 +546,17 @@ defmodule Forge.Engine do
     end
   end
 
+  # **A live conversation of a chat step is a live job here**: `Jobs.live?/2` counts its row as it
+  # counts a job's, so the refusal is the same one every by-hand transition, chat request and API
+  # call already meets; the first branch only names it, so the person is told to Accept instead of
+  # being told a job is running (`docs/design/conversations.md` § A
+  # conversation that is a step). The way out of a live step is Accept.
   defp no_live_job(%Ticket{id: id, state: state}) do
-    if Jobs.live?(id, state), do: {:error, {:job_live, state}}, else: :ok
+    cond do
+      Jobs.live_step(id, state) != nil -> {:error, {:step_live, state}}
+      Jobs.live?(id, state) -> {:error, {:job_live, state}}
+      true -> :ok
+    end
   end
 
   @doc """
@@ -634,6 +663,7 @@ defmodule Forge.Engine do
         end
 
         Enum.each(live, &Forge.Git.Tokens.revoke_for_job(&1.id))
+        stop_step_chats(ticket, user_id)
         {:ok, ticket}
 
       {:error, :locked, reason, _changes} ->
@@ -642,6 +672,17 @@ defmodule Forge.Engine do
       {:error, step, reason, _changes} ->
         {:error, {step, reason}}
     end
+  end
+
+  # A cancelled ticket's step conversation is stopped and left dormant, its branch kept, so that
+  # restoring the ticket leaves it reopenable (`docs/design/conversations.md` § A conversation
+  # that is a step). After the commit, for the reason the jobs' pushes are.
+  defp stop_step_chats(%Ticket{id: id}, user_id) do
+    for chat <- Jobs.live_step_chats(id) do
+      Forge.Conversations.close(chat, "cancelled", actor: actor(user_id))
+    end
+
+    :ok
   end
 
   defp lock_stuck(repo, ticket_id) do
@@ -798,6 +839,9 @@ defmodule Forge.Engine do
 
   defp retryable(%Ticket{} = ticket, workflow) do
     case Workflow.state(workflow, ticket.state) do
+      # A chat step is never run again as a job: its conversation is reopened, and a new visit
+      # comes only from the workflow's own edges.
+      %State{chat: true} -> {:error, {:no_job_in, ticket.state}}
       %State{prompt: prompt} when is_binary(prompt) -> no_live_job(ticket)
       %State{invoke: [_ | _]} -> no_live_job(ticket)
       _human_or_missing -> {:error, {:no_job_in, ticket.state}}
@@ -1040,12 +1084,17 @@ defmodule Forge.Engine do
   # version were recorded between the check and the transaction, which nothing here can open: the
   # only writer of a changeset is a job's result, and no job is live while a person takes an edge.
   # So reading it again is an equivalent mutant as far as any test can tell.
-  defp put_decisions(ticket, %Transition{} = transition, user_id, decision, comment, source) do
+  defp put_decisions(ticket, transition, user_id, decision, comment, source, pinned \\ %{}) do
     transition_map = %{"from" => transition.from, "to" => transition.to}
 
     multi =
       Enum.reduce(transition.approve, Multi.new(), fn name, multi ->
-        case checked(name, source) || Artifacts.latest(ticket.id, name) do
+        # `pinned` is Accept's versions, each checked against what the person was shown. Reading
+        # the latest here instead is an equivalent mutant as far as a test can tell: a conversation's
+        # turn takes the ticket lock Accept holds, so only a writer that takes none — a person
+        # editing a document through the API — could commit a newer version in between, and a test
+        # cannot interleave one. Passed so the approval names the version the check named when one does.
+        case checked(name, source) || Map.get(pinned, name) || Artifacts.latest(ticket.id, name) do
           nil ->
             Multi.error(multi, {:approval, name}, {:no_version, name})
 
@@ -1077,6 +1126,191 @@ defmodule Forge.Engine do
   end
 
   defp checked(_name, nil), do: nil
+
+  # -- accepting a chat step -------------------------------------------------------------------
+
+  @doc """
+  The person ends a chat step: the ticket takes the edge for `outcome` as it would after a job,
+  and the step's conversation is ended (`docs/design/conversations.md` § A conversation that is
+  a step).
+
+  **Accept is the approval.** When the edge asks for approval, the latest version of each
+  document it names is approved by `user_id`, as `choose/4` would, with no second decision.
+
+  **`seen` is `%{document name => version}` as the person was shown it**, and every declared
+  document must still be at exactly that version — one written since, or one the page showed as
+  not written, refuses with `{:stale, names}` and approves nothing unseen. In one transaction
+  under the ticket's lock, which a step's turn also takes to record its documents, so the
+  versions read are the versions approved. Refused, nothing changed, when the ticket is not open
+  or no longer in the step, `chat` is not the visit's latest or was already accepted (so a second
+  press, or a replay after a reconnect, moves the ticket once), a turn is in flight, the outcome
+  is not one the step declares or has no edge left (`max`), or a document it must produce has no
+  version.
+  """
+  @spec accept(Ticket.t(), Job.t(), String.t(), String.t() | nil, %{String.t() => pos_integer()}) ::
+          {:ok, Ticket.t()} | {:error, term()}
+  def accept(%Ticket{} = ticket, %Job{} = chat, user_id, outcome, seen) do
+    with {:ok, workflow} <- Tickets.parsed_workflow(ticket),
+         {:ok, transition} <- accepted_edge(ticket, workflow, chat, outcome),
+         {:ok, source} <- accepted_merge(ticket, workflow, transition) do
+      Multi.new()
+      |> Multi.run(:locked, fn repo, _changes -> lock_open(repo, ticket.id, :not_active) end)
+      |> Multi.run(:step, fn repo, %{locked: locked} ->
+        accepted_step(repo, locked, workflow, chat, outcome, seen)
+      end)
+      |> Multi.merge(fn %{locked: locked, step: %{transition: edge, versions: versions}} ->
+        put_decisions(locked, edge, user_id, :approved, nil, source, versions)
+        |> put_transition(locked, workflow, edge, outcome, actor(user_id), source: source)
+        |> Events.log(:accepted_event, "step.accepted", actor(user_id), %{
+          ticket_id: ticket.id,
+          job_id: chat.id,
+          payload: %{
+            "state" => chat.state,
+            "visit" => chat.attempt,
+            "outcome" => outcome,
+            "to" => edge.to,
+            "approved" => edge.approve,
+            "versions" => Map.new(versions, fn {name, version} -> {name, version.version} end)
+          }
+        })
+      end)
+      |> Repo.transaction()
+      |> case do
+        {:ok, changes} ->
+          moved = Map.get(changes, :ticket, ticket)
+          # The conversation is over with the step: its machine released, its branch dealt with as
+          # ending any conversation does. After the commit, never inside it.
+          Forge.Conversations.end_step(chat, actor: actor(user_id))
+
+          {:ok,
+           run_entry_actions(moved, workflow, accepted_transition(changes), :approved, user_id)}
+
+        {:error, step, reason, _changes} when step in [:locked, :step] ->
+          {:error, reason}
+
+        # A document the edge approves that no state has written: the refusal the page words,
+        # not the step of the transaction it was found in.
+        {:error, {:approval, _name}, {:no_version, _name2} = reason, _changes} ->
+          {:error, reason}
+
+        {:error, step, reason, _changes} ->
+          {:error, {step, reason}}
+      end
+    end
+  end
+
+  defp accepted_transition(changes) do
+    %{step: %{transition: transition}} = changes
+    transition
+  end
+
+  # The edge `outcome` takes, found outside the transaction so a merge into the next state can be
+  # checked with no side effect, and found again inside it (`accepted_step/6`) so the answer used
+  # is the one the locked ticket gives.
+  def accepted_edge(ticket, workflow, chat, outcome) do
+    declared = (Workflow.state(workflow, chat.state) || %State{name: chat.state}).outcomes
+
+    # Reached only by a conversation of a state its ticket's workflow lacks, so no test is written:
+    # the parser gives every state with a prompt `[done]` when it names no outcomes
+    # (`ForgeCore.Workflow.Parser`), a chat step included, so `nil` is only the fallback state
+    # above. Deleting the default would make `outcome in nil` raise for that, and for nothing else.
+    declared = declared || [Workflow.default_outcome()]
+
+    if outcome in declared do
+      case Core.step(workflow, chat.state, outcome, counts(ticket.id)) do
+        {:transition, transition} -> {:ok, transition}
+        {:approval, transition} -> {:ok, transition}
+        {:stuck, {:no_transition, _outcome}} -> {:error, {:no_edge, outcome}}
+        {:stuck, {:max_exceeded, _transition}} -> {:error, {:max_spent, outcome}}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      {:error, {:unknown_outcome, outcome}}
+    end
+  end
+
+  defp accepted_merge(ticket, workflow, transition) do
+    case mergeable(ticket, workflow, transition, :approved) do
+      {:ok, source} -> {:ok, source}
+      {:conflict, _edge, conflict} -> {:error, {:merge_conflict, conflict}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp accepted_step(repo, ticket, workflow, chat, outcome, seen) do
+    row = repo.get!(Job, chat.id)
+
+    latest =
+      repo.one(
+        from j in Job,
+          where: j.ticket_id == ^ticket.id and j.state == ^chat.state and j.kind == :chat,
+          select: max(j.attempt)
+      )
+
+    cond do
+      ticket.state != chat.state ->
+        {:error, {:not_in_step, chat.state}}
+
+      # Before `superseded`, so that on an edge back into this state — where the press opened a newer
+      # visit — a second press on the old conversation is told it was accepted, not that the
+      # ticket has been round again.
+      Forge.Conversations.accepted?(chat.id) ->
+        {:error, :already_accepted}
+
+      latest != row.attempt ->
+        {:error, :superseded}
+
+      Forge.Conversations.in_flight?(row) ->
+        {:error, :in_flight}
+
+      true ->
+        accepted_documents(ticket, workflow, chat, outcome, seen)
+    end
+  end
+
+  # **Every document Accept records or approves is pinned to the version the person was shown**:
+  # the step's own `produces` and the documents the chosen edge approves, which may be an earlier
+  # state's. An approved document the step does not produce used to be read as the latest and not
+  # checked, so a version written meanwhile — by the step's agent, a plain chat or a person through
+  # the API — was approved unseen. The page lists and sends it like any other
+  # (`Forge.Steps.view/2`), so it is checked here the same way.
+  defp accepted_documents(ticket, workflow, chat, outcome, seen) do
+    state = Workflow.state(workflow, chat.state)
+
+    with {:ok, transition} <- accepted_edge(ticket, workflow, chat, outcome) do
+      own = for name <- state.produces, Workflow.document?(name), do: name
+      approved = for name <- transition.approve, Workflow.document?(name), do: name
+      names = Enum.uniq(own ++ approved)
+      latest = Map.new(names, &{&1, Artifacts.latest(ticket.id, &1)})
+
+      # An optional document the step never wrote is not missing — unless the edge approves it,
+      # when there is nothing to approve.
+      missing =
+        for name <- names,
+            latest[name] == nil,
+            name not in state.optional or name in approved,
+            do: name
+
+      stale =
+        for name <- names,
+            Map.get(seen, name) != (latest[name] && latest[name].version),
+            do: name
+
+      with [] <- missing |> Enum.sort() |> none_or({:no_version, missing}),
+           [] <- stale |> Enum.sort() |> none_or({:stale, stale}) do
+        {:ok,
+         %{
+           transition: transition,
+           versions: for({n, v} <- latest, v != nil, into: %{}, do: {n, v})
+         }}
+      else
+        {tag, names} -> {:error, {tag, Enum.sort(names)}}
+      end
+    end
+  end
+
+  defp none_or([], _refusal), do: []
+  defp none_or(_names, refusal), do: refusal
 
   # -- sending a ticket down the conflict route ------------------------------------------------
 

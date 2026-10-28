@@ -54,6 +54,7 @@ defmodule Forge.Jobs do
   @optional_outputs_protocol 7
   @merge_protocol 8
   @archive_protocol 9
+  @step_protocol 10
 
   # How many of the merges that landed on the default branch since a ticket's base an integrating
   # job is told about by name; the rest are counted (`docs/design/job-prompt.md` § Integrating the
@@ -137,6 +138,108 @@ defmodule Forge.Jobs do
         payload: %{"state" => state_name, "attempt" => job.attempt}
       }
     end)
+  end
+
+  @doc """
+  Adds opening the conversation of a chat step to `multi` under `key`: the `:chat` row naming the
+  state, its `chat.opened` event and nothing else (`docs/design/conversations.md` § A conversation
+  that is a step). `attempt` is the visit — the step's conversations on this ticket so far, plus
+  one — and `entered` is how the ticket came in, kept on the event for the manifest.
+
+  The branch is `put_step_branch/4`'s, because a first state is entered before the ticket's own
+  branch exists and a chat's is cut from that one.
+  """
+  @spec put_create_step(Multi.t(), term(), Ticket.t(), Workflow.t(), String.t(), map() | nil) ::
+          Multi.t()
+  def put_create_step(multi, key, %Ticket{} = ticket, %Workflow{} = workflow, state_name, entered) do
+    %State{} = state = Workflow.state(workflow, state_name)
+    resources = resources(workflow, state_name)
+
+    multi
+    |> Multi.run(key, fn repo, _changes ->
+      repo.insert(
+        Job.create_changeset(%Job{id: Ecto.UUID.generate()}, %{
+          kind: :chat,
+          ticket_id: ticket.id,
+          project_id: ticket.project_id,
+          state: state_name,
+          attempt: next_visit(repo, ticket.id, state_name),
+          model: state.model,
+          effort: state.effort,
+          memory_max: resources.memory,
+          cores: resources.cores,
+          secret_names: state.secrets
+        })
+      )
+    end)
+    |> Events.log({key, :event}, "chat.opened", :system, fn changes ->
+      chat = changes[key]
+
+      %{
+        ticket_id: ticket.id,
+        job_id: chat.id,
+        payload: %{
+          "branch" => chat_branch(chat),
+          "secrets" => chat.secret_names,
+          "step" => %{"state" => state_name, "visit" => chat.attempt, "entered" => entered}
+        }
+      }
+    end)
+  end
+
+  @doc "Cuts a chat step's branch from the ticket's, once the ticket's exists."
+  @spec put_step_branch(Multi.t(), term(), Job.t(), Ticket.t()) :: Multi.t()
+  def put_step_branch(multi, key, %Job{} = chat, %Ticket{} = ticket) do
+    Multi.run(multi, key, fn _repo, _changes ->
+      repo_path = ticket.project_id |> Projects.get!() |> Projects.repo_path()
+      branch = chat_branch(chat)
+
+      with :ok <- Git.create_branch(repo_path, branch, "refs/heads/" <> ticket.branch) do
+        {:ok, branch}
+      end
+    end)
+  end
+
+  # The step's conversations on this ticket so far, as `next_attempt/3` counts a job's.
+  defp next_visit(repo, ticket_id, state_name) do
+    (repo.one(
+       from j in Job,
+         where: j.ticket_id == ^ticket_id and j.state == ^state_name and j.kind == :chat,
+         select: max(j.attempt)
+     ) || 0) + 1
+  end
+
+  @doc """
+  A chat step's contract, string keys, for the manifest and the page
+  (`docs/design/conversations.md` § A conversation that is a step): the declared inputs and
+  documents, and each outcome with the state it leads to and what it approves. `entered` is how
+  this visit began, from the conversation's `chat.opened` event.
+  """
+  @spec step_contract(Workflow.t(), String.t(), pos_integer(), map() | nil) :: map() | nil
+  def step_contract(%Workflow{} = workflow, state_name, visit, entered) do
+    case Workflow.state(workflow, state_name) do
+      %State{} = state ->
+        %{
+          "state" => state_name,
+          "visit" => visit,
+          "inputs" => state.inputs,
+          "produces" => for(name <- state.produces, Workflow.document?(name), do: name),
+          "optional" => state.optional,
+          "outcomes" => step_outcomes(workflow, state),
+          "entered" => entered
+        }
+
+      nil ->
+        nil
+    end
+  end
+
+  defp step_outcomes(workflow, %State{name: name, outcomes: outcomes}) do
+    edges = Workflow.transitions_from(workflow, name)
+
+    for outcome <- outcomes || [Workflow.default_outcome()],
+        edge <- Enum.filter(edges, &(ForgeCore.Workflow.Transition.outcome(&1) == outcome)),
+        do: %{"outcome" => outcome, "to" => edge.to, "approve" => edge.approve}
   end
 
   @doc """
@@ -404,6 +507,39 @@ defmodule Forge.Jobs do
     )
   end
 
+  @doc "The live conversation of the ticket's chat step `state`, or nil."
+  @spec live_step(String.t(), String.t()) :: Job.t() | nil
+  def live_step(ticket_id, state) do
+    Repo.one(
+      from j in Job,
+        where:
+          j.ticket_id == ^ticket_id and j.state == ^state and j.kind == :chat and
+            j.status in [:pending, :running],
+        limit: 1
+    )
+  end
+
+  @doc "Every conversation that is a chat step's of the ticket, oldest first."
+  @spec step_chats_for_ticket(String.t()) :: [Job.t()]
+  def step_chats_for_ticket(ticket_id) do
+    Repo.all(
+      from j in Job,
+        where: j.ticket_id == ^ticket_id and j.kind == :chat and not is_nil(j.state),
+        order_by: j.inserted_at
+    )
+  end
+
+  @doc "Every live conversation that is a step of the ticket."
+  @spec live_step_chats(String.t()) :: [Job.t()]
+  def live_step_chats(ticket_id) do
+    Repo.all(
+      from j in Job,
+        where:
+          j.ticket_id == ^ticket_id and j.kind == :chat and not is_nil(j.state) and
+            j.status in [:pending, :running]
+    )
+  end
+
   @doc "Conversations about a ticket, newest first."
   @spec chats_for_ticket(String.t()) :: [Job.t()]
   def chats_for_ticket(ticket_id) do
@@ -621,12 +757,15 @@ defmodule Forge.Jobs do
   # for a machine, and this is the answer that counts (`docs/design/secrets.md` § Delivery). A
   # workflow job or a command naming one deleted since goes back to pending, and the next pass
   # sticks its ticket. A conversation holds what is still set, and its run's record names what is
-  # not, which its page shows (§ Conversations).
+  # not, which its page shows (§ Conversations) — except a chat step's, which are the workflow's
+  # and wait like a job's.
   defp secrets_for(%Job{secret_names: []}, _worker), do: {:ok, nil}
 
   defp secrets_for(%Job{} = job, worker) do
+    optional? = job.kind == :chat and not Job.step?(job)
+
     case Secrets.resolve(job.project_id, job.secret_names) do
-      {_found, [_ | _] = missing} when job.kind != :chat ->
+      {_found, [_ | _] = missing} when not optional? ->
         {:error, {:no_secret, missing}}
 
       {found, gone} ->
@@ -733,6 +872,9 @@ defmodule Forge.Jobs do
     (`docs/design/archive.md`): a release from before it starts the job without the folder and says
     nothing, and the prompt tells the agent it is there. A command has no folder and asks nothing
     more.
+  - **A chat step needs protocol 10**: the spec's `step` is the contract the worker renders into
+    the manifest, and an older worker drops the field and tells the agent there is nothing to
+    write (`docs/design/worker-channel.md` § Versions).
   """
   @spec protocol(Job.t()) :: non_neg_integer()
   def protocol(%Job{} = job), do: job |> protocol_needs() |> Keyword.values() |> Enum.max()
@@ -774,7 +916,9 @@ defmodule Forge.Jobs do
     if spec(job).integration, do: @integration_protocol, else: @questions_protocol
   end
 
-  defp kind_protocol(%Job{kind: :chat}), do: @merge_protocol
+  defp kind_protocol(%Job{kind: :chat} = chat),
+    do: if(Job.step?(chat), do: @step_protocol, else: @merge_protocol)
+
   defp kind_protocol(%Job{}), do: 0
 
   @doc "How many of `parent_id`'s invocations of `command` are running now."
@@ -1002,7 +1146,7 @@ defmodule Forge.Jobs do
   def preparation_margin_ms, do: config(:preparation_margin_ms, :timer.hours(1))
 
   # What only a conversation carries. `max_cost_usd` is what is left of the day, passed to the
-  # harness as its per-turn ceiling: a chat has no state to take a budget from, and the daily cap
+  # harness as its per-turn ceiling: a chat has no budget to take from a state, and the daily cap
   # is the only one there is (`docs/design/conversations.md` § Spend).
   defp chat_assignment(%Job{kind: :chat} = job) do
     %{
@@ -1086,6 +1230,49 @@ defmodule Forge.Jobs do
     end
   end
 
+  # A step's first start, with nothing said yet, is the platform's kickoff
+  # (`docs/design/conversations.md` § A conversation that is a step); the state's prompt is in the
+  # manifest, so a reopened conversation has it too.
+  defp begin_step(%Spec{prompt: nil, replay: nil} = spec),
+    do: %{spec | prompt: Conversations.step_kickoff()}
+
+  defp begin_step(%Spec{} = spec), do: spec
+
+  defp step_of(%Job{} = job, %Ticket{} = ticket) do
+    with {:ok, workflow} <- Tickets.parsed_workflow(ticket),
+         %{} = contract <-
+           step_contract(workflow, job.state, job.attempt, step_entered(job)) do
+      Map.put(contract, "prompt", step_prompt(ticket, Workflow.state(workflow, job.state)))
+    else
+      _broken -> nil
+    end
+  end
+
+  # The step's `env`, carried in the spec as a job's is: the worker's conversation process starts
+  # its harness through the same runner, which enters the devshell when the spec names one.
+  defp step_env(%Job{state: state}, %Ticket{} = ticket) do
+    with {:ok, workflow} <- Tickets.parsed_workflow(ticket),
+         %State{env: env} <- Workflow.state(workflow, state),
+         do: env,
+         else: (_ -> nil)
+  end
+
+  defp step_entered(%Job{id: id}) do
+    case Conversations.opened_step(id) do
+      %{"entered" => entered} -> entered
+      _none -> nil
+    end
+  end
+
+  defp step_prompt(%Ticket{} = ticket, %State{prompt: prompt}) do
+    repo_path = ticket.project_id |> Projects.get!() |> Projects.repo_path()
+
+    case Git.show(repo_path, ticket.workflow_commit, ".forge/" <> prompt) do
+      {:ok, text} -> text
+      {:error, _reason} -> ""
+    end
+  end
+
   # The stored spec never changes; answers given since are appended at run time, the keys already
   # answered are passed so the worker does not wait on them again, and the cost budget is lowered
   # to whatever cap binds first. That last one is what stops a runaway job mid-flight: the figure
@@ -1109,12 +1296,16 @@ defmodule Forge.Jobs do
       replay: opening.replay,
       inputs: chat_inputs(job, ticket),
       preamble_hash: ForgeCore.Prompt.chat_preamble_hash(),
+      env: if(Job.step?(job), do: step_env(job, ticket)),
       model: model_for(job),
       effort: effort_for(job),
       produces: [],
       outcomes: [],
-      moving: moving(ticket)
+      moving: if(Job.step?(job), do: nil, else: moving(ticket)),
+      step: if(Job.step?(job), do: step_of(job, ticket))
     }
+
+    spec = if Job.step?(job), do: begin_step(spec), else: spec
 
     :ok = Spec.validate(spec)
     spec
@@ -1234,7 +1425,7 @@ defmodule Forge.Jobs do
   # An integrating job's checkout fetches the default branch too, and so does a conversation's;
   # every other job's does not (`docs/design/git-hosting.md` § The job's own git).
   #
-  # **A conversation is told the project's, not a spec's.** It has no state and no `integration`,
+  # **A conversation is told the project's, not a spec's.** It has no `integration` of a state's,
   # and it is the one job kind whose agent fetches and merges the default branch on its own
   # initiative — which it could not do at all without this, and whose merge the squash dropped
   # because nothing named a branch to keep (ticket 11, `docs/design/conversations.md` § Commits).
@@ -1261,8 +1452,8 @@ defmodule Forge.Jobs do
   What this job runs on: the most specific thing that says so.
 
   A state's model, then the project's, then nil — and nil is not "no model", it is the machine's,
-  which is the platform-wide setting the worker was built with. A conversation has no state, so
-  the first link is the model it was opened with.
+  which is the platform-wide setting the worker was built with. A plain conversation has no state,
+  so the first link is the model it was opened with.
 
   Resolved here and carried in the spec, so the worker is told rather than deciding: the platform
   knows the state and the project, and a machine knows neither.
@@ -1283,7 +1474,7 @@ defmodule Forge.Jobs do
 
   The same chain as `model_for/1`, link for link — a state's effort, then the project's, then nil
   for the machine's, which is the platform-wide setting the worker was built with. A conversation
-  has no state, so the first link is the effort it was opened with.
+  has no state (a step's is its state's own), so the first link is the effort it was opened with.
 
   Resolved here and carried in the spec for the same reason: the platform knows the state and the
   project, and a machine knows neither.
@@ -1651,7 +1842,7 @@ defmodule Forge.Jobs do
     cond do
       # A conversation never sends one: it ends by hibernating, because it has no outcome to
       # report. One arriving anyway is a worker the platform does not understand, and recording
-      # it would run the whole workflow follow-up over a job with no state to leave.
+      # it would run the whole workflow follow-up over a job with no outcome for it to act on.
       job.kind == :chat -> {:error, :not_a_workflow_job}
       # The worker re-sends a result until it is acked, so the platform has to be able to
       # hear the same one twice. Keyed by the job: a job is recorded once. Not "is it running":
@@ -2035,7 +2226,7 @@ defmodule Forge.Jobs do
         Workers.release(job.worker_id)
         # A conversation has no engine to continue: it failed, and a person decides what next.
         # On the kind, not on "does it have a ticket" — a *ticket* chat has one, so that guard
-        # sent every failed ticket chat into `Engine.after_job`, which has no state to move from
+        # sent every failed ticket chat into `Engine.after_job`, which has no workflow job to move on from
         # and logs `job.orphaned`. The note names this as the failure mode to guard against; the
         # comment here was right and the condition under it was not.
         if job.kind == :workflow and ticket do

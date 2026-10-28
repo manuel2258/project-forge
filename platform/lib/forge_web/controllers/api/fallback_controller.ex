@@ -76,6 +76,15 @@ defmodule ForgeWeb.Api.FallbackController do
   def call(conn, {:error, {:job_live, state}}),
     do: error(conn, :conflict, "job_live", "a job for #{state} is pending, running or waiting")
 
+  def call(conn, {:error, {:step_live, state}}),
+    do:
+      error(
+        conn,
+        :conflict,
+        "step_live",
+        "#{state} is a conversation with a person; it ends with Accept, not by a transition"
+      )
+
   def call(conn, {:error, {:no_version, name}}),
     do: error(conn, :conflict, "no_version", "#{name} has no version to approve")
 

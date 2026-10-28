@@ -260,7 +260,8 @@ defmodule ForgeCore.Prompt do
   @doc """
   What a conversation is told about where it is.
 
-  Deliberately not the job manifest: there is no state to be in, no outcome to declare, no
+  Deliberately not the job manifest: there is no outcome to declare (a chat step is in a state, which
+  its § This step describes, but the person ends it), no
   document that carries one and no budget of its own. Saying otherwise would invite the agent to
   end the conversation by writing an outcome, which is the disguise `docs/design/conversations.md`
   § Why it is not a workflow exists to avoid.
@@ -270,8 +271,8 @@ defmodule ForgeCore.Prompt do
     """
     # This is a conversation
 
-    You are talking to a person. There is no state to leave and no outcome to declare: reply,
-    and wait for what they say next. Work you commit on `#{spec.branch}` is kept and can be
+    You are talking to a person. Nothing you write ends this conversation, and there is no
+    outcome to declare: reply, and wait for what they say next. Work you commit on `#{spec.branch}` is kept and can be
     merged; nothing else about this conversation is a contract.
 
     #{about(spec)}
@@ -282,9 +283,68 @@ defmodule ForgeCore.Prompt do
 
     #{inputs(spec, job_dir)}
     #{history(spec, job_dir)}
-    #{replay(spec, job_dir)}#{secrets(spec)}#{moving_the_ticket(spec, job_dir)}
+    #{replay(spec, job_dir)}#{secrets(spec)}#{moving_the_ticket(spec, job_dir)}#{this_step(spec, job_dir)}
     """
   end
+
+  # A workflow step run as a conversation (`docs/design/conversations.md` § A conversation that is
+  # a step). Said after everything else because it overrides the preamble's "nothing you do is a
+  # contract": here the documents are one, and the outcome is still not the agent's.
+  defp this_step(%Spec{step: nil}, _job_dir), do: ""
+
+  defp this_step(%Spec{step: step, branch: branch}, job_dir) do
+    """
+
+    ## This step
+
+    This conversation is the ticket's step `#{step["state"]}` (visit #{step["visit"]}). **Where the preamble says no document is required, this step
+    differs**: the person will accept the step only once these exist, and every one you write is
+    recorded as a version on the ticket. Nothing you commit on `#{branch}` reaches the ticket.
+
+    #{step_inputs(step)}#{step_documents(step, job_dir)}#{step_outcomes(step)}
+    ### The step's instructions
+
+    #{String.trim(step["prompt"] || "")}
+
+    **The person alone chooses the outcome and ends the step.** You cannot, and nothing you write
+    does: an `outcome:` in a document's front matter is ignored, and there is no
+    `transition.json` for this step. Keep working with them until they are satisfied, and say
+    which documents are ready when you think they are.
+    #{step_arrival(step)}
+    """
+  end
+
+  defp step_inputs(%{"inputs" => []}), do: ""
+
+  defp step_inputs(%{"inputs" => names}),
+    do:
+      "The step's declared inputs, among the documents above: " <>
+        Enum.map_join(names, ", ", &"`#{&1}`") <> ".\n\n"
+
+  defp step_documents(%{"produces" => []}, _job_dir),
+    do: "This step declares no document to write.\n\n"
+
+  defp step_documents(%{"produces" => names, "optional" => optional}, job_dir) do
+    "Documents to write:\n" <>
+      Enum.map_join(names, "\n", fn name ->
+        "- `#{name}` -> `#{Path.join([job_dir, "out", name])}`" <> optional_note(name, optional)
+      end) <> "\n\n"
+  end
+
+  defp step_outcomes(%{"outcomes" => outcomes}) do
+    "Outcomes the person may choose, and where each leads:\n" <>
+      Enum.map_join(outcomes, "\n", fn %{"outcome" => outcome, "to" => to, "approve" => approve} ->
+        "- `#{outcome}` -> `#{to}`" <> approving(approve)
+      end) <> "\n\n"
+  end
+
+  defp step_arrival(%{"visit" => visit, "entered" => entered}) when visit > 1 do
+    "\nThis is a return to the step: visit #{visit}. " <>
+      arrival(entered) <>
+      " The documents from the earlier visit are among the documents above."
+  end
+
+  defp step_arrival(_step), do: ""
 
   # What a ticket conversation may ask the engine for (`docs/design/conversations.md` § Taking a
   # transition). Only for a ticket chat: a project chat has no ticket, and a section about the

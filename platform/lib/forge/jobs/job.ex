@@ -88,6 +88,13 @@ defmodule Forge.Jobs.Job do
   def kinds, do: @kinds
 
   @doc """
+  Whether this is the conversation of a workflow step (`docs/design/conversations.md` § A
+  conversation that is a step): a chat that names a state. `attempt` is its visit.
+  """
+  def step?(%__MODULE__{kind: :chat, state: state}), do: state != nil
+  def step?(%__MODULE__{}), do: false
+
+  @doc """
   Changeset for creating a job. The spec is immutable from here on.
 
   What is required depends on the kind, and the database says the same thing in a CHECK
@@ -133,13 +140,20 @@ defmodule Forge.Jobs.Job do
 
   defp validate_shape(changeset) do
     case get_field(changeset, :kind) do
-      :chat -> validate_absent(changeset, [:state, :spec])
+      :chat -> changeset |> validate_absent([:spec]) |> validate_step()
       _workflow_or_command -> validate_required(changeset, [:ticket_id, :state, :spec])
     end
   end
 
-  # A chat with a state would be a chat the timeline draws as a visit to it, and a chat with a
-  # spec would be a chat the engine can read a budget and an outcome list out of.
+  # A chat step names its state and so needs the ticket it is a step of; a project chat has none.
+  defp validate_step(changeset) do
+    if get_field(changeset, :state) != nil and get_field(changeset, :ticket_id) == nil,
+      do: add_error(changeset, :state, "a conversation is a step only of a ticket"),
+      else: changeset
+  end
+
+  # A chat with a spec would be a chat the engine can read a budget and an outcome list out of.
+  # (Its `state` is allowed: a step's conversation names the step, and says so on its row.)
   defp validate_absent(changeset, fields) do
     Enum.reduce(fields, changeset, fn field, changeset ->
       case get_field(changeset, field) do

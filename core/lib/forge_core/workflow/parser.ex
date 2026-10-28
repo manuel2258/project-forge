@@ -36,7 +36,7 @@ defmodule ForgeCore.Workflow.Parser do
 
   @top_keys ~w(version description initial states transitions limits defaults commands)
   @state_keys ~w(prompt env model effort inputs produces optional outcomes budget on_enter
-                 on_conflict resources invoke exit may_invoke secrets)
+                 on_conflict resources invoke exit may_invoke secrets chat)
   @command_keys ~w(run env produces timeout resources secrets)
   @grant_keys ~w(max concurrent)
   @transition_keys ~w(from to when approve max)
@@ -334,6 +334,7 @@ defmodule ForgeCore.Workflow.Parser do
     {secrets, e14} = string_list(definition, "secrets", path)
     {optional, e15} = string_list(definition, "optional", path)
     {effort, e16} = optional_string(definition, "effort", path)
+    {chat, e17} = boolean(definition, "chat", path)
 
     state = %State{
       name: name,
@@ -352,14 +353,16 @@ defmodule ForgeCore.Workflow.Parser do
       exit: exit,
       may_invoke: may_invoke,
       on_conflict: on_conflict,
-      secrets: secrets || []
+      secrets: secrets || [],
+      chat: chat
     }
 
     {state,
      unknown_keys(definition, @state_keys, path) ++
        e1 ++
        e2 ++
-       e3 ++ e4 ++ e5 ++ e6 ++ e7 ++ e8 ++ e9 ++ e10 ++ e11 ++ e12 ++ e13 ++ e14 ++ e15 ++ e16}
+       e3 ++
+       e4 ++ e5 ++ e6 ++ e7 ++ e8 ++ e9 ++ e10 ++ e11 ++ e12 ++ e13 ++ e14 ++ e15 ++ e16 ++ e17}
   end
 
   defp state(name, _definition) do
@@ -667,6 +670,14 @@ defmodule ForgeCore.Workflow.Parser do
       nil -> {nil, []}
       value when is_binary(value) and value != "" -> {value, []}
       _ -> {nil, [Error.new(Error.join(path, key), "must be a non-empty string")]}
+    end
+  end
+
+  defp boolean(map, key, path) do
+    case Map.get(map, key) do
+      nil -> {false, []}
+      value when is_boolean(value) -> {value, []}
+      _ -> {false, [Error.new(Error.join(path, key), "must be true or false")]}
     end
   end
 

@@ -110,9 +110,11 @@ defmodule ForgeCore.Workflow.Validator do
         budget: command.budget,
         may_invoke: command.may_invoke,
         # Each command brings its own, as it brings its own `env` (`docs/design/secrets.md`).
-        secrets: command.secrets
+        secrets: command.secrets,
+        # A command runs and ends by itself; a conversation is what a person ends.
+        chat: command.chat
       ]
-      |> Enum.reject(fn {_key, value} -> value in [nil, [], %{}] end)
+      |> Enum.reject(fn {_key, value} -> value in [nil, [], %{}, false] end)
       |> Enum.map(
         &Error.new(Error.join(path, to_string(elem(&1, 0))), "not allowed on a command state")
       )
@@ -156,9 +158,10 @@ defmodule ForgeCore.Workflow.Validator do
         resources: human.resources,
         exit: human.exit,
         may_invoke: human.may_invoke,
-        secrets: human.secrets
+        secrets: human.secrets,
+        chat: human.chat
       ]
-      |> Enum.reject(fn {_key, value} -> value in [nil, [], %{}] end)
+      |> Enum.reject(fn {_key, value} -> value in [nil, [], %{}, false] end)
       |> Enum.map(fn {key, _value} -> to_string(key) end)
 
     changeset ++
@@ -166,6 +169,43 @@ defmodule ForgeCore.Workflow.Validator do
         present,
         &Error.new(Error.join(path, &1), "not allowed on a human state (no prompt)")
       )
+  end
+
+  # A chat step is a conversation: nothing in it ends without a person, so it has no ceiling to
+  # state, no commands to invoke, and nothing to commit to the ticket's branch
+  # (`docs/design/workflow-grammar-v1.md` § Chat steps). Every other rule of a job state holds.
+  defp state_shape(path, %State{chat: true} = step) do
+    budget =
+      if step.budget == nil,
+        do: [],
+        else: [
+          Error.new(
+            Error.join(path, "budget"),
+            "not allowed on a chat step: a conversation has no ceiling"
+          )
+        ]
+
+    may_invoke =
+      if step.may_invoke == %{},
+        do: [],
+        else: [
+          Error.new(
+            Error.join(path, "may_invoke"),
+            "not allowed on a chat step: it invokes no commands"
+          )
+        ]
+
+    exit =
+      if step.exit == nil,
+        do: [],
+        else: [
+          Error.new(
+            Error.join(path, "exit"),
+            "not allowed on a chat step: a person chooses its outcome"
+          )
+        ]
+
+    budget ++ may_invoke ++ exit ++ chat_produces(path, step)
   end
 
   defp state_shape(path, %State{} = job) do
@@ -185,6 +225,61 @@ defmodule ForgeCore.Workflow.Validator do
         ]
 
     budget ++ exit
+  end
+
+  defp chat_produces(path, step) do
+    produces_path = Error.join(path, "produces")
+
+    produced =
+      step.produces
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {entry, index} ->
+        at = Error.join(produces_path, index)
+
+        cond do
+          entry == Workflow.changeset_artifact() ->
+            [
+              Error.new(
+                at,
+                "a chat step commits to its own branch and cannot produce " <>
+                  Workflow.changeset_artifact()
+              )
+            ]
+
+          entry == Workflow.commit_message_artifact() ->
+            [
+              Error.new(
+                at,
+                "#{Workflow.commit_message_artifact()} belongs to the conversation's own " <>
+                  "branch, and a chat step cannot produce it"
+              )
+            ]
+
+          Workflow.group?(entry) ->
+            [Error.new(at, "a chat step writes documents, not a group of files")]
+
+          Workflow.presentation?(entry) ->
+            [Error.new(at, "a chat step writes documents, not a presentation")]
+
+          true ->
+            []
+        end
+      end)
+
+    outcome_document = Workflow.outcome_document(step.produces)
+
+    optional =
+      if outcome_document != nil and outcome_document in step.optional,
+        do: [
+          Error.new(
+            Error.join(path, "optional"),
+            "#{inspect(outcome_document)} is the document a chat step must write before it " <>
+              "can be accepted and cannot be optional"
+          )
+        ],
+        else: []
+
+    produced ++ optional
   end
 
   # An engine outcome is the engine's to decide — a command state's `exit` naming `error` would let

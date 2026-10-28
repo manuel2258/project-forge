@@ -112,7 +112,7 @@ worker's jobs, and summing `(spec->>'memory')::bigint` is a query nobody should 
 rewritten, exactly as `spec` is.
 
 **A chat is the one kind with nothing to declare, and it gets its own number rather than a
-build's.** `resources` is a workflow state's grammar and a conversation has no state, so it fell
+build's.** `resources` is a workflow state's grammar and a plain conversation has no state, so it fell
 off the end of the chain onto `slice_bytes` — which is M3's *cold build* peak, 2210 MiB. Nobody
 decided that talking to an agent should reserve a machine's worth of memory; it was the last link
 of a chain written for jobs that compile. So `chat_slice_bytes` sits beside `slice_bytes` as the

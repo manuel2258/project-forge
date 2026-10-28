@@ -40,7 +40,8 @@ defmodule Forge.Conversations do
   """
   @spec open(Projects.Project.t(), String.t(), keyword()) :: {:ok, Job.t()} | {:error, term()}
   def open(project, text, opts \\ []) do
-    # A chat has no state and so no declaration to resolve — the grammar is a workflow's, and
+    # A chat opened here has no state and so no declaration to resolve (a chat step is opened by the
+    # engine, from its state's) — the grammar is a workflow's, and
     # this is not one. So the person opening it says, and the platform's defaults are what they
     # get when they do not (`docs/design/conversations.md` § What it asks for).
     with :ok <- ticket_of(project, Keyword.get(opts, :ticket)),
@@ -448,40 +449,48 @@ defmodule Forge.Conversations do
     # (`docs/design/conversations.md` § Spend) — and the conversation's cost is every run's, since
     # a conversation reopened is a new process whose total starts again from nothing.
     Multi.new()
+    |> lock_step_ticket(chat)
+    |> Multi.run(:step_open, fn _repo, _changes -> {:ok, not step_accepted?(chat)} end)
     |> put_proposals(chat, payload)
-    |> put_documents(chat, documents)
+    |> Multi.merge(fn %{step_open: open?} ->
+      put_documents(Multi.new(), chat, documents, open?)
+    end)
+    |> Multi.run(:spent_before, fn _repo, _changes -> {:ok, Runs.total(chat.id)} end)
     |> Runs.cost(chat.id, decimal(harness["cost_usd"]))
-    |> Multi.update(:job, fn _changes ->
+    |> put_ticket_cost(chat)
+    |> Multi.update(:job, fn %{step_open: open?} ->
       Job.progress_changeset(chat, %{
-        status: :running,
+        status: if(open?, do: :running, else: chat.status),
         turns: chat.turns + (harness["turns"] || 1),
         cost_usd: Runs.total(chat.id),
         harness_session_id: harness["session_id"] || chat.harness_session_id,
         session_blob: Jobs.session_blob(chat, harness) || chat.session_blob
       })
     end)
-    |> Events.log(:turn, "chat.turn", {:job, chat.id}, %{
-      ticket_id: chat.ticket_id,
-      job_id: chat.id,
-      payload: %{
-        "turn" => turn,
-        "session_id" => harness["session_id"],
-        "commit" => payload["commit"],
-        # Why there is no commit, when there is none: the worker's reason, kept so the page can
-        # say it in the conversation rather than leaving it in the machine's log, which the
-        # person in the chat does not read (`docs/design/conversations.md` § Commits).
-        "uncommitted" => payload["uncommitted"],
-        "interrupted" => payload["interrupted"] == true,
-        "cost_usd" => harness["cost_usd"],
-        "subtype" => harness["subtype"],
-        # The job's memory as the turn ended, kept here and nowhere else
-        # (`docs/design/claude-code-events.md` § Memory).
-        "memory" => harness["memory"],
-        # Every turn, empty or not: the page reads the newest, so a file the agent fixed stops
-        # being listed as refused the turn it is fixed.
-        "refused_documents" => refused
-      }
-    })
+    |> Multi.merge(fn %{step_open: open?} ->
+      Events.log(Multi.new(), :turn, "chat.turn", {:job, chat.id}, %{
+        ticket_id: chat.ticket_id,
+        job_id: chat.id,
+        payload: %{
+          "turn" => turn,
+          "session_id" => harness["session_id"],
+          "commit" => payload["commit"],
+          # Why there is no commit, when there is none: the worker's reason, kept so the page can
+          # say it in the conversation rather than leaving it in the machine's log, which the
+          # person in the chat does not read (`docs/design/conversations.md` § Commits).
+          "uncommitted" => payload["uncommitted"],
+          "interrupted" => payload["interrupted"] == true,
+          "cost_usd" => harness["cost_usd"],
+          "subtype" => harness["subtype"],
+          # The job's memory as the turn ended, kept here and nowhere else
+          # (`docs/design/claude-code-events.md` § Memory).
+          "memory" => harness["memory"],
+          # Every turn, empty or not: the page reads the newest, so a file the agent fixed stops
+          # being listed as refused the turn it is fixed.
+          "refused_documents" => refused_in(open?, refused, documents)
+        }
+      })
+    end)
     |> Repo.transaction()
     |> case do
       {:ok, %{job: chat, turn: event}} ->
@@ -505,6 +514,47 @@ defmodule Forge.Conversations do
         {:error, {step, reason}}
     end
   end
+
+  # **A ticket conversation's turn records its documents under the ticket's lock**, the lock
+  # `Engine.accept/5` reads the latest versions under — any conversation of the ticket, not only
+  # the step's, because a plain chat may write the same document name. Then what Accept approves
+  # is what was latest when it looked, and no turn can land a newer one between its read and its
+  # commit. A project chat has no ticket and takes none.
+  #
+  # Removing it is an equivalent mutant as far as any test can tell: it only matters when a turn's
+  # commit lands between Accept's read and its commit, and a test cannot interleave two
+  # transactions on one connection (`Forge.Engine.put_decisions/7` says the same of the approval).
+  defp lock_step_ticket(multi, %Job{ticket_id: ticket_id}) when is_binary(ticket_id) do
+    Multi.run(multi, :ticket_lock, fn repo, _changes ->
+      {:ok,
+       repo.one!(from t in Forge.Tickets.Ticket, where: t.id == ^ticket_id, lock: "FOR UPDATE")}
+    end)
+  end
+
+  defp lock_step_ticket(multi, %Job{}), do: multi
+
+  # A step's turn adds what it cost to its ticket's total, which a conversation about a ticket
+  # otherwise never does (`docs/design/workflow-grammar-v1.md` § `limits.ticket_cost`): the step is
+  # the ticket's own work, so the cap on later jobs sees it — and nothing the cap finds ends the
+  # conversation. The delta, because the turn's figure is the process's running total.
+  defp put_ticket_cost(multi, %Job{ticket_id: ticket_id} = chat) when is_binary(ticket_id) do
+    if Job.step?(chat) do
+      Multi.run(multi, :ticket_cost, fn repo, %{spent_before: before} ->
+        delta = Decimal.sub(Runs.total(chat.id), before)
+
+        {_count, _rows} =
+          repo.update_all(from(t in Forge.Tickets.Ticket, where: t.id == ^ticket_id),
+            inc: [cost_usd: delta]
+          )
+
+        {:ok, delta}
+      end)
+    else
+      multi
+    end
+  end
+
+  defp put_ticket_cost(multi, %Job{}), do: multi
 
   # What the conversation asked the engine to do with its ticket, if anything
   # (`docs/design/conversations.md` § Taking a transition).
@@ -544,7 +594,21 @@ defmodule Forge.Conversations do
 
   defp request(_payload), do: :none
 
-  defp refuse_or_apply(chat, request) do
+  # **A step's agent cannot move the ticket**: the person ends the step with Accept, and nothing
+  # an agent writes is a way past them (`docs/design/conversations.md` § A conversation that is a
+  # step). Refused whatever the request, and recorded as any refusal is.
+  defp refuse_or_apply(%Job{} = chat, request) do
+    if Job.step?(chat),
+      do:
+        refused(
+          chat,
+          request,
+          "the person ends this step with Accept; you cannot move the ticket"
+        ),
+      else: do_refuse_or_apply(chat, request)
+  end
+
+  defp do_refuse_or_apply(chat, request) do
     case transition_actor(chat, request) do
       {:ok, ticket, user} -> apply_request(chat, ticket, user, request)
       {:error, reason} -> refused(chat, request, reason)
@@ -762,6 +826,10 @@ defmodule Forge.Conversations do
   defp humanise({:job_live, state}),
     do: "a job of `#{state}` is still running; the ticket has to be cancelled and restored first"
 
+  defp humanise({:step_live, state}),
+    do:
+      "`#{state}` is a conversation with the person; they end it with Accept, and only then does the ticket move"
+
   defp humanise({:not_active, status}), do: "the ticket is #{status}"
 
   defp humanise({:no_version, name}),
@@ -908,8 +976,22 @@ defmodule Forge.Conversations do
 
   defp held(%Job{ticket_id: ticket_id}) do
     ticket = Tickets.get!(ticket_id)
+
     Map.merge(questioned(ticket), awaiting_approval(ticket))
   end
+
+  defp step_accepted?(chat), do: Job.step?(chat) and accepted?(chat.id)
+
+  defp refused_in(true, refused, _write), do: refused
+  defp refused_in(false, refused, write), do: Map.merge(refused, dropped(write))
+
+  # What a turn that landed after Accept would have written, said as refused so the page lists it
+  # rather than letting the person think it was kept (`unrecorded/1`).
+  defp dropped(write),
+    do:
+      Map.new(write, fn {_scope, name, _raw, _meta} ->
+        {name, "arrived after the step was accepted, so it was not recorded"}
+      end)
 
   defp questioned(ticket) do
     case Jobs.waiting_job(ticket) do
@@ -953,6 +1035,13 @@ defmodule Forge.Conversations do
   # in a chat's document became a question on the ticket — a blocking one held a waiting job on
   # something nobody had been asked. The block was still checked by `check/4`, which is also where
   # the front matter kept as the version's `meta` comes from (§ Commits).
+  # `open?` is read under the ticket's lock, which `Engine.accept/5` holds while it records the
+  # press: a turn that lands after Accept — a message sent before it, reaching the worker before
+  # the close — records its cost and nothing else, so the next state reads no version nobody
+  # accepted and the finished conversation is not set running again.
+  defp put_documents(multi, _chat, _write, false), do: multi
+  defp put_documents(multi, chat, write, true), do: put_documents(multi, chat, write)
+
   defp put_documents(multi, chat, write) do
     Enum.reduce(write, multi, fn {scope, name, raw, meta}, multi ->
       Forge.Artifacts.put_version(
@@ -999,6 +1088,9 @@ defmodule Forge.Conversations do
   defp decimal(number) when is_integer(number), do: Decimal.new(number)
 
   @closed "closed"
+  # A step ended by Accept: over for good, so it ends as `closed` does (status, branch), but the
+  # reason says who ended it (`docs/design/conversations.md` § A conversation that is a step).
+  @accepted "accepted"
 
   @doc """
   Records that a conversation stopped, and why. It is not over: a reopen resumes the session it
@@ -1025,7 +1117,7 @@ defmodule Forge.Conversations do
   @spec ended(Job.t(), String.t() | nil, String.t() | nil, keyword()) ::
           {:ok, Job.t()} | {:error, term()}
   def ended(%Job{kind: :chat} = chat, commit, reason, opts \\ []) do
-    status = if reason in [@closed, "idle"], do: :finished, else: :hibernated
+    status = if reason in [@closed, @accepted, "idle"], do: :finished, else: :hibernated
     forget? = status == :hibernated and refused?(chat, opts[:result])
 
     worker_id =
@@ -1054,7 +1146,7 @@ defmodule Forge.Conversations do
         # back. Without this the machine stays `busy` for ever and takes no more work — which
         # is not visible anywhere except the next thing that never gets scheduled.
         Tokens.revoke_for_job(chat.id)
-        if reason == @closed, do: abandon_branch(chat)
+        if reason in [@closed, @accepted], do: abandon_branch(chat)
         Workers.release(worker_id)
         Events.notify_job(chat.id, event)
         Events.notify(chat.ticket_id)
@@ -1139,6 +1231,7 @@ defmodule Forge.Conversations do
   def reopen(%Job{kind: :chat} = chat, opts \\ []) do
     Multi.new()
     |> Multi.run(:dormant, fn repo, _changes -> dormant(repo, chat) end)
+    |> Multi.run(:step, fn repo, _changes -> step_still_open(repo, chat) end)
     |> Multi.update(:job, fn %{dormant: row} ->
       # The session is kept: the reopen resumes it as a fork when its file was carried, and starts
       # cold with the replay when it was not (`docs/design/conversations.md` § Lifetime).
@@ -1161,6 +1254,9 @@ defmodule Forge.Conversations do
       {:error, :dormant, :live, _changes} ->
         {:error, :live}
 
+      {:error, :step, :step_over, _changes} ->
+        {:error, :step_over}
+
       {:error, step, reason, _changes} ->
         {:error, {step, reason}}
     end
@@ -1176,6 +1272,49 @@ defmodule Forge.Conversations do
     row = repo.one!(from j in Job, where: j.id == ^chat.id, lock: "FOR UPDATE")
     if live?(row), do: {:error, :live}, else: {:ok, row}
   end
+
+  # **A step's conversation is reopened only while its step is the ticket's** — the ticket open,
+  # still in that state, this the latest visit, and Accept not pressed. After any of those the
+  # step is over, and a conversation in it would be talking to nobody about nothing.
+  defp step_still_open(repo, %Job{} = chat) do
+    if Job.step?(chat) do
+      ticket = repo.get!(Forge.Tickets.Ticket, chat.ticket_id)
+
+      latest =
+        repo.one(
+          from j in Job,
+            where: j.ticket_id == ^chat.ticket_id and j.state == ^chat.state and j.kind == :chat,
+            select: max(j.attempt)
+        )
+
+      if ticket.status in [:active, :stuck] and ticket.state == chat.state and
+           latest == chat.attempt and not accepted?(chat.id),
+         do: {:ok, :open},
+         else: {:error, :step_over}
+    else
+      {:ok, :not_a_step}
+    end
+  end
+
+  @doc """
+  Ends a step's conversation because the person accepted it: closed like any conversation, with
+  the reason `accepted`, or recorded as ended here when it has no process to tell — a dormant one
+  is accepted too (`docs/design/conversations.md` § A conversation that is a step).
+  """
+  @spec end_step(Job.t(), keyword()) :: :ok | {:error, term()}
+  def end_step(%Job{} = chat, opts \\ []) do
+    case close(chat, @accepted, opts) do
+      {:error, :not_live} ->
+        with {:ok, _chat} <- ended(chat, nil, @accepted, opts), do: :ok
+
+      other ->
+        other
+    end
+  end
+
+  @doc "Whether Accept ended this step's conversation."
+  @spec accepted?(String.t()) :: boolean()
+  def accepted?(job_id), do: Events.latest_for_job(job_id, "step.accepted") != nil
 
   defp restore_branch(chat) do
     %{project: project, ticket: ticket} = context(chat)
@@ -1620,6 +1759,52 @@ defmodule Forge.Conversations do
     do: action.children |> Enum.reverse() |> Enum.find_value(&open_action/1) || action
 
   defp open_action(_resolved), do: nil
+
+  @doc """
+  What a step's conversation says to start with when nobody has said anything: the platform's
+  words, not the person's — never logged as a `chat.message`, so the page does not show it as
+  something they typed. The step's prompt is in the manifest (`ForgeCore.Prompt.chat_manifest/2`).
+  """
+  @spec step_kickoff() :: String.t()
+  def step_kickoff do
+    "Begin the step described under \"This step\" in the manifest: read its inputs, say where " <>
+      "you are starting from, and ask the person what you need to know. Write the step's " <>
+      "documents to `out/` as you learn more, and keep them current as the conversation goes."
+  end
+
+  @doc "The `step` a conversation was opened with (`state`, `visit`, `entered`), or nil."
+  @spec opened_step(String.t()) :: map() | nil
+  def opened_step(job_id) do
+    case Events.latest_for_job(job_id, "chat.opened") do
+      %Event{payload: %{"step" => %{} = step}} -> step
+      _plain_chat -> nil
+    end
+  end
+
+  @doc """
+  Whether a turn of this conversation is still in flight: it has been asked something, or begun,
+  and the platform has not yet recorded the turn that answers it. False for one with no process
+  (`:hibernated`, `:finished`) — nothing is going to reply — and for a reopened one nobody has
+  spoken to. Accept waits on it, so a document the reply is still writing is not accepted half
+  written (`docs/design/conversations.md` § A conversation that is a step).
+  """
+  @spec in_flight?(Job.t()) :: boolean()
+  def in_flight?(%Job{id: id}) do
+    case Repo.one(from j in Job, where: j.id == ^id, select: j.status) do
+      status when status in [:pending, :running] ->
+        id
+        |> Events.for_job()
+        |> Enum.reverse()
+        |> Enum.take_while(&(&1.type != "chat.turn"))
+        |> Enum.any?(
+          &(&1.type in ~w(chat.opened chat.message job.harness.text job.harness.tool_use
+                          job.harness.tool_result))
+        )
+
+      _dormant ->
+        false
+    end
+  end
 
   @doc """
   What a conversation's next process starts with: what was said before it, and what it answers.

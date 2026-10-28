@@ -12,7 +12,7 @@ defmodule ForgeCore.Job.Spec do
   alias ForgeCore.Job.Spec.Input
   alias ForgeCore.Workflow
 
-  # A conversation has no state, no outcomes and no budget of its own, so the keys a workflow
+  # A conversation has no outcomes and no budget of its own (and no state, but a chat step's), so the keys a workflow
   # job must have cannot be enforced by the struct any more. They are enforced by `validate/1`
   # instead, at the one place a workflow spec is built — which is a weaker guarantee than the
   # compiler's and is why it is called rather than merely available.
@@ -117,8 +117,17 @@ defmodule ForgeCore.Job.Spec do
     #
     # One field rather than three because they are one question — what can this chat do to its
     # ticket now — and are read in one place, the manifest's § Moving the ticket. Nil for a
-    # project chat and for every workflow job, neither of which reads it.
-    moving: nil
+    # project chat, for a chat step's (the person ends it, so there is nothing to ask for) and for
+    # every workflow job, none of which reads it.
+    moving: nil,
+    # A chat step's contract (`docs/design/conversations.md` § A conversation that is a step),
+    # string keys: `state`, `prompt` (the state's text), `visit`, `inputs` (the declared input
+    # names), `produces` (the documents it must write, by name on disk), `optional`, `outcomes`
+    # (each `%{"outcome", "to", "approve"}`) and `entered`, how the ticket arrived on this visit.
+    # Nil for every other job.
+    # The worker composes the manifest's § This step from it, which is why a worker has to speak
+    # protocol 10 to be given one.
+    step: nil
   ]
 
   @workflow_keys [
@@ -145,6 +154,7 @@ defmodule ForgeCore.Job.Spec do
           secrets: [String.t()],
           secrets_gone: [String.t()],
           moving: %{String.t() => term()} | nil,
+          step: %{String.t() => term()} | nil,
           ticket:
             %{number: pos_integer(), title: String.t(), ticket_type: String.t() | nil} | nil,
           state: String.t() | nil,
@@ -306,9 +316,33 @@ defmodule ForgeCore.Job.Spec do
       answered_keys: or_default(get, :answered_keys, []),
       secrets: or_default(get, :secrets, []),
       secrets_gone: or_default(get, :secrets_gone, []),
-      moving: moving_from_map(get.(:moving))
+      moving: moving_from_map(get.(:moving)),
+      step: step_from_map(get.(:step))
     }
   end
+
+  # String keys whichever way it arrived, for the reason `moving` is.
+  defp step_from_map(nil), do: nil
+
+  defp step_from_map(map) do
+    %{
+      "state" => nested(map, :state),
+      "prompt" => nested(map, :prompt) || "",
+      "visit" => nested(map, :visit) || 1,
+      "inputs" => nested(map, :inputs) || [],
+      "produces" => nested(map, :produces) || [],
+      "optional" => nested(map, :optional) || [],
+      "outcomes" => Enum.map(nested(map, :outcomes) || [], &step_outcome/1),
+      "entered" => entered_from_map(nested(map, :entered))
+    }
+  end
+
+  defp step_outcome(map),
+    do: %{
+      "outcome" => nested(map, :outcome),
+      "to" => nested(map, :to),
+      "approve" => nested(map, :approve) || []
+    }
 
   # String keys whichever way it arrived, for the reason `entered` is: the manifest reads it by
   # string, and a spec built in memory and one read back from the row must render the same.

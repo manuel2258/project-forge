@@ -58,7 +58,8 @@ defmodule ForgeWeb.ProjectLive do
       spent:
         project |> Tickets.all() |> Enum.reduce(Decimal.new(0), &Decimal.add(&2, &1.cost_usd)),
       events: Events.for_project(project.id, 8),
-      # The board is the workflow, and a conversation is not on it — it has no state to be in.
+      # The board is the workflow, and a plain conversation is not on it — it has no state to be in
+      # (a chat step is a ticket's state).
       # Without this a chat is a thing you can start from this page and then cannot find from it.
       chats: Conversations.summaries(project_id: project.id),
       proposals: open_proposals(project),

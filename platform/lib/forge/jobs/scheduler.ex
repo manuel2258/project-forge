@@ -15,6 +15,7 @@ defmodule Forge.Jobs.Scheduler do
   use GenServer
 
   alias Forge.{Credentials, Engine, Jobs, Projects, Secrets, Tickets, Workers}
+  alias Forge.Jobs.Job
 
   require Logger
 
@@ -195,13 +196,16 @@ defmodule Forge.Jobs.Scheduler do
   defp credential(job), do: Credentials.for_job(job)
 
   # A conversation holds what is still set and says what is not (`docs/design/secrets.md`
-  # § Conversations), so only a workflow job or a command waits on a secret.
-  defp secrets(%{kind: :chat}), do: :ok
-
+  # § Conversations), so only a workflow job, a command or a chat step waits on a secret: a step's
+  # secrets are the workflow's, listed on its state, and not the person's pick.
   defp secrets(job) do
-    case Secrets.missing(job.project_id, job.secret_names) do
-      [] -> :ok
-      names -> {:error, {:no_secret, names_it(job), names}}
+    if job.kind == :chat and not Job.step?(job) do
+      :ok
+    else
+      case Secrets.missing(job.project_id, job.secret_names) do
+        [] -> :ok
+        names -> {:error, {:no_secret, names_it(job), names}}
+      end
     end
   end
 
@@ -224,7 +228,9 @@ defmodule Forge.Jobs.Scheduler do
   defp claim(claims, worker_id, %{memory: memory, cores: cores}),
     do: Map.update(claims, worker_id, {memory, cores}, fn {m, c} -> {m + memory, c + cores} end)
 
-  # A chat is not the ticket's work, so a chat that cannot be placed sticks nothing — not even a
+  # A chat is not the ticket's work, and a chat step's conversation is no exception (its ticket
+  # waits for a person whatever happens to the machine), so a chat that cannot be placed sticks
+  # nothing — not even a
   # ticket chat's ticket, whose own jobs may place perfectly well (a template can take workflow
   # jobs and refuse chats). It stays pending and says why on its own page, in the sentence the
   # ticket would have been stuck with; nothing puts it in the queue, which is the gap
@@ -337,12 +343,15 @@ defmodule Forge.Jobs.Scheduler do
          "snapshot its template follows speaks #{has}. Build one and mark it, and the next " <>
          "pass will use it; nothing needs editing."}
 
-  # Only a chat reaches these two: anything else sticks its ticket instead (`stick/2`).
+  # Only a chat reaches these three: anything else sticks its ticket instead (`stick/2`).
   defp waiting({:no_template, why} = refusal),
     do: {Atom.to_string(why), "Waiting for a template: " <> reason(refusal) <> "."}
 
   defp waiting({:no_credential, _why} = refusal),
     do: {"no_credential", "Waiting for a credential: " <> reason(refusal) <> "."}
+
+  defp waiting({:no_secret, _who, _names} = refusal),
+    do: {"no_secret", "Waiting for a secret: " <> reason(refusal) <> "."}
 
   # Every credential in the pool is rate-limited, and time resolves it
   # (`docs/design/credentials.md` § How a job picks). **No reset time in it**: a reason is

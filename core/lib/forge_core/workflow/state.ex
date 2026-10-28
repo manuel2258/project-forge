@@ -28,6 +28,7 @@ defmodule ForgeCore.Workflow.State do
     :resources,
     :exit,
     :on_conflict,
+    chat: false,
     inputs: [],
     produces: [],
     optional: [],
@@ -79,7 +80,10 @@ defmodule ForgeCore.Workflow.State do
           may_invoke: %{String.t() => grant()},
           # A job state's: the project secrets its job is handed, by name
           # (`docs/design/secrets.md` § The workflow is the access list).
-          secrets: [String.t()]
+          secrets: [String.t()],
+          # A job state's: whether entering it opens a conversation instead of running a job
+          # (`docs/design/workflow-grammar-v1.md` § Chat steps).
+          chat: boolean()
         }
 
   @doc "The entry actions v1 knows."
@@ -92,6 +96,14 @@ defmodule ForgeCore.Workflow.State do
   @doc "Whether the state runs an agent: it has a prompt."
   @spec job?(t()) :: boolean()
   def job?(%__MODULE__{prompt: prompt}), do: prompt != nil
+
+  @doc """
+  Whether the state is a chat step: a job state whose entry opens a conversation a person ends,
+  rather than a job that ends itself. False for every state that is not a job state — the
+  validator refuses `chat` on the others, so the `job?` test is an equivalent mutant there.
+  """
+  @spec chat?(t()) :: boolean()
+  def chat?(%__MODULE__{chat: chat} = state), do: chat == true and job?(state)
 
   @doc "Whether the state runs commands on entry and nothing else."
   @spec command?(t()) :: boolean()

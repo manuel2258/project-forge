@@ -352,6 +352,11 @@ under it, a document's question form, an approval's comment, a proposal's commen
 a human state's document, and the two screens that start something — a new ticket and a new
 conversation, which is where the person who reported this said they lost work.
 
+A chat step's Accept form (§ The Accept area) is in this group too: its outcome pick and its open
+confirm ride in the form's own fields, so the change event the client replays restores them. It
+holds no text box, so `ForgeWeb.ReconnectTest`'s walk and inventory have nothing to say about it;
+`chat_step_live_test.exs` replays the event against a fresh mount instead.
+
 `ForgeWeb.ReconnectTest` holds the rule two ways: it walks those pages and fails on a box drawn
 outside a form carrying both attributes, and it inventories every form in the web layer that
 holds a box — including the boxes components draw rather than the form itself — so a new one
@@ -787,6 +792,44 @@ on it, the script as it ran, the argument vector as JSON — it reached `exec` a
 joined with spaces two arguments would read as one — the commit it ran at, its timeout, the job
 that invoked it, and its log.
 
+### The Accept area (a chat step)
+
+A ticket resting in a **chat step** (`workflow-grammar-v1.md` § Chat steps) says so on its page —
+*This step is a conversation* — with a link to it; the conversation's page says which ticket and
+step it is part of. **Accept** is on the conversation's page beside the composer's region and on
+the ticket's Decide tab, the same component and the same state in both: `ForgeWeb.Components.StepAccept`
+drawn from one read model, `Forge.Steps.view/2`.
+
+It lists each document the step declares, and any an outcome approves that it does not, with its latest version, whether it is written, and
+whether this visit's conversation wrote it or it is from an earlier visit (or, for one the step
+does not declare, an earlier step). A step with one
+outcome shows no picker; a step with several shows each outcome as a card saying where it leads
+and whether it counts as approval, with none preselected and Accept disabled until one is picked.
+Accept is a deliberate second step — **Review, then accept** opens a confirm summarising what is
+recorded or approved, because it starts the next state (§ The affordance rule). The form
+carries the version number of each document as it was drawn, in hidden fields, so what is sent is what the DOM showed; a newer version
+since refuses it and redraws.
+
+States, each saying what to do rather than going blank:
+
+| State | The area says |
+|---|---|
+| Nothing produced yet | the documents expected, and that they appear as the agent writes them |
+| A turn in flight | it is waiting for the reply to finish; no button |
+| Ready | the documents with versions, the outcome cards, the Accept button |
+| Refused | why in words (no version of X, the step has moved on, the outcome has no edge or its `max` is spent, a newer version arrived) and what to do |
+| Every way out blocked | no outcome can be taken now, and for each one why: no edge, `max` spent, or an approved document nobody has written; no form and no button |
+| Dormant | the conversation is interrupted with **Reopen**; Accept still works if the documents exist; never "run again" |
+
+On a phone both stay on the work screen with 46px targets and the composer above the keyboard.
+The outcome pick and an open confirm live in a form with an `id` and `phx-change`, so they
+survive a reconnect (§ A reconnect is not a reload), on the ticket's Decide tab as on the
+conversation's. Outcome, state and document names are text, cut to the line (`truncate`) where
+they stand alone and wrapped (`overflow-wrap: anywhere`) where they sit in a sentence. A step
+waiting for a machine, a slot, a credential or a missing secret says why on both pages: on the
+ticket, under the step's row in the timeline and above the Accept area in the Decide card. The
+timeline's row for an accepted step draws the outcome as a job's row does.
+
 ## The phone
 
 Below `sm` the shell is the bottom bar — Queue, Board, Chats, More — and every page reflows to one
@@ -969,7 +1012,7 @@ page says what the repository means to the platform; what is actually in it is
 § The project's repository.
 
 **It lists the project's conversations, live ones first.** The board is the workflow and a
-conversation is not on it — it has no state to be in — so without this a chat is a thing you can
+plain conversation is not on it — it has no state to be in; a chat step is the ticket's, and on the board as its state — so without this a chat is a thing you can
 start from the page and then cannot find from the page. Live first because that is the one that
 is costing something and holding a machine; the rest are a record, and are folded away once there
 are more than a handful of them.

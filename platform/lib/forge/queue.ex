@@ -80,9 +80,19 @@ defmodule Forge.Queue do
   """
   @spec for_ticket(Ticket.t()) :: [item()]
   def for_ticket(%Ticket{status: status} = ticket) when status in @open,
-    do: questions([ticket]) ++ ticket_items(ticket)
+    do: questions([ticket]) ++ ticket_items(ticket) ++ step_items(ticket)
 
   def for_ticket(%Ticket{}), do: []
+
+  # A chat step's conversation waiting for the person's reply is the ticket waiting on a person:
+  # it is in the queue as the conversation already, and a ticket page counts what the queue would
+  # (`docs/design/ui.md` § Decide and Timeline).
+  defp step_items(%Ticket{} = ticket) do
+    case Forge.Steps.live(ticket) do
+      nil -> []
+      chat -> for_chat(chat)
+    end
+  end
 
   @doc """
   The queue's item for one conversation — the one it would list — or none: a conversation is

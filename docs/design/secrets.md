@@ -110,6 +110,11 @@ in the one state that needs it is in that state's.
 
 ### Conversations
 
+**A chat step is not this**: its secrets are the ones its state lists, and it waits on a missing
+one as a job does — before a machine, recorded as its wait reason — except that it sticks no
+ticket (`conversations.md` § A conversation that is a step). What follows is a plain
+conversation's.
+
 **A conversation's secrets are picked by the person opening it**, from the project's secrets,
 none ticked by default. A conversation has no state to list them on, and it is a person deciding
 in the moment rather than a workflow deciding in advance — which is what a conversation is for

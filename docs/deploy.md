@@ -574,6 +574,17 @@ which are best-effort.
 What changes for a node that is already running, where the change is in what the platform does
 with rows it already has. Newest first.
 
+- **A chat step needs protocol 10, and a migration changes the `jobs` shape constraint**
+  (`design/conversations.md` § A conversation that is a step, `design/worker-channel.md`
+  § Versions). `20261028100000_chats_may_be_steps` lets a conversation carry a `state`; it runs
+  with the release and **cannot be rolled back once a step conversation exists** (it refuses,
+  naming how many). Nothing is refused and the minimum stays 4: no workflow in this repository
+  marks a `chat: true` state, so nothing changes until a project's own does. When one does, its
+  step waits for a machine that speaks 10 — a snapshot built from this release
+  (`bin/hetzner-image`) with the template pointing at it, or `bin/worker-update` on a permanent
+  machine — and says so on its page as any placement wait does. A plain conversation needs the
+  archive's 9, as in the entry below.
+
 - **A workflow job and a conversation are given the project's archive, and need protocol 9**
   (`design/archive.md`, `design/worker-channel.md` § Versions). Nothing is refused: the minimum
   stays 4, and an older machine still takes every command. But **no workflow job and no

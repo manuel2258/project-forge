@@ -57,10 +57,11 @@ names only, resolved to values at each assignment; `design/secrets.md` § Delive
 Its timestamps are sub-second: jobs are read back in creation order and that order is the ticket's
 timeline, so two jobs created within one second must still be ordered.
 
-A chat is a job with a project, no state and no spec, and a ticket only when it is a ticket
+A chat is a job with a project, no spec and — unless it is a chat step — no state, and a ticket only when it is a ticket
 chat — `design/conversations.md` § Shape. `ticket_id`, `state` and `spec` are therefore nullable,
 and the CHECK constraint `jobs_kind_shape` is what says which shape a row must have: a workflow
-row and a command row carry all three, a chat row has no state and no spec. The `(ticket_id, state, attempt)`
+row and a command row carry all three, a chat row has no spec and has a state only when it is a
+chat step (`conversations.md` § A conversation that is a step), which needs a ticket. The `(ticket_id, state, attempt)`
 unique index is partial, over workflow rows, because Postgres treats NULLs as distinct and would
 otherwise constrain nothing.
 

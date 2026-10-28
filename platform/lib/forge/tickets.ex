@@ -216,7 +216,12 @@ defmodule Forge.Tickets do
       })
     end)
     |> Multi.merge(fn %{ticket: ticket} ->
-      Jobs.put_create(Multi.new(), :first_job, ticket, workflow, workflow.initial)
+      # A first state that is a chat step opens its conversation instead (its branch is cut below,
+      # after the ticket's own exists).
+      if chat_initial?(workflow),
+        do:
+          Jobs.put_create_step(Multi.new(), :first_job, ticket, workflow, workflow.initial, nil),
+        else: Jobs.put_create(Multi.new(), :first_job, ticket, workflow, workflow.initial)
     end)
     |> Multi.run(:branch, fn _repo, %{ticket: ticket} ->
       case Git.create_branch(repo, ticket.branch, base) do
@@ -224,7 +229,15 @@ defmodule Forge.Tickets do
         {:error, reason} -> {:error, reason}
       end
     end)
+    |> Multi.merge(fn %{ticket: ticket, first_job: first} ->
+      if chat_initial?(workflow),
+        do: Jobs.put_step_branch(Multi.new(), :step_branch, first, ticket),
+        else: Multi.new()
+    end)
   end
+
+  defp chat_initial?(workflow),
+    do: ForgeCore.Workflow.State.chat?(Workflow.state(workflow, workflow.initial))
 
   # What the validator asks of the repository, answered at the commit the workflow is read at:
   # a prompt file under `.forge/`, a command's script by its full path, and a library's text.

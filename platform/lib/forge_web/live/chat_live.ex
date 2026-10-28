@@ -20,6 +20,8 @@ defmodule ForgeWeb.ChatLive do
 
   alias Forge.{Artifacts, Conversations, Events, Git, Jobs, Merge, Operator, Projects, Tickets}
   alias ForgeWeb.{Actions, Diff, Format, JobStream, Transcript, WorkScreen}
+  alias ForgeWeb.Components.StepAccept
+  alias ForgeWeb.Operator.StepAccept, as: StepEvents
 
   @tabs ~w(talk changes docs activity)
 
@@ -45,6 +47,7 @@ defmodule ForgeWeb.ChatLive do
        page_title: title(project, ticket),
        forms: ForgeWeb.Operator.QuestionForm.init()
      )
+     |> StepEvents.init()
      |> JobStream.init()
      |> ForgeWeb.Capacity.project(project)
      |> load()}
@@ -89,10 +92,19 @@ defmodule ForgeWeb.ChatLive do
       base_branch: Conversations.base_branch(project, ticket),
       merged: Merge.merged_chat?(chat),
       waiting: Jobs.current_wait(chat),
-      conflict: nil
+      conflict: nil,
+      step: step_view(chat, ticket)
     )
     |> fold()
   end
+
+  defp step_view(chat, %Forge.Tickets.Ticket{} = ticket),
+    do: if(Jobs.Job.step?(chat), do: Forge.Steps.view(ticket, chat))
+
+  defp step_view(_chat, nil), do: nil
+
+  defp step_over?(%{over: over}), do: over != nil
+  defp step_over?(nil), do: false
 
   # The projection, from the log the page holds. Pure, so an appended event costs a fold and no
   # query.
@@ -220,6 +232,9 @@ defmodule ForgeWeb.ChatLive do
   @impl true
   def handle_event("draft", %{"text" => text}, socket),
     do: {:noreply, assign(socket, draft: text)}
+
+  def handle_event("step:" <> _ = event, params, socket),
+    do: StepEvents.handle_event(event, params, socket, &load/1)
 
   # Three controls, because they are three intentions and guessing between them from one gesture
   # is how a chat client loses a message (`docs/design/conversations.md` § Turns). Send holds the
@@ -439,6 +454,17 @@ defmodule ForgeWeb.ChatLive do
             </h1>
             <span class="hidden sm:inline"><.job_status status={@chat.status} /></span>
           </div>
+          <%!-- Which ticket and step this conversation is part of (`docs/design/ui.md` § The Accept
+                area). Names are the workflow author's and the ticket title the reporter's:
+                escaped by the template and cut to the line. --%>
+          <p :if={@step} id="step-banner" class="min-w-0 truncate text-sm opacity-70">
+            Step <span class="font-mono text-[12.5px]">{@step.state}</span>
+            of
+            <.link navigate={back(@project, @ticket)} class="underline">
+              #{@ticket.number} {@ticket.title}
+            </.link>
+            · visit {@step.visit}
+          </p>
         </:header>
 
         <:strip>
@@ -502,8 +528,8 @@ defmodule ForgeWeb.ChatLive do
 
       <%!-- A conversation that has not started yet says why, where the reply will appear: the
             scheduler's sentence, the latest since it last started (docs/design/ui.md § A job
-            waiting for a machine). A chat sticks nothing, so this is the only surface that says
-            a template is missing. --%>
+            waiting for a machine). A chat sticks nothing, so this and — for a chat step — the
+            ticket's own page are the only surfaces that say a template is missing. --%>
       <p :if={@waiting} id="chat-waiting" class="mt-4 text-sm/[1.55] opacity-70">
         {Events.summary(@waiting)}
       </p>
@@ -579,11 +605,19 @@ defmodule ForgeWeb.ChatLive do
 
       <p :if={waiting?(@chat, @messages)} class="text-sm opacity-60">It is waiting on you.</p>
 
+      <StepAccept.accept_area
+        :if={@step}
+        step={@step}
+        pick={@step_pick}
+        confirming={@step_confirming}
+        error={@step_error}
+      />
+
       <form :if={@live} id="say" phx-change="draft" phx-submit="send">
         <ForgeWeb.Conversations.message_box id="draft" name="text" value={@draft} send />
       </form>
 
-      <section :if={not @live}>
+      <section :if={not @live and not step_over?(@step)}>
         <p id="reopen-copy" class="text-sm/[1.55] opacity-70">
           This conversation has stopped. Reopening starts a new process on a new machine: it is
           given everything said here to read, and answers the next thing you say.

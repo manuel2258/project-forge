@@ -52,6 +52,7 @@ defmodule ForgeWeb.TicketLive do
        forms: QuestionForm.init(),
        drafts: Drafts.init()
      )
+     |> ForgeWeb.Operator.StepAccept.init()
      |> JobStream.init()
      |> ForgeWeb.Capacity.project(project)
      |> load()}
@@ -111,7 +112,16 @@ defmodule ForgeWeb.TicketLive do
 
     # Commands are the ticket's work too, and sit in the step their state is in: an agent's beneath
     # it, a command state's as that state's (`docs/design/ui.md` § Decide and Timeline).
-    work = Enum.sort_by(jobs ++ Jobs.commands_for_ticket(ticket.id), & &1.inserted_at, DateTime)
+    # A chat step's conversations sit in the step they are, beside the jobs of other states
+    # (`docs/design/ui.md` § The Accept area).
+    step_chats = Jobs.step_chats_for_ticket(ticket.id)
+
+    work =
+      Enum.sort_by(
+        jobs ++ Jobs.commands_for_ticket(ticket.id) ++ step_chats,
+        & &1.inserted_at,
+        DateTime
+      )
 
     # Approval state is shown only where approval is possible: an artifact no transition lists in
     # `approve:` would otherwise be marked `unapproved` for ever, flagging a job the operator does
@@ -147,6 +157,8 @@ defmodule ForgeWeb.TicketLive do
       decisions: ticket |> Queue.for_ticket() |> Enum.count(&Queue.waiting?/1),
       jobs: jobs,
       current: current,
+      step: step_view(ticket),
+      accepted: accepted_steps(ticket),
       steps: steps(work, artifacts, ticket, workflow),
       waits: waits(work),
       # Why the last batch sent the ticket where it is, under the commands that failed in it.
@@ -176,6 +188,28 @@ defmodule ForgeWeb.TicketLive do
       until_midnight: until_midnight(),
       now: DateTime.utc_now()
     )
+  end
+
+  # The Accept area's model while the ticket rests in a chat step that has a conversation.
+  defp step_view(%Forge.Tickets.Ticket{status: status} = ticket)
+       when status in [:active, :stuck] do
+    with true <- Forge.Steps.step?(ticket),
+         %Jobs.Job{} = chat <- Forge.Steps.chat_for(ticket) do
+      Forge.Steps.view(ticket, chat)
+    else
+      _no_step -> nil
+    end
+  end
+
+  defp step_view(_ticket), do: nil
+
+  # What each step's conversation was accepted with, by conversation id: the timeline's entry for
+  # the outcome, as a job's row has one. Who pressed it is the event's actor.
+  defp accepted_steps(ticket) do
+    ticket.id
+    |> Events.for_ticket()
+    |> Enum.filter(&(&1.type == "step.accepted"))
+    |> Map.new(&{&1.job_id, &1.payload})
   end
 
   # The documents the state the ticket rests in declares, for a person to write: a human state's
@@ -382,6 +416,9 @@ defmodule ForgeWeb.TicketLive do
   def handle_event("notices", params, socket),
     do: JobStream.handle_event("notices", params, socket)
 
+  def handle_event("step:" <> _ = event, params, socket),
+    do: ForgeWeb.Operator.StepAccept.handle_event(event, params, socket, &load/1)
+
   def handle_event(event, params, socket) do
     case Actions.handle(event, params, socket) do
       {:handled, socket} -> {:noreply, load(socket)}
@@ -391,6 +428,7 @@ defmodule ForgeWeb.TicketLive do
   end
 
   defp tab(%{tab: nil, decisions: n}) when n > 0, do: "decide"
+  defp tab(%{tab: nil, step: %{current: true}}), do: "decide"
   defp tab(%{tab: nil}), do: "timeline"
   defp tab(%{tab: tab}), do: tab
 
@@ -408,7 +446,8 @@ defmodule ForgeWeb.TicketLive do
   defp deciding?(assigns),
     do:
       assigns.ticket.pending_transition != nil or blocking(assigns) != [] or
-        stuck_or_human?(assigns) or assigns.retry or assigns.writable != []
+        stuck_or_human?(assigns) or assigns.retry or assigns.writable != [] or
+        assigns.step != nil
 
   # The changeset approval, at the foot of the diff it approves — only when that approval is what
   # the ticket waits on.
@@ -598,6 +637,32 @@ defmodule ForgeWeb.TicketLive do
     <section :if={deciding?(assigns)} id="hoisted-decision">
       <h2 class="font-mono text-[11px] tracking-[.14em] uppercase text-accent">Waiting on you</h2>
       <div class="mt-3">
+        <%!-- A chat step: this step is a conversation, and Accept is how it ends. --%>
+        <div :if={@step} id="step-card" class="mb-4 flex flex-col gap-3">
+          <p class="min-w-0 break-words text-sm">
+            This step is a conversation.
+            <.link
+              navigate={~p"/chats/#{@step.chat.id}"}
+              class="underline"
+            >
+              {if @step.dormant, do: "Open it to reopen it", else: "Talk to the agent"} ›
+            </.link>
+          </p>
+          <p
+            :if={@waits[@step.chat.id]}
+            id="step-waiting-reason"
+            class="min-w-0 text-sm opacity-60 [overflow-wrap:anywhere]"
+          >
+            {@waits[@step.chat.id]}
+          </p>
+          <ForgeWeb.Components.StepAccept.accept_area
+            step={@step}
+            pick={@step_pick}
+            confirming={@step_confirming}
+            error={@step_error}
+          />
+        </div>
+
         <.approval_card
           :if={@ticket.pending_transition}
           ticket={@ticket}
@@ -637,7 +702,10 @@ defmodule ForgeWeb.TicketLive do
           />
         </div>
         <.transition_card
-          :if={!@ticket.pending_transition and blocking(assigns) == [] and stuck_or_human?(assigns)}
+          :if={
+            !@ticket.pending_transition and blocking(assigns) == [] and stuck_or_human?(assigns) and
+              not step_live?(@step)
+          }
           ticket={@ticket}
           transitions={@transitions}
         />
@@ -677,6 +745,11 @@ defmodule ForgeWeb.TicketLive do
   end
 
   defp blocking(%{questions: {blocking, _assumed}}), do: blocking
+
+  # No by-hand transition is offered while a step's conversation is live: Accept is the way out
+  # (`docs/design/conversations.md` § A conversation that is a step).
+  defp step_live?(%{current: true, dormant: false}), do: true
+  defp step_live?(_step), do: false
 
   # One form per document version (`docs/design/ui.md` § Answering questions). A version holding a
   # blocking question is waiting, and its assumptions join its form, optional; a version with only
@@ -741,7 +814,41 @@ defmodule ForgeWeb.TicketLive do
                 class="max-h-72 overflow-auto border-l-2 border-error/60 bg-base-200/60 px-3 py-2 font-mono text-[12px]/[1.5] whitespace-pre-wrap break-words"
               >{@tails[job.id]}</pre>
               <.link
-                :if={job.kind != :command}
+                :if={job.kind == :chat}
+                id={"step-chat-#{job.id}"}
+                navigate={~p"/chats/#{job.id}"}
+                class="flex min-h-[46px] items-center gap-3 border-b border-base-300/60 py-1.5 text-[12.5px] hover:bg-base-200"
+              >
+                <span class="w-8 shrink-0 font-mono">#{job.attempt}</span>
+                <span class="min-w-0 flex-1 text-sm">
+                  <span class="block truncate">Conversation</span>
+                  <%!-- The outcome drawn with the component a job's row uses (`.outcome`), cut to
+                        the line: the outcome is the workflow author's word. --%>
+                  <span
+                    :if={@accepted[job.id]}
+                    id={"step-accepted-#{job.id}"}
+                    class="block truncate"
+                  >
+                    <.outcome value={@accepted[job.id]["outcome"]} />
+                    <span class="opacity-70">→ {@accepted[job.id]["to"]}</span>
+                  </span>
+                  <.job_status :if={!@accepted[job.id]} status={job.status} />
+                  <span
+                    :if={@waits[job.id]}
+                    id={"job-#{job.id}-waiting"}
+                    class="block text-sm/[1.4] opacity-60 [overflow-wrap:anywhere]"
+                  >
+                    {@waits[job.id]}
+                  </span>
+                </span>
+                <span class="shrink-0 font-mono opacity-60">{job.turns} turns</span>
+                <span class="w-20 shrink-0 text-right font-mono opacity-60">
+                  {Format.windows(job.cost_usd) || "—"}
+                </span>
+                <span class="shrink-0 font-mono opacity-40" aria-hidden="true">›</span>
+              </.link>
+              <.link
+                :if={job.kind == :workflow}
                 navigate={~p"/tickets/#{@project.name}/#{@ticket.number}/jobs/#{job.id}"}
                 class="flex min-h-[46px] items-center gap-3 border-b border-base-300/60 py-1.5 text-[12.5px] hover:bg-base-200"
               >
@@ -1140,6 +1247,9 @@ defmodule ForgeWeb.TicketLive do
   # The confirm says what pressing it spends: a job, when the state it sends to runs one.
   defp send_confirm(target, workflow, branch) do
     case Workflow.state(workflow, target) do
+      %Workflow.State{chat: true} ->
+        "Send this ticket to #{target}? A conversation opens there, waiting for a person."
+
       %Workflow.State{prompt: prompt} when is_binary(prompt) ->
         "Send this ticket to #{target}? A job starts there to merge #{branch} into its branch, " <>
           "and spends a credential."

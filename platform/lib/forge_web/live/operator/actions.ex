@@ -139,6 +139,7 @@ defmodule ForgeWeb.Operator.Actions do
   defp blank_to_nil(value), do: value
 
   defp describe({:job_live, state}), do: "a job for #{state} is still live"
+  defp describe({:step_live, state}), do: "#{state} is a conversation; Accept it to move on"
   defp describe({:invalid_document, errors}), do: ForgeCore.Error.format(errors)
   defp describe(:nothing_pending), do: "nothing awaits approval"
 

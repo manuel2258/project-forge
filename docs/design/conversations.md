@@ -9,8 +9,9 @@ This note is the standard for it. Code follows; a change of mind updates this fi
 ## Why it is not a workflow
 
 The engine's shape is: a state runs one job, the job ends with one outcome, the outcome selects
-one transition. A conversation has no state, no single outcome and no end that the workflow
-decides — it ends when a person stops talking. Expressing it as a self-looping state with a
+one transition. A conversation has no state of its own, no single outcome and no end that the
+workflow decides — it ends when a person stops talking. (One kind of conversation is given a state
+by the workflow: a chat step, § A conversation that is a step, whose end is a person's Accept.) Expressing it as a self-looping state with a
 blocking question per turn works (`docs/design/workflow-grammar-v1.md` permits it) and is a
 disguise: the queue would fill with questions that are not questions, the ticket timeline would
 record a "visit" per sentence, and every outcome would be a lie told to satisfy the engine.
@@ -74,7 +75,8 @@ guard against, and the guard belongs at the one place jobs complete, not scatter
 | | `:workflow` | `:chat` |
 |---|---|---|
 | `ticket_id` | required | set for a ticket chat, null for a project chat |
-| `state`, `spec` | required | null |
+| `state` | required | null, but for a chat step, which carries its step's name (§ A conversation that is a step) |
+| `spec` | required | null |
 | `outcome` | one, decided by `ForgeCore.Job.Outcome` | none, ever |
 | ends because | the harness finished | a person stopped talking, or a ceiling was hit |
 | `turns` | the harness's count | the same, across the whole conversation |
@@ -102,7 +104,7 @@ were told, and the rest is available without being in the way.
 ## What it asks for
 
 A conversation is the one job kind with nothing to declare: `resources` is a workflow state's
-grammar (`commands.md` § Resources) and a chat has no state, so it fell off the end of the
+grammar (`commands.md` § Resources) and a plain chat has no state, so it fell off the end of the
 resolution chain onto the platform's default. That default is now an agent's figure rather than a
 cold build's (`provisioning.md` § What a job asks for), and **the person opening the conversation
 may say instead**.
@@ -390,6 +392,68 @@ checked — it is part of what the parse refuses — and is otherwise text. What
 is replace: a question counts on the latest version only, so a chat's version of a document
 closes the questions of the version before. An assumption dropped that way is dropped as a
 person's edit drops one; a blocking question a job waits on is the case refused above.
+
+## A conversation that is a step
+
+A workflow job state marked `chat: true` (`workflow-grammar-v1.md` § Chat steps) opens a ticket
+conversation on entry instead of a job. It is the same `:chat` row with one change to § Shape:
+**a chat may carry `state`** — the step's name — with `attempt` as the visit number (earlier step
+chats of that ticket and state, plus one). `spec` stays null. `jobs_kind_shape` allows `state` on
+a `:chat` and still no `spec`; `Job.step?/1` is `kind == :chat and state != nil`. The row is
+chosen over a new column because `Jobs.live?/2` — what `Engine.no_live_job/1` asks before any
+by-hand transition — then counts a live step conversation, and the refusal needs no new rule; the
+engine only names it (`{:step_live, state}`) so the person is told to Accept. It is worded where
+`{:job_live, state}` is: the operator's action line, the API's `409 step_live`, and the reason a
+ticket chat is given for a refused move.
+
+- **Who speaks first.** The agent. With nothing said yet, the spec's prompt is a fixed platform
+  kickoff (`Conversations.step_kickoff/0`) that is never logged as a `chat.message`, so the page
+  does not show it as the person speaking; the state's prompt is in the manifest, so a resumed or
+  cold reopened conversation still has it.
+- **The manifest** is the chat preamble plus § This step: the prompt, the declared inputs, the
+  documents to write to `out/`, the outcomes and where each leads, that **the person alone
+  chooses the outcome and ends the step**, that an `outcome:` in front matter is ignored, and on
+  a return visit where it came from and why. The job spec carries it as `step`, so the worker
+  protocol is 10 for a step chat and 9 for any other conversation (the archive's, `archive.md`). There is no § Moving the ticket
+  and `transition.json` is not honoured: `apply_transition_request/2` refuses every request from a
+  step chat.
+- **Documents** are recorded as ticket documents, versioned, each turn as in any ticket chat; a
+  `question` block in one is text. **A document an edge out of the step approves is the step's to
+  show even when the step does not declare it** (an earlier state's, or one only the agent writes
+  here): Accept lists it beside the declared ones, sends its version back as drawn, and refuses
+  with *changed while you were looking* when a newer one was recorded since — by the step's agent,
+  a plain chat or a person through the API alike. Nothing is held against the conversations of the
+  ticket for it, so the step's agent can write one that no state has yet. **A turn that lands
+  after Accept** is still recorded (its cost, its count, its proposals) but writes no document,
+  names each one it dropped in the turn's `refused_documents` so the page says so, and does not
+  set the finished conversation running again (the check is made under the ticket's lock Accept
+  holds).
+- **No ceiling.** No turns, no cost budget. The day's cap and the idle timeout still pause or end
+  it, and the ticket stays in the step; a dormant one reopens. A lost machine or restart makes it
+  dormant, never re-queued (§ Lifetime).
+- **Accept** (`Operator.accept_step/4`, `Engine.accept/5`) is the only way out while the
+  conversation is live. In one transaction under the ticket's lock it requires that the ticket is
+  open and in this step, that this is not an already accepted conversation and is the visit's
+  latest step chat (in that order, so a second press on a visit the ticket has since come back to
+  says *accepted*), that
+  no turn is in flight, that the chosen outcome has an edge with `max` unspent, that every
+  non-optional declared document has a version (and so has every document the chosen edge
+  approves, optional or not), and that each version the person was shown, of both, is still the
+  latest. Then it takes the edge as approved with the edge's `approve` documents
+  approved at the shown versions, and logs `step.accepted` (who, outcome, `to`, versions). The
+  pressing user's standing is read again from the database, not taken from the page. After the
+  commit the chat is ended with reason `accepted`, which ends a conversation as `closed` does:
+  its branch is abandoned and the machine released. A dormant one is accepted the same way.
+- **Cancel and restore.** Cancelling the ticket ends a live step chat with reason `cancelled`,
+  dormant with its branch kept; restoring leaves it reopenable. `reopen/2` is refused when the
+  ticket is not open, no longer in the step, or the visit was accepted or left.
+- **Secrets** are the state's `secrets`, not the person's pick: the scheduler treats a step like a
+  job, so one the project has not set keeps it from starting (before a machine, as for a job) and
+  is recorded as its wait reason, `no_secret`, drawn on both pages: on the conversation's, and on
+  the ticket's row for the step and in its Decide card. A step sticks no ticket for it, as no
+  conversation does, and unlike a job, which does.
+- **Spend** — each turn adds its cost to `ticket.cost_usd` as well as to the conversation. The
+  ticket allowance never stops it.
 
 ## Taking a transition
 

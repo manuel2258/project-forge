@@ -1082,8 +1082,9 @@ defmodule ForgeWorker.Job.Runner do
 
   defp stage(result, _state), do: result
 
-  # A conversation has no outcome, ever, and nothing asks it for one: there is no state to leave
-  # and no transition to select. Running `Outcome.decide/2` over it would invent a `declared`
+  # A conversation has no outcome, ever, and nothing asks it for one: there is no
+  # transition to select, and a chat step's state is left by the person's Accept, not by anything
+  # the worker reports. Running `Outcome.decide/2` over it would invent a `declared`
   # from the last turn's document and hand the engine something to act on — see
   # `docs/design/conversations.md` § Shape, where the guard against exactly that is described as
   # belonging at the one place jobs complete.

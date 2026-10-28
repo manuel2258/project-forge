@@ -494,7 +494,7 @@ the templates page's word for a snapshot that cannot run an agent. Every worker 
 can run those two; a conversation is the kind that now asks for more (protocol 8, below).
 **The protocol dimension of `Workers.fits?/2` and the scheduler's demand decides something
 again** since protocol 5: an integrating job needs it, a job that names a secret needs 6, a state
-that declares a presentation or an optional output needs 7, a conversation needs 8, and a
+that declares a presentation or an optional output needs 7, a conversation needs 8, a chat step 9, and a
 protocol 4 worker is still accepted, so the gate is what keeps such a
 job off it (above).
 
@@ -551,6 +551,13 @@ folder their prompt describes. A release from before it would start the job with
 say nothing, so these two kinds need protocol 9 (`Forge.Jobs.protocol/1`), a protocol 4-8 worker keeps
 taking commands — which have no folder — and the minimum stays 4. The change to the platform's
 side is additive; the bump is for the worker.
+
+**Protocol 10 is chat steps** (`docs/design/conversations.md` § A conversation that is a step): the
+job spec gains `step`, the contract of a workflow step run as a conversation — its prompt, inputs,
+documents, outcomes and visit. The worker composes the chat manifest from it, so a protocol 9
+worker would drop the field and tell the agent there is nothing to write: a field the other side
+must act on, hence a bump. `Forge.Jobs.protocol/1` is 10 for a step chat and 9 for any other
+conversation, which needs the archive; the minimum is unchanged.
 
 **`uncommitted` on a turn rides along without a bump.** An older worker never sends it, and an
 older platform builds the `chat.turn` payload key by key (`Conversations.record_turn/2`) and so
@@ -778,7 +785,7 @@ already has the framework for.
   every accepted worker at protocol 4 or later, `Forge.Jobs.protocol/1`'s numbers for a command and
   a workflow job decide nothing; the protocol dimension of `Workers.fits?/2` and the scheduler's
   demand stay, because an integrating job needs protocol 5, a job that names a secret needs 6, a
-  state that declares a presentation or an optional output needs 7, a conversation needs 8, and
+  state that declares a presentation or an optional output needs 7, a conversation needs 8, a chat step 9, and
   the floor is still 4; the workers
   page's *no stats — update it*, for a connected machine that spoke no protocol, can no longer be
   drawn; and `Provisioning.holds?/2` still asks only whether a template's image is new enough for

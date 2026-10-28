@@ -175,6 +175,8 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     # The version id is the client's; `Operator.accept_proposal/4` and `decline_proposal/3` resolve
     # it to its project and refuse a non-member (`allow_proposal/2`).
     {"project_live.ex", "decide_proposal"} => :member,
+    # Hands the event to `ForgeWeb.Operator.Actions`, whose "take-out" is `Operator.take_out/2`.
+    {"project_live.ex", "take-out"} => :member,
     # `Operator.start_release/3` asks for `:manage`, and the page draws the block for an admin only
     # (`docs/design/ticket-types.md` § Releases).
     {"project_live.ex", "release:start"} => :manage,
@@ -267,6 +269,7 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"operator/actions.ex", "retry"} => :member,
     {"operator/actions.ex", "repin"} => :member,
     {"operator/actions.ex", "integrate"} => :member,
+    {"operator/actions.ex", "take-out"} => :member,
     {"operator/actions.ex", "write_document"} => :member,
     # A card's draft is the page's alone, the same as a question form's: nothing is written
     # until the form it sits in is submitted, and that submit carries its own guard.

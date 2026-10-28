@@ -4,14 +4,15 @@ defmodule ForgeCore.Workflow.Transition do
   alias ForgeCore.Workflow
 
   @enforce_keys [:from, :to]
-  defstruct [:from, :to, :when, :max, approve: []]
+  defstruct [:from, :to, :when, :max, approve: [], queue: false]
 
   @type t :: %__MODULE__{
           from: String.t(),
           to: String.t(),
           when: String.t() | nil,
           max: pos_integer() | nil,
-          approve: [String.t()]
+          approve: [String.t()],
+          queue: boolean()
         }
 
   @typedoc "Identifies a transition within a workflow, for counting how often it fired."
@@ -28,4 +29,11 @@ defmodule ForgeCore.Workflow.Transition do
 
   @spec requires_approval?(t()) :: boolean()
   def requires_approval?(%__MODULE__{approve: approve}), do: approve != []
+
+  @doc """
+  Whether taking this edge into a merging state queues the ticket instead of merging it
+  (`docs/design/workflow-grammar-v1.md` § The merge queue). Always, wherever it is declared.
+  """
+  @spec queues?(t()) :: boolean()
+  def queues?(%__MODULE__{queue: queue}), do: queue == true
 end

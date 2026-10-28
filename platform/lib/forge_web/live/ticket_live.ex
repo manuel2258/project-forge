@@ -169,9 +169,12 @@ defmodule ForgeWeb.TicketLive do
       commits: commits(project, ticket),
       chats: Conversations.summaries(ticket_id: ticket.id),
       events: ticket.id |> Events.for_ticket() |> Enum.reverse() |> Enum.take(4),
+      queue_events: queue_events(ticket),
       activity: if(current, do: Events.for_job(current.id), else: []),
       transitions: Engine.offered_transitions(ticket, workflow),
       retry: Engine.retryable?(ticket),
+      # Where the ticket stands in its project's merge queue, or nil (`ui.md` § Decide and Timeline).
+      queue: Forge.MergeQueue.places(project.id)[ticket.id],
       stuck_reason: Engine.why_stuck(ticket),
       drift: Tickets.drift(ticket, project),
       conflict: Forge.Merge.Watch.notice(ticket),
@@ -189,6 +192,19 @@ defmodule ForgeWeb.TicketLive do
       now: DateTime.utc_now()
     )
   end
+
+  # What the merge queue did to the ticket, oldest first, and the merge it ended in — and nothing
+  # for a ticket the queue never held: a merge on a workflow that queues nothing is no part of
+  # this section's story.
+  defp queue_events(ticket) do
+    events = Events.for_ticket(ticket.id)
+
+    if Enum.any?(events, &queue_event?/1),
+      do: Enum.filter(events, &(queue_event?(&1) or &1.type == "ticket.merged")),
+      else: []
+  end
+
+  defp queue_event?(%{type: type}), do: String.starts_with?(type, "merge_queue.")
 
   # The Accept area's model while the ticket rests in a chat step that has a conversation.
   defp step_view(%Forge.Tickets.Ticket{status: status} = ticket)
@@ -428,6 +444,7 @@ defmodule ForgeWeb.TicketLive do
   end
 
   defp tab(%{tab: nil, decisions: n}) when n > 0, do: "decide"
+  defp tab(%{tab: nil, queue: %{}}), do: "decide"
   defp tab(%{tab: nil, step: %{current: true}}), do: "decide"
   defp tab(%{tab: nil}), do: "timeline"
   defp tab(%{tab: tab}), do: tab
@@ -445,9 +462,9 @@ defmodule ForgeWeb.TicketLive do
   # What Decide draws: the queue's own cards for this ticket, whatever is waiting.
   defp deciding?(assigns),
     do:
-      assigns.ticket.pending_transition != nil or blocking(assigns) != [] or
-        stuck_or_human?(assigns) or assigns.retry or assigns.writable != [] or
-        assigns.step != nil
+      assigns.queue != nil or assigns.ticket.pending_transition != nil or
+        blocking(assigns) != [] or stuck_or_human?(assigns) or assigns.retry or
+        assigns.writable != [] or assigns.step != nil
 
   # The changeset approval, at the foot of the diff it approves — only when that approval is what
   # the ticket waits on.
@@ -672,6 +689,10 @@ defmodule ForgeWeb.TicketLive do
           commit_message={@commit_message}
         />
 
+        <%!-- Where the approval card stood: approving a queueing edge puts the ticket in line, and
+              the card says so instead of offering to approve what is approved. --%>
+        <.merge_queue_card :if={@queue} ticket={@ticket} place={@queue} />
+
         <.link
           :if={@reviewable}
           navigate={~p"/tickets/#{@project.name}/#{@ticket.number}/review"}
@@ -704,7 +725,7 @@ defmodule ForgeWeb.TicketLive do
         <.transition_card
           :if={
             !@ticket.pending_transition and blocking(assigns) == [] and stuck_or_human?(assigns) and
-              not step_live?(@step)
+              @queue == nil and not step_live?(@step)
           }
           ticket={@ticket}
           transitions={@transitions}
@@ -892,6 +913,25 @@ defmodule ForgeWeb.TicketLive do
       </li>
     </ol>
 
+    <%!-- The merge queue's part of the ticket's story: queued, back in line after an integration,
+          taken out, merged, left — in the words the rail uses (`ui.md` § Decide and Timeline). --%>
+    <section :if={@queue_events != []} id="queue-history" class="mt-2 mb-6">
+      <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Merge queue</h2>
+      <ol class="mt-3 flex flex-col gap-1.5 text-sm/[1.45]">
+        <li :for={event <- @queue_events} class="flex gap-3">
+          <span class="shrink-0 font-mono text-[12.5px] opacity-50">
+            {Calendar.strftime(event.inserted_at, "%m-%d %H:%M")}
+          </span>
+          <span class="min-w-0 break-words">
+            {Forge.Events.summary(event)}<span
+              :if={Format.author(event.actor)}
+              class="opacity-60"
+            > · {Format.author(event.actor)}</span>
+          </span>
+        </li>
+      </ol>
+    </section>
+
     <%!-- A conversation started from a ticket was findable from the project page and not from
           the ticket it is about. Live first: that one is costing something. --%>
     <section id="ticket-chats" class="mt-4 border-t border-base-300 pt-5">
@@ -1064,6 +1104,9 @@ defmodule ForgeWeb.TicketLive do
     <dl class="mt-3 flex flex-col gap-2 text-[12.5px]">
       <.fact label="branch">{@ticket.branch}</.fact>
       <.fact label="base">{String.slice(@ticket.base_commit || "", 0, 12)}</.fact>
+      <.fact :if={@queue} label="merge queue">
+        {merge_queue_place(@queue)}
+      </.fact>
       <.fact label="workflow">{String.slice(@ticket.workflow_commit || "", 0, 12)}</.fact>
       <.fact label="admitted">{Format.ago(@ticket.inserted_at, @now)} ago</.fact>
     </dl>
@@ -1232,7 +1275,8 @@ defmodule ForgeWeb.TicketLive do
   # ticket stuck, where it went, why a conversation's request to move it moved nothing. Every
   # other type is its own sentence here.
   @said ~w(commands.decided ticket.stuck transition.taken ticket.merge_conflicted
-           chat.transition_refused ticket.renamed)
+           chat.transition_refused merge_queue.entered merge_queue.returned merge_queue.taken_out
+           merge_queue.left ticket.merged ticket.renamed)
 
   defp said(%{type: type} = event) when type in @said, do: Forge.Events.summary(event)
   defp said(_event), do: nil
@@ -1266,6 +1310,8 @@ defmodule ForgeWeb.TicketLive do
     do: "Stuck: #{reason}. Waiting for you to choose."
 
   defp waiting_clause(%{ticket: %{status: :stuck}}), do: "Stuck, and waiting for you to choose."
+
+  defp waiting_clause(%{queue: %{}}), do: "In the merge queue."
 
   defp waiting_clause(%{ticket: %{pending_transition: p}}) when is_map(p),
     do: "Waiting for approval."

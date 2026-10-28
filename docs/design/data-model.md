@@ -186,6 +186,20 @@ a ref rather than an account for a scope, and a job rather than "until revoked" 
 Rows are revoked rather than deleted, because they are the audit trail behind the
 `token.issued` and `token.revoked` events.
 
+**merge_queue_entry** — `project_id`, `ticket_id` (unique: a ticket is queued once), `position`
+(a database sequence, the order approvals were recorded in), `status` (`waiting`, `merging`,
+`integrating`), `from_state`, `to_state`, `edge_outcome` (the edge's own outcome, to pick it again by
+`ForgeCore.Engine.choose/4` among parallel edges), `outcome` (the job's outcome behind it, nil for a
+person's choice),
+`changeset_sha`, `changeset_version`, `commit_message_version` (what was current at the approval, replaced by the integrated changeset and
+the latest message when an integration puts the row back in the line),
+`approval_ids` (the approvals it recorded, so that exactly those are withdrawn), `entered_by`, `comment`. A
+ticket has a row exactly while it is in the merge queue and rows are deleted when it leaves, so the
+events (`merge_queue.entered`, `.returned`, `.taken_out`, `.left`) are the history. A partial unique
+index on `(project_id) where status = 'merging'` is the guard on one merge at a time
+(`workflow-grammar-v1.md` § The merge queue). An **approval** has a `withdrawn_at`: set when taking
+the ticket out of the queue withdrew it; the row stays.
+
 ## Statechart persistence
 
 The ticket's current state is `ticket.state`. The history is the `transition.taken` events.

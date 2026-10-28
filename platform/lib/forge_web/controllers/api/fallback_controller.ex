@@ -32,6 +32,16 @@ defmodule ForgeWeb.Api.FallbackController do
         "a decision on another transition is pending; decide that one first"
       )
 
+  # Likewise a ticket in the merge queue: a person takes it out, then the next one is reachable.
+  def call(conn, {:error, :queued}),
+    do:
+      error(
+        conn,
+        :conflict,
+        "queued",
+        "the ticket is in the merge queue; take it out of the queue first"
+      )
+
   def call(conn, {:error, :no_such_transition}),
     do: error(conn, :unprocessable_entity, "no_such_transition", nil)
 

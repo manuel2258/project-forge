@@ -41,7 +41,7 @@ defmodule ForgeCore.Workflow.Parser do
                  on_conflict resources invoke exit may_invoke secrets chat)
   @command_keys ~w(run env produces timeout resources secrets)
   @grant_keys ~w(max concurrent)
-  @transition_keys ~w(from to when approve max)
+  @transition_keys ~w(from to when approve max queue)
   @budget_keys ~w(turns cost)
   @limit_keys ~w(ticket_cost)
   @defaults_keys ~w(resources)
@@ -601,16 +601,19 @@ defmodule ForgeCore.Workflow.Parser do
     {when_outcome, e3} = optional_string(definition, "when", path)
     {approve, e4} = string_list(definition, "approve", path)
     {max, e5} = positive_integer(definition, "max", path, required: false)
+    {queue, e6} = boolean(definition, "queue", path)
 
     transition = %Transition{
       from: from,
       to: to,
       when: when_outcome,
       approve: approve || [],
-      max: max
+      max: max,
+      queue: queue
     }
 
-    {transition, unknown_keys(definition, @transition_keys, path) ++ e1 ++ e2 ++ e3 ++ e4 ++ e5}
+    {transition,
+     unknown_keys(definition, @transition_keys, path) ++ e1 ++ e2 ++ e3 ++ e4 ++ e5 ++ e6}
   end
 
   defp transition(_definition, path) do
@@ -699,6 +702,7 @@ defmodule ForgeCore.Workflow.Parser do
     end
   end
 
+  # Absent reads as false: a pin made before `queue`, `chat` or `release` existed has no key.
   defp boolean(map, key, path) do
     case Map.get(map, key) do
       nil -> {false, []}

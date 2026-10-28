@@ -31,6 +31,7 @@ defmodule ForgeWeb.BoardLive do
         %{
           project: project,
           lanes: Board.lanes(tickets, cap: @rows),
+          places: Forge.MergeQueue.places(project.id),
           open: Enum.count(tickets, &(&1.status in Forge.Tickets.Ticket.open_statuses())),
           waiting: Enum.count(tickets, &(&1.status == :stuck))
         }
@@ -76,7 +77,12 @@ defmodule ForgeWeb.BoardLive do
           </span>
         </header>
 
-        <Board.board lanes={board.lanes} project={board.project.name} now={@now} />
+        <Board.board
+          lanes={board.lanes}
+          project={board.project.name}
+          now={@now}
+          places={board.places}
+        />
       </section>
     </Layouts.app>
     """

@@ -818,6 +818,9 @@ defmodule Forge.Conversations do
   defp humanise(:pending_approval),
     do: "a decision on another transition is already pending; decide that one first"
 
+  defp humanise(:queued),
+    do: "the ticket is in the merge queue; a person has to take it out before it can be moved"
+
   defp humanise(:nothing_pending), do: "no transition is waiting for a decision"
 
   defp humanise(:no_such_transition),

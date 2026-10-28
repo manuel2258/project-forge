@@ -179,6 +179,7 @@ defmodule Forge.Steps do
   def refusal(:not_approved), do: "Your account is not approved."
   def refusal(:in_flight), do: "The agent is still replying. Accept once the reply has finished."
   def refusal(:already_accepted), do: "This step was already accepted."
+  def refusal(:queued), do: "The ticket is in the merge queue. Take it out first, then Accept."
   def refusal(:superseded), do: "The ticket has been through this step again since."
   def refusal(:not_a_step), do: "This conversation is not a workflow step."
   def refusal({:not_in_step, _state}), do: "The ticket has already left this step."

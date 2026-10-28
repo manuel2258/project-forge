@@ -722,6 +722,20 @@ nothing waiting it says so and names what would put something there. Beneath, wi
 under no count, is what an agent **assumed and carried on from**: the non-blocking questions the
 queue's digest sends here to be answered (§ Not waiting on you).
 
+**The merge queue card** stands where the approval card stood once an approval has queued the
+ticket (`workflow-grammar-v1.md` § The merge queue): *In the merge queue · 2nd of 5*, then what is
+happening — waiting for those ahead, being merged, being integrated (it keeps its place) — and
+**Take out of queue**, an answer row behind a confirm that says the approval is withdrawn and that
+an integration already running will finish but will not merge. Nothing is hidden by pressing it:
+the card goes when the server says the ticket left the queue, and a ticket that has merged, or was
+taken out by someone else, is refused in words saying so. A queued ticket has no transition card, no
+run-again row and no send-to-integration action — the queue does those — and approval is not offered
+again for what is approved. The rail says *merge queue* with the place, and the Timeline tab lists the queue's events —
+queued, back in line after an integration, taken out, left, merged — under *Merge queue*, and only
+for a ticket that has a queue event (a merge on a workflow that queues nothing is not drawn there); the rail's
+last events say what each means in words, and the ticket is no item of the operator's queue, which is
+a different thing and is never drawn under this name.
+
 **Run again.** Beneath the transition card, and on its own when there is no card, a row names the
 state and offers to run it again — `Run refining again` — whenever the ticket rests in a job or
 command state with nothing live in it (`workflow-grammar-v1.md` § Running a state again). It is
@@ -999,6 +1013,14 @@ Its board is `/board`'s, uncapped. The four-row cap is there so a column never g
 scrollbar and hides its own count; the objection is to a column that scrolls independently, not
 to a long one, and with a single project on the page there is room to let the page scroll. Both
 boards arrange their columns with the same code, so the two can never drift apart.
+
+**It lists the merge queue** in order, under its own heading, *Merge queue* (never "the queue":
+that is the page of questions and approvals): ticket number, title (wrapped and cut at two lines,
+markup shown as text), the ticket's state (so *integrating* while it is), its place and what is happening to it, and
+**Take out** behind the same confirm. More than eight rows fold behind "N more", as a board's column
+does. Empty, it names the edge that would fill it when the repository's workflow queues one, and
+otherwise says only that nothing is waiting. A queued ticket on either board carries a flag,
+*queued 2/5*, beside the stuck one: it stays in its state's column.
 
 **It shows the workflow and never edits it.** A workflow is `.forge/workflow.yml` in the
 project's own repository, read at the ticket's base commit and pinned at admission, so it

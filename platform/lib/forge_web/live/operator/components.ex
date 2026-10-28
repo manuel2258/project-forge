@@ -587,6 +587,60 @@ defmodule ForgeWeb.Operator.Components do
   end
 
   @doc """
+  Where a queued ticket stands in its project's merge queue, in the words a person reads: "2nd of
+  5", "being merged now", "being integrated". `place` is one of `Forge.MergeQueue.places/1`.
+  """
+  @spec merge_queue_place(map()) :: String.t()
+  def merge_queue_place(%{status: :merging}), do: "being merged now"
+  def merge_queue_place(%{status: :integrating}), do: "being integrated"
+  def merge_queue_place(%{index: index, total: total}), do: "#{ordinal(index)} of #{total}"
+
+  @doc "What is happening to a queued ticket (`merge_queue_place/1`'s companion)."
+  @spec merge_queue_doing(map()) :: String.t()
+  def merge_queue_doing(%{status: :merging}), do: "being merged"
+  def merge_queue_doing(%{status: :integrating}), do: "being integrated; it keeps its place"
+  def merge_queue_doing(%{ahead: 0}), do: "next to be merged"
+  def merge_queue_doing(%{ahead: ahead}), do: "waiting for #{ahead} ahead"
+
+  defp ordinal(n) when rem(n, 100) in [11, 12, 13], do: "#{n}th"
+  defp ordinal(n) when rem(n, 10) == 1, do: "#{n}st"
+  defp ordinal(n) when rem(n, 10) == 2, do: "#{n}nd"
+  defp ordinal(n) when rem(n, 10) == 3, do: "#{n}rd"
+  defp ordinal(n), do: "#{n}th"
+
+  @doc """
+  A ticket in the merge queue (`docs/design/ui.md` § Decide and Timeline): where it stands, what is
+  happening to it, and *Take out of queue*, which is an unapproval. It stands where the approval
+  card stood. The card goes only when the server says the ticket left the queue — pressing the
+  button hides nothing — and the confirm says what an integration already running will do.
+  """
+  attr :ticket, :map, required: true
+  attr :place, :map, required: true, doc: "the ticket's entry of `Forge.MergeQueue.places/1`"
+
+  def merge_queue_card(assigns) do
+    ~H"""
+    <div id={"merge-queue-#{@ticket.id}"} class="flex flex-col gap-3">
+      <p class="text-sm/[1.55]">
+        <span class="font-medium">In the merge queue</span>
+        · <span id="merge-queue-place">{merge_queue_place(@place)}</span>
+      </p>
+      <p id="merge-queue-doing" class="text-sm/[1.55] opacity-70">
+        {String.capitalize(merge_queue_doing(@place))}.
+      </p>
+      <.answer_row
+        id={"take-out-#{@ticket.id}"}
+        phx-click="take-out"
+        phx-disable-with="Taking out…"
+        phx-value-ticket={@ticket.id}
+        data-confirm="Take this ticket out of the merge queue? Its approval is withdrawn and it has to be approved again. An integration already running will finish, but will not merge."
+      >
+        Take out of queue
+      </.answer_row>
+    </div>
+    """
+  end
+
+  @doc """
   Runs the state the ticket rests in again (`docs/design/ui.md` § Decide and Timeline): after a
   failure, or after a success whose documents a person wants done afresh. An answer row, because
   it commits something — it spends a job.

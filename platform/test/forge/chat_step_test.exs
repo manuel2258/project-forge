@@ -301,6 +301,33 @@ defmodule Forge.ChatStepTest do
       assert {:ok, %{state: "review_ready"}} = accept(chat, user, "needs_more", seen)
     end
 
+    # A queued ticket whose conflict route led into a chat step moves only once a person takes it
+    # out, as `choose/4` refuses a queued ticket (`workflow-grammar-v1.md` § The merge queue). The
+    # row stands in for the queue's own conflict route, which needs a merging state the step's
+    # workflow does not have.
+    test "a queued ticket refuses it until taken out", %{
+      ticket: ticket,
+      user: user,
+      chat: chat,
+      seen: seen
+    } do
+      Repo.insert!(%Forge.MergeQueue.Entry{
+        project_id: ticket.project_id,
+        ticket_id: ticket.id,
+        status: :integrating,
+        from_state: "refining",
+        to_state: "planning",
+        edge_outcome: "done"
+      })
+
+      assert {:error, :queued} = accept(chat, user, "done", seen)
+      assert %{state: "refining"} = Repo.reload!(ticket)
+      assert Steps.refusal(:queued) =~ "Take it out first"
+
+      assert {:ok, _ticket} = Operator.take_out(Repo.reload!(ticket), user)
+      assert {:ok, %{state: "planning"}} = accept(chat, user, "done", seen)
+    end
+
     test "a turn in flight refuses it", %{user: user, chat: chat, seen: seen} do
       {:ok, _event} = Conversations.send(Repo.get!(Job, chat.id), "and another thing")
       assert {:error, :in_flight} = accept(chat, user, "done", seen)

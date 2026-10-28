@@ -13,6 +13,8 @@ defmodule Forge.Artifacts.Approval do
     field :decision, Ecto.Enum, values: [:approved, :rejected]
     field :comment, :string
     field :transition, :map
+    # Set when taking the ticket out of the merge queue withdrew the approval; the row stays.
+    field :withdrawn_at, :utc_datetime_usec
 
     belongs_to :artifact_version, Forge.Artifacts.Version
     belongs_to :user, Forge.Accounts.User

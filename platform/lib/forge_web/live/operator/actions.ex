@@ -104,6 +104,14 @@ defmodule ForgeWeb.Operator.Actions do
     end
   end
 
+  # Taking a ticket out of the merge queue: an unapproval (`docs/design/ui.md` § Decide and
+  # Timeline). A ticket that merged or was taken out by someone else meanwhile is refused in words.
+  defp act("take-out", %{"ticket" => id}, socket) do
+    with {:ok, _ticket} <- Operator.take_out(ticket(id), user(socket)) do
+      {:ok, "Taken out of the merge queue; it has to be approved again"}
+    end
+  end
+
   # A document a human state declares, written from the ticket's Decide tab. The same write the
   # API's `POST …/artifacts/:name` makes (`docs/design/workflow-grammar-v1.md` § Semantics).
   # `base` is the version the draft in the box was typed against, which the form carries in a
@@ -159,6 +167,19 @@ defmodule ForgeWeb.Operator.Actions do
   defp describe({:not_repinnable, status}), do: "a #{status} ticket cannot be re-pinned"
   defp describe(:already_pinned), do: "the ticket is already pinned at the default branch's head"
   defp describe(:pending_approval), do: "decide the pending approval first"
+  defp describe(:queued), do: "the ticket is in the merge queue; take it out first"
+  defp describe(:merging), do: "it is being merged right now, which cannot be taken back"
+
+  defp describe({:not_queued, {:merged, _}}),
+    do: "it has already merged, so there is nothing to take out"
+
+  defp describe({:not_queued, {:taken_out, _}}),
+    do: "someone has already taken it out of the merge queue"
+
+  defp describe({:not_queued, {:left, reason}}),
+    do: "it is no longer in the merge queue (#{reason})"
+
+  defp describe({:not_queued, nil}), do: "it is not in the merge queue"
   defp describe(:merges_cleanly), do: "it merges cleanly now, so there is nothing to integrate"
 
   defp describe({:merge_conflict, paths}),

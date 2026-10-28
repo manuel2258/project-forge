@@ -501,7 +501,10 @@ defmodule Forge.Artifacts do
   """
   @spec approved?(Version.t() | nil) :: boolean()
   def approved?(nil), do: false
-  def approved?(%Version{id: id}), do: id |> approvals() |> Enum.any?(&(&1.decision == :approved))
+
+  def approved?(%Version{id: id}) do
+    id |> approvals() |> Enum.any?(&(&1.decision == :approved and &1.withdrawn_at == nil))
+  end
 
   @doc """
   Artifact names the pinned workflow can ever approve: every name in any transition's `approve`.
@@ -840,6 +843,27 @@ defmodule Forge.Artifacts do
           comment: comment
         })
       )
+    )
+  end
+
+  @doc """
+  Adds withdrawing the approvals `approval_ids` to `multi`: taking a ticket
+  out of the merge queue is an unapproval. The rows stay, marked, so the history says who approved
+  and when; a later approval of the same version is a new row and counts again. Marked, not ordered
+  against a later row by `inserted_at`, which is whole seconds.
+  """
+  @spec put_withdrawal(Multi.t(), [String.t()]) :: Multi.t()
+  # `ap.decision == :approved` and `is_nil(ap.withdrawn_at)` are equivalent mutants now that the
+  # rows are named by id: the ids are approvals this same entry inserted as `:approved`, and each
+  # entry is taken out once. They stay so that the function is safe to call with any ids.
+  def put_withdrawal(multi, approval_ids) do
+    Multi.update_all(
+      multi,
+      :withdrawn,
+      from(ap in Approval,
+        where: ap.id in ^approval_ids and ap.decision == :approved and is_nil(ap.withdrawn_at)
+      ),
+      set: [withdrawn_at: DateTime.utc_now()]
     )
   end
 

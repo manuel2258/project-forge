@@ -22,7 +22,7 @@ defmodule Forge.Queue do
   require Logger
 
   alias Forge.Accounts.User
-  alias Forge.{Artifacts, Conversations, Engine, Jobs, Projects, Repo, Spend, Tickets}
+  alias Forge.{Artifacts, Conversations, Engine, Jobs, MergeQueue, Projects, Repo, Spend, Tickets}
   alias Forge.Artifacts.Question
   alias Forge.Events.Event
   alias Forge.Jobs.{Job, Runs}
@@ -80,7 +80,7 @@ defmodule Forge.Queue do
   """
   @spec for_ticket(Ticket.t()) :: [item()]
   def for_ticket(%Ticket{status: status} = ticket) when status in @open,
-    do: questions([ticket]) ++ ticket_items(ticket) ++ step_items(ticket)
+    do: questions([ticket]) ++ decisions([ticket]) ++ step_items(ticket)
 
   def for_ticket(%Ticket{}), do: []
 
@@ -353,10 +353,18 @@ defmodule Forge.Queue do
       )
 
     {waiting, assumed} =
-      (questions(tickets) ++ Enum.flat_map(tickets, &ticket_items/1) ++ chats(project_ids))
+      (questions(tickets) ++ decisions(tickets) ++ chats(project_ids))
       |> Enum.split_with(&waiting?/1)
 
     oldest_first(waiting) ++ oldest_first(assumed)
+  end
+
+  # A queued ticket waits on the merge queue and not on a person: its approval is given, so nothing
+  # of it is offered here — and the queue is never drawn under the merge queue's name
+  # (`docs/design/ui.md` § Decide and Timeline).
+  defp decisions(tickets) do
+    queued = MergeQueue.queued_ids(Enum.map(tickets, & &1.id))
+    tickets |> Enum.reject(&(&1.id in queued)) |> Enum.flat_map(&ticket_items/1)
   end
 
   defp oldest_first(items), do: Enum.sort_by(items, & &1.since, DateTime)

@@ -18,6 +18,7 @@ defmodule ForgeCore.Workflow.Validator do
       optional_outputs(workflow),
       entry_actions(workflow),
       conflict_targets(workflow),
+      queueing_edges(workflow),
       artifact_names(workflow),
       commands(workflow, Keyword.get(opts, :file_exists)),
       invocations(workflow),
@@ -399,6 +400,41 @@ defmodule ForgeCore.Workflow.Validator do
         )
       ]
     end
+  end
+
+  # `docs/design/workflow-grammar-v1.md` § The merge queue: only an edge into a merging state has
+  # anything to queue for, and none out of a chat step — its Accept ends the conversation, so a
+  # ticket taken out of the line would rest in a step with nothing left to Accept.
+  defp queueing_edges(%Workflow{transitions: transitions} = workflow) do
+    transitions
+    |> Enum.with_index()
+    |> Enum.filter(fn {transition, _index} -> transition.queue == true end)
+    |> Enum.flat_map(fn {transition, index} ->
+      path = Error.join(Error.join("transitions", index), "queue")
+
+      cond do
+        not Workflow.merges_on_enter?(workflow, transition.to) ->
+          [
+            Error.new(
+              path,
+              "only an edge into a merging state (one with on_enter: merge) can queue; " <>
+                "#{inspect(transition.to)} merges nothing"
+            )
+          ]
+
+        State.chat?(Workflow.state(workflow, transition.from) || %State{name: ""}) ->
+          [
+            Error.new(
+              path,
+              "an edge out of a chat step cannot queue: #{inspect(transition.from)} is ended " <>
+                "by Accept, which merges at once"
+            )
+          ]
+
+        true ->
+          []
+      end
+    end)
   end
 
   # `docs/design/workflow-grammar-v1.md` § Merging: where a conflict goes is the merging state's to

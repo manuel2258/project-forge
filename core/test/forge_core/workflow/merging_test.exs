@@ -322,6 +322,72 @@ defmodule ForgeCore.Workflow.MergingTest do
     |> Parser.from_map()
   end
 
+  describe "queue" do
+    defp queue_edge(map, queue) do
+      Map.update!(map, "transitions", fn transitions ->
+        Enum.map(transitions, fn
+          %{"from" => "review_ready", "to" => "merged"} = edge -> Map.put(edge, "queue", queue)
+          edge -> edge
+        end)
+      end)
+    end
+
+    test "an edge into the merging state may queue; one that says nothing does not", %{map: map} do
+      assert {:ok, workflow} = Parser.from_map(queue_edge(map, true))
+      edge = Enum.find(workflow.transitions, &(&1.to == "merged"))
+      assert edge.queue == true
+      assert Transition.queues?(edge)
+
+      assert {:ok, plain} = Parser.from_map(map)
+      refute Enum.any?(plain.transitions, &Transition.queues?/1)
+      assert {:ok, explicit} = Parser.from_map(queue_edge(map, false))
+      refute Enum.any?(explicit.transitions, &Transition.queues?/1)
+    end
+
+    test "an edge that leads into no merging state may not, and the message says why", %{map: map} do
+      map =
+        Map.update!(map, "transitions", fn transitions ->
+          Enum.map(transitions, fn
+            %{"from" => "verifying", "to" => "review_ready"} = edge ->
+              Map.put(edge, "queue", true)
+
+            edge ->
+              edge
+          end)
+        end)
+
+      assert [{path, message}] = messages(map)
+      assert path =~ ~r/^transitions\[\d+\]\.queue$/
+      assert message =~ "only an edge into a merging state"
+      assert message =~ "\"review_ready\" merges nothing"
+    end
+
+    test "a value that is not true or false is refused", %{map: map} do
+      assert [{_path, "must be true or false"}] = messages(queue_edge(map, "yes"))
+    end
+
+    # Accept ends a chat step's conversation, so a ticket taken out of the line would rest in a
+    # step with nothing left to Accept; the same edge with no `queue` is a chat step's like any.
+    test "an edge out of a chat step may not, and the message says why", %{map: map} do
+      chat = fn map ->
+        put_in(map, ["states", "review_ready"], %{"chat" => true, "prompt" => "agents/review.md"})
+      end
+
+      assert {:ok, _workflow} = Parser.from_map(chat.(map))
+      assert [{path, message}] = messages(chat.(queue_edge(map, true)))
+      assert path =~ ~r/^transitions\[\d+\]\.queue$/
+      assert message =~ "an edge out of a chat step cannot queue"
+      assert message =~ "\"review_ready\""
+    end
+
+    test "a stored pin with no queue key reads as false, and one with it keeps it", %{map: map} do
+      assert {:ok, pinned} = Parser.from_pinned(map)
+      refute Enum.any?(pinned.transitions, &Transition.queues?/1)
+      assert {:ok, pinned} = Parser.from_pinned(queue_edge(map, true))
+      assert Enum.any?(pinned.transitions, &Transition.queues?/1)
+    end
+  end
+
   defp messages(map) do
     {:error, errors} = Parser.from_map(map)
     Enum.map(errors, &{&1.path, &1.message})

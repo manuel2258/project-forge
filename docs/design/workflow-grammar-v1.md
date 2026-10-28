@@ -334,6 +334,10 @@ left it pending left the ticket saying "waiting for you to choose" while the que
 page both still drew the approve-or-reject card, because each of them checks `pending_transition`
 before anything else. There was no way forward from the page at all.
 
+**An approval on an edge that queues merges nothing** (§ The merge queue): it records the approval
+and queues the ticket, and **while the ticket is queued no other transition may be taken**, the
+same rule as for a pending decision.
+
 **While a decision is pending, no other transition may be taken.** The decision comes first,
 whichever edge is asked for, and `Forge.Engine.choose/4` refuses with `{:error, :pending_approval}`
 — `repinnable/2`'s name for the same condition. This is a rule of the grammar and not of a
@@ -636,7 +640,8 @@ the job ran — it takes `on_conflict` again.
 `on_conflict` by itself at most **three times in a row**: an engine-taken edge into the merging
 state whose check conflicts takes `on_conflict` only while fewer than three
 `ticket.merge_conflicted` the engine took have been recorded since a person last moved the ticket —
-took a transition, or ran its state again. The fourth sticks the ticket where it was, in the
+took a transition, ran its state again or put it in the merge queue (`merge_queue.entered`, by a
+person; the engine's own enqueue does not count). The fourth sticks the ticket where it was, in the
 integrating state with its edges out, saying `merge still conflicts after 3 integrations in a row:
 the integrate-then-merge loop stops here`. A person moving it on starts the count again, and a
 person's own conflicting approval is never counted: there is a person in that loop already.
@@ -679,6 +684,83 @@ version it would approve is about to be replaced. A ticket that merges cleanly b
 and the notice it acted on was stale.
 
 The merge itself is idempotent, so entering the merging state twice merges once.
+
+### The merge queue
+
+An edge into a merging state may say `queue: true`:
+
+```yaml
+  - { from: review_ready, to: merged, approve: [changeset], queue: true }
+```
+
+Taking that edge **takes no transition**. It records the approvals, if the edge has any, and puts
+the ticket in its project's line (`merge_queue_entries`, one row per queued ticket); the ticket
+stays in `from`, `active`, with nothing pending, and nothing is checked for a conflict. Wherever
+the key is declared it is always in force — there is no project, user or ticket setting that turns
+it off for that edge, and a workflow with no `queue` key never writes a row, so approval merges
+at once and a conflicting approval takes the conflict route exactly as above. The engine's own
+edge into a merging state queues the same way (it is the ticket's place that matters, not who
+asked), with the job's outcome behind it.
+
+A runner takes the line one project at a time (`Forge.MergeQueue.Runner`; the work is a task of
+its own, not the request that approved):
+
+- **Order** is the row's `position`, a database sequence, so it is the order approvals were
+  recorded in and it is the same after a restart. A ticket approved again is a new approval and
+  goes to the back.
+- **One at a time.** The front `waiting` row is claimed by making it `merging`; a partial unique
+  index on `(project_id) where status = 'merging'` refuses a second one, which is the guard.
+  Projects do not wait for each other.
+- **The front is checked** against the default branch's head, on the changeset version and with
+  the `commit-message` version that were current when it was approved (after an integration, the
+  changeset it produced and the latest message). Clean: the edge is taken
+  (`transition.taken` names both) and the merge made, and the ticket leaves the line as merged.
+  Conflicting: the conflict route is taken as for any engine edge, the three-in-a-row bound
+  included — a person's entry into the queue (`merge_queue.entered`) starts the count again, as
+  taking a transition does — and reaching the bound sticks that ticket with the message above and
+  nobody behind it. Any other failure (no changeset, no commit message, a push refused) sticks
+  that ticket with the reason. A stuck ticket is out of the line; one bad ticket never holds it.
+- **Integration keeps the place** and does not hold the line: a row being integrated
+  (`integrating`) is skipped over, and the tickets behind it that merge cleanly go first. When the
+  integrating job ends, an edge straight to the merging state puts the row back to `waiting`
+  (`merge_queue.returned`) against the changeset the integration produced, to be checked in its
+  turn; an edge to any other state — and an approval to be given, or a stick — takes the ticket out
+  of the line (`merge_queue.left`), because it needs a person again. A `on_conflict` that is a
+  human state leaves on arrival for the same reason.
+- **Taking a ticket out** (`Forge.Engine.take_out/2`) is an unapproval, by a person who may
+  approve on the project: the approval rows are marked withdrawn (they stay, and `approved?` no
+  longer counts them), the row goes, and the ticket is again where it was approved from — the
+  pending approval when a job's outcome asked for it, the chooser when it rests in a human state,
+  otherwise stuck so a person is offered its edges. It must be approved afresh to be queued again.
+  Allowed while waiting and while integrating. During integration the job is not stopped: only the
+  merge after it is, because when the job ends the engine does not take an edge into the merging
+  state for a ticket a person took out since it entered its state (it sticks with its edges
+  offered); an edge to any other state is taken as the workflow says. It is refused while the
+  merge itself is running, and, for a ticket that is not queued, with how it left (merged, or
+  taken out by someone else).
+- **While queued, no other transition may be taken** — `choose`, retry, integrate, re-pin and a
+  chat step's Accept all refuse with `:queued`, at the operation, whether asked by the page, the
+  API or a conversation. Accept meets it when a conflict route leads into a chat step (§ Chat
+  steps): the step's conversation runs as an integration does, and its Accept waits until a
+  person takes the ticket out, after which it takes the edge as it would on any ticket.
+- **Recovery** is the runner's task's first act, and a node has only one task for a project: it
+  registers under the project's name (`Forge.MergeQueue.Registry`, local to the node) and a second
+  finds the name taken, asks for it for a couple of seconds in case its holder is just finishing,
+  and stops. Its tasks outlive a restarted runner, so holding the name is how a new task
+  knows whether a live one owns a `merging` row; holding it, any `merging` row is a task's that is
+  gone (a crash of the platform, the runner or the task), including one whose runner was down when
+  its task died, and a project with only such a row is started like one with a waiting row. A row
+  left `merging` is finished from where its ticket got to: in the merging state, the merge is
+  finished (entering is idempotent); sent down the conflict route, the row becomes `integrating`
+  and keeps its place; still where it was queued from, back to `waiting`; anywhere else, the row
+  goes. A task that dies is started again after a delay, so a row that kills it does not spin.
+- **The ticket row is locked** wherever the line and the ticket are decided together: taking out, a
+  job's result arriving for a ticket in the line, and the runner's merge or stick. Each re-reads
+  the row under the lock, so a take-out and an integration finishing at once are serialised and
+  each sees the other's result.
+
+`approve` is not needed on a queueing edge; without it the edge queues and only the engine's
+runner takes it.
 
 ## Commands
 
@@ -900,6 +982,8 @@ ticket is open (Restore once cancelled) — neither reads the old pin. The revie
 engine reads such a pin with `Tickets.workflow/1`, which raises, and the page offers no action that
 reaches it (cancel, restore and re-pin do not read the old pin).
 
+A stored definition with no `queue` key reads every edge as `queue: false`.
+
 **Re-pinning is a person's act** (`Forge.Engine.repin/2`). It reads the workflow of the ticket's
 own type at the default branch's head — refusing when that type's file is gone — validates it as
 admission does, and stores the definition and the commit in place of the old ones; every job made after it reads its prompt and its scripts from there. The branch,
@@ -1005,6 +1089,12 @@ is never produced; `answers.md` is platform-managed and never declared.
   approval comes before its reader, the order the board draws its columns in — follows it as an
   edge out of the merging state, because the ticket can reach the target only by it. It is no
   transition: no `when` selects it and no person chooses it.
+- `queue` is `true` or `false`, and `true` only on an edge whose `to` has `on_enter: merge`:
+  `only an edge into a merging state (one with on_enter: merge) can queue; "x" merges nothing`.
+  Nor on an edge out of a chat step: `an edge out of a chat step cannot queue: "x" is ended by
+  Accept, which merges at once` — Accept ends the step's conversation, so a ticket taken out of
+  the line would rest in a step with nothing left to Accept. A pin made before the key existed
+  reads as `false` (§ Pinning).
 - `merge_conflict` is neither a declared outcome nor a value of an `exit` map.
 - `description`, where present, is a non-empty string.
 - `release`, where present, is `true` or `false`. It is refused in `.forge/workflow.yml`, which has

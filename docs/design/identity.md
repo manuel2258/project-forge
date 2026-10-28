@@ -542,7 +542,8 @@ The vocabulary:
 | `token` | A platform-issued credential and no session: git, the blob store, a worker. |
 | `local` | Changes nothing on the server. Page state only. |
 
-What that comes to:
+What that comes to (taking a ticket out of the merge queue is `member`, as approving is: the
+`take-out` action on a ticket page and on the project page, both `Forge.Operator.take_out/2`):
 
 - **`member`** is most of the product: the queue and board, every project, ticket, review, job,
   chat and artifact page, the ticket and proposal endpoints of the JSON API (for a project token, classified in `test/support/token_routes.ex`),

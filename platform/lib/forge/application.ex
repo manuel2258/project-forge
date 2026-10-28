@@ -31,6 +31,9 @@ defmodule Forge.Application do
         # Where a connected worker's channel process registers itself, so the platform has
         # somewhere to look when it wants to speak to a machine.
         {Registry, keys: :unique, name: Forge.Workers.Registry},
+        # The merge queue's task for each project registers here, so a new runner can tell a live
+        # task's `merging` row from one that was left (`Forge.MergeQueue.Runner`).
+        {Registry, keys: :unique, name: Forge.MergeQueue.Registry},
         # Before anything is served: a node whose `SECRET_KEY_BASE` opens none of the credentials
         # it holds refuses to start, rather than starting broken in five places at once.
         Forge.Credentials.KeyCheck,
@@ -70,7 +73,7 @@ defmodule Forge.Application do
   # rows no machine can join (`Forge.Jobs.recover/0`).
   defp scheduler do
     if Forge.Jobs.config(:run_jobs, true),
-      do: [{Task, &recover/0}, Forge.Jobs.Scheduler],
+      do: [{Task, &recover/0}, Forge.Jobs.Scheduler, Forge.MergeQueue.Runner],
       else: []
   end
 

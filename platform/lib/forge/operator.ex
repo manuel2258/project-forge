@@ -185,6 +185,18 @@ defmodule Forge.Operator do
     end
   end
 
+  @doc """
+  Takes a ticket out of the merge queue (`Forge.Engine.take_out/2`): an unapproval, allowed to
+  whoever may approve on the project, and a person only — a token cannot reach it.
+  """
+  @spec take_out(Ticket.t(), User.t()) :: {:ok, Ticket.t()} | {:error, term()}
+  def take_out(%Ticket{} = ticket, %User{} = user) do
+    with :ok <- allow(ticket, user, :use),
+         {:ok, ticket} <- Engine.take_out(ticket, user.id) do
+      notify(ticket)
+    end
+  end
+
   @doc "Re-pins a ticket's workflow to the default branch as it is now (`Forge.Engine.repin/2`)."
   @spec repin(Ticket.t(), User.t()) :: {:ok, Ticket.t()} | {:error, term()}
   def repin(%Ticket{} = ticket, %User{} = user) do

@@ -168,6 +168,7 @@ defmodule ForgeWeb.Operator.Board do
   attr :project, :string, required: true
   attr :ticket_type, :string, default: nil
   attr :now, :any, required: true
+  attr :places, :map, default: %{}, doc: "`Forge.MergeQueue.places/1`, for the queued flag"
 
   def column(assigns) do
     assigns =
@@ -192,7 +193,13 @@ defmodule ForgeWeb.Operator.Board do
         </span>
       </div>
 
-      <.board_ticket :for={ticket <- @column.shown} ticket={ticket} project={@project} now={@now} />
+      <.board_ticket
+        :for={ticket <- @column.shown}
+        ticket={ticket}
+        project={@project}
+        now={@now}
+        place={@places[ticket.id]}
+      />
 
       <div :if={@column.more > 0} id={@id <> "-more"} class="hidden flex-col gap-3">
         <.board_ticket
@@ -200,6 +207,7 @@ defmodule ForgeWeb.Operator.Board do
           ticket={ticket}
           project={@project}
           now={@now}
+          place={@places[ticket.id]}
         />
       </div>
 
@@ -243,6 +251,7 @@ defmodule ForgeWeb.Operator.Board do
   attr :lanes, :list, required: true
   attr :project, :string, required: true
   attr :now, :any, required: true
+  attr :places, :map, default: %{}, doc: "`Forge.MergeQueue.places/1`, for the queued flag"
 
   def board(assigns) do
     ~H"""
@@ -257,6 +266,7 @@ defmodule ForgeWeb.Operator.Board do
           project={@project}
           ticket_type={lane.ticket_type}
           now={@now}
+          places={@places}
         />
       </div>
     </div>
@@ -266,6 +276,7 @@ defmodule ForgeWeb.Operator.Board do
   attr :ticket, :map, required: true
   attr :project, :string, required: true
   attr :now, :any, required: true
+  attr :place, :map, default: nil
 
   defp board_ticket(assigns) do
     ~H"""
@@ -282,6 +293,10 @@ defmodule ForgeWeb.Operator.Board do
         class="font-mono text-[11px] tracking-[.14em] uppercase text-accent"
       >
         stuck {Format.ago(@ticket.updated_at, @now)}
+      </span>
+      <%!-- A flag, as `stuck` is: the ticket keeps its state and its column. --%>
+      <span :if={@place} class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
+        queued {@place.index}/{@place.total}
       </span>
     </div>
     """

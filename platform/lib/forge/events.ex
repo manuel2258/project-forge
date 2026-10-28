@@ -297,6 +297,29 @@ defmodule Forge.Events do
 
   defp describe(%Event{type: "ticket.stuck", payload: %{"reason" => reason}}, _bound), do: reason
 
+  defp describe(%Event{type: "ticket.merged", payload: %{"sha" => sha} = p}, _bound),
+    do: "merged as #{short(sha)}#{if p["already"], do: " (it was already there)"}"
+
+  # The merge queue (`docs/design/workflow-grammar-v1.md` § The merge queue), in plain words.
+  defp describe(%Event{type: "merge_queue.entered", payload: %{"to" => to}}, _bound),
+    do: "queued to merge into #{to}"
+
+  defp describe(%Event{type: "merge_queue.returned"}, _bound),
+    do: "integrated; back in the merge queue at its place"
+
+  defp describe(
+         %Event{type: "merge_queue.taken_out", payload: %{"status" => "integrating"}},
+         _bound
+       ),
+       do:
+         "taken out of the merge queue while integrating; the integration finishes but will not merge"
+
+  defp describe(%Event{type: "merge_queue.taken_out"}, _bound),
+    do: "taken out of the merge queue; its approval is withdrawn"
+
+  defp describe(%Event{type: "merge_queue.left", payload: %{"reason" => reason}}, _bound),
+    do: left_words(reason)
+
   defp describe(%Event{type: "ticket.renamed", payload: %{"to" => to} = p}, _bound),
     do: "renamed to #{to}, from #{p["document"]}"
 
@@ -333,6 +356,12 @@ defmodule Forge.Events do
     |> Enum.map_join(" ", fn {k, v} -> "#{k}=#{inspect(v)}" end)
     |> bounded(160, bound)
   end
+
+  defp left_words("merged"), do: "merged, and left the merge queue"
+  defp left_words("stuck"), do: "stuck, and left the merge queue"
+  defp left_words("cancelled"), do: "cancelled, and left the merge queue"
+  defp left_words("needs_person"), do: "left the merge queue: it needs a person's approval again"
+  defp left_words(reason), do: "left the merge queue (#{reason})"
 
   defp bounded(text, most, :bounded), do: String.slice(text, 0, most)
   defp bounded(text, _most, :whole), do: text

@@ -18,7 +18,17 @@ defmodule ForgeWeb.ProjectLive do
   import ForgeWeb.Indicators
   import ForgeWeb.Operator.Components
 
-  alias Forge.{Conversations, Events, Operator, Projects, Proposals, ReleaseTickets, Tickets}
+  alias Forge.{
+    Conversations,
+    Events,
+    MergeQueue,
+    Operator,
+    Projects,
+    Proposals,
+    ReleaseTickets,
+    Tickets
+  }
+
   alias Forge.Git.Url
   alias ForgeCore.Workflow
   alias ForgeWeb.Format
@@ -48,12 +58,18 @@ defmodule ForgeWeb.ProjectLive do
   defp load(%{assigns: %{project_id: id}} = socket) do
     project = Projects.get!(id)
     tickets = Tickets.list(project)
+    queue = MergeQueue.with_places(project.id)
     current = Tickets.types(project)
 
     assign(socket,
       project: project,
       tickets: tickets,
       lanes: Board.lanes(tickets),
+      # The merge queue in order, and the places the board's flags are drawn from. Replaced only
+      # by a read that succeeded: `load/1` raises on a failure, so the last known order stays.
+      queue: queue,
+      places: Map.new(queue, fn {entry, place} -> {entry.ticket_id, place} end),
+      queueing: queueing_edges(current),
       # The repository's current workflow, which is what the *next* ticket will pin — not the
       # board's, which is the workflow the tickets on it were admitted with. On a project whose
       # workflow has just changed these are different, and saying so is the point.
@@ -76,6 +92,20 @@ defmodule ForgeWeb.ProjectLive do
       now: DateTime.utc_now()
     )
   end
+
+  # The edges the repository's current workflows queue on, for the empty queue to say what would
+  # fill it.
+  defp queueing_edges(current) do
+    for type <- current_types(current),
+        {:ok, workflow} <- [type.workflow],
+        transition <- workflow.transitions,
+        ForgeCore.Workflow.Transition.queues?(transition),
+        uniq: true,
+        do: "#{transition.from} → #{transition.to}"
+  end
+
+  # A merge queue shows this many rows and folds the rest behind "N more", as a board's columns do.
+  @queue_rows 8
 
   # What the Release block draws, for a project admin and nobody else: one of `{:open, ticket}`,
   # `{:ready, entry}`, `{:broken, entry}`, `:none` and `{:several, paths}`. An open release wins
@@ -143,6 +173,13 @@ defmodule ForgeWeb.ProjectLive do
   def handle_event("draft:change", params, socket) do
     case Drafts.handle("draft:change", params, socket) do
       {:state, socket} -> {:noreply, socket}
+      :unknown -> {:noreply, socket}
+    end
+  end
+
+  def handle_event("take-out", params, socket) do
+    case ForgeWeb.Operator.Actions.handle("take-out", params, socket) do
+      {:handled, socket} -> {:noreply, load(socket)}
       :unknown -> {:noreply, socket}
     end
   end
@@ -279,6 +316,44 @@ defmodule ForgeWeb.ProjectLive do
         out: Workflow.transitions_from(workflow, name)
       }
     end
+  end
+
+  defp queue_rows, do: @queue_rows
+
+  attr :entry, :map, required: true
+  attr :place, :map, required: true
+  attr :project, :string, required: true
+
+  # One row: the ticket, what it is doing, and the way out. The title is wrapped and cut at two
+  # lines (HEEx escapes it, so markup in a title is text).
+  defp queue_row(assigns) do
+    ~H"""
+    <li
+      id={"queue-#{@entry.ticket_id}"}
+      class="flex flex-col gap-1 border-l border-base-300 pl-2 sm:flex-row sm:items-baseline sm:gap-3"
+    >
+      <.link
+        navigate={~p"/tickets/#{@project}/#{@entry.ticket.number}"}
+        class="inline-flex min-h-[46px] shrink-0 items-center font-mono text-[12.5px] hover:underline sm:min-h-0"
+      >
+        #{@entry.ticket.number}
+      </.link>
+      <span class="min-w-0 flex-1 line-clamp-2 text-sm break-words">{@entry.ticket.title}</span>
+      <span class="font-mono text-[12.5px] opacity-60">
+        {@entry.ticket.state} · {merge_queue_place(@place)} · {merge_queue_doing(@place)}
+      </span>
+      <button
+        type="button"
+        phx-click="take-out"
+        phx-value-ticket={@entry.ticket_id}
+        phx-disable-with="Taking out…"
+        data-confirm="Take this ticket out of the merge queue? Its approval is withdrawn and it has to be approved again. An integration already running will finish, but will not merge."
+        class="flex min-h-[46px] items-center text-sm text-primary hover:underline"
+      >
+        Take out
+      </button>
+    </li>
+    """
   end
 
   attr :release, :any, required: true
@@ -431,8 +506,61 @@ defmodule ForgeWeb.ProjectLive do
           </p>
 
           <div :if={@tickets != []} class="mt-3">
-            <Board.board lanes={@lanes} project={@project.name} now={@now} />
+            <Board.board lanes={@lanes} project={@project.name} now={@now} places={@places} />
           </div>
+
+          <%!-- The merge queue: approved tickets waiting to merge, in the order they were approved.
+                Never the operator's queue, the page of questions and approvals
+                (`docs/design/ui.md` § The project page). --%>
+          <section id="merge-queue" class="mt-8">
+            <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
+              Merge queue
+            </h2>
+            <p
+              :if={@queue == [] and @queueing != []}
+              id="merge-queue-empty"
+              class="mt-3 text-sm opacity-60"
+            >
+              Nothing is waiting to merge. Approving a ticket on {Enum.join(@queueing, ", ")} adds it here.
+            </p>
+            <p
+              :if={@queue == [] and @queueing == []}
+              id="merge-queue-empty"
+              class="mt-3 text-sm opacity-50"
+            >
+              Nothing is waiting to merge.
+            </p>
+            <ol :if={@queue != []} id="merge-queue-list" class="mt-3 flex flex-col gap-2">
+              <.queue_row
+                :for={{{entry, place}, index} <- Enum.with_index(@queue)}
+                :if={index < queue_rows()}
+                entry={entry}
+                place={place}
+                project={@project.name}
+              />
+            </ol>
+            <ol
+              :if={length(@queue) > queue_rows()}
+              id="merge-queue-more"
+              class="mt-2 hidden flex-col gap-2"
+            >
+              <.queue_row
+                :for={{entry, place} <- Enum.drop(@queue, queue_rows())}
+                entry={entry}
+                place={place}
+                project={@project.name}
+              />
+            </ol>
+            <button
+              :if={length(@queue) > queue_rows()}
+              type="button"
+              id="merge-queue-expand"
+              phx-click={JS.show(to: "#merge-queue-more", display: "flex") |> JS.hide()}
+              class="flex min-h-[46px] items-center font-mono text-[11px] text-primary hover:underline"
+            >
+              {length(@queue) - queue_rows()} more ↓
+            </button>
+          </section>
 
           <h2 class="mt-8 font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
             {if multiple?(@current),

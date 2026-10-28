@@ -514,6 +514,11 @@ no migration is needed. Safe to call twice, safe to retry.
 
 ### Where it runs, and what a conflict does
 
+A merge a **queue** makes (`workflow-grammar-v1.md` § The merge queue) runs in the runner's task
+and not in a request, one project at a time; steps 1–4 below are the same, made on the changeset
+and the commit message that were current at the approval (after an integration, the changeset it
+produced and the latest message).
+
 A git side effect cannot live inside an Ecto transaction that may roll back, and it cannot run
 after the transaction either — a conflict would then leave the ticket reading `merged` while the
 default branch never moved. The resolution is a **pre-flight check**, shaped like the existing

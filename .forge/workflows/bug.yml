@@ -4,17 +4,18 @@ initial: refining
 import: [common.yml]
 
 states:
+  # A conversation that ends on the person's Accept, on opus at `high` and with no budget, all for
+  # the reasons `dev.yml`'s `refining` carries: it is the same step, grilling for a defect rather
+  # than a feature (`agents/refine-bug.md`). `env` matters more here than there, because the first
+  # thing the agent is asked to do is reproduce the bug, and that needs the devshell.
   refining:
+    chat: true
     prompt: agents/refine-bug.md
     env: default
-    # Sonnet and `high`, for the reason `dev.yml`'s `refining` carries: it is the same state, and
-    # it is the only one whose document a person approves before anything runs on it.
-    model: sonnet
+    model: opus
     effort: high
     inputs: [ticket]
     produces: [refinement.md]
-    # Turns at 60: `dev.yml`'s `refining` carries why, and it is the same state.
-    budget: { turns: 60, cost: 3.00 }
 
   # `implementation.md` is here because `implementing` sends the ticket back on
   # `diagnosis_invalid`, and a re-diagnosis that cannot read why it was sent back re-derives the
@@ -57,23 +58,28 @@ states:
   # what it found and read only what changed since, rather than re-deriving the whole diff at
   # full price — ticket 7's second review spent $21.96 doing exactly that, and its fifth, scoped,
   # cost $4.13.
+  #
+  # `rebase.md` too, and optional for the same reason: only a ticket a rebase sent back on
+  # `needs_review` has one. That review is scoped to the rebase and not to the change a person
+  # already approved (`agents/review.md` § After a rebase, review the rebase), and the
+  # presentation says what the rebase did, because that is what the person approves this time.
   reviewing:
     extends: reviewing
-    inputs: [refinement.md, diagnosis.md, implementation.md, report.md, changeset]
+    inputs: [refinement.md, diagnosis.md, implementation.md, report.md, rebase.md, changeset]
 
   presenting:
     extends: presenting
-    inputs: [refinement.md, diagnosis.md, implementation.md, report.md, changeset]
+    inputs: [refinement.md, diagnosis.md, implementation.md, report.md, rebase.md, changeset]
 
   review_ready: {}
 
   merged:
     extends: merged
 
-  # `refinement.md` for the reason `dev.yml`'s `integrating` carries: the prompt is written against
+  # `refinement.md` for the reason `dev.yml`'s `rebasing` carries: the prompt is written against
   # the acceptance criteria and did not get them.
-  integrating:
-    extends: integrating
+  rebasing:
+    extends: rebasing
     inputs: [refinement.md, diagnosis.md, changeset]
 
 # The work of the ticket, first. Then the edges for the engine's own outcomes, which exist
@@ -101,10 +107,17 @@ states:
 # `did_not_converge` keeps its retry: that is a review that had the budget and no answer, which
 # another attempt can change.
 #
-# `integrating` gets none of these, and cannot: it is `merged`'s `on_conflict`, and the validator
+# `refining` gets none of these either, and needs none: it is a chat step, which no engine outcome
+# ends — nothing in it happens without a person, and an edge on one would never fire.
+#
+# `rebasing` gets none of these, and cannot: it is `merged`'s `on_conflict`, and the validator
 # refuses a state reached by a conflict that any transition also leads into. The rule is right —
-# an integration is a route out of a conflict, not a step anything else may jump into — and it
-# was found by running the parser over this file rather than by reading it.
+# a rebase is a route out of a conflict, not a step anything else may jump into — and it was found
+# by running the parser over this file rather than by reading it. It leaves on its own two
+# outcomes, which `.forge/common.yml` explains: `done` straight back into the merge queue, and
+# `needs_review` through `checking` to a person. Neither carries a `max`, and needs none: the
+# platform bounds the queue's conflict loop at three rebases in a row, and `needs_review` reaches
+# `merged` again only through `review_ready`'s approval, which is a person.
 transitions:
   - { from: refining,     to: diagnosing,   approve: [refinement.md] }
   - { from: diagnosing,   to: implementing }
@@ -115,12 +128,11 @@ transitions:
   - { from: reviewing,    to: presenting }
   - { from: reviewing,    to: implementing, when: issues_found,      max: 5 }
   - { from: presenting,   to: review_ready }
-  - { from: review_ready, to: merged,       approve: [changeset] }
-  - { from: integrating,  to: checking }
+  - { from: review_ready, to: merged,       approve: [changeset], queue: true }
+  - { from: rebasing,     to: merged,       queue: true }
+  - { from: rebasing,     to: checking,     when: needs_review }
 
   - { from: checking,     to: checking,     when: gate_unavailable,  max: 2 }
-  - { from: refining,     to: refining,     when: budget_exhausted,  max: 1 }
-  - { from: refining,     to: refining,     when: did_not_converge,  max: 1 }
   - { from: diagnosing,   to: diagnosing,   when: budget_exhausted,  max: 1 }
   - { from: diagnosing,   to: diagnosing,   when: did_not_converge,  max: 1 }
   - { from: implementing, to: implementing, when: budget_exhausted,  max: 1 }
@@ -131,8 +143,8 @@ transitions:
   - { from: presenting,   to: presenting,   when: did_not_converge,  max: 1 }
 
 limits:
-  # $310 and not $120 because `reviewing` costs $35 and its loop runs five times: the cap is what
-  # the review loop has to fit inside, and `.forge/common.yml` derives the figure beside the budget
-  # and the bound it follows from.
+  # $361 and not $120 because `reviewing` costs $35 and its loop runs five times, and because the
+  # refinement conversation and the rebases after the approval spend under the same cap:
+  # `.forge/common.yml` derives the figure beside the review budget and the bounds it follows from.
   # `project_workflows_test.exs` computes it from this file rather than trusting the comment.
-  ticket_cost: 310.00
+  ticket_cost: 361.00

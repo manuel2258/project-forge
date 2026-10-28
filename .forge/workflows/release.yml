@@ -1,5 +1,12 @@
 version: 1
 description: Cut and publish a forge release — version bump, platform image, Hetzner snapshot.
+# **The project's release** (`docs/design/ticket-types.md` § Releases): a project admin starts one
+# from the project page with an optional note, which is the ticket's body and so its `ticket`
+# input; the New ticket form no longer offers this type. The ticket is titled *Release in progress*
+# until `release-notes.md`'s front matter names the version (`agents/release-plan.md`), and then
+# carries that. **It concludes by itself**: the approval of `release-notes.md` is the one a person
+# gives, and a publish that went as planned merges with no second one (the transitions below).
+release: true
 initial: refining
 
 defaults:
@@ -86,7 +93,7 @@ states:
     prompt: agents/publish.md
     env: default
     # **No retry transition at all** (below), which it shares only with `common.yml`'s
-    # `integrating`, and for a different reason: this one pushes an image to GHCR and writes a
+    # `rebasing`, and for a different reason: this one pushes an image to GHCR and writes a
     # Hetzner snapshot, so a run that stops halfway has already written outside the repository.
     # Opus and `high`, named rather than inherited, because a project default set low would buy a
     # cheap reading of exactly the job whose mistakes cannot be undone by running it again.
@@ -97,13 +104,19 @@ states:
       hetzner-snapshot: { max: 2 }
     inputs: [release-notes.md]
     # `commit-message` because this workflow has no `presenting` state and `publishing` is the
-    # equivalent last stop before `release_ready -> merged` (`.forge/common.yml`'s `presenting`).
+    # equivalent last stop before `merged` (`.forge/common.yml`'s `presenting`).
     produces: [publish-report.md, changeset, commit-message]
+    # `snapshot_failed` is a release half done: the image is published, so `VERSION` must still
+    # land, but the worker snapshot it called for was not made, and machines a template starts go
+    # on booting the old one. That is the case a person has to hear about before the ticket ends.
+    outcomes: [done, snapshot_failed]
     # Turns at 60, and here the ceiling matters more than anywhere: `publishing` has no retry
     # transition (below), so a run its turn ceiling stops sticks the ticket having already
     # written to GHCR or Hetzner. The cost ceiling is the one meant to bind.
     budget: { turns: 60, cost: 4.00 }
 
+  # Reached only on `snapshot_failed`: a person reads `publish-report.md`, retries the snapshot
+  # by hand (`bin/hetzner-image`), and approves the merge.
   release_ready: {}
 
   merged:
@@ -115,10 +128,24 @@ states:
 # somewhere outside this repository, and what to do about that is a person's to decide from the
 # log rather than the engine's to guess by running it again. So it still sticks, which is what
 # sticking is for.
+#
+# **A release is approved once**, on `release-notes.md`, before anything is built. By the time
+# `publishing` ends the image is pushed and cannot be taken back, so a second approval of the
+# `VERSION` bump could only delay saying so on `main`. `done` therefore goes straight to `merged`
+# with no `approve`, and the ticket concludes on its own (`docs/design/ticket-types.md`
+# § Releases). `snapshot_failed` goes to `release_ready` instead, for the reason `publishing`
+# gives, and there the merge waits for a person.
+#
+# Both edges queue, as in `bug.yml` and `dev.yml`: a release's commit takes its turn in the same
+# line as every other ticket's. `merged` here names no `on_conflict`, so a release whose commit no
+# longer merges sticks where it was queued from, with the conflicting paths, rather than going
+# anywhere. All it changes is `VERSION`, and only one release is open at a time, so a conflict
+# there means a release landed some other way meanwhile — which is a person's to sort out.
 transitions:
   - { from: refining,      to: publishing,    approve: [release-notes.md] }
-  - { from: publishing,    to: release_ready }
-  - { from: release_ready, to: merged,        approve: [changeset] }
+  - { from: publishing,    to: merged,        queue: true }
+  - { from: publishing,    to: release_ready, when: snapshot_failed }
+  - { from: release_ready, to: merged,        approve: [changeset], queue: true }
 
   - { from: refining,      to: refining,      when: budget_exhausted, max: 1 }
   - { from: refining,      to: refining,      when: did_not_converge, max: 1 }

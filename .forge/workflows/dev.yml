@@ -5,23 +5,28 @@ import: [common.yml]
 
 states:
   refining:
+    # **A conversation, not a job** (`docs/design/workflow-grammar-v1.md` § Chat steps): the ticket
+    # opens a chat on entry, `agents/refine.md` has the agent grill the person phase by phase, and
+    # the step ends only when the person presses Accept — which is also the approval of
+    # `refinement.md` that `planning` waits on, pinned to the version the person was shown. So the
+    # approval this state always had is now the end of a conversation with the person approving,
+    # rather than a document from an agent that could not ask them anything.
+    chat: true
     prompt: agents/refine.md
     env: default
-    # **The one judgement state on the smaller model, and it is the one a human approves.** What
-    # `agents/refine.md` asks for is a restatement of the ticket, a list of criteria and a list of
-    # non-goals, read out of the ticket and the notes it touches — and a person reads the result
-    # and approves it before `planning` ever runs (`transitions` below). So a weaker reading is
-    # caught by the approval that already exists, which is not true of any later state. `high`
-    # because deciding what is out of scope is the part that is not transcription.
-    model: sonnet
+    # **Opus, which this state was not while it was a job.** Then it was a restatement a person
+    # read once, and a weak reading was caught by the approval. Now the value is in the questions:
+    # the decision nobody thought to make, the earlier ticket that settled it, the guard a feature
+    # needs. That is judgement, and every answer it fails to get is a guess `planning` makes on
+    # its own. `high` and not `xhigh` because a person waits for every turn.
+    #
+    # **No `budget`, and the validator refuses one**: a chat step has no ceiling, and its spend is
+    # added to the ticket's. `.forge/common.yml` derives the $30 of `limits.ticket_cost` it leaves
+    # the conversation, and why that is a guess.
+    model: opus
     effort: high
     inputs: [ticket]
     produces: [refinement.md]
-    # Turns at 60 and not 40, as on every state here whose budget is a few dollars: a turn buys
-    # no inference and a job stopped by its turn ceiling throws away everything it spent, so the
-    # cost ceiling is the one that should bind. Ticket 7's `planning` died at turn 51 of 50 with
-    # $1.11 of its $4.00 unspent, and one of its four refinements used 36 of these 40.
-    budget: { turns: 60, cost: 3.00 }
 
   # `implementation.md` is here for the same reason `bug.yml`'s `diagnosing` reads it: the ticket
   # comes back on `plan_invalid`, and a re-plan that cannot read why re-derives the same plan. It
@@ -64,7 +69,7 @@ states:
     # Turns go to 300 with the model, not as a separate judgement: $15 buys several times the
     # tokens on sonnet that it bought on opus, so at 200 the turn ceiling would quietly become the
     # binding limit — and a job its turn ceiling stops throws away everything it spent, which is
-    # the rule `refining` above states and this would have broken silently.
+    # the rule `.forge/common.yml`'s `presenting` states and this would have broken silently.
     model: sonnet
     effort: high
     may_invoke:
@@ -82,25 +87,30 @@ states:
   # what it found and read only what changed since, rather than re-deriving the whole diff at
   # full price — ticket 7's second review spent $21.96 doing exactly that, and its fifth, scoped,
   # cost $4.13.
+  #
+  # `rebase.md` too, and optional for the same reason: only a ticket a rebase sent back on
+  # `needs_review` has one. That review is scoped to the rebase and not to the change a person
+  # already approved (`agents/review.md` § After a rebase, review the rebase), and the
+  # presentation says what the rebase did, because that is what the person approves this time.
   reviewing:
     extends: reviewing
-    inputs: [refinement.md, plan.md, implementation.md, report.md, changeset]
+    inputs: [refinement.md, plan.md, implementation.md, report.md, rebase.md, changeset]
 
   presenting:
     extends: presenting
-    inputs: [refinement.md, plan.md, implementation.md, report.md, changeset]
+    inputs: [refinement.md, plan.md, implementation.md, report.md, rebase.md, changeset]
 
   review_ready: {}
 
   merged:
     extends: merged
 
-  # `refinement.md` because `agents/integrate.md` asks for a resolution that still satisfies the
+  # `refinement.md` because `agents/rebase.md` asks for a resolution that still satisfies the
   # acceptance criteria rather than one that merely merges, and until it was listed here the
   # prompt named a document the state was never handed. Found by reading the prompt against the
   # workflow; the validator cannot catch it, because an input a prompt mentions is prose.
-  integrating:
-    extends: integrating
+  rebasing:
+    extends: rebasing
     inputs: [refinement.md, plan.md, changeset]
 
 # The work of the ticket, then the edges for the engine's own outcomes. `bug.yml`'s transitions
@@ -115,12 +125,11 @@ transitions:
   - { from: reviewing,    to: presenting }
   - { from: reviewing,    to: implementing, when: issues_found,      max: 5 }
   - { from: presenting,   to: review_ready }
-  - { from: review_ready, to: merged,       approve: [changeset] }
-  - { from: integrating,  to: checking }
+  - { from: review_ready, to: merged,       approve: [changeset], queue: true }
+  - { from: rebasing,     to: merged,       queue: true }
+  - { from: rebasing,     to: checking,     when: needs_review }
 
   - { from: checking,     to: checking,     when: gate_unavailable,  max: 2 }
-  - { from: refining,     to: refining,     when: budget_exhausted,  max: 1 }
-  - { from: refining,     to: refining,     when: did_not_converge,  max: 1 }
   - { from: planning,     to: planning,     when: budget_exhausted,  max: 1 }
   - { from: planning,     to: planning,     when: did_not_converge,  max: 1 }
   - { from: implementing, to: implementing, when: budget_exhausted,  max: 1 }
@@ -131,8 +140,8 @@ transitions:
   - { from: presenting,   to: presenting,   when: did_not_converge,  max: 1 }
 
 limits:
-  # $310 and not $120 because `reviewing` costs $35 and its loop runs five times: the cap is what
-  # the review loop has to fit inside, and `.forge/common.yml` derives the figure beside the budget
-  # and the bound it follows from.
+  # $361 and not $120 because `reviewing` costs $35 and its loop runs five times, and because the
+  # refinement conversation and the rebases after the approval spend under the same cap:
+  # `.forge/common.yml` derives the figure beside the review budget and the bounds it follows from.
   # `project_workflows_test.exs` computes it from this file rather than trusting the comment.
-  ticket_cost: 310.00
+  ticket_cost: 361.00

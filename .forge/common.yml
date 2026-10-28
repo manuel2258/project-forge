@@ -39,21 +39,38 @@ states:
   # **Raising this means raising `limits.ticket_cost` in each workflow that has a `reviewing`
   # state**, because the cap is checked before each job starts against what the ticket has spent
   # already — so what has to fit under it is every running total, not the finished total. Both
-  # workflows cost the same on the way in, $22 (refining $3, the state that plans or diagnoses $4,
-  # implementing $15) with `checking` free because a command buys no inference, so the review loop
-  # they declare prices out the same:
+  # workflows cost the same on the way in: the refinement conversation, then $19 of jobs (the state
+  # that plans or diagnoses $4, implementing $15) with `checking` free because a command buys no
+  # inference.
   #
-  #     22 + 35                        =  57    the way in, then the first review
+  # **The conversation has no budget, and the cap still has to leave it room.** A chat step cannot
+  # declare one (`docs/design/workflow-grammar-v1.md` § Chat steps), but every turn adds to the
+  # ticket's spend and every later job is checked against that. $30 is an allowance and a guess,
+  # not a measurement: the ticket conversations this project has had cost $2.45 to $13.49 and its
+  # longest conversation of any kind $20.44 (the `chat` rows of the archive's `jobs.tsv`), and a
+  # refinement that grills through five phases is the long kind. What one actually costs is on the
+  # ticket afterwards, which is the figure to correct this with.
+  #
+  # So the journey these workflows declare prices out the same in both:
+  #
+  #     30                             =  30    the refinement conversation, an allowance
+  #     19 + 35                        =  54    the jobs on the way in, then the first review
   #     5 × (15 + 0 + 35)              = 250    five `issues_found` round-trips at `max: 5`
   #     3                              =   3    `presenting`, once, on the way out
+  #     3 × 8                          =  24    `rebasing`, as often as the queue sends it round
   #                                      ---
-  #                                      310    of which 307 is spent before `presenting` starts
+  #                                      361    of which 353 is spent before the last job starts
+  #
+  # Three rebases because the engine sends a ticket down `on_conflict` by itself at most three times
+  # in a row (`ForgeCore.Engine.conflict/5`), and once a ticket is approved every conflict it meets
+  # is the engine's: both edges into `merged` queue, so the merge queue's runner is what checks it.
   #
   # At a $120 cap and this $35 the third round-trip stopped mid-loop, after $15 of implementing
   # that was then never checked or reviewed, and `max: 3` on `reviewing → implementing` could not
-  # be reached at all. $310 clears the loop as it now stands, the $272 before the last review and
-  # the $307 before the presentation included — the cap is read before a job starts, against what
-  # is spent already, so a journey whose total is the cap exactly still runs to the end.
+  # be reached at all. $361 clears the journey as it now stands, the $299 before the last review,
+  # the $334 before the presentation and the $353 before the third rebase included — the cap is
+  # read before a job starts, against what is spent already, so a journey whose total is the cap
+  # exactly still runs to the end.
   #
   # **The bound is five round-trips and not three because three was being reached**, which is the
   # operator's report of these workflows in use and not a figure measured here. An exhausted `max`
@@ -77,14 +94,16 @@ states:
   # see that the plan and the code disagree, instead of one that quietly spends $19 a lap until
   # the cap stops it with nothing to show.
   #
-  # The cap still binds, and is still the outer backstop. The `issues_found` loop alone prices at
-  # $310, which is the cap exactly; the worst journey is that loop *plus* two re-plan laps and
-  # every `budget_exhausted` and `did_not_converge` retry, so it is strictly greater and the cap
-  # is what stops it. The bounds shape the ordinary path; the cap catches the pathological one.
+  # The cap still binds, and is still the outer backstop. The journey above prices at $361, which
+  # is the cap exactly; the worst journey is that *plus* two re-plan laps, every `budget_exhausted`
+  # and `did_not_converge` retry, a refinement that talked past its allowance and a `needs_review`
+  # rebase that sends the ticket round the review loop again, so it is strictly greater and the
+  # cap is what stops it. The bounds shape the ordinary path; the cap catches the pathological one.
   #
-  # `project_workflows_test.exs` prices the review loop out of the files themselves, and asserts
-  # separately that every cycle in either workflow carries a `max` somewhere — so these numbers
-  # and the caps cannot drift apart, and a new unbounded loop fails the gate rather than a ticket.
+  # `project_workflows_test.exs` prices that journey out of the files themselves, all but the
+  # conversation's allowance, which no key can carry and the test repeats. It asserts separately
+  # that every cycle in either workflow carries a `max` somewhere. So these numbers and the caps
+  # cannot drift apart, and a new unbounded loop fails the gate rather than a ticket.
   reviewing:
     prompt: agents/review.md
     env: default
@@ -144,22 +163,48 @@ states:
     effort: medium
     produces: [presentation.md!, commit-message]
     optional: [presentation.md]
-    # Turns at 60 for the same reason as `dev.yml`'s `refining`, which carries it: on a state
-    # costing a few dollars the cost ceiling is the one meant to bind, because a turn buys no
-    # inference and a job the turn ceiling stops throws away everything it spent.
+    # Turns at 60 and not 40, as on every job state here whose budget is a few dollars: a turn buys
+    # no inference and a job stopped by its turn ceiling throws away everything it spent, so the
+    # cost ceiling is the one that should bind. Ticket 7's `planning` died at turn 51 of 50 with
+    # $1.11 of its $4.00 unspent, and one of its four refinements — a job then, a conversation now
+    # — used 36 of 40.
     budget: { turns: 60, cost: 3.00 }
 
+  # Every edge into it queues (`queue: true` in each workflow's transitions), so an approval puts
+  # the ticket in the project's line and the merge queue's runner merges the line one ticket at a
+  # time (`docs/design/workflow-grammar-v1.md` § The merge queue).
   merged:
     on_enter: merge
-    on_conflict: integrating
+    on_conflict: rebasing
 
-  integrating:
-    prompt: agents/integrate.md
+  # **Rebasing in name, a merge in git.** The name is what the state is for: putting a ticket whose
+  # approved merge conflicted back on top of the default branch. What it does in git is the merge
+  # the platform tells every `on_conflict` job to make, never a `git rebase`, because the commit
+  # the last merge attempt was made for has to stay an ancestor of the branch
+  # (`docs/design/git-hosting.md` § Non-fast-forward on a ticket branch). Nothing of that reaches
+  # `main`, which takes each ticket as one squashed commit, so there the two are the same. It was
+  # `integrating`; a ticket pinned before the rename keeps that state and its prompt, which are
+  # read at the pin.
+  #
+  # **`done` merges with nobody looking.** Its edge goes straight to `merged`, which puts a queued
+  # ticket back in its old place in the line to merge as soon as it checks clean: the changeset
+  # was approved once, and a rebase that only reconciles it with what landed meanwhile does not
+  # ask for that again. `needs_review` is every other case, and sends the ticket back through
+  # `checking`, a review of the rebase alone and a presentation of it to a fresh approval. Which of the two it is, `agents/rebase.md`
+  # decides by rules rather than taste — among them that a ticket a person sent here by hand may be
+  # one nobody has approved — and the gate is in `may_invoke` because nothing after a `done` runs
+  # it: the queue checks for a conflict, not for a passing build.
+  #
+  # Opus at `high`, named rather than inherited for the reason `reviewing` above gives: resolving a
+  # conflict by keeping both sides' intent is the judgement this state exists for, and on the
+  # `done` path nobody reads it before it lands.
+  rebasing:
+    prompt: agents/rebase.md
     env: default
     model: opus
-    # Resolving a conflict by keeping both sides' intent is the judgement this state exists for,
-    # and getting it wrong loses behaviour silently in work a person has already approved. Named
-    # rather than inherited, for the reason `reviewing` above gives.
     effort: high
-    produces: [integration.md, changeset]
+    may_invoke:
+      check: { max: 3 }
+    produces: [rebase.md, changeset]
+    outcomes: [done, needs_review]
     budget: { turns: 100, cost: 8.00 }

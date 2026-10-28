@@ -15,6 +15,12 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
   Ticket 7 added `presenting` between `reviewing` and `review_ready` and the assertions that say
   so, folding in the file it had added for them: both tickets wanted the same test file, and one
   of them is enough.
+
+  The port to 0.17.0 added the rest: `refining` is a chat step whose Accept is the approval, every
+  merge goes through the merge queue, a conflict goes to `rebasing`, whose `done` merges with no
+  second approval, and `release.yml` is the project's release, which concludes on its own once its
+  notes are approved and its publish went as planned. The journey priced against the cap
+  now includes the conversation and the rebases, because both spend under it.
   """
 
   use ExUnit.Case, async: true
@@ -61,6 +67,9 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
     |> Enum.filter(&(Transition.outcome(&1) == outcome))
     |> Enum.map(&{&1.to, &1.max})
   end
+
+  defp edges_between(%Workflow{} = workflow, from, to),
+    do: Enum.filter(Workflow.transitions_from(workflow, from), &(&1.to == to))
 
   # `release.yml` has no `reviewing` state and never did, so the list is filtered — and then
   # pinned to the two workflows that do have one, because every test below says "for each" and a
@@ -204,11 +213,11 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
   # journey is priced out of the workflow itself, so the cap and the budgets cannot drift apart.
   #
   # **The journey priced here is the review loop these workflows declare, and not the worst one
-  # they allow**, which has no price: the edge sending `implementing` back to be planned again
-  # carries no `max` in either workflow, so the two can alternate without bound. That
-  # is what a cap is for, and it is why this asserts what the ticket asked about — three
-  # `issues_found` round-trips at the new review budget — rather than a maximum that does not
-  # exist.
+  # they allow**, which has no useful price: it adds the re-plan laps, every retry, a refinement
+  # conversation that talked past its allowance, and a `needs_review` rebase that sends the ticket
+  # round the review loop again. That is what a cap is for, and it is why this asserts the
+  # ordinary journey — the conversation, five `issues_found` round-trips at the review budget,
+  # the presentation and the rebases after the approval — rather than a maximum nobody would set.
   test "the review round-trips these workflows declare fit inside the ticket cost cap" do
     for {name, workflow} <- reviewing_workflows() do
       loop =
@@ -229,13 +238,35 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
   end
 
   # Every job the worst journey runs, in order: the way in on nothing but each state's ordinary
-  # outcome, then the `issues_found` round-trip as many times as its `max` allows.
+  # outcome, then the `issues_found` round-trip as many times as its `max` allows, then the way
+  # out — and after the approval, as many rebases as the platform will send the ticket to by
+  # itself, because a queued ticket's conflicts are the engine's and each rebase spends under the
+  # same cap.
   defp journey(workflow, loop) do
     List.flatten([
       default_path(workflow, workflow.initial),
       List.duplicate(default_path(workflow, loop.to), loop.max),
-      after_review(workflow)
+      after_review(workflow),
+      rebases(workflow)
     ])
+  end
+
+  # Read off the platform rather than written down: `ForgeCore.Engine.conflict/5` routes an
+  # engine's conflict to `on_conflict` while fewer than its bound have gone before, and sticks the
+  # ticket after. So the count is how many rounds it routes, asked of it one by one.
+  defp rebases(workflow) do
+    approval = Enum.find(workflow.transitions, &Workflow.merges_on_enter?(workflow, &1.to))
+    target = Workflow.on_conflict(workflow, approval.to)
+
+    rounds =
+      Enum.take_while(0..10, fn rounds ->
+        match?(
+          {:route, _},
+          Engine.conflict(workflow, approval.from, approval.to, :engine, rounds)
+        )
+      end)
+
+    List.duplicate(target, length(rounds))
   end
 
   # The last review is not the last job to spend: the state its default edge leads to runs once,
@@ -259,11 +290,17 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
   defp default_edge(workflow, from),
     do: workflow |> Workflow.transitions_from(from) |> Enum.find(&(&1.when == nil))
 
-  # A command state and a human state both cost no inference, and declare no budget to read.
+  # A command state and a human state both cost no inference, and declare no budget to read. A
+  # chat step costs whatever the conversation does and may declare no budget either, so it is
+  # priced at what `.forge/common.yml` allows it — a figure that file states and this one repeats,
+  # because nothing in the workflow can carry it.
+  @chat_allowance 30.00
+
   defp cost(workflow, state) do
-    case Workflow.state(workflow, state).budget do
-      nil -> 0.0
-      %{cost: cost} -> cost
+    case Workflow.state(workflow, state) do
+      %State{chat: true} -> @chat_allowance
+      %State{budget: nil} -> 0.0
+      %State{budget: %{cost: cost}} -> cost
     end
   end
 
@@ -299,6 +336,22 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
     end
   end
 
+  # A review after a rebase reads the rebase and not the change a person already approved
+  # (`agents/review.md` § After a rebase, review the rebase): what it is scoped to is `rebase.md`
+  # and the rebase's own commit, so the document has to reach it — and the presentation, which
+  # tells the person approving again what the rebase did.
+  test "a review and a presentation after a rebase are handed what the rebase did" do
+    for {name, workflow} <- reviewing_workflows(), state <- ["reviewing", "presenting"] do
+      assert "rebase.md" in Workflow.state(workflow, state).inputs,
+             "#{name}: #{state} cannot read what the rebase did"
+    end
+
+    prompt = File.read!(Path.join(@forge, "agents/review.md"))
+
+    assert prompt =~ "git show --remerge-diff HEAD",
+           "agents/review.md no longer scopes a review after a rebase to the rebase's own commit"
+  end
+
   # **On a state costing a few dollars the cost ceiling is the one meant to bind.** A turn buys no
   # inference, and a job its turn ceiling stops throws away every dollar it had already spent —
   # ticket 7's `planning` died at turn 51 of 50 with $1.11 of its $4.00 unspent, and `publishing`
@@ -318,6 +371,117 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
 
     for {name, state, cost, turns} <- budgets do
       assert turns >= 60, "#{name}: #{state} costs $#{cost} but gives only #{turns} turns"
+    end
+  end
+
+  # **Accept is the approval, and nothing else leaves the step.** `planning` and `diagnosing` start
+  # from `refinement.md` as the person last saw it, which holds only while the one edge out of
+  # `refining` approves it. An edge on an engine outcome is not refused by the validator, and never
+  # fires from a chat step — nothing in it ends without a person — so one here would be a dead edge
+  # that reads like a retry.
+  test "refining is a conversation that ends on the person's approval of refinement.md" do
+    for {name, workflow} <- reviewing_workflows() do
+      refining = Workflow.state(workflow, workflow.initial)
+
+      assert refining.name == "refining", name
+      assert State.chat?(refining), "#{name}: refining is not a chat step"
+      assert refining.produces == ["refinement.md"], name
+
+      assert [%Transition{approve: ["refinement.md"], when: nil}] =
+               Workflow.transitions_from(workflow, "refining"),
+             "#{name}: refining must leave on one edge, approving refinement.md"
+    end
+  end
+
+  # Wherever the key is declared it is in force, and an edge without it merges at once and skips
+  # the line (`docs/design/workflow-grammar-v1.md` § The merge queue) — so a merging edge added
+  # without it would merge out of turn, in silence.
+  test "every edge into a merging state queues" do
+    for path <- workflow_files() do
+      workflow = load!(path)
+
+      merging = Enum.filter(workflow.transitions, &Workflow.merges_on_enter?(workflow, &1.to))
+      assert merging != [], "#{Path.basename(path)} has no edge into a merging state"
+
+      for transition <- merging do
+        assert Transition.queues?(transition),
+               "#{Path.basename(path)}: #{transition.from} -> #{transition.to} does not queue"
+      end
+    end
+  end
+
+  # **Approved once, merged after a rebase without a second approval** — and only on `done`, which
+  # `agents/rebase.md` holds to rules. `needs_review` is the way back to a person, through the
+  # gate. The approval edge still asks for `changeset`: that is the "once".
+  test "a conflict goes to rebasing, whose done merges in turn and needs_review goes to a person" do
+    for {name, workflow} <- reviewing_workflows() do
+      assert Workflow.on_conflict(workflow, "merged") == "rebasing", name
+
+      assert [%Transition{approve: ["changeset"]}] =
+               edges_between(workflow, "review_ready", "merged"),
+             "#{name}: the approval of the changeset is what lets a rebase merge on its own"
+
+      assert edges(workflow, "rebasing", "done") == [{"merged", nil}],
+             "#{name}: a rebase that is done goes straight back to the merge"
+
+      assert [%Transition{approve: []}] = edges_between(workflow, "rebasing", "merged"),
+             "#{name}: the edge out of a rebase asks for no second approval"
+
+      assert edges(workflow, "rebasing", "needs_review") == [{"checking", nil}],
+             "#{name}: a rebase that needs a person goes back through the gate"
+
+      assert Map.has_key?(Workflow.state(workflow, "rebasing").may_invoke, "check"),
+             "#{name}: nothing runs the gate on a rebase that merges on its own unless it does"
+    end
+  end
+
+  # The rules for choosing between the two outcomes are prose, so the outcomes the workflow
+  # declares are looked for in it: an outcome renamed in `common.yml` and not in the prompt leaves
+  # the agent writing one the state does not declare, which is `error` and a stuck ticket.
+  test "agents/rebase.md names every outcome rebasing declares" do
+    prompt = File.read!(Path.join(@forge, "agents/rebase.md"))
+
+    for {name, workflow} <- reviewing_workflows(),
+        outcome <- Workflow.state(workflow, "rebasing").outcomes do
+      assert prompt =~ "`outcome: #{outcome}`",
+             "#{name}: agents/rebase.md does not say how to end on #{outcome}"
+    end
+  end
+
+  # Two flagged files mean the project has no release at all (`docs/design/ticket-types.md`
+  # § Releases), and the same reading of the file the platform uses is asked here.
+  test "release.yml is the project's release, and the only one" do
+    releases =
+      for path <- workflow_files(),
+          Parser.declares_release?(File.read!(path)),
+          do: Path.basename(path)
+
+    assert releases == ["release.yml"]
+  end
+
+  # **A release is approved once, on its notes**, before anything is built; by the end of
+  # `publishing` the image is out, so the merge of `VERSION` follows on its own. The exception is
+  # a release half done — image published, snapshot not made — which has to reach a person before
+  # the ticket ends. `agents/publish.md` says which is which, so its outcomes are looked for there.
+  test "a published release merges with no second approval, unless its snapshot failed" do
+    workflow = load!(Path.join(@forge, "workflows/release.yml"))
+
+    assert [%Transition{when: nil, approve: []}] =
+             edges_between(workflow, "publishing", "merged"),
+           "a release that published as planned merges with no approval after its notes"
+
+    assert edges(workflow, "publishing", "snapshot_failed") == [{"release_ready", nil}],
+           "a release whose snapshot failed waits for a person"
+
+    assert [%Transition{approve: ["changeset"]}] =
+             edges_between(workflow, "release_ready", "merged"),
+           "the person who hears about a failed snapshot is the one who approves the merge"
+
+    prompt = File.read!(Path.join(@forge, "agents/publish.md"))
+
+    for outcome <- Workflow.state(workflow, "publishing").outcomes do
+      assert prompt =~ "`outcome: #{outcome}`",
+             "agents/publish.md does not say how to end on #{outcome}"
     end
   end
 end

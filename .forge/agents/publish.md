@@ -23,8 +23,18 @@ and say so.
 Produce `publish-report.md` — the digest from `release-build`'s log and that `:latest` names it,
 the snapshot's verdict and either its name/build/protocol from `hetzner-snapshot`'s log or why it
 was skipped or failed, and the reminder that pointing a template at a new snapshot is still the
-operator's own action on `/templates` — and the changeset, now that there is something worth
-approving.
+operator's own action on `/templates` — and the changeset.
+
+**How you end decides whether a person sees this before it lands.** The release notes were the
+one approval; what you leave merges on its own.
+
+- `outcome: done` in `publish-report.md`'s front matter when the image is published and the
+  snapshot was made or not needed. The release merges as soon as the merge queue reaches it, and
+  the ticket is finished.
+- `outcome: snapshot_failed` when the verdict called for a snapshot and none was made. The image
+  is out, so `VERSION` still has to land, but the ticket stops in `release_ready` until a person
+  has read your report, retried the snapshot and approved the merge. Say there exactly what failed
+  and the command that retries it.
 
 Produce **`commit-message`** too — and **do not write a new one**. `release-notes.md`, in your
 inputs, already carries the message this release's commit should use, and a human approved that

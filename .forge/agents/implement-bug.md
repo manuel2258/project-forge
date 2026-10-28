@@ -47,9 +47,22 @@ else — it is not a reviewer and must not fix anything:
 - Every comment the diff adds or touches that asserts something — "bounded at", "is asserted",
   "cannot" — against the code beside it.
 
+**On an attempt a review sent back, point it at what this attempt changed first.** From the second
+round on, most of what a review finds is what the last fix broke: a new branch with no test that
+fails without it, a new sentence that is not true. Ticket 26's second review found "the fix opened
+the dead end", and ticket 28's "the fix opened a new hole". The lines you just wrote are the ones
+nobody has read yet.
+
 Fix what it finds, in this job. What you cannot fix, say plainly in `implementation.md` rather
 than leaving it to be found: a claim you have withdrawn costs nothing, and one a reviewer
 catches costs a round trip.
+
+**The last gate run is on the commit you end on.** What the subagent made you change is a change
+like any other, and so is every edit after your last `check`. If anything changed since the last
+passing run, invoke it again, or, when the budget will not carry the resume, run at least
+`mix format` and `mix credo --strict` in each project you touched. Ticket 24's gate passed, the job
+kept editing, and it ended on one line 128 characters long, which `checking` refused at the price
+of a whole further attempt.
 
 Produce `implementation.md` — what the defect was, what fixed it, and which other sites were or
 were not touched — and the changeset. End on outcome `diagnosis_invalid` instead, with why, if

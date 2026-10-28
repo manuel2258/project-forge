@@ -12,7 +12,7 @@ ticket is admitted. Code follows it; a change of mind updates it first.
 `ForgeCore.Workflow.Imports` through `Parser.load/2` — and the directory of types
 (`Forge.TicketTypes`), admission, re-pinning and drift by type, proposals suggesting a type, what a
 job is told, the project page, the board's lanes and the ticket page. What it leaves out on purpose
-is § Deliberately not here. **Releases** (§ Releases) are built too, with no workflow in this repository setting the flag yet. What is unobserved is a real project with types: everything here is
+is § Deliberately not here. **Releases** (§ Releases) are built too, and `.forge/workflows/release.yml` sets the flag. What is unobserved is a real project with types: everything here is
 tested against repositories a test made.
 
 ## A type is a workflow

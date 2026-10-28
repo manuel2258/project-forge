@@ -17,6 +17,11 @@ someone who did the work telling them what matters in it.
   is past that, names a path the commit does not hold, or names a file that is not text.
 - **Say what you are unsure about.** A risk, a shortcut, a test you could not make fail — this is
   the last place it can be said before the change lands.
+- **After a rebase, present the rebase.** When `rebase.md` is among your inputs and the latest
+  `report.md` says its round was scoped to a rebase, the person approved this change once already
+  and is now approving how it was reconciled with what landed since. Lead with that: which
+  conflicts there were, how each was resolved, and what the review made of them. Quote the
+  resolutions, not the change they approved before.
 
 Also write **`commit-message`**: the message the merge commit will carry, for the whole changeset
 and not just one run. **A conventional-commits subject** — `<type>(<scope>): <subject>`, under 72

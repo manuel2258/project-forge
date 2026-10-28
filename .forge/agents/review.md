@@ -20,6 +20,35 @@ What a later round still owes the person: say which findings are closed and how 
 which survived, and what the new work brought with it. A closed finding is worth a line, not a
 re-litigation.
 
+## After a rebase, review the rebase
+
+**When the commit you are reviewing is a rebase's, the change itself is not yours to review
+again.** A person approved it; the merge queue found that it conflicts with what landed since;
+`rebasing` merged `main` in, and ended on `needs_review` rather than merging it unread. You can tell
+by two things together: `rebase.md` is among your inputs, and `git log -1 --format=%P HEAD` names
+two parents, which only a rebase's run leaves on this branch. What nobody has read is how the rebase
+reconciled the two sides, and that is the whole of this round:
+
+- **The diff is `git show --remerge-diff HEAD`**: how the rebase's commit differs from git's own
+  merge of its two parents. It shows each conflict as git left it and as the rebase resolved it,
+  and whatever the rebase changed on top, and nothing else. Not `git diff <last reviewed
+  commit>..HEAD`, which also holds everything `main` brought in, other tickets' reviewed work
+  included, and not the changeset from the start again.
+- **Start from `rebase.md`**: which of its four conditions did not hold is why you are here, and
+  each resolution it describes is a claim to check against that diff.
+- **The question each resolution has to answer** is whether it keeps both sides' intent, or quietly
+  drops one side's behaviour. Read what the other side was for, in the commits the rebase named and
+  the archive's documents of the tickets that wrote them, before deciding.
+- **Correctness and security over the resolutions**, on this job's model, always. The mutation
+  lens only over tests the rebase touched, and the third lens only if it touched a note or a
+  comment that asserts something, as for any later round (§ The lenses).
+- **The bar is a later round's** (§ The bar rises each round), whatever round the count gives:
+  only a defect is a finding. The findings of the report the approval was given on were settled
+  then; do not verify them again.
+
+Say in `report.md` that the round was scoped to the rebase, and name its commit. A later round
+after this one is an ordinary later round: it starts from that commit.
+
 ## The bar rises each round
 
 `reviewing → implementing` on `issues_found` runs at most five times, and then the ticket sticks
@@ -66,6 +95,19 @@ So by round two or three, `issues_found` should mean one thing: a defect from th
 open. If what is left is anything else, the verdict is `done` — and say in the report what you
 are leaving and why, as the verdict rule below already requires, rather than letting it drop
 silently.
+
+## Stay inside the change
+
+**A defect in code this changeset did not touch is a proposal, not a finding**, at every round —
+unless the change makes it reachable, makes it worse, or relies on it, in which case say which.
+Write it as a ticket proposal in `$FORGE_JOB/out/proposals/`, as your manifest describes, and name
+it in `report.md` among what you are leaving. It does not decide the verdict.
+
+Ticket 21 is why. Its second round widened into chat attribution the ticket had not touched, and
+rounds three to five found faults in that widening, until its fifth report said "the feature has
+been sound since round 1, and what recurs is prose and untested additions". `CLAUDE.md`'s "fix
+the class, not the instance" is for the defect this change fixes. Applied to whatever a reviewer
+happens to read nearby, it turns every round into the next round's work.
 
 ## The lenses, and the model each runs on
 
@@ -119,8 +161,9 @@ comparison, not a judgement.**
   `refining` is now asked for criteria about the empty state, the refused state, the phone and
   what survives a reconnect — each of which is satisfied in a template or a LiveView test or
   nowhere. **What stands behind the criteria is the human approval on `refinement.md`**, not the model
-  that reads them here: `refining` runs on `sonnet` too, and a person approves that document before
-  `planning` ever runs, which is the one gate in the workflow this lens is downstream of.
+  that reads them here: `refining` is a conversation in which an agent questions the person phase by
+  phase, and that person's Accept is the approval, before `planning` ever runs — the one gate in the
+  workflow this lens is downstream of.
 
 **Correctness and security stays on this job's model, alone.** That is the reading where judgement
 is the whole value, and it is where this state earns its budget: the three findings on ticket 7

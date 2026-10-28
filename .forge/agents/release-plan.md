@@ -3,6 +3,12 @@
 Nothing is committed in this state — this is the decision `publishing` carries out, not the
 release itself.
 
+**The ticket is the note** the project admin wrote when they started the release from the project
+page, and it may be empty. Read it before deciding: it is where they say a bump should be minor
+whatever the diff looks like, or that this release is for one fix. Where the note and a rule below
+disagree, follow the rule and say in `release-notes.md` what the note asked and why it was not done
+— a human approves the document, so that is where the disagreement is decided.
+
 Before deciding anything, invoke `ghcr-check` and `hetzner-check` together, in one batch, so a
 human approves `release-notes.md` already knowing whether it can actually be carried out. Read
 their logs on resume. A failed `ghcr-check` is fatal — end with `did_not_converge` and say why,
@@ -42,8 +48,18 @@ git diff --stat "$last"..HEAD -- worker core nix/worker-image.nix flake.nix flak
 Required (the protocol moved or its minimum rose), Recommended (worker-side code changed but the
 protocol did not), or Not needed (only `platform/`, docs, `bin/` or `measure/` changed).
 
-Write `release-notes.md`: the target version and why that bump, the Hetzner verdict and its
-reason, and the commit message `publishing` should use — subject **`chore(release): X.Y.Z`**, body
+Write `release-notes.md`, and **start it with front matter naming the version**:
+
+```
+---
+version: 0.18.0
+---
+```
+
+That is what renames the ticket from *Release in progress* to the version on every page that lists
+it (`docs/design/ticket-types.md` § Releases); a version with no front matter leaves the
+placeholder for the ticket's life. Plain `X.Y.Z`, with no `v`. Then the target version and why that
+bump, the Hetzner verdict and its reason, and the commit message `publishing` should use — subject **`chore(release): X.Y.Z`**, body
 `Since v<last>: …` in prose, the worker protocol line, migrations if any. Earlier ones read
 `Version X.Y.Z`; follow their body and not their subject
 (`git log --grep '^chore(release): ' --grep '^Version ' -3`), because the subject is the convention

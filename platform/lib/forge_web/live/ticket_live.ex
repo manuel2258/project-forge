@@ -66,9 +66,46 @@ defmodule ForgeWeb.TicketLive do
     {:noreply, assign(socket, tab: tab)}
   end
 
-  defp load(%{assigns: %{ticket_id: id, project: project}} = socket) do
+  # **A pin is read as it was admitted** (`docs/design/workflow-grammar-v1.md` § Pinning), so this
+  # is not where the validator's newer rules are asked again: that is what gave every ticket
+  # admitted before 0.16.0 a 500. A pin the grammar can no longer build has no steps to draw and
+  # no topology, so it gets a page of its own that says so rather than a half-drawn work screen.
+  defp load(%{assigns: %{ticket_id: id}} = socket) do
     ticket = Tickets.get!(id)
-    workflow = Tickets.workflow(ticket)
+
+    case Tickets.parsed_workflow(ticket) do
+      {:ok, workflow} -> load(socket, ticket, workflow)
+      {:error, errors} -> load_unreadable(socket, ticket, errors)
+    end
+  end
+
+  # What the page can still say with no workflow: the ticket, what its jobs wrote and what
+  # happened to it. Nothing that asks the workflow is assigned, and `handle_event/3` refuses what
+  # would.
+  defp load_unreadable(%{assigns: %{project: project}} = socket, ticket, errors) do
+    artifacts =
+      for artifact <- Artifacts.list(ticket.id) do
+        latest = Artifacts.latest(ticket.id, artifact.name)
+        %{artifact: artifact, latest: latest, approved: false, approvable: false}
+      end
+
+    socket
+    |> follow(nil)
+    |> assign(
+      page_title: "#{project.name}##{ticket.number}",
+      ticket: ticket,
+      workflow: nil,
+      errors: errors,
+      docs: docs(project, ticket, artifacts),
+      events: ticket.id |> Events.for_ticket() |> Enum.reverse() |> Enum.take(10),
+      drift: Tickets.drift(ticket, project),
+      paused: false,
+      until_midnight: nil,
+      now: DateTime.utc_now()
+    )
+  end
+
+  defp load(%{assigns: %{project: project}} = socket, ticket, workflow) do
     jobs = Jobs.for_ticket(ticket.id)
     current = List.last(jobs)
 
@@ -310,11 +347,24 @@ defmodule ForgeWeb.TicketLive do
      )}
   end
 
+  @impl true
+  # A ticket whose pin cannot be read can be cancelled, restored and re-pinned, and nothing else:
+  # the page draws no other control, and the rest either asks the workflow or reads what
+  # `load_unreadable/3` does not assign.
+  def handle_event(event, _params, %{assigns: %{workflow: nil}} = socket)
+      when event not in ["cancel-ticket", "restore-ticket", "repin"] do
+    {:noreply,
+     put_flash(
+       socket,
+       :error,
+       "That is not available while this ticket's workflow cannot be read."
+     )}
+  end
+
   # *Ask about this* on a ticket has no composer to put the reference in, so it goes to one: the
   # ticket's most recent live conversation, with the reference in its draft, or a new one about
   # the ticket with the reference as its first message. The reference travels in the address and
   # nothing is sent until the operator sends it (`docs/design/ui.md` § Changes).
-  @impl true
   def handle_event("ask", %{"ref" => ref}, socket) do
     %{project: project, ticket: ticket, chats: chats} = socket.assigns
 
@@ -369,6 +419,100 @@ defmodule ForgeWeb.TicketLive do
   defp approving_changeset?(_assigns), do: false
 
   @impl true
+  def render(%{workflow: nil} = assigns) do
+    ~H"""
+    <Layouts.app flash={@flash} current_scope={@current_scope} capacity={@capacity} measure="46rem">
+      <.link
+        navigate={~p"/projects/#{@project.name}"}
+        class="flex min-h-[46px] items-center font-mono text-[12.5px] opacity-60 hover:opacity-100 sm:min-h-0"
+      >
+        ‹ {@project.name}
+      </.link>
+      <h1 class="text-xl font-semibold break-words -tracking-[.03em] sm:text-2xl">
+        {@ticket.title}
+      </h1>
+      <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+        <span :if={@ticket.ticket_type} id="ticket-type" class="font-mono text-[12.5px] opacity-60">
+          {@ticket.ticket_type}
+        </span>
+        <span id="ticket-state" class="font-mono text-[12.5px]">{@ticket.state}</span>
+        <.status_flag status={@ticket.status} age={Format.ago(@ticket.updated_at, @now)} />
+      </div>
+
+      <%!-- Said once, in plain words, with the way on: neither Re-pin nor Cancel reads the pin
+            that cannot be built (`workflow-grammar-v1.md` § Pinning). --%>
+      <section id="unreadable-pin" class="mt-6">
+        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase text-accent">
+          Cannot be read
+        </h2>
+        <p class="mt-2 text-sm/[1.55]">
+          The workflow this ticket was pinned to can no longer be read, so its steps cannot be
+          shown and it cannot move on. Its documents and history are below.
+        </p>
+        <details class="mt-2 text-[12.5px]">
+          <summary class="flex min-h-[46px] cursor-pointer items-center opacity-70">
+            What stopped it
+          </summary>
+          <pre class="overflow-x-auto font-mono whitespace-pre-wrap opacity-70">{ForgeCore.Error.format(@errors)}</pre>
+        </details>
+        <div :if={@drift && @ticket.status in Forge.Tickets.Ticket.open_statuses()} id="pin-drift">
+          <p class="text-sm/[1.55] opacity-70">
+            {@project.default_branch} has a workflow it can be pinned to instead.
+          </p>
+          <button
+            type="button"
+            id="repin-ticket"
+            phx-click="repin"
+            phx-value-ticket={@ticket.id}
+            data-confirm={"Re-pin at #{String.slice(@drift.head, 0, 12)}? Every job from now on reads the workflow, its prompts and its command scripts from there."}
+            class="flex min-h-[46px] items-center text-sm text-primary hover:underline"
+          >
+            Re-pin at {String.slice(@drift.head, 0, 12)}
+          </button>
+        </div>
+        <button
+          :if={@ticket.status in Forge.Tickets.Ticket.open_statuses()}
+          type="button"
+          id="cancel-ticket"
+          phx-click="cancel-ticket"
+          phx-value-ticket={@ticket.id}
+          data-confirm="Cancel this ticket? Its jobs stop and it is hidden everywhere but this page, where Restore brings it back."
+          class="flex min-h-[46px] items-center text-sm text-error hover:underline"
+        >
+          Cancel ticket
+        </button>
+        <button
+          :if={@ticket.status == :cancelled}
+          type="button"
+          id="restore-ticket"
+          phx-click="restore-ticket"
+          phx-value-ticket={@ticket.id}
+          class="flex min-h-[46px] items-center text-sm text-primary hover:underline"
+        >
+          Restore
+        </button>
+      </section>
+
+      <section id="docs" class="mt-6">
+        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Documents</h2>
+        <WorkScreen.docs docs={@docs} empty="No job wrote a document on this ticket." />
+      </section>
+
+      <section id="timeline" class="mt-6">
+        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">History</h2>
+        <ol class="mt-3 flex flex-col gap-1 font-mono text-[12.5px]">
+          <li :for={event <- @events} class="flex gap-2">
+            <span class="shrink-0 opacity-50">
+              {Calendar.strftime(event.inserted_at, "%m-%d %H:%M")}
+            </span>
+            <span class="block min-w-0 truncate">{event.type}</span>
+          </li>
+        </ol>
+      </section>
+    </Layouts.app>
+    """
+  end
+
   def render(assigns) do
     assigns = assign(assigns, shown_tab: tab(assigns))
 

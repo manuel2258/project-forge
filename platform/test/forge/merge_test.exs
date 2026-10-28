@@ -415,6 +415,53 @@ defmodule Forge.MergeTest do
       assert {:ok, ^before} = Git.resolve(bare, "refs/heads/main")
     end
 
+    # A ticket pinned under 0.15.0 has no state that could write a `commit-message`, so it would
+    # stick for ever on a message nothing can write: it merges under the one earlier releases
+    # wrote instead. The pin decides this, not the missing version — the test above is the
+    # other half, with a pin that has a producer.
+    test "a ticket pinned before commit-message existed merges under the old message", context do
+      %{ticket: ticket, bare: bare, user: user} = context
+      sha = commit_on_branch(context, "feature.txt", "the change")
+      changeset!(ticket, sha)
+      ticket = ticket |> old_pin!() |> pend_merge()
+
+      assert Merge.legacy_message?(ticket)
+      assert {:ok, ticket} = Operator.decide(ticket, user, :approved, nil)
+
+      assert ticket.status == :done
+      {:ok, head} = Git.resolve(bare, "refs/heads/main")
+      {:ok, body} = Git.run(bare, ["show", "--no-patch", "--format=%B", head])
+
+      assert String.trim_trailing(body) ==
+               String.trim_trailing(
+                 "Merge #{ticket.branch}: #{ticket.title}\n\n" <>
+                   "Ticket: #{context.project.name}##{ticket.number}\n" <>
+                   "Changeset: #{sha}\nApproved-by: #{user.email}\n"
+               )
+    end
+
+    # No user is a merge the engine made on its own, and the message says so.
+    test "a legacy merge nobody approved says the engine made it", context do
+      %{ticket: ticket, bare: bare} = context
+      sha = commit_on_branch(context, "feature.txt", "the change")
+      ticket = old_pin!(ticket)
+
+      assert {:ok, _result} = Merge.perform(ticket, sha, nil)
+
+      {:ok, head} = Git.resolve(bare, "refs/heads/main")
+      {:ok, body} = Git.run(bare, ["show", "--no-patch", "--format=%B", head])
+      assert body =~ "Approved-by: the engine"
+    end
+
+    test "legacy_message? is decided by the pin: a producer, or a pin that cannot be read, is not",
+         %{ticket: ticket} do
+      refute Merge.legacy_message?(ticket)
+      assert Merge.legacy_message?(old_pin!(ticket))
+
+      unreadable = ticket |> Ecto.Changeset.change(workflow: %{}) |> Repo.update!()
+      refute Merge.legacy_message?(unreadable)
+    end
+
     # Had the ticket moved into terminal `merged` first, a stuck item there would offer no
     # transitions at all: a terminal state has none. Refusing before the transition is what keeps
     # the way forward open.
@@ -437,10 +484,10 @@ defmodule Forge.MergeTest do
       refute "ticket.merged" in event_types(ticket)
     end
 
-    # A transition that named a changeset and no message is refused *before* the merge is
-    # attempted, which is what `Engine.named/1`'s own clause is for: reading the version as nil
-    # and letting `Merge.perform/4` refuse it would report whatever went wrong first instead —
-    # here, an approved commit that has gone.
+    # A transition that named a changeset and no message is refused *before* the commit is looked
+    # for, which is what the order of `Merge.perform/4` is for: `named/1` reads the version as nil
+    # and `perform/4` asks for the message first, so what is reported is the missing message and
+    # not whatever else is wrong — here, an approved commit that has gone.
     test "a transition with no commit message is refused before the merge is tried", context do
       %{ticket: ticket, user: user} = context
       gone = String.duplicate("a", 40)

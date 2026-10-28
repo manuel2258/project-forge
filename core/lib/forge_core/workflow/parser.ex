@@ -1,7 +1,7 @@
 defmodule ForgeCore.Workflow.Parser do
   @moduledoc """
   Parses a workflow definition, as YAML text or an already decoded map, into a validated
-  `ForgeCore.Workflow`. Every error found is returned, not only the first, so a project can
+  `ForgeCore.Workflow` — or, for a stored pin, builds one without validating (`from_pinned/1`). Every error found is returned, not only the first, so a project can
   fix its file in one round.
 
   Options:
@@ -14,7 +14,8 @@ defmodule ForgeCore.Workflow.Parser do
 
   `load/2` is what admission calls: it returns the flattened definition beside the workflow,
   because that — with no `import` and no `extends` left in it — is what a ticket pins.
-  `from_map/2` reads a pinned one back, and resolves nothing.
+  `from_map/2` validates a decoded definition and resolves nothing; `from_pinned/1` reads a pinned
+  one back as it was admitted, which the validator's later rules do not reach.
   """
 
   alias ForgeCore.Error
@@ -97,6 +98,29 @@ defmodule ForgeCore.Workflow.Parser do
     with {:ok, map} <- no_complex_keys(map) do
       case build(map) do
         {workflow, []} -> validate(workflow, opts)
+        {_workflow, errors} -> {:error, sort(errors)}
+      end
+    end
+  end
+
+  @doc """
+  Builds a workflow from a definition a ticket pinned, without validating it.
+
+  A pinning is read as it was admitted (`docs/design/workflow-grammar-v1.md` § Pinning). Validation
+  is how admission and re-pinning decide, and a rule added to it later binds the next admission,
+  never a stored pin: running `from_map/2` on every read made 0.16.0's `commit-message` rule
+  reject every ticket admitted before it. What still fails here is a pin the grammar can no longer
+  build — a key it dropped or a value of a type it no longer takes.
+  """
+  @spec from_pinned(map()) :: result()
+  def from_pinned(map) when is_map(map) do
+    # `no_complex_keys` here is an equivalent mutant: a mapping or a sequence as a key cannot come
+    # back from jsonb, where every key is a string. It is kept so that a map built in memory is
+    # refused the way `from_map/2` refuses it, and `Keys` documents why the rest of the parser may
+    # assume names.
+    with {:ok, map} <- no_complex_keys(map) do
+      case build(map) do
+        {workflow, []} -> {:ok, normalise(workflow)}
         {_workflow, errors} -> {:error, sort(errors)}
       end
     end

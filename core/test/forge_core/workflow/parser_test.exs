@@ -967,6 +967,35 @@ defmodule ForgeCore.Workflow.ParserTest do
              )
     end
 
+    # A pinning is read as it was admitted (`workflow-grammar-v1.md` § Pinning). 0.16.0 added the
+    # rule above and every definition a ticket had already stored stopped parsing, which was a 500
+    # on each of those tickets' pages. Both halves are asserted: admission still refuses the map,
+    # and reading a stored pin does not.
+    test "a stored pin without a commit message producer is built, though admission refuses it",
+         %{map: map} do
+      map =
+        put_in(map, ["states", "implementing", "produces"], ["implementation.md", "changeset"])
+
+      assert {:error, _errors} = Parser.from_map(map)
+      assert {:ok, %Workflow{} = workflow} = Parser.from_pinned(map)
+      refute Workflow.produced?(workflow, Workflow.commit_message_artifact())
+      assert workflow.states["implementing"].produces == ["implementation.md", "changeset"]
+    end
+
+    test "a stored pin the grammar cannot build is still an error", %{map: map} do
+      assert {:error, [_ | _]} = Parser.from_pinned(%{})
+      assert {:error, [_ | _]} = Parser.from_pinned(%{"no longer" => "a workflow"})
+
+      broken = put_in(map, ["states", "implementing", "budget"], "plenty")
+      assert {:error, [_ | _]} = Parser.from_pinned(broken)
+    end
+
+    test "a stored pin has its defaults filled in as an admitted one does", %{map: map} do
+      assert {:ok, admitted} = Parser.from_map(map)
+      assert {:ok, pinned} = Parser.from_pinned(map)
+      assert pinned == admitted
+    end
+
     # On the state that does produce it, which is the case the rule is for: "it is a document this
     # state produces" would otherwise excuse it like any other.
     test "the commit message may not be optional", %{map: map} do

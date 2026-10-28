@@ -2661,7 +2661,7 @@ defmodule Forge.ConversationsTest do
       assert length(turn_events(chat)) == 1
     end
 
-    # **Finding 1.** The pinning a ticket was admitted with can stop parsing as the validator
+    # **Finding 1.** The pinning a ticket was admitted with can stop building as the grammar
     # moves on, and that ticket is exactly the one a conversation exists to rescue. The apply
     # path runs after the turn's transaction has committed, so a raise here kills the channel's
     # handler, the worker re-sends, `recorded?/2` says the turn is recorded, and the request is
@@ -2914,8 +2914,8 @@ defmodule Forge.ConversationsTest do
       |> Repo.update!()
     end
 
-    # A pinning that no longer parses: validated at admission, and `%{}` fails every rule the
-    # validator has now.
+    # A pinning that no longer parses: validated at admission, and `%{}` is not a definition
+    # the grammar can build at all.
     defp unparseable!(ticket) do
       ticket
       |> Ecto.Changeset.change(%{workflow: %{}})

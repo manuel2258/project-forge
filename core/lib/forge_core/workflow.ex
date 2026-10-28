@@ -395,6 +395,17 @@ defmodule ForgeCore.Workflow do
     end)
   end
 
+  @doc """
+  Whether any state produces `artifact`, the entry `commit-message!` counting as `commit-message`
+  (`produced_name/1`). `producers/2` compares raw entries, so it is not this question.
+  """
+  @spec produced?(t(), artifact_name()) :: boolean()
+  def produced?(%__MODULE__{states: states}, artifact) do
+    Enum.any?(states, fn {_name, state} ->
+      Enum.any?(state.produces, &(produced_name(&1) == artifact))
+    end)
+  end
+
   @doc "Names of the states that produce `artifact`, sorted."
   @spec producers(t(), artifact_name()) :: [state_name()]
   def producers(%__MODULE__{states: states}, artifact) do

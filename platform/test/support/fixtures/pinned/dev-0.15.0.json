@@ -1,0 +1,284 @@
+{
+  "commands": {
+    "check": {
+      "env": "default",
+      "produces": "check.log",
+      "resources": {
+        "cpu": 2,
+        "memory": "4GiB"
+      },
+      "run": ".forge/commands/check.sh",
+      "timeout": "20m"
+    }
+  },
+  "defaults": {
+    "resources": {
+      "cpu": 1,
+      "memory": "2200MiB"
+    }
+  },
+  "description": "Code changes to forge itself — refine, plan, implement, check, review, merge.",
+  "initial": "refining",
+  "limits": {
+    "ticket_cost": 210.0
+  },
+  "states": {
+    "checking": {
+      "exit": {
+        "0": "done",
+        "2": "gate_unavailable",
+        "*": "checks_failed"
+      },
+      "invoke": [
+        "check"
+      ]
+    },
+    "implementing": {
+      "budget": {
+        "cost": 15.0,
+        "turns": 200
+      },
+      "env": "default",
+      "inputs": [
+        "ticket",
+        "refinement.md",
+        "plan.md",
+        "report.md"
+      ],
+      "may_invoke": {
+        "check": {
+          "max": 10
+        }
+      },
+      "model": "opus",
+      "outcomes": [
+        "done",
+        "plan_invalid"
+      ],
+      "produces": [
+        "implementation.md",
+        "changeset"
+      ],
+      "prompt": "agents/implement.md"
+    },
+    "integrating": {
+      "budget": {
+        "cost": 8.0,
+        "turns": 100
+      },
+      "env": "default",
+      "inputs": [
+        "plan.md",
+        "changeset"
+      ],
+      "model": "opus",
+      "produces": [
+        "integration.md",
+        "changeset"
+      ],
+      "prompt": "agents/integrate.md"
+    },
+    "merged": {
+      "on_conflict": "integrating",
+      "on_enter": "merge"
+    },
+    "planning": {
+      "budget": {
+        "cost": 4.0,
+        "turns": 80
+      },
+      "env": "default",
+      "inputs": [
+        "ticket",
+        "refinement.md",
+        "implementation.md"
+      ],
+      "produces": [
+        "plan.md"
+      ],
+      "prompt": "agents/plan.md"
+    },
+    "presenting": {
+      "budget": {
+        "cost": 3.0,
+        "turns": 60
+      },
+      "env": "default",
+      "inputs": [
+        "refinement.md",
+        "plan.md",
+        "implementation.md",
+        "report.md",
+        "changeset"
+      ],
+      "optional": [
+        "presentation.md"
+      ],
+      "produces": [
+        "presentation.md!"
+      ],
+      "prompt": "agents/present.md"
+    },
+    "refining": {
+      "budget": {
+        "cost": 3.0,
+        "turns": 60
+      },
+      "env": "default",
+      "inputs": [
+        "ticket"
+      ],
+      "produces": [
+        "refinement.md"
+      ],
+      "prompt": "agents/refine.md"
+    },
+    "review_ready": {},
+    "reviewing": {
+      "budget": {
+        "cost": 35.0,
+        "turns": 120
+      },
+      "env": "default",
+      "inputs": [
+        "refinement.md",
+        "plan.md",
+        "implementation.md",
+        "report.md",
+        "changeset"
+      ],
+      "model": "opus",
+      "outcomes": [
+        "done",
+        "issues_found"
+      ],
+      "produces": [
+        "report.md"
+      ],
+      "prompt": "agents/review.md"
+    }
+  },
+  "transitions": [
+    {
+      "approve": [
+        "refinement.md"
+      ],
+      "from": "refining",
+      "to": "planning"
+    },
+    {
+      "from": "planning",
+      "to": "implementing"
+    },
+    {
+      "from": "implementing",
+      "to": "checking"
+    },
+    {
+      "from": "implementing",
+      "to": "planning",
+      "when": "plan_invalid"
+    },
+    {
+      "from": "checking",
+      "to": "reviewing"
+    },
+    {
+      "from": "checking",
+      "max": 3,
+      "to": "implementing",
+      "when": "checks_failed"
+    },
+    {
+      "from": "reviewing",
+      "to": "presenting"
+    },
+    {
+      "from": "reviewing",
+      "max": 3,
+      "to": "implementing",
+      "when": "issues_found"
+    },
+    {
+      "from": "presenting",
+      "to": "review_ready"
+    },
+    {
+      "approve": [
+        "changeset"
+      ],
+      "from": "review_ready",
+      "to": "merged"
+    },
+    {
+      "from": "integrating",
+      "to": "checking"
+    },
+    {
+      "from": "checking",
+      "max": 2,
+      "to": "checking",
+      "when": "gate_unavailable"
+    },
+    {
+      "from": "refining",
+      "max": 1,
+      "to": "refining",
+      "when": "budget_exhausted"
+    },
+    {
+      "from": "refining",
+      "max": 1,
+      "to": "refining",
+      "when": "did_not_converge"
+    },
+    {
+      "from": "planning",
+      "max": 1,
+      "to": "planning",
+      "when": "budget_exhausted"
+    },
+    {
+      "from": "planning",
+      "max": 1,
+      "to": "planning",
+      "when": "did_not_converge"
+    },
+    {
+      "from": "implementing",
+      "max": 1,
+      "to": "implementing",
+      "when": "budget_exhausted"
+    },
+    {
+      "from": "implementing",
+      "max": 1,
+      "to": "implementing",
+      "when": "did_not_converge"
+    },
+    {
+      "from": "reviewing",
+      "to": "presenting",
+      "when": "budget_exhausted"
+    },
+    {
+      "from": "reviewing",
+      "max": 1,
+      "to": "reviewing",
+      "when": "did_not_converge"
+    },
+    {
+      "from": "presenting",
+      "max": 1,
+      "to": "presenting",
+      "when": "budget_exhausted"
+    },
+    {
+      "from": "presenting",
+      "max": 1,
+      "to": "presenting",
+      "when": "did_not_converge"
+    }
+  ],
+  "version": 1
+}

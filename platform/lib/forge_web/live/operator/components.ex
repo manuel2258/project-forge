@@ -302,6 +302,17 @@ defmodule ForgeWeb.Operator.Components do
       |> assign(:draft, "approve-#{assigns.ticket.id}")
       |> assign(:merges, Forge.Engine.approval_merges?(assigns.ticket))
 
+    # A pin from before merges carried a written message has no state that could write one, so its
+    # merge says what earlier releases wrote (`Forge.Merge.legacy_message?/1`, the same question
+    # the merge asks) and the card says so in place of a block with nothing to show.
+    assigns =
+      assign(
+        assigns,
+        :legacy,
+        assigns.merges and is_nil(assigns.commit_message) and
+          Forge.Merge.legacy_message?(assigns.ticket)
+      )
+
     ~H"""
     <div class="flex flex-col gap-[11px]" id={"approval-#{@ticket.id}"}>
       <p class="text-sm/[1.55] opacity-70">
@@ -339,10 +350,22 @@ defmodule ForgeWeb.Operator.Components do
       <%!-- What the merge will commit, read-only, directly above the control that approves it
             (`docs/design/ui.md` § Changes). --%>
       <WorkScreen.commit_message
-        :if={@merges}
+        :if={@merges and not @legacy}
         version={@commit_message}
         id={commit_message_id(@ticket)}
       />
+      <section :if={@legacy} id={commit_message_id(@ticket)}>
+        <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
+          The commit it will make
+        </h2>
+        <p class="mt-2 text-sm/[1.55] opacity-70">
+          This ticket was pinned before merges carried a written message, so its merge says what
+          earlier releases wrote.
+        </p>
+        <p class="mt-1 min-w-0 break-words font-mono text-[12.5px]/[1.55]">
+          Merge {@ticket.branch}: {@ticket.title}
+        </p>
+      </section>
 
       <%!-- `id` and `phx-change` are what make the comment survive a reconnect: without both of
             them the client has no form to copy and replay, and the new mount draws the box
@@ -364,7 +387,7 @@ defmodule ForgeWeb.Operator.Components do
           aria-label="Comment on this approval"
         />
         <button
-          :if={not (@merges and is_nil(@commit_message))}
+          :if={not (@merges and is_nil(@commit_message) and not @legacy)}
           type="submit"
           name="decision"
           value="approved"

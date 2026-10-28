@@ -19,7 +19,7 @@ defmodule ForgeCore.Workflow.Imports do
   - Imports are one level deep, so there are no cycles to find and no diamond to order.
 
   **What comes out is what is pinned.** A ticket's stored definition is re-read with
-  `Parser.from_map/2` and no repository, everywhere its workflow is read, so it must hold no
+  `Parser.from_pinned/1` and no repository, everywhere its workflow is read, so it must hold no
   `import` and no `extends`. The result also carries where each imported part came from, so an
   error about it can name the library rather than the file that does not contain it
   (`attribute/2`).

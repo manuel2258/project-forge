@@ -87,9 +87,21 @@ defmodule ForgeWeb.ReviewLive do
      |> load()}
   end
 
+  # A pin the grammar can no longer build has no merging state to review towards: the ticket's own
+  # page says so and offers the way on (`docs/design/ui.md` § Decide and Timeline), so this goes there.
   defp load(%{assigns: %{ticket_id: id, project: project}} = socket) do
     ticket = Tickets.get!(id)
-    workflow = Tickets.workflow(ticket)
+
+    case Tickets.parsed_workflow(ticket) do
+      {:ok, workflow} ->
+        load(socket, ticket, workflow)
+
+      {:error, _errors} ->
+        push_navigate(socket, to: ~p"/tickets/#{project.name}/#{ticket.number}")
+    end
+  end
+
+  defp load(%{assigns: %{project: project}} = socket, ticket, workflow) do
     changeset = Artifacts.latest(ticket.id, Workflow.changeset_artifact())
     artifacts = Artifacts.list(ticket.id)
 

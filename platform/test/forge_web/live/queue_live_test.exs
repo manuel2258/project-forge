@@ -881,8 +881,8 @@ defmodule ForgeWeb.QueueLiveTest do
            )
   end
 
-  # The queue draws every ticket at once, so one whose pinned workflow no longer parses — the
-  # validator's rules move, and this branch adds three — costs its own detail and not the page.
+  # The queue draws every ticket at once, so one whose pinned workflow no longer builds — the
+  # grammar can drop a key, and a pin is not validated again — costs its own detail and not the page.
   test "a ticket whose pinned workflow no longer parses does not take the queue down", %{
     conn: conn,
     project: project

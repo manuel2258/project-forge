@@ -632,6 +632,10 @@ What the branch holds against its base, bounded per § Semantics that must not b
   surface offers to change it. Absent, it says there is nothing to merge yet rather than drawing
   an empty box — and on a conversation, where no version means the merge would be refused, the
   merge button is not drawn at all.
+- **A ticket pinned before the document existed** has no state that could write one, so its
+  card draws a sentence in the block's place — pinned before merges carried a written message, so
+  the merge says what earlier releases wrote — with the subject line, and **does draw Approve**.
+  A ticket whose pin has a producer and no version is the case above, with no Approve.
 - The review page stays: it is where *what it was built from* and *questions answered* sit beside
   the diff, and the queue's review items link there. Changes links to it when the ticket has a
   changeset.
@@ -697,6 +701,13 @@ and structure). A conversation's job is not opened on the job page; this tab is 
 The job page itself tails its job while it runs, for the same reason.
 
 ### Decide and Timeline (ticket)
+
+**A ticket whose pin cannot be built** (`workflow-grammar-v1.md` § Pinning) has no steps to draw,
+so it does not get a half-drawn work screen: its page is the header, a notice that the workflow it
+was pinned to can no longer be read with the errors behind a disclosure, the way on — Re-pin when
+`.forge/` has changed, Cancel (Restore when cancelled) — then its documents and its history. Every
+other action on it is refused in words. This is not a ticket admitted under an earlier release:
+those open as any other.
 
 **Decide** is the ticket's *Waiting on you*: its blocking questions, approval card and
 transition card, drawn with the queue's components — a document's questions as one form

@@ -255,7 +255,10 @@ defmodule Forge.Tickets do
       1
   end
 
-  @doc "The pinned workflow of a ticket, as a validated struct. Raises if it no longer parses."
+  @doc """
+  The pinned workflow of a ticket, as a struct. Raises if the pin can no longer be built — which
+  is a grammar change, not a validator rule (`parsed_workflow/1`).
+  """
   @spec workflow(Ticket.t()) :: Workflow.t()
   def workflow(%Ticket{} = ticket) do
     {:ok, workflow} = parsed_workflow(ticket)
@@ -263,15 +266,18 @@ defmodule Forge.Tickets do
   end
 
   @doc """
-  The pinned workflow, or the validator's errors.
+  The pinned workflow, or the errors that stopped it being built.
 
-  A definition is validated when the ticket is admitted and pinned as it was then, while the
-  validator's rules move between milestones, so a pinning can stop parsing long after it was
-  written. Callers serving more than one ticket at a time use this, so that one such row
-  cannot take the others down with it.
+  A definition is validated when the ticket is admitted and pinned as it was then, and **a pinning
+  is read as it was admitted** (`docs/design/workflow-grammar-v1.md` § Pinning): it is built
+  against the grammar and not validated again, so a rule added to the validator binds the next
+  admission and never a stored pin. 0.16.0 validated on every read and its `commit-message` rule
+  gave a 500 on every ticket admitted before it. What can still fail is a pin the grammar can no
+  longer build, a key it dropped, long after it was written. Callers serving more than one ticket
+  at a time use this, so that one such row cannot take the others down with it.
   """
   @spec parsed_workflow(Ticket.t()) :: {:ok, Workflow.t()} | {:error, [ForgeCore.Error.t()]}
-  def parsed_workflow(%Ticket{workflow: map}), do: Parser.from_map(map)
+  def parsed_workflow(%Ticket{workflow: map}), do: Parser.from_pinned(map)
 
   @spec get!(String.t()) :: Ticket.t()
   def get!(id), do: Repo.get!(Ticket, id)

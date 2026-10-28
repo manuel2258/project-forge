@@ -474,8 +474,11 @@ agent's own for a conversation — read at the version the transition into the m
 than as `-m`, because Linux caps one argument at 128 KiB and a document may be eight times that,
 so a long message failed with "Argument list too long". The approving operator sees it above the
 approve control and does not type or edit it. Nothing generates `Ticket:`,
-`Changeset:` or `Approved-by:` trailers any more; a merge with no `commit-message` version is
-refused and sticks the ticket, rather than landing under a message nobody wrote.
+`Changeset:` or `Approved-by:` trailers any more but for one ticket: a pin made before the document
+existed, which has no state that could write it, merges under the message 0.15.0 wrote
+(`Forge.Merge.legacy_message?/1`). Any other merge with no `commit-message` version is refused and
+sticks the ticket, rather than landing under a message nobody wrote
+(`workflow-grammar-v1.md` § Merging).
 
 **The merge pushes rather than calling `update-ref`.** Pushing over the local transport spawns
 `receive-pack` in the bare repository, which runs both hooks — so the merge is enforced by, and

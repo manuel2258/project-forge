@@ -2188,7 +2188,7 @@ defmodule Forge.FlowTest do
     refute_receive {:assign, _assignment}, 100
   end
 
-  # A ticket pins its workflow, and the validator's rules move between milestones, so a
+  # A ticket pins its workflow, and the grammar can drop a key between milestones, so a
   # pinned definition can stop parsing long after the row was written. The queue is shared:
   # one such ticket must not take it away from every other one.
   test "a stuck ticket whose pinned workflow no longer parses leaves the queue standing", %{

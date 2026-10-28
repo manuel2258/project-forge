@@ -171,8 +171,8 @@ not built.
 the commit, the same shape as the `prompt_exists` and `file_exists` callbacks `Parser` already
 takes — and returns a plain v1 map with no `import` and no `extends` in it. That map is what is
 validated and what admission stores in `tickets.workflow`. This is not a convenience; it is
-required. `Tickets.parsed_workflow/1` re-parses the stored map with `Parser.from_map/1` and no
-repository, on every read of a ticket's workflow — the board, the queue, the engine — so a stored
+required. `Tickets.parsed_workflow/1` builds the stored map with `Parser.from_pinned/1` (the
+grammar's reading, and not the validator's) and no repository, on every read of a ticket's workflow — the board, the queue, the engine — so a stored
 map that still said `import` could not be read anywhere. It also keeps pinning honest: a ticket
 holds exactly the definition it runs, a later edit to a library reaches it only through a re-pin,
 and `workflow_commit` with the ticket's type reproduces it.

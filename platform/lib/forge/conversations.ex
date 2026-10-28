@@ -566,7 +566,7 @@ defmodule Forge.Conversations do
 
   # **The pinning is asked about here because the engine would raise on it.**
   # `Engine.choose/4` reads `Tickets.workflow/1`, which is `{:ok, w} = parsed_workflow(ticket)`
-  # and so a `MatchError` on a pinning that has stopped parsing. Raising from here is worse than
+  # and so a `MatchError` on a pinning the grammar can no longer build. Raising from here is worse than
   # anywhere else: this runs after the turn's transaction has committed, so the channel's
   # `handle_in("turn", ...)` dies, the worker re-sends, `recorded?/2` says the turn is already
   # recorded, and the request vanishes with no refusal event and nothing said to anyone. Asked

@@ -1164,8 +1164,8 @@ defmodule Forge.Jobs do
   # transition): the same edges a person is offered, each with the `approve` list its choice would
   # record.
   #
-  # **`parsed_workflow/1`, never `workflow/1`.** A pinning validated at admission can stop parsing
-  # later as the validator's rules move on, and `workflow/1` raises on one that has. This runs for
+  # **`parsed_workflow/1`, never `workflow/1`.** A pinning validated at admission can stop being
+  # buildable later as the grammar moves on, and `workflow/1` raises on one that has. This runs for
   # every ticket chat assignment, inside `assign/2` after `mark_started` has set the row running,
   # so a raise here fails the job — on precisely the broken ticket a conversation is the way to
   # rescue. Nothing is offered instead, and the manifest says why.

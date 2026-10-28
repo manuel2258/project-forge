@@ -204,7 +204,8 @@ defmodule Forge.Engine do
   end
 
   # No key where the ticket has no `commit-message` yet, the way a missing changeset leaves none:
-  # `named/1` then reports it rather than the merge inventing something to say.
+  # `named/1` reads it as nil and `Merge.perform/4` refuses it, unless the pin could never have
+  # had one (`Merge.legacy_message?/1`).
   defp put_commit_message(payload, nil), do: payload
 
   defp put_commit_message(payload, version),
@@ -1237,10 +1238,11 @@ defmodule Forge.Engine do
         {:ok, %{sha: sha, version: version, commit_message_version: message}}
 
       # A transition that named a changeset and no `commit-message`: the ticket reached its merge
-      # with nothing written for the commit to say. Sticking says so, rather than merging under a
-      # message nobody wrote.
-      %{"changeset" => _sha, "changeset_version" => _version} ->
-        {:error, :no_commit_message}
+      # with nothing written for the commit to say. Whether that is a ticket pinned before the
+      # document existed, which merges under the message earlier releases wrote, or one that was
+      # meant to have one and sticks, is `Merge.perform/4`'s to say: the decision is in one place.
+      %{"changeset" => sha, "changeset_version" => version} ->
+        {:ok, %{sha: sha, version: version, commit_message_version: nil}}
 
       _none ->
         {:error, :no_changeset}

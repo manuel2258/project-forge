@@ -500,6 +500,12 @@ after the approval but before the entry action runs would otherwise change what 
 A transition that names a changeset and no `commit-message` reaches the merge with nothing for the
 commit to say, and sticks the ticket in the merging state saying so.
 
+**One exception, decided by the pin and never by the missing version.** A pinning whose workflow
+has no state producing `commit-message` — one stored before 0.16.0 added the document — can never
+get a version, so its merge says what the platform wrote for every merge until 0.15.0: the subject
+`Merge <branch>: <title>`, then `Ticket:`, `Changeset:` and `Approved-by:` (`Forge.Merge.legacy_message?/1`).
+A pin that *has* a producer and no written version sticks as above.
+
 `refs/forge/approved/<n>` is written by each merge attempt, at the commit it merges, whoever's
 transition named it — on route (b) nobody approved anything and the engine's attempt writes it. The
 name is history; what it means is *the commit this ticket's merge was last attempted for*, kept
@@ -535,7 +541,7 @@ sticks the ticket in the merging state. `on_conflict` adds no transition: nobody
 outcome selects it, so a merging state with no transitions out is as terminal as it was. If the
 move cannot be made — the target's job cannot be created — the ticket is stuck in the merging
 state saying so, rather than left reading `done`. So does a merge with no `commit-message` version
-to read.
+to read, unless the pin has no state producing it (§ Merging).
 
 **The target is a job state or a human state, with a transition out.** A job state is the usual
 case, and a job state that is some merging state's `on_conflict` is an *integrating* state: its
@@ -830,6 +836,19 @@ ticket. Later changes to the
 file do not affect that ticket, and neither do later changes to its prompts or command scripts,
 which are read at the same commit.
 
+**A pinning is read as it was admitted.** The stored definition is built against the grammar — its
+keys and the types of its values — and is not validated again (`Parser.from_pinned/1`).
+Validation belongs to admission and re-pinning, which read the file as it is now and are exactly
+as strict as the validator is: a rule added later binds the next admission, never a stored pin.
+Reading a pin through the validator was the defect of 0.16.0, whose `commit-message` rule rejected
+every definition stored before it and gave each of those tickets a 500 on its page. What can still
+fail is a pin the grammar can no longer build, because it dropped a key the pin uses. The ticket
+page then says that the workflow it was pinned to can no longer be read, with the errors behind a
+disclosure, and offers Re-pin when `.forge/` has changed on the default branch and Cancel while the
+ticket is open (Restore once cancelled) — neither reads the old pin. The review page sends such a ticket to that page. The
+engine reads such a pin with `Tickets.workflow/1`, which raises, and the page offers no action that
+reaches it (cancel, restore and re-pin do not read the old pin).
+
 **Re-pinning is a person's act** (`Forge.Engine.repin/2`). It reads the workflow of the ticket's
 own type at the default branch's head — refusing when that type's file is gone — validates it as
 admission does, and stores the definition and the commit in place of the old ones; every job made after it reads its prompt and its scripts from there. The branch,
@@ -921,7 +940,8 @@ is never produced; `answers.md` is platform-managed and never declared.
 - Every `on_enter` entry is a known action (`merge` alone in v1); `on_enter` is absent from every
   job state and every command state; at most one state in a workflow merges; `initial` does not merge; and a workflow that
   merges has a state producing `changeset` and a state producing `commit-message`, the second
-  never `optional`.
+  never `optional`. This binds admission and re-pinning; a stored pin is not asked again
+  (§ Pinning) and its merge is the exception in § Merging.
 - `on_conflict`, where present, is on the state that merges, and names another state of the
   workflow that is a job state or a human state with a transition out — never a command state,
   and never the merging state itself; a job state it names is the `to` of no transition

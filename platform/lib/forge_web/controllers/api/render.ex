@@ -225,7 +225,7 @@ defmodule ForgeWeb.Api.Render do
       changeset: %{version: changeset.version, commit: head, base: ticket.base_commit},
       # What the merge commit will say, beside the diff it is about: the page draws it above the
       # approve control, so a client deciding the same thing has it too. Null where nothing has
-      # written one, which is a merge with nothing to say.
+      # written one: a merge with nothing to say, or an old pin's, which says what 0.15.0 wrote.
       commit_message: review_commit_message(ticket),
       merged: Forge.Merge.merged?(ticket),
       diff: diff(repo, ticket.base_commit, head, changeset.blob_uri),

@@ -280,13 +280,8 @@ defmodule ForgeCore.Workflow.Validator do
   # the merge reads and comparing the raw entry told it the merge had no producer.
   defp merge_needs_artifact([], _workflow, _name), do: []
 
-  defp merge_needs_artifact([state_name | _rest], %Workflow{states: states}, name) do
-    produced? =
-      Enum.any?(states, fn {_n, state} ->
-        Enum.any?(state.produces, &(Workflow.produced_name(&1) == name))
-      end)
-
-    if produced? do
+  defp merge_needs_artifact([state_name | _rest], %Workflow{} = workflow, name) do
+    if Workflow.produced?(workflow, name) do
       []
     else
       [

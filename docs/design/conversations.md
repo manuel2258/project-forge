@@ -427,10 +427,11 @@ records against the latest version of each named artifact. The chat does not sto
 a person cancels the ticket and restores it, which is what they already have.
 
 **A pinning that no longer parses refuses the request rather than raising.** A ticket's workflow
-is validated when it is admitted and kept as it was, while the validator's rules move on, so a
-pinning can stop parsing long after it was written (`Tickets.parsed_workflow/1`). That ticket is
+is validated when it is admitted and kept as it was, and is not validated again (a rule added
+later binds the next admission only), so a pinning stops building only when the grammar drops a key
+it uses (`Tickets.parsed_workflow/1`). That ticket is
 exactly the one in trouble this feature exists for, so neither half may raise on it: the manifest
-offers no transitions and says why, and the apply path refuses with the validator's own complaint.
+offers no transitions and says why, and the apply path refuses with the parser's own complaint.
 `Engine.choose/4` and `Engine.decide/4` both open with `Tickets.workflow/1`, which raises; what
 makes the raise unreachable is that `parses/1` asks `parsed_workflow/1` on the same struct first,
 before either is called. That ordering is the guard, so it is not a line to tidy away.

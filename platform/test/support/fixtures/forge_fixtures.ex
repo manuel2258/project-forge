@@ -5,6 +5,30 @@ defmodule Forge.ForgeFixtures do
 
   @workflow_fixture Path.expand("../../../../core/test/fixtures/workflow_example.yml", __DIR__)
 
+  @old_pin Path.expand("pinned/dev-0.15.0.json", __DIR__)
+  @external_resource @old_pin
+
+  @doc """
+  The definition a ticket admitted under 0.15.0 stored as its pin: `dev.yml` and `common.yml` at
+  commit d8c8067, flattened by `ForgeCore.Workflow.Imports.resolve/2` — which resolves imports and
+  validates nothing — and encoded as JSON. It has no state that produces `commit-message`, which
+  0.16.0's validator refuses and which is why every such ticket's page gave a 500. Not a map the
+  current code would admit, which is the point: the validator refuses it, and reading a stored pin
+  (`Parser.from_pinned/1`) must not.
+  """
+  def old_pin_map, do: @old_pin |> File.read!() |> Jason.decode!()
+
+  @doc """
+  Rewrites `ticket`'s stored pin to the one 0.15.0 wrote, as a row an earlier release left in the
+  database, and moves it to `state` when one is given.
+  """
+  def old_pin!(%Forge.Tickets.Ticket{} = ticket, state \\ nil) do
+    changes =
+      if state, do: [workflow: old_pin_map(), state: state], else: [workflow: old_pin_map()]
+
+    ticket |> Ecto.Changeset.change(changes) |> Repo.update!()
+  end
+
   def workflow_map do
     {:ok, map} = YamlElixir.read_from_string(File.read!(@workflow_fixture))
     map

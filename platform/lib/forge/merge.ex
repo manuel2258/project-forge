@@ -27,8 +27,11 @@ defmodule Forge.Merge do
   one (`docs/design/workflow-grammar-v1.md` § Merging). `changeset/1` and
   `commit_message_version/1` are where the transition reads them.
 
-  **Nothing here composes a message.** The text is an agent's, written as the `commit-message`
-  document, and is used as it stands.
+  **Nothing here composes a message, but for one case.** The text is an agent's, written as the
+  `commit-message` document, and is used as it stands. The case is a ticket pinned before the
+  document existed, whose workflow has no state that could write it: `legacy_message?/1`, and the
+  message the platform wrote for every merge until 0.15.0 (`docs/design/workflow-grammar-v1.md`
+  § Merging).
 
   **A merge that loses a race is retried once.** An attempt is written against the head it
   resolved; when it fails and the default branch has moved since, one more attempt is made
@@ -92,6 +95,22 @@ defmodule Forge.Merge do
     case commit_message(ticket) do
       nil -> nil
       row -> row.version
+    end
+  end
+
+  @doc """
+  Whether this ticket's merge says what the platform wrote before merges carried a `commit-message`
+  (`perform/4`): its pinned workflow reads and no state of it produces the document.
+
+  **It is the pin that decides, never the missing version.** A pin with a producer and no version
+  written is a ticket that was meant to have a message and does not, and it sticks rather than
+  merging under text nobody wrote. A pin that cannot be built is false as well: there is no workflow to say what it merges.
+  """
+  @spec legacy_message?(Ticket.t()) :: boolean()
+  def legacy_message?(%Ticket{} = ticket) do
+    case Tickets.parsed_workflow(ticket) do
+      {:ok, workflow} -> not Workflow.produced?(workflow, Workflow.commit_message_artifact())
+      {:error, _errors} -> false
     end
   end
 
@@ -176,12 +195,13 @@ defmodule Forge.Merge do
 
   `{:error, :no_commit_message}` when that version is absent, gone or blank: there is nothing for
   the commit to say, and the caller sticks the ticket rather than merging under a message nobody
-  wrote.
+  wrote. The one exception is a ticket whose pin has no state that could write the document
+  (`legacy_message?/1`): with no version, it merges under the message earlier releases wrote.
   """
   @spec perform(Ticket.t(), String.t(), pos_integer() | nil, User.t() | nil) :: outcome()
   def perform(%Ticket{} = ticket, sha, message_version, user \\ nil) do
-    with {:ok, plan} <- ticket_plan(ticket, sha),
-         {:ok, message} <- ticket_commit_message(ticket, message_version) do
+    with {:ok, message} <- ticket_commit_message(ticket, message_version, sha, user),
+         {:ok, plan} <- ticket_plan(ticket, sha) do
       perform_refs(%{plan | message: message}, user)
     end
   end
@@ -527,14 +547,33 @@ defmodule Forge.Merge do
   end
 
   # The version the transition named, not the latest: a conversation that rewrote `commit-message`
-  # between the approval and the entry action does not get to change what the commit says.
-  defp ticket_commit_message(%Ticket{}, nil), do: {:error, :no_commit_message}
+  # between the approval and the entry action does not get to change what the commit says. Asked
+  # before the commit is resolved, so a merge with nothing to say is refused as that and not as
+  # whatever else is wrong with it.
+  defp ticket_commit_message(%Ticket{} = ticket, nil, sha, user) do
+    if legacy_message?(ticket),
+      do: {:ok, legacy_message(ticket, sha, user)},
+      else: {:error, :no_commit_message}
+  end
 
-  defp ticket_commit_message(%Ticket{id: id}, version) do
+  defp ticket_commit_message(%Ticket{id: id}, version, _sha, _user) do
     {:ticket, id}
     |> Artifacts.versions(Workflow.commit_message_artifact())
     |> Enum.find(&(&1.version == version))
     |> message_text()
+  end
+
+  # What every ticket's merge said until 0.15.0 (`git show 5eb1c39:platform/lib/forge/merge.ex`).
+  defp legacy_message(%Ticket{} = ticket, sha, user) do
+    project = Tickets.project_of(ticket)
+
+    """
+    Merge #{ticket.branch}: #{ticket.title}
+
+    Ticket: #{project.name}##{ticket.number}
+    Changeset: #{sha}
+    Approved-by: #{(user && user.email) || "the engine"}
+    """
   end
 
   # What the conversation last wrote, as its page read it to offer the merge in the first place.

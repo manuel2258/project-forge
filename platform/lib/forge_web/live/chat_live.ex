@@ -140,13 +140,23 @@ defmodule ForgeWeb.ChatLive do
         "refs/heads/" <> Jobs.chat_branch(chat)
       )
 
+  defp approvable(nil), do: MapSet.new()
+
+  # A pin the grammar can no longer build approves nothing: the chat still opens, and its
+  # documents carry no mark.
+  defp approvable(ticket) do
+    case Tickets.parsed_workflow(ticket) do
+      {:ok, workflow} -> Artifacts.approvable(workflow)
+      {:error, _errors} -> MapSet.new()
+    end
+  end
+
   # Every version it wrote, whichever scope it is in — a ticket chat's documents are the
   # ticket's — grouped by document, the latest rendered and the rest linked
   # (`docs/design/ui.md` § Docs). Approval is possible only for a ticket's document that the
   # ticket's workflow approves, so only those carry a mark.
   defp docs(chat, project, ticket) do
-    approvable =
-      if ticket, do: ticket |> Tickets.workflow() |> Artifacts.approvable(), else: MapSet.new()
+    approvable = approvable(ticket)
 
     chat.id
     |> Artifacts.written_by()

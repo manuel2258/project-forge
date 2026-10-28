@@ -117,8 +117,9 @@ on the stream-json channel, all on a subscription credential.
 - **The queue could be lost whole.** A ticket whose pinned workflow no longer parsed raised
   from the queue's own read path, so one such row returned 500 for the queue page and the
   queue API — for every ticket, not just that one. A pinned definition is validated at
-  admission and kept as it was, while the validator's rules move between milestones, so this
-  is reachable without malformed data. Fixed by degrading that ticket's detail instead of the
+  admission and kept as it was; it was then validated again on every read, so a rule added
+  between milestones made it unreadable without any malformed data (0.16.0's `commit-message`
+  rule did, and `Parser.from_pinned/1` now reads a pin without the validator). Fixed by degrading that ticket's detail instead of the
   page, but worth recording as the shape of failure this probe is looking for: the operator
   does not lose a message, they lose the whole queue.
 - **Unknown harness messages degrade rather than drop.** Claude Code emits message types the

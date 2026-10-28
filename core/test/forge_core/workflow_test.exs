@@ -322,6 +322,33 @@ defmodule ForgeCore.WorkflowTest do
   # `docs/design/workflow-grammar-v1.md` § Inputs. The flow this was written for: a review that
   # sends work back with its reasons, a build that fails, and a tester who writes a note. Each
   # reason is read by a state that also runs before any reason exists.
+  describe "produced?/2" do
+    defp workflow_producing(produces) do
+      %Workflow{
+        initial: "a",
+        transitions: [],
+        limits: nil,
+        states: %{
+          "a" => %State{name: "a", produces: ["notes.md"]},
+          "b" => %State{name: "b", produces: produces}
+        }
+      }
+    end
+
+    # `producers/2` compares raw entries; this is the question the merge rule asks, in which a
+    # marked entry (`!` on a presentation, `/*` on a group) is the document it names.
+    test "a marked entry produces the document it names" do
+      assert Workflow.produced?(workflow_producing(["commit-message"]), "commit-message")
+      assert Workflow.produced?(workflow_producing(["commit-message!"]), "commit-message")
+      assert Workflow.produced?(workflow_producing(["shots/*"]), "shots")
+    end
+
+    test "nothing produces what no state names" do
+      refute Workflow.produced?(workflow_producing(["plan.md"]), "commit-message")
+      refute Workflow.produced?(workflow_producing(["commit-message.md"]), "commit-message")
+    end
+  end
+
   describe "required_input?/3" do
     setup do
       yaml = """

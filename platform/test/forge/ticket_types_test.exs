@@ -104,7 +104,7 @@ defmodule Forge.TicketTypesTest do
   end
 
   describe "imports at admission" do
-    # A ticket's workflow is read back with `Parser.from_map/2` and no repository, on every read —
+    # A ticket's workflow is read back with `Parser.from_pinned/1` and no repository, on every read —
     # the board, the queue, the engine. A pinned map that still said `import` could be read nowhere.
     test "what is pinned is the definition with its imports resolved" do
       project =

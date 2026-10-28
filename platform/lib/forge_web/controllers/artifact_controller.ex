@@ -7,16 +7,12 @@ defmodule ForgeWeb.ArtifactController do
   meaning — when the margin-questions view lands it takes the HTML representation of this same
   address and raw moves behind a parameter.
 
-  Text is served `text/plain` and inline, and anything else as an attachment: bytes, or an
-  Android app's own type. The content was written by an agent, so it is never served as a type a
-  browser will execute or lay out: `X-Content-Type-Options: nosniff` is what stops a `.md` full of
-  markup being treated as HTML in the operator's own session.
+  What is sent, and how, is `ForgeWeb.ArtifactBytes`'s, which the JSON API's raw route shares.
   """
 
   use ForgeWeb, :controller
 
   alias Forge.{Artifacts, Conversations, Projects, Tickets}
-  alias ForgeWeb.FileType
 
   def show(conn, %{"project" => name, "number" => number, "name" => artifact} = params) do
     {ticket, project} = Tickets.fetch!(name, number)
@@ -45,31 +41,10 @@ defmodule ForgeWeb.ArtifactController do
     serve(conn, artifact, version({:job, chat.id}, artifact, params["version"]))
   end
 
-  # Text is shown; anything else is a download, never laid out: `nosniff` on both, and the bytes of
-  # something that is not text are `attachment`, so the browser saves them rather than guessing
-  # what they are (`docs/design/ui.md` § Addressable artifact versions). An Android app keeps its
-  # own type, which a phone's browser hands to the package installer (§ Artifact types).
   defp serve(conn, artifact, {:ok, version}) do
-    case Artifacts.served(version, Path.join(System.tmp_dir!(), "forge-download")) do
-      {:text, bytes} ->
-        conn |> headers("text/plain", "inline", artifact, version) |> send_resp(200, bytes)
-
-      {:bytes, bytes} ->
-        conn
-        |> headers(FileType.download_type(artifact), "attachment", artifact, version)
-        |> send_resp(200, bytes)
-
-      {:file, path} ->
-        try do
-          conn
-          |> headers(FileType.download_type(artifact), "attachment", artifact, version)
-          |> send_file(200, path)
-        after
-          File.rm(path)
-        end
-
-      {:error, reason} ->
-        serve(conn, artifact, {:error, reason})
+    case ForgeWeb.ArtifactBytes.send_version(conn, artifact, version) do
+      {:error, reason} -> serve(conn, artifact, {:error, reason})
+      conn -> conn
     end
   end
 
@@ -87,32 +62,6 @@ defmodule ForgeWeb.ArtifactController do
       if Artifacts.commit(version), do: {:error, :not_a_file}, else: {:ok, version}
     else
       _other -> {:error, :not_found}
-    end
-  end
-
-  defp headers(conn, type, disposition, artifact, version) do
-    conn
-    |> put_resp_content_type(type, if(type == "text/plain", do: "utf-8"))
-    |> put_resp_header("x-content-type-options", "nosniff")
-    |> put_resp_header(
-      "content-disposition",
-      ~s(#{disposition}; filename="#{filename(artifact, version)}")
-    )
-  end
-
-  # The version is in the name a browser saves, because two versions of one artifact are two
-  # different files and the product never lets "latest" stand in for a version.
-  #
-  # Scrubbed, because an artifact name is whatever a project's `produces:` says. A quote in it
-  # injects a second `filename` parameter into the header and a newline makes Plug refuse the
-  # value outright — a 500 on that artifact's route. The name is cosmetic here; the address is
-  # what identifies the version.
-  defp filename(artifact, version) do
-    base = artifact |> Path.basename() |> String.replace(~r/[^A-Za-z0-9._-]/, "_")
-
-    case Path.extname(base) do
-      "" -> "#{base}-v#{version.version}"
-      ext -> "#{Path.rootname(base, ext)}-v#{version.version}#{ext}"
     end
   end
 end

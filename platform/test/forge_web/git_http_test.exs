@@ -17,6 +17,7 @@ defmodule ForgeWeb.GitHttpTest do
   alias Forge.Git
   alias Forge.Git.{Hooks, Tokens, Url}
   alias Forge.Projects
+  alias Forge.Repo
 
   setup do
     bare = seeded_repo()
@@ -34,7 +35,7 @@ defmodule ForgeWeb.GitHttpTest do
 
   describe "fetching" do
     test "a token clones the repository", %{project: project} do
-      {:ok, token, _row} = Tokens.issue(project, ref: "refs/heads/ticket/1", write: true)
+      {:ok, token, _row} = Tokens.issue(project, name: "t", ref: "refs/heads/ticket/1")
       dir = clone!(project, token)
 
       assert File.read!(Path.join(dir, "README.md")) == "# Game\n"
@@ -53,10 +54,10 @@ defmodule ForgeWeb.GitHttpTest do
     end
 
     test "an unknown, a revoked and an expired token are all refused", %{project: project} do
-      {:ok, revoked, row} = Tokens.issue(project, ref: "refs/heads/ticket/1", write: true)
+      {:ok, revoked, row} = Tokens.issue(project, name: "t", ref: "refs/heads/ticket/1")
       Repo.update!(Ecto.Changeset.change(row, revoked_at: DateTime.utc_now(:second)))
 
-      {:ok, expired, row} = Tokens.issue(project, ref: "refs/heads/ticket/1", write: true)
+      {:ok, expired, row} = Tokens.issue(project, name: "t", ref: "refs/heads/ticket/1")
 
       Repo.update!(
         Ecto.Changeset.change(row,
@@ -77,14 +78,14 @@ defmodule ForgeWeb.GitHttpTest do
       {:ok, other} =
         register_owned!(%{name: name, repo_path: other_bare, default_branch: "main"})
 
-      {:ok, token, _row} = Tokens.issue(other, ref: "refs/heads/ticket/1", write: true)
+      {:ok, token, _row} = Tokens.issue(other, name: "t", ref: "refs/heads/ticket/1")
 
       {_out, code} = clone(project, token)
       assert code != 0
     end
 
     test "the dumb protocol is not served", %{project: project} do
-      {:ok, token, _row} = Tokens.issue(project, ref: "refs/heads/ticket/1", write: true)
+      {:ok, token, _row} = Tokens.issue(project, name: "t", ref: "refs/heads/ticket/1")
       url = Url.with_token(project, token)
 
       for path <- ["/objects/info/packs", "/HEAD", "/info/refs"] do
@@ -96,7 +97,7 @@ defmodule ForgeWeb.GitHttpTest do
 
   describe "pushing" do
     test "the credential's own branch is accepted", %{project: project, bare: bare} do
-      {:ok, token, _row} = Tokens.issue(project, ref: "refs/heads/ticket/1", write: true)
+      {:ok, token, _row} = Tokens.issue(project, name: "t", ref: "refs/heads/ticket/1")
       dir = clone!(project, token, "ticket/1")
       sha = commit!(dir, "work.txt", "done")
 
@@ -105,7 +106,7 @@ defmodule ForgeWeb.GitHttpTest do
     end
 
     test "another ticket's branch is refused", %{project: project, bare: bare} do
-      {:ok, token, _row} = Tokens.issue(project, ref: "refs/heads/ticket/1", write: true)
+      {:ok, token, _row} = Tokens.issue(project, name: "t", ref: "refs/heads/ticket/1")
       dir = clone!(project, token, "ticket/1")
       commit!(dir, "work.txt", "done")
       {:ok, before} = Git.resolve(bare, "refs/heads/ticket/2")
@@ -121,7 +122,7 @@ defmodule ForgeWeb.GitHttpTest do
       bare: bare,
       main: main
     } do
-      {:ok, token, _row} = Tokens.issue(project, ref: "refs/heads/ticket/1", write: true)
+      {:ok, token, _row} = Tokens.issue(project, name: "t", ref: "refs/heads/ticket/1")
       dir = clone!(project, token, "ticket/1")
       commit!(dir, "work.txt", "done")
 
@@ -135,7 +136,7 @@ defmodule ForgeWeb.GitHttpTest do
       project: project,
       bare: bare
     } do
-      {:ok, token, _row} = Tokens.issue(project, ref: Tokens.default_ref(project), write: true)
+      {:ok, token, _row} = Tokens.issue(project, name: "t", ref: Tokens.default_ref(project))
       dir = clone!(project, token, "main")
       sha = commit!(dir, ".forge/workflow.yml", "states: {}")
 
@@ -150,7 +151,7 @@ defmodule ForgeWeb.GitHttpTest do
       project: project,
       bare: bare
     } do
-      {:ok, token, _row} = Tokens.issue(project, ref: Tokens.default_ref(project), write: true)
+      {:ok, token, _row} = Tokens.issue(project, name: "t", ref: Tokens.default_ref(project))
       dir = clone!(project, token, "main")
       commit!(dir, "work.txt", "first")
       assert {_out, 0} = push(dir, project, token, "HEAD:refs/heads/main")
@@ -165,10 +166,136 @@ defmodule ForgeWeb.GitHttpTest do
       assert {:ok, ^pushed} = Git.resolve(bare, "refs/heads/main")
     end
 
+    # A developer's token lists no ref of its own: the platform computes the open tickets' branches
+    # per request, and `pre-receive` takes membership of that list as the whole rule.
+    test "a developer pushes any open ticket's branch, and nothing else", ctx do
+      %{project: project, bare: bare, main: main} = ctx
+      ticket_fixture(%{project: project, number: 1, branch: "ticket/1"})
+      done = ticket_fixture(%{project: project, number: 2, branch: "ticket/2"})
+      done = Repo.update!(Ecto.Changeset.change(done, status: :done))
+
+      {:ok, token, _row} = Tokens.issue(project, name: "dev", git: :developer)
+      dir = clone!(project, token, "ticket/1")
+      sha = commit!(dir, "work.txt", "done")
+
+      assert {_out, 0} = push(dir, project, token, "HEAD:refs/heads/ticket/1")
+      assert {:ok, ^sha} = Git.resolve(bare, "refs/heads/ticket/1")
+
+      assert {out, code} = push(dir, project, token, "HEAD:refs/heads/ticket/#{done.number}")
+      assert code != 0
+      assert out =~ "this credential may write"
+      assert {:ok, ^main} = Git.resolve(bare, "refs/heads/ticket/2")
+
+      assert {_out, code} =
+               push(dir, project, token, "HEAD:refs/heads/chat/#{Ecto.UUID.generate()}")
+
+      assert code != 0
+
+      assert {out, code} = push(dir, project, token, "HEAD:refs/heads/main")
+      assert code != 0
+      assert out =~ "main is written by the platform's merge"
+      assert {:ok, ^main} = Git.resolve(bare, "refs/heads/main")
+    end
+
+    # The list is the whole rule: one ticket's token must not reach ticket/10 by prefix, and a
+    # developer's list must hold every open ticket, not the first.
+    test "a developer's list holds every open ticket, and a branch token is an exact match",
+         ctx do
+      %{project: project, bare: bare, main: main} = ctx
+      ticket_fixture(%{project: project, number: 1, branch: "ticket/1"})
+      ticket_fixture(%{project: project, number: 10, branch: "ticket/10"})
+      :ok = Git.create_branch(bare, "ticket/10", main)
+
+      {:ok, developer, _row} = Tokens.issue(project, name: "dev", git: :developer)
+      dir = clone!(project, developer, "main")
+      sha = commit!(dir, "work.txt", "done")
+
+      assert {_out, 0} = push(dir, project, developer, "HEAD:refs/heads/ticket/1")
+      assert {_out, 0} = push(dir, project, developer, "HEAD:refs/heads/ticket/10")
+      assert {:ok, ^sha} = Git.resolve(bare, "refs/heads/ticket/10")
+
+      {:ok, branch, _row} = Tokens.issue(project, name: "one", ref: "refs/heads/ticket/1")
+      dir = clone!(project, branch, "ticket/1")
+      commit!(dir, "more.txt", "more")
+      assert {out, code} = push(dir, project, branch, "HEAD:refs/heads/ticket/10")
+      assert code != 0
+      assert out =~ "this credential may write"
+    end
+
+    # A developer is a second writer of a branch a job is working on: a rewrite would drop the
+    # job's commits. The single-ticket token keeps the rewrite it always had.
+    test "a developer or admin may not rewrite a ticket branch, a branch token may", ctx do
+      %{project: project, bare: bare} = ctx
+      ticket_fixture(%{project: project, number: 1, branch: "ticket/1"})
+
+      for access <- [:developer, :admin] do
+        {:ok, token, _row} = Tokens.issue(project, name: "w", git: access)
+        dir = clone!(project, token, "ticket/1")
+        commit!(dir, "#{access}.txt", "first")
+        assert {_out, 0} = push(dir, project, token, "HEAD:refs/heads/ticket/1")
+        {:ok, pushed} = Git.resolve(bare, "refs/heads/ticket/1")
+
+        {:ok, _out} = Git.run(dir, ["reset", "--quiet", "--hard", "HEAD~1"])
+        commit!(dir, "#{access}.txt", "rewritten")
+
+        assert {out, code} = force_push(dir, project, token, "HEAD:refs/heads/ticket/1")
+        assert code != 0
+        assert out =~ "must be fast-forward for this credential"
+        assert {:ok, ^pushed} = Git.resolve(bare, "refs/heads/ticket/1")
+      end
+
+      {:ok, token, _row} = Tokens.issue(project, name: "one", ref: "refs/heads/ticket/1")
+      dir = clone!(project, token, "ticket/1")
+      {:ok, _out} = Git.run(dir, ["reset", "--quiet", "--hard", "HEAD~1"])
+      commit!(dir, "b.txt", "rewritten by the ticket's own token")
+      assert {_out, 0} = force_push(dir, project, token, "HEAD:refs/heads/ticket/1")
+    end
+
+    test "a developer with no open ticket pushes nothing", %{project: project} do
+      {:ok, token, _row} = Tokens.issue(project, name: "dev", git: :developer)
+      dir = clone!(project, token, "main")
+      commit!(dir, "work.txt", "done")
+
+      assert {_out, code} = push(dir, project, token, "HEAD:refs/heads/ticket/1")
+      assert code != 0
+    end
+
+    test "an admin fast-forwards the default branch and may not rewrite it", ctx do
+      %{project: project, bare: bare} = ctx
+      {:ok, token, _row} = Tokens.issue(project, name: "adm", git: :admin)
+      dir = clone!(project, token, "main")
+      commit!(dir, "work.txt", "first")
+      assert {_out, 0} = push(dir, project, token, "HEAD:refs/heads/main")
+      {:ok, pushed} = Git.resolve(bare, "refs/heads/main")
+
+      {:ok, _out} = Git.run(dir, ["reset", "--quiet", "--hard", "HEAD~1"])
+      commit!(dir, "work.txt", "rewritten")
+
+      assert {out, code} = force_push(dir, project, token, "HEAD:refs/heads/main")
+      assert code != 0
+      assert out =~ "main must be fast-forward"
+      assert {:ok, ^pushed} = Git.resolve(bare, "refs/heads/main")
+    end
+
+    test "a reader and an API-only token push nothing", %{project: project} do
+      {:ok, reader, _row} = Tokens.issue(project, name: "r", git: :reader)
+      dir = clone!(project, reader, "main")
+      commit!(dir, "work.txt", "done")
+      assert {_out, code} = push(dir, project, reader, "HEAD:refs/heads/ticket/1")
+      assert code != 0
+
+      {:ok, api_only, _row} = Tokens.issue(project, name: "a", git: :none, api: :read)
+
+      assert {_out, code} =
+               git(tmp_dir("none"), ["clone", "--quiet", Url.with_token(project, api_only), "c"])
+
+      assert code != 0
+    end
+
     # The scope check and the naming rule are separate clauses, and a default-branch credential
     # passes neither for someone else's branch.
     test "a default-branch credential reaches nothing else", %{project: project, bare: bare} do
-      {:ok, token, _row} = Tokens.issue(project, ref: Tokens.default_ref(project), write: true)
+      {:ok, token, _row} = Tokens.issue(project, name: "t", ref: Tokens.default_ref(project))
       dir = clone!(project, token, "main")
       commit!(dir, "work.txt", "done")
       {:ok, before} = Git.resolve(bare, "refs/heads/ticket/1")
@@ -180,12 +307,12 @@ defmodule ForgeWeb.GitHttpTest do
     end
 
     test "a branch that is not a ticket's is refused", %{project: project} do
-      {:ok, token, _row} = Tokens.issue(project, ref: "refs/heads/ticket/1", write: true)
+      {:ok, token, _row} = Tokens.issue(project, name: "t", ref: "refs/heads/ticket/1")
       dir = clone!(project, token, "ticket/1")
       commit!(dir, "work.txt", "done")
 
       # The token's own ref passes the scope check; the naming rule is what refuses it.
-      {:ok, wild, wild_row} = Tokens.issue(project, ref: "refs/heads/ticket/1", write: true)
+      {:ok, wild, wild_row} = Tokens.issue(project, name: "t", ref: "refs/heads/ticket/1")
       Repo.update!(Ecto.Changeset.change(wild_row, ref: "refs/heads/wildcat"))
 
       assert {out, code} = push(dir, project, wild, "HEAD:refs/heads/wildcat")
@@ -196,13 +323,13 @@ defmodule ForgeWeb.GitHttpTest do
     # The hook is the enforcement point, so it must hold without the token's own validation in
     # front of it: `ticket/[0-9]*` as a glob is a digit followed by anything.
     test "a ticket branch is a number and nothing after it", %{project: project} do
-      {:ok, token, _row} = Tokens.issue(project, ref: "refs/heads/ticket/1", write: true)
+      {:ok, token, _row} = Tokens.issue(project, name: "t", ref: "refs/heads/ticket/1")
       dir = clone!(project, token, "ticket/1")
       commit!(dir, "work.txt", "done")
 
       # Anything after the number, wherever it is — not only at the end.
       for bad <- ["ticket/1abc", "ticket/1a2", "ticket/1/2"] do
-        {:ok, wild, wild_row} = Tokens.issue(project, ref: "refs/heads/ticket/1", write: true)
+        {:ok, wild, wild_row} = Tokens.issue(project, name: "t", ref: "refs/heads/ticket/1")
         Repo.update!(Ecto.Changeset.change(wild_row, ref: "refs/heads/" <> bad))
 
         assert {out, code} = push(dir, project, wild, "HEAD:refs/heads/" <> bad)
@@ -212,7 +339,7 @@ defmodule ForgeWeb.GitHttpTest do
     end
 
     test "a ref is never deleted", %{project: project, bare: bare} do
-      {:ok, token, _row} = Tokens.issue(project, ref: "refs/heads/ticket/1", write: true)
+      {:ok, token, _row} = Tokens.issue(project, name: "t", ref: "refs/heads/ticket/1")
       dir = clone!(project, token, "ticket/1")
 
       assert {out, code} = push(dir, project, token, ":refs/heads/ticket/1")
@@ -222,8 +349,8 @@ defmodule ForgeWeb.GitHttpTest do
     end
 
     test "a read token cannot push", %{project: project} do
-      {:ok, token, _row} = Tokens.issue(project)
-      {:ok, write, _row} = Tokens.issue(project, ref: "refs/heads/ticket/1", write: true)
+      {:ok, token, _row} = Tokens.issue(project, name: "t")
+      {:ok, write, _row} = Tokens.issue(project, name: "t", ref: "refs/heads/ticket/1")
       dir = clone!(project, write, "ticket/1")
       commit!(dir, "work.txt", "done")
 
@@ -232,7 +359,7 @@ defmodule ForgeWeb.GitHttpTest do
     end
 
     test "a rewrite of the ticket branch is allowed and said out loud", %{project: project} do
-      {:ok, token, _row} = Tokens.issue(project, ref: "refs/heads/ticket/1", write: true)
+      {:ok, token, _row} = Tokens.issue(project, name: "t", ref: "refs/heads/ticket/1")
       dir = clone!(project, token, "ticket/1")
       commit!(dir, "work.txt", "first")
       assert {_out, 0} = push(dir, project, token, "HEAD:refs/heads/ticket/1")
@@ -311,7 +438,7 @@ defmodule ForgeWeb.GitHttpTest do
 
       # The default-branch write token is the shape only an operator can mint, and it is what
       # `pre-receive` on the far side accepts as authority over `main`.
-      {:ok, token, _row} = Tokens.issue(destination, ref: "refs/heads/main", write: true)
+      {:ok, token, _row} = Tokens.issue(destination, name: "t", ref: "refs/heads/main")
 
       %{
         owner: owner,
@@ -328,7 +455,7 @@ defmodule ForgeWeb.GitHttpTest do
     # repository's own hooks. `Git.run/3` merges stderr unless told otherwise, so the hook's
     # `forge: ` lines come back in `out`.
     defp mirror_push(project, bare) do
-      {:ok, token, _row} = Tokens.issue(project, ref: "refs/heads/ticket/1", write: true)
+      {:ok, token, _row} = Tokens.issue(project, name: "t", ref: "refs/heads/ticket/1")
       dir = clone!(project, token, "ticket/1")
       commit!(dir, "work.txt", "done")
 
@@ -536,7 +663,7 @@ defmodule ForgeWeb.GitHttpTest do
     } do
       :ok = Projects.put_mirror(project, owner, "backup", url, user: "forge", token: token)
 
-      {:ok, main_token, _row} = Tokens.issue(project, ref: "refs/heads/main", write: true)
+      {:ok, main_token, _row} = Tokens.issue(project, name: "t", ref: "refs/heads/main")
       dir = clone!(project, main_token, "main")
       commit!(dir, "work.txt", "done")
 
@@ -558,7 +685,7 @@ defmodule ForgeWeb.GitHttpTest do
       System.put_env("FORGE_INTERNAL", "1")
       on_exit(fn -> System.delete_env("FORGE_INTERNAL") end)
 
-      {:ok, token, _row} = Tokens.issue(project, ref: "refs/heads/ticket/1", write: true)
+      {:ok, token, _row} = Tokens.issue(project, name: "t", ref: "refs/heads/ticket/1")
       dir = clone!(project, token, "ticket/1")
       commit!(dir, "work.txt", "done")
 
@@ -566,6 +693,41 @@ defmodule ForgeWeb.GitHttpTest do
       assert code != 0
       assert out =~ "main is written by the platform's merge, or by a credential minted for it"
       assert {:ok, ^main} = Git.resolve(bare, "refs/heads/main")
+    end
+  end
+
+  describe "the platform's own environment" do
+    # The write list and the no-rewrite switch are set per request from the token. A value the
+    # platform's own environment happened to carry must not reach a child that sets none: a developer
+    # with no open ticket would write with a leaked list, and a branch token would lose its rewrite.
+    test "FORGE_ALLOWED_REFS and FORGE_NO_REWRITE never leak from it", ctx do
+      %{project: project, bare: bare} = ctx
+      System.put_env("FORGE_ALLOWED_REFS", "refs/heads/ticket/1")
+      System.put_env("FORGE_NO_REWRITE", "1")
+
+      on_exit(fn ->
+        System.delete_env("FORGE_ALLOWED_REFS")
+        System.delete_env("FORGE_NO_REWRITE")
+      end)
+
+      # A developer with no open ticket may push, and has an empty list: the leaked one would be
+      # all it had.
+      {:ok, reader, _row} = Tokens.issue(project, name: "r", git: :developer)
+      dir = clone!(project, reader, "main")
+      commit!(dir, "work.txt", "done")
+      {:ok, before} = Git.resolve(bare, "refs/heads/ticket/1")
+
+      assert {_out, code} = push(dir, project, reader, "HEAD:refs/heads/ticket/1")
+      assert code != 0
+      assert {:ok, ^before} = Git.resolve(bare, "refs/heads/ticket/1")
+
+      {:ok, branch, _row} = Tokens.issue(project, name: "one", ref: "refs/heads/ticket/1")
+      dir = clone!(project, branch, "ticket/1")
+      commit!(dir, "a.txt", "first")
+      assert {_out, 0} = push(dir, project, branch, "HEAD:refs/heads/ticket/1")
+      {:ok, _out} = Git.run(dir, ["reset", "--quiet", "--hard", "HEAD~1"])
+      commit!(dir, "a.txt", "rewritten")
+      assert {_out, 0} = force_push(dir, project, branch, "HEAD:refs/heads/ticket/1")
     end
   end
 
@@ -580,7 +742,7 @@ defmodule ForgeWeb.GitHttpTest do
     # the one the CGI answers itself rather than the plug in front of it. The plug's own 404s are
     # sent by `send_resp` and never go near this.
     test "a failure keeps the status git http-backend gave it", %{project: project} do
-      {:ok, token, _row} = Tokens.issue(project)
+      {:ok, token, _row} = Tokens.issue(project, name: "t")
       advertisement = Url.with_token(project, token) <> "/info/refs?service=git-upload-pack"
 
       assert status(advertisement) == 200

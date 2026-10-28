@@ -173,7 +173,7 @@ defmodule Forge.ReleaseTest do
     printed = capture_io(fn -> Release.git_token(project.name) end)
 
     assert [token] = Tokens.list(project)
-    refute token.write
+    refute token.git_access in [:branch, :developer, :admin]
     assert token.ref == nil
     assert token.ticket_id == nil
     assert printed =~ "writes nothing"
@@ -189,7 +189,7 @@ defmodule Forge.ReleaseTest do
     printed = capture_io(fn -> Release.git_token(project.name, 7) end)
 
     assert [token] = Tokens.list(project)
-    assert token.write
+    assert token.git_access == :branch
     assert token.ref == "refs/heads/ticket/7"
     assert token.ticket_id == ticket.id
     assert printed =~ "writes refs/heads/ticket/7"

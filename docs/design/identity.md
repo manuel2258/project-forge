@@ -237,6 +237,15 @@ made it look true sorted the stored strings, so "admins first" held because 'adm
 `Forge.Operator` is the single place every human action exists, taking the acting user, and the
 guard goes at the entrance of each of its functions.
 
+The acting *user* is a `%User{}` or, for the eleven operations a project token may do (`answer`,
+`answer_all`, `decide`, `transition`, `retry`, `cancel`, `restore`, `edit`, `admit`,
+`accept_proposal`, `decline_proposal`), a `%Forge.Git.Token{}`. Both go through the same
+`Forge.Access` call, a token's scope being `:use` only on its own project and only with API write.
+Every other function still takes a `%User{}` only, so a token cannot reach one by construction.
+Below `Operator` the actor is `{:user, id}` or `{:api, id, name}`, and answers, approvals and
+proposal decisions carry `token_id` instead of `user_id` for the latter (a check constraint says
+exactly one is set).
+
 That was a description of the intended design before it was a description of the code. A review
 found seven human writes reaching their context directly — a conversation answered from the
 queue with an id off the wire, everything on the settings page, admitting a ticket, opening a
@@ -312,8 +321,11 @@ part of. The migration drops the trigger, backfills, and re-creates it, in one t
 The store endpoint (`/store/*key`) is unchanged: it is the worker's door, authorised by a
 short-lived token scoped to one key and one verb, and no user is involved.
 
-API tokens stay platform-issued. They act as their user and inherit that user's memberships, so
-there is nothing to authorise separately. Accepting IdP-issued JWTs on `/api/v1` would buy
+API tokens stay platform-issued. A **user** token acts as its user and inherits that user's
+memberships, so there is nothing to authorise separately. A **project** token (`git-hosting.md`
+§ One project token, two doors) acts as **API**, not as the person who issued it: it holds `:use`
+on its own project when its API access is *write*, never `:manage`, and nothing on any other
+project. Accepting IdP-issued JWTs on `/api/v1` would buy
 service accounts at the cost of JWKS rotation, clock skew and a revocation story, for a surface
 whose clients are `curl` and the Mix tasks. Not now; it is an addition, not a migration.
 
@@ -533,7 +545,8 @@ The vocabulary:
 What that comes to:
 
 - **`member`** is most of the product: the queue and board, every project, ticket, review, job,
-  chat and artifact page, all fifteen ticket and proposal endpoints of the JSON API, and every
+  chat and artifact page, the ticket and proposal endpoints of the JSON API (for a project token, classified in `test/support/token_routes.ex`),
+  and every
   conversation write.
 - **`manage`** is the settings actions — the model, the effort, the project's secrets, minting a
   git token and revoking one, membership, and mirrors. Those tokens are admin-only to *read* as well, because the token list
@@ -549,6 +562,10 @@ What that comes to:
   else's. Minting into a project is an assignment too, and holds the same membership rule; the
   inventory records the action as `self` because without a project it reaches none.
 - **`node_admin`** is one page.
+- **Project tokens at `/api/v1`.** Every route is classified as readable by a token read, writable
+  by a token write, or never for a token (`/projects` registration, `/queue`). The inventory test
+  fails on an unclassified route (the table is `test/support/token_routes.ex`), and
+  `ForgeWeb.Api.ProjectTokenTest` drives each class against a token that must be refused.
 - **`token`** is three: `/git`, `/store/*key` and the worker socket. None of them carries a
   person. The LiveView socket is not one of them: it carries the session, and every route behind
   it sits in a `live_session` whose `on_mount` checks it.

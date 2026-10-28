@@ -30,7 +30,7 @@ defmodule Mix.Tasks.Forge.Git.TokenTest do
     Token.run([project.name])
 
     assert [token] = Tokens.list(project)
-    refute token.write
+    refute token.git_access in [:branch, :developer, :admin]
     assert token.ref == nil
     assert token.ticket_id == nil
   end
@@ -42,9 +42,51 @@ defmodule Mix.Tasks.Forge.Git.TokenTest do
     Token.run([project.name, "--ticket", "4"])
 
     assert [token] = Tokens.list(project)
-    assert token.write
+    assert token.git_access == :branch
     assert token.ref == "refs/heads/ticket/4"
     assert token.ticket_id == ticket.id
+  end
+
+  test "--git, --api, --days and --name issue a project token and say what it may do" do
+    project = project_fixture()
+    ticket_fixture(%{project: project, number: 4, branch: "ticket/4"})
+
+    Token.run([
+      project.name,
+      "--git",
+      "developer",
+      "--api",
+      "write",
+      "--days",
+      "30",
+      "--name",
+      "ci"
+    ])
+
+    assert [token] = Tokens.list(project)
+    assert %{name: "ci", git_access: :developer, api_access: :write, ref: nil} = token
+
+    assert DateTime.diff(token.expires_at, DateTime.utc_now()) in (30 * 86_400 - 60)..(30 * 86_400)
+
+    assert_received {:mix_shell, :info, [clone]}
+    assert clone =~ "/git/#{project.name}.git"
+    assert_received {:mix_shell, :info, ["api token: " <> secret]}
+    assert {:ok, %{id: id}} = Tokens.authenticate_api(secret)
+    assert id == token.id
+    assert_received {:mix_shell, :info, [said]}
+    assert said =~ "developer, writes every open ticket's branch"
+    assert said =~ "api: write"
+  end
+
+  test "an API-only token prints no clone URL, and a ceiling is kept" do
+    project = project_fixture()
+
+    Token.run([project.name, "--git", "none", "--api", "read"])
+    assert_received {:mix_shell, :info, ["api token: " <> _secret]}
+    refute_received {:mix_shell, :info, ["http" <> _url]}
+
+    assert_raise Mix.Error, fn -> Token.run([project.name, "--days", "366"]) end
+    assert [_one] = Tokens.list(project)
   end
 
   # `--minutes` shares the `case` the write scope is decided in, so a rearrangement that loses the
@@ -57,5 +99,48 @@ defmodule Mix.Tasks.Forge.Git.TokenTest do
 
     assert [token] = Tokens.list(project)
     assert DateTime.diff(token.expires_at, before) in 240..300
+  end
+
+  # The words are the whole of what the operator is told a credential may do, and they are written
+  # once per access, so each one is read back on its own — `developer` in the test above.
+  describe "the line that says what the credential may do" do
+    setup do
+      project = project_fixture()
+      ticket_fixture(%{project: project, number: 4, branch: "ticket/4"})
+      %{project: project}
+    end
+
+    test "admin names the default branch", %{project: project} do
+      Token.run([project.name, "--git", "admin"])
+      assert said() =~ "git: admin, writes every open ticket's branch and the default branch,"
+    end
+
+    test "a ticket's token names its branch", %{project: project} do
+      Token.run([project.name, "--ticket", "4"])
+      assert said() =~ "git: writes refs/heads/ticket/4,"
+    end
+
+    test "the default branch's token names that branch", %{project: project} do
+      Token.run([project.name, "--default"])
+      assert said() =~ "git: writes #{Tokens.default_ref(project)},"
+    end
+
+    test "reader and none are said as they are", %{project: project} do
+      Token.run([project.name])
+      assert said() =~ "git: reader, api: none,"
+
+      Token.run([project.name, "--git", "none", "--api", "read"])
+      assert said() =~ "git: none, api: read,"
+    end
+
+    test "a token without API access prints no api token line", %{project: project} do
+      Token.run([project.name, "--api", "none"])
+      refute_received {:mix_shell, :info, ["api token: " <> _secret]}
+    end
+  end
+
+  defp said do
+    assert_received {:mix_shell, :info, [line]} when binary_part(line, 0, 4) == "git:"
+    line
   end
 end

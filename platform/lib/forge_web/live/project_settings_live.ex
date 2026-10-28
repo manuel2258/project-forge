@@ -46,10 +46,22 @@ defmodule ForgeWeb.ProjectSettingsLive do
        # and `Forge.Projects` refuses without it, which is the half that matters.
        manage: Forge.Access.can?(scope, :manage)
      )
-     |> assign(form: to_form(%{"scope" => "read", "ticket" => "", "minutes" => "90"}, as: :token))
+     |> assign(form: token_form(), nonce: nonce())
      |> ForgeWeb.Capacity.project(project)
      |> load()}
   end
+
+  # Nothing that writes is preselected: git reads, the API is off, and the lifetime is short.
+  defp token_form,
+    do:
+      to_form(
+        %{"name" => "", "git" => "reader", "ticket" => "", "api" => "none", "days" => "7"},
+        as: :token
+      )
+
+  # A second submit of the form this page rendered is a no-op: the nonce is spent by the first, so
+  # a double click cannot make two tokens.
+  defp nonce, do: 12 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
 
   defp load(%{assigns: %{project: project}} = socket) do
     now = DateTime.utc_now()
@@ -85,31 +97,61 @@ defmodule ForgeWeb.ProjectSettingsLive do
     }
   end
 
-  # What it may do, which is the only thing about a token worth reading.
-  defp capability(%{write: true, ref: ref}) when is_binary(ref), do: "write " <> ref
-  defp capability(%{write: true}), do: "write"
-  defp capability(_token), do: "read"
+  # What it may do, in a sentence, which is the only thing about a token worth reading.
+  defp capability(token), do: "Git: #{git_words(token)} · API: #{api_words(token.api_access)}"
+
+  defp git_words(%{git_access: :branch, ref: ref}), do: "writes #{ref}"
+  defp git_words(%{git_access: :reader}), do: "read"
+  defp git_words(%{git_access: access}), do: to_string(access)
+
+  defp api_words(:none), do: "none"
+  defp api_words(access), do: to_string(access)
+
+  # Who issued it, and through which door it was last used.
+  defp issuer(%{issued_by: %{email: email}}), do: email
+  defp issuer(%{job_id: job_id}) when is_binary(job_id), do: "a job"
+  # Not recorded: a token the mix task or a release made has no issuer, nor does one issued before
+  # issuers were kept, nor one whose issuer's account has since gone — which the row cannot tell apart.
+  defp issuer(_token), do: nil
 
   @impl true
   def handle_event("validate", %{"token" => params}, socket) do
     {:noreply, assign(socket, form: to_form(params, as: :token), error: nil)}
   end
 
+  # The nonce is spent by the first submit; a repeat of the same form is ignored whole.
+  def handle_event(
+        "issue",
+        %{"token" => %{"nonce" => nonce}},
+        %{assigns: %{nonce: current}} = socket
+      )
+      when nonce != current,
+      do: {:noreply, socket}
+
   def handle_event("issue", %{"token" => params}, socket) do
-    with {:ok, opts} <- scope(socket.assigns, params),
+    with {:ok, opts} <- issue_opts(socket.assigns, params),
          {:ok, secret, token} <-
            Operator.issue_token(socket.assigns.project, socket.assigns.current_scope.user, opts) do
       {:noreply,
        socket
-       |> assign(issued: %{url: Url.with_token(socket.assigns.project, secret), token: token})
+       |> assign(
+         issued: %{
+           url: Url.with_token(socket.assigns.project, secret),
+           secret: secret,
+           token: token
+         },
+         form: token_form(),
+         nonce: nonce(),
+         error: nil
+       )
        |> load()}
     else
       # The form is hidden from a member; this is what refuses the event sent by hand.
       {:error, :forbidden} ->
         {:noreply, assign(socket, error: "Only an administrator can do that.")}
 
-      {:error, message} ->
-        {:noreply, assign(socket, form: to_form(params, as: :token), error: message)}
+      {:error, reason} ->
+        {:noreply, assign(socket, form: to_form(params, as: :token), error: message(reason))}
     end
   end
 
@@ -348,49 +390,73 @@ defmodule ForgeWeb.ProjectSettingsLive do
     end
   end
 
-  # Exactly three shapes, because they are the three an operator has a use for. A job-scoped
-  # token is the engine's to mint — see docs/design/git-hosting.md § Issuing a token.
-  #
-  # The default branch is the one that reaches what every job builds on, so it is its own choice
-  # in the dropdown rather than a ref typed into a box: what may be minted is the project's own
-  # default branch and nothing else, and `Forge.Git.Token` refuses anything wider anyway.
-  defp scope(assigns, %{"scope" => "default"} = params) do
-    with {:ok, minutes} <- minutes(params) do
-      {:ok,
-       [
-         ref: Tokens.default_ref(assigns.project),
-         write: true,
-         ttl_minutes: minutes
-       ]}
+  # What the form asks for, as `Forge.Git.Tokens.issue/2` takes it. A job-scoped token is the
+  # engine's to mint — see docs/design/git-hosting.md § Issuing a token — and no field here can
+  # name one. The default-branch-only shape is no longer offered: `admin` replaces it.
+  defp issue_opts(assigns, params) do
+    with {:ok, name} <- name(params),
+         {:ok, days} <- days(params),
+         {:ok, git} <-
+           choice(params["git"], ~w(none reader branch developer admin), "git access"),
+         {:ok, api} <- choice(params["api"], ~w(none read write), "API access"),
+         {:ok, branch} <- branch(assigns, git, params) do
+      {:ok, [name: name, days: days, git: git, api: api] ++ branch}
     end
   end
 
-  defp scope(assigns, %{"scope" => "write"} = params) do
-    with {:ok, minutes} <- minutes(params),
-         %{} = ticket <- Enum.find(assigns.tickets, &(to_string(&1.number) == params["ticket"])) do
-      {:ok,
-       [
-         ticket_id: ticket.id,
-         ref: "refs/heads/" <> ticket.branch,
-         write: true,
-         ttl_minutes: minutes
-       ]}
-    else
-      nil -> {:error, "choose the ticket whose branch this token may write"}
-      other -> other
+  defp name(params) do
+    name = String.trim(params["name"] || "")
+
+    cond do
+      name == "" ->
+        {:error, "Give the token a name; it is how you will recognise it later."}
+
+      String.length(name) > Forge.Git.Token.name_max() ->
+        {:error, "A name is at most 60 characters."}
+
+      true ->
+        {:ok, name}
     end
   end
 
-  defp scope(_assigns, params) do
-    with {:ok, minutes} <- minutes(params), do: {:ok, [ttl_minutes: minutes]}
-  end
-
-  defp minutes(%{"minutes" => value}) do
-    case Integer.parse(String.trim(value || "")) do
-      {n, ""} when n > 0 and n <= 10_080 -> {:ok, n}
-      _other -> {:error, "minutes must be a whole number of minutes, up to a week"}
+  # The bound is `Tokens.issue/2`'s as well, with the same words, so dropping the check here
+  # changes nothing a person can see: an equivalent mutant, kept so the page refuses before it asks.
+  defp days(params) do
+    case Integer.parse(String.trim(params["days"] || "")) do
+      {n, ""} when n >= 1 -> if n <= Tokens.max_days(), do: {:ok, n}, else: too_long()
+      _other -> too_long()
     end
   end
+
+  defp too_long, do: {:error, "Days must be a whole number from 1 to #{Tokens.max_days()}."}
+
+  defp choice(value, allowed, what) do
+    if value in allowed,
+      do: {:ok, String.to_existing_atom(value)},
+      else: {:error, "Choose the #{what}."}
+  end
+
+  defp branch(assigns, :branch, params) do
+    case Enum.find(assigns.tickets, &(to_string(&1.number) == params["ticket"])) do
+      nil ->
+        {:error, "Choose the ticket whose branch this token may write."}
+
+      ticket ->
+        {:ok, [ticket_id: ticket.id, ref: "refs/heads/" <> ticket.branch]}
+    end
+  end
+
+  defp branch(_assigns, _git, _params), do: {:ok, []}
+
+  defp message(%Ecto.Changeset{} = changeset) do
+    changeset
+    |> Ecto.Changeset.traverse_errors(fn {msg, _opts} -> msg end)
+    |> Enum.map_join("; ", fn {field, messages} -> "#{field} #{Enum.join(messages, ", ")}" end)
+  end
+
+  defp message({:bad_days, max}), do: "Days must be a whole number from 1 to #{max}."
+  defp message(message) when is_binary(message), do: message
+  defp message(_reason), do: "That did not work."
 
   @impl true
   def render(assigns) do
@@ -413,11 +479,23 @@ defmodule ForgeWeb.ProjectSettingsLive do
 
       <%!-- Once, and only here: the row below will never be able to show it again. --%>
       <.shown_once :if={@issued} id="issued" done="dismiss">
-        <:note>It {capability(@issued.token)}, until {@issued.token.expires_at}.</:note>
-        <.copyable id="issued-url" value={@issued.url} label="Clone URL, token included" />
-        <p class="mt-2 text-sm/[1.55] opacity-60">
-          Usable as-is, or give the token alone as the password when git asks.
-        </p>
+        <:note>
+          {@issued.token.name}: {capability(@issued.token)}, until {@issued.token.expires_at}. It is
+          not shown again.
+        </:note>
+        <.copyable id="issued-secret" value={@issued.secret} label="Token" />
+        <.copyable
+          :if={@issued.token.api_access != :none}
+          id="issued-curl"
+          value={"curl -H \"Authorization: Bearer #{@issued.secret}\" #{ForgeWeb.Endpoint.url()}/api/v1/tickets"}
+          label="Use it on the API"
+        />
+        <.copyable
+          :if={@issued.token.git_access != :none}
+          id="issued-url"
+          value={@issued.url}
+          label="Clone URL, token included"
+        />
       </.shown_once>
 
       <section :if={@manage} class="mt-8">
@@ -434,26 +512,30 @@ defmodule ForgeWeb.ProjectSettingsLive do
           phx-submit="issue"
           class="mt-4 flex flex-col gap-4"
         >
+          <input type="hidden" name="token[nonce]" value={@nonce} />
+
+          <.input field={@form[:name]} type="text" label="Name" maxlength="60" />
+
           <.input
-            field={@form[:scope]}
+            field={@form[:git]}
             type="select"
-            label="May"
+            label="Git: it may"
             options={[
-              {"read every branch", "read"},
-              {"write one ticket's branch", "write"},
-              {"write #{@project.default_branch}, the default branch", "default"}
+              {"not use git", "none"},
+              {"read every branch", "reader"},
+              {"write one ticket's branch", "branch"},
+              {"push any open ticket's branch", "developer"},
+              {"push those, and #{@project.default_branch}, the default branch", "admin"}
             ]}
           />
 
-          <p :if={@form[:scope].value == "default"} class="text-sm/[1.55] opacity-70">
-            This is what a repository is seeded with and what a
-            <code class="font-mono text-[12.5px]">.forge/workflow.yml</code>
-            is changed with. It is fast-forward only, like the platform's own merge, and every
-            other credential — a job's included — is refused that branch.
+          <p :if={@form[:git].value == "admin"} class="text-sm/[1.55] opacity-70">
+            The default branch is what every job builds on. It is fast-forward only, like the
+            platform's own merge, and every credential a job holds is refused it.
           </p>
 
           <.input
-            :if={@form[:scope].value == "write"}
+            :if={@form[:git].value == "branch"}
             field={@form[:ticket]}
             type="select"
             label="Ticket"
@@ -461,16 +543,34 @@ defmodule ForgeWeb.ProjectSettingsLive do
             options={Enum.map(@tickets, &{"##{&1.number} #{&1.title}", &1.number})}
           />
 
-          <p :if={@form[:scope].value == "write" and @tickets == []} class="text-sm text-warning">
+          <p :if={@form[:git].value == "branch" and @tickets == []} class="text-sm text-warning">
             This project has no tickets yet, so there is no branch to write.
           </p>
 
-          <.input field={@form[:minutes]} type="number" label="Minutes" min="1" max="10080" />
+          <.input
+            field={@form[:api]}
+            type="select"
+            label="API: it may"
+            options={[
+              {"not use the API", "none"},
+              {"read tickets and their documents", "read"},
+              {"read, and also change tickets as a member can", "write"}
+            ]}
+          />
+
+          <.input
+            field={@form[:days]}
+            type="number"
+            label="Days it lasts"
+            min="1"
+            max={Tokens.max_days()}
+          />
 
           <p :if={@error} class="text-sm text-error">{@error}</p>
 
           <button
             type="submit"
+            phx-disable-with="Issuing…"
             class="min-h-[52px] rounded-field bg-base-content px-4 text-sm font-medium text-base-100"
           >
             Issue it
@@ -495,13 +595,15 @@ defmodule ForgeWeb.ProjectSettingsLive do
         </div>
 
         <p :if={@tokens == []} class="mt-3 text-sm opacity-60">
-          None yet. One issued above appears here, described but never shown again.
+          A token lets an outside program — a script, a dashboard, <code class="font-mono">curl</code>
+          — read this project's tickets and their documents, push to git, or both. Issue one above;
+          it appears here, described but never shown again.
         </p>
 
         <table :if={@tokens != []} id="tokens" class="reflow mt-3 w-full text-left text-[12.5px]">
           <thead class="font-mono text-[11px] tracking-[.14em] uppercase opacity-50">
             <tr class="border-b border-base-300">
-              <th class="py-2 pr-3 font-normal">May</th>
+              <th class="py-2 pr-3 font-normal">Token</th>
               <th class="py-2 pr-3 font-normal">Expires</th>
               <th class="py-2 pr-3 font-normal">Last used</th>
               <th class="py-2 font-normal"></th>
@@ -514,7 +616,21 @@ defmodule ForgeWeb.ProjectSettingsLive do
               class={["border-b border-base-300/60 align-top", row.live || "opacity-50"]}
             >
               <td class="py-3 pr-3 font-mono">
+                <%!-- A long name is cut to a line and opens whole on a tap: a `title` is a hover, and
+                      a phone has none (`ui.md` § The capacity gauge in the top bar: "a phone has no hover"). --%>
+                <div :if={row.token.name && String.length(row.token.name) <= 22}>
+                  {row.token.name}
+                </div>
+                <details :if={row.token.name && String.length(row.token.name) > 22}>
+                  <summary class="flex min-h-[46px] max-w-[22ch] cursor-pointer items-center truncate">
+                    {row.token.name}
+                  </summary>
+                  <p class="break-words">{row.token.name}</p>
+                </details>
                 <div class="break-all">{row.capability}</div>
+                <div :if={issuer(row.token)} class="text-[11px] opacity-50">
+                  issued by {issuer(row.token)}
+                </div>
                 <div :if={row.held_by_job} class="text-[11px] opacity-50">held by a job</div>
               </td>
               <td data-label="Expires" class="py-3 pr-3 font-mono">
@@ -523,7 +639,9 @@ defmodule ForgeWeb.ProjectSettingsLive do
                   else: spent(row.token, @now)}
               </td>
               <td data-label="Last used" class="py-3 pr-3 font-mono opacity-70">
-                {(row.token.last_used_at && Format.ago(row.token.last_used_at, @now)) || "never"}
+                {(row.token.last_used_at &&
+                    "#{Format.ago(row.token.last_used_at, @now)} via #{row.token.last_used_via || "git"}") ||
+                  "never"}
               </td>
               <td class="py-3 text-right">
                 <button
@@ -531,6 +649,7 @@ defmodule ForgeWeb.ProjectSettingsLive do
                   type="button"
                   phx-click="revoke"
                   phx-value-id={row.token.id}
+                  phx-disable-with="Revoking…"
                   data-confirm="Revoke this token? Anything using it stops working."
                   class="min-h-[46px] text-sm text-primary hover:underline reflow-control"
                 >

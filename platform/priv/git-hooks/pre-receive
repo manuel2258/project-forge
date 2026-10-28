@@ -4,14 +4,27 @@
 # The branch discipline, enforced mechanically rather than by convention. See
 # docs/design/git-hosting.md.
 #
-#   FORGE_ALLOWED_REF  the one ref this credential may write, set per request by the CGI wrapper
+#   FORGE_ALLOWED_REFS the refs this credential may write, space-separated, set per request by
+#                      the CGI wrapper: one for a job, every open ticket's for a developer
+#   FORGE_NO_REWRITE   set to 1 for a developer or admin credential: no non-fast-forward anywhere
 #   FORGE_INTERNAL     set to 1 only by the platform's own merge, never by anything on the network
 set -euo pipefail
 
 zero=0000000000000000000000000000000000000000
 default=$(git config --get forge.defaultBranch || echo main)
-allowed=${FORGE_ALLOWED_REF:-}
+allowed=${FORGE_ALLOWED_REFS:-}
 internal=${FORGE_INTERNAL:-}
+no_rewrite=${FORGE_NO_REWRITE:-}
+
+# Whether $1 is one of the space-separated refs in $allowed. A ref is a branch name and has no
+# space in it (git refuses one), so splitting on whitespace is exact.
+may_write() {
+  local candidate
+  for candidate in $allowed; do
+    [ "$candidate" = "$1" ] && return 0
+  done
+  return 1
+}
 
 deny() {
   echo "forge: $1" >&2
@@ -31,7 +44,7 @@ while read -r old new ref; do
   # so it lands in the clause below and is refused there. Fast-forward binds both writers --
   # a token may not rewrite history the merge could not.
   if [ "$ref" = "refs/heads/$default" ]; then
-    if [ "$internal" != "1" ] && [ "$allowed" != "$ref" ]; then
+    if [ "$internal" != "1" ] && ! may_write "$ref"; then
       deny "$default is written by the platform's merge, or by a credential minted for it"
     fi
     if [ "$old" != "$zero" ] && ! git merge-base --is-ancestor "$old" "$new"; then
@@ -41,7 +54,7 @@ while read -r old new ref; do
   fi
 
   if [ -n "$allowed" ]; then
-    [ "$ref" = "$allowed" ] || deny "this credential may write $allowed only, not $ref"
+    may_write "$ref" || deny "this credential may write $allowed only, not $ref"
   else
     [ "$internal" = "1" ] || deny "this credential may not write $ref"
   fi
@@ -61,8 +74,16 @@ while read -r old new ref; do
 
   # A job may rewrite its own branch: it squashes, and a resume may amend. The record that an
   # approval attaches to is the changeset version's sha, not the ref, so a rewrite loses nothing
-  # -- but it is never silent.
+  # -- but it is never silent. A developer's or an admin's credential is a *second* writer of a
+  # branch a job is working on, and rewriting would drop that job's commits: it is fast-forward
+  # only there, as on the default branch (FORGE_NO_REWRITE).
   if [ "$old" != "$zero" ] && ! git merge-base --is-ancestor "$old" "$new"; then
+    # `$internal != 1` is an equivalent mutant: nothing sets FORGE_INTERNAL and FORGE_NO_REWRITE
+    # together (the CGI clears the first from every request that sets the second), and the
+    # platform's own pushes set only the first. It is kept so the exemption is written down.
+    if [ "$no_rewrite" = "1" ] && [ "$internal" != "1" ]; then
+      deny "$ref must be fast-forward for this credential"
+    fi
     echo "forge: note: $ref was rewritten (non-fast-forward)" >&2
   fi
 done

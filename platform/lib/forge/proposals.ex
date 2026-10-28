@@ -329,7 +329,7 @@ defmodule Forge.Proposals do
 
     with {:ok, prepared} <- prepare(project, ticket_type, proposal.ticket_type) do
       Multi.new()
-      |> Tickets.put_admit(prepared, project, attrs, {:user, user_id})
+      |> Tickets.put_admit(prepared, project, attrs, Forge.Actor.of(user_id))
       |> put_decision(found, user_id, :accepted, comment)
       |> Repo.transaction()
       |> case do
@@ -410,20 +410,24 @@ defmodule Forge.Proposals do
 
   # The decision and its event, as steps. `ticket` is read from the multi's own changes when
   # there is one, so an acceptance can name the ticket the same transaction is creating.
-  defp put_decision(multi, found, user_id, decision, comment) do
+  defp put_decision(multi, found, who, decision, comment) do
+    actor = Forge.Actor.of(who)
+
     multi
     |> Multi.insert(:decision, fn changes ->
       ticket = changes[:ticket]
 
-      Decision.changeset(%Decision{}, %{
-        artifact_version_id: found.version.id,
-        user_id: user_id,
-        ticket_id: ticket && ticket.id,
-        decision: decision,
-        comment: comment
-      })
+      Decision.changeset(
+        %Decision{},
+        Map.merge(Forge.Actor.columns(actor), %{
+          artifact_version_id: found.version.id,
+          ticket_id: ticket && ticket.id,
+          decision: decision,
+          comment: comment
+        })
+      )
     end)
-    |> Events.log(:event, "proposal.#{decision}", {:user, user_id}, fn changes ->
+    |> Events.log(:event, "proposal.#{decision}", actor, fn changes ->
       ticket = changes[:ticket]
 
       %{

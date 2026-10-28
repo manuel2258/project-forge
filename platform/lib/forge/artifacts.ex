@@ -262,6 +262,28 @@ defmodule Forge.Artifacts do
     )
   end
 
+  @doc """
+  Every artifact of a ticket with all its versions, oldest first, as `{artifact, [version]}` and
+  in two queries however many there are — the listing the API serves for a ticket with hundreds of
+  versions, where one query per artifact would be hundreds of round trips.
+  """
+  @spec versions_for_ticket(String.t()) :: [{Artifact.t(), [Version.t()]}]
+  def versions_for_ticket(ticket_id) do
+    # The `a.ticket_id` filter only bounds the cost: grouping by artifact and looking up each of the
+    # ticket's own artifacts below would answer the same without it, so dropping it is an
+    # equivalent mutant.
+    by_artifact =
+      Repo.all(
+        from v in Version,
+          join: a in assoc(v, :artifact),
+          where: a.ticket_id == ^ticket_id,
+          order_by: [asc: v.artifact_id, asc: v.version]
+      )
+      |> Enum.group_by(& &1.artifact_id)
+
+    for artifact <- list(ticket_id), do: {artifact, Map.get(by_artifact, artifact.id, [])}
+  end
+
   @doc "The artifact called `name` in a scope, or nil."
   @spec find(scope(), String.t()) :: Artifact.t() | nil
   def find(scope, name), do: Repo.one(scope_query(scope(scope), name))
@@ -330,21 +352,22 @@ defmodule Forge.Artifacts do
   A version as the addressable-version route serves it (`docs/design/ui.md` § Addressable artifact
   versions): `{:text, bytes}` for a document, or a blob that is text no larger than a document
   may be; `{:bytes, bytes}` for a small blob that is not text; and `{:file, path}` for a larger
-  blob, fetched from the store into `dir` rather than read into memory — a build, a package. The
-  caller removes the file once it is sent.
+  blob, fetched from the store into `path` rather than read into memory — a build, a package. The
+  caller chooses `path` (a `Plug.Upload.random_file/1`, which Plug deletes when the request dies)
+  and removes the file once it is sent.
   """
   @spec served(Version.t(), Path.t()) ::
           {:text, binary()} | {:bytes, binary()} | {:file, Path.t()} | {:error, term()}
-  def served(%Version{blob_uri: "store:" <> _rest = uri} = version, dir) do
+  def served(%Version{blob_uri: "store:" <> _rest = uri} = version, path) do
     with {:ok, key} <- key(uri),
          {:ok, %{size: size}} <- Storage.stat(key) do
       if size <= ForgeCore.Document.max_bytes(),
         do: small(version),
-        else: fetched(key, dir)
+        else: fetched(key, path)
     end
   end
 
-  def served(%Version{} = version, _dir), do: small(version)
+  def served(%Version{} = version, _path), do: small(version)
 
   defp small(version) do
     with {:ok, bytes} <- content(version) do
@@ -352,10 +375,7 @@ defmodule Forge.Artifacts do
     end
   end
 
-  defp fetched(key, dir) do
-    File.mkdir_p!(dir)
-    path = Path.join(dir, Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false))
-
+  defp fetched(key, path) do
     case Storage.fetch(key, path) do
       {:ok, _info} -> {:file, path}
       {:error, reason} -> {:error, reason}
@@ -591,9 +611,10 @@ defmodule Forge.Artifacts do
   Answers a question: writes the answer row and a new version of the ticket's `answers.md`
   document listing every answer so far, in one transaction. Returns the answer.
   """
-  @spec answer(Question.t(), String.t(), map()) :: {:ok, Answer.t()} | {:error, term()}
-  def answer(%Question{} = question, user_id, attrs) do
-    with {:ok, [answer]} <- answer_all([{question, attrs}], user_id), do: {:ok, answer}
+  @spec answer(Question.t(), Forge.Actor.t() | String.t(), map()) ::
+          {:ok, Answer.t()} | {:error, term()}
+  def answer(%Question{} = question, who, attrs) do
+    with {:ok, [answer]} <- answer_all([{question, attrs}], who), do: {:ok, answer}
   end
 
   @doc """
@@ -606,8 +627,11 @@ defmodule Forge.Artifacts do
   and `mix forge.answer` take whatever they are sent, so the rule lives here where every answer
   passes (`docs/design/job-prompt.md` § Answering a document's questions at once).
   """
-  @spec answer_all([{Question.t(), map()}], String.t()) :: {:ok, [Answer.t()]} | {:error, term()}
-  def answer_all([_ | _] = entries, user_id) do
+  @spec answer_all([{Question.t(), map()}], Forge.Actor.t() | String.t()) ::
+          {:ok, [Answer.t()]} | {:error, term()}
+  def answer_all([_ | _] = entries, who) do
+    actor = Forge.Actor.of(who)
+
     entries = Enum.map(entries, fn {question, attrs} -> entry(question, attrs) end)
 
     with :ok <- valid_answers(entries) do
@@ -618,11 +642,11 @@ defmodule Forge.Artifacts do
       entries
       |> Enum.with_index()
       |> Enum.reduce(
-        put_version(Multi.new(), :answers, ticket_id, @answers, :document, {:user, user_id}, %{
+        put_version(Multi.new(), :answers, ticket_id, @answers, :document, actor, %{
           content: content,
           parse: false
         }),
-        fn {entry, index}, multi -> put_answer(multi, index, entry, ticket_id, user_id) end
+        fn {entry, index}, multi -> put_answer(multi, index, entry, ticket_id, actor) end
       )
       |> Repo.transaction()
       |> case do
@@ -658,18 +682,20 @@ defmodule Forge.Artifacts do
 
   defp text?(value), do: is_nil(value) or is_binary(value)
 
-  defp put_answer(multi, index, {question, choice, text}, ticket_id, user_id) do
+  defp put_answer(multi, index, {question, choice, text}, ticket_id, actor) do
     multi
     |> Multi.insert({:answer, index}, fn changes ->
-      Answer.changeset(%Answer{}, %{
-        question_id: question.id,
-        user_id: user_id,
-        choice: choice,
-        text: text,
-        artifact_version_id: changes[{:answers, :version}].id
-      })
+      Answer.changeset(
+        %Answer{},
+        Map.merge(Forge.Actor.columns(actor), %{
+          question_id: question.id,
+          choice: choice,
+          text: text,
+          artifact_version_id: changes[{:answers, :version}].id
+        })
+      )
     end)
-    |> Events.log({:event, index}, "question.answered", {:user, user_id}, fn changes ->
+    |> Events.log({:event, index}, "question.answered", actor, fn changes ->
       %{
         ticket_id: ticket_id,
         payload: %{
@@ -690,7 +716,8 @@ defmodule Forge.Artifacts do
             question: Question.t(),
             answer: Answer.t(),
             artifact: String.t(),
-            version: pos_integer()
+            version: pos_integer(),
+            token_name: String.t() | nil
           }
         ]
   def answered(ticket_id) do
@@ -699,9 +726,16 @@ defmodule Forge.Artifacts do
         join: q in assoc(ans, :question),
         join: v in assoc(q, :artifact_version),
         join: a in assoc(v, :artifact),
+        left_join: t in assoc(ans, :token),
         where: a.ticket_id == ^ticket_id,
         order_by: ans.inserted_at,
-        select: %{question: q, answer: ans, artifact: a.name, version: v.version}
+        select: %{
+          question: q,
+          answer: ans,
+          artifact: a.name,
+          version: v.version,
+          token_name: t.name
+        }
     )
   end
 
@@ -787,23 +821,25 @@ defmodule Forge.Artifacts do
           Multi.t(),
           term(),
           Version.t(),
-          String.t(),
+          Forge.Actor.t() | String.t(),
           :approved | :rejected,
           map(),
           String.t() | nil
         ) ::
           Multi.t()
-  def put_approval(multi, key, %Version{} = version, user_id, decision, transition, comment) do
+  def put_approval(multi, key, %Version{} = version, who, decision, transition, comment) do
     multi
     |> Multi.insert(
       key,
-      Approval.changeset(%Approval{}, %{
-        artifact_version_id: version.id,
-        user_id: user_id,
-        decision: decision,
-        transition: transition,
-        comment: comment
-      })
+      Approval.changeset(
+        %Approval{},
+        Map.merge(Forge.Actor.columns(who), %{
+          artifact_version_id: version.id,
+          decision: decision,
+          transition: transition,
+          comment: comment
+        })
+      )
     )
   end
 

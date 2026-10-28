@@ -302,14 +302,14 @@ defmodule Forge.Release do
           []
 
         :default ->
-          [ref: Forge.Git.Tokens.default_ref(project), write: true]
+          [ref: Forge.Git.Tokens.default_ref(project)]
 
         number ->
           ticket = Forge.Tickets.get_by_number!(project, number)
-          [ticket_id: ticket.id, ref: "refs/heads/" <> ticket.branch, write: true]
+          [ticket_id: ticket.id, ref: "refs/heads/" <> ticket.branch]
       end
 
-    {:ok, secret, token} = Forge.Git.Tokens.issue(project, scope)
+    {:ok, secret, token} = Forge.Git.Tokens.issue(project, [name: "release task"] ++ scope)
     IO.puts(Forge.Git.Url.with_token(project, secret))
     IO.puts("writes #{token.ref || "nothing"}, until #{token.expires_at}")
   end

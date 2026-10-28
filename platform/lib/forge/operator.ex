@@ -21,10 +21,12 @@ defmodule Forge.Operator do
   alias Forge.Access
   alias Forge.Accounts.Scope
   alias Forge.Accounts.User
+  alias Forge.Actor
   alias Forge.Artifacts
   alias Forge.Conversations
   alias Forge.Engine
   alias Forge.Events
+  alias Forge.Git.Token
   alias Forge.Jobs
   alias Forge.Jobs.Job
   alias Forge.Projects
@@ -33,24 +35,31 @@ defmodule Forge.Operator do
   alias Forge.Tickets
   alias Forge.Tickets.Ticket
 
+  @typedoc """
+  Who acts. A project token with API write may do the operations that say so; the rest take a
+  `%User{}` only, so a token cannot reach them by construction (`docs/design/identity.md`
+  § Where the guard lives).
+  """
+  @type actor :: User.t() | Token.t()
+
   @doc """
   Answers the open question `key`. The waiting job of the ticket's current state resumes in
   the same transaction once no blocking question on the ticket remains open, whoever wrote
   the document that carries it.
   """
-  @spec answer(Ticket.t(), User.t(), String.t(), map()) :: {:ok, Ticket.t()} | {:error, term()}
-  def answer(%Ticket{} = ticket, %User{} = user, key, attrs) do
-    with :ok <- allow(ticket, user, :use),
+  @spec answer(Ticket.t(), actor(), String.t(), map()) :: {:ok, Ticket.t()} | {:error, term()}
+  def answer(%Ticket{} = ticket, actor, key, attrs) do
+    with :ok <- allow(ticket, actor, :use),
          %{} = question <-
            Artifacts.find_open_question(ticket.id, key) || {:error, {:no_open_question, key}},
          {:ok, _answer} <-
-           Forge.Repo.transact(fn -> answer_and_resume(ticket, question, user, attrs) end) do
+           Forge.Repo.transact(fn -> answer_and_resume(ticket, question, actor, attrs) end) do
       notify(ticket)
     end
   end
 
-  defp answer_and_resume(ticket, question, user, attrs) do
-    with {:ok, answer} <- Artifacts.answer(question, user.id, attrs),
+  defp answer_and_resume(ticket, question, actor, attrs) do
+    with {:ok, answer} <- Artifacts.answer(question, Actor.of(actor), attrs),
          :ok <- resume_if_unblocked(ticket) do
       {:ok, answer}
     end
@@ -71,18 +80,20 @@ defmodule Forge.Operator do
   - `{:error, :no_answers}` — nothing to send.
   - whatever `Forge.Artifacts.answer_all/2` refuses: an empty answer, a choice that is no label.
   """
-  @spec answer_all(Ticket.t(), User.t(), String.t(), %{String.t() => map()}) ::
+  @spec answer_all(Ticket.t(), actor(), String.t(), %{String.t() => map()}) ::
           {:ok, Ticket.t()} | {:error, term()}
-  def answer_all(%Ticket{} = ticket, %User{} = user, version_id, answers) when is_map(answers) do
-    with :ok <- allow(ticket, user, :use),
+  def answer_all(%Ticket{} = ticket, actor, version_id, answers) when is_map(answers) do
+    with :ok <- allow(ticket, actor, :use),
          {:ok, _answers} <-
-           Forge.Repo.transact(fn -> answer_all_and_resume(ticket, user, version_id, answers) end) do
+           Forge.Repo.transact(fn ->
+             answer_all_and_resume(ticket, actor, version_id, answers)
+           end) do
       notify(ticket)
     end
   end
 
   # Read inside the transaction that writes, so what is checked is what is answered.
-  defp answer_all_and_resume(ticket, user, version_id, answers) do
+  defp answer_all_and_resume(ticket, actor, version_id, answers) do
     open =
       ticket.id
       |> Artifacts.open_questions()
@@ -96,7 +107,7 @@ defmodule Forge.Operator do
            answers
            |> Enum.map(fn {key, attrs} -> {by_key[key], attrs} end)
            |> Enum.sort_by(fn {question, _attrs} -> question.line end)
-           |> Artifacts.answer_all(user.id),
+           |> Artifacts.answer_all(Actor.of(actor)),
          :ok <- resume_if_unblocked(ticket) do
       {:ok, written}
     end
@@ -129,22 +140,22 @@ defmodule Forge.Operator do
   end
 
   @doc "Decides the pending transition."
-  @spec decide(Ticket.t(), User.t(), :approved | :rejected, String.t() | nil) ::
+  @spec decide(Ticket.t(), actor(), :approved | :rejected, String.t() | nil) ::
           {:ok, Ticket.t()} | {:error, term()}
-  def decide(%Ticket{} = ticket, %User{} = user, decision, comment)
+  def decide(%Ticket{} = ticket, actor, decision, comment)
       when decision in [:approved, :rejected] do
-    with :ok <- allow(ticket, user, :use),
-         {:ok, ticket} <- Engine.decide(ticket, user.id, decision, comment) do
+    with :ok <- allow(ticket, actor, :use),
+         {:ok, ticket} <- Engine.decide(ticket, Actor.of(actor), decision, comment) do
       notify(ticket)
     end
   end
 
   @doc "Takes a declared transition by hand. Options: `:outcome`, `:comment`."
-  @spec transition(Ticket.t(), User.t(), String.t(), keyword()) ::
+  @spec transition(Ticket.t(), actor(), String.t(), keyword()) ::
           {:ok, Ticket.t()} | {:error, term()}
-  def transition(%Ticket{} = ticket, %User{} = user, to, opts \\ []) do
-    with :ok <- allow(ticket, user, :use),
-         {:ok, ticket} <- Engine.choose(ticket, user.id, to, opts) do
+  def transition(%Ticket{} = ticket, actor, to, opts \\ []) do
+    with :ok <- allow(ticket, actor, :use),
+         {:ok, ticket} <- Engine.choose(ticket, Actor.of(actor), to, opts) do
       notify(ticket)
     end
   end
@@ -153,10 +164,10 @@ defmodule Forge.Operator do
   Runs the ticket's current state again (`Forge.Engine.retry/2`): after a failure, or after a
   success whose documents a person wants done afresh.
   """
-  @spec retry(Ticket.t(), User.t()) :: {:ok, Ticket.t()} | {:error, term()}
-  def retry(%Ticket{} = ticket, %User{} = user) do
-    with :ok <- allow(ticket, user, :use),
-         {:ok, ticket} <- Engine.retry(ticket, user.id) do
+  @spec retry(Ticket.t(), actor()) :: {:ok, Ticket.t()} | {:error, term()}
+  def retry(%Ticket{} = ticket, actor) do
+    with :ok <- allow(ticket, actor, :use),
+         {:ok, ticket} <- Engine.retry(ticket, Actor.of(actor)) do
       notify(ticket)
     end
   end
@@ -186,19 +197,19 @@ defmodule Forge.Operator do
   Cancels a ticket (`Forge.Engine.cancel/2`): its live jobs end and it is hidden everywhere a ticket
   is listed. Not a deletion; `restore/2` undoes it.
   """
-  @spec cancel(Ticket.t(), User.t()) :: {:ok, Ticket.t()} | {:error, term()}
-  def cancel(%Ticket{} = ticket, %User{} = user) do
-    with :ok <- allow(ticket, user, :use),
-         {:ok, ticket} <- Engine.cancel(ticket, user.id) do
+  @spec cancel(Ticket.t(), actor()) :: {:ok, Ticket.t()} | {:error, term()}
+  def cancel(%Ticket{} = ticket, actor) do
+    with :ok <- allow(ticket, actor, :use),
+         {:ok, ticket} <- Engine.cancel(ticket, Actor.of(actor)) do
       notify(ticket)
     end
   end
 
   @doc "Brings a cancelled ticket back, stuck in the state it was in (`Forge.Engine.restore/2`)."
-  @spec restore(Ticket.t(), User.t()) :: {:ok, Ticket.t()} | {:error, term()}
-  def restore(%Ticket{} = ticket, %User{} = user) do
-    with :ok <- allow(ticket, user, :use),
-         {:ok, ticket} <- Engine.restore(ticket, user.id) do
+  @spec restore(Ticket.t(), actor()) :: {:ok, Ticket.t()} | {:error, term()}
+  def restore(%Ticket{} = ticket, actor) do
+    with :ok <- allow(ticket, actor, :use),
+         {:ok, ticket} <- Engine.restore(ticket, Actor.of(actor)) do
       notify(ticket)
     end
   end
@@ -213,20 +224,20 @@ defmodule Forge.Operator do
   not a reload). It guards an accident, not a member who means it: anybody who may write here may
   reload and write the same content again.
   """
-  @spec edit(Ticket.t(), User.t(), String.t(), String.t(), String.t() | nil) ::
+  @spec edit(Ticket.t(), actor(), String.t(), String.t(), String.t() | nil) ::
           {:ok, Ticket.t()} | {:error, term()}
-  def edit(%Ticket{} = ticket, %User{} = user, name, content, base \\ nil) do
-    with :ok <- allow(ticket, user, :use),
+  def edit(%Ticket{} = ticket, actor, name, content, base \\ nil) do
+    with :ok <- allow(ticket, actor, :use),
          {:ok, _version} <-
-           Forge.Repo.transact(fn -> write_version(ticket, user, name, content, base) end) do
+           Forge.Repo.transact(fn -> write_version(ticket, actor, name, content, base) end) do
       notify(ticket)
     end
   end
 
   # Read inside the transaction that writes, so what is checked is what is overwritten.
-  defp write_version(ticket, user, name, content, base) do
+  defp write_version(ticket, actor, name, content, base) do
     with :ok <- current?(ticket, name, base) do
-      Artifacts.record_version(ticket.id, name, :document, {:user, user.id}, %{content: content})
+      Artifacts.record_version(ticket.id, name, :document, Actor.of(actor), %{content: content})
     end
   end
 
@@ -245,10 +256,10 @@ defmodule Forge.Operator do
   @doc """
   Admits a ticket into a project. A member's write, like the rest of the work.
   """
-  @spec admit(Project.t(), User.t(), map()) :: {:ok, Ticket.t()} | {:error, term()}
-  def admit(%Project{} = project, %User{} = user, attrs) do
-    with :ok <- allow(project, user, :use) do
-      Tickets.admit(project, attrs, {:user, user.id})
+  @spec admit(Project.t(), actor(), map()) :: {:ok, Ticket.t()} | {:error, term()}
+  def admit(%Project{} = project, actor, attrs) do
+    with :ok <- allow(project, actor, :use) do
+      Tickets.admit(project, attrs, Actor.of(actor))
     end
   end
 
@@ -369,11 +380,25 @@ defmodule Forge.Operator do
     with :ok <- allow(project, user, :manage), do: Forge.Secrets.delete(project, user, id)
   end
 
-  @doc "Mints a git token for the project's repository."
+  @doc """
+  Issues a project token: one secret for git and the JSON API (`docs/design/git-hosting.md`
+  § One project token, two doors). A project admin's.
+
+  `opts` are `Forge.Git.Tokens.issue/2`'s. The issuer is set here from the acting user, and a
+  `:job_id` is dropped: a job's token is the engine's to mint, and what a caller proposed is the one
+  thing nobody has verified. Logs `token.issued` with the token's id, name and accesses, never the
+  secret.
+  """
   @spec issue_token(Project.t(), User.t(), keyword()) ::
           {:ok, String.t(), Forge.Git.Token.t()} | {:error, term()}
   def issue_token(%Project{} = project, %User{} = user, opts) do
-    with :ok <- allow(project, user, :manage), do: Forge.Git.Tokens.issue(project, opts)
+    opts = opts |> Keyword.delete(:job_id) |> Keyword.put(:issued_by_id, user.id)
+
+    with :ok <- allow(project, user, :manage),
+         {:ok, secret, token} <- Forge.Git.Tokens.issue(project, opts) do
+      log_token("token.issued", user, project, token)
+      {:ok, secret, token}
+    end
   end
 
   @doc """
@@ -386,12 +411,29 @@ defmodule Forge.Operator do
   @spec revoke_token(Project.t(), User.t(), String.t()) :: {:ok, term()} | {:error, term()}
   def revoke_token(%Project{} = project, %User{} = user, token_id) do
     with :ok <- allow(project, user, :manage),
-         true <- Enum.any?(Forge.Git.Tokens.list(project), &(&1.id == token_id)) do
-      Forge.Git.Tokens.revoke(token_id)
+         true <- Enum.any?(Forge.Git.Tokens.list(project), &(&1.id == token_id)),
+         {:ok, token} <- Forge.Git.Tokens.revoke(token_id) do
+      log_token("token.revoked", user, project, token)
+      {:ok, token}
     else
       false -> {:error, :not_found}
       other -> other
     end
+  end
+
+  # What was granted and to whom, by id and name; the secret is not in the token row and so cannot
+  # be here.
+  defp log_token(type, %User{id: user_id}, %Project{id: project_id}, token) do
+    Events.append(type, {:user, user_id}, %{
+      project_id: project_id,
+      payload: %{
+        "token_id" => token.id,
+        "name" => token.name,
+        "git" => to_string(token.git_access),
+        "api" => to_string(token.api_access),
+        "expires_at" => DateTime.to_iso8601(token.expires_at)
+      }
+    })
   end
 
   @doc """
@@ -401,12 +443,12 @@ defmodule Forge.Operator do
   ticket it *made*, which is a different one. A proposal belongs to the job that wrote it rather
   than to a ticket, and a project chat's proposal has no ticket anywhere near it.
   """
-  @spec accept_proposal(String.t(), User.t(), String.t() | nil, String.t() | nil) ::
+  @spec accept_proposal(String.t(), actor(), String.t() | nil, String.t() | nil) ::
           {:ok, Ticket.t()} | {:error, term()}
-  def accept_proposal(version_id, %User{} = user, comment \\ nil, ticket_type \\ nil) do
-    with :ok <- allow_proposal(version_id, user),
+  def accept_proposal(version_id, actor, comment \\ nil, ticket_type \\ nil) do
+    with :ok <- allow_proposal(version_id, actor),
          {:ok, %Ticket{} = ticket} <-
-           Proposals.accept(version_id, user.id, comment, ticket_type) do
+           Proposals.accept(version_id, Actor.of(actor), comment, ticket_type) do
       # Both: the ticket the proposal came out of has a page that lists it, and the ticket it
       # became has one of its own that nobody is looking at yet.
       notify_origin(version_id)
@@ -415,11 +457,11 @@ defmodule Forge.Operator do
   end
 
   @doc "Declines a ticket proposal. Recorded, so the next job does not propose it again."
-  @spec decline_proposal(String.t(), User.t(), String.t() | nil) ::
+  @spec decline_proposal(String.t(), actor(), String.t() | nil) ::
           {:ok, Forge.Proposals.Decision.t()} | {:error, term()}
-  def decline_proposal(version_id, %User{} = user, comment \\ nil) do
-    with :ok <- allow_proposal(version_id, user),
-         {:ok, decision} <- Proposals.decline(version_id, user.id, comment) do
+  def decline_proposal(version_id, actor, comment \\ nil) do
+    with :ok <- allow_proposal(version_id, actor),
+         {:ok, decision} <- Proposals.decline(version_id, Actor.of(actor), comment) do
       notify_origin(version_id)
       {:ok, decision}
     end
@@ -428,8 +470,8 @@ defmodule Forge.Operator do
   # Every operation above resolves to a project the same way the objects do: a ticket carries
   # one, a proposal reaches one through the job that wrote it. There is no object here that
   # cannot answer, which is why the check is always the same two lines.
-  defp allow(%Ticket{} = ticket, %User{} = user, capability),
-    do: allow(Tickets.project_of(ticket), user, capability)
+  defp allow(%Ticket{} = ticket, actor, capability),
+    do: allow(Tickets.project_of(ticket), actor, capability)
 
   defp allow(%Job{project_id: project_id}, %User{} = user, capability),
     do: allow(Projects.get!(project_id), user, capability)
@@ -439,13 +481,17 @@ defmodule Forge.Operator do
     Access.ensure(scope, capability)
   end
 
-  defp allow_proposal(version_id, %User{} = user) do
+  defp allow(%Project{} = project, %Token{} = token, capability) do
+    Access.ensure(Scope.for_token(token, project), capability)
+  end
+
+  defp allow_proposal(version_id, actor) do
     case Proposals.get(version_id) do
       %{job: %{project_id: project_id}} when is_binary(project_id) ->
-        scope = Scope.for_project(Scope.for_user(user), Forge.Projects.get!(project_id))
+        project = Forge.Projects.get!(project_id)
         # `:not_found`, not `:forbidden`: a proposal in someone else's project has to answer the
         # same way as one that does not exist, or the refusal itself says it exists.
-        if Access.can?(scope, :use), do: :ok, else: {:error, :not_found}
+        if Access.can?(scope_of(actor, project), :use), do: :ok, else: {:error, :not_found}
 
       _absent ->
         # Let the operation report it. It already says not_found, and duplicating that here
@@ -453,6 +499,9 @@ defmodule Forge.Operator do
         :ok
     end
   end
+
+  defp scope_of(%User{} = user, project), do: Scope.for_project(Scope.for_user(user), project)
+  defp scope_of(%Token{} = token, project), do: Scope.for_token(token, project)
 
   # A proposal's page is its origin ticket's, when it has one. A project chat's has none, and
   # nothing needs telling.

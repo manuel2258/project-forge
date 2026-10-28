@@ -33,10 +33,11 @@ defmodule Forge.MixProject do
       # points on one tree: measured three times on one it read 89.12% to 89.21%. A floor set from
       # the top of that range would fail runs with nothing wrong, and a gate that fails at random
       # is a gate people learn to re-run — so the floor is raised only once the *lowest* figure
-      # clears it. It is 90 since the ticket-types branch, whose three gate runs read 90.13%,
-      # 90.06% and 90.06%; the next raise waits until the lowest clears 91.
+      # clears it. It is 91 since the project-token branch, whose two full runs (on trees a few
+      # lines apart) read 91.20% and 91.27%; before it, 90 since the ticket-types branch, whose
+      # three runs read 90.13%, 90.06% and 90.06%. The next raise waits until the lowest clears 92.
       test_coverage: [
-        summary: [threshold: 90],
+        summary: [threshold: 91],
         ignore_modules: [
           Forge.AccountsFixtures,
           Forge.DataCase,

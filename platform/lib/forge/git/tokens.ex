@@ -19,6 +19,7 @@ defmodule Forge.Git.Tokens do
   alias Forge.Tickets.Ticket
 
   @rand_size 32
+  @max_days 365
   @default_ttl_minutes 90
 
   @typedoc "What a request needs: reading advertises and fetches, writing pushes."
@@ -27,7 +28,11 @@ defmodule Forge.Git.Tokens do
   @doc """
   Issues a token for `project`. Returns the secret, which is never recoverable afterwards.
 
-  Options: `:ticket_id`, `:job_id`, `:ref` (required when writing), `:write`, `:ttl_minutes`.
+  Options: `:name` (required unless a job holds it), `:git` (`:none`, `:reader`, `:branch`,
+  `:developer`, `:admin`; default `:branch` when a `:ref` is given, else `:reader`), `:api`
+  (`:none`, `:read`, `:write`; default `:none`), `:issued_by_id`, `:ticket_id`, `:job_id`, `:ref`
+  (required for `:branch`), and the lifetime: `:days` (1..#{@max_days}, for a person's token) or
+  `:ttl_minutes` (a job's, and the default).
 
   What a `:ref` may name is `Forge.Git.Token`'s to say, and it is said against this project's
   default branch: the operator's default-branch token is mintable here and a job's is not.
@@ -35,23 +40,62 @@ defmodule Forge.Git.Tokens do
   @spec issue(Project.t(), keyword()) :: {:ok, String.t(), Token.t()} | {:error, term()}
   def issue(%Project{} = project, opts \\ []) do
     secret = :crypto.strong_rand_bytes(@rand_size)
-    ttl = Keyword.get(opts, :ttl_minutes, ttl_minutes())
+    ref = Keyword.get(opts, :ref)
 
     attrs = %{
       token_hash: hash(secret),
       project_id: project.id,
       ticket_id: Keyword.get(opts, :ticket_id),
       job_id: Keyword.get(opts, :job_id),
-      ref: Keyword.get(opts, :ref),
-      write: Keyword.get(opts, :write, false),
-      expires_at: DateTime.add(DateTime.utc_now(:second), ttl * 60, :second)
+      ref: ref,
+      name: Keyword.get(opts, :name),
+      git_access: Keyword.get(opts, :git, if(ref, do: :branch, else: :reader)),
+      api_access: Keyword.get(opts, :api, :none),
+      issued_by_id: Keyword.get(opts, :issued_by_id)
     }
 
-    with {:ok, token} <-
+    with {:ok, minutes} <- lifetime_minutes(opts),
+         attrs =
+           Map.put(
+             attrs,
+             :expires_at,
+             DateTime.add(DateTime.utc_now(:second), minutes * 60, :second)
+           ),
+         {:ok, token} <-
            Repo.insert(Token.create_changeset(%Token{}, attrs, project.default_branch)) do
       {:ok, Base.url_encode64(secret, padding: false), token}
     end
   end
+
+  # A person's lifetime is days, and bounded here so the page and the mix task share the bound; a
+  # job's is minutes and the engine's. Both given, or minutes below one, is a caller's mistake worth
+  # failing on.
+  defp lifetime_minutes(opts) do
+    case {Keyword.get(opts, :days), Keyword.get(opts, :ttl_minutes)} do
+      {nil, nil} ->
+        {:ok, ttl_minutes()}
+
+      # A job's minutes are the engine's. A person's are bounded by the same year as their days,
+      # or `mix forge.git.token --minutes` would be a way round the ceiling.
+      {nil, minutes} when is_integer(minutes) and minutes >= 1 ->
+        job_minutes(minutes, Keyword.get(opts, :job_id))
+
+      {days, nil} when is_integer(days) and days >= 1 and days <= @max_days ->
+        {:ok, days * 24 * 60}
+
+      _other ->
+        {:error, {:bad_days, @max_days}}
+    end
+  end
+
+  defp job_minutes(minutes, nil) when minutes > @max_days * 24 * 60,
+    do: {:error, {:bad_days, @max_days}}
+
+  defp job_minutes(minutes, _job_id), do: {:ok, minutes}
+
+  @doc "The longest lifetime, in days, a person's token may be issued for."
+  @spec max_days() :: pos_integer()
+  def max_days, do: @max_days
 
   @doc """
   The ref an operator's default-branch token is minted for: the one shape that may write what
@@ -77,7 +121,7 @@ defmodule Forge.Git.Tokens do
     issue(project,
       job_id: job.id,
       ref: "refs/heads/" <> Forge.Jobs.chat_branch(job),
-      write: true,
+      git: :branch,
       ttl_minutes: job_ttl_minutes(job)
     )
   end
@@ -88,7 +132,7 @@ defmodule Forge.Git.Tokens do
     issue(project,
       ticket_id: ticket.id,
       job_id: job.id,
-      write: false,
+      git: :reader,
       ttl_minutes: job_ttl_minutes(job)
     )
   end
@@ -98,7 +142,7 @@ defmodule Forge.Git.Tokens do
       ticket_id: ticket.id,
       job_id: job.id,
       ref: "refs/heads/" <> ticket.branch,
-      write: true,
+      git: :branch,
       ttl_minutes: job_ttl_minutes(job)
     )
   end
@@ -123,8 +167,8 @@ defmodule Forge.Git.Tokens do
     with {:ok, token} <- find(secret),
          true <- live?(token),
          true <- token.project_id == project.id,
-         true <- needs != :write or token.write do
-      touch(token)
+         true <- permits?(token.git_access, needs) do
+      touch(token, :git)
       {:ok, token}
     else
       _other -> :error
@@ -132,6 +176,31 @@ defmodule Forge.Git.Tokens do
   end
 
   def authorise(_secret, _project, _needs), do: :error
+
+  defp permits?(:none, _needs), do: false
+  defp permits?(_access, :read), do: true
+  defp permits?(access, :write), do: access in [:branch, :developer, :admin]
+
+  @doc """
+  Resolves a presented secret to the project token it is, for the JSON API.
+
+  Only a token nobody's job holds, with API access, that is live. `:error` for every other reason
+  — unknown, expired, revoked, a job's, git-only — so the 401 says nothing about which.
+  """
+  @spec authenticate_api(String.t() | nil) :: {:ok, Token.t()} | :error
+  def authenticate_api(secret) when is_binary(secret) do
+    with {:ok, token} <- find(secret),
+         true <- live?(token),
+         nil <- token.job_id,
+         true <- token.api_access != :none do
+      touch(token, :api)
+      {:ok, token}
+    else
+      _other -> :error
+    end
+  end
+
+  def authenticate_api(_secret), do: :error
 
   @doc """
   Resolves a presented secret to a live token **a job holds** — the grant the archive door takes
@@ -143,7 +212,7 @@ defmodule Forge.Git.Tokens do
     with {:ok, token} <- find(secret),
          true <- live?(token),
          true <- is_binary(token.job_id) do
-      touch(token)
+      touch(token, :archive)
       {:ok, token}
     else
       _other -> :error
@@ -161,6 +230,31 @@ defmodule Forge.Git.Tokens do
          true <- Plug.Crypto.secure_compare(token.token_hash, hash(raw)) do
       {:ok, token}
     end
+  end
+
+  @doc """
+  The refs the git door lets this token write, which `priv/git-hooks/pre-receive` receives as
+  `FORGE_ALLOWED_REFS`: the one branch of a `branch` token, every open ticket's branch for a
+  developer, and those plus the default branch for an admin. A reader, and a token with no git
+  access, has none. A conversation's branch is in no list: only the token its own job holds
+  names it.
+  """
+  @spec allowed_refs(Token.t(), Project.t()) :: [String.t()]
+  def allowed_refs(%Token{git_access: :branch, ref: ref}, _project), do: [ref]
+  def allowed_refs(%Token{git_access: :developer}, project), do: open_branches(project)
+
+  def allowed_refs(%Token{git_access: :admin}, project),
+    do: open_branches(project) ++ [default_ref(project)]
+
+  def allowed_refs(%Token{}, _project), do: []
+
+  defp open_branches(%Project{id: id}) do
+    Repo.all(
+      from t in Ticket,
+        where: t.project_id == ^id and t.status in ^Ticket.open_statuses(),
+        order_by: t.number,
+        select: fragment("'refs/heads/' || ?", t.branch)
+    )
   end
 
   @doc "Revokes every live token issued for `job_id`. Rows are kept: they are the audit trail."
@@ -191,7 +285,12 @@ defmodule Forge.Git.Tokens do
   """
   @spec list(Project.t()) :: [Token.t()]
   def list(%Project{id: project_id}) do
-    Repo.all(from t in Token, where: t.project_id == ^project_id, order_by: [desc: t.inserted_at])
+    Repo.all(
+      from t in Token,
+        where: t.project_id == ^project_id,
+        order_by: [desc: t.inserted_at],
+        preload: :issued_by
+    )
   end
 
   @doc """
@@ -221,11 +320,19 @@ defmodule Forge.Git.Tokens do
 
   def live?(%Token{}, _now), do: false
 
-  @doc "Deletes tokens that expired more than a day ago. Nothing calls this on a timer yet."
+  @doc """
+  Deletes a job's tokens that expired more than a day ago. Nothing calls this on a timer yet.
+
+  A token a person issued is not swept: its row is the audit record, and the author an answer or
+  a version it wrote names (`docs/design/git-hosting.md` § One project token, two doors).
+  """
   @spec sweep() :: non_neg_integer()
   def sweep do
     cutoff = DateTime.add(DateTime.utc_now(:second), -86_400, :second)
-    {count, _} = Repo.delete_all(from t in Token, where: t.expires_at < ^cutoff)
+
+    {count, _} =
+      Repo.delete_all(from t in Token, where: t.expires_at < ^cutoff and not is_nil(t.job_id))
+
     count
   end
 
@@ -241,10 +348,10 @@ defmodule Forge.Git.Tokens do
   defp live?(%Token{}), do: false
 
   # Off the request path: a credential that works must not wait on a write.
-  defp touch(%Token{id: id}) do
+  defp touch(%Token{id: id}, via) do
     Task.Supervisor.start_child(Forge.TaskSupervisor, fn ->
       Repo.update_all(from(t in Token, where: t.id == ^id),
-        set: [last_used_at: DateTime.utc_now(:second)]
+        set: [last_used_at: DateTime.utc_now(:second), last_used_via: via]
       )
     end)
 

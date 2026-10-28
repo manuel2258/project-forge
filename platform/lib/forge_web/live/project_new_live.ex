@@ -122,8 +122,8 @@ defmodule ForgeWeb.ProjectNewLive do
           >
             issue one in settings ›
           </.link>
-          . A credential writes one branch. For work, that is a branch you merge; for importing a
-          repository that already exists, settings mints one scoped to {@created.default_branch} itself, fast-forward only.
+          . For work, a credential writes a branch you merge; for importing a repository that
+          already exists, settings mints an admin token, which also writes {@created.default_branch} itself, fast-forward only.
         </p>
 
         <div class="mt-8 flex flex-col gap-2">

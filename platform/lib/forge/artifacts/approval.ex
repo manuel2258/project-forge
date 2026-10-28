@@ -16,17 +16,21 @@ defmodule Forge.Artifacts.Approval do
 
     belongs_to :artifact_version, Forge.Artifacts.Version
     belongs_to :user, Forge.Accounts.User
+    belongs_to :token, Forge.Git.Token
 
     timestamps(type: :utc_datetime, updated_at: false)
   end
 
   def changeset(approval, attrs) do
     approval
-    |> cast(attrs, [:artifact_version_id, :user_id, :decision, :comment, :transition])
-    |> validate_required([:artifact_version_id, :user_id, :decision, :transition])
+    |> cast(attrs, [:artifact_version_id, :user_id, :token_id, :decision, :comment, :transition])
+    |> validate_required([:artifact_version_id, :decision, :transition])
+    |> Forge.Actor.validate_one_author()
     |> validate_transition()
     |> foreign_key_constraint(:artifact_version_id)
     |> foreign_key_constraint(:user_id)
+    |> foreign_key_constraint(:token_id)
+    |> check_constraint(:user_id, name: :approvals_one_author)
   end
 
   defp validate_transition(changeset) do

@@ -19,10 +19,11 @@ defmodule Forge.Accounts.Scope do
   alias Forge.Accounts.User
   alias Forge.Projects.Project
 
-  defstruct user: nil, project: nil, role: nil
+  defstruct user: nil, token: nil, project: nil, role: nil
 
   @type t :: %__MODULE__{
           user: User.t() | nil,
+          token: Forge.Git.Token.t() | nil,
           project: Project.t() | nil,
           role: Forge.Projects.Member.role() | nil
         }
@@ -49,4 +50,12 @@ defmodule Forge.Accounts.Scope do
   def for_project(%__MODULE__{user: %User{} = user} = scope, %Project{} = project) do
     %{scope | project: project, role: Forge.Projects.role(project, user)}
   end
+
+  @doc """
+  The scope of a project token (`docs/design/identity.md` § Where the guard lives): no user, and
+  the project it was issued for. Whether it may do anything there is `Forge.Access`'s to say.
+  """
+  @spec for_token(Forge.Git.Token.t(), Project.t()) :: t()
+  def for_token(%Forge.Git.Token{} = token, %Project{} = project),
+    do: %__MODULE__{token: token, project: project}
 end

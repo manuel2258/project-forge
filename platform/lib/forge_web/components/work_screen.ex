@@ -161,6 +161,7 @@ defmodule ForgeWeb.WorkScreen do
         aria-label={"#{doc.name} v#{doc.latest.version}"}
         class="absolute top-0 right-0 flex min-h-[46px] items-center gap-3 pl-3 font-mono text-[12.5px] hover:underline"
       >
+        <span :if={doc.latest.author} class="opacity-50">{doc.latest.author}</span>
         v{doc.latest.version} <span class="opacity-40" aria-hidden="true">›</span>
       </.link>
 
@@ -171,6 +172,9 @@ defmodule ForgeWeb.WorkScreen do
       >
         <span aria-hidden="true" class="w-3 shrink-0"></span>
         <.doc_name entry={doc} />
+        <span :if={doc.latest.author} class="shrink-0 font-mono text-[12.5px] opacity-50">
+          {doc.latest.author}
+        </span>
         <span class="shrink-0 font-mono text-[12.5px]">v{doc.latest.version}</span>
         <span class="shrink-0 font-mono text-[12.5px] opacity-40" aria-hidden="true">›</span>
       </.link>
@@ -182,7 +186,7 @@ defmodule ForgeWeb.WorkScreen do
           href={version.href}
           class="flex min-h-[46px] items-center font-mono text-primary hover:underline"
         >
-          v{version.version}
+          v{version.version}<span :if={version.author} class="ml-1 opacity-50">{version.author}</span>
         </.link>
       </p>
     </section>
@@ -240,6 +244,7 @@ defmodule ForgeWeb.WorkScreen do
       latest: %{
         version: latest.version,
         href: href.(latest.version),
+        author: ForgeWeb.Format.author(latest.author),
         # A blob's bytes are in the store, and drawing its row does not read them.
         body:
           if(artifact.kind == :document,
@@ -248,7 +253,11 @@ defmodule ForgeWeb.WorkScreen do
       },
       earlier:
         for version <- versions |> Enum.drop(-1) |> Enum.reverse() do
-          %{version: version.version, href: href.(version.version)}
+          %{
+            version: version.version,
+            href: href.(version.version),
+            author: ForgeWeb.Format.author(version.author)
+          }
         end,
       approvable: approvable,
       approved: approvable and Artifacts.approved?(latest)

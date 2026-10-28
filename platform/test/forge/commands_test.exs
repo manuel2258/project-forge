@@ -234,7 +234,7 @@ defmodule Forge.CommandsTest do
 
       project = Forge.Projects.get!(ticket.project_id)
       assert {:ok, token} = Tokens.authorise(assignment["git"]["token"], project, :read)
-      refute token.write
+      refute token.git_access in [:branch, :developer, :admin]
       assert :error = Tokens.authorise(assignment["git"]["token"], project, :write)
 
       assert %Job{status: :running, credential_id: nil} = Jobs.get!(build.id)

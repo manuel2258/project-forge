@@ -92,7 +92,7 @@ defmodule Forge.DemoTest do
         default_branch: "main"
       })
 
-    {:ok, token, _row} = Tokens.issue(destination, ref: "refs/heads/main", write: true)
+    {:ok, token, _row} = Tokens.issue(destination, name: "t", ref: "refs/heads/main")
 
     :ok =
       Projects.put_mirror(

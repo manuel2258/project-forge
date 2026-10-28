@@ -1,7 +1,7 @@
 defmodule Forge.Artifacts.Version do
   @moduledoc """
   One immutable version of an artifact. Rows are insert-only, enforced by a database trigger.
-  `author` is `%{"kind" => "job" | "user" | "system", "id" => id | nil}`. Documents carry `content`; blobs
+  `author` is `%{"kind" => "job" | "user" | "api" | "system", "id" => id | nil}` (`api` also carries `"name"`). Documents carry `content`; blobs
   carry `blob_uri`. `meta` holds the parsed front matter.
   """
 
@@ -38,9 +38,14 @@ defmodule Forge.Artifacts.Version do
 
   defp validate_author(changeset) do
     case get_field(changeset, :author) do
-      %{"kind" => kind, "id" => id} when kind in ["job", "user"] and is_binary(id) -> changeset
-      %{"kind" => "system"} -> changeset
-      _ -> add_error(changeset, :author, "must be %{kind: job | user | system, id: id}")
+      %{"kind" => kind, "id" => id} when kind in ["job", "user", "api"] and is_binary(id) ->
+        changeset
+
+      %{"kind" => "system"} ->
+        changeset
+
+      _ ->
+        add_error(changeset, :author, "must be %{kind: job | user | api | system, id: id}")
     end
   end
 

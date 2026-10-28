@@ -290,7 +290,7 @@ commit, into a checkout on a snapshot of its warm seed, and runs the script in `
 
 **A read-only per-job token, and no write credential.** This paragraph first argued for no per-job
 token at all: the worker token the machine already holds for the channel, accepted by the git host
-as a read credential. What was built is a per-job token with `write: false`, minted at assignment
+as a read credential. What was built is a per-job token with git access `reader`, minted at assignment
 and revoked when the job ends, exactly as a workflow job's write token is. It keeps the property
 that mattered — a command pool holds no Claude credential and no write credential, and the script
 never sees either — and it costs a row per invocation. Accepting the worker token would have made

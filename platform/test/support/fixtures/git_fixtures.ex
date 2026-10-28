@@ -136,7 +136,7 @@ defmodule Forge.GitFixtures do
     dir = Path.join(tmp_dir("client"), "clone")
 
     {:ok, token, _row} =
-      Forge.Git.Tokens.issue(project, ref: "refs/heads/" <> branch, write: true)
+      Forge.Git.Tokens.issue(project, name: "t", ref: "refs/heads/" <> branch)
 
     url = Forge.Git.Url.with_token(project, token)
 

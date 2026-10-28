@@ -1,12 +1,16 @@
 defmodule Mix.Tasks.Forge.Git.Token do
-  @shortdoc "Issues a git token: mix forge.git.token PROJECT [--ticket N|--default] [--minutes 90]"
+  @shortdoc "Issues a project token: mix forge.git.token PROJECT [--git reader|developer|admin|none] [--api none|read|write] [--ticket N|--default] [--name NAME] [--days 7]"
   @moduledoc """
-  Prints a clone URL carrying a short-lived credential for the platform's git endpoint, once.
+  Prints a clone URL carrying a project token for the platform's git endpoint, once, and the bare
+  secret for the JSON API.
 
-  Without `--ticket` the token may only read. With it the token may also write that ticket's
-  branch, and nothing else. `--default` writes the project's default branch instead — the shape a
-  repository is seeded with, fast-forward only — and is the one shape no job is ever given. See
-  `docs/design/git-hosting.md`.
+  By default the token may only read git. `--git developer` also pushes the branch of any open
+  ticket and `--git admin` also fast-forwards the default branch; `--git none` leaves git out.
+  `--api read` or `--api write` opens `/api/v1` to the same secret. `--ticket N` instead scopes the
+  token to one ticket's branch, and `--default` to the project's default branch alone (the shape a
+  repository is seeded with, fast-forward only), which is the one shape no job is ever given.
+  `--days` is the lifetime (1 to 365, default 7); `--minutes` is a shorter one, for a throwaway.
+  See `docs/design/git-hosting.md` § One project token, two doors.
   """
 
   use Mix.Task
@@ -14,42 +18,97 @@ defmodule Mix.Tasks.Forge.Git.Token do
   alias Forge.{CLI, Projects, Tickets}
   alias Forge.Git.{Tokens, Url}
 
+  @git ~w(none reader developer admin)
+  @api ~w(none read write)
+
   @impl true
   def run(args) do
     {opts, positional, _} =
-      OptionParser.parse(args, strict: [ticket: :integer, default: :boolean, minutes: :integer])
+      OptionParser.parse(args,
+        strict: [
+          ticket: :integer,
+          default: :boolean,
+          minutes: :integer,
+          days: :integer,
+          name: :string,
+          git: :string,
+          api: :string
+        ]
+      )
 
     case positional do
       [name] ->
         CLI.boot()
         project = Projects.by_name(name) || CLI.fail("unknown project #{name}")
-        {:ok, secret, token} = Tokens.issue(project, scope(project, opts))
 
-        Mix.shell().info(Url.with_token(project, secret))
-        Mix.shell().info("writes #{token.ref || "nothing"}, until #{token.expires_at}")
+        case Tokens.issue(project, scope(project, opts)) do
+          {:ok, secret, token} -> print(project, secret, token)
+          {:error, reason} -> CLI.fail("not issued: #{inspect(reason)}")
+        end
 
       _ ->
-        CLI.fail("usage: mix forge.git.token PROJECT [--ticket N|--default] [--minutes 90]")
+        CLI.fail(
+          "usage: mix forge.git.token PROJECT [--git G] [--api A] [--ticket N|--default] " <>
+            "[--name NAME] [--days 7]"
+        )
     end
   end
 
+  defp print(project, secret, token) do
+    if token.git_access != :none, do: Mix.shell().info(Url.with_token(project, secret))
+    if token.api_access != :none, do: Mix.shell().info("api token: #{secret}")
+
+    Mix.shell().info(
+      "git: #{git_words(token)}, api: #{token.api_access}, until #{token.expires_at}"
+    )
+  end
+
+  defp git_words(%{git_access: :branch, ref: ref}), do: "writes #{ref}"
+  defp git_words(%{git_access: :developer}), do: "developer, writes every open ticket's branch"
+
+  defp git_words(%{git_access: :admin}),
+    do: "admin, writes every open ticket's branch and the default branch"
+
+  defp git_words(%{git_access: access}), do: to_string(access)
+
   defp scope(project, opts) do
-    minutes = Keyword.take(opts, [:minutes]) |> Keyword.get(:minutes)
-    ttl = if minutes, do: [ttl_minutes: minutes], else: []
+    base = [name: opts[:name] || "mix task", api: choice(opts[:api], @api, :none)]
+    base ++ lifetime(opts) ++ git_scope(project, opts)
+  end
 
-    case {Keyword.get(opts, :ticket), Keyword.get(opts, :default, false)} do
-      {nil, false} ->
-        ttl
-
-      {nil, true} ->
-        [ref: Tokens.default_ref(project), write: true] ++ ttl
-
-      {_number, true} ->
-        CLI.fail("--ticket and --default are two different scopes; ask for one")
-
-      {number, false} ->
-        ticket = Tickets.get_by_number!(project, number)
-        [ticket_id: ticket.id, ref: "refs/heads/" <> ticket.branch, write: true] ++ ttl
+  defp lifetime(opts) do
+    case {opts[:minutes], opts[:days]} do
+      {nil, nil} -> [days: 7]
+      {minutes, nil} -> [ttl_minutes: minutes]
+      {nil, days} -> [days: days]
+      {_minutes, _days} -> CLI.fail("--minutes and --days are two lifetimes; ask for one")
     end
+  end
+
+  # One of: a git group, one ticket's branch, or the default branch alone. They are different
+  # scopes and asking for two is a mistake worth failing on.
+  defp git_scope(project, opts) do
+    case {opts[:ticket], opts[:default] || false, opts[:git]} do
+      {nil, false, git} ->
+        [git: choice(git, @git, :reader)]
+
+      {nil, true, nil} ->
+        [ref: Tokens.default_ref(project), git: :branch]
+
+      {number, false, nil} when is_integer(number) ->
+        ticket = Tickets.get_by_number!(project, number)
+        [ticket_id: ticket.id, ref: "refs/heads/" <> ticket.branch, git: :branch]
+
+      _several ->
+        CLI.fail("--git, --ticket and --default are different scopes; ask for one")
+    end
+  end
+
+  defp choice(nil, _allowed, default), do: default
+
+  defp choice(value, allowed, _default) do
+    if value in allowed,
+      do: String.to_existing_atom(value),
+      else: CLI.fail("#{value} is not one of #{Enum.join(allowed, ", ")}")
   end
 end

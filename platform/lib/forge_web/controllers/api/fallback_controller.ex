@@ -142,6 +142,16 @@ defmodule ForgeWeb.Api.FallbackController do
 
   def call(conn, {:error, :not_found}), do: error(conn, :not_found, "not_found", nil)
 
+  # A changeset is a commit, not bytes. Where its diff is, is the whole of the answer.
+  def call(conn, {:error, :not_a_file}),
+    do:
+      error(
+        conn,
+        :unprocessable_entity,
+        "not_a_file",
+        "this version is a commit, not a file; its diff is GET /api/v1/tickets/:project/:number/review"
+      )
+
   def call(conn, {:error, {:bad_request, detail}}),
     do: error(conn, :bad_request, "bad_request", detail)
 

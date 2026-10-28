@@ -101,7 +101,8 @@ What the wrapper does set:
 | `GIT_PROTOCOL` | required: without it every v2 client silently degrades to v0 |
 | `REMOTE_USER` | `forge-job-<job id>`; becomes the reflog identity |
 | `REMOTE_ADDR`, `SERVER_PROTOCOL`, `GATEWAY_INTERFACE`, `SERVER_SOFTWARE` | CGI hygiene |
-| `FORGE_ALLOWED_REF` | the one ref this credential may write, e.g. `refs/heads/ticket/12` |
+| `FORGE_ALLOWED_REFS` | the refs this credential may write, space-separated, e.g. `refs/heads/ticket/12` (a developer's is every open ticket's branch) |
+| `FORGE_NO_REWRITE` | `1` for a developer or admin token, which may not rewrite any branch; otherwise unset |
 | `FORGE_TOKEN_ID`, `FORGE_TICKET_ID`, `FORGE_PROJECT` | identity for the hook's messages |
 | `FORGE_INTERNAL` | **`nil`**, always |
 
@@ -117,7 +118,7 @@ its lifetime is a job rather than "until revoked" — so it is its own table, `g
 the mechanics are borrowed from `Forge.Accounts.UserToken`: 32 random bytes, handed out once as
 url-safe base64, stored as a sha256 hash, looked up by hash so no secret is ever string-compared.
 
-- **Scope.** A project, a capability (`read` or `write`), and for a write token exactly one ref:
+- **Scope.** A project, a git access (a job's is `reader` or `branch`), and for a `branch` token exactly one ref:
   `refs/heads/ticket/<n>` for a ticket's job, `refs/heads/chat/<uuid>` for a conversation, or the
   project's own default branch for the token an operator mints by hand (§ Issuing a token). A job
   is never issued the third.
@@ -139,8 +140,8 @@ url-safe base64, stored as a sha256 hash, looked up by hash so no secret is ever
 - **Revocation.** When the job finishes or fails, and when it is requeued because its worker was
   lost, retired or rejoined without it (`Jobs.requeue/2`) — the next run is issued its own, and
   the old one would otherwise outlive a partitioned machine by the job's whole wall clock. A
-  waiting job keeps its token; a resumed one is issued a fresh one. Rows are kept rather than deleted: they are the audit trail behind the
-  `git.token.issued` and `git.token.revoked` events.
+  waiting job keeps its token; a resumed one is issued a fresh one. Rows are kept rather than deleted: they are the audit trail. (A job's token logs no event of its
+  own; `token.issued` and `token.revoked` are logged for the tokens a person issues and revokes.)
 
 The username in the Basic credential is ignored; the convention is `forge:<token>` so the URL form
 `http://forge:TOKEN@host/git/project.git` works with no credential helper.
@@ -187,15 +188,18 @@ operator sees a mirror that stopped working rather than a mirror that was never 
 - Only branches are written.
 - The default branch is written only with authority over it, and only fast-forward. Authority is
   either `FORGE_INTERNAL=1`, which the platform's own merge sets and the CGI strips from every
-  request it serves, or a credential whose `FORGE_ALLOWED_REF` *is* the default branch — the shape
-  § Issuing a token describes and only an operator can mint. So the default branch is
+  request it serves, or a credential whose `FORGE_ALLOWED_REFS` (space-separated; the list
+  `Tokens.allowed_refs/2` computes) names it — an *admin* project token or an old default-branch
+  token, which only an operator can mint. So the default branch is
   fast-forward-only by construction, and no credential a job holds can move it.
-- Any other branch must be exactly the credential's `FORGE_ALLOWED_REF` (or be written by the
+- Any other branch must be a member of the credential's `FORGE_ALLOWED_REFS` (one ref for a job or a
+  single-ticket token, every open ticket's branch for a developer's; or be written by the
   platform's own `FORGE_INTERNAL` push), and must be `refs/heads/ticket/<number>` or
   `refs/heads/chat/<uuid>` — the second matched to a UUID's shape rather than to `chat/*`, because
   a glob in the enforcement point would hand out the namespace. One branch per ticket or
   conversation, enforced rather than assumed.
-- A push with no `FORGE_ALLOWED_REF` and no `FORGE_INTERNAL` writes nothing.
+- A push with an empty `FORGE_ALLOWED_REFS` and no `FORGE_INTERNAL` writes nothing.
+- A developer's or admin's credential (`FORGE_NO_REWRITE=1`) is fast-forward only on every branch it may write, ticket branches included — a job may be working on one, and a rewrite would drop its commits. Only the platform's own `FORGE_INTERNAL` pushes are exempt, and none sets both.
 
 ### Non-fast-forward on a ticket branch: allowed, recorded, and pinned
 
@@ -207,8 +211,11 @@ again — it keeps both parents (§ The merge). So the common case is append-onl
 a rebase onto a moved base, is a rewrite, and refusing those would fail the job's own recovery
 path with a git error the agent cannot act on.
 
-**So the ticket branch accepts a rewrite and the default branch does not.** The ticket branch is
-scratch space with exactly one writer, and the record that matters is not the ref: it is the
+**So the ticket branch accepts a rewrite from the credentials that have a reason to rewrite it,
+and the default branch from none.** A job's token, and a single-ticket token, may rewrite the
+branch they are scoped to. A *developer* or *admin* project token is a second writer of a branch a
+job may be working on, and a rewrite would drop that job's commits, so it is fast-forward only
+everywhere (`FORGE_NO_REWRITE`, § Hooks, § The environment). The ticket branch is otherwise scratch space, and the record that matters is not the ref: it is the
 `changeset` artifact version, which pins `git:<sha>` in the database and is what an approval
 attaches to. A ref moving does not move an approval.
 
@@ -636,9 +643,38 @@ in this one module, which is what keeps the credential's handling in one place.
 clone this, push a workflow — unfollowable without a terminal. `/projects/:name/settings` issues
 them too, over `Forge.Git.Tokens.issue/2`, which is the same call the task makes.
 
-The UI may issue exactly three shapes, because they are the three an operator has a use for: a
-**read** token for the whole project, a **write** token scoped to one ticket's branch, and a
-**write** token scoped to the project's default branch. It cannot mint a job-scoped token — those
+### One project token, two doors
+
+The settings page issues **a project token**: one secret that opens git (Basic password at `/git`)
+and the JSON API (bearer at `/api/v1`), each door with its own permission, chosen at issue. A token
+is a `git_tokens` row; there is no second table and no second secret.
+
+- **Git access** is *none*, *reader* (clone and fetch the project), *one ticket's branch* (what the
+  single-ticket write token always was), *developer* (additionally pushes the branch of **any open
+  ticket** — status active or stuck — and never the default branch, a done or cancelled ticket's
+  branch, or a conversation's) or *admin* (developer, and additionally fast-forwards the default
+  branch, which replaces the default-branch-only shape below).
+- **API access** is *none*, *read* or *write*. Write does what a member can do through the API; it
+  is `:use` on `Forge.Access` for that one project and never `:manage`
+  (`api-and-ui.md` § JSON API).
+- **Name**, required, at most 60 characters: the "who" in every audit line. **Lifetime** in days,
+  1 to 365, offered at 7, checked in `Tokens.issue/2` so the page and `mix forge.git.token` share
+  it. A token with both permissions *none* is refused: "allows nothing".
+- **Who issued it** is recorded (`issued_by_id`, nilified when the user goes: a token belongs to the
+  project and outlives its issuer; only revoking, expiry or the project's deletion ends it).
+  **Last used**, and through which door (`last_used_via`: `git` or `api`;
+  `archive` on a job's token, when the archive door took it).
+- **A job's token is not one of these.** It has a `job_id`, git access *reader* or *one ticket's
+  branch*, API access *none*, and `authenticate_api/1` refuses any token with a `job_id`: both the
+  changeset and the lookup say so, so neither is the only thing standing between a running job and
+  the API.
+- **Sweeping** deletes only a job's expired tokens. A hand-minted row is an audit record and the
+  author of what it wrote.
+
+The default-branch-only shape (`git_access: admin` replaces it) is no longer minted from the page;
+rows already issued keep working until they expire.
+
+It cannot mint a job-scoped token — those
 belong to a job, are issued by the engine as part of an assignment, and are revoked when it ends.
 
 Revocation from the UI is refused for a token a job holds, for the same reason: revoking it
@@ -646,7 +682,7 @@ mid-run fails that job, and nothing would record why.
 
 ### The default-branch token, and what it costs
 
-The third shape exists for one case that has no other route: **importing a repository that already
+The default-branch-only shape exists for one case that has no other route: **importing a repository that already
 exists**. A registered project holds a single empty commit (`Forge.Git.ensure_initial_commit/2`),
 and putting a project's history into it is not a ticket, not a conversation and not a merge — there
 is no branch to review, and the thing being imported is the base every branch would be cut from.
@@ -669,7 +705,7 @@ it, and one minted for it can, fast-forward only*. What keeps the change bounded
   token cannot rewrite history the merge could not.
 - **The same TTL and the same audit as every other token.** It expires, it is revocable from the
   page that minted it, and the row records what it could do and when it was last used.
-- **Minting it is a deliberate choice of a third option**, in a dropdown that names the branch.
+- **Minting it is a deliberate choice.** The settings page offers it as git access *admin*, in a dropdown that names the branch; the mix task's `--default` and `Forge.Release` still mint the older default-branch-only shape.
 
 What it does not defend against is an operator's own token, taken while live, fast-forwarding the
 default branch — which is the same authority the operator has by pressing merge, bounded by the

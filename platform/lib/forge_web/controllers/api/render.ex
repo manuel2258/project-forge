@@ -73,6 +73,37 @@ defmodule ForgeWeb.Api.Render do
     }
   end
 
+  @doc """
+  One artifact with all its versions: enough for a client to choose what to fetch. `form` says how
+  — `text` and `file` are bytes at `.../:version/raw`, `commit` is the changeset, whose diff is the
+  review endpoint's.
+  """
+  def artifact_listing(%Artifact{} = a, versions) do
+    %{
+      name: a.name,
+      kind: a.kind,
+      versions:
+        Enum.map(versions, fn v ->
+          %{
+            number: v.version,
+            id: v.id,
+            author: v.author,
+            inserted_at: v.inserted_at,
+            content_hash: v.content_hash,
+            form: form(v)
+          }
+        end)
+    }
+  end
+
+  defp form(%Version{} = v) do
+    cond do
+      Forge.Artifacts.commit(v) -> :commit
+      is_binary(v.blob_uri) -> :file
+      true -> :text
+    end
+  end
+
   def version(%Version{} = v, name) do
     %{
       id: v.id,
@@ -260,8 +291,16 @@ defmodule ForgeWeb.Api.Render do
         choice: entry.answer.choice,
         answer_text: entry.answer.text,
         artifact: entry.artifact,
-        version: entry.version
+        version: entry.version,
+        author: answer_author(entry)
       }
     end
   end
+
+  # An answer is a person's or a token's, and says which. The token's name is as the token has it
+  # now, which for a hand-minted token is as it was issued: the row is never deleted.
+  defp answer_author(%{answer: %{token_id: token_id}, token_name: name}) when is_binary(token_id),
+    do: %{kind: "api", id: token_id, name: name}
+
+  defp answer_author(%{answer: %{user_id: user_id}}), do: %{kind: "user", id: user_id, name: nil}
 end

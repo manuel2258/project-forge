@@ -73,7 +73,7 @@ unique indexes — one over rows with a ticket, one over rows with a job. Holds 
 job that produces it finishes, so approval attaches to an exact commit.
 
 **artifact_version** — `artifact_id`, `version` (1, 2, 3 per artifact), `author`
-(`{job, id}` or `{user, id}`), `content` (documents: the text), `blob_uri` (blobs),
+(`{job, id}`, `{user, id}` or `{api, id, name}` — a project token, its name carried so a revoked one reads the same), `content` (documents: the text), `blob_uri` (blobs),
 `content_hash`, `meta` (parsed front matter, JSON), `inserted_at`. Never updated or deleted.
 
 **question** — `artifact_version_id`, `key` (stable within the document), `anchor` (the
@@ -82,16 +82,16 @@ most one recommended), `blocking` (bool), `assumption` (non-blocking only: what 
 with). Extracted from a document version at write time. There is no `default` column: the
 recommendation is a flag on its option.
 
-**answer** — `question_id`, `user_id`, `choice` (one of the question's labels, or nil), `text`
+**answer** — `question_id`, `user_id` or `token_id` (exactly one, by a check constraint), `choice` (one of the question's labels, or nil), `text`
 (free-form: the whole answer without a choice, a note beside one),
 `artifact_version_id` of the `answers` document version that records it. Answers are
 themselves versioned, attributed artifacts; this row is the queryable index.
 
-**approval** — `artifact_version_id`, `user_id`, `decision` (`approved | rejected`),
+**approval** — `artifact_version_id`, `user_id` or `token_id` (exactly one), `decision` (`approved | rejected`),
 `comment`, `transition` (`{from, to}`), `inserted_at`. Approval attaches to a version. A
 newer version has no approval until it gets one.
 
-**proposal_decision** — `artifact_version_id` (unique), `user_id`, `ticket_id` (set exactly
+**proposal_decision** — `artifact_version_id` (unique), `user_id` or `token_id` (exactly one), `ticket_id` (set exactly
 when accepted), `decision` (`accepted | declined`), `comment`. A person's decision on one ticket
 proposal. Deliberately **not** an `approval`: `approvals.transition` is required because an
 approval authorises an edge in the statechart and the engine reads it against a ticket's
@@ -101,7 +101,7 @@ approval authorises an edge in the statechart and the engine reads it against a 
 **event** — `seq` (bigserial), `project_id`, `ticket_id`, `job_id` (all nullable; `project_id`
 is denormalised so "the events I may read" is one indexed query, and null means node-wide, which
 only a node admin reads — `design/identity.md` § Read scoping is the half that leaks), `actor`
-(`system`, `{user, id}` or `{job, id}`), `type` (dotted, e.g. `ticket.admitted`,
+(`system`, `{user, id}`, `{job, id}` or `{api, id, name}`), `type` (dotted, e.g. `ticket.admitted`,
 `job.started`, `job.harness.tool_use`, `question.answered`, `transition.taken`),
 `payload` (JSON), `inserted_at`. Append only.
 
@@ -174,13 +174,16 @@ process of a job: a resume, a requeue or a reopened conversation is a new run. S
 here per credential, set from the harness's running total for that process (`Forge.Jobs.Runs`).
 
 **git_token** — `project_id`, `ticket_id`, `job_id` (the last two nullable), `token_hash`,
-`ref` (the one ref a write token may update: `refs/heads/ticket/<n>` for a ticket's job,
-`refs/heads/chat/<uuid>` for a conversation, or the project's default branch for the token an
-operator mints by hand, which no job is ever given), `write`, `expires_at`,
-`revoked_at`, `last_used_at`. The credential the git endpoint accepts. Not a user token: no user,
+`ref` (the one ref a `branch` token may update: `refs/heads/ticket/<n>` for a ticket's job,
+`refs/heads/chat/<uuid>` for a conversation, or the project's default branch for the older
+default-branch token, which no job is ever given), `name`, `git_access` (`none`, `reader`,
+`branch`, `developer`, `admin`), `api_access` (`none`, `read`, `write`), `issued_by_id`,
+`last_used_via` (`git`, `api`, or `archive` for a job's read of `docs/design/archive.md`),
+`expires_at`, `revoked_at`, `last_used_at`. Answers, approvals
+and proposal decisions have a `token_id` beside `user_id`, exactly one of the two set. The credential the git endpoint accepts. Not a user token: no user,
 a ref rather than an account for a scope, and a job rather than "until revoked" for a lifetime.
 Rows are revoked rather than deleted, because they are the audit trail behind the
-`git.token.issued` and `git.token.revoked` events.
+`token.issued` and `token.revoked` events.
 
 ## Statechart persistence
 

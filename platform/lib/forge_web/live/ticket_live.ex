@@ -899,6 +899,9 @@ defmodule ForgeWeb.TicketLive do
         </span>
         <span class="min-w-0">
           <span class="block truncate">{event.type}</span>
+          <span :if={Format.author(event.actor)} class="block truncate text-[11.5px] opacity-60">
+            {Format.author(event.actor)}
+          </span>
           <span :if={said(event)} class="block break-words font-sans text-sm/[1.4] opacity-70">
             {said(event)}
           </span>

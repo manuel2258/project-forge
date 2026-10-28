@@ -163,7 +163,7 @@ defmodule ForgeWeb.ArtifactControllerTest do
       assert response(conn, 200) == big
       assert get_resp_header(conn, "content-type") == ["application/octet-stream"]
       assert [~s(attachment; filename="pkg-v1")] = get_resp_header(conn, "content-disposition")
-      assert Path.wildcard(Path.join(System.tmp_dir!(), "forge-download/*")) == []
+      assert Path.wildcard(Path.join(System.tmp_dir!(), "plug-*/forge-download-*")) == []
     end
 
     # `docs/design/ui.md` § Artifact types: an Android app keeps its own type, which a phone's

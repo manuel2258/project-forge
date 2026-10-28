@@ -508,6 +508,9 @@ defmodule ForgeWeb.ReviewLive do
                     {entry.answer.choice}
                   </span>
                   <span :if={entry.answer.text}>{entry.answer.text}</span>
+                  <span :if={entry.answer.token_id} class="font-mono text-[12.5px] opacity-50">
+                    · API · {entry.token_name}
+                  </span>
                 </p>
                 <div class="font-mono text-[12.5px] opacity-50">
                   {entry.question.key} ·

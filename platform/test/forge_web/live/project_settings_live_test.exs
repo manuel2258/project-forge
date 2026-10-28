@@ -13,7 +13,7 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
   import Forge.GitFixtures
 
   alias Forge.Git.Tokens
-  alias Forge.{Projects, Tickets, Workers}
+  alias Forge.{Projects, Repo, Tickets, Workers}
 
   setup :register_and_log_in_user
 
@@ -30,124 +30,287 @@ defmodule ForgeWeb.ProjectSettingsLiveTest do
     %{project: project}
   end
 
-  # The ticket select only exists once the scope is `write`, and `form/3` checks its params
-  # against the rendered DOM — so the scope changes on its own first, which is also the order an
-  # operator does it in.
-  defp issue(view, %{"scope" => "write"} = params) do
-    view |> form("#token-form", %{"token" => %{"scope" => "write"}}) |> render_change()
-    view |> form("#token-form", %{"token" => params}) |> render_submit()
+  @defaults %{"name" => "ci", "git" => "reader", "api" => "none", "days" => "7"}
+
+  # The ticket select only exists once git is `branch`, and `form/3` checks its params against the
+  # rendered DOM — so git changes on its own first, which is also the order an operator does it in.
+  defp issue(view, %{"git" => "branch"} = params) do
+    view |> form("#token-form", %{"token" => %{"git" => "branch"}}) |> render_change()
+    view |> form("#token-form", %{"token" => Map.merge(@defaults, params)}) |> render_submit()
   end
 
   defp issue(view, params) do
-    view |> form("#token-form", %{"token" => params}) |> render_submit()
+    view |> form("#token-form", %{"token" => Map.merge(@defaults, params)}) |> render_submit()
   end
 
-  test "issues a read token and shows it once", %{conn: conn, project: project} do
+  test "issues a read token and shows it once, with the line that uses it", ctx do
+    %{conn: conn, project: project} = ctx
     {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
 
-    html = issue(view, %{"scope" => "read", "minutes" => "90"})
+    html = issue(view, %{"name" => "dashboard", "api" => "read"})
 
     assert html =~ "Copy this now"
     # What the token may do, said beside it: the row below can only describe it from now on.
-    assert has_element?(view, "#issued", "It read, until")
+    assert has_element?(view, "#issued", "dashboard: Git: read · API: read")
+    assert has_element?(view, "#issued", "not shown again")
+    assert html =~ ~s(id="issued-secret")
+    assert html =~ ~s(id="issued-curl")
+    assert html =~ "Authorization: Bearer"
+    assert html =~ "/api/v1/tickets"
 
-    # The URL, with a button that copies it. The value stays visible: the clipboard API needs a
-    # secure context and a LAN address over plain http is not one.
     assert html =~ ~s(id="issued-url")
     assert html =~ ~s(data-target="issued-url")
     assert html =~ "phx-hook"
     assert [token] = Tokens.list(project)
-    refute token.write
+    assert token.name == "dashboard"
+    assert token.git_access == :reader
+    assert token.api_access == :read
 
-    # The secret is in the clone URL on screen, and in nothing that is stored.
+    # The secret is on screen and in nothing that is stored, and opens both doors.
     assert [_, secret] = Regex.run(~r|forge:([A-Za-z0-9_-]+)@|, html)
-    assert {:ok, ^token} = Tokens.authorise(secret, project, :read)
+    assert {:ok, %{id: id}} = Tokens.authorise(secret, project, :read)
+    assert {:ok, %{id: ^id}} = Tokens.authenticate_api(secret)
+    assert id == token.id
 
     # Dismissing it is the last time it exists anywhere.
     refute view |> element("button", "Done") |> render_click() =~ secret
     refute render(view) =~ secret
   end
 
-  test "a write token is scoped to one ticket's branch", %{
-    conn: conn,
-    project: project,
-    user: user
-  } do
+  test "an API-only token is shown without a clone URL, and the issuer is recorded", ctx do
+    %{conn: conn, project: project, user: user} = ctx
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+
+    html = issue(view, %{"git" => "none", "api" => "write"})
+
+    refute html =~ ~s(id="issued-url")
+    assert html =~ ~s(id="issued-curl")
+    assert [token] = Tokens.list(project)
+    assert token.issued_by_id == user.id
+    assert html =~ "issued by #{user.email}"
+  end
+
+  test "nothing that writes is preselected", %{conn: conn, project: project} do
+    {:ok, view, html} = live(conn, ~p"/projects/#{project.name}/settings")
+
+    assert has_element?(
+             view,
+             ~s(#token-form select[name="token[git]"] option[selected][value=reader])
+           )
+
+    assert has_element?(
+             view,
+             ~s(#token-form select[name="token[api]"] option[selected][value=none])
+           )
+
+    assert html =~ ~s(value="7")
+  end
+
+  test "a branch token is scoped to one ticket's branch", ctx do
+    %{conn: conn, project: project, user: user} = ctx
     {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
 
     {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
 
-    html =
-      issue(view, %{"scope" => "write", "ticket" => to_string(ticket.number), "minutes" => "30"})
+    html = issue(view, %{"git" => "branch", "ticket" => to_string(ticket.number)})
 
     assert [token] = Tokens.list(project)
-    assert token.write
+    assert token.git_access == :branch
     assert token.ref == "refs/heads/" <> ticket.branch
     assert token.ticket_id == ticket.id
     assert html =~ "refs/heads/#{ticket.branch}"
   end
 
-  test "a default-branch token is offered, named after the branch, and scoped to it", %{
-    conn: conn,
-    project: project
-  } do
+  test "developer and admin tokens name no ref, and admin says what it reaches", ctx do
+    %{conn: conn, project: project} = ctx
     {:ok, view, html} = live(conn, ~p"/projects/#{project.name}/settings")
 
-    # Named after the branch rather than "the default branch", because which branch it is is the
-    # thing the operator is choosing — `docs/design/ui.md` § Project settings.
-    assert html =~ "write main, the default branch"
+    assert html =~ "push any open ticket&#39;s branch"
+    assert html =~ "the default branch"
 
-    html = issue(view, %{"scope" => "default", "minutes" => "30"})
+    issue(view, %{"name" => "dev", "git" => "developer"})
+    issue(view, %{"name" => "adm", "git" => "admin"})
 
-    assert [token] = Tokens.list(project)
-    assert token.write
-    assert token.ref == "refs/heads/main"
-    assert is_nil(token.ticket_id)
-    assert is_nil(token.job_id)
-    assert html =~ "refs/heads/main"
+    tokens = Map.new(Tokens.list(project), &{&1.name, &1})
+    assert %{git_access: :developer, ref: nil} = tokens["dev"]
+    assert %{git_access: :admin, ref: nil} = tokens["adm"]
   end
 
-  # The page may mint three shapes and only three. A job's is the engine's, and the ref a job
-  # would be given is the one this page can never ask for.
-  test "the page mints nothing wider than the branch chosen", %{
-    conn: conn,
-    project: project,
-    user: user
-  } do
+  test "a job's token cannot be asked for from the page", ctx do
+    %{conn: conn, project: project} = ctx
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+    issue(view, %{"name" => "plain"})
+
+    assert [token] = Tokens.list(project)
+    assert is_nil(token.job_id)
+    assert is_nil(token.ref)
+  end
+
+  test "a branch token with no ticket chosen is refused, not issued", ctx do
+    %{conn: conn, project: project} = ctx
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+
+    html = issue(view, %{"git" => "branch", "ticket" => ""})
+
+    assert html =~ "Choose the ticket"
+    assert Tokens.list(project) == []
+  end
+
+  test "a refusal keeps what was typed and says what to change", %{conn: conn, project: project} do
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+
+    html = issue(view, %{"name" => "keep me", "days" => "366"})
+    assert html =~ "from 1 to 365"
+    assert html =~ ~s(value="keep me")
+
+    assert issue(view, %{"name" => "x", "days" => "0"}) =~ "from 1 to 365"
+    assert issue(view, %{"name" => "x", "days" => "soon"}) =~ "from 1 to 365"
+    assert issue(view, %{"name" => "  "}) =~ "Give the token a name"
+    assert issue(view, %{"name" => "x", "git" => "none", "api" => "none"}) =~ "allows nothing"
+    assert Tokens.list(project) == []
+  end
+
+  test "a name over sixty characters is refused, and one with markup is drawn as text", ctx do
+    %{conn: conn, project: project} = ctx
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+
+    # The input's own `maxlength` is the browser's; the server says it too.
+    long = String.duplicate("n", 61)
+
+    html =
+      render_submit(view, "issue", %{
+        "token" => Map.put(@defaults, "name", long) |> Map.put("nonce", nonce(view))
+      })
+
+    assert html =~ "A name is at most 60 characters."
+    assert Tokens.list(project) == []
+
+    html = issue(view, %{"name" => "<script>alert(1)</script>"})
+    refute html =~ "<script>alert(1)"
+    assert html =~ "&lt;script&gt;"
+  end
+
+  defp nonce(view) do
+    [_, nonce] = Regex.run(~r/name="token\[nonce\]" value="([^"]+)"/, render(view))
+    nonce
+  end
+
+  test "a second submit of the same form makes no second token", %{conn: conn, project: project} do
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+    params = Map.put(@defaults, "nonce", nonce(view))
+
+    render_submit(view, "issue", %{"token" => params})
+    render_submit(view, "issue", %{"token" => params})
+
+    assert [_one] = Tokens.list(project)
+  end
+
+  test "with no tokens the section says what one is for", %{conn: conn, project: project} do
+    {:ok, _view, html} = live(conn, ~p"/projects/#{project.name}/settings")
+
+    assert html =~ "lets an outside program"
+    refute html =~ "None yet. One issued above"
+  end
+
+  test "a row says what the token may do, who issued it and when it was used", ctx do
+    %{conn: conn, project: project, user: user} = ctx
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+    issue(view, %{"name" => "nightly", "api" => "read"})
+    [token] = Tokens.list(project)
+
+    Repo.update!(
+      Ecto.Changeset.change(token, last_used_at: DateTime.utc_now(:second), last_used_via: :api)
+    )
+
+    {:ok, _view, html} = live(conn, ~p"/projects/#{project.name}/settings")
+    assert html =~ "nightly"
+    assert html =~ "Git: read · API: read"
+    assert html =~ "issued by #{user.email}"
+    assert html =~ "via api"
+  end
+
+  test "a token whose issuer has gone says so, and keeps working", ctx do
+    %{conn: conn, project: project, user: user} = ctx
+
+    {:ok, secret, token} =
+      Tokens.issue(project, name: "orphan", git: :reader, api: :read, issued_by_id: user.id)
+
+    Repo.update!(Ecto.Changeset.change(token, issued_by_id: nil))
+    {:ok, _view, html} = live(conn, ~p"/projects/#{project.name}/settings")
+
+    refute html =~ "removed account"
+    refute html =~ "issued by"
+    assert {:ok, _} = Tokens.authenticate_api(secret)
+  end
+
+  test "a hand-sent value outside the choices is refused, not a crash", ctx do
+    %{conn: conn, project: project} = ctx
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+    nonce = nonce(view)
+
+    for {field, value} <- [{"git", "root"}, {"api", "admin"}, {"days", "7abc"}] do
+      params = @defaults |> Map.put(field, value) |> Map.put("nonce", nonce)
+
+      assert render_submit(view, "issue", %{"token" => params}) =~ "Choose the" or
+               render(view) =~ "Days must be"
+    end
+
+    assert Tokens.list(project) == []
+  end
+
+  test "a branch token for a ticket that is not this project's is refused", ctx do
+    %{conn: conn, project: project, user: user} = ctx
     {:ok, ticket} = Tickets.admit(project, %{title: "Persist scores"}, {:user, user.id})
     {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
 
-    issue(view, %{"scope" => "default", "minutes" => "30"})
-    issue(view, %{"scope" => "write", "ticket" => to_string(ticket.number), "minutes" => "30"})
-    issue(view, %{"scope" => "read", "minutes" => "30"})
+    params = @defaults |> Map.merge(%{"git" => "branch", "ticket" => "#{ticket.number + 1}"})
+    html = render_submit(view, "issue", %{"token" => Map.put(params, "nonce", nonce(view))})
 
-    refs = project |> Tokens.list() |> Enum.map(& &1.ref) |> Enum.sort()
-    assert refs == [nil, "refs/heads/main", "refs/heads/" <> ticket.branch]
-    assert Enum.all?(Tokens.list(project), &is_nil(&1.job_id))
+    assert html =~ "Choose the ticket"
+    assert Tokens.list(project) == []
   end
 
-  test "a write token with no ticket chosen is refused, not issued", %{
+  test "a long name opens whole on a tap, and a short one is plain", ctx do
+    %{conn: conn, project: project} = ctx
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+    long = String.duplicate("long-name-", 5)
+    issue(view, %{"name" => long})
+    issue(view, %{"name" => "short"})
+
+    html = render(view)
+    assert html =~ ~r/<details[^>]*>\s*<summary[^>]*>\s*#{long}/
+    refute html =~ ~r/<summary[^>]*>\s*short/
+    assert html =~ "short"
+
+    # Whole inside the opened part, and drawn there once: a name over the bound is not also plain.
+    assert html =~ ~r/<p class="break-words">\s*#{long}\s*<\/p>/
+    assert length(String.split(html, long)) - 1 == 2
+  end
+
+  test "the heading counts the live tokens, not the revoked ones", %{
     conn: conn,
     project: project
   } do
-    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+    {:ok, _secret, _kept} = Tokens.issue(project, name: "kept", git: :reader, api: :read)
+    {:ok, _secret, gone} = Tokens.issue(project, name: "gone", git: :reader, api: :read)
+    {:ok, _} = Tokens.revoke(gone.id)
 
-    html = issue(view, %{"scope" => "write", "ticket" => "", "minutes" => "30"})
+    {:ok, _view, html} = live(conn, ~p"/projects/#{project.name}/settings")
 
-    assert html =~ "choose the ticket"
-    assert Tokens.list(project) == []
+    assert html =~ "Tokens · 1 live"
   end
 
-  test "minutes must be a number of minutes", %{conn: conn, project: project} do
-    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
+  test "four hundred tokens leave the page readable", %{conn: conn, project: project} do
+    for i <- 1..400,
+        do: {:ok, _, _} = Tokens.issue(project, name: "token #{i}", git: :reader, api: :read)
 
-    assert issue(view, %{"scope" => "read", "minutes" => "soon"}) =~ "whole number of minutes"
-    assert Tokens.list(project) == []
+    {:ok, _view, html} = live(conn, ~p"/projects/#{project.name}/settings")
+    assert html =~ "Tokens · 400 live"
   end
 
   test "a live token can be revoked, and then is not live", %{conn: conn, project: project} do
     {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
-    issue(view, %{"scope" => "read", "minutes" => "90"})
+    issue(view, %{})
     [token] = Tokens.list(project)
 
     html = view |> element(~s(button[phx-value-id="#{token.id}"])) |> render_click()

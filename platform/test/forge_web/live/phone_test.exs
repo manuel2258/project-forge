@@ -293,7 +293,7 @@ defmodule ForgeWeb.PhoneTest do
           user
         )
 
-      {:ok, _token, _row} = Forge.Git.Tokens.issue(project)
+      {:ok, _token, _row} = Forge.Git.Tokens.issue(project, name: "t")
 
       {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/settings")
 

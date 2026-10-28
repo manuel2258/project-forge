@@ -97,6 +97,8 @@ defmodule ForgeWeb.Router do
     get "/tickets/:project/:number/events", TicketController, :events
     get "/tickets/:project/:number/review", TicketController, :review
     get "/tickets/:project/:number/jobs/:job_id", TicketController, :job
+    get "/tickets/:project/:number/artifacts", TicketController, :artifacts
+    get "/tickets/:project/:number/artifacts/:name/:version/raw", TicketController, :raw
     get "/tickets/:project/:number/artifacts/:name", TicketController, :artifact
     post "/tickets/:project/:number/artifacts/:name", TicketController, :edit
     post "/tickets/:project/:number/answers", TicketController, :answer

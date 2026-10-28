@@ -84,12 +84,12 @@ defmodule Forge.PrivilegeTest do
     end
 
     test "a member cannot mint a git token", %{project: project, member: member} do
-      assert {:error, :forbidden} = Operator.issue_token(project, member, [])
+      assert {:error, :forbidden} = Operator.issue_token(project, member, name: "t", days: 7)
       assert Forge.Git.Tokens.list(project) == []
     end
 
     test "a member cannot revoke one", %{project: project, admin: admin, member: member} do
-      {:ok, _secret, token} = Operator.issue_token(project, admin, [])
+      {:ok, _secret, token} = Operator.issue_token(project, admin, name: "t", days: 7)
 
       assert {:error, :forbidden} = Operator.revoke_token(project, member, token.id)
       assert [%{revoked_at: nil}] = Forge.Git.Tokens.list(project)
@@ -98,7 +98,7 @@ defmodule Forge.PrivilegeTest do
     test "an admin cannot revoke another project's token", %{admin: admin, project: project} do
       other = project_fixture()
       other_admin = member_fixture(other, :admin)
-      {:ok, _secret, theirs} = Operator.issue_token(other, other_admin, [])
+      {:ok, _secret, theirs} = Operator.issue_token(other, other_admin, name: "t", days: 7)
 
       # The id is the only thing the page sends. Without resolving it to this project, any
       # admin anywhere can revoke any token on the node given its UUID.

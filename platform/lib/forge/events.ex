@@ -10,7 +10,8 @@ defmodule Forge.Events do
   alias Forge.Events.Event
   alias Forge.Repo
 
-  @type actor :: :system | {:user, String.t()} | {:job, String.t()}
+  @type actor ::
+          :system | {:user, String.t()} | {:job, String.t()} | {:api, String.t(), String.t()}
 
   @doc """
   Adds an event insert to `multi` under `name`. `attrs` may hold `:project_id`, `:ticket_id`,
@@ -360,4 +361,6 @@ defmodule Forge.Events do
   def encode_actor(:system), do: %{"kind" => "system", "id" => nil}
   def encode_actor({:user, id}), do: %{"kind" => "user", "id" => id}
   def encode_actor({:job, id}), do: %{"kind" => "job", "id" => id}
+
+  def encode_actor({:api, id, name}), do: %{"kind" => "api", "id" => id, "name" => name}
 end

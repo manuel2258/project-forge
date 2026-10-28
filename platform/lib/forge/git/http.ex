@@ -29,7 +29,7 @@ defmodule Forge.Git.Http do
   # removed. `System.cmd/3` MERGES `:env` with the BEAM's environment rather than replacing it,
   # and FORGE_INTERNAL is what pre-receive accepts as authority over the default branch: leaking
   # it into a CGI child would let any credential that reaches the network rewrite it.
-  @cleared ~w(FORGE_INTERNAL FORGE_ALLOWED_REF FORGE_TOKEN_ID FORGE_TICKET_ID FORGE_PROJECT
+  @cleared ~w(FORGE_INTERNAL FORGE_ALLOWED_REF FORGE_ALLOWED_REFS FORGE_NO_REWRITE FORGE_TOKEN_ID FORGE_TICKET_ID FORGE_PROJECT
               FORGE_GIT_TOKEN FORGE_GIT_URL)
 
   @doc """
@@ -141,7 +141,8 @@ defmodule Forge.Git.Http do
       {"SERVER_SOFTWARE", "forge"},
       {"GIT_COMMITTER_NAME", "forge"},
       {"GIT_COMMITTER_EMAIL", "forge@localhost"},
-      {"FORGE_ALLOWED_REF", token.ref},
+      {"FORGE_ALLOWED_REFS", token |> Forge.Git.Tokens.allowed_refs(project) |> allowed()},
+      {"FORGE_NO_REWRITE", if(token.git_access in [:developer, :admin], do: "1")},
       {"FORGE_TOKEN_ID", token.id},
       {"FORGE_TICKET_ID", token.ticket_id},
       {"FORGE_PROJECT", project.name}
@@ -150,6 +151,10 @@ defmodule Forge.Git.Http do
     # The cleared list comes first so a variable this request does set wins over its removal.
     Enum.uniq_by(Enum.reject(set, &(elem(&1, 1) == nil)) ++ cleared, &elem(&1, 0))
   end
+
+  # Empty is nothing to export: `pre-receive` reads an unset list as "writes nothing".
+  defp allowed([]), do: nil
+  defp allowed(refs), do: Enum.join(refs, " ")
 
   defp header(conn, name) do
     case get_req_header(conn, name) do

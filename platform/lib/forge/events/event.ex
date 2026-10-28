@@ -1,7 +1,7 @@
 defmodule Forge.Events.Event do
   @moduledoc """
   One entry in the append-only event log. `seq` is the global order. `actor` is
-  `%{"kind" => "system" | "user" | "job", "id" => id | nil}`. `type` is dotted, e.g.
+  `%{"kind" => "system" | "user" | "job" | "api", "id" => id | nil}` (an `api` actor, a project token, also carries `"name"`). `type` is dotted, e.g.
   `ticket.admitted`, `job.harness.tool_use`, `transition.taken`.
 
   `project_id` is denormalised rather than reached through the ticket or the job, because both
@@ -42,9 +42,14 @@ defmodule Forge.Events.Event do
 
   defp validate_actor(changeset) do
     case get_field(changeset, :actor) do
-      %{"kind" => "system"} -> changeset
-      %{"kind" => kind, "id" => id} when kind in ["user", "job"] and is_binary(id) -> changeset
-      _ -> add_error(changeset, :actor, "must be %{kind: system | user | job, id: id}")
+      %{"kind" => "system"} ->
+        changeset
+
+      %{"kind" => kind, "id" => id} when kind in ["user", "job", "api"] and is_binary(id) ->
+        changeset
+
+      _ ->
+        add_error(changeset, :actor, "must be %{kind: system | user | job | api, id: id}")
     end
   end
 end

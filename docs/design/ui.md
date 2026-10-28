@@ -975,12 +975,18 @@ worker token and the operator's API tokens, so the row afterwards can say what a
 and when it was last used but never what it is. The one-time display is the same shape as the
 create view's clone URL: the moment it is useful is the moment it is on screen.
 
-The form offers three scopes and no more: read the whole project, write one ticket's branch, or
-write the default branch — the last named after the branch itself, because it is the one that
-reaches what every job builds on, and a scope worth choosing on purpose.
+The form issues **a project token** (`git-hosting.md` § One project token, two doors): a name, what
+git may do (nothing, read, write one ticket's branch, push any open ticket's branch, or also the
+default branch — the last named after the branch itself, because it is the one that reaches what
+every job builds on, and a choice worth making on purpose), what the API may do (nothing, read, or
+read and change as a member can), and how many days it lasts (offered at 7, at most 365). Git reads
+and API none are selected, so nothing that writes is preselected. A hidden per-render nonce makes a
+second submit of the same form a no-op, so a double click makes one token. The one-time panel shows
+the secret, a `curl` line for the API only when the API is not none, and the clone URL only when git is not none.
 
-What a row shows is its *capability*, not its identity: the ref it may write, or that it may only
-read; when it expires; when it was last used; and whether a job holds it. A token minted for a
+What a row shows is its *capability* in a sentence — "Git: read · API: write" — beside its name
+(truncated, whole in a `title`), who issued it, when it expires, when it was last used and through
+which door, and whether a job holds it. A token minted for a
 job is listed and never offered for revocation by hand — the engine revokes it when the job ends,
 and a human revoking one mid-run would fail that job for a reason nothing records.
 

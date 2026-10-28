@@ -196,7 +196,7 @@ defmodule ForgeWeb.MembershipScopingTest do
       project: project,
       owner: owner
     } do
-      {:ok, _secret, token} = Forge.Operator.issue_token(project, owner, [])
+      {:ok, _secret, token} = Forge.Operator.issue_token(project, owner, name: "t", days: 7)
       plain = member_fixture(project, :member)
 
       {:ok, view, _html} =
@@ -214,7 +214,9 @@ defmodule ForgeWeb.MembershipScopingTest do
     } do
       victim = project_fixture()
       victim_admin = member_fixture(victim, :admin)
-      {:ok, _secret, theirs} = Forge.Operator.issue_token(victim, victim_admin, [])
+
+      {:ok, _secret, theirs} =
+        Forge.Operator.issue_token(victim, victim_admin, name: "t", days: 7)
 
       {:ok, view, _html} =
         conn |> log_in_user(owner) |> live(~p"/projects/#{project.name}/settings")
@@ -230,7 +232,7 @@ defmodule ForgeWeb.MembershipScopingTest do
       project: project,
       owner: owner
     } do
-      {:ok, _secret, token} = Forge.Operator.issue_token(project, owner, [])
+      {:ok, _secret, token} = Forge.Operator.issue_token(project, owner, name: "t", days: 7)
 
       {:ok, view, _html} =
         conn |> log_in_user(owner) |> live(~p"/projects/#{project.name}/settings")
@@ -245,7 +247,7 @@ defmodule ForgeWeb.MembershipScopingTest do
       project: project,
       owner: owner
     } do
-      {:ok, _secret, _token} = Forge.Operator.issue_token(project, owner, [])
+      {:ok, _secret, _token} = Forge.Operator.issue_token(project, owner, name: "t", days: 7)
       plain = member_fixture(project, :member)
 
       {:ok, view, _html} =

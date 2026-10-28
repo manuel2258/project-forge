@@ -987,7 +987,7 @@ defmodule Forge.Engine do
   defp commit_conflict(ticket, workflow, transition, edge, conflict, user_id, comment) do
     ticket
     |> put_decisions(transition, user_id, :approved, comment, conflict.source)
-    |> put_conflict(ticket, workflow, edge, transition.to, conflict, {:user, user_id}, comment)
+    |> put_conflict(ticket, workflow, edge, transition.to, conflict, actor(user_id), comment)
     |> Repo.transaction()
     |> case do
       # `Forge.Operator` announces what a person's act did, as it does for every other.
@@ -1002,7 +1002,7 @@ defmodule Forge.Engine do
     multi =
       case decision do
         :approved ->
-          put_transition(multi, ticket, workflow, transition, outcome, {:user, user_id},
+          put_transition(multi, ticket, workflow, transition, outcome, actor(user_id),
             comment: comment,
             source: source
           )
@@ -1064,7 +1064,7 @@ defmodule Forge.Engine do
     if transition.approve == [] do
       multi
     else
-      Events.log(multi, :decision_event, "approval.#{decision}", {:user, user_id}, %{
+      Events.log(multi, :decision_event, "approval.#{decision}", actor(user_id), %{
         ticket_id: ticket.id,
         payload: Map.put(transition_map, "comment", comment)
       })
@@ -1110,7 +1110,7 @@ defmodule Forge.Engine do
 
   defp send_down(ticket, workflow, edge, merging, conflict, user_id) do
     Multi.new()
-    |> put_conflict(ticket, workflow, edge, merging, conflict, {:user, user_id}, nil)
+    |> put_conflict(ticket, workflow, edge, merging, conflict, actor(user_id), nil)
     |> Repo.transaction()
     |> case do
       {:ok, %{ticket: moved}} -> {:ok, moved}
@@ -1172,7 +1172,8 @@ defmodule Forge.Engine do
   defp run_entry_actions(ticket, _workflow, _transition, _decision, _user_id), do: ticket
 
   defp merge_now(ticket, workflow, user_id) do
-    user = user_id && Repo.get(Forge.Accounts.User, user_id)
+    user =
+      Forge.Actor.user_id(user_id) && Repo.get(Forge.Accounts.User, Forge.Actor.user_id(user_id))
 
     case named(ticket) do
       {:ok, source} ->
@@ -1287,6 +1288,5 @@ defmodule Forge.Engine do
     end
   end
 
-  defp actor(nil), do: :system
-  defp actor(user_id), do: {:user, user_id}
+  defp actor(who), do: Forge.Actor.of(who)
 end

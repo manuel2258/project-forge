@@ -93,7 +93,9 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     "/api/v1/tickets/:project/:number/events" => :member,
     "/api/v1/tickets/:project/:number/review" => :member,
     "/api/v1/tickets/:project/:number/jobs/:job_id" => :member,
+    "/api/v1/tickets/:project/:number/artifacts" => :member,
     "/api/v1/tickets/:project/:number/artifacts/:name" => :member,
+    "/api/v1/tickets/:project/:number/artifacts/:name/:version/raw" => :member,
     "/api/v1/tickets/:project/:number/answers" => :member,
     "/api/v1/tickets/:project/:number/approve" => :member,
     "/api/v1/tickets/:project/:number/transition" => :member,
@@ -295,6 +297,20 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     "hibernated" => :owns_job,
     "failed" => :owns_job
   }
+
+  test "every API route is classified for a project token" do
+    actual =
+      for %{path: "/api/v1" <> _ = path, verb: verb} <- ForgeWeb.Router.__routes__(),
+          into: MapSet.new(),
+          do: {verb, path}
+
+    recorded = ForgeWeb.TokenRoutes.all() |> Map.keys() |> MapSet.new()
+
+    assert MapSet.to_list(MapSet.difference(actual, recorded)) == [],
+           "API route(s) with no token class: classify them in test/support/token_routes.ex"
+
+    assert MapSet.to_list(MapSet.difference(recorded, actual)) == []
+  end
 
   test "every route is recorded with the guard it carries" do
     actual = ForgeWeb.Router.__routes__() |> Enum.map(& &1.path) |> MapSet.new()

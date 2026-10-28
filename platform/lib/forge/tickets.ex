@@ -19,7 +19,7 @@ defmodule Forge.Tickets do
   `.forge/workflow.yml`, or `.forge/workflows/<type>.yml` (`docs/design/ticket-types.md`) — then
   in one transaction allocates the number under a lock on the project row, records the ticket and
   its body, creates the first pending job, and last creates the branch, so a failure leaves
-  neither a row nor a branch behind. `actor` is `{:user, id}` or `:system`.
+  neither a row nor a branch behind. `actor` is a `Forge.Actor`: `{:user, id}`, `{:api, id, name}` or `:system`.
   """
   @spec admit(Project.t(), map(), Events.actor()) :: {:ok, Ticket.t()} | {:error, term()}
   def admit(%Project{} = project, attrs, actor \\ :system) do
@@ -283,7 +283,7 @@ defmodule Forge.Tickets do
   @spec fetch(String.t(), String.t()) :: {:ok, Ticket.t(), Project.t()} | :error
   def fetch(project_name, number) when is_binary(project_name) and is_binary(number) do
     with %Project{} = project <- Projects.by_name(project_name),
-         {n, ""} when n > 0 <- Integer.parse(number),
+         {n, ""} when n > 0 and n <= 2_147_483_647 <- Integer.parse(number),
          %Ticket{} = ticket <- Repo.get_by(Ticket, project_id: project.id, number: n) do
       {:ok, ticket, project}
     else
@@ -316,8 +316,31 @@ defmodule Forge.Tickets do
   def list(nil),
     do: Repo.all(from t in visible(Ticket), order_by: [asc: t.inserted_at])
 
-  def list(%Project{id: id}),
-    do: Repo.all(from t in visible(Ticket), where: t.project_id == ^id, order_by: [asc: t.number])
+  def list(%Project{} = project), do: list(project, [])
+
+  @doc """
+  A project's listed tickets narrowed by `filters`, which combine: `:state` (a state name) and
+  `:open` (true: status active or stuck). A state no ticket is in is an empty list, not an error.
+  Cancelled tickets stay out, as in `list/1`, which a filter cannot bring back.
+  """
+  @spec list(Project.t(), keyword()) :: [Ticket.t()]
+  def list(%Project{id: id}, filters) do
+    query = from t in visible(Ticket), where: t.project_id == ^id, order_by: [asc: t.number]
+
+    query =
+      Enum.reduce(filters, query, fn
+        {:state, state}, query when is_binary(state) ->
+          from t in query, where: t.state == ^state
+
+        {:open, true}, query ->
+          from t in query, where: t.status in ^Ticket.open_statuses()
+
+        _other, query ->
+          query
+      end)
+
+    Repo.all(query)
+  end
 
   @doc """
   Every ticket of a project, cancelled ones included: for what a cancel must not change — money

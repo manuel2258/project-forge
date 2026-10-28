@@ -25,6 +25,15 @@ defmodule Forge.Access do
   A scope with no membership answers false to everything, which is what a non-member is.
   """
   @spec can?(Scope.t() | nil, capability()) :: boolean()
+  # A project token holds `:use` on its own project when its API access is write, and nothing
+  # else anywhere: not `:manage`, and not any other project. Four conditions, and the mutation
+  # that drops any is caught by `project_token_test.exs` ("Access for a token scope").
+  def can?(%Scope{token: %Forge.Git.Token{} = token, project: project}, capability)
+      when not is_nil(project),
+      do:
+        capability == :use and token.api_access == :write and token.job_id == nil and
+          token.project_id == project.id
+
   def can?(%Scope{role: role}, capability) when not is_nil(role),
     do: capability in capabilities(role)
 

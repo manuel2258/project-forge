@@ -79,7 +79,7 @@ defmodule Forge.MergeTest do
     user = user_fixture()
     join!(project, user)
 
-    {:ok, token, _row} = Tokens.issue(destination, ref: "refs/heads/main", write: true)
+    {:ok, token, _row} = Tokens.issue(destination, name: "t", ref: "refs/heads/main")
 
     :ok =
       Projects.put_mirror(

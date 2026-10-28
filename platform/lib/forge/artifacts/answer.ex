@@ -15,6 +15,7 @@ defmodule Forge.Artifacts.Answer do
 
     belongs_to :question, Forge.Artifacts.Question
     belongs_to :user, Forge.Accounts.User
+    belongs_to :token, Forge.Git.Token
     belongs_to :artifact_version, Forge.Artifacts.Version
 
     timestamps(type: :utc_datetime, updated_at: false)
@@ -22,11 +23,14 @@ defmodule Forge.Artifacts.Answer do
 
   def changeset(answer, attrs) do
     answer
-    |> cast(attrs, [:question_id, :user_id, :choice, :text, :artifact_version_id])
-    |> validate_required([:question_id, :user_id, :artifact_version_id])
+    |> cast(attrs, [:question_id, :user_id, :token_id, :choice, :text, :artifact_version_id])
+    |> validate_required([:question_id, :artifact_version_id])
+    |> Forge.Actor.validate_one_author()
     |> validate_choice_or_text()
     |> foreign_key_constraint(:question_id)
     |> foreign_key_constraint(:user_id)
+    |> foreign_key_constraint(:token_id)
+    |> check_constraint(:user_id, name: :answers_one_author)
     |> foreign_key_constraint(:artifact_version_id)
   end
 

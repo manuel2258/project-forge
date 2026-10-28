@@ -8,7 +8,7 @@ outside `Operator` altogether (§ Operations).
 
 ## Operations
 
-`Forge.Operator`, all taking the acting user:
+`Forge.Operator`, taking the acting user — a project token for the operations a token may do (`identity.md` § Where the guard lives):
 
 - `answer(ticket, user, key, %{choice, text})` — records the answer; resumes the waiting job
   when none of its blocking questions remain open.
@@ -70,23 +70,39 @@ admin.
 
 ## JSON API
 
-Base path `/api/v1`. Authentication: `Authorization: Bearer <token>`. Tokens are per user,
-created with `mix forge.token EMAIL --name NAME`, stored hashed in the users' token table
-under context `api`, shown once. Requests act as that user; every mutation is attributed
-and audited like any other.
+Base path `/api/v1`. Authentication: `Authorization: Bearer <token>`, and there are two kinds of
+bearer, tried in this order.
+
+- **A user token**, created with `mix forge.token EMAIL --name NAME`, stored hashed in the users'
+  token table under context `api`, shown once. Requests act as that user; every mutation is
+  attributed and audited like any other.
+- **A project token**, issued by a project's admin on its settings page (`git-hosting.md`
+  § One project token, two doors): the same secret that opens git, with API access *read* or
+  *write*. It reaches its own project and no other: another project's ticket, artifact or proposal
+  answers 404 with the body of a missing one. A write is authored by **`api`** — event actor
+  `{"kind": "api", "id": token id, "name": token name}` — and never by the person who issued the
+  token; the name is copied into the event and version so drawing them needs no lookup, and a
+  revoked token reads the same. A job's token is refused (401).
+
+A token with *read* gets 403 `forbidden` on every `POST`, decided before the ticket is looked up. A
+project token is always refused (403) `POST /projects` and `GET /queue`, which are a person's, and
+nothing here exposes settings, secrets, members, mirrors, tokens, conversations or workers to
+it. Every refusal to authenticate is the same 401 body.
 
 | Method and path | Purpose |
 |---|---|
-| `GET /me` | The token's user |
+| `GET /me` | The token's user; for a project token, `{token: {id, name, project, git, api, expires_at}}` |
 | `GET /queue` | The operator queue |
 | `GET /projects`, `POST /projects` | List; register `{name, default_branch}` (repository created under the platform's repos directory) |
-| `GET /tickets[?project=name]` | List tickets |
+| `GET /tickets[?project=name][&state=s][&open=true]` | List tickets. `state` filters to one state name, `open=true` to status active or stuck; they combine. A project token needs no `project` |
 | `POST /projects/:name/tickets` | Admit `{title, body, ticket_type}`; `ticket_type` is required when the project has more than one (`ticket-types.md`) |
 | `GET /tickets/:project/:number` | Ticket with jobs, artifacts, open questions, pending transition |
 | `GET /tickets/:project/:number/events` | The event timeline |
 | `GET /tickets/:project/:number/review` | The merge decision: diff, documents, presentations, the commit message, answers, cost |
 | `GET /tickets/:project/:number/jobs/:job_id` | Job with its spec and harness events |
 | `GET /tickets/:project/:number/artifacts/:name[?version=n]` | A version with content |
+| `GET /tickets/:project/:number/artifacts` | Every artifact (name, kind) with **all** its versions: number, id, author, `inserted_at`, `content_hash`, and `form` (`text`, `file` or `commit`). One call, no limit |
+| `GET /tickets/:project/:number/artifacts/:name/:version/raw` | The version's stored bytes, `:name` one encoded segment (`group%2Ffile`). The listed `content_hash` is `sha256:` of exactly these bytes for anything a worker's result or a person wrote (a blob recorded without a hash, milestone 1's, lists `uri:…` instead). Text is `text/plain`, anything else an attachment, `nosniff` on both. A commit is 422 `not_a_file` naming the review endpoint; a version that is not a positive integer, or does not exist, is 404 |
 | `POST /tickets/:project/:number/artifacts/:name` | New version `{content}` |
 | `POST /tickets/:project/:number/answers` | `{key, choice, text}` |
 | `POST /tickets/:project/:number/approve` | `{decision, comment}` |
@@ -96,6 +112,8 @@ and audited like any other.
 | `GET /projects/:project/proposals` | Open ticket proposals on the project, each with the `suggested_type` it names |
 | `POST /proposals/:version_id/accept` | `{comment, ticket_type}`; answers with the ticket it admitted |
 | `POST /proposals/:version_id/decline` | `{comment}` |
+
+`GET …/review` serves each answer with an `author` — `{kind: "user", id, name: null}` or `{kind: "api", id, name}`.
 
 A proposal is named by the **version** id, never the artifact's. A decision attaches to an exact
 version, so an API that named the artifact would let a client accept text nobody had read. There
@@ -112,7 +130,7 @@ call is its own transaction, the waiting job resumes on the call that answers it
 question, and an answer sent after that one reaches the job's next run rather than this one.
 
 Responses are plain JSON objects; errors are `{"error": {"reason": ..., "detail": ...}}`
-with 400, 401, 404, 409 or 422. No envelope, no HATEOAS, no versioning beyond the path.
+with 400, 401, 403, 404, 409 or 422. No envelope, no HATEOAS, no versioning beyond the path.
 
 ## Pages
 

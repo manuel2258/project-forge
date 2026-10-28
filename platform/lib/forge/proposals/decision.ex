@@ -22,6 +22,7 @@ defmodule Forge.Proposals.Decision do
 
     belongs_to :artifact_version, Forge.Artifacts.Version
     belongs_to :user, Forge.Accounts.User
+    belongs_to :token, Forge.Git.Token
     belongs_to :ticket, Forge.Tickets.Ticket
 
     timestamps(type: :utc_datetime, updated_at: false)
@@ -31,13 +32,16 @@ defmodule Forge.Proposals.Decision do
 
   def changeset(decision, attrs) do
     decision
-    |> cast(attrs, [:artifact_version_id, :user_id, :ticket_id, :decision, :comment])
-    |> validate_required([:artifact_version_id, :user_id, :decision])
+    |> cast(attrs, [:artifact_version_id, :user_id, :token_id, :ticket_id, :decision, :comment])
+    |> validate_required([:artifact_version_id, :decision])
+    |> Forge.Actor.validate_one_author()
     |> validate_ticket()
     |> unique_constraint(:artifact_version_id)
     |> check_constraint(:ticket_id, name: :proposal_decisions_accepted_has_ticket)
     |> foreign_key_constraint(:artifact_version_id)
     |> foreign_key_constraint(:user_id)
+    |> foreign_key_constraint(:token_id)
+    |> check_constraint(:user_id, name: :proposal_decisions_one_author)
     |> foreign_key_constraint(:ticket_id)
   end
 

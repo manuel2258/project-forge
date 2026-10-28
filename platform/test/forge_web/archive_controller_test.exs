@@ -118,7 +118,7 @@ defmodule ForgeWeb.ArchiveControllerTest do
       conn: conn,
       project: project
     } do
-      {:ok, secret, %Token{job_id: nil}} = Tokens.issue(project)
+      {:ok, secret, %Token{job_id: nil}} = Tokens.issue(project, name: "operator")
 
       assert conn |> door(secret, "/archive") |> json_response(401)
     end

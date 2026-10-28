@@ -10,6 +10,15 @@ defmodule ForgeWeb.Format do
   alias ForgeCore.Capacity
 
   @doc """
+  How a version's or an event's author reads when it was not a person or the engine: `API · name`
+  for a project token, named as it was when it wrote, so a token revoked since reads the same. Nil
+  for everyone else, whose name no page draws today.
+  """
+  @spec author(map() | nil) :: String.t() | nil
+  def author(%{"kind" => "api", "name" => name}) when is_binary(name), do: "API · " <> name
+  def author(_actor), do: nil
+
+  @doc """
   A compact relative age: `4m`, `19h`, `3d`. Seconds are `now`, because a queue item that just
   arrived does not need a number ticking on it.
   """

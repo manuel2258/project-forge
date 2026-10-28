@@ -36,7 +36,7 @@ defmodule Forge.GitTokensTest do
   end
 
   defp issue!(project, job, ref) do
-    {:ok, secret, row} = Tokens.issue(project, job_id: job.id, ref: ref, write: true)
+    {:ok, secret, row} = Tokens.issue(project, job_id: job.id, ref: ref)
     {secret, row}
   end
 
@@ -96,7 +96,7 @@ defmodule Forge.GitTokensTest do
     end
 
     test "refuses an operator's token, which holds no job", %{project: project} do
-      {:ok, secret, _row} = Tokens.issue(project)
+      {:ok, secret, _row} = Tokens.issue(project, name: "operator")
 
       assert Tokens.authorise_job(secret) == :error
     end
@@ -124,18 +124,17 @@ defmodule Forge.GitTokensTest do
   describe "what may be minted" do
     test "an operator may be given the project's default branch", %{project: project} do
       assert {:ok, _secret, token} =
-               Tokens.issue(project, ref: Tokens.default_ref(project), write: true)
+               Tokens.issue(project, name: "t", ref: Tokens.default_ref(project))
 
       assert token.ref == "refs/heads/main"
-      assert token.write
+      assert token.git_access == :branch
     end
 
     test "a job is never given it, however it is asked for", %{project: project, job_a: job} do
       assert {:error, changeset} =
                Tokens.issue(project,
                  job_id: job.id,
-                 ref: Tokens.default_ref(project),
-                 write: true
+                 ref: Tokens.default_ref(project)
                )
 
       assert "a job is never given the default branch" in errors_on(changeset).ref
@@ -199,30 +198,30 @@ defmodule Forge.GitTokensTest do
       # default nor a ticket's nor a chat's, so it cannot be minted at all. The hook reads
       # `forge.defaultBranch` from the repository for the same reason.
       assert {:error, changeset} =
-               Tokens.issue(trunk, ref: "refs/heads/main", write: true)
+               Tokens.issue(trunk, name: "t", ref: "refs/heads/main")
 
       assert [message] = errors_on(changeset).ref
       assert message =~ "refs/heads/trunk"
 
       assert {:ok, _secret, token} =
-               Tokens.issue(trunk, ref: "refs/heads/trunk", write: true)
+               Tokens.issue(trunk, name: "t", ref: "refs/heads/trunk")
 
       assert token.ref == "refs/heads/trunk"
 
       # And the other way round, so the pair says the rule rather than one example of it.
-      assert {:error, _changeset} = Tokens.issue(project, ref: "refs/heads/trunk", write: true)
+      assert {:error, _changeset} = Tokens.issue(project, name: "t", ref: "refs/heads/trunk")
     end
 
     test "a ticket's and a chat's are the only other shapes", %{project: project} do
       assert {:ok, _secret, _token} =
-               Tokens.issue(project, ref: "refs/heads/ticket/7", write: true)
+               Tokens.issue(project, name: "t", ref: "refs/heads/ticket/7")
 
       id = Ecto.UUID.generate()
 
       assert {:ok, _secret, _token} =
-               Tokens.issue(project, ref: "refs/heads/chat/#{id}", write: true)
+               Tokens.issue(project, name: "t", ref: "refs/heads/chat/#{id}")
 
-      assert {:error, changeset} = Tokens.issue(project, ref: "refs/heads/wildcat", write: true)
+      assert {:error, changeset} = Tokens.issue(project, name: "t", ref: "refs/heads/wildcat")
       assert errors_on(changeset).ref != []
     end
   end

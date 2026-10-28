@@ -127,6 +127,11 @@ Three properties this must have, and why:
 A `put` to a key that exists is refused (409). Blobs are immutable — the artifact model says so —
 and the store is not the place to discover that a job ran twice.
 
+**The archive is a third door** (`archive.md`): `/archive`, authorised by the job's git token and
+not by a store token, and it reads through `Forge.Artifacts.served/2` like the operator's route
+does, so a large file is fetched from the store into a temporary file and sent, and removed after.
+It lists a version by its id, never by a store key: a key never leaves the platform on this door.
+
 ## The local implementation
 
 `Forge.Storage.Local`, writing under `<root>/<key>`, where the root (`Forge.Storage.Local.root/0`)

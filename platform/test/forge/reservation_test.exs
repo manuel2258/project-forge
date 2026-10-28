@@ -177,7 +177,14 @@ defmodule Forge.ReservationTest do
       # One dimension at a time, so each is seen to count on its own.
       refute MapSet.member?(Workers.holders(%{demand | cores: 9}), context.worker.id)
       refute MapSet.member?(Workers.holders(%{demand | memory: 10_001}), context.worker.id)
-      refute MapSet.member?(Workers.holders(Map.put(demand, :protocol, 9)), context.worker.id)
+
+      refute MapSet.member?(
+               Workers.holders(
+                 Map.put(demand, :protocol, ForgeCore.WorkerProtocol.current() + 1)
+               ),
+               context.worker.id
+             )
+
       refute MapSet.member?(Workers.holders(%{demand | harness: "other"}), context.worker.id)
       assert Workers.holders(%{demand | project_id: Ecto.UUID.generate()}) == MapSet.new()
 

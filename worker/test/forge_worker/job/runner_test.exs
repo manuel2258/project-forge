@@ -1240,4 +1240,84 @@ defmodule ForgeWorker.Job.RunnerTest do
     {:ok, _} = Runner.await(pid, 5_000)
     assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
   end
+
+  # `docs/design/archive.md` § The worker's side: the folder is there before the harness starts and
+  # gone when the job ends, and a job that is promised one and cannot have it does not start.
+  describe "the archive" do
+    setup do
+      Application.put_env(:forge_worker, :archive_mount, ForgeWorker.RecordingMount)
+      Application.put_env(:forge_worker, :archive_test_pid, self())
+
+      on_exit(fn ->
+        for key <- [:archive_mount, :archive_test_pid, :archive_test_mount],
+            do: Application.delete_env(:forge_worker, key)
+      end)
+    end
+
+    @grant %{url: "http://platform.test", token: "secret-token"}
+
+    test "is mounted before the harness starts and released when the job ends", context do
+      pid = run(context, "success", archive: @grant)
+      assert {:ok, %Result{} = result} = Runner.await(pid, 5_000)
+
+      # Released as the job starts (what an earlier run left), mounted, and released as it ends.
+      folder = Path.join(job_dir(result), "archive")
+
+      assert [{:unmounted, ^folder}, {:mounted, _socket, ^folder}, {:unmounted, ^folder}] =
+               mounts()
+
+      assert result.outcome == :converged
+    end
+
+    defp lifecycle do
+      receive do
+        {:slice_prepared, _} -> [:slice | lifecycle()]
+        {:mounted, _, _} -> [:mounted | lifecycle()]
+        {:unmounted, _} -> [:unmounted | lifecycle()]
+      after
+        0 -> []
+      end
+    end
+
+    defp mounts do
+      receive do
+        {:mounted, _, _} = message -> [message | mounts()]
+        {:unmounted, _} = message -> [message | mounts()]
+      after
+        0 -> []
+      end
+    end
+
+    # `Slice.Systemd.prepare/1` hands the job directory to the job's user with a recursive `chown`,
+    # which on a directory that already held the mount would walk it and fail on every file.
+    test "is mounted after the slice is made and before it is released, never before", context do
+      pid =
+        run(context, "success",
+          slice: RecordingSlice,
+          slice_opts: %{reply_to: self()},
+          archive: @grant
+        )
+
+      assert {:ok, _result} = Runner.await(pid, 5_000)
+      assert lifecycle() == [:slice, :unmounted, :mounted, :unmounted]
+    end
+
+    test "is not made for a job with no grant", context do
+      pid = run(context, "success")
+      assert {:ok, _result} = Runner.await(pid, 5_000)
+
+      refute_received {:mounted, _, _}
+      refute File.exists?(Path.join([context.root, spec().job_id, "archive"]))
+    end
+
+    test "that cannot be mounted ends the job with nothing started", context do
+      Application.put_env(:forge_worker, :archive_test_mount, {:error, :boom})
+      pid = run(context, "success", archive: @grant)
+
+      assert {:ok, result} = Runner.await(pid, 5_000)
+      assert result.outcome == :error
+      assert result.exit_status == nil
+      assert events() == []
+    end
+  end
 end

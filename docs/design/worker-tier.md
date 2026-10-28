@@ -521,6 +521,30 @@ what `measure/`'s selftest already makes for the same reason
 (`docs/design/measurement-harness.md`), and stamping which one ran is part of the record there and
 here.
 
+### What the slice may see: the archive
+
+A job's directory holds one more thing than the files the worker wrote: `archive/`, the project's
+past, which is a mount (`archive.md`). The worker serves it itself, over a unix socket in a directory of its own
+(mode 0700, named at random, under the temporary directory: a socket's path may be 107 bytes and
+the job's own directory can make it longer), and root mounts it with the kernel's 9p client, read-only, `nosuid`, `nodev`
+and `noexec`, after the unit's user owns the job directory and before the unit is started. The
+unit is given no mount namespace of its own (`Slice.Systemd.flags/1` has no `Private*` or
+`Protect*`), so what is mounted on the host is what the job sees.
+
+- **The order is the point.** Made after `Dir.prepare/3` **and after `slice.prepare`**, which hands
+  the job directory to the job's user with a recursive `chown` and would walk a mount already there —
+  a download of every file in it, and an error on every one — and before the process starts; released
+  in the runner's `finish/2` and, idempotently, in `ForgeWorker.Slice.leave/2`, ahead of the
+  `chown -R` that takes the job's files back. `Slice.leave/2` is the one call all three endings of a
+  job go through.
+- **A resume is a new prepare**: the old mount is released first, and the socket and the cache are
+  new.
+- **Nothing on this machine is exposed that was not already**: the server answers what the
+  platform's door lists for that job's token, and its socket is where only root can connect, once.
+- **`FORGE_ARCHIVE=9p`** selects the kernel mount, as `FORGE_SLICE` selects the slice; unset, a
+  worker leaves a README in the folder saying there is no archive on this machine. The image sets
+  it and loads `9p` and `9pnet_fd`.
+
 ### What the slice reads while a job runs
 
 A ceiling that binds is visible from outside the job only in its cgroup, and the cgroup is plain
@@ -994,6 +1018,13 @@ know an age is a sweep that cannot get that wrong.
   than on a timer that fires when nothing is wrong. The cost is that a seldom-used project's
   closure may have to be fetched again; the alternative is a full disk, which costs every
   project at once.
+
+**A mount left by a killed worker is not retention, and is not left to age.** The archive of a job
+that was running when its worker died is still mounted when the worker starts again, and a sweep
+that removed the directory would walk it. So the worker's start unmounts every 9p mount under the
+jobs root, read from `/proc/self/mountinfo` (`ForgeWorker.Archive.sweep/2`). `Dir.sweep/2` runs
+whenever *any* job ends, so it does not do that — another job's archive is live — and releases only
+the directory it is about to remove, once that directory is stale (`ForgeWorker.Archive.release/1`).
 
 **None of this is per-job hygiene, and it should not become it.** A job's *worktree* is deleted
 the moment the job ends, because that is a snapshot whose whole cost is what the job wrote into

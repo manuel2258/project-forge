@@ -141,10 +141,10 @@ defmodule Forge.IntegratingJobTest do
   end
 
   test "needs a worker that knows how to keep the merge", %{ticket: ticket, job: job} do
-    assert Jobs.protocol(job) == 5
+    assert Jobs.protocol_needs(job)[:kind] == 5
 
     [implementing] = ticket.id |> Jobs.for_ticket() |> Enum.filter(&(&1.state == "implementing"))
-    assert Jobs.protocol(implementing) == 3
+    assert Jobs.protocol_needs(implementing)[:kind] == 3
   end
 
   test "any other job is given no default branch", context do

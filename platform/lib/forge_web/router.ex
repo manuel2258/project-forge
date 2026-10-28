@@ -119,6 +119,15 @@ defmodule ForgeWeb.Router do
     put "/*key", StoreController, :update
   end
 
+  # The worker's door to the project's archive. No session: the job's own git token authorises it,
+  # and only for the project that token was minted for (`docs/design/archive.md` § The door and
+  # its grant). `GET` and nothing else.
+  scope "/archive", ForgeWeb do
+    get "/", ArchiveController, :root
+    get "/tickets/:number", ArchiveController, :ticket
+    get "/tickets/:number/:ref", ArchiveController, :show
+  end
+
   # Liveness for a container runtime and a proxy. Forwarded from the router rather than mounted
   # on the endpoint, though it needs nothing the router does: a way in that `Router.__routes__/0`
   # cannot enumerate is a way in `AuthorizationInventoryTest` cannot make anybody classify, and

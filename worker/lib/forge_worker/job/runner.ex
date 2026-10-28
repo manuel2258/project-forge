@@ -294,12 +294,34 @@ defmodule ForgeWorker.Job.Runner do
 
     case slice(opts, spec, job_dir, plain, secrets_file) do
       {:ok, slice, context} ->
-        {executable, args} = slice.wrap(executable, args, context)
         state = %{state | slice: slice, slice_context: context}
-        {:noreply, spawn_harness(state, opts, executable, args, plain)}
+        {executable, args} = slice.wrap(executable, args, context)
+
+        {:noreply,
+         with_archive(state, opts, fn -> spawn_harness(state, opts, executable, args, plain) end)}
 
       {:error, reason} ->
         {:noreply, conclude_without_starting(state, reason)}
+    end
+  end
+
+  # The project's archive, mounted for the harness to read (`docs/design/archive.md`). **After the
+  # slice is made, and not before**: `Slice.Systemd.prepare/1` hands the job directory to the job's
+  # user with a recursive `chown`, which on a directory holding a read-only mount is a walk through
+  # every file in it and an error on each. Before the process starts, since that is the first
+  # thing that reads it. A job without a grant — a command, or a test — has no folder at all. One
+  # that cannot be made does not start: its prompt promises the folder, and a job that runs without
+  # one would be told something untrue.
+  defp with_archive(state, opts, start) do
+    case Keyword.get(opts, :archive) do
+      nil ->
+        start.()
+
+      grant ->
+        case ForgeWorker.Archive.start(state.job_dir, grant, state.spec.job_id) do
+          :ok -> start.()
+          {:error, reason} -> conclude_without_starting(state, reason)
+        end
     end
   end
 
@@ -648,6 +670,7 @@ defmodule ForgeWorker.Job.Runner do
   defp finish(state, result) do
     File.close(state.transcript)
     if state.slice, do: state.slice.cleanup(state.slice_context)
+    ForgeWorker.Archive.release(state.job_dir)
 
     result =
       result

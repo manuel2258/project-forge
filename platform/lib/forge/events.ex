@@ -67,14 +67,37 @@ defmodule Forge.Events do
     Repo.one(from r in schema, where: r.id == ^id, select: r.project_id)
   end
 
+  # **Recorded, and not listed.** A job that opens three hundred files writes three hundred of
+  # these, and every list of events here is something an operator reads: the job page, the ticket's
+  # latest events, a project's feed, a chat. `docs/design/archive.md` § What is recorded says the
+  # operator sees the count and nothing else (the job page's, and no list), so the lists leave them
+  # out and `archive_reads/1` is the one way to read them.
+  @unlisted ["job.archive_read"]
+
+  @doc "The events of one job that record which archive versions it opened, oldest first."
+  @spec archive_reads(String.t()) :: [Event.t()]
+  def archive_reads(job_id) do
+    Repo.all(
+      from e in Event,
+        where: e.job_id == ^job_id and e.type == "job.archive_read",
+        order_by: e.seq
+    )
+  end
+
   @spec for_ticket(String.t()) :: [Event.t()]
   def for_ticket(ticket_id) do
-    Repo.all(from e in Event, where: e.ticket_id == ^ticket_id, order_by: e.seq)
+    Repo.all(
+      from e in Event,
+        where: e.ticket_id == ^ticket_id and e.type not in ^@unlisted,
+        order_by: e.seq
+    )
   end
 
   @spec for_job(String.t()) :: [Event.t()]
   def for_job(job_id) do
-    Repo.all(from e in Event, where: e.job_id == ^job_id, order_by: e.seq)
+    Repo.all(
+      from e in Event, where: e.job_id == ^job_id and e.type not in ^@unlisted, order_by: e.seq
+    )
   end
 
   @doc "The newest event of `type` for a job, or nil."
@@ -128,7 +151,7 @@ defmodule Forge.Events do
   def for_project(project_id, limit) do
     Repo.all(
       from e in Event,
-        where: e.project_id == ^project_id,
+        where: e.project_id == ^project_id and e.type not in ^@unlisted,
         order_by: [desc: e.seq],
         limit: ^limit
     )

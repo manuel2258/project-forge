@@ -539,6 +539,30 @@ defmodule ForgeCore.PromptTest do
     end
   end
 
+  # `docs/design/archive.md`: the folder is live, and an agent that does not know it is not pinned
+  # cites "the plan" as if it were an input.
+  describe "what the preambles say about the archive" do
+    test "both name the folder, say it is live and not pinned, and what each failed read means" do
+      for preamble <- [Prompt.preamble(), Prompt.chat_preamble()] do
+        flat = String.replace(preamble, ~r/\s+/, " ")
+
+        assert flat =~ "$FORGE_JOB/archive/"
+        assert flat =~ "live, not pinned"
+        assert flat =~ "cite a version"
+
+        for errno <- [
+              "Connection timed out",
+              "No such file",
+              "Permission denied",
+              "Input/output error"
+            ],
+            do: assert(flat =~ errno)
+      end
+
+      assert ForgeCore.Workflow.archive_dir() == "archive"
+    end
+  end
+
   # A job is handed its ticket's type beside its number, and only when there is one.
   describe "the manifest's ticket type" do
     test "is named when the ticket has one, and absent when it does not" do
@@ -571,7 +595,7 @@ defmodule ForgeCore.PromptTest do
       assert flat =~ "$FORGE_JOB/tickets/"
       assert flat =~ "index.md"
       assert flat =~ "snapshot"
-      assert flat =~ "not yours to read"
+      assert flat =~ "body and nothing else"
     end
 
     test "a job is told how to propose, and that it is a suggestion" do

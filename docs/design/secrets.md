@@ -338,6 +338,12 @@ Rewriting a commit would change the agent's work, and the agent can push on its 
 token; a group's files are uploaded as they are, and may be binary, where a substring replaced is
 a file broken. A push carrying a value is § Open.
 
+**So the archive reads them too** (`archive.md`): a group's files are ticket files, and every job
+and chat of the project can now open them — including one that holds none of the secrets the file
+may contain. Commits were already such a channel, and a project's members can already download the
+files; what changes is that an agent can. A value in a group's file is no more protected than a value
+in a commit, and this is the same § Open.
+
 ## Surfaces
 
 - **Project settings gains Secrets** (`ui.md` § Project settings): the list for every member; set,

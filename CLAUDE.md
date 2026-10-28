@@ -44,6 +44,13 @@ which holds the grammar half. **It is built**, `resources` on a *command* includ
 driver has created and destroyed real Hetzner machines; none has yet connected to a platform and
 run a job.
 
+`docs/design/archive.md` is the standard for what a job may read of the project's past: every
+ticket's documents and files in every version and a ledger of the jobs that ran, as a read-only
+folder `$FORGE_JOB/archive/` that the worker serves over 9P and mounts, fetched when a file is
+opened and pinned to nothing. **It is built** to the platform's door and the worker's server, with
+the 9P messages spoken to the socket from the suite; the kernel mount itself needs a machine and has
+not run here (its § Not verified here).
+
 `docs/design/ticket-types.md` is the standard for ticket types: one workflow per type in
 `.forge/workflows/<type>.yml`, chosen at admission with no default, libraries of commands,
 defaults and state templates a type imports, and a proposal that may suggest a type a person

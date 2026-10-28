@@ -288,6 +288,7 @@ defmodule ForgeWorker.Job.Conversation do
       # is not a runaway. The wall clock stays as a backstop, far out.
       wall_clock_ms: assignment["wall_clock_ms"] || :timer.hours(24),
       nix_env: Application.get_env(:forge_worker, :nix_env, true),
+      archive: ForgeWorker.Archive.grant(assignment),
       extra_env: Application.get_env(:forge_worker, :extra_env, []) ++ git_env(assignment)
     ]
   end

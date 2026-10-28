@@ -157,13 +157,13 @@ defmodule Forge.PresentationTest do
   test "a job declaring a presentation or an optional output needs protocol 7", context do
     [job] = Jobs.for_ticket(context.ticket.id)
 
-    assert Jobs.protocol(job) == 7
+    assert Jobs.protocol_needs(job)[:outputs] == 7
     assert Jobs.protocol(job) <= ForgeCore.WorkerProtocol.current()
 
     # Each half on its own, and a state that declares neither asking no more than any agent job.
-    assert Jobs.protocol(respec(job, ["refinement.md", "deck.md!"], [])) == 7
-    assert Jobs.protocol(respec(job, ["refinement.md"], ["refinement.md"])) == 7
-    assert Jobs.protocol(respec(job, ["refinement.md"], [])) == 3
+    assert Jobs.protocol_needs(respec(job, ["refinement.md", "deck.md!"], []))[:outputs] == 7
+    assert Jobs.protocol_needs(respec(job, ["refinement.md"], ["refinement.md"]))[:outputs] == 7
+    assert Jobs.protocol_needs(respec(job, ["refinement.md"], []))[:outputs] == 0
   end
 
   defp respec(job, produces, optional) do

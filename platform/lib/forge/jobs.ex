@@ -53,6 +53,7 @@ defmodule Forge.Jobs do
   @secrets_protocol 6
   @optional_outputs_protocol 7
   @merge_protocol 8
+  @archive_protocol 9
 
   # How many of the merges that landed on the default branch since a ticket's base an integrating
   # job is told about by name; the rest are counted (`docs/design/job-prompt.md` § Integrating the
@@ -728,10 +729,29 @@ defmodule Forge.Jobs do
     before 8 acts on that without being able to squash a merge that is still open — the turn dies
     on `reset --soft` and every turn after it does too, which is a trap a chat could not reach
     while nothing told it the branch (ticket 11, `docs/design/worker-channel.md` § Versions).
+  - **A workflow job and a conversation need protocol 9**, which mounts their archive
+    (`docs/design/archive.md`): a release from before it starts the job without the folder and says
+    nothing, and the prompt tells the agent it is there. A command has no folder and asks nothing
+    more.
   """
   @spec protocol(Job.t()) :: non_neg_integer()
-  def protocol(%Job{} = job),
-    do: Enum.max([kind_protocol(job), secrets_protocol(job), outputs_protocol(job)])
+  def protocol(%Job{} = job), do: job |> protocol_needs() |> Keyword.values() |> Enum.max()
+
+  @doc """
+  What `protocol/1` is the largest of, by reason. The maximum hides which reason set it, and a
+  newer reason is always the larger: a test of an older one would otherwise pass whatever it did.
+  """
+  @spec protocol_needs(Job.t()) :: [{atom(), non_neg_integer()}]
+  def protocol_needs(%Job{} = job),
+    do: [
+      kind: kind_protocol(job),
+      secrets: secrets_protocol(job),
+      outputs: outputs_protocol(job),
+      archive: archive_protocol(job)
+    ]
+
+  defp archive_protocol(%Job{kind: kind}) when kind in [:workflow, :chat], do: @archive_protocol
+  defp archive_protocol(%Job{}), do: 0
 
   defp secrets_protocol(%Job{secret_names: [_ | _]}), do: @secrets_protocol
   defp secrets_protocol(%Job{}), do: 0

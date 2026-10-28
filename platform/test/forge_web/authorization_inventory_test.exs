@@ -106,6 +106,9 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
 
     # No session at all: a credential that names one key and one verb, or one ref of one repo.
     "/store/*key" => :token,
+    "/archive" => :token,
+    "/archive/tickets/:number" => :token,
+    "/archive/tickets/:number/:ref" => :token,
     "/git" => :token
   }
 

@@ -5,7 +5,7 @@ defmodule ForgeWeb.JobLive do
 
   import ForgeWeb.Indicators
 
-  alias Forge.{Artifacts, Events, Jobs, Tickets}
+  alias Forge.{Archive, Artifacts, Events, Jobs, Tickets}
   alias Forge.Jobs.Memory
   alias ForgeWeb.{FileType, Format, Indicators, JobStream, WorkScreen}
 
@@ -51,10 +51,18 @@ defmodule ForgeWeb.JobLive do
       spec: spec,
       written: written,
       written_names: MapSet.new(written, fn {artifact, _v} -> artifact.name end),
-      refusals: Jobs.refusals(job)
+      refusals: Jobs.refusals(job),
+      archive_reads: Archive.reads(job.id)
     )
     |> assign(events: events, memory: Memory.trouble(events), held: held(events))
   end
+
+  # Only a count: a title or a file name from another ticket never reaches this layout. The events
+  # behind the count are left out of every list of events (`Forge.Events.archive_reads/1` reads
+  # them), so no row of the stream names a file either (`docs/design/archive.md` § What is recorded).
+  defp archive_line(0), do: "nothing opened"
+  defp archive_line(1), do: "1 file opened"
+  defp archive_line(count), do: "#{count} files opened"
 
   # What each run held, by name and version, from its `job.secrets` record — never a value, which
   # nothing on the platform side keeps in a form this page could show (`secrets.md` § Surfaces).
@@ -332,6 +340,10 @@ defmodule ForgeWeb.JobLive do
             <div class="flex min-w-0 justify-between gap-3">
               <dt class="opacity-50">environment</dt>
               <dd class="font-mono">{@spec.env || "none"}</dd>
+            </div>
+            <div class="job-archive flex min-w-0 justify-between gap-3">
+              <dt class="opacity-50">archive</dt>
+              <dd class="font-mono">{archive_line(@archive_reads)}</dd>
             </div>
             <div class="flex min-w-0 justify-between gap-3">
               <dt class="opacity-50">budget</dt>

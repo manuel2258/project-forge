@@ -46,6 +46,14 @@ if config_env() != :test do
     other -> raise ~s(FORGE_SLICE must be "systemd" or "direct", got #{inspect(other)})
   end
 
+  # Where a job's archive folder comes from (docs/design/archive.md § The worker's side). The image
+  # says `9p`; unset, a job's archive is a README saying there is none on this machine.
+  case System.get_env("FORGE_ARCHIVE") do
+    "9p" -> config :forge_worker, archive_mount: ForgeWorker.Archive.Mount.NineP
+    nil -> :ok
+    other -> raise ~s(FORGE_ARCHIVE must be "9p", got #{inspect(other)})
+  end
+
   # Where a job's worktree comes from (docs/design/worker-tier.md § Volumes and the seed).
   # Btrfs on the image, whose root is btrfs for exactly this; Copy anywhere else, which is
   # correct without the sharing.

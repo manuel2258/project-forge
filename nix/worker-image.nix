@@ -157,6 +157,9 @@ in
   # `limine bios-install`, which is the one step repart cannot do. UEFI never reads any of it.
   # See docs/design/worker-tier.md § The worker image.
   boot.loader.grub.enable = false;
+  # The kernel's 9p client and its fd transport, which `trans=unix` rides on. Loaded at boot rather
+  # than on the first mount, so that a job's first mount does not wait on `modprobe`.
+  boot.kernelModules = [ "9p" "9pnet_fd" ];
   boot.loader.timeout = 0;
 
   image.repart = {
@@ -610,6 +613,10 @@ in
       # The root is btrfs for exactly this: a job's worktree is a snapshot of the project's
       # seed, and costs nothing until the job writes to it.
       FORGE_VOLUME = "btrfs";
+      # A job's archive is mounted with the kernel's 9p client, from a server the worker runs
+      # itself (docs/design/archive.md § The worker's side); the modules are loaded at boot, by
+      # `boot.kernelModules` above.
+      FORGE_ARCHIVE = "9p";
       FORGE_NIX_ENV = "1";
       FORGE_CLAUDE_EXECUTABLE = claudeExecutable;
       # **This covers the worker's own invocations and nothing else.** `ForgeWorker.Job.Exec`

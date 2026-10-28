@@ -545,6 +545,13 @@ That is the bug being fixed, not a misread of anything new the platform sends, a
 floor would strand tickets on machines that can still do everything else such a job needs. It
 closes when the templates move, as every protocol does.
 
+**Protocol 9 is the project's archive** (`archive.md`). A workflow job and a conversation are
+handed the platform's archive door in the git token they already hold, and the worker mounts the
+folder their prompt describes. A release from before it would start the job without the folder and
+say nothing, so these two kinds need protocol 9 (`Forge.Jobs.protocol/1`), a protocol 4-8 worker keeps
+taking commands — which have no folder — and the minimum stays 4. The change to the platform's
+side is additive; the bump is for the worker.
+
 **`uncommitted` on a turn rides along without a bump.** An older worker never sends it, and an
 older platform builds the `chat.turn` payload key by key (`Conversations.record_turn/2`) and so
 drops it: the turn is recorded as it was before, with no commit and no reason.

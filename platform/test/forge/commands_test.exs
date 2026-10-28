@@ -755,16 +755,32 @@ defmodule Forge.CommandsTest do
     # A conversation needs 8, the one that squashes a merge it left open: it is told the default
     # branch, and a release that acts on that without 8's squash loses every turn after the merge
     # (`worker-channel.md` § Versions).
+    #
+    # Its archive is the largest of these for a workflow job and a conversation, which is why the
+    # reasons are read apart (`Jobs.protocol_needs/1`): the whole would say 9 for both.
     test "asks a command for protocol 2, a workflow job 3 and a conversation 8", context do
       [job] = pending(context.ticket)
-      assert Jobs.protocol(job) == 3
+      assert Jobs.protocol_needs(job)[:kind] == 3
 
       ticket = implement(context)
       [build | _] = pending(ticket, :command)
       assert Jobs.protocol(build) == 2
       assert Jobs.harness(build) == nil
 
-      assert Jobs.protocol(%Job{kind: :chat}) == 8
+      assert Jobs.protocol_needs(%Job{kind: :chat})[:kind] == 8
+    end
+
+    # A command has no archive folder, so a worker without one may run it; the others need 9
+    # (`docs/design/archive.md` § The worker's side).
+    test "asks a workflow job and a conversation for protocol 9, and a command for nothing of it",
+         context do
+      [job] = pending(context.ticket)
+      assert Jobs.protocol(job) == 9
+      assert Jobs.protocol(%Job{kind: :chat}) == 9
+      assert Jobs.protocol_needs(job)[:archive] == 9
+
+      [build | _] = pending(implement(context), :command)
+      assert Jobs.protocol_needs(build)[:archive] == 0
     end
 
     # The scheduler's own demand: a protocol 2 release serving the project is not handed an agent,
@@ -778,10 +794,22 @@ defmodule Forge.CommandsTest do
       assert Jobs.get!(job.id).status == :pending
     end
 
+    # `docs/design/archive.md`: a release from before the archive would start the job without the
+    # folder its prompt describes, so the scheduler gives it neither a workflow job nor a chat.
+    test "the scheduler does not hand an agent to a protocol 8 release, which has no archive",
+         context do
+      [job] = pending(context.ticket)
+      _old = FakeWorker.connect(protocol: 8, project: context.project)
+      start_supervised!(Forge.Jobs.Scheduler)
+
+      assert Forge.Jobs.Scheduler.tick() == 0
+      assert Jobs.get!(job.id).status == :pending
+    end
+
     test "a worker of protocol 2 is not given an agent, and still is given a command", context do
       [job] = pending(context.ticket)
       old = Workers.get!(FakeWorker.connect(protocol: 2, project: context.project).id)
-      new = Workers.get!(FakeWorker.connect(protocol: 3, project: context.project).id)
+      new = Workers.get!(FakeWorker.connect(protocol: 9, project: context.project).id)
       agent = %{kind: :workflow, memory: 1, cores: 1, project_id: context.project.id}
       agent = Map.put(agent, :protocol, Jobs.protocol(job))
 

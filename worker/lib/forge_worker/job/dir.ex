@@ -12,6 +12,7 @@ defmodule ForgeWorker.Job.Dir do
       <root>/<job_id>/out/<name>
       <root>/<job_id>/out/proposals/<file> ticket proposals, written by the agent
       <root>/<job_id>/out/<file>           a conversation's documents; see documents/1
+      <root>/<job_id>/archive/             the project's past, a read-only mount (archive.md), or a README
       <root>/<job_id>/invoke.json          commands an agent asks to run, then removed
       <root>/<job_id>/commands/<n>-<name>.log  a resumed run's command logs, read-only
       <root>/<job_id>/commands/entered-<n>-<name>.log  the logs of the batch it was entered after
@@ -24,6 +25,7 @@ defmodule ForgeWorker.Job.Dir do
       <root>/<job_id>.worker/transcript-<run>.jsonl
       <root>/<job_id>.worker/command.log   a command job's combined output
       <root>/<job_id>.worker/blobs/<n>     a run's groups of files, staged for upload
+      <root>/<job_id>.worker/archive-cache/<ref>  what the job has opened of it, fetched whole
       <root>/<job_id>.worker/fetched/<n>   command logs fetched for a resume, before `commands/`
   """
 
@@ -424,6 +426,13 @@ defmodule ForgeWorker.Job.Dir do
     with true <- File.dir?(path),
          {:ok, %File.Stat{mtime: mtime}} <- File.stat(path, time: :posix),
          true <- mtime < cutoff do
+      # Only this directory's, and only now that it is known to be stale: this runs when any job
+      # ends, and another job's archive on the same machine is live. A mount left by a worker that
+      # was killed would have `rm_rf` walk the archive — a download of everything in it and an
+      # error on every file (`docs/design/archive.md`); the worker's start has already unmounted
+      # those, and this is the second line for one that appeared since.
+      ForgeWorker.Archive.release(path)
+
       # Not the bang form: this runs on the path that reports a job's result, and an unlinkable
       # leftover would take the link process down with it and re-queue the worker's jobs. A
       # directory that will not go away is worth a line in the log and nothing more.

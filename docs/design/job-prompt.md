@@ -119,6 +119,7 @@ $FORGE_JOB/commands/<n>-<command>.log    # a resumed run's command logs, read-on
 $FORGE_JOB/commands/entered-<n>-<command>.log  # the logs of the batch that sent it here
 $FORGE_JOB/tickets/index.md              # the project's tickets and open proposals, read-only
 $FORGE_JOB/tickets/<number>.md           # one ticket's body
+$FORGE_JOB/archive/                      # the project's past, read-only and live (archive.md)
 $FORGE_JOB/conversation.md               # a reopened conversation's past, read-only
 $FORGE_JOB/platform/platform.md          # how the platform works, read-only
 $FORGE_JOB/platform/workflow-grammar.md  # workflow-grammar-v1.md as compiled in, read-only
@@ -135,6 +136,11 @@ file is opened by the worker's shell before the harness starts, which inherits i
 a conversation's directory also holds `history/` (`conversations.md` § Context) and, once it has
 been reopened, `conversation.md` — what was said before this process started, from the spec's
 `replay` (`conversations.md` § Lifetime). `Dir.prepare/3` removes it when the spec carries none.
+
+`archive/` is `archive.md`: a read-only mount of the project's past, outside the repository like
+the rest of the directory, made after `Dir.prepare/3` and gone with the job — a resume gets a new
+one. The prompt says in one sentence that it is live and not pinned, so a document read there is
+cited by version and is not an input anyone approved for this job.
 
 On a resume the spec, the prompt, `inputs/`, `platform/`, `tickets/` and `conversation.md` are
 rewritten; `out/`,

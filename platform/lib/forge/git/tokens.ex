@@ -120,9 +120,7 @@ defmodule Forge.Git.Tokens do
   def authorise(secret, project, needs)
 
   def authorise(secret, %Project{} = project, needs) when is_binary(secret) do
-    with {:ok, raw} <- Base.url_decode64(secret, padding: false),
-         %Token{} = token <- Repo.one(from t in Token, where: t.token_hash == ^hash(raw)),
-         true <- Plug.Crypto.secure_compare(token.token_hash, hash(raw)),
+    with {:ok, token} <- find(secret),
          true <- live?(token),
          true <- token.project_id == project.id,
          true <- needs != :write or token.write do
@@ -134,6 +132,36 @@ defmodule Forge.Git.Tokens do
   end
 
   def authorise(_secret, _project, _needs), do: :error
+
+  @doc """
+  Resolves a presented secret to a live token **a job holds** — the grant the archive door takes
+  (`docs/design/archive.md`). An operator's token has no job and is refused, as is every other
+  failure, identically: `:error`.
+  """
+  @spec authorise_job(String.t() | nil) :: {:ok, Token.t()} | :error
+  def authorise_job(secret) when is_binary(secret) do
+    with {:ok, token} <- find(secret),
+         true <- live?(token),
+         true <- is_binary(token.job_id) do
+      touch(token)
+      {:ok, token}
+    else
+      _other -> :error
+    end
+  end
+
+  def authorise_job(_secret), do: :error
+
+  # The row a presented secret names. Found by its hash, so the index does the matching; the
+  # comparison after it is an equivalent mutant (the row was selected by that very equality) kept as
+  # the belt and braces the moduledoc describes, and no test can make the two disagree.
+  defp find(secret) do
+    with {:ok, raw} <- Base.url_decode64(secret, padding: false),
+         %Token{} = token <- Repo.one(from t in Token, where: t.token_hash == ^hash(raw)),
+         true <- Plug.Crypto.secure_compare(token.token_hash, hash(raw)) do
+      {:ok, token}
+    end
+  end
 
   @doc "Revokes every live token issued for `job_id`. Rows are kept: they are the audit trail."
   @spec revoke_for_job(String.t()) :: non_neg_integer()

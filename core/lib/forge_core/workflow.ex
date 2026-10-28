@@ -54,6 +54,7 @@ defmodule ForgeCore.Workflow do
   @proposals "proposals"
   @proposal_prefix "proposal-"
   @tickets_dir "tickets"
+  @archive_dir "archive"
   @replay "conversation.md"
 
   @enforce_keys [:initial, :states, :transitions, :limits]
@@ -162,6 +163,10 @@ defmodule ForgeCore.Workflow do
   what else exists. See `docs/design/ticket-proposals.md` § Reading the backlog.
   """
   def tickets_dir, do: @tickets_dir
+
+  @doc "The read-only folder of the project's past in a job directory (`docs/design/archive.md`)."
+  @spec archive_dir() :: String.t()
+  def archive_dir, do: @archive_dir
 
   @doc """
   The file in `$FORGE_JOB` holding what a reopened conversation had already said, for the new

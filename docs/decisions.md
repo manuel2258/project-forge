@@ -23,8 +23,11 @@ These decisions are settled. They are not to be reopened.
   ticket; beyond it, it can only speak. See `design/ticket-proposals.md`.
 - **Every job is handed the project's tickets and its open proposals**, as a snapshot composed
   when the job is assigned with its hash recorded. It is the one input that is not pinned to a
-  version, because a generated index has no version to pin. Bodies only: another ticket's
-  artifacts are pinned to jobs that are not this one.
+  version, because a generated index has no version to pin. `tickets/` is bodies only, and the
+  pinned `inputs/` stay the only approvable input. What a job may *read* is wider: the project's
+  archive — every ticket's documents and files in every version, and a ledger of the jobs that ran —
+  is a live, read-only folder fetched on open and pinned to nothing, because the person who owns the
+  project chose that over handing it all over at every start. See `design/archive.md`.
 
 ## Jobs
 

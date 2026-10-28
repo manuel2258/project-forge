@@ -574,6 +574,20 @@ which are best-effort.
 What changes for a node that is already running, where the change is in what the platform does
 with rows it already has. Newest first.
 
+- **A workflow job and a conversation are given the project's archive, and need protocol 9**
+  (`design/archive.md`, `design/worker-channel.md` § Versions). Nothing is refused: the minimum
+  stays 4, and an older machine still takes every command. But **no workflow job and no
+  conversation runs until a machine speaks 9** — and that is every agent job of every project, which
+  makes this the broadest entry below. Build a snapshot from this release (`bin/hetzner-image`) and
+  point each template at it **before admitting work**, and `bin/worker-update` every permanent
+  machine. Until then a ticket sticks with *no worker template … runs a worker new enough for it*
+  (a placement stick: pointing a template at a new snapshot brings it back; a template on the
+  `latest` mark waits instead of sticking, with the `image_too_old` sentence), and a chat waits. The
+  image now sets `FORGE_ARCHIVE=9p` and loads `9p` and `9pnet_fd`; a worker run by hand without
+  `FORGE_ARCHIVE` puts a README where the folder would be. Nothing on the platform side needs a
+  migration. What the platform now serves, at `/archive`, is read with a job's own git token and
+  only for that job's project.
+
 - **A conversation merges the default branch, and needs protocol 8**
   (`design/conversations.md` § Commits, `design/worker-channel.md` § Versions). Nothing is
   refused: the minimum stays 4, and an older machine takes every workflow job and command exactly

@@ -238,6 +238,32 @@ defmodule ForgeWorker.Job.DirTest do
       assert File.dir?(recent)
     end
 
+    # This runs when any job ends. Another job's archive on the machine is live, and unmounting it
+    # leaves that job with an empty mountpoint under a prompt that promises the folder.
+    @tag :tmp_dir
+    test "releases the archive of a directory it removes, and of no other", %{tmp_dir: tmp_dir} do
+      Application.put_env(:forge_worker, :archive_mount, ForgeWorker.RecordingMount)
+      Application.put_env(:forge_worker, :archive_test_pid, self())
+
+      on_exit(fn ->
+        for key <- [:archive_mount, :archive_test_pid],
+            do: Application.delete_env(:forge_worker, key)
+      end)
+
+      old = Path.join(tmp_dir, "11111111-1111-1111-1111-111111111111")
+      recent = Path.join(tmp_dir, "22222222-2222-2222-2222-222222222222")
+      File.mkdir_p!(Path.join(old, "home"))
+      File.mkdir_p!(Path.join(recent, "home"))
+      File.touch!(old, System.os_time(:second) - 8 * 24 * 60 * 60)
+
+      assert Dir.sweep(tmp_dir, 7 * 24 * 60 * 60 * 1000) == 1
+
+      released = Path.join(old, "archive")
+      live = Path.join(recent, "archive")
+      assert_received {:unmounted, ^released}
+      refute_received {:unmounted, ^live}
+    end
+
     @tag :tmp_dir
     test "a root that is not there yet is not an error", %{tmp_dir: tmp_dir} do
       assert Dir.sweep(Path.join(tmp_dir, "no-jobs-have-run"), 1000) == 0

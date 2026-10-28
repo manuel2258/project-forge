@@ -8,10 +8,11 @@ defmodule Forge.Backlog do
 
   Three rules it exists to keep:
 
-  **Bodies only, never artifacts.** Another ticket's `plan.md` is reasoning at versions this job
-  did not pin, and handing it over is how "artifacts are the contract" quietly stops being true:
-  a job would be building on a document that is not in its manifest and cannot be approved on
-  its behalf. A body says what the work is, which is all that duplicate suppression needs.
+  **Bodies only here; the artifacts are in the archive.** `tickets/` hands over a ticket's body and
+  nothing else: another ticket's `plan.md` is reasoning at versions this job did not pin, so it is
+  not an input anyone approved for this job. It can be read from `$FORGE_JOB/archive/`, which is
+  live and says so (`docs/design/archive.md`). A body says what the work is, which is all that
+  duplicate suppression needs.
 
   **Open proposals sit beside the tickets.** A proposal is a document rather than a ticket row,
   so an agent looking at the ticket list would not see one — and three jobs would each propose

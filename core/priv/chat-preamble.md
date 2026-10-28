@@ -29,6 +29,15 @@ checkout is yours until the conversation ends or goes idle.
 - `$FORGE_JOB/tickets/` — the project's tickets. `index.md` is one line each, plus any open
   proposals and the project's ticket types when it has them; a numbered file holds that ticket's
   body. Read-only, and a snapshot taken when this process started.
+- `$FORGE_JOB/archive/` — the project's past, read-only: `index.md` has a line per ticket, `jobs.tsv`
+  one per job that ran, and each ticket's folder holds every version of every document and file it
+  produced, `plan.md` being the latest and `plan.v001.md` the first. Nothing is copied in advance; a
+  file is fetched when you open it. **It is live, not pinned**: later versions may appear, and what
+  is there was not approved for this conversation, so cite a version rather than assume the latest.
+  A read that fails says why: *Connection timed out* — the platform is unreachable, try later; *No
+  such file* — it is gone; *Permission denied* — this conversation's access has ended;
+  *Input/output error* — it arrived damaged or the platform could not serve it, try again. Not here: transcripts (that is `history/`),
+  open proposals, the changeset.
 - `$FORGE_JOB/out/<name>` — documents you write to be kept; see below.
 - `$FORGE_JOB/out/proposals/<name>.md` — ticket proposals; see below.
 - `$FORGE_JOB/spec.json` — the specification this conversation was started with.

@@ -218,9 +218,9 @@ defmodule ForgeWeb.SecretsDeliveryTest do
     # release has to speak the protocol it asks for, or no job holding one is ever placed.
     test "that holds a secret needs a worker that speaks protocol 6", %{project: project} do
       {_ticket, job} = admit(project)
-      assert Jobs.protocol(job) == 6
+      assert Jobs.protocol_needs(job)[:secrets] == 6
       assert Jobs.protocol(job) <= ForgeCore.WorkerProtocol.current()
-      assert Jobs.protocol(%{job | secret_names: []}) == 3
+      assert Jobs.protocol_needs(%{job | secret_names: []})[:secrets] == 0
       assert Jobs.protocol(%Job{kind: :command, secret_names: ["X_KEY"]}) == 6
       assert Jobs.protocol(%Job{kind: :command, secret_names: []}) == 2
     end

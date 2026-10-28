@@ -84,6 +84,43 @@ defmodule Forge.GitTokensTest do
     assert Repo.get!(Token, row.id).revoked_at == then
   end
 
+  # `docs/design/archive.md` § The door and its grant: the archive is opened by a job's token and
+  # by no other, and by one that is still alive.
+  describe "authorise_job" do
+    test "accepts a live token a job holds", %{project: project, job_a: job} do
+      {:ok, secret, row} = Tokens.issue(project, job_id: job.id)
+
+      assert {:ok, %Token{id: id, job_id: job_id}} = Tokens.authorise_job(secret)
+      assert id == row.id
+      assert job_id == job.id
+    end
+
+    test "refuses an operator's token, which holds no job", %{project: project} do
+      {:ok, secret, _row} = Tokens.issue(project)
+
+      assert Tokens.authorise_job(secret) == :error
+    end
+
+    test "refuses a revoked token, and an expired one", %{project: project, job_a: job} do
+      {:ok, revoked, _row} = Tokens.issue(project, job_id: job.id)
+      Tokens.revoke_for_job(job.id)
+      assert Tokens.authorise_job(revoked) == :error
+
+      {:ok, expired, row} = Tokens.issue(project, job_id: job.id)
+      past = DateTime.add(DateTime.utc_now(:second), -1, :second)
+      Repo.update!(Ecto.Changeset.change(row, expires_at: past))
+      assert Tokens.authorise_job(expired) == :error
+    end
+
+    test "refuses what is not a token, identically", %{project: project, job_a: job} do
+      {:ok, _secret, _row} = Tokens.issue(project, job_id: job.id)
+
+      for secret <- [nil, "", "not base64 !!", Base.url_encode64("short", padding: false), 7] do
+        assert Tokens.authorise_job(secret) == :error
+      end
+    end
+  end
+
   describe "what may be minted" do
     test "an operator may be given the project's default branch", %{project: project} do
       assert {:ok, _secret, token} =

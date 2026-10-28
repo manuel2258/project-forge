@@ -5,7 +5,7 @@
 # notes rely on. Units are started with the worker's own code (slice.exs), never with flags
 # written here.
 #
-#     guest.sh identity | oom-child | oom-main | readings | secrets | forgery | wedge | health | reboot
+#     guest.sh identity | oom-child | oom-main | readings | secrets | archive | forgery | wedge | health | reboot
 set -uo pipefail
 
 here=$(dirname "$(readlink -f "$0")")
@@ -160,6 +160,44 @@ secrets() {
     fail "the loader did not read the unit's credential"
 }
 
+# The project's archive (docs/design/archive.md): a job's folder is mounted by the worker's own code
+# against a platform that is not there, which is enough to see what the kernel adds — that the mount
+# is made as 9p and read-only, that the job's user can look at it and cannot write to it, that a read
+# fails as "Connection timed out" and not as a hang, and that it is gone when the worker releases it.
+# The release is kept alive by archive.exs for the length of the checks, because the server is a
+# process of the BEAM that made it.
+archive() {
+  local id=a1a1a1a1-0000-4000-8000-000000000000 job_dir=$root/jobs/a1a1a1a1-0000-4000-8000-000000000000
+  local dir=$job_dir/archive ready=/tmp/forge-archive-ready finished=/tmp/forge-archive-finished pid out
+  rm -f "$ready" "$finished"
+  FJ_ID=$id FJ_READY=$ready FJ_DONE=$finished \
+    "$root/release/bin/forge_worker" eval "Code.eval_file(\"$here/archive.exs\")" &
+  pid=$!
+  for _ in $(seq 1 100); do
+    [ -e "$ready" ] && break
+    sleep 0.1
+  done
+  [ -e "$ready" ] || fail "the archive was not mounted within ten seconds"
+  findmnt -n -o FSTYPE,OPTIONS "$dir" | tee /dev/stderr | grep -q '^9p .*\bro\b' ||
+    fail "the archive is not a read-only 9p mount"
+  out=$(setpriv --reuid=nobody --regid=nogroup --clear-groups ls -ld "$dir" 2>&1) ||
+    fail "a job's user cannot look at the archive: $out"
+  out=$(setpriv --reuid=nobody --regid=nogroup --clear-groups touch "$dir/x" 2>&1) &&
+    fail "a job's user wrote to the archive"
+  echo "write: $out"
+  out=$(setpriv --reuid=nobody --regid=nogroup --clear-groups cat "$dir/index.md" 2>&1) &&
+    fail "a read with no platform behind it succeeded"
+  echo "read: $out"
+  case $out in
+    *"Connection timed out"*) ;;
+    *) fail "an unreachable platform did not read as a timeout" ;;
+  esac
+  touch "$finished"
+  wait "$pid" || fail "the release did not end cleanly"
+  findmnt -n "$dir" > /dev/null && fail "the archive is still mounted after release"
+  return 0
+}
+
 # Recorded, not asserted, apart from PID 1 answering afterwards: whether a forgery should be believed
 # is the operator's open question (docs/design/worker-tier.md § Open), and a check that failed on
 # either answer would be deciding it.
@@ -253,6 +291,7 @@ case ${1:-} in
   oom-main) oom_main ;;
   readings) readings ;;
   secrets) secrets ;;
+  archive) archive ;;
   forgery) forgery ;;
   wedge) wedge ;;
   wedge-run) wedge_run ;;

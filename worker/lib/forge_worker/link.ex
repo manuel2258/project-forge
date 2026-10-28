@@ -1075,6 +1075,7 @@ defmodule ForgeWorker.Link do
       head: head(worktree, user),
       wall_clock_ms: assignment["wall_clock_ms"] || :timer.hours(1),
       nix_env: Application.get_env(:forge_worker, :nix_env, true),
+      archive: ForgeWorker.Archive.grant(assignment),
       extra_env: Application.get_env(:forge_worker, :extra_env, []) ++ git_env(assignment)
     )
   end

@@ -2079,7 +2079,8 @@ defmodule Forge.FlowTest do
   end
 
   # The only template assigned to `project` names a snapshot speaking a protocol this platform
-  # refuses: every pass refuses it before asking the driver, the passes up to the failure limit
+  # refuses — one newer than it, since an older one is turned away earlier, for not being new enough
+  # for the job (archive.md: a workflow job needs the newest there is): every pass refuses it before asking the driver, the passes up to the failure limit
   # take it out of service, and the next sticks the ticket for placement
   # (`Forge.Workers.create_machine/1`).
   defp stuck_on_a_refused_image(project, user) do
@@ -2088,7 +2089,7 @@ defmodule Forge.FlowTest do
         name: "old-snapshot",
         provider: "fake",
         image: "snapshot-old",
-        image_protocol: ForgeCore.WorkerProtocol.minimum() - 1,
+        image_protocol: ForgeCore.WorkerProtocol.current() + 1,
         memory: 64 * 1024 * 1024 * 1024,
         cores: 64,
         max_workers: 1

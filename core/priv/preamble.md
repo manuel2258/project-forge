@@ -16,7 +16,17 @@ repository and nothing in it is committed.
 - `$FORGE_JOB/out/` — your declared outputs, and `proposals/` (below). Nothing else.
 - `$FORGE_JOB/tickets/` — the project's tickets, as a snapshot taken when this run started:
   `index.md` has one line per ticket and per open proposal, and the project's ticket types when it
-  has them, and each numbered file holds that ticket's body. Another ticket's plan, report or changeset is not there and is not yours to read.
+  has them, and each numbered file holds that ticket's body and nothing else: its documents are in
+  `archive/`, below.
+- `$FORGE_JOB/archive/` — the project's past, read-only: `index.md` has a line per ticket, `jobs.tsv`
+  one per job that ran, and each ticket's folder holds every version of every document and file it
+  produced, `plan.md` being the latest and `plan.v001.md` the first. Nothing is copied in advance; a
+  file is fetched when you open it, so listing is free and reading costs a download. **It is live,
+  not pinned**: later versions may appear, and what is there was not approved for this job, so cite
+  a version rather than assume the latest. A read that fails says why: *Connection timed out* — the
+  platform is unreachable, try later; *No such file* — it is gone; *Permission denied* — this job's
+  access has ended; *Input/output error* — it arrived damaged or the platform could not serve it, try again. Not here: transcripts,
+  raw harness output, open proposals, the changeset.
 - `$FORGE_JOB/spec.json` — this job's full specification.
 - `$FORGE_JOB/platform/platform.md` — how the platform around you works. Reference, not required
   reading.

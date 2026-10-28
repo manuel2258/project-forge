@@ -121,6 +121,9 @@ url-safe base64, stored as a sha256 hash, looked up by hash so no secret is ever
   `refs/heads/ticket/<n>` for a ticket's job, `refs/heads/chat/<uuid>` for a conversation, or the
   project's own default branch for the token an operator mints by hand (§ Issuing a token). A job
   is never issued the third.
+- **A second use.** The same token, held by a job, opens its project's archive
+  (`docs/design/archive.md`): `Forge.Git.Tokens.authorise_job/1` accepts a live token that carries
+  a `job_id`, and the project is the row's. An operator's token has no job and is refused there.
 - **Lifetime.** Absolute `expires_at`, the job's wall clock plus a margin. Absolute rather than
   computed from `inserted_at`, because a waiting job may legitimately need a longer one.
 - **Issuance.** `Forge.Jobs.assign/2`, immediately before the job is handed to a worker — the

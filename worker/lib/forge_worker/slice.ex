@@ -149,9 +149,19 @@ defmodule ForgeWorker.Slice do
   def as_user({slice, owner}),
     do: fn executable, args -> slice.run_as(owner, executable, args) end
 
-  @doc "Gives `paths` back and removes the job's user."
+  @doc """
+  Gives `paths` back and removes the job's user.
+
+  **The archive goes first, from here and not from each caller**: a `chown -R` of a job directory
+  that still holds the archive's mount walks the mount, which fetches every file in it and fails on
+  a read-only filesystem (`docs/design/archive.md` § The worker's side). Three places end a job,
+  and this is the one thing all three call.
+  """
   @spec leave(user(), [String.t()]) :: :ok
-  def leave({slice, owner}, paths), do: slice.leave(owner, paths)
+  def leave({slice, owner}, paths) do
+    Enum.each(paths, &ForgeWorker.Archive.release/1)
+    slice.leave(owner, paths)
+  end
 
   @doc "The last `bytes` of a file, as text; empty when there is no file."
   @spec tail(String.t(), pos_integer()) :: String.t()

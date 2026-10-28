@@ -2924,6 +2924,37 @@ defmodule ForgeWorker.LinkTest do
     refute List.keyfind(slice.env, "FORGE_GIT_TOKEN", 0)
   end
 
+  # The archive is promised in the job's prompt, so the platform's door and the job's own token
+  # have to reach the runner by the route the job really takes (`docs/design/archive.md`): a
+  # `nil` in `Link.start_runner/4` leaves a job with no folder and nothing else failing.
+  test "a workflow job is given its archive, and one with no token is not", context do
+    %{client: client, origin: origin} = context
+    Application.put_env(:forge_worker, :archive_mount, ForgeWorker.RecordingMount)
+    Application.put_env(:forge_worker, :archive_test_pid, self())
+
+    on_exit(fn ->
+      for key <- [:archive_mount, :archive_test_pid],
+          do: Application.delete_env(:forge_worker, key)
+    end)
+
+    connect_and_assert_join(client, @topic, %{}, :ok)
+    assert_push(@topic, "ready", %{})
+
+    job = put_in(assignment(origin), ["git", "token"], "job-token")
+    push(client, @topic, "assign", job)
+    {%{"result" => _result}, _events} = take_push("result")
+
+    folder = Path.join([context.root, "jobs", job["spec"]["job_id"], "archive"])
+    assert_received {:mounted, _socket, ^folder}
+
+    without = assignment(origin)
+    push(client, @topic, "assign", without)
+    {%{"result" => _result}, _events} = take_push("result")
+
+    folder = Path.join([context.root, "jobs", without["spec"]["job_id"], "archive"])
+    refute_received {:mounted, _socket, ^folder}
+  end
+
   # The promotion is wired after the push and before the worktree goes, and the order is the
   # whole of what makes it safe: promote before `commit_and_push` and the template holds the
   # agent's own commits and its untracked files, which the next job would inherit into a tree
@@ -3737,6 +3768,28 @@ defmodule ForgeWorker.LinkTest do
       assert is_binary(slice.secrets_file)
       refute inspect(slice, limit: :infinity, printable_limit: :infinity) =~ "push-secret"
       refute List.keyfind(slice.env, "FORGE_GIT_TOKEN", 0)
+    end
+
+    # The archive's grant is the third thing a chat takes by its own route to the runner.
+    test "a chat is given its archive", context do
+      %{client: client, origin: origin} = context
+      Application.put_env(:forge_worker, :archive_mount, ForgeWorker.RecordingMount)
+      Application.put_env(:forge_worker, :archive_test_pid, self())
+
+      on_exit(fn ->
+        for key <- [:archive_mount, :archive_test_pid],
+            do: Application.delete_env(:forge_worker, key)
+      end)
+
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = put_in(chat(origin), ["git", "token"], "chat-token")
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _} = take_push("turn")
+
+      folder = Path.join([context.root, "jobs", job["job_id"], "archive"])
+      assert_received {:mounted, _socket, ^folder}
     end
 
     # A conversation takes its own route to the runner (`Conversation.runner_opts/1`), so the

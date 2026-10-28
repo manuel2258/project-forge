@@ -22,6 +22,10 @@ defmodule ForgeWorker.Application do
         ForgeWorker.Health
       ] ++ link()
 
+    # A worker that was killed left its jobs' archives mounted; nothing may walk a job directory
+    # under one (`docs/design/archive.md` § The worker's side).
+    ForgeWorker.Archive.sweep(Path.join(ForgeWorker.Config.root(), "jobs"))
+
     # See https://hexdocs.pm/elixir/Supervisor.html
     # for other strategies and supported options
     opts = [strategy: :one_for_one, name: ForgeWorker.Supervisor]

@@ -152,6 +152,10 @@ the ticket's jobs is handed — a job gets the inputs its state declares, pinned
 created — and it is the point: a conversation is for asking about, or fixing, the work in flight,
 and it should not have to guess which document was the one that mattered.
 
+**It also gets the project's archive**, the same folder a workflow job has and on the same terms
+(`archive.md`): `archive/` beside `tickets/`, live and not pinned, a fresh index on every reopen.
+It holds documents, files and a jobs ledger, and not the transcripts below.
+
 **It also gets what already ran.** `history/<state>/<attempt>/` per workflow job of the ticket,
 oldest first: `job.md` — what it was, what it declared, what the engine concluded, what it wrote,
 what it cost — and `transcript.jsonl`, everything that job's agent did. Without it a conversation

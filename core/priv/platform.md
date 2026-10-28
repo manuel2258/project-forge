@@ -97,7 +97,8 @@ money or takes a machine.
 
 An accepted proposal becomes a ticket like any other; a declined one is recorded and is no longer
 listed. `$FORGE_JOB/tickets/` is the project's tickets and its open proposals, as a snapshot taken
-when your job started. A job that ends in `error` proposes nothing: what it wrote there is withheld.
+when your job started. The rest of the project's past — every document and file of every ticket, in
+every version, and which jobs ran — is `$FORGE_JOB/archive/`, read-only and fetched when opened. A job that ends in `error` proposes nothing: what it wrote there is withheld.
 
 ## Branches and merging
 

@@ -11,6 +11,7 @@ defmodule ForgeCore.Workflow.Validator do
   @spec validate(Workflow.t(), keyword()) :: [Error.t()]
   def validate(%Workflow{} = workflow, opts \\ []) do
     [
+      release(workflow, Keyword.get(opts, :single_file, false)),
       names(workflow),
       initial(workflow),
       state_shapes(workflow),
@@ -30,6 +31,18 @@ defmodule ForgeCore.Workflow.Validator do
   end
 
   # -- rules --------------------------------------------------------------------------------
+
+  # `docs/design/ticket-types.md` § Releases. The single file has no types, so nothing could
+  # start it as the release. Here and not in the parser because a stored pin must never meet it.
+  defp release(%Workflow{release: true}, true),
+    do: [
+      Error.new(
+        "release",
+        "only a ticket type in .forge/workflows/ can be a release: .forge/workflow.yml has no types"
+      )
+    ]
+
+  defp release(_workflow, _single_file), do: []
 
   defp names(%Workflow{states: states}) do
     Enum.flat_map(states, fn {name, state} ->

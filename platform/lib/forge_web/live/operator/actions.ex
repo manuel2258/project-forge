@@ -153,6 +153,7 @@ defmodule ForgeWeb.Operator.Actions do
   defp describe({:no_job_in, state}), do: "no job runs in #{state}"
   defp describe({:not_retryable, status}), do: "a #{status} ticket cannot be run again"
   defp describe({:not_cancellable, status}), do: "a #{status} ticket cannot be cancelled"
+  defp describe({:release_open, _ticket} = reason), do: Admission.explain(reason)
   defp describe({:not_cancelled, _status}), do: "only a cancelled ticket can be restored"
   defp describe({:not_active, :cancelled}), do: "the ticket is cancelled; restore it first"
   defp describe({:not_repinnable, status}), do: "a #{status} ticket cannot be re-pinned"

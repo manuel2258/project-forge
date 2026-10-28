@@ -33,6 +33,7 @@ defmodule ForgeCore.Workflow.Imports do
   alias ForgeCore.Workflow
 
   @library_keys ~w(commands defaults states)
+  @release_in_library "a library is not a workflow: set release in the ticket type that imports it"
   @types_dir "workflows"
 
   @typedoc "Reads a file by its path under `.forge/`, at the commit the workflow is read at."
@@ -252,6 +253,7 @@ defmodule ForgeCore.Workflow.Imports do
       |> Enum.flat_map(fn
         key when key in @library_keys -> []
         "import" -> [Error.new("import", "imports are one level deep: a library cannot import")]
+        "release" -> [Error.new("release", @release_in_library)]
         key -> [Error.new(key, "not allowed in a library, which holds only #{library_keys()}")]
       end)
 

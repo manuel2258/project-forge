@@ -9,12 +9,15 @@ defmodule ForgeWeb.TicketNewLive do
 
   A project with more than one ticket type asks which, and preselects nothing
   (`docs/design/ticket-types.md` § Admission): a default is how a bug runs the feature lifecycle.
-  A broken type is offered as broken, beside the ones that are not.
+  A broken type is offered as broken, beside the ones that are not. A project's release is not
+  offered at all (`docs/design/ticket-types.md` § Releases): `ReleaseTickets.ordinary/1` takes it
+  out of what the form is shown, and a project with nothing else says so as it does a project
+  with no workflow.
   """
 
   use ForgeWeb, :live_view
 
-  alias Forge.{Operator, Projects, Tickets}
+  alias Forge.{Operator, Projects, ReleaseTickets, Tickets}
   alias ForgeWeb.Operator.Admission
 
   @impl true
@@ -49,7 +52,12 @@ defmodule ForgeWeb.TicketNewLive do
         assign(socket, project: nil, types: nil, workflow: nil)
 
       project ->
-        socket |> assign(project: project, types: Tickets.types(project)) |> assign_chosen()
+        socket
+        |> assign(
+          project: project,
+          types: project |> Tickets.types() |> ReleaseTickets.ordinary()
+        )
+        |> assign_chosen()
     end
   end
 

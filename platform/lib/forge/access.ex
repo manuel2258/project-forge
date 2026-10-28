@@ -8,7 +8,7 @@ defmodule Forge.Access do
 
   - `:use` — everything the product does on a project: admit tickets, answer questions, approve
     transitions and merges, edit documents, open conversations, decide proposals.
-  - `:manage` — the project's own settings, its deletion, and who is in it.
+  - `:manage` — the project's own settings, its deletion, who is in it, and starting a release.
 
   Node admins are **not** privileged here and this is the point of them: the flag governs
   accounts, not work. A node admin who is not a member of a project reaches nothing in it.

@@ -765,7 +765,7 @@ defmodule ForgeWeb.TicketLive do
 
   defp timeline(assigns) do
     ~H"""
-    <p :if={@ticket.body != ""} class="mb-6 text-sm/[1.55] whitespace-pre-line opacity-80">
+    <p :if={@ticket.body != ""} class="mb-6 text-sm/[1.55] whitespace-pre-line break-words opacity-80">
       {@ticket.body}
     </p>
 
@@ -1232,7 +1232,7 @@ defmodule ForgeWeb.TicketLive do
   # ticket stuck, where it went, why a conversation's request to move it moved nothing. Every
   # other type is its own sentence here.
   @said ~w(commands.decided ticket.stuck transition.taken ticket.merge_conflicted
-           chat.transition_refused)
+           chat.transition_refused ticket.renamed)
 
   defp said(%{type: type} = event) when type in @said, do: Forge.Events.summary(event)
   defp said(_event), do: nil

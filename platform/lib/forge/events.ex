@@ -297,6 +297,9 @@ defmodule Forge.Events do
 
   defp describe(%Event{type: "ticket.stuck", payload: %{"reason" => reason}}, _bound), do: reason
 
+  defp describe(%Event{type: "ticket.renamed", payload: %{"to" => to} = p}, _bound),
+    do: "renamed to #{to}, from #{p["document"]}"
+
   # Why a conversation's request to move its ticket moved nothing
   # (`docs/design/conversations.md` § Taking a transition). The reason, not the request: the
   # request is in the payload for whoever opens the event, and the row is read for what went

@@ -59,4 +59,20 @@ defmodule Mix.Tasks.Forge.AdmitTest do
                  "it has more than one ticket type, so one must be chosen: bug, feature",
                  fn -> Admit.run([project.name, "Lost slot", "--user", user.email]) end
   end
+
+  test "--type naming the release is refused, saying who starts one", %{
+    project: project,
+    user: user
+  } do
+    commit_to_default(project, %{
+      ".forge/workflows/bug.yml" =>
+        "release: true\n" <> String.replace(@workflow, "INITIAL", "fixing")
+    })
+
+    assert_raise Mix.Error, ~r/bug is this project's release.*Release on the project page/, fn ->
+      Admit.run([project.name, "Lost slot", "--type", "bug", "--user", user.email])
+    end
+
+    assert Tickets.list(project) == []
+  end
 end

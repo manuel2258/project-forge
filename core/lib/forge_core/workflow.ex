@@ -65,7 +65,8 @@ defmodule ForgeCore.Workflow do
             transitions: [],
             limits: nil,
             defaults: nil,
-            commands: %{}
+            commands: %{},
+            release: false
 
   @type state_name :: String.t()
   @type artifact_name :: String.t()
@@ -79,7 +80,8 @@ defmodule ForgeCore.Workflow do
           transitions: [Transition.t()],
           limits: Limits.t(),
           defaults: Defaults.t() | nil,
-          commands: %{String.t() => Command.t()}
+          commands: %{String.t() => Command.t()},
+          release: boolean()
         }
 
   @doc "Outcomes every job may end with, whatever its state declares."

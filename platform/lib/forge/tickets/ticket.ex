@@ -87,6 +87,13 @@ defmodule Forge.Tickets.Ticket do
     |> validate_required([:workflow, :workflow_commit])
   end
 
+  @doc "Changeset for a release taking its version as its title (`Forge.ReleaseTickets`), and nothing else."
+  def rename_changeset(ticket, attrs) do
+    ticket
+    |> cast(attrs, [:title])
+    |> validate_required([:title])
+  end
+
   @doc """
   Changeset for the base a ticket's changeset is diffed against moving on, after its branch merged
   the default branch (`docs/design/workflow-grammar-v1.md` § Merging), and nothing else.

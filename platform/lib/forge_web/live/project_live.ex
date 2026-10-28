@@ -18,7 +18,7 @@ defmodule ForgeWeb.ProjectLive do
   import ForgeWeb.Indicators
   import ForgeWeb.Operator.Components
 
-  alias Forge.{Conversations, Events, Operator, Projects, Proposals, Tickets}
+  alias Forge.{Conversations, Events, Operator, Projects, Proposals, ReleaseTickets, Tickets}
   alias Forge.Git.Url
   alias ForgeCore.Workflow
   alias ForgeWeb.Format
@@ -28,12 +28,19 @@ defmodule ForgeWeb.ProjectLive do
 
   @impl true
   def mount(%{"name" => name}, _session, socket) do
-    {project, _scope} = ForgeWeb.Access.project_by_name!(socket.assigns.current_scope, name)
+    {project, scope} = ForgeWeb.Access.project_by_name!(socket.assigns.current_scope, name)
     if connected?(socket), do: Events.subscribe()
 
     {:ok,
      socket
-     |> assign(project_id: project.id, page_title: project.name, drafts: Drafts.init())
+     |> assign(
+       project_id: project.id,
+       page_title: project.name,
+       drafts: Drafts.init(),
+       # Whether this page draws the Release block. `Operator.start_release/3` refuses without it,
+       # which is the half that matters.
+       manage: Forge.Access.can?(scope, :manage)
+     )
      |> ForgeWeb.Capacity.project(project)
      |> load()}
   end
@@ -41,6 +48,7 @@ defmodule ForgeWeb.ProjectLive do
   defp load(%{assigns: %{project_id: id}} = socket) do
     project = Projects.get!(id)
     tickets = Tickets.list(project)
+    current = Tickets.types(project)
 
     assign(socket,
       project: project,
@@ -49,7 +57,8 @@ defmodule ForgeWeb.ProjectLive do
       # The repository's current workflow, which is what the *next* ticket will pin — not the
       # board's, which is the workflow the tickets on it were admitted with. On a project whose
       # workflow has just changed these are different, and saying so is the point.
-      current: Tickets.types(project),
+      current: current,
+      release: release_block(socket, current, project),
       clone_url: Url.for(project),
       mirrors: Projects.list_mirrors(project),
       open: Enum.count(tickets, &(&1.status in Forge.Tickets.Ticket.open_statuses())),
@@ -67,6 +76,23 @@ defmodule ForgeWeb.ProjectLive do
       now: DateTime.utc_now()
     )
   end
+
+  # What the Release block draws, for a project admin and nobody else: one of `{:open, ticket}`,
+  # `{:ready, entry}`, `{:broken, entry}`, `:none` and `{:several, paths}`. An open release wins
+  # over the rest, because starting another is what it is there to prevent.
+  defp release_block(%{assigns: %{manage: false}}, _current, _project), do: nil
+
+  defp release_block(_socket, current, project) do
+    case ReleaseTickets.open(project) do
+      nil -> release_status(ReleaseTickets.status(current))
+      ticket -> {:open, ticket}
+    end
+  end
+
+  defp release_status({:ok, %{workflow: {:ok, _workflow}} = entry}), do: {:ready, entry}
+  defp release_status({:ok, entry}), do: {:broken, entry}
+  defp release_status({:error, {:several_release_workflows, paths}}), do: {:several, paths}
+  defp release_status({:error, :no_release_workflow}), do: :none
 
   # A fact row, not the table — the table is the settings page's. One mirror having stopped
   # working is worth a word here because this is the page somebody actually opens;
@@ -118,6 +144,37 @@ defmodule ForgeWeb.ProjectLive do
     case Drafts.handle("draft:change", params, socket) do
       {:state, socket} -> {:noreply, socket}
       :unknown -> {:noreply, socket}
+    end
+  end
+
+  # The only door to a release (`Forge.Operator.start_release/3` guards it), so a member pushing
+  # this event is refused whatever the page drew. The note comes off the wire and is made a
+  # string here rather than trusted to be one.
+  def handle_event("release:start", params, socket) do
+    note = if is_binary(params["note"]), do: params["note"], else: ""
+    project = socket.assigns.project
+
+    case Operator.start_release(project, socket.assigns.current_scope.user, note) do
+      {:ok, ticket} ->
+        {:noreply,
+         socket
+         # An equivalent mutant: the page is left for the ticket's own, and the draft goes with
+         # this process. It is dropped here so that the assign never outlives the send it was for.
+         |> Drafts.forget("release")
+         |> put_flash(:info, "Release started as ticket #{ticket.number}.")
+         |> push_navigate(to: ~p"/tickets/#{project.name}/#{ticket.number}")}
+
+      {:error, :forbidden} ->
+        {:noreply, put_flash(socket, :error, "Only a project admin can start a release.")}
+
+      # The page is reloaded, so it shows what is true now — a flag that has moved is not a ticket
+      # event, and nothing else would tell this page. The draft stays, and where the reload leaves
+      # no box the block shows the note as unsent text (`release_block/1`).
+      {:error, reason} ->
+        {:noreply,
+         socket
+         |> put_flash(:error, "Not started: " <> Admission.explain(reason) <> ".")
+         |> load()}
     end
   end
 
@@ -193,7 +250,7 @@ defmodule ForgeWeb.ProjectLive do
   # The types an Accept is asked to choose between, each marked when its workflow does not parse:
   # only when there is more than one.
   defp choosable(current) do
-    case current_types(current) do
+    case current |> ReleaseTickets.ordinary() |> current_types() do
       [_, _ | _] = types ->
         Enum.map(types, &%{name: &1.name, parses: Admission.ready?(&1.workflow)})
 
@@ -222,6 +279,89 @@ defmodule ForgeWeb.ProjectLive do
         out: Workflow.transitions_from(workflow, name)
       }
     end
+  end
+
+  attr :release, :any, required: true
+  attr :project, :map, required: true
+  attr :drafts, :map, required: true
+
+  # `docs/design/ui.md` § The project page. A project admin's, in the header area, at full width
+  # below `sm`, its button 52px tall like a form's submit elsewhere.
+  defp release_block(assigns) do
+    ~H"""
+    <section id="release" class="mt-4 rounded-box border border-base-300 p-4 sm:max-w-xl">
+      <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Release</h2>
+
+      <p :if={match?({:open, _}, @release)} id="release-open" class="mt-2 text-sm/[1.55]">
+        A release is already open:
+        <.link
+          navigate={~p"/tickets/#{@project.name}/#{elem(@release, 1).number}"}
+          class="min-w-0 break-words text-primary hover:underline"
+        >
+          #{elem(@release, 1).number} {elem(@release, 1).title} ›
+        </.link>
+      </p>
+
+      <p :if={@release == :none} id="release-none" class="mt-2 text-sm/[1.55] opacity-70">
+        {Admission.explain(:no_release_workflow)}. Set it in the workflow file that should be the
+        release, under .forge/workflows/.
+      </p>
+
+      <p :if={match?({:several, _}, @release)} id="release-several" class="mt-2 text-sm/[1.55]">
+        {Admission.explain({:several_release_workflows, elem(@release, 1)})}.
+      </p>
+
+      <p :if={match?({:broken, _}, @release)} id="release-broken" class="mt-2 text-sm/[1.55]">
+        The release, {elem(@release, 1).path}, cannot start: {Admission.explain(
+          elem(elem(@release, 1).workflow, 1)
+        )}.
+      </p>
+
+      <%!-- A note typed and not sent, in a state with no box to hold it: another admin started a
+            release, or the flag moved, while this page was open. Shown, not lost. --%>
+      <div
+        :if={
+          not match?({tag, _} when tag in [:ready, :broken], @release) and
+            Drafts.field(@drafts, "release", "note") != ""
+        }
+        id="release-draft"
+        class="mt-3"
+      >
+        <p class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Your unsent note</p>
+        <p class="mt-1 text-sm/[1.55] break-words whitespace-pre-line opacity-80">
+          {Drafts.field(@drafts, "release", "note")}
+        </p>
+      </div>
+
+      <.form
+        :if={match?({tag, _} when tag in [:ready, :broken], @release)}
+        for={%{}}
+        id="release-form"
+        phx-change="draft:change"
+        phx-submit="release:start"
+        class="mt-3 flex flex-col gap-2"
+      >
+        <input type="hidden" name="draft" value="release" />
+        <ForgeWeb.Conversations.message_box
+          id="release-note"
+          name="note"
+          rows="3"
+          value={Drafts.field(@drafts, "release", "note")}
+          enter={:newline}
+          placeholder="Note (optional)"
+          aria-label="Release note"
+        />
+        <button
+          type="submit"
+          disabled={match?({:broken, _}, @release)}
+          phx-disable-with="Starting…"
+          class="flex h-[52px] w-full items-center justify-center rounded-field bg-base-content px-4 text-sm font-medium text-base-100 disabled:opacity-40 sm:w-auto sm:self-start"
+        >
+          Release
+        </button>
+      </.form>
+    </section>
+    """
   end
 
   @impl true
@@ -274,6 +414,8 @@ defmodule ForgeWeb.ProjectLive do
         </.link>
       </header>
 
+      <.release_block :if={@release} release={@release} project={@project} drafts={@drafts} />
+
       <div class="mt-6 flex flex-col gap-10 lg:flex-row lg:gap-0">
         <div class="lg:min-w-0 lg:flex-1 lg:pr-8">
           <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Board</h2>
@@ -315,6 +457,7 @@ defmodule ForgeWeb.ProjectLive do
           <section :for={type <- current_types(@current)} id={"type-#{type.name || "workflow"}"}>
             <div :if={type.name} class="mt-5 flex flex-wrap items-baseline gap-x-3">
               <h3 class="font-mono text-[12.5px] font-medium">{type.name}</h3>
+              <span :if={type.release} class="font-mono text-[11px] text-primary">the release</span>
               <span :if={description(type)} class="text-[12.5px] opacity-70">
                 {description(type)}
               </span>

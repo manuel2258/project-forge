@@ -20,7 +20,9 @@ defmodule ForgeWeb.Operator.Admission do
     :no_ticket_types,
     :ticket_type_required,
     :unknown_ticket_type,
-    :invalid_ticket_type
+    :invalid_ticket_type,
+    :release_ticket_type,
+    :only_release_types
   ]
 
   @doc "Whether `reason` is one of the refusals about a ticket's type, for a guard."
@@ -70,6 +72,31 @@ defmodule ForgeWeb.Operator.Admission do
     do: "it has no ticket type #{name}; it has #{Enum.join(names, ", ")}"
 
   def explain({:invalid_ticket_type, _value}), do: "a ticket type is a name, like bug"
+
+  # Releases (`docs/design/ticket-types.md` § Releases): the release is not a type a ticket is
+  # admitted as, and the sentence says what is.
+  def explain({:release_ticket_type, name}),
+    do:
+      "#{name} is this project's release, which a project admin starts with Release on the " <>
+        "project page"
+
+  def explain({:only_release_types, paths}),
+    do:
+      "its only workflow is its release (#{Enum.join(paths, ", ")}), which a project admin " <>
+        "starts with Release on the project page, so it has no type for an ordinary ticket"
+
+  def explain(:no_release_workflow),
+    do: "no workflow in the project sets release: true, so it has no release to start"
+
+  def explain({:several_release_workflows, paths}),
+    do:
+      "#{Enum.join(paths, " and ")} both set release: true, so the project has no release; " <>
+        "unset it in all but one"
+
+  def explain({:release_open, %{number: number}}),
+    do: "a release is already open: ##{number}"
+
+  def explain({:invalid_note, why}), do: "the note #{why}"
 
   def explain({:no_ticket_type_in, dir, not_types}) do
     reasons = Enum.map_join(not_types, "; ", &"#{&1.path} is #{&1.why}")

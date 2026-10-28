@@ -161,7 +161,7 @@ defmodule Forge.Backlog do
   # the match below drops a single file's entry either way, and the option only spares its parse.
   defp types(project) do
     case Tickets.types(project, single: false) do
-      {:ok, %{form: :types, types: types}} -> types
+      {:ok, %{form: :types, types: types}} -> Enum.reject(types, & &1.release)
       _single_or_unreadable -> []
     end
   rescue

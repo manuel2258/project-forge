@@ -222,6 +222,17 @@ defmodule ForgeCore.Workflow.ImportsTest do
              ] = messages(errors)
     end
 
+    test "a library cannot be a release, and says to set it in the type" do
+      files = %{"common.yml" => @common <> "release: true\n"}
+
+      assert {:error, errors} = load(@type_yaml, files)
+
+      assert [{"common.yml", "release", message}] = messages(errors)
+      assert message =~ "a library is not a workflow"
+      assert message =~ "set release in the ticket type that imports it"
+      refute message =~ "not allowed in a library"
+    end
+
     test "a library cannot import: imports are one level deep" do
       files = %{"common.yml" => @common <> "import: [more.yml]\n"}
 

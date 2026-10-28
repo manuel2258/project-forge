@@ -351,11 +351,16 @@ defmodule Forge.Proposals do
   # from it is a person choosing *no* type, and is admitted as none, which a project with several
   # refuses as such. A suggestion that names no type the project has now — or names one on a
   # project that has none — is no suggestion: admission goes on as though the agent had said
-  # nothing.
+  # nothing. **The project's release is one of those**: it is never a type a ticket is admitted as
+  # (`docs/design/ticket-types.md` § Releases), so a suggestion of it is no suggestion, and the
+  # ordinary type the project has is implied or asked for as it would have been. Refusing it
+  # instead left a person on the page with one ordinary type and no select no way to accept.
+  # A person who *names* the release is still refused, below.
   defp prepare(project, nil, suggested) when is_binary(suggested) do
     case Tickets.prepare_admission(project, suggested) do
       {:error, {:no_ticket_types, _name}} -> Tickets.prepare_admission(project, nil)
       {:error, {:unknown_ticket_type, _name, _names}} -> Tickets.prepare_admission(project, nil)
+      {:error, {:release_ticket_type, _name}} -> Tickets.prepare_admission(project, nil)
       prepared -> prepared
     end
   end

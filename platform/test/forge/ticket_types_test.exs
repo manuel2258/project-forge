@@ -632,4 +632,65 @@ defmodule Forge.TicketTypesTest do
       assert Forge.Jobs.spec(job).ticket.ticket_type == "bug"
     end
   end
+
+  describe "releases, as pure functions of the layout" do
+    alias Forge.TicketTypes
+
+    defp layout(names) do
+      %{
+        form: :types,
+        types: Enum.map(names, &%{name: &1, path: ".forge/workflows/#{&1}.yml"}),
+        not_types: []
+      }
+    end
+
+    @single %{form: :single, types: [], not_types: []}
+
+    test "for_admission refuses a release's name, whatever else the project has" do
+      assert TicketTypes.for_admission(layout(["dev", "release"]), "release", ["release"]) ==
+               {:error, {:release_ticket_type, "release"}}
+
+      # Not the release: an ordinary type still admits.
+      assert {:ok, "dev", _} =
+               TicketTypes.for_admission(layout(["dev", "release"]), "dev", ["release"])
+    end
+
+    test "with the releases out, one ordinary type is implied and several still need a choice" do
+      assert {:ok, "dev", ".forge/workflows/dev.yml"} =
+               TicketTypes.for_admission(layout(["dev", "release"]), nil, ["release"])
+
+      assert {:error, {:ticket_type_required, ["bug", "dev"]}} =
+               TicketTypes.for_admission(layout(["bug", "dev", "release"]), nil, ["release"])
+
+      assert {:error, {:unknown_ticket_type, "release2", ["dev"]}} =
+               TicketTypes.for_admission(layout(["dev", "release"]), "release2", ["release"])
+    end
+
+    test "a project of nothing but releases has no type to admit" do
+      assert {:error, {:only_release_types, [".forge/workflows/release.yml"]}} =
+               TicketTypes.for_admission(layout(["release"]), nil, ["release"])
+
+      assert {:error, {:release_ticket_type, "release"}} =
+               TicketTypes.for_admission(layout(["release"]), "release", ["release"])
+    end
+
+    test "without releases nothing changes, and the single file is as it was" do
+      assert {:ok, "release", _} = TicketTypes.for_admission(layout(["release"]), nil)
+      assert {:ok, nil, ".forge/workflow.yml"} = TicketTypes.for_admission(@single, nil, [])
+      assert {:error, {:no_ticket_types, "bug"}} = TicketTypes.for_admission(@single, "bug", [])
+    end
+
+    test "for_release finds the one, and says why when there is none or several" do
+      assert {:ok, "release", ".forge/workflows/release.yml"} =
+               TicketTypes.for_release(layout(["dev", "release"]), ["release"])
+
+      assert {:error, :no_release_workflow} = TicketTypes.for_release(layout(["dev"]), [])
+      assert {:error, :no_release_workflow} = TicketTypes.for_release(@single, [])
+
+      assert {:error,
+              {:several_release_workflows,
+               [".forge/workflows/dev.yml", ".forge/workflows/release.yml"]}} =
+               TicketTypes.for_release(layout(["dev", "release"]), ["dev", "release"])
+    end
+  end
 end

@@ -97,6 +97,9 @@ defmodule ForgeWeb.Api.FallbackController do
   def call(conn, {:error, {:not_cancellable, status}}),
     do: error(conn, :conflict, "not_cancellable", "a #{status} ticket cannot be cancelled")
 
+  def call(conn, {:error, {:release_open, ticket} = reason}),
+    do: error(conn, :conflict, "release_open", Admission.explain(reason) <> " (#{ticket.title})")
+
   def call(conn, {:error, {:not_cancelled, _status}}),
     do: error(conn, :conflict, "not_cancelled", "only a cancelled ticket can be restored")
 

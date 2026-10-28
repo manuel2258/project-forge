@@ -50,6 +50,10 @@ A file in either form may carry `description:`, one line saying what kind of wor
 ticket form shows it beside the type, and a job reads every type's in `tickets/index.md`, so it is
 what decides which type a proposal suggests.
 
+A file in `.forge/workflows/` may carry `release: true`, which makes it the project's release: a
+project admin starts one from the project page, it is left out of the ticket form, and it concludes
+by itself when its last edge has no `approve` (`ticket-types.md` § Releases). Absent is false.
+
 ## Shape
 
 ```yaml
@@ -1003,6 +1007,11 @@ is never produced; `answers.md` is platform-managed and never declared.
   transition: no `when` selects it and no person chooses it.
 - `merge_conflict` is neither a declared outcome nor a value of an `exit` map.
 - `description`, where present, is a non-empty string.
+- `release`, where present, is `true` or `false`. It is refused in `.forge/workflow.yml`, which has
+  no types, and in a library, which is not a workflow, each saying why. Two type files setting it is
+  not a validation error — it is the project having no release — and is said by the project page.
+  The single-file refusal is validation and not parsing, so a stored pin carrying the key is built
+  as it was admitted.
 - Every `import` entry is a path of names under `.forge/`, not in `workflows/`, that exists at the
   pinned commit, and appears once; § Imports has the rest.
 - Keys outside this grammar (`blocks`, `use`, `can_spawn`, `fanout`, `spawn_depth`,

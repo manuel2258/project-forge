@@ -11,6 +11,8 @@ defmodule ForgeCore.Workflow.Parser do
     * `:read_library` - a function from a path under `.forge/` to `{:ok, text}` or `:error`, at
       the same commit. What `import` is resolved with (`ForgeCore.Workflow.Imports`); without it,
       a definition that imports anything is refused.
+    * `:single_file` - true when the definition is `.forge/workflow.yml`, which has no types: a
+      `release: true` there is refused (`ForgeCore.Workflow.Validator`).
 
   `load/2` is what admission calls: it returns the flattened definition beside the workflow,
   because that — with no `import` and no `extends` left in it — is what a ticket pins.
@@ -34,7 +36,7 @@ defmodule ForgeCore.Workflow.Parser do
     Validator
   }
 
-  @top_keys ~w(version description initial states transitions limits defaults commands)
+  @top_keys ~w(version description initial states transitions limits defaults commands release)
   @state_keys ~w(prompt env model effort inputs produces optional outcomes budget on_enter
                  on_conflict resources invoke exit may_invoke secrets chat)
   @command_keys ~w(run env produces timeout resources secrets)
@@ -75,6 +77,27 @@ defmodule ForgeCore.Workflow.Parser do
       end
     end
   end
+
+  @doc """
+  Whether `yaml` is a workflow that declares itself the project's release: a top-level `release:
+  true` and nothing less (`docs/design/ticket-types.md` § Releases). Reads the file's own decoded
+  YAML and validates nothing, so a release that does not validate is still known to be the
+  release and can be shown broken. Never raises: YAML that cannot be read, or whose top level is
+  not a mapping, is not a release. Both the platform's listing and its admission ask this, so
+  there is one model of "is this file the release".
+  """
+  @spec declares_release?(term()) :: boolean()
+  def declares_release?(yaml) when is_binary(yaml) do
+    match?({:ok, %{"release" => true}}, YamlElixir.read_from_string(yaml))
+  rescue
+    # Equivalent mutant: `read_from_string/1` returns `{:error, _}` for the YAML it cannot read,
+    # which the `match?` above already calls false. The rescue is for a parser that raises instead.
+    _ -> false
+  catch
+    _kind, _reason -> false
+  end
+
+  def declares_release?(_other), do: false
 
   defp decode(yaml) do
     case YamlElixir.read_from_string(yaml) do
@@ -170,6 +193,7 @@ defmodule ForgeCore.Workflow.Parser do
     {defaults, e6} = defaults(map)
     {commands, e7} = commands(map)
     {description, e8} = optional_string(map, "description", "")
+    {release, e9} = boolean(map, "release", "")
 
     workflow = %Workflow{
       version: version,
@@ -179,10 +203,12 @@ defmodule ForgeCore.Workflow.Parser do
       transitions: transitions,
       limits: limits,
       defaults: defaults,
-      commands: commands
+      commands: commands,
+      release: release
     }
 
-    {workflow, unknown_keys(map, @top_keys, "") ++ e1 ++ e2 ++ e3 ++ e4 ++ e5 ++ e6 ++ e7 ++ e8}
+    {workflow,
+     unknown_keys(map, @top_keys, "") ++ e1 ++ e2 ++ e3 ++ e4 ++ e5 ++ e6 ++ e7 ++ e8 ++ e9}
   end
 
   # `docs/design/workflow-grammar-v1.md` § Commands. A mapping of names, each a mapping of its own;

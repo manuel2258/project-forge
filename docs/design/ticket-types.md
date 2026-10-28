@@ -12,7 +12,7 @@ ticket is admitted. Code follows it; a change of mind updates it first.
 `ForgeCore.Workflow.Imports` through `Parser.load/2` — and the directory of types
 (`Forge.TicketTypes`), admission, re-pinning and drift by type, proposals suggesting a type, what a
 job is told, the project page, the board's lanes and the ticket page. What it leaves out on purpose
-is § Deliberately not here. What is unobserved is a real project with types: everything here is
+is § Deliberately not here. **Releases** (§ Releases) are built too, with no workflow in this repository setting the flag yet. What is unobserved is a real project with types: everything here is
 tested against repositories a test made.
 
 ## A type is a workflow
@@ -67,8 +67,8 @@ type.** When it holds files and none is a type, and there is no single file, not
 admitted, and the refusal — on the form, the project page and the API alike — names each file and
 why it is not a type, rather than saying only that there is no `.forge/workflow.yml`.
 
-**A file may carry `description:`**, one line — with `import` (§ Imports), one of the two
-top-level keys the grammar gains. The ticket form shows the chosen type's, and an agent proposing a
+**A file may carry `description:`**, one line — with `import` (§ Imports), one of the
+top-level keys the grammar gains (`release`, § Releases, is the third). The ticket form shows the chosen type's, and an agent proposing a
 ticket reads every type's (§ What a job is told). It is optional, and a type without one is
 offered by name alone.
 
@@ -210,7 +210,7 @@ the plan arrives for approval. The API takes `ticket_type` beside
 `title` and `body`, as do `Operator.admit/3` and `mix forge.admit`, and
 `Tickets.prepare_admission/2` reads that type's file.
 
-**The form offers every type, and nothing is preselected.** Every type is parsed *before* the
+**The form offers every type but the release, and nothing is preselected.** Every type is parsed *before* the
 operator types, as the form already resolved the one workflow (`ui.md` § Creating things), and
 the chosen type's description and the state it starts in are said beneath the select. A type
 whose file does not parse — its own or a library's error — is offered marked *does not parse*,
@@ -313,6 +313,70 @@ Each of these was updated with the part it describes:
 - `core/priv/chat-preamble.md`: a conversation bootstrapping a project writes the single file
   unless asked for types.
 
+## Releases
+
+A workflow may declare itself **the project's release**, and a project admin then starts one with a
+single action on the project page, with nothing to type but an optional note. A release was an
+ordinary ticket of a `release` type: titled by a person (or, as forge's own was, for ever "Next
+release"), with an empty body, and left waiting to be merged by hand. This section is the standard
+for the native one. It changes no workflow in a repository: setting the flag is the project's own
+commit.
+
+- **The flag** is a top-level `release: true`. Absent means false, and an explicit `false` is
+  accepted and means the same. Anything that is not a boolean is refused at `release`.
+- **Only a type file may set it.** A file in `.forge/workflows/` can; `.forge/workflow.yml` has
+  no types, so a release there is refused saying so, and a library (§ Imports) is not a workflow,
+  so a `release` in one is refused saying to set it in the type that imports it. The single-file
+  refusal is a validation rule and not a parsing one: a stored pin is never validated
+  (`workflow-grammar-v1.md` § Pinning), so one pinned before the rule existed, or from a file
+  that has since moved, still reads.
+- **Two flagged files mean the project has no release.** Neither is chosen; the project page names
+  both and says to unset one.
+- **Whether a file is the release is read from its own YAML**, by
+  `ForgeCore.Workflow.Parser.declares_release?/1`, which validates nothing. A release that does not
+  validate is therefore still *the release*, and the page shows it broken beside the action, which
+  cannot be submitted. The one thing this cannot do is name a file whose YAML cannot be decoded
+  at all: it cannot say it is the release, so it is shown and offered as a broken ordinary type and
+  the Release block says that no workflow sets the flag.
+- **A ticket pins the flag** with the rest of its workflow, and **keeps it for life**, as it keeps
+  its type. A pin with no `release` key reads as false, which is every ticket admitted before this
+  existed. `ReleaseTickets.release?/1` is the one reading of it; `open/1` asks the same of the same
+  jsonb in SQL. A re-pin (`Engine.repin/2`, which any member may do) takes the definition from the
+  file but holds the ticket's own flag: a project that later sets `release: true` on a type whose
+  tickets were admitted the ordinary way does not turn them into releases by re-pinning them, and
+  a release re-pinned onto a file that dropped the flag is still the release.
+- **Every other door refuses it.** `Tickets.prepare_admission/2` — which the API, `mix forge.admit`
+  and accepting a proposal all go through — refuses a flagged type with `{:release_ticket_type,
+  name}`, and a project whose only types are flagged with `{:only_release_types, paths}`. The
+  refusal names the Release action. With the release types taken out, one ordinary type left is
+  implied as any single type is. The New ticket form and the proposal type select offer the
+  ordinary types only, and the types section of the backlog a job reads lists none of the release
+  types (an open release ticket is still a row in its tickets table, with its type). **A proposal
+  that suggests the release is the one exception to "refuses"**: a suggestion is only ever a
+  suggestion, so it is treated as an unknown type is (§ Proposals) and the ordinary type implied or
+  asked for instead, with nothing admitted as the release. A person or an API caller who *names*
+  the release when accepting is refused.
+- **Restoring a cancelled release** (`Engine.restore/2`, a member's) takes the same lock and is
+  refused with the open one, because a cancelled release is not open and another may have been
+  started since.
+- **Who and how many.** `Operator.start_release/3` is a project admin's (`:manage`,
+  `identity.md`), and there is no token or API route. One release is open per project: the start
+  locks the project row, the lock `put_admit/5` already takes for the number, and refuses with
+  the open ticket when one is active or stuck. Two taps in quick succession make one ticket.
+- **The title** is `Release in progress` until the version is known. A job's document whose front
+  matter carries `version: X.Y.Z` (a semantic version, optionally `v`-prefixed, at most 64 bytes)
+  renames the ticket to it when it is recorded, with a `ticket.renamed` event naming the
+  document. A version that does not fit is ignored, and a rename never fails the job that caused
+  it. Only a job's documents do this; a chat step's do not. A release that stops or is cancelled
+  first keeps the placeholder.
+- **The note** is the ticket's body, so it is the `ticket` input every job in the release reads.
+  With none the body is empty and the `ticket` document is the title alone.
+- **Concluding is the workflow's.** The engine already takes an edge with no `approve` by itself
+  and merges on entering an `on_enter: merge` state, and a state with no way out ends the ticket
+  `done`. So a release whose last edge has no `approve` concludes with no person, and one that
+  does put `approve` there waits, as any workflow does. The platform adds no approval and removes
+  none. A failed or stuck job does not conclude it.
+
 ## Deliberately not here
 
 - **Changing a ticket's type.** A re-pin to another type would reuse every guard `repin/2` has,
@@ -326,6 +390,12 @@ Each of these was updated with the part it describes:
   workflow is (`ui.md` § Creating things).
 - **Nested imports, imported transitions, a deep merge, overriding an imported command.** Each is
   a rule a reader has to run in their head to know what a type does.
+- **A project setting that names the release**, starting one by API, an agent, a chat or a
+  schedule, a form for its title, and a chat step's documents renaming it. The flag in the file is
+  the only assignment and the page the only door (§ Releases).
+- **Re-pinning changing whether a ticket is the release.** A re-pin holds the ticket's flag
+  (§ Releases), so a file that gains or drops the flag changes the next admission and no ticket
+  already admitted.
 - **Per-type permissions or credential pools.** Nothing has shown that a type is the boundary
   either should follow.
 

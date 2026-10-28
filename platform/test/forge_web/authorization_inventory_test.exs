@@ -175,6 +175,9 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     # The version id is the client's; `Operator.accept_proposal/4` and `decline_proposal/3` resolve
     # it to its project and refuse a non-member (`allow_proposal/2`).
     {"project_live.ex", "decide_proposal"} => :member,
+    # `Operator.start_release/3` asks for `:manage`, and the page draws the block for an admin only
+    # (`docs/design/ticket-types.md` § Releases).
+    {"project_live.ex", "release:start"} => :manage,
     # Both resolve inside the project and ask for `:manage` in `Forge.Operator`; the value is
     # passed through and never assigned (`docs/design/secrets.md` § Surfaces).
     {"project_settings_live.ex", "set-secret"} => :manage,

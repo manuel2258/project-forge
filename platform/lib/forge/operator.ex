@@ -264,6 +264,18 @@ defmodule Forge.Operator do
     end
   end
 
+  @doc """
+  Starts the project's release (`docs/design/ticket-types.md` § Releases), with `note`, which may
+  be empty, as its body. A project admin's: there is no token clause, so the page is the one door.
+  """
+  @spec start_release(Project.t(), User.t(), String.t() | nil) ::
+          {:ok, Ticket.t()} | {:error, term()}
+  def start_release(%Project{} = project, %User{} = user, note) do
+    with :ok <- allow(project, user, :manage) do
+      Forge.ReleaseTickets.start(project, note, Actor.of(user))
+    end
+  end
+
   ## Conversations
 
   @doc "Opens a conversation on a project."

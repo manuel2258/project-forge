@@ -714,6 +714,9 @@ defmodule Forge.Engine do
   @spec restore(Ticket.t(), String.t()) :: {:ok, Ticket.t()} | {:error, term()}
   def restore(%Ticket{status: :cancelled} = ticket, user_id) do
     Multi.new()
+    # A release is one at a time (`docs/design/ticket-types.md` § Releases): another may have been
+    # started since this one was cancelled.
+    |> Forge.ReleaseTickets.put_restorable(ticket)
     |> Tickets.put_progress(:ticket, ticket, %{
       state: ticket.state,
       status: :stuck,
@@ -728,6 +731,9 @@ defmodule Forge.Engine do
     |> case do
       {:ok, %{ticket: ticket}} ->
         {:ok, ticket}
+
+      {:error, :release_lock, reason, _changes} ->
+        {:error, reason}
 
       {:error, step, reason, _changes} ->
         {:error, {step, reason}}

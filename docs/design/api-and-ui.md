@@ -26,6 +26,9 @@ outside `Operator` altogether (§ Operations).
   ticket, of the type the person chose or else the one it suggests (`ticket-types.md` § Proposals).
 - `decline_proposal(version_id, user, comment)` — records that it will not be.
 - `admit(project, user, attrs)` — admits a ticket.
+- `start_release(project, user, note)` — starts the project's release, the workflow that sets
+  `release: true`, with the note as its body. A project admin's (`:manage`); there is no API route
+  (`ticket-types.md` § Releases).
 - `open_chat(project, user, text, opts)`, `send_chat(chat, user, text, opts)`,
   `answer_chat(chat, user, reply, answers)`, `stop_chat(chat, user)`,
   `close_chat(chat, user, reason)`, `reopen_chat(chat, user)`, `merge_chat(chat, user)` — a
@@ -95,7 +98,7 @@ it. Every refusal to authenticate is the same 401 body.
 | `GET /queue` | The operator queue |
 | `GET /projects`, `POST /projects` | List; register `{name, default_branch}` (repository created under the platform's repos directory) |
 | `GET /tickets[?project=name][&state=s][&open=true]` | List tickets. `state` filters to one state name, `open=true` to status active or stuck; they combine. A project token needs no `project` |
-| `POST /projects/:name/tickets` | Admit `{title, body, ticket_type}`; `ticket_type` is required when the project has more than one (`ticket-types.md`) |
+| `POST /projects/:name/tickets` | Admit `{title, body, ticket_type}`; `ticket_type` is required when the project has more than one (`ticket-types.md`); naming the release type is refused with 422 `release_ticket_type`, saying a project admin starts it with Release on the project page |
 | `GET /tickets/:project/:number` | Ticket with jobs, artifacts, open questions, pending transition |
 | `GET /tickets/:project/:number/events` | The event timeline |
 | `GET /tickets/:project/:number/review` | The merge decision: diff, documents, presentations, the commit message, answers, cost |
@@ -108,7 +111,7 @@ it. Every refusal to authenticate is the same 401 body.
 | `POST /tickets/:project/:number/approve` | `{decision, comment}` |
 | `POST /tickets/:project/:number/transition` | `{to, outcome, comment}` |
 | `POST /tickets/:project/:number/retry` | Runs the state the ticket rests in again |
-| `POST /tickets/:project/:number/cancel`, `…/restore` | Cancels the ticket; brings a cancelled one back |
+| `POST /tickets/:project/:number/cancel`, `…/restore` | Cancels the ticket; brings a cancelled one back — a cancelled release is refused with 409 `release_open` while another release is open (`ticket-types.md` § Releases) |
 | `GET /projects/:project/proposals` | Open ticket proposals on the project, each with the `suggested_type` it names |
 | `POST /proposals/:version_id/accept` | `{comment, ticket_type}`; answers with the ticket it admitted |
 | `POST /proposals/:version_id/decline` | `{comment}` |

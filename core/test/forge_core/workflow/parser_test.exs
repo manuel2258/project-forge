@@ -1242,6 +1242,56 @@ defmodule ForgeCore.Workflow.ParserTest do
     errors
   end
 
+  describe "release" do
+    test "true is accepted, absent and false both mean no", %{map: map} do
+      assert {:ok, %Workflow{release: true}} = Parser.from_map(Map.put(map, "release", true))
+      assert {:ok, %Workflow{release: false}} = Parser.from_map(map)
+      assert {:ok, %Workflow{release: false}} = Parser.from_map(Map.put(map, "release", false))
+    end
+
+    test "anything that is not a boolean is refused at release", %{map: map} do
+      for value <- ["yes", 1, ["true"], %{"a" => 1}] do
+        assert {"release", "must be true or false"} in messages(Map.put(map, "release", value))
+      end
+    end
+
+    test "the single file cannot be a release, and says why", %{map: map} do
+      map = Map.put(map, "release", true)
+
+      assert {:ok, _} = Parser.from_map(map)
+
+      assert {:error, [%Error{path: "release", message: message}]} =
+               Parser.from_map(map, single_file: true)
+
+      assert message =~ "only a ticket type in .forge/workflows/ can be a release"
+      assert {:ok, _} = Parser.from_map(Map.put(map, "release", false), single_file: true)
+    end
+
+    # A pinning is read as it was admitted: a pin that carries the flag from the single file, or
+    # carries no key at all, builds, because `from_pinned/1` never validates.
+    test "a pin reads the flag as stored, without validating it", %{map: map} do
+      assert {:ok, %Workflow{release: false}} = Parser.from_pinned(map)
+      assert {:ok, %Workflow{release: true}} = Parser.from_pinned(Map.put(map, "release", true))
+      assert {:error, [_ | _]} = Parser.from_pinned(Map.put(map, "release", "yes"))
+    end
+
+    test "declares_release?/1 is true only for a top-level release: true" do
+      assert Parser.declares_release?("version: 1\nrelease: true\n")
+      refute Parser.declares_release?("version: 1\nrelease: false\n")
+      refute Parser.declares_release?("version: 1\nrelease: \"true\"\n")
+      refute Parser.declares_release?("version: 1\nstates:\n  release: true\n")
+      refute Parser.declares_release?("version: 1\n")
+      refute Parser.declares_release?("states: [unclosed\n")
+      refute Parser.declares_release?("- release\n")
+      refute Parser.declares_release?("just text")
+      refute Parser.declares_release?(nil)
+    end
+
+    test "declares_release?/1 needs no valid workflow" do
+      assert Parser.declares_release?("release: true\nnothing: else\n")
+    end
+  end
+
   defp paths(map), do: Enum.map(errors(map), & &1.path)
   defp messages(map), do: Enum.map(errors(map), &{&1.path, &1.message})
 end

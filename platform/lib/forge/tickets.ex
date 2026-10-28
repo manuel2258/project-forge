@@ -59,7 +59,7 @@ defmodule Forge.Tickets do
 
   def prepare_admission(%Project{} = project, ticket_type)
       when is_nil(ticket_type) or is_binary(ticket_type),
-      do: prepare(project, &TicketTypes.for_admission(&1, ticket_type))
+      do: prepare(project, &TicketTypes.for_admission(&1, ticket_type, &2))
 
   def prepare_admission(%Project{}, _ticket_type),
     do: {:error, {:invalid_ticket_type, :not_a_name}}
@@ -69,9 +69,39 @@ defmodule Forge.Tickets do
   type whose file is gone refuses rather than guessing which type the ticket is now.
   """
   @spec prepare_repin(Project.t(), Ticket.t()) :: {:ok, map()} | {:error, term()}
-  def prepare_repin(%Project{} = project, %Ticket{ticket_type: ticket_type}),
-    do: prepare(project, &TicketTypes.for_repin(&1, ticket_type))
+  def prepare_repin(%Project{} = project, %Ticket{ticket_type: ticket_type} = ticket) do
+    with {:ok, prepared} <-
+           prepare(project, fn layout, _releases ->
+             TicketTypes.for_repin(layout, ticket_type)
+           end) do
+      {:ok, keep_release(prepared, Forge.ReleaseTickets.release?(ticket))}
+    end
+  end
 
+  # **A ticket is a release, or not, for life**, as it keeps its type (`docs/design/ticket-types.md`
+  # § Releases). The file read now may say otherwise — a project that sets the flag on a type whose
+  # tickets were admitted the ordinary way — and re-pinning, which any member may do, must not turn
+  # a ticket into the project's open release or take one out of it. Only the flag is held: the rest
+  # of the definition is the file's.
+  # The struct is left as the file read, because nothing re-pinning does reads its `release`; the
+  # pin is the map, and that is what every later read builds the struct from.
+  defp keep_release(%{yaml_map: map} = prepared, true),
+    do: %{prepared | yaml_map: Map.put(map, "release", true)}
+
+  defp keep_release(%{yaml_map: map} = prepared, false),
+    do: %{prepared | yaml_map: Map.delete(map, "release")}
+
+  @doc """
+  What `Forge.ReleaseTickets.start/3` admits: the type that sets `release: true`, read as
+  `prepare_admission/2` reads one, or why the project has no release
+  (`docs/design/ticket-types.md` § Releases).
+  """
+  @spec prepare_release(Project.t()) :: {:ok, map()} | {:error, term()}
+  def prepare_release(%Project{} = project),
+    do: prepare(project, &TicketTypes.for_release/2)
+
+  # `select` is given the layout and the names of the types that set `release: true`.
+  #
   # What is pinned is the definition with its imports resolved, not the file's own text: a
   # ticket's workflow is read back with no repository to read a library from
   # (`docs/design/ticket-types.md` § Imports).
@@ -80,7 +110,7 @@ defmodule Forge.Tickets do
 
     with {:ok, base} <- Git.resolve(repo, project.default_branch),
          {:ok, layout} <- TicketTypes.layout(repo, base),
-         {:ok, ticket_type, path} <- select.(layout),
+         {:ok, ticket_type, path} <- select.(layout, releases(repo, base, layout)),
          {:ok, workflow, flat} <- load(repo, base, path) do
       {:ok,
        %{repo: repo, base: base, workflow: workflow, yaml_map: flat, ticket_type: ticket_type}}
@@ -91,18 +121,32 @@ defmodule Forge.Tickets do
   defp entries(%{form: :single}, false), do: []
   defp entries(%{form: :types, types: types}, _single), do: types
 
-  defp parsed_at(repo, base, path) do
-    case load(repo, base, path) do
+  # The names of the types whose file says `release: true`, read from the file's own YAML so that
+  # a release that does not validate is still known to be one. A file that cannot be read is not.
+  defp releases(_repo, _base, %{form: :single}), do: []
+
+  defp releases(repo, base, %{form: :types, types: types}) do
+    for %{name: name, path: path} <- types,
+        {:ok, yaml} <- [workflow_yaml(repo, base, path)],
+        Parser.declares_release?(yaml),
+        do: name
+  end
+
+  defp parsed(repo, base, path, yaml) do
+    case parse(repo, base, path, yaml) do
       {:ok, workflow, _flat} -> {:ok, workflow}
       {:error, reason} -> {:error, reason}
     end
   end
 
   defp load(repo, base, path) do
-    with {:ok, yaml} <- workflow_yaml(repo, base, path) do
-      Parser.load(yaml, at_commit(repo, base))
-    end
+    with {:ok, yaml} <- workflow_yaml(repo, base, path), do: parse(repo, base, path, yaml)
   end
+
+  # `.forge/workflow.yml` has no types, so it cannot be a release (`ForgeCore.Workflow.Validator`).
+  defp parse(repo, base, path, yaml),
+    do:
+      Parser.load(yaml, [single_file: path == TicketTypes.single_path()] ++ at_commit(repo, base))
 
   @doc """
   Every ticket type the project's default branch declares, each with its workflow or why it has
@@ -128,10 +172,29 @@ defmodule Forge.Tickets do
          {:ok, layout} <- TicketTypes.layout(repo, base) do
       entries = entries(layout, Keyword.get(opts, :single, true))
 
-      types = Enum.map(entries, &Map.put(&1, :workflow, parsed_at(repo, base, &1.path)))
+      types = Enum.map(entries, &read_type(repo, base, &1))
       {:ok, %{form: layout.form, types: types, not_types: layout.not_types}}
     end
   end
+
+  # One type's file read once: its workflow or why it has none, and whether it sets `release: true`.
+  defp read_type(repo, base, %{path: path} = entry) do
+    case workflow_yaml(repo, base, path) do
+      {:ok, yaml} ->
+        entry
+        |> Map.put(:workflow, parsed(repo, base, path, yaml))
+        |> Map.put(:release, release?(entry, yaml))
+
+      {:error, reason} ->
+        entry |> Map.put(:workflow, {:error, reason}) |> Map.put(:release, false)
+    end
+  end
+
+  # The single file (named nil) is never a release: it has no types, and validation refuses its
+  # flag, so listing it as one would hide it from the form with a sentence about a release nobody
+  # can start.
+  defp release?(%{name: nil}, _yaml), do: false
+  defp release?(_entry, yaml), do: Parser.declares_release?(yaml)
 
   @doc """
   What changed under `.forge/` on the project's default branch since `ticket` was pinned — the

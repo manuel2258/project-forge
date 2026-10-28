@@ -549,8 +549,10 @@ What that comes to:
   and every
   conversation write.
 - **`manage`** is the settings actions — the model, the effort, the project's secrets, minting a
-  git token and revoking one, membership, and mirrors. Those tokens are admin-only to *read* as well, because the token list
-  names the ids the revoke button needs.
+  git token and revoking one, membership, mirrors, and starting a release
+  (`ticket-types.md` § Releases). A node admin who is not a member is not an admin of the project, and
+  reaches nothing in it, so has no Release. The tokens are admin-only to *read* as well, because the
+  token list names the ids the revoke button needs.
 - **`approved`** is three: `/workers`, registering a project, and listing the projects you are
   in. `/workers` lists the caller's own machines only, because a row names the projects its
   machine serves.

@@ -2116,6 +2116,7 @@ defmodule Forge.Jobs do
       end
     end)
     |> put_documents(ticket, job, result)
+    |> Forge.ReleaseTickets.put_rename(ticket, job, result.documents)
     |> put_blobs(ticket, job, result)
     |> put_proposals(job, result)
     |> put_transcript(ticket, job, result)

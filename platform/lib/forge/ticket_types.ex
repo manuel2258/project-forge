@@ -79,23 +79,54 @@ defmodule Forge.TicketTypes do
   required when there is more than one, and implied when there is one; there is no default,
   because a default is how a bug quietly runs the feature lifecycle.
   """
-  @spec for_admission(layout(), String.t() | nil) ::
+  @spec for_admission(layout(), String.t() | nil, [String.t()]) ::
           {:ok, String.t() | nil, String.t()} | {:error, term()}
-  def for_admission(%{form: :single}, nil), do: {:ok, nil, @single}
-  def for_admission(%{form: :single}, name), do: {:error, {:no_ticket_types, name}}
+  def for_admission(layout, name, releases \\ [])
 
-  def for_admission(%{form: :types, types: [%{name: name, path: path}]}, nil),
-    do: {:ok, name, path}
+  def for_admission(%{form: :single}, nil, _releases), do: {:ok, nil, @single}
+  def for_admission(%{form: :single}, name, _releases), do: {:error, {:no_ticket_types, name}}
 
-  def for_admission(%{form: :types, types: types}, nil),
-    do: {:error, {:ticket_type_required, names(types)}}
+  # `releases` is the names of the types that set `release: true` (`docs/design/ticket-types.md`
+  # § Releases): naming one is refused, and the rest are chosen from as if it were not there, so a
+  # project of one ordinary type and its release still implies the ordinary one.
+  def for_admission(%{form: :types, types: types}, name, releases) do
+    if name in releases do
+      {:error, {:release_ticket_type, name}}
+    else
+      case Enum.reject(types, &(&1.name in releases)) do
+        [] -> {:error, {:only_release_types, Enum.map(types, & &1.path)}}
+        ordinary -> admission(ordinary, name)
+      end
+    end
+  end
 
-  def for_admission(%{form: :types, types: types}, name) do
+  defp admission([%{name: name, path: path}], nil), do: {:ok, name, path}
+  defp admission(types, nil), do: {:error, {:ticket_type_required, names(types)}}
+
+  defp admission(types, name) do
     case Enum.find(types, &(&1.name == name)) do
       %{path: path} -> {:ok, name, path}
       nil -> {:error, {:unknown_ticket_type, name, names(types)}}
     end
   end
+
+  @doc """
+  The file a release is read from: the one type that sets `release: true`, as `{:ok, name,
+  path}`. `releases` is the names of the types that do. None, or the single file, is
+  `{:error, :no_release_workflow}`; two or more is `{:error, {:several_release_workflows,
+  paths}}`, because neither is nearer than the other (`docs/design/ticket-types.md` § Releases).
+  """
+  @spec for_release(layout(), [String.t()]) ::
+          {:ok, String.t(), String.t()} | {:error, term()}
+  def for_release(%{form: :types, types: types}, releases) do
+    case Enum.filter(types, &(&1.name in releases)) do
+      [] -> {:error, :no_release_workflow}
+      [%{name: name, path: path}] -> {:ok, name, path}
+      several -> {:error, {:several_release_workflows, Enum.map(several, & &1.path)}}
+    end
+  end
+
+  def for_release(%{form: :single}, _releases), do: {:error, :no_release_workflow}
 
   @doc """
   The file a re-pin of a ticket of `name` reads: its own type's, at the new commit. A type whose

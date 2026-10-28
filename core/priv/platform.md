@@ -123,6 +123,15 @@ conversation deletes a branch that was not merged, unless it would not merge cle
 Bootstrapping a project — writing its first `.forge/workflow.yml` — is a conversation's job, not a
 workflow's, because until that file exists there is no workflow to run.
 
+## Releases
+
+A project's release is a workflow that sets `release: true`, started by a project admin from the
+project page; its ticket is titled `Release in progress` until a version is known. On such a ticket,
+a document you write whose front matter carries `version: X.Y.Z` renames the ticket to that
+version when your job ends. Nothing else is renamed. A version is three numbers joined by dots, with
+an optional leading `v`, a `-` pre-release and a `+` build suffix, in at most 64 bytes; anything else
+is ignored. Whether you are told to write it is up to the workflow's prompt.
+
 ## Spend
 
 Every job has a turn and cost ceiling, and the node has a daily one. They are enforced by the

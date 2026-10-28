@@ -161,6 +161,43 @@ defmodule ForgeWeb.ReconnectTest do
     end
   end
 
+  # `docs/design/ticket-types.md` § Releases: the note box is held as a proposal's comment is, and
+  # drawn only for a project admin of a project whose workflow sets the flag.
+  test "holds on a project's Release note", %{conn: conn, user: user} do
+    {:ok, project} =
+      Projects.register(
+        %{
+          name: "rc-release-#{System.unique_integer([:positive])}",
+          repo_path:
+            seeded_repo(%{
+              ".forge/workflow.yml" => nil,
+              ".forge/agents/release.md" => "Cut it.\n",
+              ".forge/workflows/release.yml" => """
+              version: 1
+              release: true
+              initial: releasing
+              states:
+                releasing:
+                  prompt: agents/release.md
+                  produces: [release-notes.md]
+                  budget: { turns: 5, cost: 1.00 }
+                published: {}
+              transitions:
+                - { from: releasing, to: published }
+              limits: { ticket_cost: 5.00 }
+              """
+            })
+        },
+        user
+      )
+
+    {:ok, view, html} = live(conn, ~p"/projects/#{project.name}")
+    assert_recoverable(html, "a project's Release block")
+
+    view |> form("#release-form", %{"note" => "half a note"}) |> render_change()
+    assert view |> element("#release-note") |> render() =~ "half a note"
+  end
+
   describe "the handler a rejoin's replay lands in" do
     # This is the event the client re-pushes on a rejoin, against a view that has just mounted
     # and holds nothing — which is the whole of what a rejoin is on the server's side.
@@ -645,7 +682,8 @@ defmodule ForgeWeb.ReconnectTest do
             {"live/chat_live.ex", "send"},
             {"live/operator/components.ex", "decide"},
             {"live/operator/components.ex", "decide_proposal"},
-            {"live/operator/components.ex", "write_document"}
+            {"live/operator/components.ex", "write_document"},
+            {"live/project_live.ex", "release:start"}
           ] do
         assert site in recovering, "#{inspect(site)} is not in the scan at all"
       end

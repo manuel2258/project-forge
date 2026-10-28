@@ -892,6 +892,11 @@ On a phone, New project is a row in the More sheet, and the project page offers 
 New chat exactly as it does on a laptop. They used to be laptop-only, on the reasoning that the
 phone is where decisions are answered; § The phone records why that no longer holds.
 
+**A release is never offered in the ticket form's type select** (nor in the proposal type select on
+the project page): the form behaves as though that type did not exist, and a project whose only
+type is the release says so the way a project with no workflow does (`ticket-types.md`
+§ Releases). The Release action on the project page is the one way to start it.
+
 **A ticket form reached from a project does not ask which project.** It says which one, as an
 identifier, and the select appears only on the bare `/tickets/new` — a route nothing links to,
 kept so the address works and so the no-projects-at-all case still has somewhere to say so.
@@ -1006,6 +1011,18 @@ just changed those differ, and saying which is which is the point rather than a 
 and a type that does not parse as its reason beside the ones that do. What `.forge/workflows/`
 holds that is not a type is listed with why, since it blocks nothing and would otherwise be
 invisible (`ticket-types.md` § The project page).
+
+**A project admin sees a Release block in the header area, and nobody else does**
+(`ticket-types.md` § Releases). It is at full width below `sm`, its button is 52px tall like a form's submit
+button elsewhere, and it is in one of five states: *ready*, a form holding one optional note box (held
+across a rejoin like the page's other drafts, and sent with `phx-disable-with`) and a Release
+button; *open*, a link to the release already open and no button; *none*, the sentence saying no
+workflow in the project sets `release: true`; *several*, naming both files and saying to unset
+one; and *broken*, the file and why it does not parse, with the button disabled. A refusal is said
+in words and keeps what was typed; where the page has since lost the box (another admin's release
+is open, the flag has moved) the note is shown as unsent text beneath the sentence. The per-type workflow table's heading for the release type
+says it is the release. A member who is not an admin is drawn nothing, and the server refuses the
+event whatever the page showed.
 
 **It links to the repository it holds** — `Repository ›` in the header, beside Settings. The
 page says what the repository means to the platform; what is actually in it is

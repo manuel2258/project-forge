@@ -29,6 +29,25 @@ defmodule ForgeWeb.TicketWorkScreenTest do
     %{project: project, ticket: ticket}
   end
 
+  # A message `ago` seconds old, inserted: events are append-only, so the time is chosen by
+  # adding one later in the log, which is what a list reads as the last thing said.
+  defp said_at(chat, text, ago) do
+    Forge.Repo.insert!(%Forge.Events.Event{
+      actor: %{"kind" => "system", "id" => nil},
+      type: "chat.message",
+      payload: %{"text" => text},
+      job_id: chat.id,
+      project_id: chat.project_id,
+      inserted_at: DateTime.add(DateTime.utc_now(:second), -ago, :second)
+    })
+  end
+
+  defp chat_order(view) do
+    ~r/id="conversation-([0-9a-f-]{36})"/
+    |> Regex.scan(render(view))
+    |> Enum.map(&List.last/1)
+  end
+
   defp page(project, ticket, query \\ ""),
     do: "/tickets/#{project.name}/#{ticket.number}" <> query
 
@@ -315,16 +334,18 @@ defmodule ForgeWeb.TicketWorkScreenTest do
 
   describe "the Timeline" do
     # A conversation started from a ticket was findable from the project page and not from the
-    # ticket it is about. Live first, because that is the one costing something.
-    test "lists the ticket's conversations, live first", %{
+    # ticket it is about. The live one is a section of its own above, even when the ended one was
+    # used more recently; the order within a section is the same one every list has.
+    test "lists the ticket's conversations, the live ones in a section above", %{
       conn: conn,
       project: project,
       ticket: ticket
     } do
+      {:ok, live_one} = Conversations.open(project, "the new question", ticket: ticket)
       {:ok, ended} = Conversations.open(project, "the old question", ticket: ticket)
       {:ok, _ended} = Conversations.ended(ended, nil, "idle")
-      {:ok, live_one} = Conversations.open(project, "the new question", ticket: ticket)
       {:ok, _other} = Conversations.open(project, "about the project")
+      said_at(live_one, "left alone", 3600)
 
       {:ok, view, _html} = live(conn, page(project, ticket, "?tab=timeline"))
       chats = view |> element("#ticket-chats") |> render()
@@ -333,8 +354,37 @@ defmodule ForgeWeb.TicketWorkScreenTest do
       assert chats =~ "/chats/#{ended.id}"
       refute chats =~ "about the project"
 
-      [first | _rest] = Regex.scan(~r"/chats/([0-9a-f-]{36})", chats, capture: :all_but_first)
-      assert first == [live_one.id]
+      assert has_element?(view, "#ticket-chats #conversations-live h3", "Live · 1")
+      assert has_element?(view, "#ticket-chats #conversations-live #conversation-#{live_one.id}")
+      assert has_element?(view, "#ticket-chats #conversations-earlier h3", "Earlier")
+      assert has_element?(view, "#ticket-chats #conversations-earlier #conversation-#{ended.id}")
+    end
+
+    test "follows what is said in the ticket's conversations, and only those", %{
+      conn: conn,
+      project: project,
+      ticket: ticket
+    } do
+      {:ok, older} = Conversations.open(project, "the older one", ticket: ticket)
+      {:ok, newer} = Conversations.open(project, "the newer one", ticket: ticket)
+      {:ok, elsewhere} = Conversations.open(project, "about the project")
+      said_at(older, "old", 3600)
+      said_at(newer, "new", 1800)
+
+      {:ok, view, _html} = live(conn, page(project, ticket, "?tab=timeline"))
+      assert chat_order(view) == [newer.id, older.id]
+
+      # Another ticket's, or none: the list is not woken, so a change behind its back stays unseen.
+      Forge.Repo.update_all(from(j in Jobs.Job, where: j.id == ^older.id), set: [turns: 7])
+      assert render(view) =~ "0 turns"
+
+      {:ok, _event} = Conversations.send(elsewhere, "not about the ticket")
+      assert render(view) =~ "0 turns"
+      refute render(view) =~ "7 turns"
+
+      {:ok, _event} = Conversations.send(older, "this ticket again")
+      assert chat_order(view) == [older.id, newer.id]
+      assert render(view) =~ "7 turns"
     end
   end
 

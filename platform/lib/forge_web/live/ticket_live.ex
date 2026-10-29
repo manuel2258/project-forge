@@ -40,7 +40,11 @@ defmodule ForgeWeb.TicketLive do
   def mount(%{"project" => name, "number" => number}, _session, socket) do
     {ticket, project} = Tickets.fetch!(name, number)
     ForgeWeb.Access.project_scope!(socket.assigns.current_scope, project)
-    if connected?(socket), do: Events.subscribe()
+
+    if connected?(socket) do
+      Events.subscribe()
+      Events.subscribe_chats()
+    end
 
     {:ok,
      socket
@@ -167,7 +171,6 @@ defmodule ForgeWeb.TicketLive do
       docs: docs(project, ticket, artifacts),
       diff: diff,
       commits: commits(project, ticket),
-      chats: Conversations.summaries(ticket_id: ticket.id),
       events: ticket.id |> Events.for_ticket() |> Enum.reverse() |> Enum.take(4),
       queue_events: queue_events(ticket),
       activity: if(current, do: Events.for_job(current.id), else: []),
@@ -191,7 +194,13 @@ defmodule ForgeWeb.TicketLive do
       until_midnight: until_midnight(),
       now: DateTime.utc_now()
     )
+    |> load_chats()
   end
+
+  # Apart from `load/3` because something said in a conversation is far more frequent than
+  # anything else on this page, and the rest of it is several reads and some git.
+  defp load_chats(%{assigns: %{ticket_id: id}} = socket),
+    do: assign(socket, chats: Conversations.summaries(ticket_id: id), now: DateTime.utc_now())
 
   # What the merge queue did to the ticket, oldest first, and the merge it ended in — and nothing
   # for a ticket the queue never held: a merge on a workflow that queues nothing is no part of
@@ -387,6 +396,12 @@ defmodule ForgeWeb.TicketLive do
 
   def handle_info({:ticket_changed, _other}, socket), do: {:noreply, socket}
 
+  # Only this ticket's conversations redraw the list, matched in the head before anything is read.
+  def handle_info({:chat_changed, _id, _project, id}, %{assigns: %{ticket_id: id}} = socket),
+    do: {:noreply, load_chats(socket)}
+
+  def handle_info({:chat_changed, _id, _project, _other}, socket), do: {:noreply, socket}
+
   # What the branch holds, read again after a call that may have committed to it.
   def handle_info(:catch_up, %{assigns: %{project: project, ticket: ticket}} = socket) do
     {:noreply,
@@ -412,9 +427,10 @@ defmodule ForgeWeb.TicketLive do
   end
 
   # *Ask about this* on a ticket has no composer to put the reference in, so it goes to one: the
-  # ticket's most recent live conversation, with the reference in its draft, or a new one about
-  # the ticket with the reference as its first message. The reference travels in the address and
-  # nothing is sent until the operator sends it (`docs/design/ui.md` § Changes).
+  # ticket's most recently used live conversation (the list's order), with the reference in its
+  # draft, or a new one about the ticket with the reference as its first message. The reference
+  # travels in the address and nothing is sent until the operator sends it
+  # (`docs/design/ui.md` § Changes).
   def handle_event("ask", %{"ref" => ref}, socket) do
     %{project: project, ticket: ticket, chats: chats} = socket.assigns
 
@@ -933,7 +949,7 @@ defmodule ForgeWeb.TicketLive do
     </section>
 
     <%!-- A conversation started from a ticket was findable from the project page and not from
-          the ticket it is about. Live first: that one is costing something. --%>
+          the ticket it is about. Its order and sections are the component's. --%>
     <section id="ticket-chats" class="mt-4 border-t border-base-300 pt-5">
       <div class="flex items-center justify-between gap-3">
         <h2 class="font-mono text-[11px] tracking-[.14em] uppercase opacity-60">Conversations</h2>
@@ -948,6 +964,7 @@ defmodule ForgeWeb.TicketLive do
         summaries={@chats}
         now={@now}
         project={false}
+        heading="h3"
         empty="No conversation about this ticket yet."
       />
     </section>

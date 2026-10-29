@@ -15,6 +15,7 @@ defmodule ForgeWeb.ChatsLiveTest do
   use ForgeWeb.ConnCase, async: false
 
   import Forge.GitFixtures
+  import Ecto.Query
   import Phoenix.LiveViewTest
 
   alias Forge.{Conversations, Jobs, Projects}
@@ -40,6 +41,26 @@ defmodule ForgeWeb.ChatsLiveTest do
     do:
       :ok =
         Jobs.record_harness_event(chat.id, %{type: "job.harness.text", payload: %{text: text}})
+
+  # A message at a chosen time: events are append-only, so one is inserted with it, later in the
+  # log than any before, which is what the list reads as the last thing said.
+  defp said_at(chat, text, at) do
+    Forge.Repo.insert!(%Forge.Events.Event{
+      actor: %{"kind" => "system", "id" => nil},
+      type: "chat.message",
+      payload: %{"text" => text},
+      job_id: chat.id,
+      project_id: chat.project_id,
+      inserted_at: at
+    })
+  end
+
+  defp ago(seconds), do: DateTime.add(DateTime.utc_now(:second), -seconds, :second)
+
+  # The chats' ids in the order the page draws them.
+  defp order(html) do
+    ~r/id="conversation-([0-9a-f-]{36})"/ |> Regex.scan(html) |> Enum.map(&List.last/1)
+  end
 
   defp row(chat), do: ~s(ol li a[href="/chats/#{chat.id}"])
 
@@ -141,10 +162,9 @@ defmodule ForgeWeb.ChatsLiveTest do
     refute rendered =~ String.duplicate("ab", 71)
   end
 
-  # The figure in the header is the count of conversations holding a machine. It is the only
-  # number on the page and the reason to look at it at all, so it has to be that count and not,
-  # say, the length of the list.
-  test "the live count is the number of conversations still holding a machine", %{
+  # The live ones are a section of their own above, headed with their count — the count that used
+  # to stand in the header. Live is holding a machine, so it is the same set that is offered End.
+  test "live conversations are a section above the rest, headed with their count", %{
     conn: conn,
     user: user
   } do
@@ -154,9 +174,183 @@ defmodule ForgeWeb.ChatsLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/chats")
 
-    assert has_element?(view, row(running))
-    assert has_element?(view, row(finished))
-    assert view |> element("header span.font-mono", "live") |> render() =~ "1 live"
+    assert has_element?(view, "#conversations-live h2", "Live · 1")
+    assert has_element?(view, "#conversations-live #conversation-#{running.id}")
+    refute has_element?(view, "#conversations-live #conversation-#{finished.id}")
+
+    assert has_element?(view, "#conversations-earlier h2", "Earlier")
+    assert has_element?(view, "#conversations-earlier #conversation-#{finished.id}")
+    refute has_element?(view, "#conversations-earlier #conversation-#{running.id}")
+
+    refute has_element?(view, "header span", "live")
+    assert render(view) =~ ~r/id="conversations-live".*id="conversations-earlier"/s
+  end
+
+  # A section with nothing in it is absent, and with nothing live the list is just the list.
+  test "with nothing live there is no Live section and no Earlier heading", %{
+    conn: conn,
+    user: user
+  } do
+    {:ok, chat} = Conversations.open(project("parser", user), "all done")
+    {:ok, _closed} = Conversations.ended(chat, nil, "closed")
+
+    {:ok, view, _html} = live(conn, ~p"/chats")
+
+    assert has_element?(view, row(chat))
+    refute has_element?(view, "#conversations-live")
+    refute has_element?(view, "#conversations-earlier")
+    refute render(view) =~ "Earlier"
+  end
+
+  test "with only live ones there is no Earlier heading", %{conn: conn, user: user} do
+    {:ok, chat} = Conversations.open(project("parser", user), "still going")
+
+    {:ok, view, _html} = live(conn, ~p"/chats")
+
+    assert has_element?(view, "#conversations-live #conversation-#{chat.id}")
+    refute has_element?(view, "#conversations-earlier")
+    refute render(view) =~ "Earlier"
+  end
+
+  # Criterion 6 and 12: the row follows what is said, and its time with it.
+  test "a conversation moves to the top when it is spoken in, and its time with it", %{
+    conn: conn,
+    user: user
+  } do
+    {:ok, older} = Conversations.open(project("parser", user), "the older one")
+    {:ok, newer} = Conversations.open(project("engine", user), "the newer one")
+    said_at(older, "old", ago(3600))
+    said_at(newer, "new", ago(1800))
+
+    {:ok, view, html} = live(conn, ~p"/chats")
+    assert order(html) == [newer.id, older.id]
+    assert view |> element(row(older)) |> render() =~ "1h"
+
+    agent_said(older, "back again")
+
+    html = render(view)
+    assert order(html) == [older.id, newer.id]
+    assert view |> element(row(older)) |> render() =~ "back again"
+    assert view |> element(row(older)) |> render() =~ "now"
+    refute view |> element(row(older)) |> render() =~ "1h"
+  end
+
+  test "the person saying something moves it too", %{conn: conn, user: user} do
+    {:ok, older} = Conversations.open(project("parser", user), "the older one")
+    {:ok, newer} = Conversations.open(project("engine", user), "the newer one")
+    said_at(older, "old", ago(3600))
+    said_at(newer, "new", ago(1800))
+
+    {:ok, view, _html} = live(conn, ~p"/chats")
+    {:ok, _event} = Conversations.send(older, "one more thing")
+
+    assert order(render(view)) == [older.id, newer.id]
+  end
+
+  # Criterion 7. The page is not woken by a chat it cannot show. "Not woken" is observed as the
+  # page keeping what it drew: the `turns` of a visible row are changed behind its back, and only
+  # a reload would show it.
+  test "something said in a project the reader is not in does not reload the page", %{
+    conn: conn,
+    user: user
+  } do
+    {:ok, mine} = Conversations.open(project("mine", user), "about my parser")
+    theirs = project("theirs", Forge.AccountsFixtures.user_fixture())
+    {:ok, stranger} = Conversations.open(theirs, "not yours")
+
+    {:ok, view, _html} = live(conn, ~p"/chats")
+    assert view |> element(row(mine)) |> render() =~ "0 turns"
+
+    Forge.Repo.update_all(from(j in Jobs.Job, where: j.id == ^mine.id), set: [turns: 7])
+
+    agent_said(stranger, "a secret")
+    assert view |> element(row(mine)) |> render() =~ "0 turns"
+
+    agent_said(mine, "mine")
+    assert view |> element(row(mine)) |> render() =~ "7 turns"
+  end
+
+  test "a change to a ticket of a project the reader is not in does not reload the page", %{
+    conn: conn,
+    user: user
+  } do
+    {:ok, mine} = Conversations.open(project("mine", user), "about my parser")
+    ticket = Forge.ForgeFixtures.ticket_fixture()
+    own = Forge.ForgeFixtures.ticket_fixture(%{project: project("own", user)})
+
+    {:ok, view, _html} = live(conn, ~p"/chats")
+    Forge.Repo.update_all(from(j in Jobs.Job, where: j.id == ^mine.id), set: [turns: 7])
+
+    Forge.Events.notify(ticket.id)
+    assert view |> element(row(mine)) |> render() =~ "0 turns"
+
+    Forge.Events.notify(own.id)
+    assert view |> element(row(mine)) |> render() =~ "7 turns"
+  end
+
+  # Criterion 13: the confirm names the chat it will end, because a row can move under a finger,
+  # and confirming ends the row that was tapped.
+  test "End names the conversation it will end", %{conn: conn, user: user} do
+    parser = project("parser", user)
+    {:ok, first} = Conversations.open(parser, "about the lexer")
+    {:ok, second} = Conversations.open(project("engine", user), "about the scheduler")
+
+    {:ok, view, _html} = live(conn, ~p"/chats")
+
+    confirm = fn chat ->
+      view
+      |> element(~s(ol li button[phx-value-id="#{chat.id}"]))
+      |> render()
+      |> Floki.parse_fragment!()
+      |> Floki.attribute("data-confirm")
+      |> hd()
+    end
+
+    assert confirm.(first) =~ ~s(End #{parser.name} "about the lexer"?)
+    assert confirm.(first) =~ ForgeWeb.Conversations.ending_rule()
+    assert confirm.(second) =~ ~s("about the scheduler")
+    refute confirm.(second) =~ "lexer"
+
+    view |> element(~s(ol li button[phx-value-id="#{first.id}"])) |> render_click()
+    assert Jobs.get(first.id).status == :finished
+    assert Jobs.get(second.id).status == :pending
+  end
+
+  test "a ticket's number is in the confirm when the chat has one", %{conn: conn, user: user} do
+    project = project("parser", user)
+    {:ok, ticket} = Forge.Tickets.admit(project, %{title: "Persist scores"}, :system)
+    {:ok, _chat} = Conversations.open(project, "about the ticket", ticket: ticket)
+
+    {:ok, view, _html} = live(conn, ~p"/chats")
+
+    assert view |> element("ol li button", "End") |> render() =~
+             "#{project.name} ##{ticket.number}"
+  end
+
+  # Criterion 16: a message is text, in the row and in the confirm, cut to its first line.
+  test "a message holding markup is shown as text, cut to its first line", %{
+    conn: conn,
+    user: user
+  } do
+    {:ok, chat} =
+      Conversations.open(
+        project("parser", user),
+        "<b>x</b> " <> String.duplicate("a", 200) <> "\nsecond line"
+      )
+
+    {:ok, view, _html} = live(conn, ~p"/chats")
+
+    row = view |> element(row(chat)) |> render()
+    assert row =~ "&lt;b&gt;x&lt;/b&gt;"
+    refute row =~ "<b>"
+    refute row =~ "second line"
+    refute has_element?(view, "ol li b")
+
+    confirm = view |> element("ol li button", "End") |> render()
+    assert confirm =~ "&lt;b&gt;x&lt;/b&gt;"
+    refute confirm =~ "<b>x"
+    refute confirm =~ "second line"
+    refute confirm =~ String.duplicate("a", 141)
   end
 
   test "a node with no conversations says so instead of drawing an empty list", %{

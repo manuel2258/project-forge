@@ -1,14 +1,21 @@
 defmodule ForgeWeb.ChatsLive do
   @moduledoc """
-  Every conversation in the projects you are in, live ones first.
+  Every conversation in the projects you are in: the live ones in a section above, then the rest,
+  each ordered by when it was last used, newest first.
 
   This is for finding one again — the one about the parser last week, the one still running that
   you closed the tab on. It is not a queue: a conversation that needs you is already in the
   queue, with its questions as a form to answer, and does not wait for you to come looking
   (`docs/design/ui.md` § Space, measure and targets).
 
-  Conversations are kept for ever, so this list only grows. Live first is what keeps it useful:
-  that is the one costing something and holding a machine.
+  Conversations are kept for ever, so this list only grows. The live section is what keeps it
+  useful: those are the ones costing something and holding a machine. The order and the sections
+  are `ForgeWeb.Conversations`' and one rule for every list of conversations
+  (`docs/design/ui.md` § Chats is a destination on both).
+
+  **The list follows what is said.** It is woken by `{:chat_changed, ...}` for a project its
+  viewer is in and by a change to a ticket of one, and by nothing else: a message in somebody
+  else's project costs this page nothing.
 
   **The two controls here follow from that.** Starting one is offered because this is where a
   person comes looking for conversations, and it is the only surface that must ask which project
@@ -25,22 +32,53 @@ defmodule ForgeWeb.ChatsLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    if connected?(socket), do: Events.subscribe()
+    if connected?(socket) do
+      Events.subscribe()
+      Events.subscribe_chats()
+    end
+
     {:ok, socket |> assign(page_title: "Chats") |> load()}
   end
 
   defp load(socket) do
-    summaries = Conversations.summaries(for: socket.assigns.current_scope.user)
+    user = socket.assigns.current_scope.user
 
     assign(socket,
-      summaries: summaries,
-      live: Enum.count(summaries, & &1.live),
+      summaries: Conversations.summaries(for: user),
+      # The projects the list was read for. `summaries(for:)` scopes with the same call, so what a
+      # message is filtered by and what is then read are one model of "the viewer's projects".
+      project_ids: MapSet.new(Forge.Projects.list(user), & &1.id),
       now: DateTime.utc_now()
     )
   end
 
+  # A chat said something, started, ended or moved: reload only for a project of the viewer's,
+  # decided from the message before anything is read.
   @impl true
-  def handle_info({:ticket_changed, _id}, socket), do: {:noreply, load(socket)}
+  def handle_info({:chat_changed, _id, project_id, _ticket_id}, socket) do
+    if MapSet.member?(socket.assigns.project_ids, project_id),
+      do: {:noreply, load(socket)},
+      else: {:noreply, socket}
+  end
+
+  # A project chat's changes are also broadcast with no ticket, alongside the `chat_changed` that
+  # redraws this page, so there is nothing here for it.
+  def handle_info({:ticket_changed, nil}, socket), do: {:noreply, socket}
+
+  # What draws a workflow step's chat the moment its ticket enters the step: the engine tells the
+  # ticket's pages and not the chats. Read the ticket's project, one indexed read, and reload only
+  # for one the viewer is in.
+  def handle_info({:ticket_changed, id}, socket) do
+    case Forge.Repo.get(Forge.Tickets.Ticket, id) do
+      %{project_id: project_id} ->
+        if MapSet.member?(socket.assigns.project_ids, project_id),
+          do: {:noreply, load(socket)},
+          else: {:noreply, socket}
+
+      nil ->
+        {:noreply, socket}
+    end
+  end
 
   # The id comes off the wire, so the chat is read and then authorised — being able to see a
   # conversation in your own list is not the same as the row this id names being in it
@@ -67,7 +105,6 @@ defmodule ForgeWeb.ChatsLive do
     >
       <header class="flex flex-wrap items-baseline gap-x-4 gap-y-2">
         <h1 class="text-2xl font-semibold -tracking-[.025em]">Chats</h1>
-        <span :if={@live > 0} class="font-mono text-[12.5px] opacity-60">{@live} live</span>
         <.link
           navigate={~p"/chats/new"}
           class="ml-auto flex min-h-[46px] items-center rounded-field border border-base-300 px-3 text-sm hover:border-base-content/30"

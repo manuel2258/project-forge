@@ -170,6 +170,41 @@ defmodule Forge.Events do
   @spec subscribe() :: :ok | {:error, term()}
   def subscribe, do: Phoenix.PubSub.subscribe(Forge.PubSub, @topic)
 
+  @chats_topic "chats"
+
+  @doc """
+  Tells the lists of conversations that one changed, and which project and ticket it is in.
+
+  A no-op for any job that is not a chat: the lists draw nothing else, and a workflow job says
+  everything it has to on the ticket's own topic. The ids travel with the message so that a list
+  can decide from the head of its clause whether the change is one it shows, before it reads
+  anything (`CLAUDE.md` § Rules: a handler on a global topic filters before it does any work).
+  """
+  @spec notify_chat(map()) :: :ok
+  def notify_chat(%{kind: :chat, id: id, project_id: project_id, ticket_id: ticket_id}) do
+    Phoenix.PubSub.broadcast(
+      Forge.PubSub,
+      @chats_topic,
+      {:chat_changed, id, project_id, ticket_id}
+    )
+  end
+
+  def notify_chat(_job), do: :ok
+
+  @doc "Subscribes the caller to `{:chat_changed, id, project_id, ticket_id}` for every chat."
+  @spec subscribe_chats() :: :ok | {:error, term()}
+  def subscribe_chats, do: Phoenix.PubSub.subscribe(Forge.PubSub, @chats_topic)
+
+  @doc """
+  Tells everything that draws a job that it changed: the ticket's pages, and the lists of
+  conversations when the job is one. Where a job's state changes, rather than something being said.
+  """
+  @spec notify_changed(map()) :: :ok
+  def notify_changed(job) do
+    notify(job.ticket_id)
+    notify_chat(job)
+  end
+
   @doc """
   Tells a page watching one job that an event arrived, with the event itself.
 

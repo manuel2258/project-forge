@@ -1966,42 +1966,217 @@ defmodule Forge.ConversationsTest do
       refute summary.waiting
     end
 
-    # The second half of "live ones first and newest within that". A list that only grows is only
-    # usable if the thing you were just doing is at the top of it, so the order is the feature
-    # rather than a presentation detail, and nothing rendered it before this.
-    test "conversations of the same liveness come newest first", %{project: project} do
-      {:ok, first_opened} = Conversations.open(project, "the older one")
-      {:ok, second_opened} = Conversations.open(project, "the newer one")
+    # Last, the id: two chats used in the same second and started in the same instant are ordered
+    # by it, so the list is the same list each time it is read and does not shuffle on a redraw.
+    test "chats tied on use and on start are ordered by id", %{project: project} do
+      {:ok, one} = Conversations.open(project, "one")
+      {:ok, two} = Conversations.open(project, "two")
+      at = ago(60)
+      said_at(one, "x", at)
+      said_at(two, "x", at)
+      started(one, at)
+      started(two, at)
 
-      Repo.update_all(from(j in Jobs.Job, where: j.id == ^first_opened.id),
-        set: [inserted_at: DateTime.add(DateTime.utc_now(:second), -3600, :second)]
-      )
-
-      assert [newer, older] = Conversations.summaries(project_id: project.id)
-      assert newer.chat.id == second_opened.id
-      assert older.chat.id == first_opened.id
+      assert Enum.sort([one.id, two.id], :desc) ==
+               Enum.map(Conversations.summaries(project_id: project.id), & &1.chat.id)
     end
 
-    # The first half, and the half that was wrong. `summaries/1` promises "live ones first and
-    # newest within that" and `ForgeWeb.ChatsLive` repeats it — "Live first is what keeps it
-    # useful: that is the one costing something and holding a machine". The sort key was `not
-    # live` under a descending sorter, so `true` — a *finished* chat — came first.
-    #
-    # It hid because the two keys usually agree: the live conversation is normally also the
-    # newest, so the second key put it on top regardless. They disagree exactly when you come
-    # back to a machine you left running, which is the case the page exists for.
-    test "a live conversation sorts above a newer finished one", %{project: project} do
-      {:ok, older_live} = Conversations.open(project, "older, still running")
-      {:ok, newer} = Conversations.open(project, "newer, already closed")
-      {:ok, _closed} = Conversations.ended(newer, nil, "closed")
-
-      Repo.update_all(from(j in Jobs.Job, where: j.id == ^older_live.id),
-        set: [inserted_at: DateTime.add(DateTime.utc_now(:second), -3600, :second)]
-      )
+    # The order is when each was last used, and not whether it is live: the split into a Live
+    # section is the list's (`ForgeWeb.Conversations.list/1`), so that one rule orders every
+    # caller. A finished chat used more recently sits above a live one left alone.
+    test "a conversation used more recently sorts above a live one left alone", %{
+      project: project
+    } do
+      {:ok, left_alone} = Conversations.open(project, "still running, not touched")
+      {:ok, used} = Conversations.open(project, "closed, but used since")
+      {:ok, _closed} = Conversations.ended(used, nil, "closed")
+      said_at(left_alone, "old", ago(3600))
 
       assert [first, second] = Conversations.summaries(project_id: project.id)
-      assert first.chat.id == older_live.id
-      assert second.chat.id == newer.id
+      assert first.chat.id == used.id
+      assert second.chat.id == left_alone.id
+      assert second.live
+    end
+
+    # Criterion 1: used recently beats started recently. The old sort was on the start.
+    test "a chat started long ago and used now sits above one started later and left alone", %{
+      project: project
+    } do
+      {:ok, old_used} = Conversations.open(project, "started last week")
+      {:ok, newer_idle} = Conversations.open(project, "started yesterday")
+      started(old_used, ago(7 * 86_400))
+      started(newer_idle, ago(86_400))
+      said_at(newer_idle, "left alone", ago(80_000))
+
+      assert [first, second] = Conversations.summaries(project_id: project.id)
+      assert first.chat.id == old_used.id
+      assert second.chat.id == newer_idle.id
+      assert DateTime.compare(first.at, second.at) == :gt
+    end
+
+    # `DateTime` is a struct, so `>=` on two of them compares its fields in key order: the day
+    # before the month. 31 October read as later than 1 November, and 12:05:00.9 as later than
+    # 12:30:00.0 in the fraction of a second. Both are `:lt` to `DateTime.compare/2`.
+    test "times are compared as times, not as structs", %{project: project} do
+      {:ok, oct} = Conversations.open(project, "the thirty-first")
+      {:ok, nov} = Conversations.open(project, "the first")
+      said_at(oct, "a", ~U[2026-10-31 09:00:00Z])
+      said_at(nov, "b", ~U[2026-11-01 09:00:00Z])
+
+      assert [nov.id, oct.id] ==
+               Enum.map(Conversations.summaries(project_id: project.id), & &1.chat.id)
+    end
+
+    # Criterion 2: nothing in the order depends on the project.
+    test "chats from different projects interleave by time", %{project: project} do
+      {:ok, other} =
+        register_owned!(%{
+          name: "other-#{System.unique_integer([:positive])}",
+          repo_path: seeded_repo()
+        })
+
+      {:ok, a1} = Conversations.open(project, "first")
+      {:ok, b1} = Conversations.open(other, "second")
+      {:ok, a2} = Conversations.open(project, "third")
+      said_at(a1, "x", ago(300))
+      said_at(b1, "x", ago(200))
+      said_at(a2, "x", ago(100))
+
+      ids = Enum.map(Conversations.summaries(), & &1.chat.id)
+      assert [a2.id, b1.id, a1.id] == ids
+    end
+
+    # Criterion 3: nothing said yet is placed by the start. A workflow step's chat waiting for a
+    # machine has no message, because its agent speaks first.
+    test "a chat with nothing said is placed by when it started", %{project: project} do
+      {:ok, newest} = Conversations.open(project, "newest")
+      {:ok, oldest} = Conversations.open(project, "oldest")
+      said_at(newest, "x", ago(10))
+      said_at(oldest, "x", ago(1000))
+      # A chat row with no event at all, as a workflow step's is before its agent speaks.
+      silent =
+        Repo.insert!(%Jobs.Job{project_id: project.id, kind: :chat, status: :pending, attempt: 1})
+
+      started(silent, ago(500))
+
+      summaries = Conversations.summaries(project_id: project.id)
+      assert [newest.id, silent.id, oldest.id] == Enum.map(summaries, & &1.chat.id)
+      silent_summary = Enum.find(summaries, &(&1.chat.id == silent.id))
+      assert silent_summary.said == nil
+      assert silent_summary.at == Jobs.get(silent.id).inserted_at
+    end
+
+    # Events are stamped to the second, so two chats used in the same second tie: the later start
+    # first, and the id after that, not whatever the query returned. The starts are 12:05:00.9 and
+    # 12:30:00.0, which a struct comparison reads the other way round — the fraction of a second
+    # comes before the minute in the struct's key order.
+    test "a tie on the time of use goes to the later start", %{project: project} do
+      {:ok, early} = Conversations.open(project, "started earlier")
+      {:ok, late} = Conversations.open(project, "started later")
+      at = ago(60)
+      said_at(early, "x", at)
+      said_at(late, "x", at)
+      started(early, ~U[2027-01-01 12:05:00.900000Z])
+      started(late, ~U[2027-01-01 12:30:00.000000Z])
+
+      assert [late.id, early.id] ==
+               Enum.map(Conversations.summaries(project_id: project.id), & &1.chat.id)
+    end
+  end
+
+  # **The lists of conversations are told, by id, what changed** (`Events.subscribe_chats/0`): the
+  # message carries the project and ticket so that a list decides from its head whether it shows
+  # the chat before it reads anything.
+  describe "being told" do
+    setup %{project: project} do
+      {:ok, chat} = Conversations.open(project, "hello")
+      :ok = Events.subscribe_chats()
+      # `open/3` told everyone already.
+      flush_chat_changes()
+      %{chat: chat}
+    end
+
+    defp flush_chat_changes do
+      receive do
+        {:chat_changed, _, _, _} -> flush_chat_changes()
+      after
+        0 -> :ok
+      end
+    end
+
+    test "the agent saying something names the chat, its project and its ticket", %{
+      chat: chat,
+      project: project
+    } do
+      text(chat, "Hello.")
+
+      project_id = project.id
+      chat_id = chat.id
+      assert_receive {:chat_changed, ^chat_id, ^project_id, nil}
+    end
+
+    # A subagent's text is not the agent speaking, and is no row's preview: waking every open
+    # list for it would redraw what has not changed, many times a turn.
+    test "a subagent's report wakes nothing", %{chat: chat} do
+      text(chat, "found it in lib/lexer.ex", "task-1")
+
+      refute_receive {:chat_changed, _, _, _}, 50
+    end
+
+    # Tool calls and usage arrive many times a turn and are on no row.
+    test "a tool call wakes nothing", %{chat: chat} do
+      tool_use(chat, "t1", "Read", %{})
+
+      refute_receive {:chat_changed, _, _, _}, 50
+    end
+
+    test "a workflow job's text is no conversation's" do
+      job = job_fixture(%{ticket: ticket_fixture()})
+
+      :ok =
+        Jobs.record_harness_event(job.id, %{type: "job.harness.text", payload: %{text: "hi"}})
+
+      refute_receive {:chat_changed, _, _, _}, 50
+    end
+
+    test "the person saying something wakes the lists", %{chat: chat} do
+      {:ok, _event} = Conversations.send(chat, "and another thing")
+
+      chat_id = chat.id
+      assert_receive {:chat_changed, ^chat_id, _, _}
+    end
+
+    # What moves a row between the two sections is a chat starting, ending, coming back and its
+    # turn finishing, and each is told on the chats topic: a ticketless chat has no ticket for
+    # the ticket topic to name.
+    test "starting, a turn, ending and reopening each tell the lists", %{
+      project: project,
+      chat: chat
+    } do
+      {:ok, started} = Conversations.open(project, "another")
+      started_id = started.id
+      assert_receive {:chat_changed, ^started_id, _, nil}
+
+      chat_id = chat.id
+      {:ok, chat} = Conversations.record_turn(chat, turn(1, 0.01))
+      assert_receive {:chat_changed, ^chat_id, _, nil}
+
+      {:ok, chat} = Conversations.ended(chat, nil, "idle")
+      assert_receive {:chat_changed, ^chat_id, _, nil}
+
+      {:ok, _chat} = Conversations.reopen(chat)
+      assert_receive {:chat_changed, ^chat_id, _, nil}
+    end
+
+    # `requeue/2` and `fail/2` are job-level, and a ticketless conversation has no ticket for the
+    # ticket topic to name: it is told on the chats topic or not at all.
+    test "a ticketless conversation being interrupted or failed is told", %{chat: chat} do
+      {:ok, _job} = Jobs.requeue(chat.id, :worker_lost)
+      chat_id = chat.id
+      assert_receive {:chat_changed, ^chat_id, _, nil}
+
+      {:ok, _job} = Jobs.fail(chat.id, :boom)
+      assert_receive {:chat_changed, ^chat_id, _, nil}
     end
   end
 
@@ -2977,6 +3152,24 @@ defmodule Forge.ConversationsTest do
       }
     }
   end
+
+  # A message at a chosen time. Events are append-only, so a time is chosen by inserting one with
+  # it, later in the log than any before, which is what `summaries/1` reads as the last said.
+  defp said_at(chat, text, at) do
+    Repo.insert!(%Forge.Events.Event{
+      actor: %{"kind" => "system", "id" => nil},
+      type: "chat.message",
+      payload: %{"text" => text},
+      job_id: chat.id,
+      project_id: chat.project_id,
+      inserted_at: DateTime.truncate(at, :second)
+    })
+  end
+
+  defp started(chat, at),
+    do: Repo.update_all(from(j in Jobs.Job, where: j.id == ^chat.id), set: [inserted_at: at])
+
+  defp ago(seconds), do: DateTime.add(DateTime.utc_now(:second), -seconds, :second)
 
   defp text(chat, text, parent \\ nil),
     do: harness(chat, "job.harness.text", %{text: text, parent_tool_use_id: parent})

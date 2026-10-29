@@ -1654,7 +1654,9 @@ defmodule Forge.Jobs do
           })
 
         # Per job for a conversation's page, and per ticket for the ticket's timeline and the
-        # job's own page, which is what each of them is subscribed to.
+        # job's own page, which is what each of them is subscribed to. Not `notify_changed/1`:
+        # the reason a job waits is on no row of a list of conversations, so waking them for it
+        # would redraw what has not changed.
         Events.notify_job(job.id, event)
         if job.ticket_id, do: Events.notify(job.ticket_id)
         :ok
@@ -1716,17 +1718,27 @@ defmodule Forge.Jobs do
   """
   @spec record_harness_event(String.t(), ForgeCore.Job.Event.t()) :: :ok
   def record_harness_event(job_id, %{type: "job.harness." <> _rest = type, payload: payload}) do
-    {ticket_id, credential_id} =
-      Repo.one(from j in Job, where: j.id == ^job_id, select: {j.ticket_id, j.credential_id}) ||
-        {nil, nil}
+    job =
+      Repo.one(
+        from j in Job,
+          where: j.id == ^job_id,
+          select: %{
+            id: j.id,
+            kind: j.kind,
+            project_id: j.project_id,
+            ticket_id: j.ticket_id,
+            credential_id: j.credential_id
+          }
+      ) || %{id: job_id, kind: nil, project_id: nil, ticket_id: nil, credential_id: nil}
 
     case Events.append(type, {:job, job_id}, %{
-           ticket_id: ticket_id,
+           ticket_id: job.ticket_id,
            job_id: job_id,
-           payload: payload |> json_safe() |> stamp(type, credential_id)
+           payload: payload |> json_safe() |> stamp(type, job.credential_id)
          }) do
       {:ok, event} ->
         Events.notify_job(job_id, event)
+        if said?(event), do: Events.notify_chat(job)
         :ok
 
       {:error, changeset} ->
@@ -1741,6 +1753,14 @@ defmodule Forge.Jobs do
   def record_harness_event(job_id, %{type: type}) do
     Logger.warning("dropped an event of type #{inspect(type)} for job #{job_id}: not a harness's")
   end
+
+  # Whether an event is the agent speaking, by the rule `Conversations.summaries/1` reads: a
+  # `job.harness.text` that is not a subagent's report. Only that changes a row of a list of
+  # conversations — tool calls and usage arrive many times a turn and change none of it.
+  defp said?(%Event{type: "job.harness.text", payload: payload}),
+    do: is_nil(payload["parent_tool_use_id"])
+
+  defp said?(%Event{}), do: false
 
   defp json_safe(term), do: term |> Jason.encode!() |> Jason.decode!()
 
@@ -1782,7 +1802,7 @@ defmodule Forge.Jobs do
     |> Repo.transaction()
     |> case do
       {:ok, %{job: job}} ->
-        Events.notify(job.ticket_id)
+        Events.notify_changed(job)
         {:ok, job}
 
       {:error, :row, changed, _changes} ->
@@ -1903,7 +1923,7 @@ defmodule Forge.Jobs do
       {:ok, %{job: job}} ->
         Tokens.revoke_for_job(job.id)
         Workers.release(job.worker_id)
-        Events.notify(ticket.id)
+        Events.notify_changed(job)
         {:ok, job}
 
       {:error, step, reason, _} ->
@@ -1954,7 +1974,7 @@ defmodule Forge.Jobs do
       {:ok, %{job: job}} ->
         # The fresh run mints its own (`assign/2`); see `requeue/2` for why this one goes now.
         Tokens.revoke_for_job(job.id)
-        Events.notify(ticket.id)
+        Events.notify_changed(job)
         {:ok, job}
 
       {:error, step, reason, _} ->
@@ -2011,7 +2031,7 @@ defmodule Forge.Jobs do
         {:ok, %{job: job}} ->
           Tokens.revoke_for_job(job.id)
           Workers.release(job.worker_id)
-          Events.notify(ticket.id)
+          Events.notify_changed(job)
           {:ok, job}
 
         {:error, :running, :already_recorded, _changes} ->
@@ -2098,7 +2118,7 @@ defmodule Forge.Jobs do
         Tokens.revoke_for_job(job.id)
     end
 
-    Events.notify(ticket.id)
+    Events.notify_changed(job)
     {:ok, job}
   end
 
@@ -2237,7 +2257,7 @@ defmodule Forge.Jobs do
         # A command that failed is finished all the same: its batch is looked at as for any other.
         if job.kind == :command, do: Commands.follow_up(job)
 
-        Events.notify(job.ticket_id)
+        Events.notify_changed(job)
         {:ok, job}
 
       {:error, step, reason, _} ->
@@ -2534,7 +2554,7 @@ defmodule Forge.Jobs do
         # The worker pushed before it said so, and a resume is a new assignment with a new
         # credential — for a conversation, a day's worth of one (`requeue/2`).
         Tokens.revoke_for_job(job.id)
-        Events.notify(job.ticket_id)
+        Events.notify_changed(job)
         {:ok, job}
 
       {:error, step, reason, _changes} ->
@@ -2569,7 +2589,7 @@ defmodule Forge.Jobs do
     |> case do
       {:ok, %{job: job}} ->
         Tokens.revoke_for_job(job.id)
-        Events.notify(job.ticket_id)
+        Events.notify_changed(job)
         {:ok, job}
 
       {:error, step, reason, _changes} ->
@@ -2623,7 +2643,7 @@ defmodule Forge.Jobs do
 
       # Whatever machine was running it may still be up and reachable; see `requeue/2`.
       Tokens.revoke_for_job(job.id)
-      Events.notify(job.ticket_id)
+      Events.notify_changed(job)
     end)
 
     Commands.recover()

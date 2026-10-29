@@ -10,10 +10,24 @@ defmodule ForgeWeb.ProjectLiveTest do
 
   use ForgeWeb.ConnCase, async: false
 
+  import Ecto.Query, only: [from: 2]
   import Phoenix.LiveViewTest
   import Forge.GitFixtures
 
   alias Forge.{Conversations, Projects, Tickets}
+
+  # A message `ago` seconds old: events are append-only, so a time is chosen by adding one later
+  # in the log, which is what a list reads as the last thing said.
+  defp said_at(chat, text, ago) do
+    Forge.Repo.insert!(%Forge.Events.Event{
+      actor: %{"kind" => "system", "id" => nil},
+      type: "chat.message",
+      payload: %{"text" => text},
+      job_id: chat.id,
+      project_id: chat.project_id,
+      inserted_at: DateTime.add(DateTime.utc_now(:second), -ago, :second)
+    })
+  end
 
   setup :register_and_log_in_user
 
@@ -163,6 +177,58 @@ defmodule ForgeWeb.ProjectLiveTest do
 
     {:ok, all_chats, _html} = live(conn, ~p"/chats")
     assert all_chats |> element(row) |> render() =~ project.name
+  end
+
+  # The same component and the same order as `/chats`, under the page's own heading, and woken
+  # only by this project's conversations.
+  test "the conversations are in sections, follow what is said, and only this project's", %{
+    conn: conn,
+    project: project,
+    user: user
+  } do
+    {:ok, running} = Conversations.open(project, "still going")
+    {:ok, finished} = Conversations.open(project, "all done")
+    {:ok, _closed} = Conversations.ended(finished, nil, "closed")
+
+    {:ok, other_project} =
+      Projects.register(
+        %{name: "other-#{System.unique_integer([:positive])}", repo_path: seeded_repo()},
+        user
+      )
+
+    {:ok, elsewhere} = Conversations.open(other_project, "somewhere else")
+    said_at(running, "old", 3600)
+    said_at(finished, "newer", 1800)
+
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}")
+
+    assert has_element?(view, "#conversations-live h3", "Live · 1")
+    assert has_element?(view, "#conversations-live #conversation-#{running.id}")
+    assert has_element?(view, "#conversations-earlier h3", "Earlier")
+    assert has_element?(view, "#conversations-earlier #conversation-#{finished.id}")
+    refute has_element?(view, "#conversation-#{elsewhere.id}")
+
+    # Another project's conversation does not wake it; this one's does.
+    Forge.Repo.update_all(from(j in Forge.Jobs.Job, where: j.id == ^running.id), set: [turns: 7])
+    {:ok, _event} = Conversations.send(elsewhere, "not here")
+    refute render(view) =~ "7 turns"
+
+    {:ok, _event} = Conversations.send(running, "here")
+    assert render(view) =~ "7 turns"
+    assert view |> element("#conversation-#{running.id}") |> render() =~ "now"
+  end
+
+  # A chat with no ticket is told on the chats topic only.
+  test "an unscoped chat's end redraws the page", %{conn: conn, project: project} do
+    {:ok, chat} = Conversations.open(project, "about the parser")
+
+    {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}")
+    assert has_element?(view, "#conversations-live #conversation-#{chat.id}")
+
+    {:ok, _closed} = Conversations.ended(chat, nil, "closed")
+
+    refute has_element?(view, "#conversations-live")
+    assert has_element?(view, "#conversation-#{chat.id}")
   end
 
   test "an unknown project is a 404", %{conn: conn} do

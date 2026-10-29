@@ -39,7 +39,11 @@ defmodule ForgeWeb.ProjectLive do
   @impl true
   def mount(%{"name" => name}, _session, socket) do
     {project, scope} = ForgeWeb.Access.project_by_name!(socket.assigns.current_scope, name)
-    if connected?(socket), do: Events.subscribe()
+
+    if connected?(socket) do
+      Events.subscribe()
+      Events.subscribe_chats()
+    end
 
     {:ok,
      socket
@@ -86,12 +90,16 @@ defmodule ForgeWeb.ProjectLive do
       # The board is the workflow, and a plain conversation is not on it — it has no state to be in
       # (a chat step is a ticket's state).
       # Without this a chat is a thing you can start from this page and then cannot find from it.
-      chats: Conversations.summaries(project_id: project.id),
       proposals: open_proposals(project),
-      paused: Forge.Spend.paused?(),
-      now: DateTime.utc_now()
+      paused: Forge.Spend.paused?()
     )
+    |> load_chats()
   end
+
+  # Apart from `load/1` because a conversation being said in is far more frequent than anything
+  # else on this page, and reading the repository to redraw one list would be a waste.
+  defp load_chats(%{assigns: %{project_id: id}} = socket),
+    do: assign(socket, chats: Conversations.summaries(project_id: id), now: DateTime.utc_now())
 
   # The edges the repository's current workflows queue on, for the empty queue to say what would
   # fill it.
@@ -266,9 +274,18 @@ defmodule ForgeWeb.ProjectLive do
   # The project is read from the row rather than matched against the tickets already loaded: a
   # ticket admitted *since* this page mounted is exactly the one that has to appear, and it is
   # not in that list. One indexed read is far less than what it saves.
-  # A project chat's changes are broadcast with no ticket, and are not this page's.
+  # A project chat's changes are `chat_changed`, with no ticket, and are not `ticket_changed`'s.
   @impl true
   def handle_info({:ticket_changed, nil}, socket), do: {:noreply, socket}
+
+  # Only this project's chats redraw the list, matched in the head before anything is read.
+  def handle_info(
+        {:chat_changed, _id, project_id, _ticket_id},
+        %{assigns: %{project_id: project_id}} = socket
+      ),
+      do: {:noreply, load_chats(socket)}
+
+  def handle_info({:chat_changed, _id, _other, _ticket_id}, socket), do: {:noreply, socket}
 
   def handle_info({:ticket_changed, id}, socket) do
     project_id = socket.assigns.project.id
@@ -688,6 +705,7 @@ defmodule ForgeWeb.ProjectLive do
               summaries={@chats}
               now={@now}
               project={false}
+              heading="h3"
               empty="None yet. A chat is for the work that does not fit a ticket."
             />
           </section>

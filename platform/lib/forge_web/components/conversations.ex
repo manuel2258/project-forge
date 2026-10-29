@@ -2,8 +2,10 @@ defmodule ForgeWeb.Conversations do
   @moduledoc """
   How a conversation is drawn in a list.
 
-  Two surfaces show one — `/chats` and a project's page — so there is one of this rather than
-  two. What differs between them is which conversations, not what a row looks like.
+  Three surfaces show one — `/chats`, a project's page and a ticket's page — so there is one of
+  this rather than three. What differs between them is which conversations, not what a row looks
+  like, nor the order and the sections they come in (`docs/design/ui.md` § Chats is a destination
+  on both).
   """
 
   use Phoenix.Component
@@ -136,11 +138,16 @@ defmodule ForgeWeb.Conversations do
   @spec ending_rule() :: String.t()
   def ending_rule, do: @ending_rule
 
-  @doc "What ending a conversation asks before it happens, from every surface that offers it."
-  @spec ending_confirm() :: String.t()
-  def ending_confirm,
+  @doc """
+  What ending a conversation asks before it happens, from every surface that offers it.
+
+  With a name, the confirm says which conversation it will end: a list can move a row under a
+  finger, and ending deletes the branch, so the wrong one is lost work.
+  """
+  @spec ending_confirm(String.t()) :: String.t()
+  def ending_confirm(name \\ "this conversation"),
     do:
-      "End this conversation? The last turn finishes, the machine is released, and " <>
+      "End #{name}? The last turn finishes, the machine is released, and " <>
         @ending_rule <> " — merge first what you want to keep."
 
   attr :summaries, :list, required: true
@@ -148,16 +155,70 @@ defmodule ForgeWeb.Conversations do
   attr :project, :boolean, default: true, doc: "name the project; false on a project's own page"
   attr :empty, :string, default: "No conversations yet."
 
+  attr :heading, :string,
+    default: "h2",
+    doc: "the tag of the section headings, one level under the page's own"
+
   attr :ending, :string,
     default: nil,
     doc: "event to send to end a live conversation from the row; no control without it"
 
+  @doc """
+  A list of conversations: the live ones in a section of their own above, then the rest.
+
+  The summaries arrive in the order `Conversations.summaries/1` gives, and each part keeps it.
+  With nothing live there is no section and no heading, and the list is just the list.
+  """
   def list(assigns) do
+    {live, earlier} = Enum.split_with(assigns.summaries, & &1.live)
+    assigns = assign(assigns, live: live, earlier: earlier)
+
     ~H"""
     <p :if={@summaries == []} class="mt-3 text-sm opacity-60">{@empty}</p>
 
-    <ol :if={@summaries != []} class="mt-3 flex flex-col">
-      <li :for={summary <- @summaries} class="flex items-start gap-4 border-t border-base-300">
+    <section :if={@live != []} id="conversations-live">
+      <.dynamic_tag
+        tag_name={@heading}
+        class="mt-5 font-mono text-[11px] tracking-[.14em] uppercase opacity-60"
+      >
+        Live · {length(@live)}
+      </.dynamic_tag>
+      <.rows summaries={@live} now={@now} project={@project} ending={@ending} />
+    </section>
+
+    <section :if={@live != [] and @earlier != []} id="conversations-earlier">
+      <.dynamic_tag
+        tag_name={@heading}
+        class="mt-5 font-mono text-[11px] tracking-[.14em] uppercase opacity-60"
+      >
+        Earlier
+      </.dynamic_tag>
+      <.rows summaries={@earlier} now={@now} project={@project} ending={@ending} />
+    </section>
+
+    <.rows
+      :if={@live == [] and @earlier != []}
+      summaries={@earlier}
+      now={@now}
+      project={@project}
+      ending={@ending}
+    />
+    """
+  end
+
+  attr :summaries, :list, required: true
+  attr :now, :any, required: true
+  attr :project, :boolean, required: true
+  attr :ending, :string, default: nil
+
+  defp rows(assigns) do
+    ~H"""
+    <ol class="mt-3 flex flex-col">
+      <li
+        :for={summary <- @summaries}
+        id={"conversation-#{summary.chat.id}"}
+        class="flex items-start gap-4 border-t border-base-300"
+      >
         <%!-- The row goes to one place, and the control that ends the conversation is beside it
               rather than inside it: `ui.md` § The affordance rule — a navigation target never
               encloses something that commits, or reading and ending become one gesture. --%>
@@ -173,8 +234,9 @@ defmodule ForgeWeb.Conversations do
               <span :if={summary.waiting} class="text-accent">· waiting on you</span>
               <.job_status :if={not summary.live} status={summary.chat.status} />
             </div>
+            <%!-- When it was last used, which is what the list is ordered by. --%>
             <span class="shrink-0 font-mono text-[12.5px] opacity-50">
-              {Format.ago(summary.chat.inserted_at, @now)}
+              {Format.ago(summary.at, @now)}
             </span>
           </div>
 
@@ -195,13 +257,15 @@ defmodule ForgeWeb.Conversations do
         <%!-- Only a live one, and worded as the conversation's own page words it: a
               conversation cannot be deleted at all (`conversations.md` § Lifetime), so the
               affordance a list can offer is the one that stops it costing something — which
-              also deletes its branch, and the confirm says so. --%>
+              also deletes its branch, and the confirm says so. The confirm names this row's
+              conversation, from the same summary as `phx-value-id`, so the two cannot name
+              different ones. HEEx escapes the attribute, so a message cannot close it. --%>
         <button
           :if={@ending && summary.live}
           type="button"
           phx-click={@ending}
           phx-value-id={summary.chat.id}
-          data-confirm={ending_confirm()}
+          data-confirm={ending_confirm(name(summary, @project))}
           class="mt-[15px] min-h-[46px] shrink-0 text-sm text-primary hover:underline"
         >
           End
@@ -209,6 +273,20 @@ defmodule ForgeWeb.Conversations do
       </li>
     </ol>
     """
+  end
+
+  # Project where the list names it, the ticket's number, and the start of the last thing said.
+  defp name(summary, project?) do
+    [
+      project? && summary.project.name,
+      summary.ticket && "##{summary.ticket.number}",
+      summary.said && ~s("#{said(summary.said)}")
+    ]
+    |> Enum.filter(& &1)
+    |> case do
+      [] -> "this conversation"
+      parts -> Enum.join(parts, " ")
+    end
   end
 
   defp speaker({:user, _text}), do: "you:"

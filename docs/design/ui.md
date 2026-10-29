@@ -180,7 +180,7 @@ measure; each route sets its own:
 | `/tickets/:project/:number` | 74rem | A work screen (§ The work screen): 53rem tabbed column plus a 21rem facts rail, divided by a 1px rule. Below `lg` the rail is the details sheet, opened from the context strip. |
 | `…/review` | 74rem | Not a work screen: a page that scrolls, its column beside a 21rem rail at `lg` and above it below. The diff needs the width; the rail carries the evidence. |
 | `…/jobs/:job_id` | 96rem | Laid out as the review page is, wider: its column is the harness stream, whose lines are an agent's paragraphs and commands, and at 74rem the column beside the 21rem rail left them a ribbon. A command's page is the same route and takes the same width, its script in the column. Manifest in the rail, the harness stream in the column — a bounded pane, since no tab body bounds it here — tailed while the job runs (§ Motion and structure). Under the outcome, and only when memory was the trouble, the `warning` line `capacity.md` § Memory describes. A job whose runs held project secrets has a *secrets* row in the manifest, a line per run — *`STRIPE_TEST_KEY` v2, `SENTRY_TOKEN` v1* — by name and version, never a value. |
-| `/chats` | 34rem | One ordered list, so the queue's measure and for the queue's reason: width only lets a second row compete for the same glance. |
+| `/chats` | 34rem | One list in one order — with the live ones in a **Live** section above it when there are any — so the queue's measure and for the queue's reason: width only lets a second row compete for the same glance. The order is § Chats is a destination on both. |
 | `/chats/:id` | 74rem | The same work screen: a conversation is work with a branch, a cost and a record. The tabs are the column; what it cost and its facts are the rail, or the details sheet below `lg`. |
 | `/chats/new` | 34rem | The first message is prose and needs the queue's measure, not a form field's — the same reason `/tickets/new` has it. |
 | `/projects/new` | 26rem | A short form. Same frame as log-in, for the same reason. |
@@ -213,6 +213,24 @@ waiting. See `design/identity.md` § Approval.
 queue with its question form; `/chats` is for finding one again — the one about the parser last
 week, the one still running whose tab was closed. That used to be called a laptop errand. It is
 not: on a phone it is how you get back to the work you were doing.
+
+**A list of conversations is ordered by when each was last used, and the project plays no part.**
+That is the last thing said in it, by the person or the agent, newest first; a conversation where
+nothing has been said yet — a workflow step's chat waiting for a machine, whose agent speaks first —
+is placed by when it was started. It is one rule for `/chats`, a project's page and a ticket's
+Timeline, because they are one component. The **live** ones — holding a machine, waiting for one or
+running on one, the set that gets *End* — are a section above, headed **Live · N**; the rest follow
+under **Earlier**, drawn only when a Live section is. With nothing live there is neither heading and
+the list is just the list; a section with nothing in it is absent, not empty, and with no
+conversations at all the page says so in its own words. A row's time is the same moment it is
+ordered by, not the start. The list follows what is said without a reload, woken by conversations it
+can show (`Events.subscribe_chats/0`: a message names its project and ticket, and a list matches
+that before it reads anything) and, on the Chats tab, by a change to a ticket of a project the
+viewer is in, which is what draws a workflow step's chat the moment its ticket enters the step. A
+row moves as things are said, and a conversation starting, ending or going idle moves it between the
+sections. Because a row can move under a finger, *End* names the conversation it will end — its
+project where the list names projects, its ticket, and the start of the last thing said — and
+confirming ends the row that was tapped, whatever has moved since.
 
 Ticket, job and artifact are pushed views with a back affordance naming where you came from, not
 tabs in the nav. (The work screen has tabs *inside* it — § The work screen — which is a different
@@ -759,8 +777,9 @@ next job needs to hear from, and a note that lived anywhere else would be skippe
 button.
 
 **Timeline** is the ticket's body, the steps and job rows, and then **the ticket's
-conversations**, live first, with *New chat* beside their heading — a conversation started from a
-ticket used to be findable from the project page and not from the ticket it is about.
+conversations**, in the order and the sections of § Chats is a destination on both, with *New chat*
+beside their heading — a conversation started from a ticket used to be findable from the project
+page and not from the ticket it is about.
 
 **A command is a job row like any other** (`docs/design/commands.md`): the whole row the target,
 leading with `$` where an agent job's row has its attempt, the command and its arguments as an
@@ -935,8 +954,10 @@ alternative was opening it first. The row is the link and the control is its sib
 The affordance rule above applied rather than excepted. What a list may never offer is deleting a
 conversation: they are kept for ever (`conversations.md` § Lifetime), and the affordance that
 exists is the one that stops it costing something. Ending one does delete its *branch*, unless
-the branch would not merge cleanly, so its confirm says so — the same sentence on the list and on
-the conversation's page, from one definition, so neither can understate it.
+the branch would not merge cleanly, so its confirm says so — the same rule, in the same words, on
+the list and on the conversation's page, from one definition, so neither can understate it. The
+list's confirm names the conversation before it (`End parser #12 "why does…"?`), because a row can
+move under a finger; the page's does not need to.
 
 A project and a ticket are made in the product. A **workflow is not**: it is
 `.forge/workflow.yml` — or one file per ticket type under `.forge/workflows/` — in the project's
@@ -1050,11 +1071,10 @@ event whatever the page showed.
 page says what the repository means to the platform; what is actually in it is
 § The project's repository.
 
-**It lists the project's conversations, live ones first.** The board is the workflow and a
-plain conversation is not on it — it has no state to be in; a chat step is the ticket's, and on the board as its state — so without this a chat is a thing you can
-start from the page and then cannot find from the page. Live first because that is the one that
-is costing something and holding a machine; the rest are a record, and are folded away once there
-are more than a handful of them.
+**It lists the project's conversations**, in the order and the sections of § Chats is a destination
+on both. The board is the workflow and a plain conversation is not on it — it has no state to be in; a
+chat step is the ticket's, and on the board as its state — so without this a chat is a thing you can
+start from the page and then cannot find from the page. Every one is drawn: nothing folds away.
 
 ## Project settings
 

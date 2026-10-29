@@ -131,7 +131,7 @@ defmodule Forge.Conversations do
     |> Repo.transaction()
     |> case do
       {:ok, %{chat: chat}} ->
-        Events.notify(chat.ticket_id)
+        Events.notify_changed(chat)
         {:ok, chat}
 
       {:error, step, reason, _changes} ->
@@ -303,6 +303,7 @@ defmodule Forge.Conversations do
         })
 
         Events.notify_job(chat.id, event)
+        Events.notify_chat(chat)
         {:ok, event}
 
       {:error, step, reason, _changes} ->
@@ -363,7 +364,7 @@ defmodule Forge.Conversations do
           })
 
         Events.notify_job(chat.id, event)
-        Events.notify(chat.ticket_id)
+        Events.notify_changed(chat)
 
         deliver(worker_id, chat.id, "close", %{"reason" => reason})
 
@@ -495,7 +496,7 @@ defmodule Forge.Conversations do
     |> case do
       {:ok, %{job: chat, turn: event}} ->
         Events.notify_job(chat.id, event)
-        Events.notify(chat.ticket_id)
+        Events.notify_changed(chat)
         # A turn ending is the event worth a notification; an interrupted one is not, because
         # the person who interrupted it is the person who would be told.
         unless payload["interrupted"] == true do
@@ -779,7 +780,7 @@ defmodule Forge.Conversations do
       payload: %{"request" => bounded_request(request), "reason" => reason}
     })
 
-    Events.notify(chat.ticket_id)
+    Events.notify_changed(chat)
     :ok
   end
 
@@ -1152,7 +1153,7 @@ defmodule Forge.Conversations do
         if reason in [@closed, @accepted], do: abandon_branch(chat)
         Workers.release(worker_id)
         Events.notify_job(chat.id, event)
-        Events.notify(chat.ticket_id)
+        Events.notify_changed(chat)
         {:ok, chat}
 
       {:error, step, reason, _changes} ->
@@ -1251,7 +1252,7 @@ defmodule Forge.Conversations do
     |> Repo.transaction()
     |> case do
       {:ok, %{job: chat}} ->
-        Events.notify(chat.ticket_id)
+        Events.notify_changed(chat)
         {:ok, chat}
 
       {:error, :dormant, :live, _changes} ->
@@ -1986,19 +1987,22 @@ defmodule Forge.Conversations do
           ticket: Tickets.Ticket.t() | nil,
           live: boolean(),
           waiting: boolean(),
-          said: {:user | :agent, String.t()} | nil
+          said: {:user | :agent, String.t()} | nil,
+          at: DateTime.t()
         }
 
   @doc """
-  Conversations for a list, live ones first and newest within that.
+  Conversations for a list, the most recently used first.
 
   `:ticket_id` narrows it to one ticket's, `:project_id` to one project's; `:for` narrows it to
   the projects one user is a member of, which is what every operator surface passes. Without any
   of them this is every conversation on the node, and only the command line may ask for that.
 
-  Live first because that is the one costing something and holding a machine. The rest are a
-  record — a conversation is kept for ever, so this list only grows, and what it is for is
-  finding one again rather than watching them all.
+  **Most recently used is the last thing said in it** by either side, and its start for one where
+  nothing has been said yet; each summary's `at` is that moment. Neither the project nor whether
+  the conversation is live plays a part: splitting out the live ones is the list's to draw
+  (`ForgeWeb.Conversations.list/1`), so that the order is one rule for every caller. A conversation
+  is kept for ever, so this list only grows, and what it is for is finding one again.
   """
   @spec summaries(keyword()) :: [summary()]
   def summaries(opts \\ []) do
@@ -2033,7 +2037,7 @@ defmodule Forge.Conversations do
 
     chats
     |> Enum.map(fn chat ->
-      last = said[chat.id]
+      {last, at} = said[chat.id] || {nil, chat.inserted_at}
 
       %{
         chat: chat,
@@ -2042,14 +2046,25 @@ defmodule Forge.Conversations do
         live: live?(chat),
         # Waiting on a person is the agent having spoken last, which is what the queue reads too.
         waiting: live?(chat) and match?({:agent, _text}, last),
-        said: last
+        said: last,
+        at: at
       }
     end)
-    # Live first, newest within that. The sorter is descending, so both keys are the ones that
-    # sort *high*: `live` rather than `not live`, and the later timestamp. It read `not live`
-    # before, which put finished conversations on top — invisible while the live one was also
-    # the newest, and wrong exactly when you came back to a machine you had left running.
-    |> Enum.sort_by(&{&1.live, &1.chat.inserted_at}, fn a, b -> a >= b end)
+    # Newest use first, compared as times: `DateTime` is a struct, and the term order of a struct
+    # compares its fields in key order — the day before the month before the year — so an
+    # `>=` on the timestamps put 31 October above 1 November. Events are stamped to the second,
+    # so a tie is common: the later start first, then the id, so that the order never depends on
+    # what the query happened to return.
+    |> Enum.sort(fn a, b ->
+      case {DateTime.compare(a.at, b.at),
+            DateTime.compare(a.chat.inserted_at, b.chat.inserted_at)} do
+        {:gt, _} -> true
+        {:lt, _} -> false
+        {:eq, :gt} -> true
+        {:eq, :lt} -> false
+        {:eq, :eq} -> a.chat.id >= b.chat.id
+      end
+    end)
   end
 
   defp by_id(_schema, []), do: %{}
@@ -2068,9 +2083,9 @@ defmodule Forge.Conversations do
         where: fragment("(? ->> 'parent_tool_use_id') IS NULL", e.payload),
         distinct: e.job_id,
         order_by: [asc: e.job_id, desc: e.seq],
-        select: {e.job_id, e.type, e.payload}
+        select: {e.job_id, e.type, e.payload, e.inserted_at}
     )
-    |> Map.new(fn {id, type, payload} -> {id, {role(type), payload["text"] || ""}} end)
+    |> Map.new(fn {id, type, payload, at} -> {id, {{role(type), payload["text"] || ""}, at}} end)
   end
 
   defp role("chat.message"), do: :user

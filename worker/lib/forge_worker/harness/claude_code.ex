@@ -249,9 +249,11 @@ defmodule ForgeWorker.Harness.ClaudeCode do
   # per credential). `utilization` arrives only once the warning threshold is crossed, and is `nil`
   # rather than zero until then.
   #
-  # `windows` is `unifiedWindows`, which third-party reports show newer releases adding: every
-  # window's utilization and reset on every event. Nothing recorded here has it, so it is mapped
-  # when present and `nil` otherwise, and nothing decides on it — it carries no status.
+  # `windows` is `unifiedWindows`, which newer releases add: each window's utilization and reset.
+  # It does not always name every window (a report naming `five_hour` and `seven_day` was followed
+  # on one credential by a newer one whose `unifiedWindows` held only `five_hour`), so it is
+  # mapped when present and `nil` otherwise, and nothing decides on it — it carries no status.
+  # The platform reads a window from the newest report that names it, not from the newest report.
   defp normalise(%{"type" => "rate_limit_event", "rate_limit_info" => %{} = info} = m) do
     [
       event("rate_limit", %{

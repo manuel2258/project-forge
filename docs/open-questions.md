@@ -100,8 +100,9 @@ on the stream-json channel, all on a subscription credential.
   the events with `status: "allowed_warning"`, which also carry `surpassedThreshold: 0.9`. The
   other 66 were `status: "allowed"` and carried no figure. Observed range where present: 0.92 to
   0.99.
-- **No weekly event was seen.** `rateLimitType` was `five_hour` on all 87, so whether a weekly
-  ceiling is reported at all is unobserved.
+- **No weekly event was seen in that sample.** `rateLimitType` was `five_hour` on all 87. The week
+  has since been seen in `unifiedWindows` (`capacity.md` § What newer releases add); a report whose
+  own type is the week is still unobserved.
 - **No rejecting status was seen.** Only `allowed` and `allowed_warning` occurred, so what the
   harness emits when a window is actually exhausted is unobserved — including whether the job
   fails, hibernates, or is refused before starting.

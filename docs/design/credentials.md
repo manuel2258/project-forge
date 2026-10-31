@@ -229,16 +229,21 @@ job waiting on it would wait on nothing (`Forge.Credentials.limited/2`).
 
 **A credential has one window per kind of limit.** Every report names its `rateLimitType` —
 `five_hour` on all 87 recorded in `capacity.md`, `seven_day` by third-party reports — and a report
-about one window says nothing about another. So a credential's windows are the latest report
-*per type*, and it is limited while any of them blocks. Step 5 read only the latest report,
-whatever its type, and a weekly block followed by a five-hour `allowed` would have looked free.
+about one window says nothing about another. So whether a window blocks is the latest report *of
+its type*, and a credential is limited while any of them blocks. Step 5 read only the latest
+report, whatever its type, and a weekly block followed by a five-hour `allowed` would have looked
+free.
 
-**`unifiedWindows`, if it arrives.** A third-party report shows newer Claude Code adding, to every
-event, the utilization and reset of each window — `five_hour` and `seven_day` together. Nothing
-recorded here carries it. The driver maps it when present and a window takes its utilization and
-reset from whichever report about it is newest; whether it *blocks* still comes only from a
-report's own status, because `unifiedWindows` carries none. So it is read if it comes, drawn
-from (§ Showing the windows), and nothing decides on it.
+**`unifiedWindows`.** Newer Claude Code adds the utilization and reset of each window —
+`five_hour` and `seven_day` together. It has been seen here (2026-10-29; the version of Claude Code that sent it was not
+recorded), and a report does not always name every window: one naming both was followed on the same
+credential by a newer one whose `unifiedWindows` held only `five_hour`. The driver maps it when present and a window takes its utilization and reset from
+whichever report naming it is newest — as its own type or in `unifiedWindows` — until its reset
+passes, so a report that leaves a window out leaves it as it was. When the newest report naming a
+window gives no utilization, the newest figure given for the same reset stands; a different reset
+is a new window and starts with none. Whether it *blocks* still comes only from a report's own
+status, because `unifiedWindows` carries none. So it is drawn from (§ Showing the windows), and
+nothing decides on it.
 
 **The stamp is the platform's, from the job's row, when the event arrives**
 (`Forge.Jobs.record_harness_event/2`). Not looked up later through the job, because a job whose
@@ -514,8 +519,10 @@ a permanent one needs `bin/worker-update`.
    windows. It reverses step 5's *a job waits for its own credential*, on request, before the
    evidence § Deliberately not here named for it had arrived.
 7. **Built.** Windows per type: `Forge.Credentials.windows/2`, the latest report per credential
-   *and* `rateLimitType`, `unifiedWindows` mapped by the driver, and a credential limited until
-   the last of its blocking windows resets. This closes the hole step 5 left, where a five-hour
+   *and* `rateLimitType` for what blocks, `unifiedWindows` mapped by the driver and read for the
+   figures of every window a report names (ticket 32: first only from the newest report, which
+   dropped the week whenever it left it out), and a credential limited until the last of its
+   blocking windows resets. This closes the hole step 5 left, where a five-hour
    `allowed` hid a weekly block.
 
    Two things the tests settled rather than the design. A report with no usable type is a window

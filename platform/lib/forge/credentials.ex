@@ -13,7 +13,7 @@ defmodule Forge.Credentials do
   changeset can be bypassed.
   """
 
-  import Ecto.Query, only: [from: 2]
+  import Ecto.Query, only: [from: 2, subquery: 1, union_all: 2]
 
   alias Ecto.Multi
   alias Forge.Accounts.User
@@ -402,36 +402,149 @@ defmodule Forge.Credentials do
   window whose reset has passed — it rolled over, and nothing is known about the new one
   (`docs/design/capacity.md` § Engine support).
 
-  **A window is its own latest report.** Each report names one type, and one about the five-hour
-  window says nothing about the week, so they are read per credential *and* type. Whether one
-  blocks is its report's alone: a status beginning `allowed` permits and anything else blocks
-  until the reset; a report with no reset has no end to wait for and blocks nothing.
+  **Whether a window blocks is its own latest report's.** Each report has one type, and the
+  latest of each type is read per credential *and* type: a status beginning `allowed` permits and
+  anything else blocks until the reset; a report with no reset has no end to wait for and blocks
+  nothing. A report about the five-hour window says nothing about the week, so it cannot free one.
 
-  **`windows` in a report** — `unifiedWindows`, which newer releases are reported to send — gives
-  every window's utilization and reset. Where the credential's newest report carries it, it is
-  the newer figure for each window it names, and never decides whether one blocks: it carries no
-  status.
+  **Its figure and its reset are the newest report's that names it** — as its own type, or as an
+  entry in `windows`, which is `unifiedWindows`. A report that leaves a window out leaves it as it
+  was (Claude Code has sent one naming both and then one naming only the five-hour window), until
+  its reset passes. When a report names a window both ways, the `windows` entry is the one read.
+  An entry never decides whether a window blocks: it carries no status. A window that blocks
+  keeps its blocking report's reset, which is what it blocks until.
+
+  **A figure is carried within a window.** When the newest report naming a window gives no
+  utilization, the newest figure given for the same reset, from either kind of naming, is used;
+  a different reset is a new window and starts with none.
   """
   @spec windows([String.t()], DateTime.t()) :: %{String.t() => %{String.t() => map()}}
   def windows(ids, now \\ DateTime.utc_now()) do
-    Repo.all(
+    reports =
+      Repo.all(
+        from e in Event,
+          where: e.type in @reports and fragment("?->>'credential_id'", e.payload) in ^ids,
+          distinct: [
+            fragment("?->>'credential_id'", e.payload),
+            fragment("?->>'rate_limit_type'", e.payload)
+          ],
+          order_by: [desc: e.seq],
+          select: {e.seq, e.payload}
+      )
+      |> Enum.group_by(fn {_seq, payload} -> payload["credential_id"] end)
+
+    named = newest_naming(ids)
+    carried = carried_figures(named, now)
+
+    # Every naming is of a report the first query also returns for that credential, so the ids of
+    # `reports` are all of them.
+    for {id, own} <- reports,
+        windows = current(own, named[id] || %{}, carried, id, now),
+        map_size(windows) > 0,
+        into: %{},
+        do: {id, windows}
+  end
+
+  # Every report's naming of a window, one row each: a `windows` entry, and a report's own type.
+  # Of the two that one report can make of the same window the entry is the one read (`rank`).
+  # **`jsonb_each` raises on anything that is not an object**, and Postgres may evaluate it before
+  # a `WHERE` that guards it, so the guard is inside the call; an entry that is not an object
+  # names nothing. Everything else here is the worker's and is checked in Elixir.
+  defp namings(ids) do
+    entries =
       from e in Event,
+        join:
+          w in fragment(
+            "jsonb_each(CASE WHEN jsonb_typeof(?->'windows') = 'object' THEN ?->'windows' ELSE '{}'::jsonb END)",
+            e.payload,
+            e.payload
+          ),
+        on: fragment("jsonb_typeof(?) = 'object'", w.value),
         where: e.type in @reports and fragment("?->>'credential_id'", e.payload) in ^ids,
-        distinct: [
-          fragment("?->>'credential_id'", e.payload),
-          fragment("?->>'rate_limit_type'", e.payload)
-        ],
-        order_by: [desc: e.seq],
-        select: {e.seq, e.payload}
+        select: %{
+          seq: e.seq,
+          rank: fragment("0"),
+          credential_id: fragment("?->>'credential_id'", e.payload),
+          type: w.key,
+          utilization: fragment("?->'utilization'", w.value),
+          resets_at: fragment("?->'resets_at'", w.value)
+        }
+
+    own =
+      from e in Event,
+        where:
+          e.type in @reports and fragment("?->>'credential_id'", e.payload) in ^ids and
+            fragment("jsonb_typeof(?->'rate_limit_type') = 'string'", e.payload),
+        select: %{
+          seq: e.seq,
+          rank: fragment("1"),
+          credential_id: fragment("?->>'credential_id'", e.payload),
+          type: fragment("?->>'rate_limit_type'", e.payload),
+          utilization: fragment("?->'utilization'", e.payload),
+          resets_at: fragment("?->'resets_at'", e.payload)
+        }
+
+    union_all(entries, ^own)
+  end
+
+  # The newest naming of each window of each credential: `%{credential_id => %{type => row}}`.
+  defp newest_naming(ids) do
+    Repo.all(
+      from n in subquery(namings(ids)),
+        distinct: [n.credential_id, n.type],
+        order_by: [desc: n.seq, asc: n.rank],
+        select: n
     )
-    |> Enum.group_by(fn {_seq, payload} -> payload["credential_id"] end)
-    |> Enum.flat_map(fn {id, reports} ->
-      case current(reports, now) do
-        empty when map_size(empty) == 0 -> []
-        windows -> [{id, windows}]
-      end
-    end)
-    |> Map.new()
+    |> Enum.group_by(& &1.credential_id)
+    |> Map.new(fn {id, rows} -> {id, Map.new(rows, &{&1.type, &1})} end)
+  end
+
+  # For the windows whose newest naming gave no figure and is still ahead of its reset: the newest
+  # figure given in the *same* window, `%{{credential_id, type, resets_at} => figure}`. The rows it
+  # returns are one per current window asked about and not one per report in the credential's
+  # history; the scan that finds them still reads the credentials' reports, as the query in
+  # `windows/2` does.
+  #
+  # **The `WHERE` on the reset is an equivalent mutant**: it narrows what is returned, and the key
+  # (see `merge/5`) already picks the reset a window asked for, so dropping the `WHERE` alone
+  # changes how many rows come back and not the answer. The reset *in the key* is the guard, and
+  # the test "does not carry a figure from another window's reset" fails without it.
+  defp carried_figures(named, now) do
+    wanted =
+      for {id, rows} <- named,
+          {type, row} <- rows,
+          # **The `is_nil` condition is an equivalent mutant**: `merge/5` prefers a naming's own
+          # figure to a carried one, so asking about a window that has one only reads a row that
+          # is never used. `ahead/2` is not: a blocking window keeps its own reset, so `open/3`
+          # does not drop it when its newest naming is over, and a figure of that old window would
+          # be attached ("carries no figure from a window already over").
+          is_nil(fraction(row.utilization)),
+          reset = ahead(row.resets_at, now),
+          do: {id, type, reset}
+
+    if wanted == [] do
+      %{}
+    else
+      resets = wanted |> Enum.map(fn {_id, _type, reset} -> to_string(reset) end) |> Enum.uniq()
+
+      Repo.all(
+        from n in subquery(namings(Enum.map(wanted, &elem(&1, 0)) |> Enum.uniq())),
+          where:
+            fragment("jsonb_typeof(?) = 'number'", n.utilization) and
+              fragment("?::text", n.resets_at) in ^resets,
+          distinct: [n.credential_id, n.type, fragment("?::text", n.resets_at)],
+          order_by: [desc: n.seq, asc: n.rank],
+          select: {n.credential_id, n.type, n.resets_at, n.utilization}
+      )
+      |> Map.new(fn {id, type, reset, figure} -> {{id, type, reset}, figure} end)
+    end
+  end
+
+  defp ahead(unix, now) do
+    case at(unix) do
+      %DateTime{} = reset -> if DateTime.compare(reset, now) == :gt, do: unix
+      nil -> nil
+    end
   end
 
   @doc """
@@ -500,40 +613,33 @@ defmodule Forge.Credentials do
   # utilization that is not a number is no figure. A report whose type is missing or not a string
   # is a window of type `"unknown"` rather than no window at all, so that a blocking report still
   # blocks — the rule fails towards not spending (`docs/design/capacity.md` § Engine support).
-  defp current(reports, now) do
-    {_seq, newest} = Enum.max_by(reports, fn {seq, _payload} -> seq end)
-
+  defp current(reports, named, carried, id, now) do
     own =
       reports
       |> Enum.sort_by(fn {seq, _payload} -> seq end)
       |> Map.new(fn {_seq, report} -> {type(report), window(report)} end)
 
-    unified =
-      for {type, %{} = figures} <- objects(newest["windows"]), into: %{} do
-        {type,
-         %{
-           utilization: fraction(figures["utilization"]),
-           resets_at: at(figures["resets_at"]),
-           limited: false
-         }}
-      end
+    for type <- Enum.uniq(Map.keys(own) ++ Map.keys(named)),
+        window <- open(type, merge(own[type], named[type], type, carried, id), now),
+        into: %{},
+        do: window
+  end
 
-    # The newest report's figures are at least as new as any window's own report. A window that
-    # blocks keeps its own reset, which is what it blocks until.
-    own
-    |> Map.merge(unified, fn
-      _type, %{limited: true} = own, newer -> %{own | utilization: newer.utilization}
-      _type, _own, newer -> newer
-    end)
-    |> Enum.flat_map(fn {type, window} -> open(type, window, now) end)
-    |> Map.new()
+  # What blocks is the window's own report; the figure and the reset are the newest naming of it.
+  # A window that blocks keeps its own reset, which is what it blocks until.
+  defp merge(own, nil, _type, _carried, _id), do: own
+
+  defp merge(own, row, type, carried, id) do
+    figure = fraction(row.utilization) || fraction(carried[{id, type, row.resets_at}])
+
+    case own do
+      %{limited: true} -> %{own | utilization: figure}
+      _permits -> %{utilization: figure, resets_at: at(row.resets_at), limited: false}
+    end
   end
 
   defp type(%{"rate_limit_type" => type}) when is_binary(type), do: type
   defp type(_report), do: "unknown"
-
-  defp objects(%{} = map), do: map
-  defp objects(_other), do: %{}
 
   defp fraction(value) when is_number(value), do: value
   defp fraction(_other), do: nil

@@ -255,6 +255,41 @@ defmodule ForgeWeb.UserLive.SettingsCredentialsTest do
     refute has_element?(view, "[id^=credential-#{silent.id}-]")
   end
 
+  # Ticket 32: a window a newer report leaves out is still the week as last reported.
+  test "a row keeps the week through a newer report that names only the five-hour window",
+       %{conn: conn, user: user} do
+    project = Forge.ForgeFixtures.project_fixture()
+    credential = Forge.ForgeFixtures.credential_fixture(user)
+    hour = DateTime.add(DateTime.utc_now(:second), 3600)
+    week = DateTime.add(DateTime.utc_now(:second), 3 * 86_400)
+
+    for windows <- [
+          %{
+            "five_hour" => %{utilization: 0.01, resets_at: DateTime.to_unix(hour)},
+            "seven_day" => %{utilization: 0.3, resets_at: DateTime.to_unix(week)}
+          },
+          %{"five_hour" => %{utilization: 0.02, resets_at: DateTime.to_unix(hour)}}
+        ] do
+      :ok =
+        Forge.Jobs.record_harness_event(ran(project, credential, "0").id, %{
+          type: "job.harness.rate_limit",
+          payload: %{
+            status: "allowed",
+            rate_limit_type: "five_hour",
+            resets_at: DateTime.to_unix(hour),
+            windows: windows
+          }
+        })
+    end
+
+    {view, _html} = open(conn)
+
+    assert view |> element("#credential-#{credential.id}-five_hour") |> render() =~ "5h 2%"
+
+    assert view |> element("#credential-#{credential.id}-seven_day") |> render() =~
+             "week 30% · resets #{Calendar.strftime(week, "%a %H:%M")} UTC"
+  end
+
   # A job in `project` that started just now on `credential` and cost `cost`.
   defp ran(project, credential, cost) do
     job = Forge.ForgeFixtures.chat_fixture(%{project: project})

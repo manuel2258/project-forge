@@ -709,11 +709,10 @@ defmodule Forge.CredentialsTest do
                Credentials.windows([credential.id], @now)[credential.id]
     end
 
-    # `unifiedWindows` — the shape a third-party report shows newer releases sending — gives the
-    # figures for every window on the newest report. It is the newer figure for each window, and
-    # never what decides whether one blocks: it carries no status, and a window that blocks keeps
-    # its own reset.
-    test "reads each window's figures from the newest report, and its block from its own",
+    # `unifiedWindows` gives the figures for every window a report names. It is the newer figure
+    # for each window it names, and never what decides whether one blocks: it carries no status,
+    # and a window that blocks keeps its own reset.
+    test "reads each window's figures from the newest report naming it, its block from its own",
          %{user: user, project: project} do
       [credential] = pool_in_order!(project, user, 1)
       week = DateTime.add(@now, 2, :day)
@@ -737,6 +736,281 @@ defmodule Forge.CredentialsTest do
                  "seven_day_opus" => %{utilization: 0.1, resets_at: week, limited: false}
                }
              }
+    end
+
+    # **A window is the newest report that names it** (ticket 32). Claude Code sent a report naming
+    # both windows and then one naming only `five_hour`; the second must leave the week as it was.
+    # The reports are the ones the platform recorded: R1 names both, R2 names the five-hour only.
+    @five_reset 1_793_274_000
+    @week_reset 1_793_671_200
+    @seen ~U[2026-10-29 07:00:00Z]
+
+    defp week_at, do: DateTime.from_unix!(@week_reset)
+
+    defp r1!(project, credential) do
+      reports!(project, credential, "allowed", DateTime.from_unix!(@five_reset), %{
+        windows: %{
+          "five_hour" => %{resets_at: @five_reset, utilization: 0.01},
+          "seven_day" => %{resets_at: @week_reset, utilization: 0.3}
+        }
+      })
+    end
+
+    defp r2!(project, credential, extra \\ %{}) do
+      reports!(project, credential, "allowed", DateTime.from_unix!(@five_reset), extra)
+    end
+
+    defp week_of(credential, now \\ @seen) do
+      Credentials.windows([credential.id], now)[credential.id]["seven_day"]
+    end
+
+    test "a newer report leaving out a window: keeps the week, whether the newer report omits windows, empties them or names one",
+         %{user: user, project: project} do
+      for later <- [
+            %{},
+            %{windows: %{}},
+            %{
+              windows: %{"five_hour" => %{resets_at: @five_reset, utilization: 0.02}}
+            }
+          ] do
+        [credential] = pool_in_order!(project, user, 1)
+        r1!(project, credential)
+        r2!(project, credential, later)
+
+        assert week_of(credential) == %{utilization: 0.3, resets_at: week_at(), limited: false}
+
+        assert Credentials.gauge([credential.id], @seen)["seven_day"] ==
+                 %{mean: 0.3, reporting: 1, known: 1, soonest: week_at()}
+      end
+    end
+
+    test "a newer report leaving out a window: takes the five-hour figure from the newer report that names it",
+         %{user: user, project: project} do
+      [credential] = pool_in_order!(project, user, 1)
+      r1!(project, credential)
+
+      r2!(project, credential, %{
+        windows: %{"five_hour" => %{resets_at: @five_reset, utilization: 0.02}}
+      })
+
+      assert %{"five_hour" => %{utilization: 0.02}, "seven_day" => %{utilization: 0.3}} =
+               Credentials.windows([credential.id], @seen)[credential.id]
+    end
+
+    # `job.rate_limited` is a report too, with no `windows` and no figure: the run a limit
+    # stopped logs one after the harness's own, and it must not wipe the credential's figures.
+    test "a newer report leaving out a window: keeps the week through a run the limit stopped", %{
+      user: user,
+      project: project
+    } do
+      [credential] = pool_in_order!(project, user, 1)
+      r1!(project, credential)
+      job = on(chat_fixture(%{project: project}), credential)
+
+      {:ok, _event} =
+        Forge.Events.append("job.rate_limited", {:job, job.id}, %{
+          job_id: job.id,
+          payload: %{
+            "credential_id" => credential.id,
+            "status" => "rejected",
+            "rate_limit_type" => "five_hour",
+            "resets_at" => @five_reset
+          }
+        })
+
+      assert %{"five_hour" => %{limited: true}, "seven_day" => %{utilization: 0.3}} =
+               Credentials.windows([credential.id], @seen)[credential.id]
+    end
+
+    # The same for every window: a report whose own type is the week leaves the five-hour
+    # figure as the earlier report gave it. 0.01 and not "present": today it is present with
+    # no figure, because the observed reports carry no top-level one.
+    test "a newer report leaving out a window: keeps the five-hour figure through a report about the week",
+         %{user: user, project: project} do
+      [credential] = pool_in_order!(project, user, 1)
+      r1!(project, credential)
+
+      reports!(project, credential, "allowed", week_at(), %{
+        rate_limit_type: "seven_day",
+        windows: %{"seven_day" => %{resets_at: @week_reset, utilization: 0.31}}
+      })
+
+      assert %{"five_hour" => %{utilization: 0.01}, "seven_day" => %{utilization: 0.31}} =
+               Credentials.windows([credential.id], @seen)[credential.id]
+    end
+
+    # A report naming a window with no figure keeps the last figure of *that window*, which is
+    # the one with the same reset; a different reset is a new window and starts with none.
+    test "a newer report leaving out a window: carries a figure to a report without one for the same reset only",
+         %{user: user, project: project} do
+      [same, other] = pool_in_order!(project, user, 2)
+      reset = DateTime.add(@now, 3600)
+
+      reports!(project, same, "allowed_warning", reset, %{utilization: 0.4})
+      reports!(project, same, "allowed", reset)
+
+      reports!(project, other, "allowed_warning", reset, %{utilization: 0.4})
+      reports!(project, other, "allowed", DateTime.add(reset, 600))
+
+      assert Credentials.windows([same.id], @now)[same.id]["five_hour"].utilization == 0.4
+      assert Credentials.windows([other.id], @now)[other.id]["five_hour"].utilization == nil
+    end
+
+    # The query is for every wanted reset of every credential at once, so a credential's own older
+    # window can come back because *another* credential is waiting on that reset.
+    test "a newer report leaving out a window: does not carry a figure from another window's reset",
+         %{user: user, project: project} do
+      [a, b] = pool_in_order!(project, user, 2)
+      old = DateTime.add(@now, 3600)
+      new = DateTime.add(@now, 7200)
+
+      reports!(project, a, "allowed_warning", old, %{utilization: 0.4})
+      reports!(project, a, "allowed", new)
+      reports!(project, b, "allowed", old)
+
+      both = Credentials.windows([a.id, b.id], @now)
+      assert both[a.id]["five_hour"] == %{utilization: nil, resets_at: new, limited: false}
+      assert both[b.id]["five_hour"] == %{utilization: nil, resets_at: old, limited: false}
+    end
+
+    # A window reports many figures, and the carried one is the newest of them: 0.5, not the first
+    # 0.3 nor the order the rows come back in.
+    test "a newer report leaving out a window: carries the newest figure of the window",
+         %{user: user, project: project} do
+      [credential] = pool_in_order!(project, user, 1)
+      reset = DateTime.add(@now, 3600)
+
+      reports!(project, credential, "allowed_warning", reset, %{utilization: 0.3})
+      reports!(project, credential, "allowed_warning", reset, %{utilization: 0.5})
+      reports!(project, credential, "allowed", reset)
+
+      assert Credentials.windows([credential.id], @now)[credential.id]["five_hour"].utilization ==
+               0.5
+    end
+
+    # Two windows of a credential can end together; each carries its own figure.
+    test "a newer report leaving out a window: carries each window's own figure at one reset",
+         %{user: user, project: project} do
+      [credential] = pool_in_order!(project, user, 1)
+      reset = DateTime.add(@now, 3600)
+      unix = DateTime.to_unix(reset)
+
+      reports!(project, credential, "allowed_warning", reset, %{
+        utilization: 0.4,
+        windows: %{"seven_day" => %{utilization: 0.6, resets_at: unix}}
+      })
+
+      reports!(project, credential, "allowed", reset, %{
+        windows: %{"seven_day" => %{resets_at: unix}}
+      })
+
+      assert %{"five_hour" => %{utilization: 0.4}, "seven_day" => %{utilization: 0.6}} =
+               Credentials.windows([credential.id], @now)[credential.id]
+    end
+
+    # Named both ways in one report, the `windows` entry is the figure that is carried on.
+    test "a newer report leaving out a window: carries the windows entry over the report's own",
+         %{user: user, project: project} do
+      [credential] = pool_in_order!(project, user, 1)
+      reset = DateTime.add(@now, 3600)
+
+      reports!(project, credential, "allowed_warning", reset, %{
+        utilization: 0.4,
+        windows: %{"five_hour" => %{utilization: 0.5, resets_at: DateTime.to_unix(reset)}}
+      })
+
+      reports!(project, credential, "allowed", reset)
+
+      assert Credentials.windows([credential.id], @now)[credential.id]["five_hour"].utilization ==
+               0.5
+    end
+
+    # A window that blocks keeps its blocking report's reset, which is ahead here, while the newest
+    # naming of it is a `windows` entry whose reset is over: the figure of that older window is
+    # not this one's.
+    test "a newer report leaving out a window: carries no figure from a window already over",
+         %{user: user, project: project} do
+      [credential] = pool_in_order!(project, user, 1)
+      over = DateTime.add(@now, -60)
+      later = DateTime.add(@now, 3600)
+
+      reports!(project, credential, "allowed_warning", over, %{utilization: 0.4})
+      reports!(project, credential, "rejected", later)
+
+      reports!(project, credential, "allowed", later, %{
+        rate_limit_type: "seven_day",
+        windows: %{"five_hour" => %{resets_at: DateTime.to_unix(over)}}
+      })
+
+      assert Credentials.windows([credential.id], @now)[credential.id]["five_hour"] ==
+               %{utilization: nil, resets_at: later, limited: true}
+    end
+
+    test "a newer report leaving out a window: carries a figure from a windows entry too", %{
+      user: user,
+      project: project
+    } do
+      [credential] = pool_in_order!(project, user, 1)
+      r1!(project, credential)
+
+      reports!(project, credential, "allowed", DateTime.from_unix!(@five_reset), %{
+        windows: %{"five_hour" => %{resets_at: @five_reset}}
+      })
+
+      assert Credentials.windows([credential.id], @seen)[credential.id]["five_hour"].utilization ==
+               0.01
+    end
+
+    # Blocking is its own report's: a figure carried from elsewhere never blocks or frees.
+    test "a newer report leaving out a window: never lets a carried figure decide whether the credential is limited",
+         %{user: user, project: project} do
+      [credential] = pool_in_order!(project, user, 1)
+      r1!(project, credential)
+      assert Credentials.limited([credential.id], @seen) == %{}
+
+      reports!(project, credential, "rejected", DateTime.from_unix!(@five_reset))
+
+      assert Credentials.limited([credential.id], @seen) == %{
+               credential.id => DateTime.from_unix!(@five_reset)
+             }
+
+      assert week_of(credential).limited == false
+    end
+
+    test "a newer report leaving out a window: ends the week at its reset, whoever reported it",
+         %{user: user, project: project} do
+      [credential] = pool_in_order!(project, user, 1)
+      r1!(project, credential)
+      r2!(project, credential)
+
+      assert week_of(credential, DateTime.add(week_at(), -1)).utilization == 0.3
+      assert week_of(credential, week_at()) == nil
+    end
+
+    test "a newer report leaving out a window: gives each credential its own week, newest first",
+         %{user: user, project: project} do
+      [a, b] = pool_in_order!(project, user, 2)
+      r1!(project, a)
+
+      reports!(project, b, "allowed", DateTime.from_unix!(@five_reset), %{
+        windows: %{"seven_day" => %{resets_at: @week_reset, utilization: 0.6}}
+      })
+
+      both = Credentials.windows([a.id, b.id], @seen)
+      assert both[a.id]["seven_day"].utilization == 0.3
+      assert both[b.id]["seven_day"].utilization == 0.6
+    end
+
+    test "a newer report leaving out a window: is one credential's own: another's week is not drawn on it",
+         %{user: user, project: project} do
+      [a, b] = pool_in_order!(project, user, 2)
+      r1!(project, a)
+      r2!(project, b)
+
+      both = Credentials.windows([a.id, b.id], @seen)
+      assert both[a.id]["seven_day"].utilization == 0.3
+      refute Map.has_key?(both[b.id], "seven_day")
+      assert Map.keys(Credentials.gauge([b.id], @seen)) == ["five_hour"]
     end
 
     # A window past its reset rolled over, and nothing is known about the new one: it is gone
@@ -800,6 +1074,10 @@ defmodule Forge.CredentialsTest do
 
       reports!(project, credential, "allowed", reset, %{windows: %{"five_hour" => "full"}})
       assert Credentials.limited([credential.id], @now) == %{credential.id => reset}
+
+      # An entry that is not an object names nothing: the five-hour window is its report's own.
+      assert Credentials.windows([credential.id], @now)[credential.id]["five_hour"] ==
+               %{utilization: nil, resets_at: reset, limited: false}
     end
 
     # Two reports of no usable type are one window, and the newer is it. The newer one here is the

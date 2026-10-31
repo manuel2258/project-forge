@@ -124,6 +124,64 @@ defmodule ForgeWeb.CapacityGaugeTest do
     assert labels(view, "five_hour") == ["90%"]
   end
 
+  # Ticket 32: Claude Code sent a report naming both windows and then one naming only the
+  # five-hour, and the week vanished from the bar. It is the newest report naming a window that
+  # draws it, so the week stays until its reset.
+  test "the week stays drawn after a newer report that names only the five-hour window",
+       %{conn: conn, user: user, project: project} do
+    credential = pool!(project, credential_fixture(user))
+    hour = System.os_time(:second) + 3600
+    week = System.os_time(:second) + 3 * 86_400
+
+    named = fn credential, windows ->
+      job = chat_fixture(%{project: project})
+
+      Repo.update_all(from(j in Jobs.Job, where: j.id == ^job.id),
+        set: [credential_id: credential.id]
+      )
+
+      :ok =
+        Jobs.record_harness_event(job.id, %{
+          type: "job.harness.rate_limit",
+          payload: %{
+            status: "allowed",
+            rate_limit_type: "five_hour",
+            resets_at: hour,
+            utilization: nil,
+            windows: windows
+          }
+        })
+    end
+
+    named.(credential, %{
+      "five_hour" => %{"resets_at" => hour, "utilization" => 0.01},
+      "seven_day" => %{"resets_at" => week, "utilization" => 0.3}
+    })
+
+    named.(credential, %{"five_hour" => %{"resets_at" => hour, "utilization" => 0.02}})
+
+    # A colleague's, in the project's pool and not the viewer's, with a week of its own.
+    colleague = user_fixture()
+    join!(project, colleague, :member)
+    theirs = pool!(project, credential_fixture(colleague))
+    named.(theirs, %{"seven_day" => %{"resets_at" => week, "utilization" => 0.5}})
+
+    {:ok, view, _html} = live(conn, ~p"/")
+
+    assert shown(view, "seven_day") =~ "30%"
+
+    assert view |> element("#capacity-seven_day") |> render() |> attribute("title") ==
+             "week window: 30% used on average, 1 of 1 credentials reporting, soonest reset " <>
+               "#{Calendar.strftime(DateTime.from_unix!(week), "%a %H:%M")} UTC"
+
+    # And the project's pool on a page about the project, the colleague's week included: the mean
+    # of 30% and 50% over two, where the viewer's own page above counted one.
+    {:ok, project_view, _html} = live(conn, ~p"/projects/#{project.name}")
+
+    assert project_view |> element("#capacity-seven_day") |> render() |> attribute("title") =~
+             "week window: 40% used on average, 2 of 2 credentials reporting"
+  end
+
   # Every page about one project — the project, its settings, a ticket, its review, a job, a
   # conversation — each switching once it has allowed the viewer.
   test "a page about a project draws that project's pool, other members' included",

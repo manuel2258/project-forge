@@ -24,8 +24,8 @@ local dev node, 87 events across its job transcripts:
 
 What the sample establishes:
 
-- `rateLimitType` was `five_hour` on all 87. **No weekly event was observed**, so the week is not
-  drawn until one is.
+- `rateLimitType` was `five_hour` on all 87. **No event of the sample was about the week**; the
+  week has since been seen in `unifiedWindows` (§ What newer releases add) and is drawn from it.
 - `resetsAt` (unix epoch) is present on all 87. The window boundary is provider-reported and does
   not have to be inferred.
 - `utilization` is present on only 21 — exactly those with `status: "allowed_warning"`, once
@@ -38,13 +38,16 @@ What the sample establishes:
 The consequence for drawing: the countdown is real and always available, and the gauge is only
 honest above 90%.
 
-**What newer releases may add, unverified here.** Third-party reports show `rateLimitType:
-"seven_day"` for the weekly window, a `rejected` status once a window is exhausted, and — on newer
-Claude Code — a `unifiedWindows` object on every event carrying `utilization` and `resetsAt` for
-`five_hour` and `seven_day` together. None of it is in the sample above. The driver maps
-`unifiedWindows` when it is present and the raw message is kept either way, so if it arrives the
-gauge is honest below 90% as well and the week has something to draw
-(`docs/design/credentials.md` § Rate limits are per credential).
+**What newer releases add.** Third-party reports show `rateLimitType: "seven_day"` for the weekly
+window and a `rejected` status once a window is exhausted; neither is in the sample above, and a
+report whose own type is `seven_day` has still not been seen here. A `unifiedWindows` object has:
+on the running platform (seen 2026-10-29; the version of Claude Code on the workers that sent them
+was not recorded) one report carried `utilization` and `resetsAt` for `five_hour` (1%) and
+`seven_day` (30%) together, and a later one on the same credential, the newest then, carried a
+`unifiedWindows` holding only `five_hour`. So a report does not always name every window, and one
+that leaves a window out says nothing about it. The driver maps `unifiedWindows` when it is present and the raw
+message is kept either way, so the gauge is honest below 90% as well and the week has something
+to draw (`docs/design/credentials.md` § Rate limits are per credential).
 
 ## Two objects, never drawn the same way
 
@@ -68,8 +71,9 @@ percent, compressing to ten ticks in the top bar) is drawn **only when the provi
 stands alone. Inventing the first ninety percent of a gauge's range would be exactly the failure
 the design warns about for the countdown, and a quiet page should stay quiet until capacity binds.
 
-The week becomes the headline only when it binds. Until a weekly `rate_limit_event` is observed
-there is nothing truthful to draw, so it is not drawn.
+The week becomes the headline only when it binds. It is drawn like the five-hour window, from the
+newest report that names it — in `unifiedWindows`, or as a report's own type — until its reset
+passes; with no such report there is nothing truthful to draw, so it is not drawn.
 
 **The top bar draws a set of credentials, not one.** With a pool there is no single window, so the
 top bar's gauge is, per window — five-hour and weekly — the mean utilization of the credentials
@@ -186,12 +190,17 @@ record, so the window is read from the most recent `job.harness.rate_limit` even
 one credential there is more than one window**: a limit is an account's, and the node's latest
 event may be another account's. So the platform stamps the job's `credential_id` onto each
 `rate_limit` event it records. **And a credential has more than one window**: each report names its
-`rateLimitType`, and a report about the five-hour window says nothing about the week. So a
-credential's windows are the latest event per credential *and* type, and it is limited while any of
-them blocks — which is what `docs/design/credentials.md` § How a job picks reads to pass over a
+`rateLimitType`, and a report about the five-hour window says nothing about the week. So whether a
+window blocks is its own type's latest event per credential, and a credential is limited while any
+of them blocks — which is what `docs/design/credentials.md` § How a job picks reads to pass over a
 limited credential. Staleness is self-evident rather than hidden: a `resets_at` in the past means
 the window has rolled over and utilization is unknown again, which is the same state as having no
-figure yet.
+figure yet. **A window's figure is the newest report's that names it**, either as its own type
+or in `unifiedWindows`, and so is its reset — except that a window that blocks keeps the reset of
+the report that blocks it, which is what it blocks until. A report that leaves a window out leaves
+it as it was, until its reset passes (`Forge.Credentials.windows/2`; the week vanished from the top
+bar when a five-hour report whose `unifiedWindows` held only `five_hour` followed one that held
+both, ticket 32). Blocking is unaffected — only a report's own status decides it.
 
 **3. Gate the scheduler.** `Forge.Jobs.Scheduler` refuses to start a job while the current window
 is blocking, leaving the ticket `active` — not `stuck`, and not in the queue — and surfacing as
@@ -244,8 +253,10 @@ the worker sent that is not a whole number of bytes is left out of the line rath
 - **`window_cost_usd` is uncalibrated.** Every absolute usage figure is wrong by whatever factor it
   is wrong by until dogfooding sets it. It is a display constant only: nothing schedules, caps or
   refuses on it.
-- **The weekly window is unobserved.** If the provider emits one, the week is a thin plain bar
-  beneath the window gauge and becomes the headline when it is the binding ceiling.
+- **A report whose own type is the week is unobserved.** The week has been seen only in
+  `unifiedWindows`, and is drawn as the five-hour window is. Were it to bind, it would be a thin
+  plain bar beneath the window gauge and become the headline when it is the binding ceiling; that
+  is not built.
 - **The rejecting status is unobserved**, so the scheduler gate's trigger is inferred from naming.
 - **A job at a window edge** goes back to pending with its session and resumes — on another
   credential if one is free, on its own after the reset if not (`docs/design/credentials.md`

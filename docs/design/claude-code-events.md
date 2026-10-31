@@ -203,10 +203,13 @@ ceiling is named when the slice had one.
 
 `rate_limit_event` is not in the documentation but is emitted in practice, carrying a
 `rate_limit_info` object: `status`, `resetsAt` (unix epoch), `rateLimitType`, `isUsingOverage`,
-and — only once `surpassedThreshold` is crossed — `utilization`. It is the provider's own report
-of the five-hour window. The platform stamps each one with the credential its job ran on, and the
-pick reads it to pass over a limited credential (`credentials.md` § Rate limits are per
-credential); `capacity.md`'s operator readout is designed to draw from it and is not built.
+and — only once `surpassedThreshold` is crossed — `utilization`. Some also carry
+`unifiedWindows` (the schema of 2.1.312 declares it), the figures of `five_hour` and `seven_day`
+together, on some events and not others; the version that sent the ones recorded on a platform
+was not noted. It is the provider's own report of a window, `five_hour` in every one recorded in
+`capacity.md`. The platform stamps each one with the credential its job ran on, and the pick reads
+it to pass over a limited credential (`credentials.md` § Rate limits are per credential); the
+operator readout draws the windows from it (`capacity.md`).
 
 This section said it was mapped before it was. Until `credentials.md` step 5 it fell through the
 catch-all into `harness.unknown`, which is the behaviour the unknown clause exists for and the

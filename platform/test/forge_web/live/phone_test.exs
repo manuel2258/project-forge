@@ -126,7 +126,13 @@ defmodule ForgeWeb.PhoneTest do
             status: "allowed_warning",
             rate_limit_type: "five_hour",
             utilization: 0.9,
-            resets_at: System.os_time(:second) + 3600
+            resets_at: System.os_time(:second) + 3600,
+            windows: %{
+              "seven_day" => %{
+                "utilization" => 0.3,
+                "resets_at" => System.os_time(:second) + 3 * 86_400
+              }
+            }
           }
         })
 
@@ -134,6 +140,8 @@ defmodule ForgeWeb.PhoneTest do
 
       assert has_element?(view, "#more-capacity-five_hour")
       assert has_element?(view, "#more-capacity p", "5h window: 90% used on average")
+      # The week, from the report's `unifiedWindows` (ticket 32).
+      assert has_element?(view, "#more-capacity p", "week window: 30% used on average")
 
       # Said once. The sentence states the percentage, so the gauge above it draws its ticks and
       # its countdown and no number — the same digits twice, two lines apart, is what writing
@@ -146,6 +154,7 @@ defmodule ForgeWeb.PhoneTest do
       {:ok, chat_view, _html} = live(conn, ~p"/chats/#{job.id}")
       refute has_element?(chat_view, "dialog#more")
       assert has_element?(chat_view, "dialog#details #details-capacity p", "5h window")
+      assert has_element?(chat_view, "dialog#details #details-capacity p", "week window")
 
       # The compact one ends the strip, on a ticket's work screen as on a conversation's.
       ticket = ticket_fixture(%{project: project})
@@ -158,6 +167,7 @@ defmodule ForgeWeb.PhoneTest do
         # the number from `figure`'s default rather than from anything it says. Without this,
         # `figure={false}` on the strip's own call would pass the whole suite.
         assert drawn(view, "#context-strip #strip-five_hour") =~ "90%"
+        assert drawn(view, "#context-strip #strip-seven_day") =~ "30%"
       end
     end
   end

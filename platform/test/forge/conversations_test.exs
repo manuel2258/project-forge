@@ -328,6 +328,20 @@ defmodule Forge.ConversationsTest do
       assert %{payload: %{"memory" => ^memory}} = Events.latest_for_job(chat.id, "chat.turn")
     end
 
+    # The turn carries the process's own `cost_usd` beside the session's total (`session_cost_usd`,
+    # which a reopen's process starts from). What is charged — the run, and the job that reads its
+    # runs — is the first; charging the second is this ticket's bug.
+    test "is charged what the process spent, not its session's total", %{chat: chat} do
+      {:ok, _chat} =
+        Conversations.record_turn(
+          chat,
+          put_in(turn(1, 0.01), ["harness", "session_cost_usd"], 0.51)
+        )
+
+      assert Decimal.equal?(Forge.Jobs.Runs.total(chat.id), Decimal.from_float(0.01))
+      assert Decimal.equal?(Forge.Jobs.get!(chat.id).cost_usd, Decimal.from_float(0.01))
+    end
+
     # The harness reports total_cost_usd cumulatively across the session and num_turns per turn —
     # measured by `bin/measure streaming`. Adding the cost, as a job's is added, would count turn
     # one's in every later turn: by turn five the conversation reports several times what it

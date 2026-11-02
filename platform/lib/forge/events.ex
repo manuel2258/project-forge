@@ -269,7 +269,7 @@ defmodule Forge.Events do
        do: "#{bytes} bytes#{if p["is_error"], do: " (error)"}"
 
   defp describe(%Event{type: "job.harness.finished", payload: p}, _bound),
-    do: "#{p["subtype"]} · #{p["num_turns"]} turns · $#{p["total_cost_usd"]}"
+    do: "#{p["subtype"]} · #{p["num_turns"]} turns · session total $#{p["total_cost_usd"]}"
 
   defp describe(%Event{type: "job.harness.started", payload: p}, _bound),
     do: "#{p["model"]} · session #{p["session_id"]}"

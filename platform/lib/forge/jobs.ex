@@ -1040,7 +1040,11 @@ defmodule Forge.Jobs do
         "key" => key,
         "token" => Storage.Token.sign(:get, key, outlasting_ms: preparation_margin_ms()),
         "id" => id,
-        "version" => blob["version"]
+        "version" => blob["version"],
+        # What the session had spent when the file was written, which the harness will carry into
+        # the next run's total: the worker takes it off, so the run reports only its own. Nil on
+        # a session recorded before this was kept, which the worker reads as nothing to take off.
+        "cost_usd" => blob["cost_usd"]
       }
     }
   end
@@ -2410,15 +2414,28 @@ defmodule Forge.Jobs do
   end
 
   @doc """
-  The session file a run or a turn reports it uploaded, as `jobs.session_blob` keeps it — its key
-  and the version that wrote it — or nil. Only a key under the job's own prefix is taken: the
-  worker names it, and a key elsewhere in the store would hand a later resume another job's
-  session (`docs/design/claude-code-events.md` § Resume).
+  The session file a run or a turn reports it uploaded, as `jobs.session_blob` keeps it — its key,
+  the version that wrote it and the session's running total when it did — or nil.
+
+  The total is `session_cost_usd`, the harness's own figure, which carries everything the session
+  had spent where `cost_usd` is only what that run did. A run that resumes the file reports a
+  total that starts from it, and the worker takes it off (`ForgeWorker.Job.Session.own_cost/3`).
+  A worker that reports no `session_cost_usd` is an older one, whose `cost_usd` is the raw total.
+
+  Only a key under the job's own prefix is taken: the worker names it, and a key elsewhere in the
+  store would hand a later resume another job's session
+  (`docs/design/claude-code-events.md` § Resume).
   """
   @spec session_blob(Job.t(), map()) :: map() | nil
   def session_blob(%Job{id: id}, %{"session_blob" => key} = harness) when is_binary(key) do
-    if String.starts_with?(key, session_prefix(id)) and Storage.Key.validate(key) == {:ok, key},
-      do: %{"key" => key, "version" => harness["version"]}
+    if String.starts_with?(key, session_prefix(id)) and Storage.Key.validate(key) == {:ok, key} do
+      blob = %{"key" => key, "version" => harness["version"]}
+
+      case harness["session_cost_usd"] || harness["cost_usd"] do
+        nil -> blob
+        cost -> Map.put(blob, "cost_usd", cost)
+      end
+    end
   end
 
   def session_blob(%Job{}, _harness), do: nil

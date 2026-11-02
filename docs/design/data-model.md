@@ -43,7 +43,8 @@ job's added up as each run reports; see **job_run** — and both running totals 
 invocation the job has had, so neither is commensurate with `spec.budget`, which is one
 invocation's ceiling),
 `harness_session_id` (opaque, nullable, an optimisation only), `session_blob` (the latest session
-file the worker uploaded — its store key and the Claude Code version that wrote it — which a resume
+file the worker uploaded — its store key, the Claude Code version that wrote it and the session's
+running total when it did, which the resumed run's cost is reported less — which a resume
 on another machine puts back; `design/claude-code-events.md` § Resume), `resume_from_id` (the
 previous attempt of the state whose session a new attempt forks, set when the ticket came back to
 a state that attempt finished in, and cleared when a resume is refused), `worker_id` (nullable),
@@ -172,7 +173,8 @@ rather than removed, and deleting destroys the value. `design/secrets.md`.
 
 **job_run** — `job_id`, `credential_id`, `worker_id`, `started_at`, `finished_at`, `cost_usd`. One
 process of a job: a resume, a requeue or a reopened conversation is a new run. Spend is recorded
-here per credential, set from the harness's running total for that process (`Forge.Jobs.Runs`).
+here per credential, set from the harness's running total for that process, less what a session it resumed had already
+spent (`Forge.Jobs.Runs`).
 
 **git_token** — `project_id`, `ticket_id`, `job_id` (the last two nullable), `token_hash`,
 `ref` (the one ref a `branch` token may update: `refs/heads/ticket/<n>` for a ticket's job,

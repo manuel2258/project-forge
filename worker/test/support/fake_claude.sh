@@ -123,7 +123,8 @@ case "${FAKE_SCENARIO:-success}" in
     printf 'args: %s\n' "$*" > "$FORGE_JOB/fake-args.txt"
     emit "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$sid\",\"model\":\"fake-model\",\"claude_code_version\":\"9.9.9\",\"tools\":[]}"
     printf -- '---\noutcome: done\n---\n# Plan\n\nRemembered %s.\n' "$remembered" > "$doc"
-    emit "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"num_turns\":1,\"duration_ms\":5,\"total_cost_usd\":0.01,\"result\":\"Done.\",\"session_id\":\"$sid\"}"
+    total="$(awk -v a="${FAKE_CARRY:-0}" -v r="$resume" 'BEGIN { printf "%.4f", (r == "" ? 0 : a) + 0.01 }')"
+    emit "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"num_turns\":1,\"duration_ms\":5,\"total_cost_usd\":$total,\"result\":\"Done.\",\"session_id\":\"$sid\"}"
     exit 0
     ;;
   chat)
@@ -138,6 +139,8 @@ case "${FAKE_SCENARIO:-success}" in
         exit 1
       fi
       sed -n 's/.*remember \([A-Z]*\).*/\1/p' "$found" | head -n 1 > "$FORGE_JOB/fake-remembered.txt"
+      # The running total starts from what the restored session had spent, as the real one's does.
+      cost="${FAKE_CARRY:-0}"
     fi
     # Every message the runner writes arrives here as one JSON line. Reading until stdin closes
     # is what makes this a conversation: the process outlives each turn and ends on EOF.
@@ -294,7 +297,21 @@ emit '{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":
 emit '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"contents of plan.md"}]}}'
 emit '{"type":"stream_event","event":{"type":"message_start"}}'
 
-result_success='{"type":"result","subtype":"success","is_error":false,"num_turns":3,"duration_ms":1234,"total_cost_usd":0.0421,"usage":{"input_tokens":10,"output_tokens":20},"result":"Done.","session_id":"sess-42"}'
+# What the harness reports as its cost, as the real one does (docs/measurements.md § Session
+# resume): the session's running total, which a resume starts from what the session had already
+# spent. FAKE_CARRY is what a restored session holds when this process resumes it; a round of the
+# same job that resumes carries the total the round before it wrote down; a cold run starts at 0.
+total=0.0421
+case " $* " in
+  *" --resume "*)
+    carried="${FAKE_CARRY:-0}"
+    [ -f "$FORGE_JOB/fake-total.txt" ] && carried="$(cat "$FORGE_JOB/fake-total.txt")"
+    total="$(awk -v a="$carried" 'BEGIN { printf "%.4f", a + 0.0421 }')"
+    ;;
+esac
+printf '%s' "$total" > "$FORGE_JOB/fake-total.txt"
+
+result_success='{"type":"result","subtype":"success","is_error":false,"num_turns":3,"duration_ms":1234,"total_cost_usd":'"$total"',"usage":{"input_tokens":10,"output_tokens":20},"result":"Done.","session_id":"sess-42"}'
 
 case "${FAKE_SCENARIO:-success}" in
   success)

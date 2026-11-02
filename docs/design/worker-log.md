@@ -97,6 +97,7 @@ it was reported in (git's, the store's, the filesystem's):
 | `history.unwritten` | warning | what already ran on the ticket that a conversation was to read and could not be laid out, or an entry refused for a name that leaves its folder |
 | `backlog.unwritten` | warning | the project's tickets that could not be laid out for the job, or an entry refused |
 | `session.unrestored` | warning | a carried harness session it did not put back — written by another version of the CLI, not the session's own, or not downloadable — and so a cold start, or for a job a resume left to what the machine holds |
+| `session.cost.below` | warning | a resumed run's harness reported a total below what its session had spent, so its cost is recorded as 0 (`claude-code-events.md` § Accounting) |
 | `commands.unwritten` | warning | a command's log a resumed job, or one entered from a command state, was to read, left out because it would not fetch or its name was refused |
 | `volume.uncreated` | warning | a worktree it could not make a volume of, so the finished tree cannot be kept as the ticket's template and its next job starts colder |
 | `volume.unused` | warning | a seed or ticket volume that would not become the job's worktree, so it started colder |

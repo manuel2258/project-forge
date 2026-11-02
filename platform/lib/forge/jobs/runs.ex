@@ -52,7 +52,8 @@ defmodule Forge.Jobs.Runs do
 
   @doc """
   Sets what `job_id`'s latest run has cost so far: a conversation's turn, whose figure is the
-  harness's running total for the process (`docs/design/conversations.md` § Spend).
+  process's own running total — the harness's, less what a session it resumed had already spent,
+  which the worker takes off (`docs/design/conversations.md` § Spend).
 
   The latest run rather than the open one, because a turn is re-sent until it is acked and can
   arrive after its conversation ended and closed the run it belongs to. Its cost still belongs to

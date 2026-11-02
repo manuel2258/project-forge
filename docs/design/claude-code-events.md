@@ -224,8 +224,22 @@ is never rendered live; it exists for debugging after the fact.
 ## Accounting
 
 `total_cost_usd` and `num_turns` from the `result` message are written to the job — **added to
-what is already there**, so `jobs.turns` and `jobs.cost_usd` are the job's running totals over
-every invocation it has had, and a job the engine resumed after a rate limit has more than one.
+what is already there**, with one correction to the cost: `total_cost_usd` is the *session's*
+running total, and a run that resumes a session, forked or not, starts it from what the restored
+session had already spent (measured on 2.1.316, `docs/measurements.md` § Session resume). The
+worker reports a run's own spend as `cost_usd` — the total less the baseline its assignment's
+`session.cost_usd` names — and the total as it came as `session_cost_usd`, which the platform keeps
+with the session file (`jobs.session_blob`) for the next run that resumes it. `--max-budget-usd` is
+not charged the carry, so a resumed run's ceiling is its own.
+
+A resume with no baseline to take off — no file was carried (none of the job's uploads succeeded),
+it would not download, or the session was recorded before the total was kept — still reports the
+raw total. A run that reports no total reports none, and the session file it uploads is recorded
+with no total either, so the next resume of it has no baseline. A total below the baseline is
+recorded as 0, with a line saying so.
+
+So `jobs.turns` and `jobs.cost_usd` are the job's running totals over every invocation it has had,
+and a job the engine resumed after a rate limit has more than one.
 This is why the two are not the same quantity as `spec.budget.turns`, which is one invocation's
 ceiling, and why nothing draws them as a ratio (`capacity.md` § Four exhaustions, three
 treatments). The documentation calls the cost a client-side estimate; it is stored as such and
@@ -317,7 +331,10 @@ stay readable. It ends like any run and is collected and decided again. Each rou
 
 **What it may spend.** The job's budget, not a new one: a round gets the turns and cost the
 earlier rounds left (`Correction.remaining/2`), and none starts on less than one turn or no money.
-The wall clock is the runner's and covers every round. A cancel reaches whichever process is
+Every round resumes the session the one before it ended, so a round's total already holds the
+rounds before it: the job's cost is the **latest** round's own figure, not a sum, and the remaining
+budget is the job's budget less that figure. The wall clock is the runner's and covers every
+round. A cancel reaches whichever process is
 running, because it is the same runner — and one that lands after a round printed its result and
 before it exited is still a cancel: a run asked to stop is never corrected, and is reported
 killed. The spawn options a round is started from are kept behind a function, because they carry
@@ -325,7 +342,8 @@ the git token and the runner's state is what a crash report prints. Two rounds a
 the run is reported as it stands.
 
 **What the platform is told.** One result: the last round's documents and outcome, with the
-harness summary's `turns`, `cost_usd` and `duration_ms` summed over every round and `corrections`
+harness summary's `turns` and `duration_ms` summed over every round, its `cost_usd` the job's own
+spend (the last round's, see *What it may spend*), and `corrections`
 saying how many ran — the platform adds a result's figures to the job once, so a result carrying
 only the last process's would lose the rest. One transcript holds every round, in order.
 
@@ -424,7 +442,8 @@ and `HOME` is `$FORGE_JOB/home` — on the machine that ran the job and on no ot
 run the worker reads that file the way it reads `out/` (one open, the handle's owner checked, a
 size cap; `ForgeWorker.Job.Dir.stage_session/4`) and uploads it under the job's own key, and the
 platform records it as `jobs.session_blob`, beside the Claude Code version that wrote it
-(`system/init`'s `claude_code_version`). A resume's assignment carries a `get` token for it, and
+(`system/init`'s `claude_code_version`) and the session's running cost when it did, which the next
+run that resumes the file takes off its own (§ Accounting). A resume's assignment carries a `get` token for it, and
 the worker puts it back before the harness starts — on whatever machine that is. The transcript
 that is already uploaded is the harness's stdout and is not this file; it cannot stand in for it
 (below).

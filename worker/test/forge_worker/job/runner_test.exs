@@ -1065,6 +1065,102 @@ defmodule ForgeWorker.Job.RunnerTest do
       assert Enum.filter(events(), &(&1.type == "job.harness.correction")) == []
     end
 
+    # `docs/measurements.md` § Session resume: a resume's `total_cost_usd` starts from what the
+    # restored session had already spent. The fake does the same (`FAKE_CARRY`), and the run
+    # reports only what it spent itself, with the session's total beside it for the next resume.
+    defp resumed(baseline) do
+      [
+        executable: fake_executable(),
+        credential: {:api_key, "secret-key"},
+        resume_session: "sess-42",
+        session_cost_usd: baseline
+      ]
+    end
+
+    test "reports its own spend and the session's total", context do
+      {:ok, result} =
+        context
+        |> run("success", harness_opts: resumed(9.0), extra_env: [{"FAKE_CARRY", "9.0"}])
+        |> Runner.await(5_000)
+
+      # Exactly, not within a delta: `9.0421 - 9.0` is 0.04210000000000029 in floating point, and
+      # the platform stores the float it is given (`Decimal.from_float/1`) in an unbounded column.
+      assert result.harness["cost_usd"] == 0.0421
+      assert_in_delta result.harness["session_cost_usd"], 9.0421, 1.0e-9
+    end
+
+    # A run that resumed and then died reports no result, so no total: there is nothing to take the
+    # baseline off, and `nil - 9.0` would raise in the middle of building the result and lose it.
+    test "a resumed run that reports no total reports none, and is not lost", context do
+      {:ok, result} =
+        context |> run("crash", harness_opts: resumed(9.0)) |> Runner.await(5_000)
+
+      assert %Result{} = result
+      assert result.harness["cost_usd"] == nil
+      assert result.harness["session_cost_usd"] == nil
+    end
+
+    # The figure is the restored session's, and a run that is not resuming has none: its total
+    # starts from nothing, and taking a baseline off it would record 0 for a run that spent.
+    test "takes nothing off a run that is not resuming", context do
+      opts = Keyword.delete(resumed(9.0), :resume_session)
+
+      {:ok, result} =
+        context |> run("success", harness_opts: opts) |> Runner.await(5_000)
+
+      assert_in_delta result.harness["cost_usd"], 0.0421, 1.0e-9
+      assert_in_delta result.harness["session_cost_usd"], 0.0421, 1.0e-9
+    end
+
+    # What a resume that found a different session would report: a total below the baseline. Not
+    # a negative, which nothing downstream expects.
+    test "records 0, and says so, when the total is below the baseline", context do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          {:ok, result} =
+            context |> run("success", harness_opts: resumed(9.0)) |> Runner.await(5_000)
+
+          assert result.harness["cost_usd"] == 0
+          assert_in_delta result.harness["session_cost_usd"], 0.0421, 1.0e-9
+        end)
+
+      assert log =~ "below the 9.0"
+    end
+
+    # Each round resumes the session the one before it ended, so its total already holds them:
+    # the job's cost is the last round's own figure, not the rounds added up.
+    test "the rounds of a corrected job are one session's total, not a sum", context do
+      {:ok, result} =
+        context
+        |> run("invalid_document",
+          harness_opts: resumed(9.0),
+          extra_env: [{"FAKE_CARRY", "9.0"}]
+        )
+        |> Runner.await(5_000)
+
+      assert result.harness["corrections"] == 2
+      assert_in_delta result.harness["cost_usd"], 3 * 0.0421, 1.0e-9
+      assert_in_delta result.harness["session_cost_usd"], 9.0 + 3 * 0.0421, 1.0e-9
+      assert result.harness["turns"] == 9
+    end
+
+    # A fork whose session already holds more than the job's whole budget is still corrected:
+    # the harness is not charged the carry (`docs/measurements.md`), and neither is the budget.
+    test "a correction is given what the job's own spend leaves of its budget", context do
+      {:ok, result} =
+        context
+        |> run("invalid_document",
+          harness_opts: resumed(15.48),
+          extra_env: [{"FAKE_CARRY", "15.48"}]
+        )
+        |> Runner.await(5_000)
+
+      assert result.harness["corrections"] == 2
+      # Two rounds in, 0.0842 of the 2.0 has gone, rounded down to the cent.
+      assert File.read!(Path.join(job_dir(result), "fake-args.txt")) =~
+               "--max-budget-usd 1.91"
+    end
+
     test "a correction is given what is left of the budget, not the whole of it", context do
       {:ok, result} = context |> run("fixes_when_resumed") |> Runner.await(5_000)
       args = File.read!(Path.join(job_dir(result), "fake-args.txt"))
@@ -1118,6 +1214,9 @@ defmodule ForgeWorker.Job.RunnerTest do
 
       assert result.reason =~ "the harness had not started after 0s"
       assert result.harness["corrections"] == 1
+      # The round that never started reported no total; round one's spend is still the job's.
+      assert_in_delta result.harness["cost_usd"], 0.0421, 1.0e-9
+      assert_in_delta result.harness["session_cost_usd"], 0.0421, 1.0e-9
     end
 
     test "a run that is cancelled is not corrected", context do
@@ -1264,7 +1363,7 @@ defmodule ForgeWorker.Job.RunnerTest do
       folder = Path.join(job_dir(result), "archive")
 
       assert [{:unmounted, ^folder}, {:mounted, _socket, ^folder}, {:unmounted, ^folder}] =
-               mounts()
+               mounts(context.root)
 
       assert result.outcome == :converged
     end
@@ -1279,13 +1378,21 @@ defmodule ForgeWorker.Job.RunnerTest do
       end
     end
 
-    defp mounts do
+    # Only the folders under `root`, this test's own. `:archive_test_pid` is application-wide and
+    # this module runs async, so every other test's job that ends while it is set reports its
+    # unmount here too — which failed the exact-list assertion above one run in several.
+    defp mounts(root) do
       receive do
-        {:mounted, _, _} = message -> [message | mounts()]
-        {:unmounted, _} = message -> [message | mounts()]
+        {:mounted, _, folder} = message -> keep(message, folder, root)
+        {:unmounted, folder} = message -> keep(message, folder, root)
       after
         0 -> []
       end
+    end
+
+    defp keep(message, folder, root) do
+      rest = mounts(root)
+      if String.starts_with?(folder, root <> "/"), do: [message | rest], else: rest
     end
 
     # `Slice.Systemd.prepare/1` hands the job directory to the job's user with a recursive `chown`,

@@ -828,7 +828,10 @@ ends, and a conversation does not end for hours — so `Spend.day_total/1` would
 conversation as having cost nothing, and the only spend protection the product has would not apply
 to the one thing that can run unattended all day. Each turn writes its cost to its run as it
 completes — the job row's cost is the sum of its runs, so a reopened conversation, a new process
-whose total starts again, adds to what it had rather than replacing it (`credentials.md` § Spend).
+whose own total starts again, adds to what it had rather than replacing it (`credentials.md` §
+Spend). A reopen resumes its session as a fork, and the harness starts that process's total from
+what the session had already spent (`docs/measurements.md` § Session resume), so the worker takes
+the baseline the assignment names off each turn's figure and reports the rest as `cost_usd`.
 
 **The harness's ceiling is set once, not per turn.** What is left of the day is read when the
 conversation is assigned — `remaining_today/0`, in `Jobs.assignment/4` — and passed as
@@ -840,7 +843,9 @@ the day is gone. Whether the harness measures its ceiling per turn or across the
 been measured; `bin/measure streaming` does not pass the flag.
 
 **Cost is set on the run, and added across runs; turns are added.** The spike measured
-`total_cost_usd` as cumulative across the session and `num_turns` as per turn.
+`total_cost_usd` as cumulative across the process and `num_turns` as per turn; a process that
+resumed a session starts its total from that session's (`docs/measurements.md` § Session resume),
+which the worker takes off before a turn is reported.
 `Jobs.progress_attrs/2` adds both, so recording a turn's `total_cost_usd` the way a job's is
 recorded would count turn one's cost in every later turn — by turn five a conversation reports
 several times what it spent, and the daily cap trips early on money nobody spent. This is written

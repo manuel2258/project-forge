@@ -87,6 +87,9 @@ defmodule ForgeWorker.Job.Conversation do
        # The CLI's version, from its `system/init`: recorded with each session upload, so a
        # reopen restores the file only onto the CLI that wrote it.
        version: nil,
+       # What the session this process resumed had already spent, which every turn's total starts
+       # from: set when the runner's options are made, once the session has been checked.
+       baseline: 0,
        idle_ms: Keyword.get(opts, :idle_ms) || assignment["idle_ms"] || @default_idle_ms,
        idle_timer: nil,
        closing: nil,
@@ -143,10 +146,13 @@ defmodule ForgeWorker.Job.Conversation do
   def terminate(_reason, state), do: leave(state)
 
   defp start_runner(state) do
-    case Runner.start_link(runner_opts(state)) do
+    opts = runner_opts(state)
+
+    case Runner.start_link(opts) do
       {:ok, runner} ->
         send(state.link, {:runner, state.job_id, runner})
-        {:noreply, reset_idle(%{state | runner: runner})}
+        baseline = opts |> Keyword.fetch!(:harness_opts) |> Session.baseline()
+        {:noreply, reset_idle(%{state | runner: runner, baseline: baseline})}
 
       {:error, reason} ->
         fail(state, "could not start the harness: #{inspect(reason)}")
@@ -417,7 +423,7 @@ defmodule ForgeWorker.Job.Conversation do
            "invalid_proposals" => proposals.invalid_proposals,
            "documents" => documents.documents,
            "invalid_documents" => documents.invalid_documents,
-           "harness" => turn_summary(event, session, state.version)
+           "harness" => turn_summary(event, session, state)
          }
          |> Map.merge(transition_keys(transition))
        )}
@@ -592,17 +598,23 @@ defmodule ForgeWorker.Job.Conversation do
 
   # String keys: this crosses the channel as JSON, and an atom key here arrives as a string key
   # there. The same trap `harness_summary/3` already carries a comment about.
-  defp turn_summary(event, session, version) do
+  #
+  # `cost_usd` is the turn's total less what the resumed session had already spent, so it is the
+  # process's own running total; the platform sets it on the run (`Forge.Jobs.Runs.cost/3`) and
+  # the next reopen's baseline is `session_cost_usd`, the harness's total as it came.
+  defp turn_summary(event, session, state) do
     payload = event.payload
+    total = payload[:total_cost_usd]
 
     %{
       "session_id" => payload[:session_id],
       "session_blob" => session,
-      "version" => version,
+      "version" => state.version,
       "subtype" => payload[:subtype],
       "is_error" => payload[:is_error],
       "turns" => payload[:num_turns],
-      "cost_usd" => payload[:total_cost_usd],
+      "cost_usd" => Session.own_cost(total, state.baseline, state.job_id),
+      "session_cost_usd" => total,
       "duration_ms" => payload[:duration_ms],
       "usage" => payload[:usage],
       "result" => payload[:result],

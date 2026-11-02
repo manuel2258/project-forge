@@ -420,11 +420,12 @@ defmodule Forge.Conversations do
 
   **Cost is set on the run, and the conversation's is every run's.** The harness reports
   `total_cost_usd` cumulatively across the process — measured, see § Spend — while `num_turns`
-  counts one turn. `progress_attrs/2` adds both, and doing that here would count turn one's cost
-  in every later turn: by turn five a conversation reports several times what it spent and the
+  counts one turn. The worker has already taken off what a session the process resumed had spent,
+  so the figure each turn carries is the process's own, still cumulative across the process.
+  `progress_attrs/2` adds both, and doing that here would count turn one's cost in every later turn: by turn five a conversation reports several times what it spent and the
   daily cap trips early on money nobody spent. So the figure is set on the current run
-  (`Forge.Jobs.Runs.cost/3`), and a reopened conversation — a new process, whose figure starts
-  again from nothing — adds a run rather than overwriting the last one's.
+  (`Forge.Jobs.Runs.cost/3`), and a reopened conversation — a new process, whose own figure
+  starts again from nothing — adds a run rather than overwriting the last one's.
 
   Idempotent on `(job_id, session, turn)`: the worker re-sends a turn until it is acked, and it
   numbers turns from one in every process — so after a reopen, turn one is a turn nobody has
@@ -448,7 +449,8 @@ defmodule Forge.Conversations do
 
     # The turn's figure is the process's running total, so it is *set* on this run
     # (`docs/design/conversations.md` § Spend) — and the conversation's cost is every run's, since
-    # a conversation reopened is a new process whose total starts again from nothing.
+    # a conversation reopened is a new process whose own total starts again from nothing (the
+    # worker has taken off what the session it resumed had spent).
     Multi.new()
     |> lock_step_ticket(chat)
     |> Multi.run(:step_open, fn _repo, _changes -> {:ok, not step_accepted?(chat)} end)

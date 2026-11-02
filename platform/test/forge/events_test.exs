@@ -87,6 +87,18 @@ defmodule Forge.EventsTest do
     end
   end
 
+  # The event carries the harness's own `total_cost_usd`, which for a run that resumed a session is
+  # the session's running total and not what the run spent (`docs/measurements.md` § Session
+  # resume), so the line says which it is rather than reading as the run's cost.
+  test "a finished harness line labels its cost as the session's total" do
+    event = %Event{
+      type: "job.harness.finished",
+      payload: %{"subtype" => "success", "num_turns" => 3, "total_cost_usd" => 9.48}
+    }
+
+    assert Events.summary(event) == "success · 3 turns · session total $9.48"
+  end
+
   # A conversation's request that moved nothing is drawn in the job's Activity stream like any
   # other event, through `detail/1` (`work_screen.ex`). Rendered as the reason and not as the
   # payload, or the person reads a JSON blob where a sentence should be

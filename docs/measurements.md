@@ -389,6 +389,32 @@ before it is used (`docs/design/claude-code-events.md` § Resume): the last row 
 does not fail and does not work, and nothing downstream could tell. The second row is the
 assumption `resume_failed?` rested on, now observed.
 
+**What a resume reports as its cost.** Measured 2026-11-01 against Claude Code 2.1.316, `haiku`, by
+hand with a scratch `HOME`, `env -i` and the driver's flags (`-p --output-format stream-json
+--verbose --permission-mode bypassPermissions`). One session (S) was written, then resumed;
+everything together cost under five cents.
+
+| Run | Session | `total_cost_usd` | The run's own `usage` | `num_turns` |
+|---|---|---|---|---|
+| r1: new session | S | 0.00296 | 6370 cache write, 11382 read, 3138 out | 1 |
+| r2: `--resume S` | S | **0.00377** | 3179 write, 17752 read, 7 out | 1 |
+| r3: `--resume S --fork-session` | new id | **0.00400** | 48 write, 20931 read, 7 out | 1 |
+| r4: `--resume S --max-budget-usd 0.002` (S already at 0.00377) | S | 0.00406, `success` | 70 write, 20931 read, 130 out | 1 |
+
+- **`total_cost_usd` after a resume starts from the restored session's total, forked or not.** r3,
+  forked from S after r2, carries r1 and r2. The result's `modelUsage` is cumulative the same way
+  (r2's `outputTokens` is 3145 = 3138 + 7). `usage` and `num_turns` are the run's own.
+- **`--max-budget-usd` counts what the process spent, not the carried total.** With a three-step
+  Bash task: a new session at a $0.0005 ceiling stopped (`error_max_budget_usd`) after one call;
+  a resume at $0.003 on a session already at 0.00406 ran to the end, and so did a fork at $0.003
+  from 0.00518; a resume at $0.0005 on 0.00518 stopped after two calls, its own spend about
+  0.0006.
+
+**What this decided.** The worker reports a run's cost as the harness's total less the total its
+restored session had reported, and the platform keeps that total beside the session file
+(`docs/design/claude-code-events.md` § Accounting). The per-run `--max-budget-usd` is not changed:
+it is already the run's own.
+
 ### The worker at its ceiling, on the image
 
 Run 2026-09-30 on the operator's machine, by hand first and then as

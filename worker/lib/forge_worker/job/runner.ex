@@ -57,7 +57,7 @@ defmodule ForgeWorker.Job.Runner do
 
   alias ForgeCore.Job.{Correction, Outcome, Result, Spec}
   alias ForgeCore.Prompt
-  alias ForgeWorker.Job.{Dir, Exec, Memory}
+  alias ForgeWorker.Job.{Dir, Exec, Memory, Session}
   alias ForgeWorker.Log
 
   require Logger
@@ -196,9 +196,13 @@ defmodule ForgeWorker.Job.Runner do
       spawn_opts: fn -> opts end,
       corrections: 0,
       max_corrections: Keyword.get(opts, :max_corrections, @default_max_corrections),
-      # What the rounds before this one spent, summed, once a correction has run: the result
-      # reports the whole job, not its last process.
+      # What the rounds before this one spent, once a correction has run: the result reports the
+      # whole job, not its last process.
       prior: nil,
+      # What the session this run resumes had already spent, which the harness's total starts
+      # from (`Session.baseline/1`). Every round of a job resumes the same session, so each
+      # round's total still starts from it and it stays the same for the whole job.
+      baseline: Session.baseline(harness_opts),
       start_notice_ms: setting(opts, :start_notice_ms, @default_start_notice_ms),
       start_timeout_ms: setting(opts, :start_timeout_ms, @default_start_timeout_ms),
       memory_sample_ms: setting(opts, :memory_sample_ms, @default_memory_sample_ms),
@@ -867,13 +871,22 @@ defmodule ForgeWorker.Job.Runner do
     %{turns: total["turns"], cost: total["cost_usd"]}
   end
 
-  @summed ~w(turns cost_usd duration_ms)
+  @summed ~w(turns duration_ms)
 
+  # Turns and time are each round's own and are summed. **Cost is not**: every round resumes the
+  # session the one before it ended, so a round's total already holds the rounds before it, and
+  # what `harness_summary/6` reports as its `cost_usd` is the whole job's own spend so far. The
+  # latest round's figure is the job's, and a round that reported none leaves the one before.
+  # `duration_ms` is summed on the assumption, not measured, that a resume does not carry it as
+  # it carries the cost; nothing on the platform reads it.
   defp add_up(nil, harness),
-    do: add_up(%{"turns" => 0, "cost_usd" => 0, "duration_ms" => 0}, harness)
+    do: add_up(%{"turns" => 0, "duration_ms" => 0, "cost_usd" => 0}, harness)
 
   defp add_up(prior, harness) do
-    Map.new(@summed, fn key -> {key, (prior[key] || 0) + (harness[key] || 0)} end)
+    @summed
+    |> Map.new(fn key -> {key, (prior[key] || 0) + (harness[key] || 0)} end)
+    |> Map.put("cost_usd", harness["cost_usd"] || prior["cost_usd"] || 0)
+    |> Map.put("session_cost_usd", harness["session_cost_usd"] || prior["session_cost_usd"])
   end
 
   # The job's result is the last round's, with what every round spent. The platform adds the cost
@@ -1066,7 +1079,8 @@ defmodule ForgeWorker.Job.Runner do
           finished,
           state.exit_status,
           state.rate_limit,
-          Memory.summary(state.memory)
+          Memory.summary(state.memory),
+          {state.baseline, state.spec.job_id}
         )
     }
 
@@ -1146,9 +1160,10 @@ defmodule ForgeWorker.Job.Runner do
   #
   # `memory` is the ceiling, the peak and the OOM kills — the unit's own last reading where there is
   # one (§ Memory in `docs/design/claude-code-events.md`) — and nil where nothing was read.
-  defp harness_summary(started, finished, exit_status, rate_limit, memory) do
+  defp harness_summary(started, finished, exit_status, rate_limit, memory, {baseline, job_id}) do
     started = started || %{}
     finished = finished || %{}
+    total = Map.get(finished, :total_cost_usd)
 
     # String keys, because this is the provider's own summary and it crosses the channel as
     # JSON. An atom key here would arrive as a string key there, and the platform would read
@@ -1160,7 +1175,12 @@ defmodule ForgeWorker.Job.Runner do
       "subtype" => Map.get(finished, :subtype),
       "is_error" => Map.get(finished, :is_error),
       "turns" => Map.get(finished, :num_turns),
-      "cost_usd" => Map.get(finished, :total_cost_usd),
+      # What this run spent, and the session's total as the harness reported it: the platform
+      # keeps the second with the session file, for the next run that resumes it to take off.
+      # The harness's total starts from what a restored session had already spent, so reporting
+      # it as the run's own charged a resume for its session's past.
+      "cost_usd" => Session.own_cost(total, baseline, job_id),
+      "session_cost_usd" => total,
       "duration_ms" => Map.get(finished, :duration_ms),
       "usage" => Map.get(finished, :usage),
       "exit_status" => exit_status,

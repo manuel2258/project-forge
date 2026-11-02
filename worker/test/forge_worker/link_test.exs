@@ -1653,8 +1653,8 @@ defmodule ForgeWorker.LinkTest do
 
     # One job id for the assignment and its spec, as the platform sends them: the job directory
     # the runner prepares and the one the link reads the session back from are the same.
-    defp session_job(origin, extra \\ %{}) do
-      job = assignment(origin, scenario: "session")
+    defp session_job(origin, extra \\ %{}, env \\ []) do
+      job = assignment(origin, scenario: "session", env: env)
       job = put_in(job, ["spec", "job_id"], job["job_id"])
 
       job
@@ -1663,12 +1663,13 @@ defmodule ForgeWorker.LinkTest do
       |> Map.merge(extra)
     end
 
-    defp carried(version \\ "9.9.9"),
+    defp carried(version \\ "9.9.9", cost \\ nil),
       do: %{
         "key" => "job/j0/session-x/1.jsonl",
         "token" => "get",
         "id" => "sess-42",
-        "version" => version
+        "version" => version,
+        "cost_usd" => cost
       }
 
     defp run_job(client, job) do
@@ -1754,6 +1755,48 @@ defmodule ForgeWorker.LinkTest do
       assert result["documents"]["plan.md"]["raw"] =~ "Remembered PELICAN."
       assert job_file(root, job, "fake-args.txt") =~ "--resume sess-42 --fork-session"
       assert job_file(root, job, "prompt.md") =~ "# A new attempt of"
+    end
+
+    # `docs/measurements.md` § Session resume: the harness's total starts from what the restored
+    # session had spent, so the result reports the run's own and the session's total beside it.
+    test "a fork reports what it spent, not what its predecessor's session had", context do
+      %{client: client, origin: origin} = context
+      store_serving(%{"/store/job/j0/session-x/1.jsonl" => @session})
+
+      job =
+        session_job(
+          origin,
+          %{
+            "resume_session" => "sess-42",
+            "fork_session" => true,
+            "session" => carried("9.9.9", 9.0)
+          },
+          [{"FAKE_CARRY", "9.0"}]
+        )
+
+      harness = run_job(client, job)["harness"]
+
+      assert_in_delta harness["cost_usd"], 0.01, 1.0e-9
+      assert_in_delta harness["session_cost_usd"], 9.01, 1.0e-9
+    end
+
+    # A session that is not restored is a cold start whose total starts from nothing, so there is
+    # nothing to take off it.
+    test "a resume dropped for another version of the CLI takes nothing off the cost", context do
+      %{client: client, origin: origin} = context
+      store_serving(%{"/store/job/j0/session-x/1.jsonl" => @session})
+
+      job =
+        session_job(
+          origin,
+          %{"resume_session" => "sess-42", "session" => carried("1.0.0", 9.0)},
+          [{"FAKE_CARRY", "9.0"}]
+        )
+
+      harness = run_job(client, job)["harness"]
+
+      assert_in_delta harness["cost_usd"], 0.01, 1.0e-9
+      assert_in_delta harness["session_cost_usd"], 0.01, 1.0e-9
     end
 
     # A fork is told its output directory is empty. Run again on the machine that lost it, what
@@ -3269,6 +3312,66 @@ defmodule ForgeWorker.LinkTest do
 
       {%{"turn" => 2, "harness" => harness}, _} = take_push("turn")
       assert harness["session_blob"] == "job/c1/session-s/2.jsonl"
+    end
+
+    # `docs/measurements.md` § Session resume: the reopened process's total starts from what the
+    # session had spent, and every turn reports its own running total beside the session's.
+    test "a reopened conversation's turns report what the process spent, not its session's",
+         context do
+      %{client: client, origin: origin} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      session =
+        ~s({"type":"user","sessionId":"sess-42","parentUuid":null,"uuid":"u1","message":{"content":"remember PELICAN"}}\n)
+
+      test = self()
+
+      Application.put_env(:forge_worker, :req_options,
+        plug: fn conn ->
+          if conn.method == "GET" do
+            Plug.Conn.send_resp(conn, 200, session)
+          else
+            {:ok, body, conn} = Plug.Conn.read_body(conn, length: 8_000_000)
+            send(test, {:uploaded, conn.request_path, [], "", body})
+            Req.Test.json(conn, %{"key" => conn.request_path, "size" => byte_size(body)})
+          end
+        end
+      )
+
+      job =
+        origin
+        |> chat(env: [{"FAKE_CARRY", "0.50"}])
+        |> put_in(["spec", "kind"], "chat")
+        |> put_in(["spec", "prompt"], "Did it land?")
+        |> Map.merge(%{
+          "resume_session" => "sess-42",
+          "fork_session" => true,
+          "session" => %{
+            "key" => "job/c1/session-s/3.jsonl",
+            "token" => "get",
+            "id" => "sess-42",
+            "version" => "9.9.9",
+            "cost_usd" => 0.5
+          }
+        })
+
+      job_id = job["job_id"]
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1, "harness" => first}, _} = take_push("turn")
+
+      push(client, @topic, "message", %{
+        "job_id" => job_id,
+        "message_id" => "m-2",
+        "text" => "and the second?"
+      })
+
+      {%{"turn" => 2, "harness" => second}, _} = take_push("turn")
+
+      assert_in_delta first["cost_usd"], 0.01, 1.0e-9
+      assert_in_delta first["session_cost_usd"], 0.51, 1.0e-9
+      assert_in_delta second["cost_usd"], 0.02, 1.0e-9
+      assert_in_delta second["session_cost_usd"], 0.52, 1.0e-9
     end
 
     # A reopen on another machine: the carried session is restored, forked so that its turns,

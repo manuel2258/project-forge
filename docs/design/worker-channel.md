@@ -123,7 +123,7 @@ Platform → worker:
 
 | Message | Payload | Meaning |
 |---|---|---|
-| `assign` | `job_id`, `kind`, spec JSON, slice limits (`memory_max`, `cpu_weight`), git endpoint + per-job token + branch + base, transcript key + token, a prefix and `put` token for the harness session's uploads, seed key + token, the backlog, `resume_session` (nil when there is nothing to resume), `fork_session`, the session file to restore (`session`: key, `get` token, id, the version that wrote it), wall clock, the job's inference credential sealed for this worker (`credentials.md` § Delivery to the machine); a chat adds `idle_ms`, `max_cost_usd` and `history` and a longer wall clock, and its spec a `replay` once it has been reopened | Run this job. |
+| `assign` | `job_id`, `kind`, spec JSON, slice limits (`memory_max`, `cpu_weight`), git endpoint + per-job token + branch + base, transcript key + token, a prefix and `put` token for the harness session's uploads, seed key + token, the backlog, `resume_session` (nil when there is nothing to resume), `fork_session`, the session file to restore (`session`: key, `get` token, id, the version that wrote it, what the session had spent), wall clock, the job's inference credential sealed for this worker (`credentials.md` § Delivery to the machine); a chat adds `idle_ms`, `max_cost_usd` and `history` and a longer wall clock, and its spec a `replay` once it has been reopened | Run this job. |
 | `assign` for a command | `job_id`, `kind: "command"`, its spec (the script's text, argv, commit, env, timeout), slice limits, git endpoint + a read-only per-job token + branch + base, the log's store key + `put` token, seed key + token, wall clock | Run this command (`docs/design/commands.md`). No credential, no backlog, no session. |
 | — and for either, when it declares a group of files | `outputs`: a store prefix and a `put` token scoped to it (`docs/design/storage.md` § Serving) | Where the group's files go. |
 | — and for any of the three, when the job names project secrets | `secrets`: one JSON object of name to value, sealed for this worker, this job and the purpose `secrets` (`docs/design/secrets.md` § Delivery); its spec's `secrets` names them | Put these in the process's environment, and mask them in what leaves (§ Masking there). |
@@ -461,6 +461,21 @@ nothing, so nothing is carried; a resume of its own session finds what that mach
 always did; a fork of another attempt's session — a job directory the machine never had — finds
 nothing, is re-queued cold with the fork cleared, and runs as a new attempt always did; and a
 conversation it reopens never read `resume_session`, so it starts cold with the replay.
+
+**The session's running total is an addition too** (`docs/design/claude-code-events.md` §
+Accounting): `session.cost_usd` on `assign` is what the file's session had spent, and
+`session_cost_usd` in a result's or a turn's harness summary is the harness's total as it reported
+it, where `cost_usd` becomes only what that run spent. No bump: every pairing reads the
+figures it understands. A new worker on an older platform is sent no `cost_usd`, takes nothing off,
+and reports the raw total as it always did. An older worker on a new platform ignores the baseline
+and still reports raw totals; the platform keeps `cost_usd` as the session's total when there is
+no `session_cost_usd`, which is right for a first run. It is not right for a job whose correction
+rounds that older worker summed: each round's total already held the rounds before it, so the
+stored baseline counts every earlier round's total again — with rounds ending at totals T1, T2 and
+T3 it is T1 + T2 + T3 against a true T3, and with two rounds T1 + T2 against T2. The next run,
+resumed by a newer worker, is under-recorded by that excess (T1 + T2 for three rounds, T1 for
+two), and clamped at 0 where it would go negative. Under-recording is the direction to err, and only sessions an older
+worker wrote are affected.
 
 **Protocol 4 is an unhealthy machine** (§ An unhealthy machine): the `unhealthy` message and its
 reply, and `unhealthy` in the join. It is a bump because a protocol 4 worker acts on the platform

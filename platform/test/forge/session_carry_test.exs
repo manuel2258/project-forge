@@ -116,8 +116,37 @@ defmodule Forge.SessionCarryTest do
 
       assert Jobs.get!(job.id).session_blob == %{
                "key" => assignment["store"]["session_prefix"] <> "1.jsonl",
-               "version" => "2.1.284"
+               "version" => "2.1.284",
+               # The fake worker's run reports a `cost_usd` and no `session_cost_usd`: an older
+               # worker, whose cost is the raw total.
+               "cost_usd" => 0.0421
              }
+    end
+
+    # `cost_usd` is what the run spent; `session_cost_usd` is the harness's running total, which
+    # the next run that resumes this file starts from (`docs/measurements.md` § Session resume).
+    # The job is charged the first, and the file is kept with the second.
+    test "the session's running total is kept with it, and the job is charged the run's own",
+         context do
+      assignment = context.ticket |> pending() |> FakeWorker.assign(context.worker)
+      harness = Map.merge(uploaded(assignment), %{"cost_usd" => 0.4, "session_cost_usd" => 9.48})
+      {:ok, job} = FakeWorker.finish(assignment, "success", harness: harness)
+
+      job = Jobs.get!(job.id)
+      assert job.session_blob["cost_usd"] == 9.48
+      assert Decimal.equal?(job.cost_usd, Decimal.from_float(0.4))
+    end
+
+    # A worker from before the total was reported sends the raw total as `cost_usd`.
+    test "a worker that reports no session total has its cost taken for it", context do
+      assignment = context.ticket |> pending() |> FakeWorker.assign(context.worker)
+
+      {:ok, job} =
+        FakeWorker.finish(assignment, "success",
+          harness: Map.put(uploaded(assignment), "cost_usd", 0.4)
+        )
+
+      assert Jobs.get!(job.id).session_blob["cost_usd"] == 0.4
     end
 
     # The worker names the key; one outside the job's own prefix would hand a later resume
@@ -147,6 +176,62 @@ defmodule Forge.SessionCarryTest do
     end
   end
 
+  # **What the ledger adds is the run's own spend, never the session's total.** The worker reports
+  # `cost_usd` (own) beside `session_cost_usd` (the harness's running total, kept with the file for
+  # the next resume to take off). A run that resumed a session that had spent 9.08 and spent 0.40
+  # itself must cost 0.40 on its run, its job and its ticket — and so on the day and the credential,
+  # which read those rows. Distinct figures, so that adding the wrong one fails.
+  describe "what the ledger adds" do
+    defp spent(run_or_job_id), do: Forge.Jobs.Runs.total(run_or_job_id)
+
+    defp reports(assignment),
+      do: Map.merge(uploaded(assignment), %{"cost_usd" => 0.4, "session_cost_usd" => 9.48})
+
+    defp assert_charged(job_id, ticket_id, cost) do
+      expected = Decimal.from_float(cost)
+      assert Decimal.equal?(Jobs.get!(job_id).cost_usd, expected)
+      assert Decimal.equal?(spent(job_id), expected)
+      assert Decimal.equal?(Tickets.get!(ticket_id).cost_usd, expected)
+    end
+
+    test "a finished run is charged what it spent, on its run, job and ticket", context do
+      assignment = context.ticket |> pending() |> FakeWorker.assign(context.worker)
+      {:ok, job} = FakeWorker.finish(assignment, "success", harness: reports(assignment))
+
+      assert_charged(job.id, context.ticket.id, 0.4)
+    end
+
+    test "a parked run is charged what it spent", context do
+      assignment = context.ticket |> pending() |> FakeWorker.assign(context.worker)
+      {:ok, job} = FakeWorker.park(assignment, [], harness: reports(assignment))
+
+      assert_charged(job.id, context.ticket.id, 0.4)
+    end
+
+    test "a run stopped by its account's limit is charged what it spent", context do
+      assignment = context.ticket |> pending() |> FakeWorker.assign(context.worker)
+
+      {:ok, job} =
+        FakeWorker.finish(assignment, "rate_limited",
+          doc: "implementation.md",
+          harness: reports(assignment)
+        )
+
+      assert_charged(job.id, context.ticket.id, 0.4)
+    end
+
+    # A cancel's late report sets the run's cost rather than adding to it (`Jobs.settled/2`).
+    test "a cancelled run's late report is charged what it spent", context do
+      assignment = context.ticket |> pending() |> FakeWorker.assign(context.worker)
+      {:ok, _cancelled} = Forge.Engine.cancel(Tickets.get!(context.ticket.id), context.user.id)
+
+      {:ok, _job} =
+        Jobs.hibernate(assignment["job_id"], nil, "cancelled", %{"harness" => reports(assignment)})
+
+      assert_charged(assignment["job_id"], context.ticket.id, 0.4)
+    end
+  end
+
   describe "a resume of the same job" do
     test "names the session to put back, with a token to fetch it, and does not fork", context do
       assignment = context.ticket |> pending() |> FakeWorker.assign(context.worker)
@@ -170,6 +255,16 @@ defmodule Forge.SessionCarryTest do
                |> Events.for_job()
                |> Enum.filter(&(&1.type == "job.started"))
                |> Enum.map(& &1.payload["resume"])
+    end
+
+    test "names what the session had spent, for the worker to take off", context do
+      assignment = context.ticket |> pending() |> FakeWorker.assign(context.worker)
+      harness = Map.put(uploaded(assignment), "session_cost_usd", 9.48)
+      {:ok, parked} = FakeWorker.park(assignment, [], harness: harness)
+
+      again = FakeWorker.assign(Jobs.get!(parked.id), context.worker)
+
+      assert again["session"]["cost_usd"] == 9.48
     end
 
     # A run whose upload failed leaves the job's session as the last one that did, which a later
@@ -216,6 +311,21 @@ defmodule Forge.SessionCarryTest do
       again = FakeWorker.assign(Jobs.get!(second.id), context.worker)
       assert again["resume_session"] == "sess-impl-2"
       assert again["fork_session"] == false
+    end
+
+    test "that forks a session is told what it had spent", context do
+      assignment = context.ticket |> pending() |> FakeWorker.assign(context.worker)
+      written = %{"implementation.md" => "---\noutcome: done\n---\n# I\n"}
+      harness = Map.put(uploaded(assignment, "sess-impl"), "session_cost_usd", 9.48)
+      {:ok, _first} = FakeWorker.finish(assignment, "success", written: written, harness: harness)
+
+      {ticket, _review, _} =
+        run(Tickets.get!(context.ticket.id), context.worker, "review.md", "changes_requested")
+
+      forked = ticket |> pending() |> FakeWorker.assign(context.worker)
+
+      assert forked["fork_session"] == true
+      assert forked["session"]["cost_usd"] == 9.48
     end
 
     # The retry lap: a state's own `budget_exhausted` self-loop sends the ticket back into the
@@ -467,6 +577,25 @@ defmodule Forge.SessionCarryTest do
 
       assert reopened.harness_session_id == "s1"
       assert Jobs.resume_source(reopened) == {"s1", %{"key" => key, "version" => "2.1.284"}, true}
+    end
+
+    # The turn's `cost_usd` is the process's own figure; the session's total is what a reopen's
+    # process starts from, so that is what is kept with the file.
+    test "reopened, is told the session's total and not the turn's own cost", %{chat: chat} do
+      key = "job/#{chat.id}/session-abc/2.jsonl"
+
+      {:ok, _chat} =
+        turn(chat, 1, %{
+          "session_id" => "s1",
+          "session_blob" => key,
+          "version" => "2.1.284",
+          "cost_usd" => 0.01,
+          "session_cost_usd" => 0.51
+        })
+
+      {:ok, reopened} = Conversations.reopen(dormant(chat))
+
+      assert {"s1", %{"key" => ^key, "cost_usd" => 0.51}, true} = Jobs.resume_source(reopened)
     end
 
     test "with no session carried, reopened, resumes nothing", %{chat: chat} do

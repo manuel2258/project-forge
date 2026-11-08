@@ -24,9 +24,45 @@ as the actual acceptance criteria for this attempt, not advice to weigh against 
   attempts made this choice and each wrote a paragraph apologising for it: it is a legitimate
   choice, and this is it being written down rather than re-litigated per attempt.
 
+## Screenshots, when the change is something a person sees
+
+Run this when `git diff --stat origin/main..HEAD -- platform/lib/forge_web platform/assets` is not
+empty — the web layer and its styles, which is also what `reviewing` checks. `docs/design/look.md`
+has the tool; this is how to use it here.
+
+- **Write or extend a setup** in `platform/test/support/look/setups/` for the screens you changed
+  (the shipped `ticket` one shows the pattern), built from the suite's own fixtures. It is code,
+  kept, and compiled by the gate: the next ticket on the same screen starts from it. **Never a
+  project secret's value** in a setup or a step: they are made-up data, and a picture is not
+  masked.
+- **Look at each changed screen** with `bin/look --setup NAME --as USER < steps`, the steps on
+  standard input and not saved: its main view at phone width and at desktop width, and every state
+  a "What a person sees" criterion of `refinement.md` describes — empty, refused, waiting, a long
+  or hostile value — at phone width, and at desktop width too where that layout differs. Name each
+  file `<screen>-<state>-<phone|desktop>.png` in `$FORGE_JOB/out/screenshots/`. Photograph what
+  changed, not the platform: there is no cap, and no reason to take the whole of it.
+- **Read the pictures**, fix what is wrong against `docs/design/ui.md` and the criteria, and take
+  them again. **Take the final set again as your last step, after your last change**, deleting any
+  a later round no longer needs: nothing checks that you did, and a picture of old code reads as
+  approved.
+- **List the ones you kept** under `## Screenshots` in `implementation.md`: file, screen, state.
+  If nothing visible changed, say in one sentence why instead. The review and the presentation
+  show the pictures that list names and no others.
+- **Pass the steps on standard input in an unquoted heredoc** (`<<EOF`, not `<<'EOF'`) so that
+  `$FORGE_JOB` expands in a `shot` path (and so would any other `$` or backtick in a step, so keep
+  those out); a relative path is relative to where you ran `bin/look`.
+- **Exit 1 is yours to fix**: a failed step, or a step list, setup or user you got wrong, is the
+  tool working, and so is a failing page; it names the step, and the fix is the page's or yours.
+  That includes a page that breaks while logging in (a script error every page shares, a crash)
+  and an app or stylesheet that will not build: the output says which, and none of them is a
+  reason to finish without pictures. **Exit 2, or your own kill (137), means the tool could not
+  run** — the browser, the namespace or the memory is the machine's, and the message says which.
+  Say so and why in `implementation.md` and finish without screenshots; do not stop, and do not
+  retry past one more try.
+
 ## Check your own claims before you declare done
 
-The cheapest finding is the one a $35 review never has to pay for. Ticket 7's second review
+The cheapest finding is the one a $40 review never has to pay for. Ticket 7's second review
 round cost $21.96 and $9.73 to fix, and most of what it reported was not code: the stated reason
 for a protocol bump backwards in both a design note and the function's own doc, two measured
 figures wrong (48 ms written as two seconds, 13,107 as tens of thousands), a stale comment three

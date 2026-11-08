@@ -1,6 +1,17 @@
 defmodule ForgeWeb.Endpoint do
   use Phoenix.Endpoint, otp_app: :forge
 
+  # `bin/look` serves this app on a loopback port other processes can reach, so in the test
+  # environment — the only one the tool runs in — a request without the look's token cookie is
+  # refused before anything else sees it, sockets included. `plug :socket_dispatch` is among the
+  # plugs `use Phoenix.Endpoint` adds ahead of any the endpoint declares, so a plug here would be
+  # too late: the guard wraps `call/2` instead, from a `@before_compile` registered after
+  # Phoenix's own. With no token configured (the suite, and a release, which does not compile
+  # this) it passes everything. `docs/design/look.md` § Security.
+  if Mix.env() == :test do
+    @before_compile Forge.Look.Guard
+  end
+
   # The session will be stored in the cookie and signed,
   # this means its contents can be read but not tampered with.
   # Set :encryption_salt if you would also like to encrypt it.

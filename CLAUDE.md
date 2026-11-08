@@ -76,6 +76,13 @@ but commits and groups of files, holding no value between uses. What a real agen
 on a real machine is unobserved here. It says plainly that every project secret is readable by
 every member, and its § Open holds the two checks a key no member should hold would need.
 
+`docs/design/look.md` is the standard for looking at the platform: `bin/look` opens a page in
+headless Chromium as a fixture user over a setup built from the suite's fixtures, runs steps and
+takes screenshots, in a network namespace of its own with a database of its own. Every change to
+`platform/lib/forge_web/` or `platform/assets/` is looked at by its implementer, judged by a
+review lens and shown in the presentation. **It is built**; `bin/look` has run on one machine,
+this ticket's (the gate's browser test has passed on a second), and its § Not verified here says what that leaves.
+
 ## Layout
 
 Three Mix projects joined by path dependencies. Not an umbrella.
@@ -113,6 +120,11 @@ irrelevant. It goes when the run does.
 `mix deps.get` runs every time, in every project, which is the one of the three steps that
 writes to a checkout: it can rewrite `mix.lock` where `mix.exs` has moved on. None of them
 relaxes a check — the suite runs against a real database either way.
+
+The gate drives Chromium once, from the devshell: `platform/test/forge/look/browser_test.exs` goes
+through `Forge.Look`, so a broken browser setup fails here and not on the next UI ticket. It adds
+about 40 seconds and 450 MiB to the suite, builds the assets it loads (`tailwind forge`, `esbuild forge`) first, and needs `FORGE_CHROMIUM` and `FORGE_CHROMEDRIVER`, which
+`nix develop` sets (`docs/design/look.md`).
 
 It also points `MIX_HOME` and `HEX_HOME` at `.mix-home/` and `.hex-home/` inside the checkout,
 so that Hex is installed and the registry fetched once per ticket rather than once per job: a

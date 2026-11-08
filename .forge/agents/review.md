@@ -59,7 +59,7 @@ not rounds that kept finding defects — they were rounds that kept finding some
 Which round you are on, count from `$FORGE_JOB/history/reviewing/`: one folder per attempt that
 has already run. Then:
 
-**Round one is the full width of this prompt.** All four lenses, the whole changeset, everything
+**Round one is the full width of this prompt.** All five lenses, the whole changeset, everything
 below.
 
 **Round two and after, only a defect is a finding.** The list is short and it does not grow:
@@ -75,6 +75,10 @@ below.
   says something the code does not do. `CLAUDE.md` makes the notes the standard, so this stays a
   defect at every round and is not a documentation nit.
 - An acceptance criterion in `refinement.md` that the change does not meet.
+- **From the screenshot lens, only one of three** (§ The lenses, *Screenshots*): a picture that
+  shows a "What a person sees" criterion unmet, a picture that shows a `docs/design/ui.md` rule
+  broken, or screenshots missing from a change to the web layer with no reason stated. Spacing,
+  colour, wording and "could be nicer" are round one's to say once.
 
 **Everything else stops being a finding after round one.** Naming, where a function lives, how it
 is factored, two copies of a short thing, a comment that could be clearer, a `@spec` that could
@@ -111,22 +115,23 @@ happens to read nearby, it turns every round into the next round's work.
 
 ## The lenses, and the model each runs on
 
-Four lenses: the skill's three — correctness and security; whether the new tests can fail, proven
+Five lenses: the skill's three — correctness and security; whether the new tests can fail, proven
 by mutating the code and re-running them; DRY, KISS and design-note fidelity — and
 `refinement.md`'s acceptance criteria, which this state adds so that a change passing all three
-and still missing what it was asked for is a finding.
+and still missing what it was asked for is a finding, and *Screenshots*, for a change whose diff
+touches the web layer.
 
 How many reviewers that is, the skill's step 1 decides from the size of the diff, and it still
 does — but the split follows the models and not only the size, because a reviewer cannot run on
-two. Below a few hundred lines: **two reviewers**, one on `sonnet` carrying all three comparisons
-(mutation, design fidelity, the criteria) and one on this job's model carrying correctness and
-security alone. Past that, split the `sonnet` one into its three lenses; correctness stays its own
+two. Below a few hundred lines: **two reviewers**, one on `sonnet` carrying every comparison
+(mutation, design fidelity, the criteria and, when the diff touches the web layer, the screenshots) and one on this job's model carrying correctness and
+security alone. Past that, split the `sonnet` one into its lenses; correctness stays its own
 either way, and the mutation lens stays its own whenever it is not the small-diff case, because its
 evidence is a command's output rather than a reading.
 
-**And on a later round it is two lenses, not four.** § The bar rises each round already says a
+**And on a later round it is two lenses, not five.** § The bar rises each round already says a
 later round reviews what changed since the commit the last `report.md` named; the lens list has to
-follow, or "scoped" means reading the same 3,000 lines through four lenses again — which is what
+follow, or "scoped" means reading the same 3,000 lines through five lenses again — which is what
 ticket 7's $21.96 second round was. So, from round two:
 
 - *Correctness and security over the new commits*, on this job's model. Always.
@@ -137,11 +142,17 @@ ticket 7's $21.96 second round was. So, from round two:
   criterion.** `git diff --stat <last reviewed commit>..HEAD -- docs/design` answers the first
   part in one command. If nothing did, say in the report that the lens was not needed and why —
   which is different from not run, and the verdict rule below is about the second.
+- *Screenshots* — **only if the new commits touched `platform/lib/forge_web/` or
+  `platform/assets/`, or the list under `## Screenshots` in `implementation.md` changed.**
+  `git diff --stat <last reviewed commit>..HEAD -- platform/lib/forge_web platform/assets` answers
+  the first part; comparing the list with the last round's answers the second. If neither, say in
+  the report that the lens was not needed and why. Its findings are only the three kinds § The bar
+  rises each round names.
 
 Verifying the previous round's findings is not a lens and is not delegated: it is yours, by hand,
 a command each, as § A later round is not the first round again and the skill's step 4 both say.
 
-**Three of the four lenses run on `sonnet`, and for the same reason: their answer is a
+**Four of the five lenses run on `sonnet`, and for the same reason: their answer is a
 comparison, not a judgement.**
 
 - *The mutation lens.* Breaking a line, re-running the tests it covers and reporting which
@@ -151,7 +162,7 @@ comparison, not a judgement.**
   comparison anyone could check — the stated reason for a protocol bump backwards in both the
   note and the function's own doc, two measured figures wrong (48 ms written as two seconds;
   13,107 as tens of thousands), a stale comment three lines from the one it had corrected. None
-  of them needed the larger model to see, and paying for it on all four lenses is how a review
+  of them needed the larger model to see, and paying for it on every lens is how a review
   reaches $29.69.
 - *`refinement.md`'s acceptance criteria.* A criterion is written to be checkable without asking
   its author what it meant — that is the standard `agents/refine.md` holds `refining` to — so
@@ -164,6 +175,25 @@ comparison, not a judgement.**
   that reads them here: `refining` is a conversation in which an agent questions the person phase by
   phase, and that person's Accept is the approval, before `planning` ever runs — the one gate in the
   workflow this lens is downstream of.
+
+- *Screenshots.* Looking at a picture against a list of rules the notes already hold —
+  `docs/design/ui.md` and the "What a person sees" criteria of `refinement.md` — is a comparison
+  with a right answer the picture shows. It runs **whenever the diff touches
+  `platform/lib/forge_web/` or `platform/assets/`** (the web layer, which is also what
+  `dev.yml` and `bug.yml` say needs screenshots), and:
+  - reads the files `implementation.md`'s `## Screenshots` list names, from
+    `$FORGE_JOB/archive/<ticket>/screenshots/`, **and no others there**: a name an earlier round
+    kept and this round did not is still on the ticket, and the archive does not say which job
+    wrote which version, so the list is what tells a current picture from a leftover;
+  - judges each against `docs/design/ui.md` and the "What a person sees" criteria, and draws every
+    picture it rejects beside its finding in `report.md` with `![what is wrong](screenshots/<name>)`;
+  - reports a web change with **neither screenshots nor a reason** in `implementation.md` as a
+    finding, and does not hold a change with no web code to a screenshot at all;
+  - treats a tool that could not run — `implementation.md` says the look exited 2 or was killed,
+    and why — as **reported, never a finding**: name it in the report and let the verdict not turn
+    on it, so a machine's fault cannot send the ticket round the review loop.
+  The pictures are trusted to show the final code: `implementing` is told to retake them last, and
+  nothing checks that it did, so judge what they show and do not run a browser here.
 
 **Correctness and security stays on this job's model, alone.** That is the reading where judgement
 is the whole value, and it is where this state earns its budget: the three findings on ticket 7

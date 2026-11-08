@@ -45,6 +45,13 @@ claims.
      claim in `docs/design/` checked against the code. In this repository the notes are the
      standard (`CLAUDE.md`), so a note that says something the code does not is a defect and not
      a documentation nit — this is usually the highest-yield lens.
+   - **Screenshots**, for work that comes with them — a diff touching `platform/lib/forge_web/` or
+     `platform/assets/`, with pictures kept as `screenshots/*` on its ticket and listed in its
+     `implementation.md`. Reads those pictures and nothing else, against `docs/design/ui.md` and
+     the ticket's "What a person sees" criteria; reports a rejected picture beside the finding.
+     A look that could not run is named, and is not a finding. Cheap and on `sonnet`; skip it
+     for work with no web code. A web change that comes with **no** pictures and no stated reason
+     is itself a finding, and is the lens's to report.
 
    Name the riskiest files explicitly in each prompt. A reviewer told where to look finds more
    than one told to look everywhere.

@@ -164,6 +164,14 @@
                 # overlays the image, genisoimage builds the config disk.
                 pkgs.qemu
                 pkgs.cdrkit
+                # What `bin/look` drives (docs/design/look.md): Chromium and the chromedriver
+                # built for it, so the major versions agree, and bubblewrap, which gives the
+                # look a network namespace of its own. Linux only: nixpkgs ships no Chromium
+                # for darwin. Together they are roughly a gigabyte of closure on a cold
+                # machine, which is the price of a browser the project does not install by hand.
+                pkgs.chromium
+                pkgs.chromedriver
+                pkgs.bubblewrap
               ];
 
               # `bin/hetzner-image` talks to the rescue server over ssh, with the key a cloud
@@ -188,6 +196,10 @@
                 # here and read by platform/config/runtime.exs.
                 FORGE_OVMF_CODE = "${pkgs.OVMF.fd}/FV/OVMF_CODE.fd";
                 FORGE_OVMF_VARS = "${pkgs.OVMF.fd}/FV/OVMF_VARS.fd";
+              } // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+                # The browser and its driver, by path, so `bin/look` never guesses.
+                FORGE_CHROMIUM = "${pkgs.chromium}/bin/chromium";
+                FORGE_CHROMEDRIVER = "${pkgs.chromedriver}/bin/chromedriver";
               };
             };
           }

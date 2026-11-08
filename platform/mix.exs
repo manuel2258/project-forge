@@ -65,7 +65,7 @@ defmodule Forge.MixProject do
 
   def cli do
     [
-      preferred_envs: [precommit: :test, check: :test]
+      preferred_envs: [precommit: :test, check: :test, "forge.look": :test]
     ]
   end
 
@@ -108,6 +108,11 @@ defmodule Forge.MixProject do
       {:phoenix_live_reload, "~> 1.2", only: :dev},
       {:phoenix_live_view, "~> 1.2.0"},
       {:lazy_html, ">= 0.1.0", only: :test},
+      # Drives headless Chromium through chromedriver for `bin/look` and the gate's one
+      # browser test (`docs/design/look.md`). Test-only and never started with the
+      # application: the tool starts it itself. It is the choice the open proposal and the
+      # ticket's refinement made, over Playwright, for one language and no Node.
+      {:wallaby, "~> 0.31", only: :test, runtime: false},
       {:phoenix_live_dashboard, "~> 0.8.3"},
       {:esbuild, "~> 0.10", runtime: Mix.env() == :dev},
       {:tailwind, "~> 0.5", runtime: Mix.env() == :dev},
@@ -161,6 +166,12 @@ defmodule Forge.MixProject do
         "compile --warnings-as-errors",
         "format --check-formatted",
         "credo --strict",
+        # The gate's one browser test loads the app's script, and the built assets are an ignored
+        # directory a fresh checkout does not have: without this the test fails on every machine
+        # that has not built them (a fresh clone, a command machine, any ticket that never ran
+        # `bin/look`), with "LiveView did not connect".
+        "tailwind forge",
+        "esbuild forge",
         "test --cover"
       ]
     ]

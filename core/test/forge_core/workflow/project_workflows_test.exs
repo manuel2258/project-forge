@@ -129,16 +129,35 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
     end
   end
 
-  # Pinned to the figure a person chose, not to a floor: `common.yml`'s comment derives $35 from
-  # the production runs, and a floor of "above the $19.53 that did report" would let a regression
-  # to $20 through while that comment still said $35. Changing it means changing both, and the
+  # Pinned to the figure a person chose, not to a floor: `common.yml`'s comment derives $40 as an
+  # estimate and not a measurement (it was $35, from the production runs), and a floor of "above
+  # the $19.53 that did report" would let a regression to $20 through while that comment still
+  # said $35. Changing it means changing both, and the
   # ticket cap below.
   test "reviewing's cost budget is the figure common.yml derives" do
     for {name, workflow} <- reviewing_workflows() do
       budget = Workflow.state(workflow, "reviewing").budget
 
-      assert budget.cost == 35.00, "#{name}: reviewing has #{budget.cost}"
+      assert budget.cost == 40.00, "#{name}: reviewing has #{budget.cost}"
       assert budget.turns == 120, "#{name}: reviewing has #{budget.turns} turns"
+    end
+  end
+
+  # A change to the web layer is looked at and its screenshots kept on the ticket
+  # (`docs/design/look.md`), so `implementing` produces the group in both workflows, and the memory
+  # a look needs (about 945 MiB with the agent, 1280 MiB with a quarter of room) fits in what the
+  # state is given. Nothing is declared on the state, so the default is what the figure is
+  # compared with.
+  test "implementing keeps the screenshots it takes and has memory to take them in" do
+    for {name, workflow} <- reviewing_workflows() do
+      assert "screenshots/*" in Workflow.state(workflow, "implementing").produces,
+             "#{name}: implementing does not keep screenshots"
+
+      memory =
+        (Workflow.state(workflow, "implementing").resources || workflow.defaults.resources).memory
+
+      assert memory >= 1280 * 1024 * 1024,
+             "#{name}: implementing has #{memory} bytes, a look needs 1280 MiB"
     end
   end
 

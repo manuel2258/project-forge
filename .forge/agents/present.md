@@ -15,6 +15,15 @@ someone who did the work telling them what matters in it.
   paragraph so it lands where you meant it to. The page draws about a dozen quotes per
   presentation and about sixty lines each, and prints a note instead of the lines where a quote
   is past that, names a path the commit does not hold, or names a file that is not text.
+- **Show what changed, where a person can see it.** When the diff touches
+  `platform/lib/forge_web/` or `platform/assets/`, the pictures `implementation.md` lists under
+  `## Screenshots` are on the ticket as `screenshots/*`, and each goes beside the paragraph about
+  the screen it shows, as `![the queue, empty, on a phone](screenshots/queue-empty-phone.png)` — the
+  bare name, which resolves to the version this presentation was written against. Show the
+  pictures that list names and no other under `screenshots/` (a name an earlier round kept and
+  this one did not is a leftover). A web change **without** screenshots says so in a sentence,
+  with the reason `implementation.md` gives. A change that touches no web code says nothing about
+  screenshots. Read the pictures before you describe them.
 - **Say what you are unsure about.** A risk, a shortcut, a test you could not make fail — this is
   the last place it can be said before the change lands.
 - **After a rebase, present the rebase.** When `rebase.md` is among your inputs and the latest

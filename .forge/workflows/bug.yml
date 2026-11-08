@@ -46,9 +46,20 @@ states:
     may_invoke:
       check: { max: 10 }
     inputs: [ticket, refinement.md, diagnosis.md, report.md]
-    produces: [implementation.md, changeset]
+    produces: [implementation.md, changeset, screenshots/*]
     outcomes: [done, diagnosis_invalid]
-    budget: { turns: 300, cost: 15.00 }
+    # **$20 and not $15, an estimate and not a measurement.** A change to the web layer now also
+    # runs the look (`bin/look`), reads its own screenshots and goes round again, which is turns
+    # and tokens this state did not spend before; nothing has run it yet, so the ticket's own
+    # spend is the figure to correct this with.
+    # **Memory is the default's 2200 MiB, which a look fits in with room** (`docs/design/look.md`
+    # § What a look costs): a look on the shipped setup peaked at 645 MiB of proportional set size
+    # summed over the browser, the BEAM, postgres and chromedriver, and the agent itself is about
+    # 300 MiB, so a job that looks needs about 945 MiB, and 945 × 1.25 rounded up to 256 MiB is
+    # 1280 MiB. Measured on 2026-11-08 with `/proc/<pid>/smaps_rollup` every 200 ms; the default
+    # is above that figure, so nothing is declared. A page much heavier than the shipped setup's
+    # would move it, and the figure to correct this with is a look killed at 137.
+    budget: { turns: 300, cost: 20.00 }
 
   checking:
     extends: checking
@@ -143,8 +154,8 @@ transitions:
   - { from: presenting,   to: presenting,   when: did_not_converge,  max: 1 }
 
 limits:
-  # $361 and not $120 because `reviewing` costs $35 and its loop runs five times, and because the
+  # $421 and not $120 because `reviewing` costs $40 and its loop runs five times, and because the
   # refinement conversation and the rebases after the approval spend under the same cap:
   # `.forge/common.yml` derives the figure beside the review budget and the bounds it follows from.
   # `project_workflows_test.exs` computes it from this file rather than trusting the comment.
-  ticket_cost: 361.00
+  ticket_cost: 421.00

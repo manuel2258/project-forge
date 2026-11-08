@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# Open the platform in headless Chromium as a fixture user and run steps read from standard input:
+#
+#   bin/look --setup NAME --as USER [--timeout SECONDS] < steps
+#
+# `docs/design/look.md` has the step grammar, what fails a run, the exit codes (0 every step
+# passed, 1 a step failed, 2 the tool could not run) and what a look costs. Pass the steps on
+# standard input rather than saving them: the setups are kept, the step lists are not.
+#
+# Everything past the asset build runs inside a network namespace of its own (bubblewrap), with a
+# loopback nothing outside can reach: chromedriver listens unauthenticated and launches any binary
+# it is told to, so the app's own check on every request is the second lock and not the only one.
+# Two looks share no port and no database, because each has its own namespace and its own
+# postgres on a unix socket. There is no weaker mode: when the namespace cannot be made the tool
+# exits 2 with the reason.
+set -euo pipefail
+
+if [ -z "${FORGE_LOOK_INSIDE:-}" ]; then
+  caller_dir="$PWD"
+  cd "$(dirname "$0")/.."
+  root="$PWD"
+
+  # shellcheck source=bin/lib/mix-cache.sh
+  . bin/lib/mix-cache.sh
+  forge_mix_cache_ensure "$root"
+
+  # Where a relative `shot` path is relative to: the task runs in `platform/`.
+  FORGE_LOOK_CALLER_DIR="$caller_dir"
+  export FORGE_LOOK_CALLER_DIR
+
+  # The app's CSS and JS, into the ignored `priv/static/assets`. Outside the namespace, because
+  # `mix deps.get` needs the network and nothing after it gains anything from being inside.
+  #
+  # **Exit 1, with the output, when the app will not compile or its assets will not build**: that
+  # is the change's fault, and exit 2 ("the machine could not run the tool") excuses an implementer
+  # from pictures and decides nothing in review, so a broken stylesheet would otherwise produce no
+  # pictures and no finding. The machine's own faults in this step — a missing tailwind or esbuild,
+  # a build killed for memory (137) — are exit 2.
+  for tool in MIX_TAILWIND_PATH MIX_ESBUILD_PATH; do
+    if [ -n "${!tool:-}" ] && [ ! -x "${!tool}" ]; then
+      echo "could not run: $tool names ${!tool}, which is not executable" >&2
+      exit 2
+    fi
+  done
+  (cd platform && mix deps.get > /dev/null 2>&1) || {
+    echo "could not run: mix deps.get failed" >&2
+    exit 2
+  }
+  build_status=0
+  build_log="$(
+    cd platform
+    export MIX_ENV=test
+    mix compile 2>&1 && mix tailwind forge 2>&1 && mix esbuild forge 2>&1
+  )" || build_status=$?
+  if [ "$build_status" -ne 0 ]; then
+    printf '%s\n' "$build_log" | tail -40 >&2
+    # Mix reports a killed tailwind or esbuild as `exited with 137` and exits 1 itself, so the
+    # message is read as well as the status.
+    if [ "$build_status" -eq 137 ] || [[ "$build_log" == *"exited with 137"* ]]; then
+      echo "could not run: the build was killed, which is the memory ceiling (exit 2)" >&2
+      exit 2
+    fi
+    echo "FAILED: the app or its assets would not build (exit 1: the change's to fix)" >&2
+    exit 1
+  fi
+
+  if ! reason="$(bwrap --dev-bind / / --unshare-net --unshare-pid --proc /proc --die-with-parent true 2>&1)"; then
+    echo "could not run: no network namespace for the look (bubblewrap: $reason)" >&2
+    exit 2
+  fi
+
+  # bubblewrap brings up the namespace's own loopback, which is what the app, the driver and the
+  # browser reach each other over.
+  exec bwrap --dev-bind / / --unshare-net --unshare-pid --proc /proc --die-with-parent \
+    env FORGE_LOOK_INSIDE=1 "$root/bin/look" "$@"
+fi
+
+cd "$(dirname "$0")/.."
+root="$PWD"
+
+# shellcheck source=bin/lib/mix-cache.sh
+. bin/lib/mix-cache.sh
+forge_mix_cache_ensure "$root"
+
+# shellcheck source=bin/lib/test-postgres.sh
+. bin/lib/test-postgres.sh
+trap forge_test_postgres_stop EXIT
+
+# Always the run's own postgres, never the operator's or a running platform's: a look logs in as
+# fixture users and builds made-up data, and must not be able to touch a real database.
+forge_test_postgres_start || {
+  echo "could not run: the throwaway postgres would not start" >&2
+  exit 2
+}
+
+cd platform
+# Not `exec`: the trap above stops the postgres when the task returns.
+status=0
+env MIX_ENV=test mix forge.look "$@" || status=$?
+exit "$status"

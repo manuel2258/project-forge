@@ -80,20 +80,32 @@ defmodule ForgeWeb.FileType do
   end
 
   @doc """
+  Whether a version is drawn and served as an image (`Forge.Artifacts.raster?/2`): the one test
+  both the route and the Markdown renderer ask.
+  """
+  defdelegate raster?(name, version), to: Forge.Artifacts
+
+  @doc "Whether `name` is an SVG, which can carry script: a blob of that name is only ever a download."
+  @spec svg?(String.t()) :: boolean()
+  def svg?(name), do: name |> Path.extname() |> String.downcase() == ".svg"
+
+  defdelegate image_type(name), to: Forge.Artifacts
+
+  @doc """
   A document's content as it is drawn (`docs/design/ui.md` § Documents): `{:html, rendered}` when
   it is Markdown, and `{:text, content}` when its name says text, a log or code, whose lines
   Markdown would join into one paragraph. Called by the page that loads the version rather than by
   a template, which is drawn again on every patch.
   """
-  @spec render_document(String.t(), String.t() | nil) ::
+  @spec render_document(String.t(), Forge.Artifacts.Version.t(), Forge.References.scope()) ::
           {:html, Phoenix.HTML.safe()} | {:text, String.t() | nil}
-  def render_document(name, content) do
+  def render_document(name, version, scope) do
     if of(%{name: name, kind: :document}) == :markdown,
-      do: {:html, ForgeWeb.Markdown.to_html(content)},
-      else: {:text, content}
+      do: {:html, ForgeWeb.Markdown.draw(version.content, scope, version)},
+      else: {:text, version.content}
   end
 
-  @doc "What `render_document/2` made, drawn: Markdown in `.doc`, text in a `pre` that scrolls."
+  @doc "What `render_document/3` made, drawn: Markdown in `.doc`, text in a `pre` that scrolls."
   attr :body, :any, required: true
 
   def document_body(assigns) do

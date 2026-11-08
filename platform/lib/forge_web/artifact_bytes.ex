@@ -4,10 +4,13 @@ defmodule ForgeWeb.ArtifactBytes do
   `ForgeWeb.Api.TicketController` (a bearer) both answer with, so that the two doors cannot
   disagree about what is served or how.
 
-  Text is served `text/plain` and inline, and anything else as an attachment: bytes, or an Android
-  app's own type. The content was written by an agent, so it is never served as a type a browser
-  will execute or lay out: `X-Content-Type-Options: nosniff` is what stops a `.md` full of markup
-  being treated as HTML in the operator's own session. See `docs/design/ui.md`
+  Text is served `text/plain` and inline; a raster image blob (`FileType.raster?/2`, decided from
+  the name before the bytes are looked at) as its `image/*` type, inline; and anything else as an
+  attachment: bytes, an SVG, or an Android app's own type. The content was written by an agent, so
+  it is never served as a type a browser will execute or lay out: `X-Content-Type-Options: nosniff`
+  is what stops a `.md` full of markup being treated as HTML in the operator's own session, and
+  every response carries `content-security-policy: default-src 'none'; sandbox`, so that if a
+  browser ever did lay one out nothing in it would run. See `docs/design/ui.md`
   § Addressable artifact versions.
   """
 
@@ -30,23 +33,29 @@ defmodule ForgeWeb.ArtifactBytes do
   def send_version(conn, artifact, version) do
     {:ok, path} = Plug.Upload.random_file("forge-download")
 
+    # **A raster image is asked about before the text check**, so that a `.png` whose bytes happen
+    # to be text is still an image: what the page draws and what this serves are one decision.
+    {type, disposition} =
+      if FileType.raster?(artifact, version),
+        do: {FileType.image_type(artifact), "inline"},
+        else: {FileType.download_type(artifact), "attachment"}
+
+    # An SVG blob can carry script, so it is a download whatever it holds, small text included. (A
+    # *document* with such a name is text, as every document is.)
+    is_svg = FileType.svg?(artifact) and is_binary(version.blob_uri)
+
     case Artifacts.served(version, path) do
-      {:text, bytes} ->
+      {:text, bytes} when disposition == "attachment" and not is_svg ->
         Plug.Upload.delete(path)
         conn |> headers("text/plain", "inline", artifact, version) |> send_resp(200, bytes)
 
-      {:bytes, bytes} ->
+      {kind, bytes} when kind in [:text, :bytes] ->
         Plug.Upload.delete(path)
-
-        conn
-        |> headers(FileType.download_type(artifact), "attachment", artifact, version)
-        |> send_resp(200, bytes)
+        conn |> headers(type, disposition, artifact, version) |> send_resp(200, bytes)
 
       {:file, path} ->
         try do
-          conn
-          |> headers(FileType.download_type(artifact), "attachment", artifact, version)
-          |> send_file(200, path)
+          conn |> headers(type, disposition, artifact, version) |> send_file(200, path)
         after
           Plug.Upload.delete(path)
         end
@@ -61,6 +70,9 @@ defmodule ForgeWeb.ArtifactBytes do
     conn
     |> put_resp_content_type(type, if(type == "text/plain", do: "utf-8"))
     |> put_resp_header("x-content-type-options", "nosniff")
+    # No script, nothing loaded, sandboxed: if a browser ever lays a version out as a page,
+    # nothing in it runs. An image drawn inside a page is unaffected.
+    |> put_resp_header("content-security-policy", "default-src 'none'; sandbox")
     |> put_resp_header(
       "content-disposition",
       ~s(#{disposition}; filename="#{filename(artifact, version)}")

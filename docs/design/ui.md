@@ -297,7 +297,9 @@ protected.
 Getting these wrong makes the UI lie. They are acceptance criteria, not preferences.
 
 - Approval attaches to an **exact artifact version**. Never imply "approve whatever is latest";
-  the word "latest" appears nowhere in the product. There is no artifact chip without a version.
+  the word "latest" appears nowhere in the product — bar one exception: `@latest` in a reference
+  from Markdown to an artifact (§ Documents → References), which still draws a numbered address.
+  There is no artifact chip without a version.
 - **Approval state is shown only where approval is possible.** An artifact no transition in the
   pinned workflow lists in `approve:` is never marked `unapproved`, because nothing will ever
   approve it and a warning the operator cannot act on is a lie about the state of the work. A
@@ -684,6 +686,14 @@ What the branch holds against its base, bounded per § Semantics that must not b
   the browser. None of it can fail the page. A ticket with no presentation reviews exactly as it
   did before: the section is absent, not empty.
 
+  **Images and links resolve, and are not bounded.** `![queue](screenshots/queue.png)` in the
+  prose is drawn as that image, pinned to the version current when the presentation was written,
+  and `[the plan](plan.md)` links to the document (§ Documents → References). The bounds above
+  stay for quotes and prose, but **images are the exception to "what is drawn is bounded"**: every
+  resolved image is drawn and each is fetched only when scrolled near (`loading="lazy"`), so a
+  presentation naming a hundred files costs the reader a hundred requests only if they scroll past
+  a hundred. An image past the prose bound is absent because the prose it was in is.
+
 ### Docs
 
 Every artifact written — documents and files alike, a conversation's included, and on a ticket
@@ -700,6 +710,9 @@ it a screen down, and the tab is read for what is there before it is read for an
 it. An opened row stays open while the tab is patched (§ Motion and structure). The
 version link is beside the summary and never inside it: the row is a control of its own
 (§ The affordance rule).
+
+**A closed row fetches nothing.** A document that refers to an image draws it with a lazy `img`
+inside the row's `<details>`, which a browser does not request until the row is opened.
 
 **A file has no body here**: its whole row is the link to its bytes, drawn at the same height.
 Reading every one of a build's outputs from the store to draw its row would be a store read per
@@ -1406,7 +1419,49 @@ needs structure, which source text cannot carry. A document whose name says it i
 code and data (§ Artifact types) is the exception: it is shown as its text, in a `pre` that
 scrolls inside itself, because Markdown would join its lines into one paragraph. This holds
 wherever a document is drawn — the Docs tab, the review page and an approval card — because all
-three draw it with `ForgeWeb.FileType.render_document/2`.
+three draw it with `ForgeWeb.FileType.render_document/3`.
+
+### References
+
+Markdown that the platform draws can point at the artifacts around it, and **everything that
+draws Markdown resolves them**: a presentation, a document in all three places above, and a chat's
+messages. `ForgeWeb.Markdown.to_html/2` takes the resolutions as an argument, so a caller that
+passes none does not compile; `Forge.References` decides what a name means.
+
+**The forms.** `![alt](screenshots/queue.png)` and `[text](plan.md)` name an artifact as its scope
+keeps it. Followed by `@N` (`queue.png@2`) it is exactly that version, and by `@latest` the newest.
+`archive/<n>/` before any of the three names ticket `<n>` of the same project, the path an agent
+reads under `$FORGE_JOB/archive/` (`archive.md`), with the archive's `queue.v002.png` spelled
+`queue.png@2`. Digits carry no leading zero, the match is exact (no `./`, no case folding, no
+URL-encoding), and a name that holds an `@` itself wins over the reading with a version.
+
+**Which version.** A bare name is pinned: the newest version that existed when the referring text
+was written, or that the same job wrote (a job's screenshots are kept in the same transaction as
+its document, and a timestamp alone would catch them only by the second). A version of another job
+in the same second counts as before. A conversation is one job across many turns, so for it "the
+same job" narrows to the same turn: a version of a later turn never changes what an earlier one
+shows. `@N` is that version whenever it was written. `@latest` follows new versions, in an
+approved document too — the one form whose picture changes after it was written, chosen as such.
+Another ticket's bare names are pinned by the clock alone.
+
+**What is drawn.** An image that resolves to a raster blob (§ Addressable artifact versions: the
+same test serves and draws it) is an `<img>` inside a link to the same numbered address,
+`loading="lazy"`, at its own size scaled down to the column and never up. **Every other image is a
+muted note and is never fetched** — alt text, the name asked for, and why: not on this ticket, no
+such version, not drawn as an image, no such ticket, not on ticket *n*, outside the project, not
+resolved by the caller (*is not shown*), or (in a project chat) *chats keep no images*. A remote URL, a `data:` URI, `//host` and a path into the app are among
+those: no `<img>` for them exists in the page. A link that resolves goes to the numbered address
+of the version in its own scope; one that does not keeps its text and loses its target, except
+`http:`, `https:`, `mailto:` and `#fragment`, which stay.
+
+**Where a name is searched.** The ticket for a ticket's text and a ticket conversation's; a
+project chat's own documents for a project chat's. A message has no version, so its moment stands
+in: a reply sees up to and including the recording of its own turn, a person's message what was
+recorded before it was sent, a reply still streaming what exists as it is drawn.
+
+**A secret in a picture is not hidden.** The worker masks secrets in text, not in groups of files
+(`secrets.md`), so a key on screen when a screenshot was taken is in the picture, and is now drawn
+without a click.
 
 Rendered document bodies are the one place the product styles Markdown, and they do it from a
 scoped block in `app.css` rather than from `@tailwindcss/typography`. The plugin brings its own
@@ -1444,7 +1499,7 @@ never read from the bytes: drawing a row must not cost a store read.
 | text | `.txt` `.csv` `.tsv` | lines | neutral |
 | log | `.log` | a terminal | neutral |
 | code and data | `.json` `.yaml` `.yml` `.toml` `.xml` `.html` `.css` `.js` `.ts` `.ex` `.exs` `.heex` `.py` `.rb` `.go` `.rs` `.java` `.kt` `.swift` `.c` `.h` `.sh` `.sql` `.nix` `.diff` `.patch` | brackets | 175 |
-| image | `.png` `.jpg` `.jpeg` `.gif` `.webp` `.svg` `.avif` | a picture | 340 |
+| image | `.png` `.jpg` `.jpeg` `.gif` `.webp` `.svg` `.avif` — all but `.svg` are served inline and drawn when a document refers to them (§ Documents → References) | a picture | 340 |
 | archive | `.zip` `.tar` `.gz` `.tgz` `.xz` `.bz2` `.zst` `.7z` `.jar` `.aab` | a box | 95 |
 | Android app | `.apk` | a phone | 125 |
 | file | anything else | a cube | neutral |
@@ -1485,7 +1540,14 @@ rail listed names, unlinked and unversioned.
 
 **There is no versionless form.** `…/artifacts/:name` would have to mean "latest", and the word
 appears nowhere in this product for the same reason approval attaches to a version and not to a
-name.
+name. The one exception is `@latest` in a reference from Markdown (§ Documents → References),
+which is resolved when the page is drawn into a numbered address.
+
+**Every response carries `content-security-policy: default-src 'none'; sandbox`**, text, images
+and downloads alike, on the session routes and the API's raw route: if a browser ever lays a
+version out as a page, nothing in it runs. (An image drawn inside a page is unaffected.) That is
+every response that sends a version's bytes; the changeset's redirect and a 404 on the session
+routes keep the browser pipeline's policy, and the API's errors are JSON.
 
 - A **document** serves its stored text as `text/plain`, front matter included. The rendered view
   is a work screen's Docs tab — the ticket's or the conversation's — and an approval card that pins
@@ -1494,7 +1556,14 @@ name.
   larger than a document may be. Anything else — a package, a screenshot, a large log — is served
   as `application/octet-stream` with `content-disposition: attachment` — an `.apk` as
   `application/vnd.android.package-archive` (§ Artifact types) — copied from the store to a
-  temporary file and sent from there rather than read into memory: a download, never rendered. A group's file is named `group/file`,
+  temporary file and sent from there rather than read into memory: a download, never rendered.
+  **A raster image is the exception:** a blob named `.png` `.jpg` `.jpeg` `.gif` `.webp` or `.avif`
+  is served with its `image/*` type and `content-disposition: inline` (the versioned filename kept
+  for a save), whatever its bytes and however small — decided from the name before the text check,
+  so that a version drawn as an image is a version served as one. `nosniff` makes a `.png` full of
+  markup an image or nothing. **`.svg` stays a download**, small text included: it can carry script, and at a
+  same-origin address it would run in the operator's session. A *document* named `x.png` or `x.svg`
+  is text, as every document is. A group's file is named `group/file`,
   and its address carries the name as one encoded segment.
 - A **changeset** is not a file. `git:<sha>` names a commit, so the changeset links to `…/review`,
   which is the rendering of a diff. Nothing tries to serve it as bytes.

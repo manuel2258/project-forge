@@ -302,7 +302,13 @@ defmodule ForgeWeb.Api.ProjectTokenTest do
       big = String.duplicate("a", ForgeCore.Document.max_bytes() + 1)
       small_bin = <<137, 80, 78, 71, 0, 1, 2>>
 
-      blobs = %{"big" => big, "small.bin" => small_bin, "group/inner.bin" => small_bin <> "x"}
+      blobs = %{
+        "big" => big,
+        "small.bin" => small_bin,
+        "group/inner.bin" => small_bin <> "x",
+        "shot.png" => small_bin,
+        "shot.svg" => small_bin
+      }
 
       for {name, bytes} <- blobs do
         key = "job/#{Ecto.UUID.generate()}/out-a/#{Path.basename(name)}"
@@ -333,6 +339,26 @@ defmodule ForgeWeb.Api.ProjectTokenTest do
         assert response(response, 200) == bytes
         assert version["content_hash"] == Storage.hash(bytes)
         assert get_resp_header(response, "x-content-type-options") == ["nosniff"]
+
+        assert get_resp_header(response, "content-security-policy") ==
+                 ["default-src 'none'; sandbox"]
+
+        # The same rule as the session route: a raster image opens, an SVG downloads.
+        {type, disposition} =
+          case name do
+            "shot.png" -> {"image/png", "inline"}
+            _ -> {nil, nil}
+          end
+
+        if type do
+          assert get_resp_header(response, "content-type") == [type]
+          assert [^disposition <> "; " <> _] = get_resp_header(response, "content-disposition")
+        end
+
+        if name == "shot.svg" do
+          assert get_resp_header(response, "content-type") == ["application/octet-stream"]
+          assert ["attachment; " <> _] = get_resp_header(response, "content-disposition")
+        end
       end
 
       assert Path.wildcard(Path.join(System.tmp_dir!(), "plug-*/forge-download-*")) -- leftovers ==

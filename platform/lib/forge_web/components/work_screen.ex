@@ -228,13 +228,19 @@ defmodule ForgeWeb.WorkScreen do
   One entry of the Docs tab: `%{name, kind, type, latest, earlier, approvable, approved}`, from an
   artifact and the versions of it to show, oldest first. `type` is `ForgeWeb.FileType.of/1`'s.
   `latest` is `%{version, href, body}`, where a document's body is
-  `ForgeWeb.FileType.render_document/2`'s and a blob's or a presentation's is nil. `earlier` is
+  `ForgeWeb.FileType.render_document/3`'s and a blob's or a presentation's is nil. `earlier` is
   the versions before it, newest first, and the approval fields are about the latest. `href`
   gives a version number's address, and `approvable` is the page's to say: where approval is
   possible at all.
   """
-  @spec doc(map(), [map()], (pos_integer() -> String.t()), boolean()) :: map()
-  def doc(artifact, versions, href, approvable) do
+  @spec doc(
+          map(),
+          [map()],
+          (pos_integer() -> String.t()),
+          boolean(),
+          Forge.References.scope()
+        ) :: map()
+  def doc(artifact, versions, href, approvable, scope) do
     latest = List.last(versions)
 
     %{
@@ -248,7 +254,7 @@ defmodule ForgeWeb.WorkScreen do
         # A blob's bytes are in the store, and drawing its row does not read them.
         body:
           if(artifact.kind == :document,
-            do: FileType.render_document(artifact.name, latest.content)
+            do: FileType.render_document(artifact.name, latest, scope)
           )
       },
       earlier:

@@ -1004,6 +1004,19 @@ The queue renders it too. A conversation waiting on you with questions in its la
 the same form a job's questions get, free text included, so a chat question can be answered
 without opening the conversation.
 
+## References in messages
+
+A conversation's messages are Markdown, and `![alt](name)` and `[text](name)` in them resolve as
+anywhere (`ui.md` § Documents → References): against the ticket for a ticket conversation, whose
+documents are the ticket's, and against the chat's own documents for a project chat, where a bare
+image name says *chats keep no images*. A message has no version, so its moment stands in for the
+referring version: an agent's reply sees what was recorded up to and including its own turn
+(`chat.turn`, after the turn's documents), a person's message what was recorded before it was sent
+(`chat.message`), and a reply still streaming what exists as it is drawn, pinned once its turn is
+recorded. The conversation's own versions are cut by event order, not by the clock, so a later turn
+never changes an earlier message. `archive/<n>/…` reaches another ticket of the project by the
+clock alone.
+
 ## The page
 
 A conversation's page is shaped like a ticket's, because it is the same kind of thing: work with

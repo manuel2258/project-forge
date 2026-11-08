@@ -713,7 +713,11 @@ defmodule ForgeCore.Prompt do
       "the ticket's merge page and read by no later job. Quote a file and line range in " <>
       "backticks — `path:42` or `path:42-58`, the path from the repository root — and those " <>
       "lines are drawn beneath the paragraph that quotes them. A handful of quotes are drawn, " <>
-      "each a bounded range, so quote what matters rather than whole files" <>
+      "each a bounded range, so quote what matters rather than whole files. A screenshot " <>
+      "this ticket keeps is shown with `![what it shows](screenshots/<file>)`, using the name " <>
+      "as the ticket keeps it, and is drawn as it was when you wrote this; the forms " <>
+      "(`@2`, `@latest`, `archive/<n>/…`) are in platform.md, \"Referring to artifacts from " <>
+      "Markdown\"" <>
       optional_note(real, optional) <> "."
   end
 

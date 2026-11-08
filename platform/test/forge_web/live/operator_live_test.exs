@@ -245,7 +245,14 @@ defmodule ForgeWeb.OperatorLiveTest do
   # log is read line by line rather than joined into one paragraph by Markdown.
   test "an approval card draws a text document as it was written" do
     version = %Forge.Artifacts.Version{version: 2, content: "# step 1\nok\n"}
-    pin = ForgeWeb.Operator.Components.pinned("game", %{number: 7}, "check.log", version)
+
+    pin =
+      ForgeWeb.Operator.Components.pinned(
+        "game",
+        %{id: "t1", project_id: "p1", number: 7},
+        "check.log",
+        version
+      )
 
     html =
       render_component(&ForgeWeb.Operator.Components.approval_card/1,

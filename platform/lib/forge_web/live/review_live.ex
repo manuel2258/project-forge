@@ -113,7 +113,7 @@ defmodule ForgeWeb.ReviewLive do
       commit_message: Merge.commit_message(ticket),
       merged: Merge.merged?(ticket),
       diff: diff(project, ticket, changeset),
-      documents: documents(ticket, artifacts),
+      documents: documents(ticket, artifacts, project),
       presentations: presentations(ticket, artifacts, project, Artifacts.commit(changeset)),
       answers: Artifacts.answered(ticket.id),
       pending: ticket.pending_transition,
@@ -148,13 +148,18 @@ defmodule ForgeWeb.ReviewLive do
   # The chain the change was built from, in the order it was written. The last document is the
   # verification report in every workflow that has one; naming it by convention would hard-code a
   # state name the grammar leaves to the project.
-  defp documents(ticket, artifacts) do
+  defp documents(ticket, artifacts, project) do
     for {name, version} <- by_kind(ticket, artifacts, :document) do
       %{
         name: name,
         version: version,
         approved: Artifacts.approved?(version),
-        body: FileType.render_document(name, version.content)
+        body:
+          FileType.render_document(
+            name,
+            version,
+            Forge.References.ticket_scope(project.name, ticket)
+          )
       }
     end
   end
@@ -166,7 +171,10 @@ defmodule ForgeWeb.ReviewLive do
     repo = Projects.repo_path(project)
 
     for {name, version} <- by_kind(ticket, artifacts, :presentation) do
-      Map.merge(%{name: name, version: version}, blocks(version.content, repo, head))
+      Map.merge(
+        %{name: name, version: version},
+        blocks(version, repo, head, Forge.References.ticket_scope(project.name, ticket))
+      )
     end
   end
 
@@ -178,8 +186,8 @@ defmodule ForgeWeb.ReviewLive do
   # line, and a fenced block with a blank line in it is cut in two and its second half read as
   # prose. Both cost legibility in one paragraph and neither can fail the page. A bigger parser
   # would buy very little for prose this simple.
-  defp blocks(content, repo, head) do
-    {prose, truncated} = prose(content)
+  defp blocks(version, repo, head, scope) do
+    {prose, truncated} = prose(version.content)
 
     paragraphs =
       prose
@@ -190,10 +198,22 @@ defmodule ForgeWeb.ReviewLive do
     # are the presentation's and not the paragraph's, which is what the caps above say.
     budget = %{files: %{}, read: 0, drawn: 0, dropped: 0}
 
+    # Parsed once, resolved together: the images and links of every paragraph in a constant
+    # number of queries, against the moment the presentation version was written (`ui.md`
+    # § Documents → References). Images are the one thing here with no cap.
+    parsed = Enum.map(paragraphs, &ForgeWeb.Markdown.parse/1)
+
+    refs = Enum.map(parsed, &ForgeWeb.Markdown.references/1)
+    moment = if Enum.any?(refs, &(&1 != [])), do: Forge.References.moment(version)
+    resolved = Forge.References.resolve(scope, refs |> Enum.with_index(&{&2, moment, &1}))
+
     {blocks, counted} =
-      Enum.map_reduce(paragraphs, budget, fn paragraph, acc ->
+      paragraphs
+      |> Enum.zip(parsed)
+      |> Enum.with_index()
+      |> Enum.map_reduce(budget, fn {{paragraph, md}, index}, acc ->
         {quotes, acc} = draw(Enum.uniq(tokens(paragraph)), repo, head, acc)
-        {%{html: ForgeWeb.Markdown.to_html(paragraph), quotes: quotes}, acc}
+        {%{html: ForgeWeb.Markdown.render(md, resolved[index]), quotes: quotes}, acc}
       end)
 
     %{blocks: blocks, dropped: counted.dropped, truncated: truncated}

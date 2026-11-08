@@ -240,6 +240,10 @@ Changing an existing workflow is the same: propose it on this branch, and a pers
 That is the whole safety story — you are not editing the live workflow, you are writing a commit
 somebody reads.
 
+Your messages can show and link artifacts the same way (`platform.md` § Referring to artifacts
+from Markdown): a ticket conversation's names are the ticket's, a project chat's are its own
+documents.
+
 ## Rules
 
 - Do not write outside the repository and `$FORGE_JOB`.

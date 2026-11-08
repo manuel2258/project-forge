@@ -1129,6 +1129,22 @@ defmodule Forge.ConversationsTest do
         )
     end
 
+    # A reply's references are pinned to the record of its turn (`conversations.md` § References
+    # in messages), so the record is the `chat.turn` event's own clock and place in the log.
+    test "a reply closed by a turn carries that turn's record; one still open carries none",
+         %{chat: chat} do
+      text(chat, "Done.")
+      {:ok, _chat} = Conversations.record_turn(chat, turn(1, 0.01))
+      text(chat, "And more, still being said.")
+
+      [turn_event] = for %{type: "chat.turn"} = e <- Forge.Events.for_job(chat.id), do: e
+
+      assert [%{role: :user}, %{recorded: recorded}, %{recorded: nil}] =
+               Conversations.transcript(chat.id)
+
+      assert recorded == %{at: turn_event.inserted_at, seq: turn_event.seq}
+    end
+
     test "is a line of the platform's own, after the turn it is about", %{chat: chat} do
       text(chat, "Merging main.")
       uncommitted_turn(chat, 1, %{"reason" => "merge_unresolved", "paths" => ["README.md"]})

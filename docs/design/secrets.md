@@ -349,6 +349,11 @@ may contain. Commits were already such a channel, and a project's members can al
 files; what changes is that an agent can. A value in a group's file is no more protected than a value
 in a commit, and this is the same § Open.
 
+**A screenshot is now drawn without a click.** A presentation, a document or a chat message can
+refer to a raster file of a group and the page draws it (`ui.md` § Documents → References). Who
+can see a key on screen when the picture was taken does not change — any member could download it
+— but it is no longer one tap away. Nothing tries to find secrets in images.
+
 ## Surfaces
 
 - **Project settings gains Secrets** (`ui.md` § Project settings): the list for every member; set,

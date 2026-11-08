@@ -145,6 +145,10 @@ matter a proposal takes — `---`, `type: bug`, `---` above the H1. No other fro
 - Say what the work is and why it is not yours to do now. One paragraph is usually enough.
 - There is a limit per job. Propose the ones that matter rather than everything you noticed.
 
+Markdown you write can show and link the ticket's artifacts — `![x](screenshots/a.png)`,
+`[the plan](plan.md)`, `@N`, `@latest`, `archive/<n>/…` — as `platform.md` § Referring to
+artifacts from Markdown says.
+
 ## Rules
 
 - Budgets are fixed. The platform enforces the turn and cost limits regardless of what you do.

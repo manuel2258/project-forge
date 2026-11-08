@@ -72,6 +72,174 @@ defmodule ForgeWeb.ChatLiveTest do
       })
   end
 
+  # `docs/design/conversations.md` § References in messages: a message has no version, so the
+  # moment it stands in for does the pinning, and a project chat's names are its own documents.
+  describe "references in a conversation's messages" do
+    defp note!(chat, content) do
+      {:ok, _} =
+        Forge.Artifacts.record_version({:job, chat.id}, "notes.md", :document, {:job, chat.id}, %{
+          content: content
+        })
+    end
+
+    defp said(view),
+      do: view |> element(~s([data-said="agent"])) |> render() |> Floki.parse_fragment!()
+
+    test "a project chat's reply links to its own document as it was when the turn was recorded",
+         %{conn: conn, chat: chat} do
+      note!(chat, "# one\n")
+      text(chat, "See [the notes](notes.md) and ![shot](shot.png) and [a](archive/9/x.md).")
+      turn(chat, 1)
+      note!(chat, "# two\n")
+
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+      html = said(view)
+
+      assert Floki.attribute(Floki.find(html, "a"), "href") ==
+               ["/chats/#{chat.id}/artifacts/notes.md/1"]
+
+      assert Floki.find(html, "img") == []
+      assert Floki.text(html) =~ "chats keep no images"
+      # A link that does not resolve is its words, with no target.
+      assert Floki.text(html) =~ "and a."
+    end
+
+    test "a person's message sees what was recorded before it was sent, and no later", %{
+      conn: conn,
+      project: project
+    } do
+      {:ok, chat} = Conversations.open(project, "Please read [the notes](notes.md).")
+      note!(chat, "# written after the message\n")
+
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+      html = view |> element(~s([data-said="you"])) |> render() |> Floki.parse_fragment!()
+
+      assert Floki.find(html, "a") == []
+      assert Floki.text(html) =~ "the notes"
+    end
+
+    test "a reply still streaming sees what exists as it is drawn", %{conn: conn, chat: chat} do
+      note!(chat, "# one\n")
+      note!(chat, "# two\n")
+      text(chat, "See [the notes](notes.md).")
+
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+      assert Floki.attribute(Floki.find(said(view), "a"), "href") ==
+               ["/chats/#{chat.id}/artifacts/notes.md/2"]
+    end
+
+    defp ticket_shot!(ticket, versions) do
+      artifact =
+        Forge.Repo.insert!(%Forge.Artifacts.Artifact{
+          ticket_id: ticket.id,
+          name: "q.png",
+          kind: :blob
+        })
+
+      for {number, offset} <- versions do
+        Forge.Repo.insert!(%Forge.Artifacts.Version{
+          artifact_id: artifact.id,
+          version: number,
+          author: %{"kind" => "system", "id" => nil},
+          blob_uri: "store:job/x/out-a/#{number}",
+          content_hash: "h#{number}",
+          inserted_at: DateTime.add(DateTime.utc_now(:second), offset, :second)
+        })
+      end
+    end
+
+    test "a person's message in a ticket conversation draws the ticket's screenshots", %{
+      conn: conn,
+      project: project,
+      user: user
+    } do
+      {:ok, ticket} = Forge.Tickets.admit(project, %{title: "t"}, {:user, user.id})
+      ticket_shot!(ticket, [{1, -60}])
+      {:ok, chat} = Conversations.open(project, "Is ![this](q.png) right?", ticket: ticket)
+
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+      html = view |> element(~s([data-said="you"])) |> render() |> Floki.parse_fragment!()
+
+      assert Floki.attribute(Floki.find(html, "img"), "src") ==
+               ["/tickets/#{project.name}/#{ticket.number}/artifacts/q.png/1"]
+    end
+
+    # Nothing is recorded for a reply still being said, so it sees what exists as it is drawn —
+    # a version stamped after its first words included.
+    test "a reply still streaming sees every version that exists", %{
+      conn: conn,
+      project: project,
+      user: user
+    } do
+      {:ok, ticket} = Forge.Tickets.admit(project, %{title: "t"}, {:user, user.id})
+      ticket_shot!(ticket, [{1, -60}, {2, 3600}])
+      {:ok, chat} = Conversations.open(project, "about it", ticket: ticket)
+      text(chat, "Look: ![the queue](q.png)")
+
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+      assert [src] = Floki.attribute(Floki.find(said(view), "img"), "src")
+      assert src == "/tickets/#{project.name}/#{ticket.number}/artifacts/q.png/2"
+    end
+
+    # A ticket conversation's documents are the ticket's, so what they refer to is the ticket's.
+    test "a document a ticket conversation wrote is drawn against the ticket", %{
+      conn: conn,
+      project: project,
+      user: user
+    } do
+      {:ok, ticket} = Forge.Tickets.admit(project, %{title: "t"}, {:user, user.id})
+      ticket_shot!(ticket, [{1, -60}])
+      {:ok, chat} = Conversations.open(project, "about it", ticket: ticket)
+
+      {:ok, _} =
+        Forge.Artifacts.record_version(ticket.id, "report.md", :document, {:job, chat.id}, %{
+          content: "# Report\n\n![q](q.png)\n"
+        })
+
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}?tab=docs")
+
+      html =
+        view |> element(~s(section[id="doc-report.md"])) |> render() |> Floki.parse_fragment!()
+
+      assert Floki.attribute(Floki.find(html, "img"), "src") ==
+               ["/tickets/#{project.name}/#{ticket.number}/artifacts/q.png/1"]
+    end
+
+    test "a ticket conversation draws the ticket's screenshots", %{
+      conn: conn,
+      project: project,
+      user: user
+    } do
+      {:ok, ticket} = Forge.Tickets.admit(project, %{title: "t"}, {:user, user.id})
+      {:ok, chat} = Conversations.open(project, "about it", ticket: ticket)
+
+      artifact =
+        Forge.Repo.insert!(%Forge.Artifacts.Artifact{
+          ticket_id: ticket.id,
+          name: "q.png",
+          kind: :blob
+        })
+
+      Forge.Repo.insert!(%Forge.Artifacts.Version{
+        artifact_id: artifact.id,
+        version: 1,
+        author: %{"kind" => "system", "id" => nil},
+        blob_uri: "store:job/x/out-a/1",
+        content_hash: "h",
+        inserted_at: DateTime.add(DateTime.utc_now(:second), -60, :second)
+      })
+
+      text(chat, "Look: ![the queue](q.png)")
+
+      {:ok, view, _html} = live(conn, ~p"/chats/#{chat.id}")
+
+      assert [src] = Floki.attribute(Floki.find(said(view), "img"), "src")
+      assert src == "/tickets/#{project.name}/#{ticket.number}/artifacts/q.png/1"
+    end
+  end
+
   # The one thing the page says about a turn that neither side said: its work is not on the
   # branch, because a merge is still open. Before this it was a line in the machine's log only,
   # which the person in the conversation never sees (ticket 11).

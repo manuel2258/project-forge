@@ -228,6 +228,12 @@
 
 .doc hr { border-color: var(--color-base-300); }
 .doc img { max-width: 100%; height: auto; }
+/* A referenced image is drawn at its own size and scaled down to the column, never up (no width
+   is set), so a very large picture never widens the page (`ui.md` § Documents → References). */
+.doc a:has(> img) { display: inline-block; max-width: 100%; }
+/* An image that was not drawn: a muted line naming what was asked for and why, as an unresolved
+   quote is. A 200-character name wraps. */
+.doc .ref-note { font-size: 0.8125rem; opacity: 0.6; overflow-wrap: anywhere; }
 
 /* The tile an artifact's type icon sits in (docs/design/ui.md § Artifact types): the icon in
    the type's hue and the ground the same hue at low strength, so the tile reads on either base.

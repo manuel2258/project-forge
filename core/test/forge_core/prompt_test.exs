@@ -197,6 +197,23 @@ defmodule ForgeCore.PromptTest do
       assert manifest =~ "A handful of quotes are drawn"
     end
 
+    test "a presentation says how to show a screenshot, and where the other forms are" do
+      manifest = Prompt.manifest(%{spec() | produces: ["deck.md!"]}, "/j")
+
+      assert manifest =~ "`![what it shows](screenshots/<file>)`"
+      assert manifest =~ "Referring to artifacts from Markdown"
+      refute Prompt.manifest(spec(), "/j") =~ "![what it shows]"
+    end
+
+    test "platform.md has the section the manifest points to, with all three forms" do
+      platform = File.read!(Path.join(:code.priv_dir(:forge_core), "platform.md"))
+
+      assert platform =~ "## Referring to artifacts from Markdown"
+
+      for form <- ["queue.png@2", "queue.png@latest", "archive/34/", "queue.v002.png"],
+          do: assert(platform =~ form)
+    end
+
     test "a presentation that is the only document says it carries the outcome" do
       manifest = Prompt.manifest(%{spec() | produces: ["deck.md!", "changeset"]}, "/j")
 

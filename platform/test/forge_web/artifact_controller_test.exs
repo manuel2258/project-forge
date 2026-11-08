@@ -131,20 +131,22 @@ defmodule ForgeWeb.ArtifactControllerTest do
       key = "job/#{Ecto.UUID.generate()}/out-a/1"
       png = <<137, 80, 78, 71, 13, 10, 26, 10, 0, 1>>
       {:ok, _info} = Storage.put(key, png)
-      write_blob(ticket, "shots/home.png", Storage.uri(key), user)
+      write_blob(ticket, "shots/home.svg", Storage.uri(key), user)
 
       # The form every page links with: `~p` encodes the slash inside the one segment.
-      name = "shots/home.png"
+      name = "shots/home.svg"
       path = ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/#{name}/1"
-      assert path =~ "/artifacts/shots%2Fhome.png/1"
+      assert path =~ "/artifacts/shots%2Fhome.svg/1"
       conn = get(conn, path)
 
       assert response(conn, 200) == png
       assert get_resp_header(conn, "content-type") == ["application/octet-stream"]
       assert get_resp_header(conn, "x-content-type-options") == ["nosniff"]
 
-      assert [~s(attachment; filename="home-v1.png")] =
+      assert [~s(attachment; filename="home-v1.svg")] =
                get_resp_header(conn, "content-disposition")
+
+      assert get_resp_header(conn, "content-security-policy") == ["default-src 'none'; sandbox"]
     end
 
     test "larger than a document is streamed from a file, text or not", %{
@@ -195,6 +197,124 @@ defmodule ForgeWeb.ArtifactControllerTest do
 
         assert [~s(attachment; filename="#{Path.rootname(Path.basename(name))}-v1.apk")] ==
                  get_resp_header(conn, "content-disposition")
+      end
+    end
+  end
+
+  # `docs/design/ui.md` § Addressable artifact versions: a raster image opens in the browser, by
+  # its name, whatever its bytes; an SVG, which can carry script, is still a download.
+  describe "a raster image" do
+    defp blob(ticket, name, bytes, user) do
+      key = "job/#{Ecto.UUID.generate()}/out-a/#{String.downcase(Path.basename(name))}"
+      {:ok, _info} = Storage.put(key, bytes)
+      write_blob(ticket, name, Storage.uri(key), user)
+    end
+
+    defp fetch(conn, project, ticket, name),
+      do: get(conn, ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/#{name}/1")
+
+    test "is served inline with its own type, and its versioned filename", ctx do
+      %{conn: conn, project: project, user: user} = ctx
+      ticket = admitted(project, user)
+      png = <<137, 80, 78, 71, 13, 10, 26, 10, 0, 1>>
+
+      for {name, type} <- [
+            {"a.png", "image/png"},
+            {"a.JPG", "image/jpeg"},
+            {"a.jpeg", "image/jpeg"},
+            {"a.gif", "image/gif"},
+            {"a.webp", "image/webp"},
+            {"shots/a.avif", "image/avif"}
+          ] do
+        blob(ticket, name, png, user)
+        conn = fetch(conn, project, ticket, name)
+
+        assert response(conn, 200) == png
+        assert get_resp_header(conn, "content-type") == [type]
+        assert get_resp_header(conn, "x-content-type-options") == ["nosniff"]
+        assert get_resp_header(conn, "content-security-policy") == ["default-src 'none'; sandbox"]
+        assert [~s(inline; filename=") <> _] = get_resp_header(conn, "content-disposition")
+      end
+
+      conn = fetch(conn, project, ticket, "a.png")
+      assert get_resp_header(conn, "content-disposition") == [~s(inline; filename="a-v1.png")]
+    end
+
+    # The decision is made on the name before the bytes are read, so what is drawn as an image
+    # and what is served as one cannot disagree.
+    test "is an image whatever its bytes are, text and large included", ctx do
+      %{conn: conn, project: project, user: user} = ctx
+      ticket = admitted(project, user)
+      html = "<html><script>alert(1)</script></html>"
+      big = String.duplicate("a", ForgeCore.Document.max_bytes() + 1)
+      blob(ticket, "page.png", html, user)
+      blob(ticket, "big.png", big, user)
+
+      conn1 = fetch(conn, project, ticket, "page.png")
+      assert response(conn1, 200) == html
+      assert get_resp_header(conn1, "content-type") == ["image/png"]
+      assert get_resp_header(conn1, "x-content-type-options") == ["nosniff"]
+
+      conn2 = fetch(conn, project, ticket, "big.png")
+      assert response(conn2, 200) == big
+      assert get_resp_header(conn2, "content-type") == ["image/png"]
+      assert get_resp_header(conn2, "content-disposition") == [~s(inline; filename="big-v1.png")]
+      assert Path.wildcard(Path.join(System.tmp_dir!(), "plug-*/forge-download-*")) == []
+    end
+
+    # An SVG is not an image to this route: it can carry script, so it is a download whatever it
+    # holds — the same bytes as a `.png`, and markup that is plain text alike.
+    test "an SVG is a download, text included, and never an image", ctx do
+      %{conn: conn, project: project, user: user} = ctx
+      ticket = admitted(project, user)
+      blob(ticket, "a.svg", "<svg onload=alert(1)/>", user)
+      blob(ticket, "b.svg", <<137, 80, 78, 71, 0, 1, 2>>, user)
+
+      conn1 = fetch(conn, project, ticket, "b.svg")
+      assert get_resp_header(conn1, "content-type") == ["application/octet-stream"]
+      assert [~s(attachment; ) <> _] = get_resp_header(conn1, "content-disposition")
+
+      conn2 = fetch(conn, project, ticket, "a.svg")
+      assert response(conn2, 200) == "<svg onload=alert(1)/>"
+      assert get_resp_header(conn2, "content-type") == ["application/octet-stream"]
+      assert [~s(attachment; ) <> _] = get_resp_header(conn2, "content-disposition")
+      assert get_resp_header(conn2, "x-content-type-options") == ["nosniff"]
+
+      # A document with the name is text, as every document is.
+      write(ticket, "notes.svg", "# words\n", user)
+      conn3 = fetch(conn, project, ticket, "notes.svg")
+      assert get_resp_header(conn3, "content-type") == ["text/plain; charset=utf-8"]
+    end
+
+    test "a document with such a name is text, and the changeset is not an image", ctx do
+      %{conn: conn, project: project, user: user} = ctx
+      ticket = admitted(project, user)
+      write(ticket, "notes.png", "# not a picture\n", user)
+
+      conn1 = fetch(conn, project, ticket, "notes.png")
+      assert response(conn1, 200) == "# not a picture\n"
+      assert get_resp_header(conn1, "content-type") == ["text/plain; charset=utf-8"]
+      assert get_resp_header(conn1, "content-security-policy") == ["default-src 'none'; sandbox"]
+    end
+
+    test "every response a version has carries the policy, a conversation's included", ctx do
+      %{conn: conn, project: project, user: user} = ctx
+      ticket = admitted(project, user)
+      write(ticket, "plan.md", "# plan\n", user)
+      {:ok, chat} = Forge.Conversations.open(project, "notes")
+
+      {:ok, _} =
+        Artifacts.record_version({:job, chat.id}, "n.md", :document, {:job, chat.id}, %{
+          content: "x"
+        })
+
+      for path <- [
+            ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/plan.md/1",
+            ~p"/chats/#{chat.id}/artifacts/n.md/1"
+          ] do
+        conn = get(conn, path)
+        assert conn.status == 200
+        assert get_resp_header(conn, "content-security-policy") == ["default-src 'none'; sandbox"]
       end
     end
   end

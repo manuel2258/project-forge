@@ -27,6 +27,10 @@ defmodule ForgeWeb.Transcript do
   attr :live, :boolean, required: true, doc: "whether the conversation is live"
   attr :now, :any, required: true, doc: "the moment ages are measured from"
 
+  attr :refs, :map,
+    default: %{},
+    doc: "`resolve/3`'s answer: what each text's images and links mean, by `{index, position}`"
+
   def transcript(assigns) do
     assigns = assign(assigns, entries: entries(assigns.messages))
 
@@ -51,12 +55,15 @@ defmodule ForgeWeb.Transcript do
       </div>
 
       <div :if={message.role == :user} class="rounded-box bg-base-200 px-4 py-3" data-said="you">
-        <div class="doc msg text-sm/[1.6] break-words">{Markdown.to_html(message.text)}</div>
+        <div class="doc msg text-sm/[1.6] break-words">
+          {Markdown.to_html(message.text, Map.get(@refs, {index, :user}, %{}))}
+        </div>
       </div>
 
       <.turn
         :if={message.role == :assistant}
         message={message}
+        refs={@refs}
         index={index}
         folded={message.turn != nil or not @live}
       />
@@ -72,6 +79,39 @@ defmodule ForgeWeb.Transcript do
     """
   end
 
+  @doc """
+  What the images and links in the messages mean, by `{index, position}` — `:user` for a person's
+  message and the segment's position for an agent's — resolved together, in the number of queries
+  one text would cost, against the moment each message stands in for (`docs/design/conversations.md`
+  § References in messages): a person's message the versions recorded before it was sent, a reply
+  whose turn is recorded up to and including that record, and a reply still streaming what exists
+  now. Called by the page when the log changes, never by a template.
+  """
+  @spec resolve([map()], Forge.References.scope(), String.t()) :: map()
+  def resolve(messages, scope, chat_id) do
+    texts =
+      for {message, index} <- Enum.with_index(messages), {position, text} <- texts(message) do
+        {{index, position}, moment(message, chat_id), Markdown.references(Markdown.parse(text))}
+      end
+
+    Forge.References.resolve(scope, texts)
+  end
+
+  defp texts(%{role: :user, text: text}), do: [{:user, text}]
+
+  defp texts(%{role: :assistant, items: items}),
+    do: items |> segments() |> Enum.with_index() |> then(&for({{:text, t}, i} <- &1, do: {i, t}))
+
+  defp texts(_notice), do: []
+
+  defp moment(%{role: :user, id: id, at: at}, chat_id),
+    do: %{at: at, job: chat_id, turn_seq: String.to_integer(id)}
+
+  defp moment(%{recorded: %{at: at, seq: seq}}, chat_id),
+    do: %{at: at, job: chat_id, turn_seq: seq}
+
+  defp moment(_streaming, _chat_id), do: %{at: :now, job: nil, turn_seq: nil}
+
   # Each message with its place and whether it starts a speaker's run.
   defp entries(messages) do
     messages
@@ -85,6 +125,7 @@ defmodule ForgeWeb.Transcript do
   attr :message, :map, required: true
   attr :index, :integer, required: true
   attr :folded, :boolean, required: true
+  attr :refs, :map, required: true
 
   defp turn(assigns) do
     todos = assigns.message.items |> actions() |> latest_todo()
@@ -103,7 +144,9 @@ defmodule ForgeWeb.Transcript do
         class="rounded-box border border-base-300 bg-base-100 px-4 py-3"
         data-said="agent"
       >
-        <div class="doc msg text-sm/[1.6] break-words">{Markdown.to_html(elem(segment, 1))}</div>
+        <div class="doc msg text-sm/[1.6] break-words">
+          {Markdown.to_html(elem(segment, 1), Map.get(@refs, {@index, position}, %{}))}
+        </div>
       </div>
       <.run
         :if={match?({:actions, _}, segment)}

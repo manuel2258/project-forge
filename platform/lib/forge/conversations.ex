@@ -1353,7 +1353,8 @@ defmodule Forge.Conversations do
               text: String.t(),
               items: [item()],
               at: DateTime.t(),
-              turn: pos_integer() | nil
+              turn: pos_integer() | nil,
+              recorded: %{at: DateTime.t(), seq: pos_integer()} | nil
             }
           | %{role: :notice, text: String.t(), at: DateTime.t(), turn: pos_integer() | nil}
 
@@ -1491,7 +1492,8 @@ defmodule Forge.Conversations do
 
   defp fold(%Event{type: "chat.turn"} = event, %{round: round} = state) do
     turn = event.payload["turn"]
-    stamp = fn message -> stamp(message, round, turn) end
+    recorded = %{at: event.inserted_at, seq: event.seq}
+    stamp = fn message -> stamp(message, round, turn, recorded) end
 
     %{
       state
@@ -1586,6 +1588,7 @@ defmodule Forge.Conversations do
           items: [item],
           at: event.inserted_at,
           turn: nil,
+          recorded: nil,
           round: state.round
         }
     }
@@ -1649,10 +1652,10 @@ defmodule Forge.Conversations do
     with {:ok, rest} <- update_in_items(rest, id, fun), do: {:ok, [item | rest]}
   end
 
-  defp stamp(%{role: :assistant, round: round, turn: nil} = message, round, turn),
-    do: %{message | turn: turn}
+  defp stamp(%{role: :assistant, round: round, turn: nil} = message, round, turn, recorded),
+    do: %{message | turn: turn, recorded: recorded}
 
-  defp stamp(message, _round, _turn), do: message
+  defp stamp(message, _round, _turn, _recorded), do: message
 
   # A user message arriving mid-reply ends the assistant message being accumulated.
   defp flush(acc, nil), do: acc

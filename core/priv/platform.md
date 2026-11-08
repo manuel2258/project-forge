@@ -46,6 +46,39 @@ read. An input written only on such a return is absent the first time and named 
 A person can **approve** an exact version. That is what authorises a merge, and it is why nothing
 in this product says "approve whatever is latest".
 
+## Referring to artifacts from Markdown
+
+Anything you write in Markdown that the platform draws — a presentation, a document, a message in a
+conversation — can point at the artifacts of the ticket (or, in a project chat, at that chat's
+own documents). An image draws the picture; a link goes to the file. Both name the artifact **as
+the ticket keeps it**, exactly: `screenshots/queue.png`, `plan.md`.
+
+- `![the queue](screenshots/queue.png)` draws the picture, linked to its full size.
+  `[the plan](plan.md)` links to the document. **Only raster images are drawn** (`.png`, `.jpg`,
+  `.jpeg`, `.gif`, `.webp`, `.avif`); an `.svg` is never drawn: `![](x.svg)` is a muted note, and `[x](x.svg)` is a link.
+- **A bare name** is the version that was current when your text was written (or that you wrote
+  in the same job). It shows the same thing for good, including after the document is approved.
+  This is the default; use it unless you have a reason not to.
+- **`@N`** is exactly version N: `screenshots/queue.png@2`, `plan.md@3`. It shows the same thing
+  for good too, and works for a version written after your text.
+- **`@latest`** is always the newest version, even one written after your text:
+  `screenshots/queue.png@latest`. It changes under an approved document when a new version
+  arrives, which is the reason to use it only where following the newest is the point.
+- **Names come from `$FORGE_JOB/archive/<n>/`.** The archive's numbered file goes behind an `@`
+  here: `$FORGE_JOB/archive/34/screenshots/queue.v002.png` is `archive/34/screenshots/queue.png@2`
+  here (the ticket number stays; only the version moves behind the `@`).
+- **Another ticket of this project** is reached with `archive/<n>/` in front, the same path you
+  read: `![](archive/34/screenshots/queue.png)`. A bare name there is pinned the same way, by the
+  clock.
+- **The name must match exactly** — no `./`, no capital letters changed, no URL-encoding. An image
+  that does not resolve is drawn as a muted note naming what was asked for, and is never fetched,
+  whatever it points at (a URL, a `data:` URI and a path into the app included). A link that does
+  not resolve is its text, plain. `http:`, `https:`, `mailto:` and `#fragment` links are left as
+  they are.
+- **It works everywhere Markdown is drawn.** A bare name is searched in the ticket, or, in a
+  project chat, in that chat's own documents — which are text, so a chat links and draws no
+  pictures.
+
 ## Commands
 
 A project may declare **commands**: fixed scripts, read from the workflow's pinned commit, that run

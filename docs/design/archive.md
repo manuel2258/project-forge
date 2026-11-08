@@ -140,6 +140,13 @@ artifact name and version — once per distinct version, written by the door on 
 that opened nothing records nothing. The job page shows only the count, and the lists of events — the job's, the ticket's, the project's
 — leave these out; `Forge.Events.archive_reads/1` reads them.
 
+## Also the form of a reference
+
+The paths in the folder are also how Markdown names another ticket's file: `archive/34/screenshots/queue.png`
+in a presentation, a document or a chat message reaches that file on ticket 34 of the same project
+(`ui.md` § Documents → References). The archive's version spelling is not accepted there:
+`queue.v002.png` in the folder is `queue.png@2` in a reference.
+
 ## Not here
 
 Writing to the history. Transcripts, stderr and a chat's own history. Open proposals. Git diffs.

@@ -227,6 +227,207 @@ defmodule ForgeWeb.ReviewLiveTest do
     refute has_element?(view, ~s([id="review-doc-presentation.md"]))
   end
 
+  # `docs/design/ui.md` § Documents → References. A screenshot is a blob the ticket keeps; a
+  # presentation draws the version that was current when it was written, and a version of the same
+  # name that arrives later changes nothing it shows. Versions are inserted as rows, because a
+  # version is immutable and its clock is the one thing the cut depends on.
+  describe "a presentation that refers to a screenshot" do
+    defp shot!(ticket, name, versions) do
+      artifact =
+        Forge.Repo.insert!(%Forge.Artifacts.Artifact{
+          ticket_id: ticket.id,
+          name: name,
+          kind: :blob
+        })
+
+      for {number, offset} <- versions do
+        Forge.Repo.insert!(%Forge.Artifacts.Version{
+          artifact_id: artifact.id,
+          version: number,
+          author: %{"kind" => "system", "id" => nil},
+          blob_uri: "store:job/x/out-a/#{number}",
+          content_hash: "h#{number}",
+          inserted_at: DateTime.add(DateTime.utc_now(:second), offset, :second)
+        })
+      end
+    end
+
+    defp section(context, content) do
+      %{conn: conn, project: project, ticket: ticket} = context
+      sha = commit_on_branch(context, "score.ex", "def persist, do: :ok")
+      changeset!(ticket, sha)
+      present!(ticket, content)
+      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+
+      view
+      |> element(~s([id="review-presentation-presentation.md"]))
+      |> render()
+      |> Floki.parse_fragment!()
+    end
+
+    defp srcs(html), do: html |> Floki.find("img") |> Floki.attribute("src")
+
+    test "draws the version current when it was written, linked, and a later one changes nothing",
+         context do
+      %{project: project, ticket: ticket} = context
+      shot!(ticket, "screenshots/queue.png", [{1, -60}, {2, 3600}])
+      base = "/tickets/#{project.name}/#{ticket.number}/artifacts/screenshots%2Fqueue.png"
+
+      html = section(context, "Here is the queue.\n\n![the queue](screenshots/queue.png)\n")
+
+      assert srcs(html) == ["#{base}/1"]
+      assert [img] = Floki.find(html, "a > img")
+      assert Floki.attribute(img, "loading") == ["lazy"]
+      assert Floki.attribute(img, "alt") == ["the queue"]
+      assert Floki.attribute(Floki.find(html, "a:has(img)"), "href") == ["#{base}/1"]
+    end
+
+    # The common case: the screenshot's later version is in the *past* too, just after the
+    # presentation. A cut at "now" would draw it; the cut is at the presentation's own clock.
+    test "a version uploaded after the presentation changes nothing, however soon", context do
+      %{conn: conn, project: project, ticket: ticket} = context
+      shot!(ticket, "q.png", [{1, -7200}, {2, -60}])
+      sha = commit_on_branch(context, "score.ex", "def persist, do: :ok")
+      changeset!(ticket, sha)
+
+      # One presentation written by nobody in particular and one by a job (which is not a
+      # conversation): the job's own versions are always seen, but the screenshot's are the
+      # system's, so a clock that read "now" would draw version 2 in both.
+      for {name, author} <- [
+            {"presentation.md", %{"kind" => "system", "id" => nil}},
+            {"by-a-job.md", %{"kind" => "job", "id" => Ecto.UUID.generate()}}
+          ] do
+        artifact =
+          Forge.Repo.insert!(%Forge.Artifacts.Artifact{
+            ticket_id: ticket.id,
+            name: name,
+            kind: :presentation
+          })
+
+        Forge.Repo.insert!(%Forge.Artifacts.Version{
+          artifact_id: artifact.id,
+          version: 1,
+          author: author,
+          content: "![a](q.png)\n\n![b](q.png@latest)\n",
+          content_hash: "p",
+          inserted_at: DateTime.add(DateTime.utc_now(:second), -3600, :second)
+        })
+      end
+
+      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+      base = "/tickets/#{project.name}/#{ticket.number}/artifacts/q.png"
+
+      for name <- ["presentation.md", "by-a-job.md"] do
+        html =
+          view
+          |> element(~s([id="review-presentation-#{name}"]))
+          |> render()
+          |> Floki.parse_fragment!()
+
+        assert srcs(html) == ["#{base}/1", "#{base}/2"], name
+      end
+    end
+
+    test "@N and @latest reach the later version, a bare name does not", context do
+      %{project: project, ticket: ticket} = context
+      shot!(ticket, "q.png", [{1, -60}, {2, 3600}])
+      base = "/tickets/#{project.name}/#{ticket.number}/artifacts/q.png"
+
+      html = section(context, "![a](q.png)\n\n![b](q.png@2)\n\n![c](q.png@latest)\n")
+
+      assert srcs(html) == ["#{base}/1", "#{base}/2", "#{base}/2"]
+    end
+
+    test "anything else is a note, never an image", context do
+      %{ticket: ticket} = context
+      shot!(ticket, "diagram.svg", [{1, -60}])
+      shot!(ticket, "q.png", [{1, -60}])
+
+      md =
+        for target <- [
+              "missing.png",
+              "diagram.svg",
+              "q.png@5",
+              "archive/9/q.png",
+              "https://evil.test/p.png",
+              "data:image/png;base64,AAAA",
+              "//evil.test/p.png",
+              "/tickets/x/1/artifacts/y/1"
+            ],
+            do: "![why](#{target})"
+
+      html = section(context, Enum.join(md, "\n\n"))
+
+      assert srcs(html) == []
+      assert length(Floki.find(html, "span.ref-note")) == 8
+      text = Floki.text(html)
+      assert text =~ "is not on this ticket"
+      assert text =~ "is not drawn as an image"
+      assert text =~ "has no such version"
+      assert text =~ "this project has no ticket 9"
+      assert text =~ "images from outside the project are not shown"
+    end
+
+    test "has no cap on images, while quotes keep theirs", context do
+      %{ticket: ticket} = context
+      shot!(ticket, "q.png", [{1, -60}])
+      html = section(context, Enum.map_join(1..30, "\n\n", fn _ -> "![x](q.png)" end))
+      assert length(srcs(html)) == 30
+    end
+
+    test "an image past the prose bound is not drawn, because its prose is not", context do
+      %{ticket: ticket} = context
+      shot!(ticket, "q.png", [{1, -60}])
+      filler = String.duplicate("word ", 70_000)
+      html = section(context, "![early](q.png)\n\n#{filler}\n\n![late](q.png)\n")
+      assert length(srcs(html)) == 1
+    end
+
+    test "an approval card pins a document and draws the same picture", context do
+      %{project: project, ticket: ticket} = context
+      shot!(ticket, "q.png", [{1, -60}, {2, 3600}])
+
+      {:ok, version} =
+        Artifacts.record_version(ticket.id, "report.md", :document, :system, %{
+          content: "# Report\n\n![q](q.png)\n"
+        })
+
+      pin = ForgeWeb.Operator.Components.pinned(project.name, ticket, "report.md", version)
+      {:html, html} = pin.body
+
+      assert html |> Phoenix.HTML.safe_to_string() |> Floki.parse_fragment!() |> srcs() ==
+               ["/tickets/#{project.name}/#{ticket.number}/artifacts/q.png/1"]
+    end
+
+    test "a document draws the same picture on the review page and on the Docs tab", context do
+      %{conn: conn, project: project, ticket: ticket} = context
+      shot!(ticket, "q.png", [{1, -60}, {2, 3600}])
+      sha = commit_on_branch(context, "score.ex", "def persist, do: :ok")
+      changeset!(ticket, sha)
+
+      {:ok, _} =
+        Artifacts.record_version(ticket.id, "report.md", :document, :system, %{
+          content: "# Report\n\n![q](q.png)\n"
+        })
+
+      want = ["/tickets/#{project.name}/#{ticket.number}/artifacts/q.png/1"]
+
+      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}/review")
+      review = view |> element(~s([id="review-doc-report.md"])) |> render()
+      assert srcs(Floki.parse_fragment!(review)) == want
+
+      {:ok, view, _html} = live(conn, ~p"/tickets/#{project.name}/#{ticket.number}?tab=docs")
+      docs = view |> element(~s(section[id="doc-report.md"])) |> render()
+      assert srcs(Floki.parse_fragment!(docs)) == want
+      # Inside the row's `<details>`, which a browser does not fetch from while it is closed.
+      assert [details] = docs |> Floki.parse_fragment!() |> Floki.find("details:has(img)")
+      # ...and the row is closed and the image lazy: a browser fetches a lazy image in a closed
+      # `<details>` only once it is opened (asserted here as markup; not observable in a test).
+      assert Floki.attribute(details, "open") == []
+      assert Floki.attribute(Floki.find(details, "img"), "loading") == ["lazy"]
+    end
+  end
+
   test "a ticket with no presentation reviews as it did before", context do
     %{conn: conn, project: project, ticket: ticket} = context
     sha = commit_on_branch(context, "score.ex", "def persist, do: :ok")

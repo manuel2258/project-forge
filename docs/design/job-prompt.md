@@ -497,6 +497,12 @@ leaving the page, and an agent that quotes nothing loses nothing. The manifest s
 a bounded number of quotes and a bounded range each, so an agent that quotes a whole file learns
 here rather than from a page that silently will not draw it.
 
+The manifest adds one sentence: a screenshot the ticket keeps is shown with
+`![what it shows](screenshots/<file>)`, using the name as the ticket keeps it, drawn as it was when
+the presentation was written. The line names the other forms (`@N`, `@latest`, `archive/<n>/…`) and
+points to `core/priv/platform.md` § Referring to artifacts from Markdown, which has them with
+examples, and links (`[text](plan.md)`), which the line does not mention. The job preamble and the chat preamble point to it in a line.
+
 A state may declare its presentation `optional` (`workflow-grammar-v1.md` § Semantics), and then
 the manifest says so on the same line: the job may finish without writing it, and nothing
 downstream is waiting for one. Every other output is required, and the line says nothing, because

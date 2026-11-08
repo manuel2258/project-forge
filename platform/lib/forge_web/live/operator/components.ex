@@ -428,7 +428,7 @@ defmodule ForgeWeb.Operator.Components do
   body}`, `kind` read from what the version holds, since a pin is built from a version alone.
   `href` is the version's address, and nil for the changeset, whose rendering is the diff on
   `…/review` rather than anything at an artifact address; `body` is the document as
-  `ForgeWeb.FileType.render_document/2` draws it, and nil for anything that is not one — a blob
+  `ForgeWeb.FileType.render_document/3` draws it, and nil for anything that is not one — a blob
   is never laid out.
 
   Rendered here, when the page loads, and not in the card, which is drawn again on every change.
@@ -447,7 +447,12 @@ defmodule ForgeWeb.Operator.Components do
         ),
       body:
         if(is_binary(version.content),
-          do: ForgeWeb.FileType.render_document(name, version.content)
+          do:
+            ForgeWeb.FileType.render_document(
+              name,
+              version,
+              Forge.References.ticket_scope(project, ticket)
+            )
         )
     }
   end

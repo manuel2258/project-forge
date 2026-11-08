@@ -127,6 +127,34 @@ defmodule Forge.Artifacts do
   def commit(%Version{blob_uri: @git_prefix <> sha}), do: sha
   def commit(_version), do: nil
 
+  @raster ~w(.png .jpg .jpeg .gif .webp .avif)
+
+  @doc """
+  Whether a version called `name` is served and drawn as an image: a blob (not a commit) whose
+  extension is a raster one. `.svg` is not, because it can carry script. Decided from the name and
+  `blob_uri` alone, so the page that draws an image and the route that serves it cannot disagree
+  (`docs/design/ui.md` § Addressable artifact versions). Takes any map with a `blob_uri`.
+  """
+  @spec raster?(String.t(), %{blob_uri: String.t() | nil}) :: boolean()
+  def raster?(name, %{blob_uri: uri}) when is_binary(uri) and is_binary(name),
+    do: not String.starts_with?(uri, @git_prefix) and ext(name) in @raster
+
+  def raster?(_name, _version), do: false
+
+  @doc "The `image/*` type of a raster name."
+  @spec image_type(String.t()) :: String.t()
+  def image_type(name) do
+    case ext(name) do
+      ".png" -> "image/png"
+      ext when ext in [".jpg", ".jpeg"] -> "image/jpeg"
+      ".gif" -> "image/gif"
+      ".webp" -> "image/webp"
+      ".avif" -> "image/avif"
+    end
+  end
+
+  defp ext(name), do: name |> Path.extname() |> String.downcase()
+
   @doc "Records one version in its own transaction."
   @spec record_version(scope(), String.t(), :document | :blob | :presentation, author(), map()) ::
           {:ok, Version.t()} | {:error, term()}

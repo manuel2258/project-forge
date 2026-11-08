@@ -106,8 +106,9 @@ defmodule ForgeWeb.ChatLive do
   defp step_over?(%{over: over}), do: over != nil
   defp step_over?(nil), do: false
 
-  # The projection, from the log the page holds. Pure, so an appended event costs a fold and no
-  # query.
+  # The projection, from the log the page holds. The fold is pure; what the transcript's references
+  # mean is not, and costs no query when the messages hold none (`Transcript.resolve/3`) and a
+  # few — not one per message — when they do.
   defp fold(%{assigns: %{events: events}} = socket) do
     messages = Conversations.transcript(events)
 
@@ -116,6 +117,8 @@ defmodule ForgeWeb.ChatLive do
       now: Conversations.now(events),
       memory: Forge.Jobs.Memory.trouble(events),
       plan: Transcript.plan(messages),
+      refs:
+        Transcript.resolve(messages, transcript_scope(socket.assigns), socket.assigns.chat_id),
       secrets_gone: secrets_gone(events),
       at: DateTime.utc_now()
     )
@@ -179,7 +182,8 @@ defmodule ForgeWeb.ChatLive do
         Enum.map(written, &elem(&1, 1)),
         &version_href(chat, project, ticket, artifact, &1),
         is_nil(artifact.job_id) and artifact.kind != :presentation and
-          MapSet.member?(approvable, artifact.name)
+          MapSet.member?(approvable, artifact.name),
+        doc_scope(chat, project, ticket, artifact)
       )
     end)
   end
@@ -521,7 +525,7 @@ defmodule ForgeWeb.ChatLive do
     ~H"""
     <.scroll_pane id="messages-pane" height={nil} class="py-4">
       <ol class="flex flex-col gap-4" id="messages" data-scroll-items>
-        <Transcript.transcript messages={@messages} live={@live} now={@at} />
+        <Transcript.transcript messages={@messages} live={@live} now={@at} refs={@refs} />
       </ol>
 
       <p :if={@messages == []} class="text-sm opacity-60">Nothing said yet.</p>
@@ -737,6 +741,22 @@ defmodule ForgeWeb.ChatLive do
 
   defp version_href(_chat, project, ticket, artifact, version),
     do: ~p"/tickets/#{project.name}/#{ticket.number}/artifacts/#{artifact.name}/#{version}"
+
+  # A document is searched where it lives: the conversation's own artifacts for what is scoped to
+  # it, the ticket's for a ticket chat's documents (`ui.md` § Documents → References).
+  defp doc_scope(chat, project, _ticket, %{job_id: job_id}) when is_binary(job_id),
+    do: Forge.References.chat_scope(project, chat.id)
+
+  defp doc_scope(_chat, project, ticket, _artifact),
+    do: Forge.References.ticket_scope(project.name, ticket)
+
+  # A ticket conversation's messages are searched against the ticket and a project chat's against
+  # its own documents (`conversations.md` § References in messages).
+  defp transcript_scope(%{project: project, ticket: nil, chat_id: id}),
+    do: Forge.References.chat_scope(project, id)
+
+  defp transcript_scope(%{project: project, ticket: ticket}),
+    do: Forge.References.ticket_scope(project.name, ticket)
 
   defp context_line(nil), do: "About the repository as a whole."
   defp context_line(_ticket), do: "About this ticket, from its branch as it stood."

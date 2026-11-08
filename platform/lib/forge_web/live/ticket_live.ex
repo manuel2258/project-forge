@@ -300,7 +300,8 @@ defmodule ForgeWeb.TicketLive do
         artifact,
         Artifacts.versions(ticket.id, artifact.name),
         href,
-        entry.approvable
+        entry.approvable,
+        Forge.References.ticket_scope(project.name, ticket)
       )
     end
   end

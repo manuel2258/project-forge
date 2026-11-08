@@ -66,21 +66,47 @@ defmodule ForgeWeb.FileTypeTest do
     end
   end
 
-  describe "render_document/2" do
+  describe "raster?/2 and svg?/1" do
+    test "a blob with a raster extension, in any case, and nothing else" do
+      blob = %{blob_uri: "store:job/x/out-a/1"}
+
+      for name <- ~w(a.png a.jpg a.jpeg a.gif a.webp a.avif shots/A.PNG),
+          do: assert(FileType.raster?(name, blob), name)
+
+      for name <- ~w(a.svg a.txt a.png.zip png a.apk),
+          do: refute(FileType.raster?(name, blob), name)
+
+      # A document is text, and a commit is not a file, whatever they are called.
+      refute FileType.raster?("a.png", %{blob_uri: nil})
+      refute FileType.raster?("changeset.png", %{blob_uri: "git:abc123"})
+      assert FileType.image_type("a.JPEG") == "image/jpeg"
+    end
+
+    test "an SVG is known by its extension" do
+      assert FileType.svg?("a.svg") and FileType.svg?("shots/B.SVG")
+      refute FileType.svg?("a.png") or FileType.svg?("svg")
+    end
+  end
+
+  @scope %{project_id: "p", project: "game", ticket: {"t", 1}, chat: nil}
+  defp doc(content),
+    do: %Forge.Artifacts.Version{content: content, inserted_at: DateTime.utc_now()}
+
+  describe "render_document/3" do
     test "renders Markdown, and keeps text, a log and code as they were written" do
-      assert {:html, html} = FileType.render_document("plan.md", "# Plan\n")
+      assert {:html, html} = FileType.render_document("plan.md", doc("# Plan\n"), @scope)
       assert Phoenix.HTML.safe_to_string(html) =~ "<h1>Plan</h1>"
-      assert {:html, _html} = FileType.render_document("plan", "# Plan\n")
+      assert {:html, _html} = FileType.render_document("plan", doc("# Plan\n"), @scope)
 
       for name <- ~w(notes.txt run.log schema.json) do
-        assert FileType.render_document(name, "# a\nb\n") == {:text, "# a\nb\n"}
+        assert FileType.render_document(name, doc("# a\nb\n"), @scope) == {:text, "# a\nb\n"}
       end
     end
 
     # Markdown is styled only inside `.doc` (`app.css`, `ui.md` § Documents); text is a `pre`.
     test "draws Markdown in the document styles and text as preformatted" do
       draw = fn name ->
-        body = FileType.render_document(name, "# a\n")
+        body = FileType.render_document(name, doc("# a\n"), @scope)
         Floki.parse_fragment!(render_component(&FileType.document_body/1, body: body))
       end
 

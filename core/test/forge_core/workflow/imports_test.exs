@@ -233,6 +233,19 @@ defmodule ForgeCore.Workflow.ImportsTest do
       refute message =~ "not allowed in a library"
     end
 
+    test "a library cannot hold the release keys either, and names the one it was given" do
+      for key <- ["release_files: [a/*]", "release_notes: notes.md"] do
+        files = %{"common.yml" => @common <> key <> "\n"}
+
+        assert {:error, errors} = load(@type_yaml, files)
+
+        [name | _] = String.split(key, ":")
+        assert [{"common.yml", ^name, message}] = messages(errors)
+        assert message =~ "set #{name} in the ticket type that imports it"
+        refute message =~ "not allowed in a library"
+      end
+    end
+
     test "a library cannot import: imports are one level deep" do
       files = %{"common.yml" => @common <> "import: [more.yml]\n"}
 

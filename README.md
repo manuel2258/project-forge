@@ -57,7 +57,7 @@ mix forge.token.revoke you@example.com laptop
 ```
 
 Repositories are served over smart HTTP at `/git/<project>.git` with a short-lived per-job token
-as the password; hooks enforce one branch per ticket and mirror the default branch. See
+as the password; hooks enforce one branch per ticket and mirror the default branch and release tags. See
 [docs/design/git-hosting.md](docs/design/git-hosting.md).
 
 And as Mix tasks that write rows:

@@ -340,4 +340,70 @@ defmodule ForgeWeb.PhoneTest do
       assert view |> element(~s(form[phx-submit="assign"] select)) |> render() =~ "h-[46px]"
     end
   end
+
+  # `ui.md` § A project's releases: one column, and every download, link and "show more" a
+  # full-size tap target. The widths are CSS; what is pinned is the 46px floor on each control.
+  describe "the releases" do
+    test "every download, link and show-more is a 46px target", %{conn: conn, user: user} do
+      {:ok, project} =
+        Projects.register(
+          %{name: "phone-#{System.unique_integer([:positive])}", repo_path: seeded_repo()},
+          user
+        )
+
+      for n <- 1..21 do
+        {:ok, ticket} = Tickets.admit(project, %{title: "Release #{n}"}, {:user, user.id})
+
+        Forge.Repo.insert!(%Forge.ReleaseRecords.Record{
+          project_id: project.id,
+          ticket_id: ticket.id,
+          version: "1.0.#{n}",
+          concluded_at: DateTime.add(~U[2026-01-01 00:00:00.000000Z], n, :minute),
+          commit_sha: String.duplicate("a", 40),
+          tag_name: "v1.0.#{n}",
+          tag_status: :tagged,
+          files: [%{"name" => "dist/app.zip", "version" => 1, "size" => 5}],
+          links: [
+            %{
+              "label" => "Image",
+              "url" => "https://ok.example/i",
+              "document" => "n",
+              "version" => 1
+            }
+          ]
+        })
+      end
+
+      {:ok, view, _html} = live(conn, ~p"/projects/#{project.name}/releases")
+
+      {:ok, own, _html} =
+        live(
+          conn,
+          ~p"/projects/#{project.name}/releases/#{Forge.ReleaseRecords.latest(project).id}"
+        )
+
+      {:ok, home, _html} = live(conn, ~p"/projects/#{project.name}")
+
+      for {page, selector} <- [{own, ~s|a[href$="/releases"]|}, {home, "#latest-release a"}] do
+        link = page |> render() |> LazyHTML.from_fragment() |> LazyHTML.query(selector)
+        assert not Enum.empty?(link), "#{selector} is not on the page"
+        assert LazyHTML.to_html(link) =~ "min-h-[46px]"
+      end
+
+      for selector <- [
+            "article h2 a",
+            "article a[href*=artifacts]",
+            ~s|article a[target="_blank"]|,
+            "article dl a",
+            "#show-more"
+          ] do
+        targets = view |> render() |> LazyHTML.from_fragment() |> LazyHTML.query(selector)
+        assert not Enum.empty?(targets), "#{selector} is not on the page"
+
+        for target <- targets do
+          assert LazyHTML.to_html(target) =~ "min-h-[46px]", "#{selector} is not a 46px target"
+        end
+      end
+    end
+  end
 end

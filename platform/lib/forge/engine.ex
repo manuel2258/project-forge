@@ -7,7 +7,7 @@ defmodule Forge.Engine do
   import Ecto.Query, only: [from: 2]
 
   alias Ecto.Multi
-  alias Forge.{Artifacts, Events, Jobs, Merge, MergeQueue, Repo, Tickets}
+  alias Forge.{Artifacts, Events, Jobs, Merge, MergeQueue, ReleaseRecords, Repo, Tickets}
   alias Forge.Events.Event
   alias Forge.Jobs.Job
   alias Forge.MergeQueue.Entry
@@ -1917,6 +1917,9 @@ defmodule Forge.Engine do
     if Workflow.merges_on_enter?(workflow, state_name) do
       merge_now(ticket, workflow, user_id, Keyword.get_lazy(opts, :by, fn -> by(user_id) end))
     else
+      # A terminal state that merges nothing still concludes a release, on the default branch's
+      # head. `conclude/2` does nothing for any ticket that is not a release that is `done`.
+      ReleaseRecords.conclude(ticket, :head)
       ticket
     end
   end
@@ -1965,6 +1968,10 @@ defmodule Forge.Engine do
     # found its commit already there moved nothing.
     unless already,
       do: Merge.Watch.after_merge(ticket.project_id, sha, %{"ticket" => ticket.number})
+
+    # A release that has merged is concluded, on the commit the merge made or found
+    # (`docs/design/ticket-types.md` § The record, the tag, the history).
+    ReleaseRecords.conclude(ticket, sha)
 
     ticket
   end

@@ -377,6 +377,61 @@ commit.
   does put `approve` there waits, as any workflow does. The platform adds no approval and removes
   none. A failed or stuck job does not conclude it.
 
+### The record, the tag, the history
+
+A release that ends `done` leaves a **release record**: a row written once and never changed, the
+project's history of its releases (`release_records`, `data-model.md`). Before this a finished
+release was one more finished ticket, and nothing listed it, marked it in git, or said which files
+belonged to it.
+
+- **When.** `Forge.ReleaseRecords.conclude/2` is called by the engine where a release ticket
+  reaches `done`: from `merged/4`, with the commit the merge produced or the one it found already
+  there, and from the entry of a terminal state that merges nothing, with the default branch's head
+  at that moment. It does nothing unless the ticket pinned `release: true` *and* is `done`, so a
+  release that fails, sticks, conflicts or is cancelled gets none, and a second call finds the
+  record and returns it. One record per ticket (`ticket_id` is unique). **No record is written
+  for a release that concluded before this existed**, #33 (0.18.0) included, and no tag is made
+  for it: the history starts with the next one.
+- **What it holds.** The version (the `to` of the ticket's latest `ticket.renamed`), the time it
+  concluded, the commit, the notes, the files, the links, and what became of the tag. A release
+  with no version still gets a record, with no tag and `no_version` as the reason.
+- **Files.** The workflow's top-level `release_files` lists groups of files (`name/*`, as
+  `produces` spells them, produced by a state or a command); only those are release files, and an
+  unnamed group stays on the ticket. The record names the exact artifact versions, `{name,
+  version, size}`, and is not a copy: they are the existing blobs, downloaded at their existing
+  addresses, and a later version of the artifact changes nothing the record lists. Of each group
+  it lists the files written by **the last job that wrote any of that group**, so a rebuild that
+  uses other file names does not leave the first build's files on the release. A group that ended
+  empty, or a file it dropped to its limits, is simply not listed.
+- **Notes.** `release_notes` names one document a job state of the workflow produces; the record
+  holds its latest text when the release concluded, front matter removed, and none when the key
+  or the document is absent.
+- **Links.** A job's document may carry `links:` in its front matter, a list of `{label, url}`.
+  This is `version:`'s mechanism and rule: only a job's documents count (a presentation, `name!`, is
+  one, as it is for `version:`), not a chat step's or a person's edit. The record lists those of
+  each such document's latest version when it concluded.
+  Each entry stands alone: a label that is not a non-empty string of at most 200 bytes, or a URL
+  that is not an absolute `http` or `https` URL with a host, at most 2048 bytes and with no
+  whitespace or control character in it, drops that entry and nothing else; only the first 50
+  entries of one document are read; and no malformed list fails the job that wrote it.
+- **The tag.** With a version, the platform makes `v<version>` (a leading `v` is dropped first, so
+  `0.18.0` and `v0.18.0` give `v0.18.0`) on the record's commit: an annotated tag whose message is
+  the notes, or the tag's name when there are none, tagged by `forge <forge@localhost>` (the
+  committer of every merge commit), unsigned, pushed by the platform's own internal write (`git-hosting.md` § `pre-receive`).
+  Outcomes, stored on the record: `tagged`; `taken` when the name already points at another commit,
+  which is never moved and is named (two releases of one version give two records and one tag); a
+  name that already points at the same commit counts as `tagged`; `failed` with the reason when git
+  refused or the name is not a ref; `no_version`. **No outcome fails, sticks or un-merges the
+  release**: the merge has happened and the ticket is `done` whatever the tag did.
+- **The window.** A crash between the ticket reaching `done` and the record is a missing record.
+  For a release that merges, a queued merge is re-entered by `recover_queue/1`, which calls
+  `conclude/2` again and finds the tag on its commit. A workflow that merges nothing has no such
+  recovery: its entry action runs after the transaction that made the ticket `done`, and nothing
+  re-enters it, so a crash there leaves a release with no record. Nothing repairs it.
+- **Seen where.** A member of the project sees `/projects/:name/releases`, each record's page and
+  the latest release on the project page (`ui.md` § A project's releases), by the project page's own
+  guard, which does not admit a node admin who is no member (`identity.md`). Nothing there writes.
+
 ## Deliberately not here
 
 - **Changing a ticket's type.** A re-pin to another type would reuse every guard `repin/2` has,
@@ -396,6 +451,9 @@ commit.
 - **Re-pinning changing whether a ticket is the release.** A re-pin holds the ticket's flag
   (§ Releases), so a file that gains or drops the flag changes the next admission and no ticket
   already admitted.
+- **A release's tag by anyone but the platform, a signed tag, a tag moved or deleted, and records
+  or tags for releases concluded before records existed.** Each is a decision (§ The record, the
+  tag, the history); the first is refused by the git server's hooks.
 - **Per-type permissions or credential pools.** Nothing has shown that a type is the boundary
   either should follow.
 

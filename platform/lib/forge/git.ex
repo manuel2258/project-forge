@@ -79,12 +79,8 @@ defmodule Forge.Git do
   end
 
   defp create_root_commit(repo, branch) do
-    env = [
-      {"GIT_AUTHOR_NAME", "forge"},
-      {"GIT_AUTHOR_EMAIL", "forge@localhost"},
-      {"GIT_COMMITTER_NAME", "forge"},
-      {"GIT_COMMITTER_EMAIL", "forge@localhost"}
-    ]
+    {name, email} = identity()
+    env = [{"GIT_AUTHOR_NAME", name}, {"GIT_AUTHOR_EMAIL", email}] ++ committer_env()
 
     with {:ok, tree} <- empty_tree(repo, write: true),
          {:ok, sha} <- run(repo, ["commit-tree", {:data, tree}, "-m", @root_message], env: env),
@@ -120,6 +116,38 @@ defmodule Forge.Git do
 
     with {:ok, out} <- run(repo, ["hash-object"] ++ write ++ ["-t", "tree", "/dev/null"]) do
       {:ok, String.trim(out)}
+    end
+  end
+
+  @doc """
+  The identity the platform's own commits and tags carry: `forge <forge@localhost>`, stated rather
+  than left to the host's passwd entry, which is a different identity on every host and none at all
+  in a container (`Forge.Merge` and the release tag both rely on it).
+  """
+  @spec identity() :: {String.t(), String.t()}
+  def identity, do: {"forge", "forge@localhost"}
+
+  @doc "`identity/0` as the committer environment of a git call."
+  @spec committer_env() :: [{String.t(), String.t()}]
+  def committer_env do
+    {name, email} = identity()
+    [{"GIT_COMMITTER_NAME", name}, {"GIT_COMMITTER_EMAIL", email}]
+  end
+
+  @doc """
+  Pushes `refspec` into `repo` itself with `FORGE_INTERNAL=1`, which is what `pre-receive` accepts
+  as the platform's own write. **Set here and nowhere else**, and the git endpoint removes it from
+  every child it spawns, so nothing on the network can claim it.
+
+  Pushing over the local transport spawns `receive-pack`, which runs both hooks: the platform's
+  writes are enforced by, and mirrored by, the code path a job's push takes
+  (`docs/design/git-hosting.md` § The merge). `{:error, reason}` carries git's own report.
+  """
+  @spec push_internal(repo(), String.t()) :: :ok | {:error, term()}
+  def push_internal(repo, refspec) do
+    case run(repo, ["push", "--quiet", ".", {:data, refspec}], env: [{"FORGE_INTERNAL", "1"}]) do
+      {:ok, _out} -> :ok
+      {:error, reason} -> {:error, reason}
     end
   end
 

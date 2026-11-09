@@ -472,6 +472,31 @@ which is what lets a harness newer than its workers keep working.
 Parsing this file reaches no worker, so the rule above is what the grammar checks, and it is
 unchanged. A workflow may name any level; only the form has a list.
 
+## Release keys
+
+Two top-level keys, meaningful only in a workflow that sets `release: true`
+(`ticket-types.md` § The record, the tag, the history), and a convention for a document.
+
+```yaml
+release: true
+release_files: [package/*, images/*]   # groups of files that belong to the release
+release_notes: release-notes.md        # the document that is the release's notes
+```
+
+- `release_files` is a list of groups, spelled as `produces` spells them (`name/*`), each produced
+  by a state or by a command's `produces`. Only these groups are listed on the release's record;
+  every other group stays on the ticket. Absent is none.
+- `release_notes` names one plain document that a job state (one with a prompt and not `chat: true`)
+  produces. The record keeps its text at its latest version when the release concluded, with front
+  matter removed; the same text is the git tag's message.
+- **`links:`** in a job's document front matter is a list of entries, each `{label, url}`, the way
+  `version:` is read: only a job's documents count, presentations included, and a chat step's and a person's edit do not. A release's record
+  lists the links of the latest version of every such document when it concluded. An entry whose
+  label is not a non-empty string of at most 200 bytes, or whose url is not an absolute `http` or
+  `https` URL with a host, of at most 2048 bytes and without whitespace or control characters, is dropped alone; only the
+  first 50 entries of a document are read; a list that is not a list is
+  ignored; neither fails the job that wrote it.
+
 ## Chat steps
 
 **A job state marked `chat: true` is a conversation, not a one-shot job.** It keeps everything a
@@ -1102,6 +1127,13 @@ is never produced; `answers.md` is platform-managed and never declared.
   not a validation error — it is the project having no release — and is said by the project page.
   The single-file refusal is validation and not parsing, so a stored pin carrying the key is built
   as it was admitted.
+- `release_files`, where present, is a list of non-empty strings, and `release_notes` a non-empty
+  string. Both are refused without `release: true`, and in a library, saying to set them in the
+  type that imports it. Each `release_files` entry must be a `name/*` that some state's `produces`
+  or some command's `produces` declares, and `release_notes` a plain document in the `produces` of
+  a state with a prompt and without `chat: true` (not a group, a presentation, the changeset, or a
+  chat step's). Every error names the key, and for a file its place in the list:
+  `release_files[1]`.
 - Every `import` entry is a path of names under `.forge/`, not in `workflows/`, that exists at the
   pinned commit, and appears once; § Imports has the rest.
 - Keys outside this grammar (`blocks`, `use`, `can_spawn`, `fanout`, `spawn_depth`,

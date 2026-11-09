@@ -66,7 +66,9 @@ defmodule ForgeCore.Workflow do
             limits: nil,
             defaults: nil,
             commands: %{},
-            release: false
+            release: false,
+            release_files: [],
+            release_notes: nil
 
   @type state_name :: String.t()
   @type artifact_name :: String.t()
@@ -81,7 +83,9 @@ defmodule ForgeCore.Workflow do
           limits: Limits.t(),
           defaults: Defaults.t() | nil,
           commands: %{String.t() => Command.t()},
-          release: boolean()
+          release: boolean(),
+          release_files: [artifact_name()],
+          release_notes: artifact_name() | nil
         }
 
   @doc "Outcomes every job may end with, whatever its state declares."

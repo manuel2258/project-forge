@@ -83,9 +83,10 @@ backpressure and client-disconnect handling on the stream. That is an upgrade, n
 ### The environment, and the one dangerous default
 
 `System.cmd/3`'s `:env` **merges with the BEAM's own environment rather than replacing it**. The
-platform process sets `FORGE_INTERNAL=1` when it performs a merge, and that variable is what the
-`pre-receive` hook accepts as authority to write the default branch. If it leaked into a CGI
-child it would let any client with a job token rewrite the default branch. Every `FORGE_*`
+platform process sets `FORGE_INTERNAL=1` when it performs a merge or makes a release's tag
+(`Forge.Git.push_internal/2`), and that variable is what the `pre-receive` hook accepts as
+authority to write the default branch and to create a tag. If it leaked into a CGI child it
+would let any client with a job token rewrite the default branch and create tags. Every `FORGE_*`
 variable the wrapper does not set is therefore passed explicitly as `nil`, which removes it.
 That is the single highest-consequence line in this note, and it has a test of its own.
 
@@ -160,7 +161,8 @@ cannot come from the environment. Repository config, under `forge.*`:
 - `forge.defaultBranch` — explicit, though `HEAD` implies it.
 - `forge.mirror.<name>.url` — where one mirror pushes. `<name>` is `[a-z0-9-]+`, so the key path
   can never be ambiguous about where the name ends.
-- `forge.mirror.<name>.refs` — a glob, default `refs/heads/<default>`.
+- `forge.mirror.<name>.refs` — a glob, default `refs/heads/<default>` **and** `refs/tags/v*`, the
+  release tags (§ `pre-receive`). A mirror with a pattern of its own carries what that matches.
 - `forge.mirror.<name>.user` — the username half of the credential, optional.
 - `forge.mirror.<name>.lastStatus`, `.lastAt`, `.lastError`, `.lastOkAt` — written by the hook
   after every attempt, read by the pages that say whether the off-node copy is current.
@@ -185,9 +187,16 @@ operator sees a mirror that stopped working rather than a mirror that was never 
 ### `pre-receive` — the branch discipline
 
 - A ref is never deleted.
-- Only branches are written.
+- **A tag is written by the platform and no one else.** `refs/tags/*` is admitted only with
+  `FORGE_INTERNAL=1`, only when it is created (`old` is the zero id: a tag is never moved), and only
+  when the commit it peels to (`$new^{commit}`, the tag may be annotated) is in the default
+  branch's history. Every token, a job's and an admin's included, is refused a tag, as it always
+  was: the CGI strips `FORGE_INTERNAL` from every request, so nothing on the network reaches the
+  clause. The platform makes release tags this way (`ticket-types.md` § The record, the tag, the
+  history).
+- Otherwise only branches are written.
 - The default branch is written only with authority over it, and only fast-forward. Authority is
-  either `FORGE_INTERNAL=1`, which the platform's own merge sets and the CGI strips from every
+  either `FORGE_INTERNAL=1`, which the platform's own pushes set (the merge, a release's tag) and the CGI strips from every
   request it serves, or a credential whose `FORGE_ALLOWED_REFS` (space-separated; the list
   `Tokens.allowed_refs/2` computes) names it — an *admin* project token or an old default-branch
   token, which only an operator can mint. So the default branch is
@@ -332,8 +341,12 @@ glob. A project may have several; they are independent.
   logged, and the push stands.
 - **One mirror's failure is not another's.** Each is attempted, and the loop continues — which is
   why the hook sets `-u` and `-o pipefail` but never `-e`.
-- **Only the configured refs mirror, by default the default branch.** The mirror exists so one
-  machine is never the only copy of the project. Publishing every ticket branch's scratch history
+- **Only the configured refs mirror, by default the default branch and the release tags
+  (`refs/tags/v*`).** A tag reaches a mirror when the platform creates it, through this hook and
+  the same status reporting as a branch push, and a mirror that fails leaves the release as it
+  was. A mirror configured with its own pattern carries exactly what the pattern matches, so one
+  set to `refs/heads/main` gets no tags. The mirror exists so one machine is never the only copy
+  of the project. Publishing every ticket branch's scratch history
   to the project's external home is a different thing, and not one anybody asked for.
 - **A dead mirror costs seconds, not minutes.** `http.lowSpeedLimit` and `http.lowSpeedTime` bound
   it. Without them every push waits on git's own timeout, once per configured mirror, inside the
@@ -486,6 +499,9 @@ mirrored by, exactly the code path a job's push takes. `update-ref` plus an expl
 would mean the branch discipline and the mirror each had two implementations, and the demo's
 "mirrored" claim would be proven by a path no job ever takes. One rule, one enforcement point.
 
+A release's tag is pushed the way the merge is — `Forge.Git.push_internal/2`, the one place
+`FORGE_INTERNAL=1` is set — so the tag discipline above and the mirror see it as they see a merge.
+
 The new commit's only parent is the current default head, so the push is a fast-forward and needs
 no force; `pre-receive` asserts that. **There is no second parent**, deliberately: a ticket lands
 as one plain commit, `git log --merges` shows nothing for it, and the ticket's own run-by-run
@@ -622,6 +638,10 @@ in this one module, which is what keeps the credential's handling in one place.
 - The push is `--force`, because a job may rewrite its own branch. `pre-receive` is the guard.
 
 ## Not built, and named so the absence is a decision
+
+- **Tags made by anyone but the platform**, signed tags, and a tag moved or deleted. A job, a
+  token or a conversation cannot create one, and the platform makes only a release's, once, at the
+  version it was renamed to; a name already taken is reported on the release record and left alone.
 
 - **SSH.** Cut, not pending. `deploy.md` described the operator pushing over SSH to the host, and
   that could never have worked: `nix/module.nix` gives `forge` no shell and no authorised keys, and

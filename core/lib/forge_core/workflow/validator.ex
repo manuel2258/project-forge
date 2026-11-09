@@ -12,6 +12,7 @@ defmodule ForgeCore.Workflow.Validator do
   def validate(%Workflow{} = workflow, opts \\ []) do
     [
       release(workflow, Keyword.get(opts, :single_file, false)),
+      release_keys(workflow),
       names(workflow),
       initial(workflow),
       state_shapes(workflow),
@@ -44,6 +45,65 @@ defmodule ForgeCore.Workflow.Validator do
     ]
 
   defp release(_workflow, _single_file), do: []
+
+  # `docs/design/ticket-types.md` § The record, the tag, the history. Both keys name something this
+  # workflow produces and only mean anything on the release, so each is refused where it would be
+  # silently ignored. The paths are the key and, for a file, its place in the list, so that the
+  # listing names the file and the key.
+  defp release_keys(%Workflow{release: release} = workflow) do
+    files =
+      workflow.release_files
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {entry, index} ->
+        path = Error.join("release_files", index)
+
+        cond do
+          not release -> [Error.new(path, "#{inspect(entry)}: release_files needs release: true")]
+          release_group?(workflow, entry) -> []
+          true -> [Error.new(path, release_files_message(entry))]
+        end
+      end)
+
+    notes =
+      case workflow.release_notes do
+        nil ->
+          []
+
+        _name when not release ->
+          [Error.new("release_notes", "release_notes needs release: true")]
+
+        name ->
+          if release_document?(workflow, name),
+            do: [],
+            else: [
+              Error.new(
+                "release_notes",
+                "#{inspect(name)} is not a document that a job state of this workflow produces " <>
+                  "(a group of files, a presentation, the changeset and a chat step's are not)"
+              )
+            ]
+      end
+
+    files ++ notes
+  end
+
+  defp release_files_message(entry),
+    do:
+      "#{inspect(entry)} is not a group of files (name/*) that a state or a command of this " <>
+        "workflow produces"
+
+  defp release_group?(workflow, entry) do
+    Workflow.group?(entry) and
+      (Enum.any?(workflow.states, fn {_name, state} -> entry in state.produces end) or
+         Enum.any?(workflow.commands, fn {_name, command} -> entry in command.outputs end))
+  end
+
+  defp release_document?(workflow, name) do
+    Workflow.document?(name) and not Workflow.presentation?(name) and
+      Enum.any?(workflow.states, fn {_name, state} ->
+        is_binary(state.prompt) and not state.chat and name in state.produces
+      end)
+  end
 
   defp names(%Workflow{states: states}) do
     Enum.flat_map(states, fn {name, state} ->

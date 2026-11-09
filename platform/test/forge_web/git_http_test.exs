@@ -338,6 +338,24 @@ defmodule ForgeWeb.GitHttpTest do
       end
     end
 
+    # `docs/design/git-hosting.md` § `pre-receive`: a tag is the platform's own write, and the CGI
+    # strips FORGE_INTERNAL, so no credential of any kind reaches the clause that admits one.
+    test "no credential is admitted a tag, whatever it may write", %{project: project, bare: bare} do
+      {:ok, job, _row} = Tokens.issue(project, name: "job", ref: "refs/heads/ticket/1")
+      {:ok, admin, _row} = Tokens.issue(project, name: "adm", git: :admin)
+      {:ok, minted, _row} = Tokens.issue(project, name: "main", ref: "refs/heads/main")
+
+      for {token, branch} <- [{job, "ticket/1"}, {admin, "main"}, {minted, "main"}] do
+        dir = clone!(project, token, branch)
+
+        assert {out, code} = push(dir, project, token, "HEAD:refs/tags/v9.9.9")
+        assert code != 0
+        assert out =~ "tags are made by the platform"
+      end
+
+      assert {:error, _} = Git.run(bare, ["rev-parse", "--verify", "--quiet", "refs/tags/v9.9.9"])
+    end
+
     test "a ref is never deleted", %{project: project, bare: bare} do
       {:ok, token, _row} = Tokens.issue(project, name: "t", ref: "refs/heads/ticket/1")
       dir = clone!(project, token, "ticket/1")

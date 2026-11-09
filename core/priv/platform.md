@@ -165,6 +165,15 @@ version when your job ends. Nothing else is renamed. A version is three numbers 
 an optional leading `v`, a `-` pre-release and a `+` build suffix, in at most 64 bytes; anything else
 is ignored. Whether you are told to write it is up to the workflow's prompt.
 
+When the release ends `done` the platform writes a **release record** and, with a version, tags the
+merge's commit `v<version>`. The record lists the files of the groups the workflow names in
+`release_files`, the text of the document it names in `release_notes` (its notes, and the tag's
+message), and the links your documents carry. A link is an entry of `links:` in a document's front
+matter, each `{label, url}`: `links: [{label: "Image", url: "https://ghcr.io/org/forge@sha256:..."}]`.
+The latest version of each document you write counts, only a job's and never a conversation's; an
+entry whose label is empty, blank or over 200 bytes, or whose url is not an absolute `http` or `https` URL,
+is dropped on its own, and nothing about a link can fail your job.
+
 ## Spend
 
 Every job has a turn and cost ceiling, and the node has a daily one. They are enforced by the

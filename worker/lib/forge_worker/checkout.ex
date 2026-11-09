@@ -482,6 +482,9 @@ defmodule ForgeWorker.Checkout do
   defp maybe_clean(_dir, false, _as), do: {:ok, ""}
   defp maybe_clean(dir, true, as), do: git(dir, ["clean", "--quiet", "-fd"], as: as)
 
+  # The worker's own copy of `Forge.Git.identity/0`: it cannot depend on platform code
+  # (`CLAUDE.md` § Layout), so the two are kept equal by hand.
+
   # The harness runs with a private HOME, so a fresh clone has no global identity and the agent's
   # first commit would fail with git's "please tell me who you are".
   defp identity(dir, opts) do

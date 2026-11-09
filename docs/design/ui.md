@@ -1084,10 +1084,51 @@ event whatever the page showed.
 page says what the repository means to the platform; what is actually in it is
 § The project's repository.
 
+**It links to the project's releases** — `Releases ›` beside `Repository ›` — and shows the latest
+record in one line when there is one (§ A project's releases).
+
 **It lists the project's conversations**, in the order and the sections of § Chats is a destination
 on both. The board is the workflow and a plain conversation is not on it — it has no state to be in; a
 chat step is the ticket's, and on the board as its state — so without this a chat is a thing you can
 start from the page and then cannot find from the page. Every one is drawn: nothing folds away.
+
+## A project's releases
+
+A release that ended `done` leaves a record (`ticket-types.md` § The record, the tag, the history),
+and three surfaces draw it. **Nothing on them is a form and none of them writes**, so a reconnect
+has nothing to lose and the page redraws the same records (§ A reconnect is not a reload). Who may
+see them is who may see the project, and the guard is the project page's own
+(`ForgeWeb.Access.project_by_name!/2`): its members. A node admin is not implicitly a member
+(`identity.md`), so to a node admin who is not one, as to anyone else, each address is "not found",
+exactly as the project page is.
+
+- **`/projects/:name/releases`** lists the records, newest first, reached by `Releases ›` in the
+  project page's header beside `Repository ›`. It shows the newest 20 and a *Show more* control
+  that is a link to `?shown=40`, then 60, and so on, so the count survives a reconnect and a
+  reload, and every record is reachable. While the project has a release ticket open, one line above
+  the list names it as in progress and links to its ticket; it is not a record and has no page.
+  With no records the page says a release appears once one ends `done`; when no workflow of the
+  project sets `release: true` it says that instead, since that is what would fill it.
+- **An entry** shows the version as its heading, linking to the record's page (a plain "no
+  version" when there was none); what became of the tag, in words; the date; the commit, short,
+  linking to the repository's commit page; the ticket it came from; the notes, rendered as a
+  document is on the Docs tab (`ForgeWeb.Markdown`, never raw HTML); the files, each a download
+  with its name and size at the address of its artifact version (§ Addressable artifact versions:
+  a large or binary file is a download and never rendered); and the links, each shown by its label.
+- **What became of the tag** is one of four sentences, the same on all three surfaces
+  (`ForgeWeb.ReleaseComponents.tag_words/1`): *Tagged vX.Y.Z*; *vX.Y.Z was already taken by
+  another commit (abc1234) and was not moved*; *Not tagged: <why>*; *No version, so no tag*.
+- **`/projects/:name/releases/:id`** is one record, at its own id, which never changes and is
+  unique when two records share a version. It shows everything the entry shows. An id that names no
+  record, names another project's, or is not an id at all is "not found".
+- **The project page** shows the latest record in one line — its version, its date and what became
+  of its tag, linking to its page — and nothing when there are none. The header link is there
+  either way.
+- **Live.** A release that concludes appears on an open releases page and project page without a
+  reload, by the ticket-changed event both already listen to.
+- **The phone.** One column; every download, link and *Show more* is a full-size tap target
+  (§ The phone). A long label, name or URL wraps and never stretches the page. Markup in a version,
+  a label or a file name is text. A record with 100 files lists 100.
 
 ## Project settings
 

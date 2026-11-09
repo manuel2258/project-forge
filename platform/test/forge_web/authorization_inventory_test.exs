@@ -50,6 +50,9 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     # the scope a read token already gives them (`docs/design/git-hosting.md`).
     "/projects/:name/repo" => :member,
     "/projects/:name/repo/commits/:sha" => :member,
+    # A project's releases, read-only: every member reads them, and nothing on them writes.
+    "/projects/:name/releases" => :member,
+    "/projects/:name/releases/:id" => :member,
     "/tickets/new" => :member,
     "/tickets/:project/:number" => :member,
     "/tickets/:project/:number/review" => :member,

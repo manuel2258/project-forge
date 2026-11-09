@@ -5,7 +5,7 @@
 # each, and written back to by this script:
 #
 #   forge.mirror.<name>.url         https:// or http://, and nothing else
-#   forge.mirror.<name>.refs        a glob, default refs/heads/<default branch>
+#   forge.mirror.<name>.refs        a glob, default refs/heads/<default branch> and refs/tags/v*
 #   forge.mirror.<name>.lastStatus  ok | failed
 #   forge.mirror.<name>.lastAt      when that was
 #   forge.mirror.<name>.lastError   why, redacted and truncated
@@ -70,10 +70,22 @@ while read -r key url; do
   name=${key#forge.mirror.}
   name=${name%.url}
 
-  pattern=$(git config --local --get "forge.mirror.$name.refs" || echo "refs/heads/$default")
+  # No pattern of its own: the default branch and the release tags. One of its own: exactly what
+  # that matches, so a mirror set to refs/heads/main carries no tag.
+  if pattern=$(git config --local --get "forge.mirror.$name.refs"); then
+    configured=1
+  else
+    pattern="" configured=0
+  fi
 
   refs=()
   for ref in "${pushed[@]}"; do
+    if [ "$configured" = 0 ]; then
+      case "$ref" in
+        "refs/heads/$default" | refs/tags/v*) refs+=("$ref") ;;
+      esac
+      continue
+    fi
     # shellcheck disable=SC2254 # the pattern is a glob by design
     case "$ref" in
       $pattern) refs+=("$ref") ;;

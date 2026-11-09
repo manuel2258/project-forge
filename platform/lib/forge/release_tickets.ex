@@ -15,6 +15,7 @@ defmodule Forge.ReleaseTickets do
 
   alias Ecto.Multi
   alias Forge.{Events, Repo, Tickets, TicketTypes}
+  alias Forge.Events.Event
   alias Forge.Jobs.Job
   alias Forge.Projects.Project
   alias Forge.Tickets.Ticket
@@ -75,6 +76,21 @@ defmodule Forge.ReleaseTickets do
   """
   @spec release?(Ticket.t()) :: boolean()
   def release?(%Ticket{workflow: workflow}), do: workflow["release"] == true
+
+  @doc """
+  The version `ticket` was renamed to, or nil: the `to` of its latest `ticket.renamed` event. **The
+  one reading of it**, which the release record's version and tag name come from.
+  """
+  @spec renamed_version(Ticket.t()) :: String.t() | nil
+  def renamed_version(%Ticket{id: id}) do
+    Repo.one(
+      from e in Event,
+        where: e.ticket_id == ^id and e.type == "ticket.renamed",
+        order_by: [desc: e.seq],
+        limit: 1,
+        select: fragment("?->>'to'", e.payload)
+    )
+  end
 
   @doc """
   The project's open release, or nil: a ticket in an active or stuck status whose pinned workflow

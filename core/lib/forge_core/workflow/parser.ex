@@ -36,7 +36,8 @@ defmodule ForgeCore.Workflow.Parser do
     Validator
   }
 
-  @top_keys ~w(version description initial states transitions limits defaults commands release)
+  @top_keys ~w(version description initial states transitions limits defaults commands release
+                release_files release_notes)
   @state_keys ~w(prompt env model effort inputs produces optional outcomes budget on_enter
                  on_conflict resources invoke exit may_invoke secrets chat)
   @command_keys ~w(run env produces timeout resources secrets)
@@ -194,6 +195,8 @@ defmodule ForgeCore.Workflow.Parser do
     {commands, e7} = commands(map)
     {description, e8} = optional_string(map, "description", "")
     {release, e9} = boolean(map, "release", "")
+    {release_files, e10} = string_list(map, "release_files", "")
+    {release_notes, e11} = optional_string(map, "release_notes", "")
 
     workflow = %Workflow{
       version: version,
@@ -204,11 +207,23 @@ defmodule ForgeCore.Workflow.Parser do
       limits: limits,
       defaults: defaults,
       commands: commands,
-      release: release
+      release: release,
+      release_files: release_files || [],
+      release_notes: release_notes
     }
 
     {workflow,
-     unknown_keys(map, @top_keys, "") ++ e1 ++ e2 ++ e3 ++ e4 ++ e5 ++ e6 ++ e7 ++ e8 ++ e9}
+     unknown_keys(map, @top_keys, "") ++
+       e1 ++
+       e2 ++
+       e3 ++
+       e4 ++
+       e5 ++
+       e6 ++
+       e7 ++
+       e8 ++
+       e9 ++
+       e10 ++ e11}
   end
 
   # `docs/design/workflow-grammar-v1.md` § Commands. A mapping of names, each a mapping of its own;

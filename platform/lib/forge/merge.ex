@@ -532,18 +532,18 @@ defmodule Forge.Merge do
   # commit at all somewhere that has neither — a container image, where `git` then fails with
   # "unable to auto-detect email address". `Git.create_root_commit/2` already states all four;
   # this is the same rule at the other site that makes commits.
-  @committer [{"GIT_COMMITTER_NAME", "forge"}, {"GIT_COMMITTER_EMAIL", "forge@localhost"}]
-
   # Nobody approved it, so the engine is the author as well as the committer. Stating the
   # committer alone left the *author* to the same passwd-entry fallback the rule above exists to
   # avoid, so the engine's own merge was the one merge that failed wherever there is no global
   # identity — a container, or a worker machine with a private HOME
   # (`docs/design/git-hosting.md` § The per-job token).
-  defp author(nil),
-    do: [{"GIT_AUTHOR_NAME", "forge"}, {"GIT_AUTHOR_EMAIL", "forge@localhost"}] ++ @committer
+  defp author(nil) do
+    {name, email} = Git.identity()
+    [{"GIT_AUTHOR_NAME", name}, {"GIT_AUTHOR_EMAIL", email}] ++ Git.committer_env()
+  end
 
   defp author(%User{email: email}) do
-    [{"GIT_AUTHOR_NAME", email}, {"GIT_AUTHOR_EMAIL", email}] ++ @committer
+    [{"GIT_AUTHOR_NAME", email}, {"GIT_AUTHOR_EMAIL", email}] ++ Git.committer_env()
   end
 
   # The version the transition named, not the latest: a conversation that rewrote `commit-message`
@@ -591,15 +591,11 @@ defmodule Forge.Merge do
     end
   end
 
-  # FORGE_INTERNAL is what `pre-receive` accepts as authority over the default branch. It is set
-  # here and nowhere else, and the git endpoint removes it from every child it spawns.
+  # `Git.push_internal/2` sets FORGE_INTERNAL, which is what `pre-receive` accepts as authority
+  # over the default branch.
   defp push(repo, %Project{default_branch: default}, sha) do
-    env = [{"FORGE_INTERNAL", "1"}]
-
-    case Git.run(repo, ["push", "--quiet", ".", {:data, "#{sha}:refs/heads/#{default}"}],
-           env: env
-         ) do
-      {:ok, _out} -> :ok
+    case Git.push_internal(repo, "#{sha}:refs/heads/#{default}") do
+      :ok -> :ok
       {:error, reason} -> {:error, {:push_refused, reason}}
     end
   end

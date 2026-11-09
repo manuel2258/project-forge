@@ -171,6 +171,15 @@ credentials its jobs may be paid for with, assigned by each credential's owner.
 project's jobs may be handed and the platform never uses, written by a project admin. Deleted
 rather than removed, and deleting destroys the value. `design/secrets.md`.
 
+**release_record** — `id`, `project_id`, `ticket_id` (unique: a release has one), `version` (nil when none
+was known), `concluded_at`, `commit_sha`, `notes` (text, nil without any), `notes_document` and
+`notes_version` (where it came from), `files` (jsonb list of `{name, version, size}`: the exact
+blob versions listed, not copies), `links` (jsonb list of `{label, url, document, version}`),
+`tag_name`, `tag_status` (`tagged`, `taken`, `failed`, `no_version`), `tag_detail` (the other
+commit a taken name points at, or the reason a tag was not made), `inserted_at`. Written once when a
+release ticket ends `done` and never updated, so it has no `updated_at`; releases concluded before it
+existed have none. `design/ticket-types.md` § The record, the tag, the history.
+
 **job_run** — `job_id`, `credential_id`, `worker_id`, `started_at`, `finished_at`, `cost_usd`. One
 process of a job: a resume, a requeue or a reopened conversation is a new run. Spend is recorded
 here per credential, set from the harness's running total for that process, less what a session it resumed had already

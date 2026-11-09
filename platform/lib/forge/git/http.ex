@@ -27,8 +27,9 @@ defmodule Forge.Git.Http do
 
   # Every FORGE_* variable the platform's own environment might carry, listed so it can be
   # removed. `System.cmd/3` MERGES `:env` with the BEAM's environment rather than replacing it,
-  # and FORGE_INTERNAL is what pre-receive accepts as authority over the default branch: leaking
-  # it into a CGI child would let any credential that reaches the network rewrite it.
+  # and FORGE_INTERNAL is what pre-receive accepts as authority over the default branch and over
+  # tags: leaking it into a CGI child would let any credential that reaches the network rewrite the
+  # one and create the other.
   @cleared ~w(FORGE_INTERNAL FORGE_ALLOWED_REF FORGE_ALLOWED_REFS FORGE_NO_REWRITE FORGE_TOKEN_ID FORGE_TICKET_ID FORGE_PROJECT
               FORGE_GIT_TOKEN FORGE_GIT_URL)
 
@@ -122,31 +123,33 @@ defmodule Forge.Git.Http do
 
     cleared = Enum.map(@cleared, &{&1, nil})
 
-    set = [
-      {"GIT_PROJECT_ROOT", Path.dirname(repo_path)},
-      {"GIT_HTTP_EXPORT_ALL", "1"},
-      {"PATH_INFO", path_info},
-      {"REQUEST_METHOD", conn.method},
-      {"QUERY_STRING", conn.query_string},
-      {"CONTENT_TYPE", header(conn, "content-type")},
-      {"CONTENT_LENGTH", Integer.to_string(length)},
-      # Clients gzip upload-pack request bodies, and http-backend inflates only when it sees this.
-      {"HTTP_CONTENT_ENCODING", header(conn, "content-encoding")},
-      # Without this every protocol v2 client silently degrades to v0.
-      {"GIT_PROTOCOL", header(conn, "git-protocol")},
-      {"REMOTE_USER", remote_user(token)},
-      {"REMOTE_ADDR", conn.remote_ip |> :inet.ntoa() |> to_string()},
-      {"SERVER_PROTOCOL", "HTTP/1.1"},
-      {"GATEWAY_INTERFACE", "CGI/1.1"},
-      {"SERVER_SOFTWARE", "forge"},
-      {"GIT_COMMITTER_NAME", "forge"},
-      {"GIT_COMMITTER_EMAIL", "forge@localhost"},
-      {"FORGE_ALLOWED_REFS", token |> Forge.Git.Tokens.allowed_refs(project) |> allowed()},
-      {"FORGE_NO_REWRITE", if(token.git_access in [:developer, :admin], do: "1")},
-      {"FORGE_TOKEN_ID", token.id},
-      {"FORGE_TICKET_ID", token.ticket_id},
-      {"FORGE_PROJECT", project.name}
-    ]
+    set =
+      [
+        {"GIT_PROJECT_ROOT", Path.dirname(repo_path)},
+        {"GIT_HTTP_EXPORT_ALL", "1"},
+        {"PATH_INFO", path_info},
+        {"REQUEST_METHOD", conn.method},
+        {"QUERY_STRING", conn.query_string},
+        {"CONTENT_TYPE", header(conn, "content-type")},
+        {"CONTENT_LENGTH", Integer.to_string(length)},
+        # Clients gzip upload-pack request bodies, and http-backend inflates only when it sees this.
+        {"HTTP_CONTENT_ENCODING", header(conn, "content-encoding")},
+        # Without this every protocol v2 client silently degrades to v0.
+        {"GIT_PROTOCOL", header(conn, "git-protocol")},
+        {"REMOTE_USER", remote_user(token)},
+        {"REMOTE_ADDR", conn.remote_ip |> :inet.ntoa() |> to_string()},
+        {"SERVER_PROTOCOL", "HTTP/1.1"},
+        {"GATEWAY_INTERFACE", "CGI/1.1"},
+        {"SERVER_SOFTWARE", "forge"}
+      ] ++
+        Forge.Git.committer_env() ++
+        [
+          {"FORGE_ALLOWED_REFS", token |> Forge.Git.Tokens.allowed_refs(project) |> allowed()},
+          {"FORGE_NO_REWRITE", if(token.git_access in [:developer, :admin], do: "1")},
+          {"FORGE_TOKEN_ID", token.id},
+          {"FORGE_TICKET_ID", token.ticket_id},
+          {"FORGE_PROJECT", project.name}
+        ]
 
     # The cleared list comes first so a variable this request does set wins over its removal.
     Enum.uniq_by(Enum.reject(set, &(elem(&1, 1) == nil)) ++ cleared, &elem(&1, 0))

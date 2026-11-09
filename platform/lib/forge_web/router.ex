@@ -47,6 +47,9 @@ defmodule ForgeWeb.Router do
       # § The project's repository.
       live "/projects/:name/repo", RepoLive
       live "/projects/:name/repo/commits/:sha", RepoCommitLive
+      # A project's releases, read-only. See docs/design/ui.md § A project's releases.
+      live "/projects/:name/releases", ReleasesLive
+      live "/projects/:name/releases/:id", ReleaseLive
       live "/tickets/new", TicketNewLive
       live "/tickets/:project/:number", TicketLive
       live "/tickets/:project/:number/review", ReviewLive

@@ -251,10 +251,20 @@ defmodule ForgeCore.Workflow.Imports do
       |> Enum.map(&to_string/1)
       |> Enum.sort()
       |> Enum.flat_map(fn
-        key when key in @library_keys -> []
-        "import" -> [Error.new("import", "imports are one level deep: a library cannot import")]
-        "release" -> [Error.new("release", @release_in_library)]
-        key -> [Error.new(key, "not allowed in a library, which holds only #{library_keys()}")]
+        key when key in @library_keys ->
+          []
+
+        "import" ->
+          [Error.new("import", "imports are one level deep: a library cannot import")]
+
+        "release" ->
+          [Error.new("release", @release_in_library)]
+
+        key when key in ~w(release_files release_notes) ->
+          [Error.new(key, String.replace(@release_in_library, "set release", "set #{key}"))]
+
+        key ->
+          [Error.new(key, "not allowed in a library, which holds only #{library_keys()}")]
       end)
 
     shapes =

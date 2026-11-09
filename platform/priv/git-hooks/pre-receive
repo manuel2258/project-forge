@@ -7,7 +7,8 @@
 #   FORGE_ALLOWED_REFS the refs this credential may write, space-separated, set per request by
 #                      the CGI wrapper: one for a job, every open ticket's for a developer
 #   FORGE_NO_REWRITE   set to 1 for a developer or admin credential: no non-fast-forward anywhere
-#   FORGE_INTERNAL     set to 1 only by the platform's own merge, never by anything on the network
+#   FORGE_INTERNAL     set to 1 only by the platform's own pushes (the merge, a release's tag), never
+#                      by anything on the network
 set -euo pipefail
 
 zero=0000000000000000000000000000000000000000
@@ -33,6 +34,22 @@ deny() {
 
 while read -r old new ref; do
   [ "$new" = "$zero" ] && deny "refs are never deleted here ($ref)"
+
+  # A tag is the platform's alone: a release's, made when it concludes. Created and never moved,
+  # and only on a commit that is already in the default branch's history, so it names something
+  # that landed. Every token is refused, the CGI having stripped FORGE_INTERNAL from its request.
+  # `$new` may be an annotated tag object; `^{commit}` names the commit it peels to. Dropping the
+  # peel is an equivalent mutant: `merge-base --is-ancestor` peels a tag object itself (checked
+  # with git), and a tree or blob fails either way and is refused.
+  case "$ref" in
+    refs/tags/*)
+      [ "$internal" = "1" ] || deny "tags are made by the platform, not by a credential ($ref)"
+      [ "$old" = "$zero" ] || deny "a tag is never moved ($ref)"
+      git merge-base --is-ancestor "$new^{commit}" "refs/heads/$default" ||
+        deny "a tag names a commit in the history of $default ($ref)"
+      continue
+      ;;
+  esac
 
   case "$ref" in
     refs/heads/*) : ;;

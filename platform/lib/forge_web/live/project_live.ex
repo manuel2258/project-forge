@@ -79,6 +79,7 @@ defmodule ForgeWeb.ProjectLive do
       # workflow has just changed these are different, and saying so is the point.
       current: current,
       release: release_block(socket, current, project),
+      latest_release: Forge.ReleaseRecords.latest(project),
       clone_url: Url.for(project),
       mirrors: Projects.list_mirrors(project),
       open: Enum.count(tickets, &(&1.status in Forge.Tickets.Ticket.open_statuses())),
@@ -493,6 +494,12 @@ defmodule ForgeWeb.ProjectLive do
           Repository ›
         </.link>
         <.link
+          navigate={~p"/projects/#{@project.name}/releases"}
+          class="flex min-h-[46px] items-center text-sm text-primary hover:underline"
+        >
+          Releases ›
+        </.link>
+        <.link
           navigate={~p"/tickets/new?project=#{@project.name}"}
           class="flex min-h-[46px] items-center text-sm text-primary hover:underline"
         >
@@ -505,6 +512,12 @@ defmodule ForgeWeb.ProjectLive do
           New chat ›
         </.link>
       </header>
+
+      <ForgeWeb.ReleaseComponents.latest
+        :if={@latest_release}
+        record={@latest_release}
+        project={@project}
+      />
 
       <.release_block :if={@release} release={@release} project={@project} drafts={@drafts} />
 

@@ -221,6 +221,7 @@ defmodule Forge.CommandsTest do
       assert assignment["spec"]["command"]["name"] == "build"
       refute Map.has_key?(assignment, "credential")
       refute Map.has_key?(assignment, "backlog")
+      refute Map.has_key?(assignment, "changelog")
       assert String.starts_with?(assignment["store"]["log_key"], "job/#{build.id}/")
       # A script runs no harness, so it has no session to upload.
       refute Map.has_key?(assignment["store"], "session_prefix")

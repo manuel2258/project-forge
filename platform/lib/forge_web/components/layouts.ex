@@ -282,7 +282,7 @@ defmodule ForgeWeb.Layouts do
 
   @doc "The release this node runs: the platform application's version, which is `VERSION`'s."
   @spec version() :: String.t()
-  def version, do: :forge |> Application.spec(:vsn) |> to_string()
+  def version, do: Forge.Changelog.running()
 
   attr :capacity, :map, required: true
   attr :prefix, :string, required: true

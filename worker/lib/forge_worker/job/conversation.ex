@@ -288,6 +288,7 @@ defmodule ForgeWorker.Job.Conversation do
       harness_opts: harness_opts,
       secrets: secrets,
       backlog: assignment["backlog"],
+      changelog: assignment["changelog"],
       session: session,
       hold_prompt: state.hold,
       # A conversation is bounded by going idle, not by the clock: a chat someone is still in

@@ -18,7 +18,10 @@ defmodule Forge.Look.Setups do
 
   @callback build() :: built
 
-  @setups %{"ticket" => Forge.Look.Setups.Ticket}
+  @setups %{
+    "ticket" => Forge.Look.Setups.Ticket,
+    "forge_release" => Forge.Look.Setups.ForgeRelease
+  }
 
   @doc "The registered setups, by name."
   @spec all() :: %{String.t() => module}

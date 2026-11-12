@@ -2134,6 +2134,21 @@ defmodule ForgeWorker.LinkTest do
       refute finished["message"] =~ "\n"
     end
 
+    # A conversation reaches the directory by its own path, not the job's (`Link.start_runner/6`),
+    # so the field has to be carried by each: removing it from `Conversation` fails only this.
+    test "a conversation is handed the changelog too", context do
+      %{client: client, origin: origin, root: root} = context
+      connect_and_assert_join(client, @topic, %{}, :ok)
+      assert_push(@topic, "ready", %{})
+
+      job = origin |> chat() |> Map.put("changelog", "## 9.9.9\n")
+      push(client, @topic, "assign", job)
+      {%{"turn" => 1}, _before} = take_push("turn")
+
+      job_dir = Path.join([root, "jobs", job["spec"]["job_id"]])
+      assert File.read!(Path.join([job_dir, "platform", "changelog.md"])) == "## 9.9.9\n"
+    end
+
     test "a chat taken on and closed is a line each", context do
       %{client: client, origin: origin} = context
       connect_and_assert_join(client, @topic, %{}, :ok)
@@ -3046,6 +3061,7 @@ defmodule ForgeWorker.LinkTest do
     job =
       origin
       |> assignment(scenario: "proposes")
+      |> Map.put("changelog", "## 9.9.9\n")
       |> Map.put("backlog", %{
         "index" => "| 7 | verifying | active | Fix the leaderboard |\n",
         "tickets" => [
@@ -3061,6 +3077,8 @@ defmodule ForgeWorker.LinkTest do
     # empty path and proves nothing — the trap the chat fixture above already records.
     job_dir = Path.join([root, "jobs", job["spec"]["job_id"]])
     assert File.read!(Path.join([job_dir, "tickets", "7.md"])) =~ "It sorts up."
+    # The changelog rides the same assignment and lands beside the compiled-in documents.
+    assert File.read!(Path.join([job_dir, "platform", "changelog.md"])) == "## 9.9.9\n"
     assert File.read!(Path.join(job_dir, "fake-backlog.txt")) =~ "Fix the leaderboard"
 
     assert %{"proposals" => proposals, "invalid_proposals" => invalid} = result

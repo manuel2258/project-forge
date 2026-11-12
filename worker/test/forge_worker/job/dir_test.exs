@@ -623,6 +623,34 @@ defmodule ForgeWorker.Job.DirTest do
       assert Bitwise.band(mode, 0o222) == 0
     end
 
+    # The changelog is the platform's, sent with the assignment and not compiled in
+    # (`docs/design/changelog.md` § Delivery).
+    test "holds the changelog the platform sent, read-only" do
+      root = tmp_dir("root")
+      job_dir = Dir.prepare(root, spec(), changelog: "## 0.1.2\n\n- a thing\n")
+
+      path = Path.join([job_dir, "platform", "changelog.md"])
+      assert File.read!(path) == "## 0.1.2\n\n- a thing\n"
+      %File.Stat{mode: mode} = File.stat!(path)
+      assert Bitwise.band(mode, 0o222) == 0
+      # beside the compiled-in ones, not instead of them
+      assert File.exists?(Path.join([job_dir, "platform", "platform.md"]))
+    end
+
+    test "has no changelog when the platform sent none, and a resume without one drops the old" do
+      root = tmp_dir("root")
+      spec = spec()
+
+      job_dir = Dir.prepare(root, spec)
+      refute File.exists?(Path.join([job_dir, "platform", "changelog.md"]))
+
+      Dir.prepare(root, spec, changelog: "## 0.1.2\n")
+      assert File.exists?(Path.join([job_dir, "platform", "changelog.md"]))
+
+      Dir.prepare(root, spec, resume: true)
+      refute File.exists?(Path.join([job_dir, "platform", "changelog.md"]))
+    end
+
     # A resumed run gets the current documents, not the ones its first attempt was handed.
     test "is rewritten on a resume" do
       root = tmp_dir("root")

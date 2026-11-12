@@ -1067,6 +1067,7 @@ defmodule ForgeWorker.Link do
       harness_opts: harness_opts,
       secrets: secrets,
       backlog: assignment["backlog"],
+      changelog: assignment["changelog"],
       command_logs: logs,
       session: session,
       # Named in the continuation a resumed run is handed, read from the tree it is about to run

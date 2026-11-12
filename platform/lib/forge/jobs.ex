@@ -933,9 +933,10 @@ defmodule Forge.Jobs do
     )
   end
 
-  # The backlog is the one thing a job is handed that is not an artifact version, so "what was
-  # this built on?" is answered by the hash rather than by a manifest entry: the snapshot is
-  # reproducible from the log, which is what keeps `docs/decisions.md`'s promise intact for it.
+  # The backlog is the one thing a job is handed that varies and is not an artifact version, so
+  # "what was this built on?" is answered by the hash rather than by a manifest entry: the snapshot
+  # is reproducible from the log, which is what keeps `docs/decisions.md`'s promise intact for it.
+  # (The changelog is handed over too, but it is the release's, fixed by the version that ran it.)
   defp log_backlog(%Job{} = job, %{"backlog" => %{} = backlog}) do
     Events.append("job.backlog", :system, %{
       ticket_id: job.ticket_id,
@@ -986,6 +987,10 @@ defmodule Forge.Jobs do
       # Every job, workflow and chat alike, with no grammar key: an unread file costs nothing
       # (`docs/design/ticket-proposals.md` § Reading the backlog).
       "backlog" => Backlog.compose(project),
+      # The same text for every project, so a job sees nothing of another's. It is sent rather than
+      # compiled into the worker so that it matches the platform that assigns it
+      # (`docs/design/changelog.md` § Delivery).
+      "changelog" => Forge.Changelog.text(),
       "seed" => seed(project),
       # The job's own figures, from the row it was admitted with, rather than one number for
       # every job (`docs/design/provisioning.md` § What a job asks for). `cpu_weight` stays a

@@ -289,6 +289,28 @@ defmodule Forge.BacklogTest do
       assert assignment["backlog"]["hash"] =~ ~r/^[0-9a-f]{64}$/
     end
 
+    # Every job is handed the same text and the platform's own: it is sent, not compiled into the
+    # worker, so that it matches the release that assigned the job (`changelog.md` § Delivery).
+    test "carries the changelog for a job and for a conversation" do
+      project = project_fixture()
+      ticket = ticket_fixture(%{project: project})
+
+      job =
+        job_fixture(%{
+          ticket: ticket,
+          spec: %{"prompt" => "agents/refine.md", "budget" => %{"turns" => 5, "cost" => 1.0}}
+        })
+
+      chat = chat_fixture(%{project: project})
+      project = Projects.get!(project.id)
+
+      assert Forge.Jobs.assignment(job, ticket, project, "token")["changelog"] ==
+               Forge.Changelog.text()
+
+      assert Forge.Jobs.assignment(chat, nil, project, "token")["changelog"] ==
+               Forge.Changelog.text()
+    end
+
     test "carries it for a conversation too, which has no ticket at all" do
       project = project_fixture()
       ticket_fixture(%{project: project, number: 12, title: "Scores vanish"})

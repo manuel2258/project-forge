@@ -503,4 +503,21 @@ defmodule ForgeCore.Workflow.ProjectWorkflowsTest do
              "agents/publish.md does not say how to end on #{outcome}"
     end
   end
+
+  # **The record keeps the notes, and the one approval covers both documents.**
+  # `release-notes.md` is what the record and its tag carry (`ticket-types.md` § Releases), and
+  # `changelog-section.md` is the release's section for the projects forge hosts, which `publishing`
+  # files unchanged (`changelog.md` § Writing a section): a person approves both before anything
+  # is built, so a section nobody read cannot ship.
+  test "a release records its notes, and one approval covers the notes and the changelog section" do
+    workflow = load!(Path.join(@forge, "workflows/release.yml"))
+
+    assert workflow.release_notes == "release-notes.md"
+
+    assert [%Transition{approve: approve}] = edges_between(workflow, "refining", "publishing")
+    assert Enum.sort(approve) == ["changelog-section.md", "release-notes.md"]
+
+    assert "changelog-section.md" in Workflow.state(workflow, "refining").produces
+    assert "changelog-section.md" in Workflow.state(workflow, "publishing").inputs
+  end
 end

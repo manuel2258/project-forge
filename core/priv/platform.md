@@ -154,7 +154,45 @@ own branch like a job and the person merges that branch if they want the work; c
 conversation deletes a branch that was not merged, unless it would not merge cleanly.
 
 Bootstrapping a project — writing its first `.forge/workflow.yml` — is a conversation's job, not a
-workflow's, because until that file exists there is no workflow to run.
+workflow's, because until that file exists there is no workflow to run. So is upgrading a project
+to a newer forge (§ Upgrading to a newer forge).
+
+## Upgrading to a newer forge
+
+`$FORGE_JOB/platform/changelog.md` is what each forge release changed for the projects it hosts,
+one `## X.Y.Z` section per release, newest first, written for a project and not for whoever runs
+the node. Its newest section is the release this platform runs. A project records the release it
+was last brought up to in **one file, `.forge/forge-release`**, holding a version and a newline
+(`0.19.0`); the platform reads the same file and shows it on the project page.
+
+Judge what the file holds by this rule, in this order. A **forge release** is 0.1.1 (the baseline,
+which has no section) or a version the changelog has a section for.
+
+1. No file: *not recorded*. The project counts as being at 0.1.1.
+2. Over 64 bytes, or not of the form `N.N.N` after trimming whitespace (`v0.17.0`, text): *not a
+   release*.
+3. Greater than the release this platform runs (the newest section): *newer*.
+4. A release in the list: *current* when it is the one this platform runs, *behind* when lower.
+5. Anything else, such as `0.12.9`, which is well formed and has no section: *not a release*.
+
+When a person asks you to bring the project up to the latest forge release:
+
+- *Newer*: say so and change nothing. *Not a release*: say so and ask which release the project
+  is really at. Do not guess.
+- Read each section after the recorded release, **oldest first**. Each entry is marked **must
+  change** (a project that uses the thing breaks or behaves differently until it changes) or
+  **may adopt** (new and optional).
+- Apply every **must change** that concerns something the project already uses, without asking.
+  Edit the workflow files, prompts and command scripts under `.forge/` to match.
+- Do not adopt a feature the project does not use yet. List the **may adopt** entries that apply
+  and adopt only the ones the person picks.
+- Set `.forge/forge-release` to the release this platform runs **last**, and only when every
+  *must change* since the old value is applied and every new feature was offered. An upgrade cut
+  off halfway leaves the old value in place. A section saying *Nothing for projects in this
+  release.* still counts as read.
+- Commit on the conversation's branch and tell the person to merge it.
+
+This is a conversation's work and never a job's: a job may not edit anything under `.forge/`.
 
 ## Releases
 
@@ -183,7 +221,8 @@ platform whatever you do, and a job stopped by a ceiling is recorded as having b
 
 - `$FORGE_JOB/platform/` — this file, and `workflow-grammar.md`, which is what
   `.forge/workflow.yml`, or a ticket type's file under `.forge/workflows/`, may contain and what
-  the validator accepts.
+  the validator accepts, and `changelog.md`, which is what each forge release changed for projects
+  (§ Upgrading to a newer forge).
 - `$FORGE_JOB/inputs/` — what you were given, read-only.
 - `$FORGE_JOB/out/` — what you write: a job's declared outputs, or a conversation's documents.
 - `$FORGE_JOB/history/` — for a conversation about a ticket, what already ran on it.

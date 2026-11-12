@@ -7,6 +7,10 @@ description: Cut and publish a forge release — version bump, platform image, H
 # carries that. **It concludes by itself**: the approval of `release-notes.md` is the one a person
 # gives, and a publish that went as planned merges with no second one (the transitions below).
 release: true
+# **The release record carries this document as its notes, and its tag as the tag's message**
+# (`docs/design/ticket-types.md` § The record, the tag, the history). `changelog-section.md` is not
+# the notes: it is addressed to the projects forge hosts and goes into the changelog instead.
+release_notes: release-notes.md
 initial: refining
 
 defaults:
@@ -83,7 +87,10 @@ states:
       ghcr-check: { max: 3 }
       hetzner-check: { max: 3 }
     inputs: [ticket]
-    produces: [release-notes.md]
+    # **Two documents, one approval.** `changelog-section.md` is this release's section of the
+    # changelog every hosted project's agent reads (`docs/design/changelog.md` § Writing a section);
+    # `publishing` files exactly the text a person approved with the notes.
+    produces: [release-notes.md, changelog-section.md]
     # Turns at 60, as on every job state here costing a few dollars: `.forge/common.yml`'s
     # `presenting` carries why. No release has been stopped by this ceiling — the raise is the
     # rule applied to the class, not a fix for something observed here.
@@ -102,7 +109,7 @@ states:
     may_invoke:
       release-build: { max: 3 }
       hetzner-snapshot: { max: 2 }
-    inputs: [release-notes.md]
+    inputs: [release-notes.md, changelog-section.md]
     # `commit-message` because this workflow has no `presenting` state and `publishing` is the
     # equivalent last stop before `merged` (`.forge/common.yml`'s `presenting`).
     produces: [publish-report.md, changeset, commit-message]
@@ -129,9 +136,9 @@ states:
 # log rather than the engine's to guess by running it again. So it still sticks, which is what
 # sticking is for.
 #
-# **A release is approved once**, on `release-notes.md`, before anything is built. By the time
-# `publishing` ends the image is pushed and cannot be taken back, so a second approval of the
-# `VERSION` bump could only delay saying so on `main`. `done` therefore goes straight to `merged`
+# **A release is approved once**, on `release-notes.md` and `changelog-section.md` together, before
+# anything is built. By the time `publishing` ends the image is pushed and cannot be taken back, so a
+# second approval of the `VERSION` bump and the filed section could only delay saying so on `main`. `done` therefore goes straight to `merged`
 # with no `approve`, and the ticket concludes on its own (`docs/design/ticket-types.md`
 # § Releases). `snapshot_failed` goes to `release_ready` instead, for the reason `publishing`
 # gives, and there the merge waits for a person.
@@ -139,10 +146,11 @@ states:
 # Both edges queue, as in `bug.yml` and `dev.yml`: a release's commit takes its turn in the same
 # line as every other ticket's. `merged` here names no `on_conflict`, so a release whose commit no
 # longer merges sticks where it was queued from, with the conflicting paths, rather than going
-# anywhere. All it changes is `VERSION`, and only one release is open at a time, so a conflict
-# there means a release landed some other way meanwhile — which is a person's to sort out.
+# anywhere. All it changes is `VERSION` and the changelog's newest section, and only one release is
+# open at a time, so a conflict there means a release landed some other way meanwhile — which is a
+# person's to sort out.
 transitions:
-  - { from: refining,      to: publishing,    approve: [release-notes.md] }
+  - { from: refining,      to: publishing,    approve: [release-notes.md, changelog-section.md] }
   - { from: publishing,    to: merged,        queue: true }
   - { from: publishing,    to: release_ready, when: snapshot_failed }
   - { from: release_ready, to: merged,        approve: [changeset], queue: true }

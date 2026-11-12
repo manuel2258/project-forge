@@ -1,11 +1,12 @@
 ---
 name: release
-description: Cut a forge release from main without stopping to ask — decide the version bump, bump VERSION, build and push the platform image with bin/release, and build the Hetzner worker snapshot when the worker changed. Run by the land skill after every landing.
+description: Cut a forge release from main without stopping to ask — decide the version bump, write the changelog section, bump VERSION, build and push the platform image with bin/release, and build the Hetzner worker snapshot when the worker changed. Run by the land skill after every landing.
 ---
 
 # release
 
-A release is a `chore(release): X.Y.Z` commit on `main` that changes `VERSION` and nothing else,
+A release is a `chore(release): X.Y.Z` commit on `main` that changes `VERSION` and files the
+release's section of the changelog (`platform/priv/changelog.md`) and nothing else,
 and the platform image at `ghcr.io/manuel2258/forge:X.Y.Z` — which
 `ghcr.io/manuel2258/forge:latest` then names too. There is no git tag: the release commit marks a
 release in git, and `bin/release` refuses a version the registry already holds, which is what the
@@ -158,11 +159,21 @@ devshell — `nix develop --command bash` for a shell, or prefix a command with
    pre-0.16.0. Keep the attribution trailers the session requires. Nobody approves it; write it
    as if someone will read it in `git log` a year from now, because that is who reads it.
 
+4a. **Write the changelog section** — the release's section of the changelog every hosted
+   project's agent reads, by `docs/design/changelog.md` § Writing a section: over the same
+   `$last..HEAD` range, from the surfaces it lists, leaving out what only concerns running a node.
+   It starts `## X.Y.Z` and is a section even when nothing in the range concerns projects (then
+   it is the heading and *Nothing for projects in this release.*). Write it to a scratch file, for
+   example `/tmp/changelog-section.md`. It is step 4a, not 5, so that the steps other places name
+   by number stay as they are. **No release reaches `main` without one**:
+   `Forge.ChangelogTest` fails when the newest section is not the version `VERSION` names.
+
 5. **Bump and push.**
 
    ```
    printf '%s\n' X.Y.Z > VERSION
-   git add VERSION
+   bin/changelog-add /tmp/changelog-section.md    # files it above the newest section
+   git add VERSION platform/priv/changelog.md
    git commit            # the message from step 4
    git push origin main
    ```

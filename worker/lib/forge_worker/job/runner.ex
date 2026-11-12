@@ -23,6 +23,8 @@ defmodule ForgeWorker.Job.Runner do
       spawn into the process's environment, never its arguments, and held sealed otherwise.
     * `:backlog` - the project's tickets, as the platform composed them at assignment. Written
       to `tickets/` in the job directory; see `ForgeWorker.Job.Dir.prepare/3`.
+    * `:changelog` - the text of the changelog for hosted projects, as the platform sent it at
+      assignment. Written to `platform/changelog.md`; see `ForgeWorker.Job.Dir.prepare/3`.
     * `:command_logs` - `[{file, path}]`, the logs of the commands a parked job invoked, copied
       to `commands/` in the job directory; see `ForgeWorker.Job.Dir.prepare/3`.
     * `:head` - the commit the worktree is at. Named in the continuation a resumed run is
@@ -154,6 +156,7 @@ defmodule ForgeWorker.Job.Runner do
       Dir.prepare(Keyword.fetch!(opts, :root), spec,
         resume: resume? and not fork? and spec.kind != :chat,
         backlog: Keyword.get(opts, :backlog),
+        changelog: Keyword.get(opts, :changelog),
         command_logs: Keyword.get(opts, :command_logs, []),
         session: Keyword.get(opts, :session)
       )

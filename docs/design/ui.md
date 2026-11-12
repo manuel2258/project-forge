@@ -1087,6 +1087,36 @@ page says what the repository means to the platform; what is actually in it is
 **It links to the project's releases** — `Releases ›` beside `Repository ›` — and shows the latest
 record in one line when there is one (§ A project's releases).
 
+**It says which forge release the project was written for** (`changelog.md` § The project page).
+The side panel always has a *forge release* line beside *default branch*: the release recorded in
+`.forge/forge-release`, e.g. `0.17.0`, or *not recorded*. It is read from the tip of the default
+branch, the same commit the "Workflow the next ticket will pin" block reads, and redrawn whenever
+that block is, so a push to the default branch is not drawn live, as it is not for the workflow. The
+line and every notice say **forge** in words, so neither is read as the project's own releases,
+which the same page draws as `Releases ›`. A notice is the page's warning box, at full width
+directly above the workflow block, with nothing in it hidden on a phone. Five cases, by the rule in
+`changelog.md` § The one list:
+
+- **Behind** (older than the release the node runs): *Written for forge 0.17.0. This node runs
+  forge 0.19.0.* It shows whenever the project is older, even when every newer section says there is
+  nothing for projects.
+- **Not recorded**: the project records no forge release, so it counts as forge 0.1.1, then the
+  node's release.
+- **Newer than the node**: written for a newer forge than the node runs, both named, and features
+  it uses may not work here.
+- **Not a release**: the file does not name a forge release, with what it holds quoted as plain
+  text, cut short (or, over 64 bytes, said to be too large).
+- **Current**: the line alone, and no notice.
+- **No default branch** (nothing to read from): the line says *not recorded* and no notice is
+  drawn, because the "cannot take a ticket" block below already speaks for that repository.
+
+*Behind* and *not recorded* carry a link, at least the page's minimum target height, that opens a
+new chat for this project with the upgrade request already typed in the message box and naming the
+release the node runs. Nothing is sent until the person sends it, and a warning nobody can act on
+is a lie (§ Semantics that must not be lost). Every member who can see the page sees the line, the
+notice and the link, since every member may open a conversation; nobody outside the project sees
+the page. There is nothing typed on the page, so a reconnect redraws the same.
+
 **It lists the project's conversations**, in the order and the sections of § Chats is a destination
 on both. The board is the workflow and a plain conversation is not on it — it has no state to be in; a
 chat step is the ticket's, and on the board as its state — so without this a chat is a thing you can

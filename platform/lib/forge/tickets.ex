@@ -163,17 +163,30 @@ defmodule Forge.Tickets do
 
   `single: false` leaves the single file out, unparsed, for a caller that wants only types — the
   backlog, which every assignment composes and which says nothing about a project without types.
+
+  `at: sha` reads at that commit instead of resolving the default branch, for a caller that has
+  resolved it already and reads something else from the same commit (`ForgeWeb.ProjectLive`).
   """
   @spec types(Project.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def types(%Project{} = project, opts \\ []) do
     repo = Projects.repo_path(project)
 
-    with {:ok, base} <- Git.resolve(repo, project.default_branch),
+    with {:ok, base} <- tip(repo, project, opts),
          {:ok, layout} <- TicketTypes.layout(repo, base) do
       entries = entries(layout, Keyword.get(opts, :single, true))
 
       types = Enum.map(entries, &read_type(repo, base, &1))
       {:ok, %{form: layout.form, types: types, not_types: layout.not_types}}
+    end
+  end
+
+  # The commit to read: the one the caller already resolved (`at:`), so that a page drawing the
+  # workflow and something else from the same branch draws both from one commit, or the default
+  # branch's tip.
+  defp tip(repo, project, opts) do
+    case Keyword.get(opts, :at) do
+      nil -> Git.resolve(repo, project.default_branch)
+      sha -> {:ok, sha}
     end
   end
 

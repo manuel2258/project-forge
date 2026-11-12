@@ -123,6 +123,7 @@ $FORGE_JOB/archive/                      # the project's past, read-only and liv
 $FORGE_JOB/conversation.md               # a reopened conversation's past, read-only
 $FORGE_JOB/platform/platform.md          # how the platform works, read-only
 $FORGE_JOB/platform/workflow-grammar.md  # workflow-grammar-v1.md as compiled in, read-only
+$FORGE_JOB/platform/changelog.md          # what each forge release changed for projects (changelog.md), from the assignment, read-only
 $FORGE_JOB/home                          # HOME for the harness process
 ```
 

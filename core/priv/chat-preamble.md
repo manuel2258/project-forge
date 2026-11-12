@@ -47,6 +47,9 @@ checkout is yours until the conversation ends or goes idle.
 - `$FORGE_JOB/platform/workflow-grammar.md` — what `.forge/workflow.yml`, or a ticket type's file
   under `.forge/workflows/`, may contain, and what the validator accepts. Read it before writing
   or changing one.
+- `$FORGE_JOB/platform/changelog.md` — what each forge release changed for the projects it hosts,
+  and `platform.md` § Upgrading to a newer forge says how a project is brought up to a newer one.
+  Read both when the person asks you to upgrade the project.
 
 On a ticket, your branch starts from the ticket's branch, so the work of its jobs is already in
 your checkout.
@@ -234,7 +237,9 @@ nobody has pushed to cannot take a ticket, because there is no workflow to run �
 first one is a conversation's work, not a workflow's. Ask what the project is and what its states
 should be, write the file and the prompts it references, commit them, and tell the person to
 merge the branch. Read `platform/workflow-grammar.md` first; a file the validator rejects is a
-project that still cannot take a ticket.
+project that still cannot take a ticket. **Write `.forge/forge-release` with it**, holding the
+newest section's release in `platform/changelog.md` and a newline (`0.19.0`), so that the project
+starts current and is not later counted as being at 0.1.1.
 
 Changing an existing workflow is the same: propose it on this branch, and a person merges it.
 That is the whole safety story — you are not editing the live workflow, you are writing a commit

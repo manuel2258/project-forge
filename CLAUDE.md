@@ -76,6 +76,13 @@ but commits and groups of files, holding no value between uses. What a real agen
 on a real machine is unobserved here. It says plainly that every project secret is readable by
 every member, and its § Open holds the two checks a key no member should hold would need.
 
+`docs/design/changelog.md` is the standard for what forge tells the projects it hosts: a changelog
+built into the platform, handed to every job and conversation as `$FORGE_JOB/platform/changelog.md`,
+one section per release saying what a project must change or may adopt, and `.forge/forge-release`,
+the one file in which a project records the release it was last brought up to, which the project page
+reads and an agent moves when it upgrades the project. **It is built**; every release writes its own
+section (§ Writing a section), and no agent has yet upgraded a real project by it.
+
 `docs/design/look.md` is the standard for looking at the platform: `bin/look` opens a page in
 headless Chromium as a fixture user over a setup built from the suite's fixtures, runs steps and
 takes screenshots, in a network namespace of its own with a database of its own. Every change to

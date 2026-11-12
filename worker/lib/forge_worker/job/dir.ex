@@ -50,6 +50,10 @@ defmodule ForgeWorker.Job.Dir do
   `tickets/`. It is rewritten on every call, resume included, for the same reason the platform
   documents are: a run that starts today should read what is true today.
 
+  `:changelog` is the text of the changelog for hosted projects, as the platform sent it with the
+  assignment, written to `platform/changelog.md` with the compiled-in documents and rewritten on
+  every call. Nil writes nothing, so a resume without it removes an earlier one.
+
   `:command_logs` is `[{file, path}]`: the logs of the commands a parked job invoked, already
   fetched from the store, copied into `commands/` read-only (`docs/design/job-prompt.md`
   § Commands). `commands/`, any `invoke.json` and any `transition.json` are removed on every call
@@ -70,7 +74,7 @@ defmodule ForgeWorker.Job.Dir do
     # Where the harness's stderr is written, before anything is spawned to write it.
     worker_dir!(job_dir)
     write_new!(Path.join(job_dir, "spec.json"), Spec.to_json(spec))
-    write_platform_docs(job_dir)
+    write_platform_docs(job_dir, Keyword.get(opts, :changelog))
     write_backlog(job_dir, Keyword.get(opts, :backlog), job_id)
     write_replay(job_dir, spec.replay)
     File.rm_rf!(invoke_path(job_dir))
@@ -94,12 +98,20 @@ defmodule ForgeWorker.Job.Dir do
   # On disk rather than in the prompt: the prompt names the folder, so an agent reads it when the
   # machinery is the question and pays nothing for it when it is not. Rewritten every time, so a
   # resumed run gets the current documents rather than the ones its first attempt was given.
-  defp write_platform_docs(job_dir) do
+  #
+  # **The changelog is the one that is not compiled in.** It is the platform's, handed over in the
+  # assignment so that it matches the platform that assigned the job rather than the worker that
+  # was built (`docs/design/changelog.md` § Delivery); absent from an assignment that carries none,
+  # which is every command's and an older platform's.
+  defp write_platform_docs(job_dir, changelog) do
     dir = Path.join(job_dir, "platform")
     File.rm_rf!(dir)
     File.mkdir_p!(dir)
 
-    Enum.each(ForgeCore.Workflow.platform_docs(), fn {name, content} ->
+    docs = ForgeCore.Workflow.platform_docs()
+    docs = if is_binary(changelog), do: docs ++ [{"changelog.md", changelog}], else: docs
+
+    Enum.each(docs, fn {name, content} ->
       path = Path.join(dir, name)
       File.write!(path, content)
       File.chmod!(path, 0o444)

@@ -97,7 +97,7 @@ defmodule ForgeWeb.ReleaseComponents do
       </dl>
 
       <div :if={@record.notes} class="doc mt-3 min-w-0 text-sm/[1.6] break-words">
-        {Markdown.to_html(@record.notes)}
+        {Markdown.to_html(@record.notes, %{})}
       </div>
 
       <section :if={@record.files != []} class="mt-4">

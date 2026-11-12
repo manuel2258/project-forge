@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Puts a release's changelog section into the changelog, byte for byte.
+#
+#   bin/changelog-add <section-file>
+#
+# The section is what `refining` in `release.yml` wrote as `changelog-section.md` (or what the
+# `release` skill wrote) and a person approved: `publishing` commits exactly that text, so this
+# script does not reformat it (`docs/design/changelog.md` § Writing a section).
+#
+#   - the first line must be `## <VERSION>`, VERSION being the file at the repository root, so a
+#     section for another release is refused rather than filed under this one;
+#   - it goes above the newest section, which is where the changelog keeps the newest;
+#   - the same section already there is a no-op, so a run that stopped after this step is safe to
+#     repeat;
+#   - a different section under the same heading is refused, never replaced: a person approved
+#     one text and the file holds another, and which is right is theirs to say.
+#
+# `CHANGELOG` overrides the file's path, and `VERSION_FILE` the version's, for the tests.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+changelog="${CHANGELOG:-$root/platform/priv/changelog.md}"
+version_file="${VERSION_FILE:-$root/VERSION}"
+
+if [ "$#" -ne 1 ]; then
+  echo "usage: bin/changelog-add <section-file>" >&2
+  exit 2
+fi
+section="$1"
+[ -f "$section" ] || {
+  echo "no such file: $section" >&2
+  exit 2
+}
+[ -f "$changelog" ] || {
+  echo "no changelog at $changelog" >&2
+  exit 2
+}
+
+version="$(tr -d '[:space:]' < "$version_file")"
+first="$(head -n 1 "$section")"
+if [ "$first" != "## $version" ]; then
+  echo "the section starts '$first', not '## $version' (VERSION)" >&2
+  exit 1
+fi
+
+# The section as filed: its lines, then one blank line. `$(...)` drops trailing newlines, which is
+# also what makes a file with and without a final newline the same section.
+body="$(cat "$section")"
+
+# The section already filed under this heading, if any: from its heading to the next `## ` one.
+# Whether a heading inside a fence counts is not asked: a section of this file's own writing never
+# has a line starting `## ` inside a fence (`docs/design/changelog.md`).
+existing="$(awk -v h="## $version" '
+  $0 == h { on = 1; print; next }
+  on && /^## / { exit }
+  on { print }
+' "$changelog")"
+
+if [ -n "$existing" ]; then
+  if [ "$existing" = "$body" ]; then
+    echo "section $version is already in the changelog"
+    exit 0
+  fi
+  echo "the changelog already has a different section for $version; not replacing it" >&2
+  exit 1
+fi
+
+# Above the first `## ` heading; the preamble stays where it is.
+tmp="$(mktemp)"
+trap 'rm -f "$tmp"' EXIT
+awk -v section="$section" '
+  !done && /^## / {
+    while ((getline line < section) > 0) print line
+    print ""
+    done = 1
+  }
+  { print }
+  END {
+    if (!done) {
+      print ""
+      while ((getline line < section) > 0) print line
+    }
+  }
+' "$changelog" > "$tmp"
+cat "$tmp" > "$changelog"
+echo "added section $version to $changelog"

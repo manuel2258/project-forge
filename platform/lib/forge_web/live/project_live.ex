@@ -19,8 +19,11 @@ defmodule ForgeWeb.ProjectLive do
   import ForgeWeb.Operator.Components
 
   alias Forge.{
+    Changelog,
     Conversations,
     Events,
+    ForgeRelease,
+    Git,
     MergeQueue,
     Operator,
     Projects,
@@ -63,7 +66,15 @@ defmodule ForgeWeb.ProjectLive do
     project = Projects.get!(id)
     tickets = Tickets.list(project)
     queue = MergeQueue.with_places(project.id)
-    current = Tickets.types(project)
+    # The default branch's tip, resolved once: the workflow block and the forge release line are
+    # drawn from this one commit, so they are redrawn together and never disagree about it.
+    #
+    # `Tickets.types/2` itself is tested to read at the sha it is given. Passing `at: tip` here
+    # rather than letting it resolve the branch again is an equivalent mutant at *this* call: both
+    # read the same commit unless the branch moves between the two reads, which a test cannot
+    # arrange. The `at:` makes the agreement hold by construction, not by any visible effect.
+    tip = default_tip(project)
+    current = if tip, do: Tickets.types(project, at: tip), else: Tickets.types(project)
 
     assign(socket,
       project: project,
@@ -78,6 +89,7 @@ defmodule ForgeWeb.ProjectLive do
       # board's, which is the workflow the tickets on it were admitted with. On a project whose
       # workflow has just changed these are different, and saying so is the point.
       current: current,
+      forge_release: forge_release(project, tip),
       release: release_block(socket, current, project),
       latest_release: Forge.ReleaseRecords.latest(project),
       clone_url: Url.for(project),
@@ -97,10 +109,87 @@ defmodule ForgeWeb.ProjectLive do
     |> load_chats()
   end
 
+  defp default_tip(project) do
+    case Git.resolve(Projects.repo_path(project), project.default_branch) do
+      {:ok, sha} -> sha
+      {:error, _} -> nil
+    end
+  end
+
+  # What the repository records as its forge release at `tip`, and how that compares with the node
+  # (`docs/design/changelog.md`). With no tip there is no repository content to read: the line says
+  # not recorded and no notice is drawn, since the page's own "cannot take a ticket" block speaks
+  # for a repository with no default branch.
+  defp forge_release(_project, nil), do: :empty
+
+  defp forge_release(project, tip),
+    do: project |> Projects.repo_path() |> ForgeRelease.read(tip) |> ForgeRelease.status()
+
   # Apart from `load/1` because a conversation being said in is far more frequent than anything
   # else on this page, and reading the repository to redraw one list would be a waste.
   defp load_chats(%{assigns: %{project_id: id}} = socket),
     do: assign(socket, chats: Conversations.summaries(project_id: id), now: DateTime.utc_now())
+
+  defp forge_release_line(status) when status in [:not_recorded, :empty], do: "not recorded"
+  defp forge_release_line(:current), do: Changelog.running()
+  defp forge_release_line({:behind, version}), do: version
+  defp forge_release_line({:newer, version}), do: version
+  defp forge_release_line({:not_release, _quote}), do: "not a release"
+
+  attr :status, :any, required: true
+  attr :project, :any, required: true
+
+  # A warning about the forge release the project records, in the page's own warning box
+  # (`docs/design/ui.md` § The project page). Every sentence says "forge", so none is read as the
+  # project's own releases. What the file holds reaches the page as escaped text only, and the link's
+  # request names the release the node runs and nothing from the file.
+  defp forge_release_notice(%{status: status} = assigns) when status in [:current, :empty],
+    do: ~H""
+
+  defp forge_release_notice(assigns) do
+    assigns = assign(assigns, :running, Changelog.running())
+
+    ~H"""
+    <div
+      id="forge-release-notice"
+      class="mt-8 w-full rounded-box border border-warning/40 bg-warning/5 p-4"
+    >
+      <p class="text-sm/[1.55] break-words">
+        <%= case @status do %>
+          <% {:behind, version} -> %>
+            Written for forge {version}. This node runs forge {@running}.
+          <% :not_recorded -> %>
+            This project records no forge release, so it counts as forge {Changelog.baseline()}.
+            This node runs forge {@running}.
+          <% {:newer, version} -> %>
+            This project was written for forge {version}, which is newer than the forge {@running} this node runs. Features it uses may not work here.
+          <% {:not_release, :too_large} -> %>
+            <code class="font-mono">{ForgeRelease.path()}</code>
+            is larger than {ForgeRelease.max_bytes()} bytes, so it does not name a forge release.
+          <% {:not_release, text} -> %>
+            <code class="font-mono">{ForgeRelease.path()}</code>
+            does not name a forge release. It holds <code id="forge-release-quote" class="font-mono">{text}</code>.
+        <% end %>
+      </p>
+      <.link
+        :if={upgrade?(@status)}
+        id="forge-upgrade-link"
+        navigate={~p"/chats/new?#{[project: @project.name, text: upgrade_request(@running)]}"}
+        class="mt-2 flex min-h-[46px] items-center font-mono text-[12.5px] text-primary hover:underline"
+      >
+        Bring this project up to forge {@running} in a new chat ›
+      </.link>
+    </div>
+    """
+  end
+
+  defp upgrade?(:not_recorded), do: true
+  defp upgrade?({:behind, _version}), do: true
+  defp upgrade?(_status), do: false
+
+  # Written here and never from the file: it names the release the node runs, and the agent reads
+  # the project's recorded release itself (`docs/design/changelog.md` § How an upgrade goes).
+  defp upgrade_request(running), do: "Bring this project up to forge #{running}."
 
   # The edges the repository's current workflows queue on, for the empty queue to say what would
   # fill it.
@@ -592,6 +681,8 @@ defmodule ForgeWeb.ProjectLive do
             </button>
           </section>
 
+          <.forge_release_notice status={@forge_release} project={@project} />
+
           <h2 class="mt-8 font-mono text-[11px] tracking-[.14em] uppercase opacity-60">
             {if multiple?(@current),
               do: "Workflows the next tickets will pin",
@@ -728,6 +819,7 @@ defmodule ForgeWeb.ProjectLive do
           <.copyable id="clone-url" value={@clone_url} label="Repository" />
           <dl class="mt-3 flex flex-col gap-2 text-[12.5px]">
             <.fact label="default branch">{@project.default_branch}</.fact>
+            <.fact label="forge release">{forge_release_line(@forge_release)}</.fact>
             <.fact label="mirror">{mirror_summary(@mirrors)}</.fact>
             <.fact label="worker seed">
               {(@project.seed_id && String.slice(@project.seed_id, 0, 16)) || "none"}

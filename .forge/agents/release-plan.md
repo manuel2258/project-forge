@@ -64,4 +64,16 @@ bump, the Hetzner verdict and its reason, and the commit message `publishing` sh
 `Version X.Y.Z`; follow their body and not their subject
 (`git log --grep '^chore(release): ' --grep '^Version ' -3`), because the subject is the convention
 `CLAUDE.md` § Commit messages now sets and the marker the command above looks for. A human
-approves this document before anything is built.
+approves this document, and `changelog-section.md` below, before anything is built — one approval for
+both. The commit message's body says the changelog section is in the commit.
+
+**Then write `changelog-section.md`**, the release's section of the changelog every hosted project's
+agent reads (`docs/design/changelog.md`). It is not the release notes: those are for whoever reads
+`git log`, and this is for a project's workflows and members. Write it by
+`docs/design/changelog.md` § Writing a section — over the same `$last..HEAD` range, from the surfaces
+it lists, leaving out everything that only concerns running a node (that is `docs/deploy.md`). It
+starts `## X.Y.Z` with the version in `release-notes.md`, exactly, and has no front matter. If
+nothing in the range concerns projects, the section is the heading and the one sentence
+*Nothing for projects in this release.* — a release always has a section. Each entry is marked
+**must change** or **may adopt**, says what to change with a short before and after where a file
+changes, and names `workflow-grammar.md § …` or `platform.md § …`.

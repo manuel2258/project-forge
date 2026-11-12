@@ -3,9 +3,22 @@
 Carry out what `release-notes.md` decided and was approved. **The merge is the last step of this
 ticket, not this one** — nothing here lands on the default branch.
 
-Bump `VERSION` to the approved version in the worktree. You don't need to commit it yourself:
-invoking a command commits whatever is in the worktree first (`docs/design/commands.md` § The
-ensured commit), so the bump just needs to be there when you invoke.
+Bump `VERSION` to the approved version in the worktree, and file the approved changelog section
+next to it:
+
+```
+printf '%s\n' X.Y.Z > VERSION
+bin/changelog-add "$FORGE_JOB/inputs/changelog-section.md"
+```
+
+`bin/changelog-add` puts the section into `platform/priv/changelog.md` byte for byte, which is the
+text a person approved with the notes, so do not edit it. It refuses a section that does not start
+`## X.Y.Z` and one that differs from what the changelog already holds under that heading: either is
+fatal, so end with `did_not_converge` and say why. Running it again on a section already filed does
+nothing, which is how a second attempt finds this part done. You don't need to commit either file
+yourself: invoking a command commits whatever is in the worktree first
+(`docs/design/commands.md` § The ensured commit), so they just need to be there when you invoke,
+and the image `release-build` builds carries the changelog.
 
 Invoke `release-build` and wait for it. It builds and pushes the platform image, checks the
 registry for a version already published, and prints the digest — read its log on resume. If it
@@ -24,6 +37,36 @@ Produce `publish-report.md` — the digest from `release-build`'s log and that `
 the snapshot's verdict and either its name/build/protocol from `hetzner-snapshot`'s log or why it
 was skipped or failed, and the reminder that pointing a template at a new snapshot is still the
 operator's own action on `/templates` — and the changeset.
+
+**`publish-report.md` carries `links:` in its front matter**, which the release record lists
+(`docs/design/ticket-types.md` § The record, the tag, the history):
+
+```
+---
+outcome: done
+links:
+  - label: "ghcr.io/manuel2258/forge:X.Y.Z (sha256:…)"
+    url: "https://github.com/users/manuel2258/packages/container/package/forge"
+  - label: "forge-worker-X.Y.Z (image 123456)"
+    url: "https://console.hetzner.cloud/…"
+---
+```
+
+One link for the platform image, labelled with its tag and digest. One for the Hetzner snapshot,
+labelled with its name and id, **only when `hetzner-snapshot` made one** — a release that built no
+snapshot has no snapshot link, and a snapshot that failed has none either. Each `url` must be an
+absolute `https` URL. Neither command's log prints one, so they are built, and only from what the
+logs do print:
+
+- the image: `ghcr.io/<owner>/<name>` is the package page
+  `https://github.com/users/<owner>/packages/container/package/<name>`, with the owner and name of
+  the reference `release-build`'s log prints;
+- the snapshot: the project's snapshots page `https://console.hetzner.cloud/projects/<id>/snapshots`
+  when `hetzner-snapshot`'s log or its environment names the Hetzner project's id, and otherwise
+  `https://console.hetzner.cloud/`, saying in `publish-report.md` that the link is the console and
+  not the snapshot, because no URL for one image exists without the project.
+
+Never write a link you did not build this way, and never one for a snapshot that was not made.
 
 **How you end decides whether a person sees this before it lands.** The release notes were the
 one approval; what you leave merges on its own.

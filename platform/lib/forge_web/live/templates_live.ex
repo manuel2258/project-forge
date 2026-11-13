@@ -29,14 +29,64 @@ defmodule ForgeWeb.TemplatesLive do
 
   import ForgeCore.Workflow.Resources, only: [gib: 1]
 
-  alias Forge.{Projects, Provider, Provisioning, Workers}
+  alias Forge.{ImageBuilds, Projects, Provider, Provisioning, WorkerImage, Workers}
   alias Forge.Provisioning.Template
   alias ForgeWeb.Format
 
   @impl true
   def mount(_params, _session, socket) do
-    {:ok, socket |> assign(page_title: "Templates") |> load() |> reset_forms()}
+    {:ok,
+     socket
+     |> assign(page_title: "Templates", listings: %{})
+     |> load()
+     |> reset_forms()
+     |> load_listings()
+     |> schedule_refresh()}
   end
+
+  # The account's snapshots, read once on mount (and again when a build ends) so that *Build now*
+  # is offered only when it would do something. Asynchronously: it is a request to the provider
+  # per credential, and the page must not wait on one.
+  defp load_listings(socket) do
+    credentials = Enum.filter(socket.assigns.credentials, &Provider.builds?(&1.provider))
+
+    if connected?(socket) and credentials != [] and socket.assigns.release != nil do
+      start_async(socket, :listings, fn ->
+        Map.new(credentials, &{&1.id, ImageBuilds.listing(&1)})
+      end)
+    else
+      socket
+    end
+  end
+
+  @impl true
+  def handle_async(:listings, {:ok, listings}, socket),
+    do: {:noreply, assign(socket, listings: listings)}
+
+  def handle_async(:listings, {:exit, _reason}, socket), do: {:noreply, socket}
+
+  @impl true
+  def handle_info(:refresh_builds, socket) do
+    before = running?(socket.assigns.builds)
+    socket = assign(socket, builds: ImageBuilds.recent(socket.assigns.current_scope.user))
+
+    socket =
+      if before and not running?(socket.assigns.builds), do: load_listings(socket), else: socket
+
+    {:noreply, socket |> schedule_refresh()}
+  end
+
+  # Only while a build runs, and only from a connected page: nothing ticks for a page nobody has
+  # open.
+  defp schedule_refresh(socket) do
+    if connected?(socket) and running?(socket.assigns.builds),
+      do: Process.send_after(self(), :refresh_builds, Forge.ImageBuilds.Runner.tick_ms())
+
+    socket
+  end
+
+  defp running?(builds),
+    do: builds |> Map.values() |> List.flatten() |> Enum.any?(&(&1.status == :running))
 
   defp load(socket) do
     user = socket.assigns.current_scope.user
@@ -49,6 +99,8 @@ defmodule ForgeWeb.TemplatesLive do
       projects: Projects.list(user),
       providers: Provider.names(),
       current_build: Workers.current_build(),
+      release: WorkerImage.release(),
+      builds: ImageBuilds.recent(user),
       # **Only the providers that have a credential to give.** A driver whose
       # `credential_fields/0` is empty reaches its machines without an account — the local one
       # does — so offering it here is offering a form with nothing in it, which
@@ -223,6 +275,20 @@ defmodule ForgeWeb.TemplatesLive do
     case Provisioning.create_credential(socket.assigns.current_scope.user, attrs) do
       {:ok, _credential} -> {:noreply, socket |> load() |> reset_forms()}
       {:error, changeset} -> {:noreply, assign(socket, error: errors(changeset))}
+    end
+  end
+
+  # **Both are the caller's own credential, whatever id arrives** (`ImageBuilds.set_auto/3`): the
+  # page offers them only on its own rows, but the event is a request anyone can send.
+  def handle_event("set-auto", %{"id" => id, "on" => on}, socket) do
+    ImageBuilds.set_auto(socket.assigns.current_scope.user, id, on == "true")
+    {:noreply, load(socket)}
+  end
+
+  def handle_event("build-now", %{"id" => id}, socket) do
+    case ImageBuilds.build_now(socket.assigns.current_scope.user, id) do
+      {:ok, _build} -> {:noreply, socket |> load() |> assign(error: nil) |> schedule_refresh()}
+      {:error, reason} -> {:noreply, socket |> load() |> assign(error: build_refusal(reason))}
     end
   end
 
@@ -557,6 +623,118 @@ defmodule ForgeWeb.TemplatesLive do
   defp kinds([]), do: "any kind"
   defp kinds(accepts), do: Enum.map_join(accepts, ", ", &to_string/1)
 
+  attr :credential, :map, required: true
+  attr :release, :map, default: nil
+  attr :listing, :any, default: nil
+  attr :builds, :list, default: []
+
+  # What the platform builds into this account and what it has built (`ui.md` § The workers page). Only
+  # the owner's page draws it, and the words a provider or a builder wrote are text, never markup,
+  # cut short here with the whole in the log.
+  defp image_builds(assigns) do
+    ~H"""
+    <div class="flex flex-col gap-3 border-t border-base-300 py-3 text-sm" data-role="image-builds">
+      <p :if={@release == nil} class="opacity-60">
+        This node has no release build to put there.
+      </p>
+
+      <div :if={@release != nil} class="flex flex-col gap-3">
+        <label class="flex min-h-[46px] cursor-pointer items-center gap-3">
+          <input
+            type="checkbox"
+            checked={@credential.build_images}
+            phx-click="set-auto"
+            phx-value-id={@credential.id}
+            phx-value-on={to_string(!@credential.build_images)}
+            class="checkbox checkbox-sm"
+          />
+          <span>Build worker images automatically</span>
+        </label>
+
+        <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
+          <button
+            :if={build_now(@credential, @listing, @builds) == :ok}
+            type="button"
+            phx-click="build-now"
+            phx-value-id={@credential.id}
+            class="min-h-[46px] rounded-field border border-base-300 px-4 text-sm font-medium"
+          >
+            Build now
+          </button>
+          <span class="opacity-60">{build_now_note(build_now(@credential, @listing, @builds))}</span>
+        </div>
+
+        <ol :if={@builds != []} class="flex flex-col gap-1" data-role="builds">
+          <li :for={build <- @builds} class="flex min-w-0 flex-col gap-0.5 py-1">
+            <span class="flex flex-wrap items-baseline gap-x-3">
+              <span class="opacity-60">{age(build.started_at)}</span>
+              <span class="font-mono text-[12.5px]">{build.build}</span>
+              <span class="opacity-60">{started_by(build)}</span>
+            </span>
+            <span class="block min-w-0 truncate" title={build.message}>{standing(build)}</span>
+          </li>
+        </ol>
+
+        <p :if={@builds == []} class="opacity-60">
+          No builds yet. One is built the first time a template naming latest needs a machine
+          here, or now with Build now.
+        </p>
+      </div>
+    </div>
+    """
+  end
+
+  # `:ok` when pressing it would do something; otherwise why not, in the row's words.
+  #
+  # **`builds` is an argument so that the expression is tracked by it**: LiveView re-evaluates an
+  # expression only when an assign it names changed, and one that asked the database by itself
+  # went on offering the button after the build it started was already running.
+  defp build_now(_credential, nil, _builds), do: :loading
+  defp build_now(_credential, {:error, _reason}, _builds), do: :unreadable
+
+  defp build_now(credential, {:ok, images}, builds) do
+    if Enum.any?(builds, &(&1.status == :running)),
+      do: {:error, :running},
+      else: ImageBuilds.buildable(credential, images)
+  end
+
+  defp build_now_note(:ok),
+    do: "Costs a few minutes of a small machine on this account."
+
+  defp build_now_note(:loading), do: "Reading this account's snapshots…"
+  defp build_now_note(:unreadable), do: "This account's snapshots could not be read."
+  defp build_now_note({:error, :running}), do: "A build is running."
+  defp build_now_note({:error, :present}), do: "The current build is already in this account."
+
+  defp build_now_note({:error, :newer}),
+    do: "This account already holds a newer release; nothing older is built into it."
+
+  defp build_now_note({:error, reason}) when reason in [:no_release, :cannot_build],
+    do: "Nothing to build here."
+
+  defp age(at) do
+    case Format.ago(at) do
+      "now" -> "just now"
+      ago -> ago <> " ago"
+    end
+  end
+
+  defp started_by(%{template_name: name}) when is_binary(name), do: "by template #{name}"
+  defp started_by(_build), do: "by Build now"
+
+  defp standing(%{status: :running, started_at: at}), do: "running, started #{age(at)}"
+  defp standing(%{status: :built}), do: "built"
+  defp standing(%{status: :failed, message: message}), do: "failed: #{message}"
+  defp standing(%{status: :abandoned, message: message}), do: message
+
+  defp build_refusal(:not_found), do: "That credential is not yours."
+
+  defp build_refusal(:unpublished),
+    do: "This release's worker image is not published, or not public."
+
+  defp build_refusal({:images, _reason}), do: "This account's snapshots could not be read."
+  defp build_refusal(_other), do: "A build would do nothing here."
+
   attr :form, :any, required: true
   attr :credentials, :list, required: true
   attr :provider, :string, required: true
@@ -735,19 +913,29 @@ defmodule ForgeWeb.TemplatesLive do
       <ul class="mt-4 flex flex-col gap-2">
         <li
           :for={credential <- @credentials}
-          class="flex min-h-[52px] items-center gap-4 rounded-field border border-base-300 px-4"
+          class="rounded-field border border-base-300 px-4"
+          id={"credential-#{credential.id}"}
         >
-          <span class="text-sm font-medium">{credential.name}</span>
-          <span class="font-mono text-[12.5px] opacity-60">{credential.provider}</span>
-          <button
-            type="button"
-            phx-click="delete-credential"
-            phx-value-id={credential.id}
-            data-confirm={"Remove #{credential.name}? Templates that name it stop being able to create."}
-            class="ml-auto min-h-[46px] text-sm text-error hover:underline"
-          >
-            Remove
-          </button>
+          <div class="flex min-h-[52px] flex-wrap items-center gap-x-4">
+            <span class="text-sm font-medium">{credential.name}</span>
+            <span class="font-mono text-[12.5px] opacity-60">{credential.provider}</span>
+            <button
+              type="button"
+              phx-click="delete-credential"
+              phx-value-id={credential.id}
+              data-confirm={"Remove #{credential.name}? Templates that name it stop being able to create."}
+              class="ml-auto min-h-[46px] text-sm text-error hover:underline"
+            >
+              Remove
+            </button>
+          </div>
+          <.image_builds
+            :if={Provider.builds?(credential.provider)}
+            credential={credential}
+            release={@release}
+            listing={@listings[credential.id]}
+            builds={@builds[credential.id] || []}
+          />
         </li>
         <li :if={@credentials == []} class="text-sm opacity-60">None yet.</li>
       </ul>

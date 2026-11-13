@@ -226,6 +226,12 @@ defmodule ForgeWeb.AuthorizationInventoryTest do
     {"workers_live.ex", "destroy"} => :self,
     {"templates_live.ex", "add-credential"} => :self,
     {"templates_live.ex", "delete-credential"} => :self,
+    # The caller's own credential, whatever id arrives: `ImageBuilds.set_auto/3` and `build_now/2`
+    # read it with `Provisioning.credential/2`, so a node admin or a member is refused and
+    # anyone else's id is not found (`docs/design/provisioning.md` § Putting the release's image
+    # into an account).
+    {"templates_live.ex", "set-auto"} => :self,
+    {"templates_live.ex", "build-now"} => :self,
     {"templates_live.ex", "add-template"} => :self,
     {"templates_live.ex", "delete-template"} => :self,
     # Own templates only, and each reads the row scoped to the caller before touching it — the

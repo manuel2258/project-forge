@@ -114,6 +114,13 @@
               # (`workerConfiguration`). An aarch64 platform taking its own system's worker would
               # have called every machine and snapshot "other build". Evaluated, not built.
               FORGE_WORKER_BUILD = workerBuild self.packages.x86_64-linux.forge-worker;
+              # The worker image this release publishes: where it is and its exact checksum,
+              # read by `config.exs` at build time and baked in, so the platform never believes
+              # a checksum fetched from where the image is published (docs/design/provisioning.md
+              # § Putting the release's image into an account). Naming the output here is also
+              # what makes building the platform build the image first.
+              FORGE_WORKER_IMAGE_RELEASE =
+                "${self.packages.x86_64-linux.worker-image-release}/release.env";
             };
             # Assets are built after `mix compile` (colocated CSS is emitted by the
             # compiler) and before `mix release` (which copies priv/static).
@@ -135,6 +142,7 @@
             platform-image = import ./nix/platform-image.nix { inherit pkgs forge version; };
           } // lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
             worker-image = workerImage pkgs.stdenv.hostPlatform.system;
+            worker-image-release = workerImageRelease pkgs.stdenv.hostPlatform.system;
           };
 
           devShells = {
@@ -158,6 +166,10 @@
                 # Docker daemon is involved, which is the whole reason it is this and not
                 # `docker load`.
                 pkgs.skopeo
+                # `bin/release` pushes the worker image as a lone file, which skopeo (container
+                # images only) cannot, and reads the result back with jq.
+                pkgs.oras
+                pkgs.jq
               ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
                 pkgs.inotify-tools
                 # What `Forge.Provider.LocalVm` shells out to: QEMU boots the machine and
@@ -310,6 +322,42 @@
 
             mkdir -p $out
             qemu-img convert -f raw -O qcow2 raw.img $out/forge-worker.qcow2
+          '';
+
+      # Where a release publishes the worker image, written once. `bin/release` reads it back from
+      # `release.env` rather than taking a flag, because the platform has it baked in and the two
+      # must not differ.
+      workerImageRepository = "ghcr.io/manuel2258/forge-worker-image";
+
+      # What a release publishes of the worker image (docs/design/provisioning.md § Putting the
+      # release's image into an account): the raw disk, gzipped, and `release.env` with where it
+      # goes and its checksums. A builder server in any Hetzner account downloads the `.gz`, checks
+      # it against DIGEST, writes it to its disk and reads RAW_SIZE bytes back against RAW_SHA256.
+      #
+      # **Reproducible, because DIGEST is the platform's idea of the image**: `gzip -n` keeps the
+      # clock out of the header, and `bin/release` refuses a tag that already holds a different
+      # digest. Every value comes from this one evaluation, so the build, the protocol and the
+      # checksum cannot name different images.
+      workerImageRelease = system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+          image = self.packages.${system}.worker-image;
+        in
+        pkgs.runCommand "forge-worker-image-release"
+          { nativeBuildInputs = [ pkgs.qemu-utils pkgs.gzip pkgs.coreutils ]; }
+          ''
+            mkdir -p $out
+            qemu-img convert -f qcow2 -O raw ${image}/forge-worker.qcow2 raw.img
+            gzip -9n < raw.img > $out/forge-worker.raw.gz
+            {
+              echo "REPOSITORY=${workerImageRepository}"
+              echo "DIGEST=sha256:$(sha256sum $out/forge-worker.raw.gz | cut -d' ' -f1)"
+              echo "RAW_SHA256=$(sha256sum raw.img | cut -d' ' -f1)"
+              echo "RAW_SIZE=$(stat -c %s raw.img)"
+              echo "BUILD=${image.build}"
+              echo "PROTOCOL=${toString image.protocol}"
+              echo "VERSION=${nixpkgs.lib.fileContents ./VERSION}"
+            } > $out/release.env
           '';
     in
     {

@@ -4,13 +4,15 @@ defmodule Forge.Provider.Hetzner do
   `docs/design/worker-tier.md` § The provider driver says so, and nothing above
   `Forge.Provider.*` learned a Hetzner name to make this work.
 
-  **The image is the one thing here that is not an API call.** Hetzner Cloud has no image
-  upload: a custom image is made by booting a rescue server, writing the disk, snapshotting it
-  and throwing the server away (`worker-tier.md` § Updating a worker). So this driver is
-  *given* a snapshot id rather than creating one, by the template — and a template that names
-  none cannot make a machine, which it says plainly rather than failing at the API. There is no
-  node-wide image to fall back to: the one `Provider.config(:image)` holds is the local
-  driver's qcow2 path (`docs/design/provisioning.md` § Where a machine comes from).
+  **The image is the one thing here that is not a plain API call.** Hetzner Cloud has no image
+  upload: a snapshot is made by booting a server whose disk was written and snapshotting it.
+  A template is *given* a snapshot id, and a template that names none cannot make a machine, which
+  it says plainly rather than failing at the API. When the template names `latest` the platform
+  may build the snapshot itself, with a builder server driven by API calls alone (§ building an
+  image below, `docs/design/provisioning.md` § Putting the release's image into an account);
+  `bin/hetzner-image` remains the by-hand tool. There is no node-wide image to fall back to: the
+  one `Provider.config(:image)` holds is the local driver's qcow2 path
+  (`docs/design/provisioning.md` § Where a machine comes from).
 
   **How a machine learns what it is.** The same `KEY=VALUE` bytes the local driver writes to a
   labelled disk go here as the server's `user_data`. `worker-tier.md` § How a machine learns
@@ -194,6 +196,352 @@ defmodule Forge.Provider.Hetzner do
     end
   end
 
+  # -- building an image ----------------------------------------------------------------------
+  #
+  # `docs/design/provisioning.md` § Putting the release's image into an account. A server made
+  # from a stock image whose first-boot script writes the release's image to its own disk and
+  # powers off; the platform snapshots it once it is off and deletes it. **Driven by API calls
+  # alone**: nothing connects to it, no ssh key is put on it, and a root password the API returns
+  # is dropped unread. It is never a worker — it carries a different label, and `list/1` and
+  # `find/2` ask only for `forge=worker`.
+
+  @builder_label "forge=image-builder"
+  # Read when this module is compiled, so a release carries the script and not a path to it.
+  @builder_script_path Path.join(__DIR__, "../../../priv/hetzner/image-builder.sh")
+  @external_resource @builder_script_path
+  @builder_script File.read!(@builder_script_path)
+
+  @impl Provider
+  def start_build(credential, source) do
+    with {:ok, token} <- token(%{credential: credential}),
+         {:ok, existing} <- find_builder(source.build_id, token) do
+      case existing do
+        # Asked again after a restart that lost the id: the builder is found, not made twice.
+        id when is_binary(id) -> {:ok, builder_handle(source.build_id, id)}
+        nil -> create_builder(source, token)
+      end
+    end
+  end
+
+  defp create_builder(source, token) do
+    with {:ok, type} <- builder_type(token) do
+      body = %{
+        name: builder_name(source.build_id),
+        server_type: type,
+        image: "debian-12",
+        location: location(),
+        start_after_create: true,
+        user_data: builder_script(source),
+        labels: builder_labels(source.build_id)
+      }
+
+      case request(:post, "/servers", token, body) do
+        {:ok, 201, %{"server" => server}} ->
+          {:ok, builder_handle(source.build_id, to_string(server["id"]))}
+
+        {:ok, status, body} ->
+          {:error, {:hetzner, status, message(body)}}
+
+        {:error, reason} ->
+          {:error, {:hetzner, reason}}
+      end
+    end
+  end
+
+  defp builder_handle(build_id, server_id),
+    do: %{"build_id" => build_id, "server_id" => server_id}
+
+  defp builder_name(build_id), do: "forge-builder-#{build_id}"
+
+  defp builder_labels(build_id) do
+    %{"forge" => "image-builder", "forge-build-id" => build_id}
+  end
+
+  # The script with its four values filled in and **nothing else**. The values are validated by
+  # `Forge.WorkerImage` and the build id is a UUID; none is a secret, which is the point.
+  defp builder_script(source) do
+    @builder_script
+    |> String.replace("@REPOSITORY@", source.repository)
+    |> String.replace("@DIGEST@", source.digest)
+    |> String.replace("@RAW_SHA256@", source.raw_sha256)
+    |> String.replace("@RAW_SIZE@", to_string(source.raw_size))
+  end
+
+  # The cheapest x86 type this location can order with at least 4 GB: the image is downloaded into
+  # memory. No setting — the platform picks.
+  defp builder_type(token) do
+    with {:ok, types} <- paginate("/server_types", "server_types", token, []) do
+      types
+      |> Enum.filter(
+        &(orderable?(&1, location()) and &1["architecture"] == "x86" and
+            (&1["memory"] || 0) >= 4)
+      )
+      |> Enum.sort_by(&{hourly(&1) || Decimal.new(1_000_000), &1["memory"]}, &builder_order/2)
+      |> case do
+        [type | _] -> {:ok, type["name"]}
+        [] -> {:error, {:hetzner, "no x86 server type with 4 GB is orderable in #{location()}"}}
+      end
+    end
+  end
+
+  defp builder_order({a, ma}, {b, mb}) do
+    case Decimal.compare(a, b) do
+      :lt -> true
+      :gt -> false
+      :eq -> ma <= mb
+    end
+  end
+
+  # By name and label together, as `find/2` is, for the same reason.
+  defp find_builder(build_id, token) do
+    query = URI.encode_query(name: builder_name(build_id), label_selector: @builder_label)
+
+    case request(:get, "/servers?" <> query, token, nil) do
+      {:ok, 200, %{"servers" => [server | _]}} -> {:ok, to_string(server["id"])}
+      {:ok, 200, %{"servers" => []}} -> {:ok, nil}
+      {:ok, status, body} -> {:error, {:hetzner, status, message(body)}}
+      {:error, reason} -> {:error, {:hetzner, reason}}
+    end
+  end
+
+  # An image id means the snapshot has been asked for: the answer is then the image's, and when it
+  # is available the mark is moved and the builder deleted, in that order, as `bin/hetzner-image`
+  # does (`finish_build/3`). The snapshot is created unmarked; a failed mark or delete answers
+  # `{:running, h}` and is tried again on the next poll.
+  @impl Provider
+  def build_progress(credential, handle) do
+    case token(%{credential: credential}) do
+      {:ok, token} -> progress(handle, token)
+      {:error, reason} -> {:failed, inspect(reason)}
+    end
+  end
+
+  # **A request that did not get an answer is still running, not failed**: the time limit bounds a
+  # provider that stays unreachable, and a build is not thrown away for one dropped connection.
+  defp progress(%{"image_id" => image_id} = handle, token) do
+    case request(:get, "/images/#{image_id}", token, nil) do
+      {:ok, 200, %{"image" => %{"status" => "available"} = image}} ->
+        finish_build(handle, image, token)
+
+      {:ok, 200, %{"image" => %{"status" => "creating"}}} ->
+        {:running, handle}
+
+      {:ok, 200, %{"image" => image}} ->
+        {:failed, "the snapshot is #{image["status"]}"}
+
+      {:ok, 404, _body} ->
+        {:failed, "the snapshot is gone"}
+
+      {:ok, status, body} ->
+        {:failed, "#{status}: #{message(body)}"}
+
+      {:error, _reason} ->
+        {:running, handle}
+    end
+  end
+
+  defp progress(handle, token) do
+    case builder_status(handle, token) do
+      # **Off counts only after the builder has been seen running.** A server is also off before
+      # its first start and after a failed one, and a person can power it off from the console;
+      # none of those has written the image. The sighting is kept in the handle. What it cannot
+      # tell is an owner who powers the builder off by hand while it runs.
+      {:ok, "running"} ->
+        {:running, Map.put(handle, "seen_running", true)}
+
+      {:ok, "off"} when is_map_key(handle, "seen_running") ->
+        {:ready, handle}
+
+      {:ok, :gone} ->
+        {:failed, "the builder server is gone"}
+
+      {:ok, _not_yet} ->
+        {:running, handle}
+
+      {:error, {:hetzner, status, _message} = reason} when is_integer(status) ->
+        {:failed, inspect(reason)}
+
+      {:error, _unanswered} ->
+        {:running, handle}
+    end
+  end
+
+  defp builder_status(%{"server_id" => id}, token) when is_binary(id) do
+    case request(:get, "/servers/#{id}", token, nil) do
+      {:ok, 200, %{"server" => server}} -> {:ok, server["status"]}
+      {:ok, 404, _body} -> {:ok, :gone}
+      {:ok, status, body} -> {:error, {:hetzner, status, message(body)}}
+      {:error, reason} -> {:error, {:hetzner, reason}}
+    end
+  end
+
+  # The mark moves when the snapshot is available and not before: a snapshot still being made is
+  # not one a machine can be created from, and `latest` would have resolved to it for the minutes
+  # that takes. Marked first and the others unmarked after, as `bin/hetzner-image` does, so a run
+  # cut short leaves two marked rather than none. **Not reported as built until the builder is
+  # gone**: a failed mark or delete is tried again on the next poll, both being idempotent, and the
+  # time limit bounds the retries.
+  defp finish_build(handle, image, token) do
+    with :ok <- mark(handle, image, token),
+         :ok <- delete_builder(handle, token) do
+      {:built, handle["image_id"]}
+    else
+      _retry -> {:running, handle}
+    end
+  end
+
+  # **Not over a newer release's mark** (`docs/design/provisioning.md` § Putting the release's
+  # image into an account): the version rule was asked when the snapshot was begun, and another
+  # node on the same project may have marked a newer snapshot since. Then this one stays unmarked
+  # and nothing is moved.
+  defp mark(%{"current" => true} = handle, image, token) do
+    id = handle["image_id"]
+    query = [type: "snapshot", label_selector: "forge-worker-current"]
+
+    case paginate("/images", "images", token, query) do
+      {:ok, marked} ->
+        others = Enum.reject(marked, &(to_string(&1["id"]) == id))
+
+        if Enum.any?(others, &newer?(&1, handle["version"])),
+          do: :ok,
+          else:
+            put_all(
+              [
+                {id, Map.put(image["labels"] || %{}, "forge-worker-current", "1")}
+                | unmarked(others)
+              ],
+              token
+            )
+
+      {:error, _reason} ->
+        :error
+    end
+  end
+
+  defp mark(_handle, _image, _token), do: :ok
+
+  defp put_all(labelled, token) do
+    Enum.reduce_while(labelled, :ok, fn {image_id, labels}, :ok ->
+      case request(:put, "/images/#{image_id}", token, %{labels: labels}) do
+        {:ok, 200, _body} -> {:cont, :ok}
+        _failed -> {:halt, :error}
+      end
+    end)
+  end
+
+  # Hetzner replaces a label set as a whole, so each PUT sends the rest back.
+  defp unmarked(images) do
+    for %{"id" => id, "labels" => labels} <- images,
+        do: {to_string(id), Map.delete(labels, "forge-worker-current")}
+  end
+
+  defp newer?(%{"labels" => %{"forge-worker-version" => other}}, version)
+       when is_binary(version) do
+    case {Version.parse(other), Version.parse(version)} do
+      {{:ok, other}, {:ok, ours}} -> Version.compare(other, ours) == :gt
+      _unreadable -> false
+    end
+  end
+
+  defp newer?(_image, _version), do: false
+
+  # **Only a builder seen running and now off is snapshotted**, and one still running never is: a
+  # snapshot of a half-written disk is the thing the whole signal exists to prevent.
+  @impl Provider
+  def snapshot_build(credential, handle, labels) do
+    with {:ok, token} <- token(%{credential: credential}),
+         :ok <- seen_running(handle),
+         {:ok, "off"} <- builder_status(handle, token),
+         {:ok, 201, %{"image" => %{"id" => id}}} <-
+           request(
+             :post,
+             "/servers/#{handle["server_id"]}/actions/create_image",
+             token,
+             snapshot_body(labels)
+           ) do
+      {:ok,
+       handle
+       |> Map.put("image_id", to_string(id))
+       |> Map.put("current", labels.current)
+       |> Map.put("version", labels.version)}
+    else
+      {:ok, :gone} -> {:error, {:hetzner, "the builder server is gone"}}
+      {:ok, status} when is_binary(status) -> {:error, {:hetzner, "the builder is #{status}"}}
+      {:ok, status, body} -> {:error, {:hetzner, status, message(body)}}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp seen_running(%{"seen_running" => true}), do: :ok
+  defp seen_running(_handle), do: {:error, {:hetzner, "the builder was never seen running"}}
+
+  defp snapshot_body(labels) do
+    base = %{
+      "forge-worker-build" => labels.build,
+      "forge-worker-version" => labels.version
+    }
+
+    base =
+      if labels.protocol,
+        do: Map.put(base, "forge-worker-protocol", to_string(labels.protocol)),
+        else: base
+
+    %{
+      description: "forge-worker-#{labels.version}",
+      type: "snapshot",
+      labels: base
+    }
+  end
+
+  @impl Provider
+  def discard_build(credential, handle) do
+    with {:ok, token} <- token(%{credential: credential}), do: delete_builder(handle, token)
+  end
+
+  defp delete_builder(%{"server_id" => id}, token) when is_binary(id) do
+    case request(:delete, "/servers/#{id}", token, nil) do
+      {:ok, status, _body} when status in [200, 202, 204, 404] -> :ok
+      {:ok, status, body} -> {:error, {:hetzner, status, message(body)}}
+      {:error, reason} -> {:error, {:hetzner, reason}}
+    end
+  end
+
+  # No id: a build that never got a handle, discarded by its id alone (`Provider.discard_build/2`).
+  # The platform may have stopped between the request that made the builder and the answer that
+  # named it, so the builder is found by name, as `start_build` does.
+  defp delete_builder(%{"build_id" => build_id}, token) do
+    case find_builder(build_id, token) do
+      {:ok, nil} -> :ok
+      {:ok, id} -> delete_builder(%{"server_id" => id}, token)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @impl Provider
+  def sweep_builders(credential, max_age_ms) do
+    with {:ok, token} <- token(%{credential: credential}),
+         {:ok, servers} <-
+           paginate("/servers", "servers", token, label_selector: @builder_label) do
+      now = DateTime.utc_now()
+
+      for server <- servers, past?(server["created"], now, max_age_ms) do
+        delete_builder(%{"server_id" => to_string(server["id"])}, token)
+      end
+
+      :ok
+    end
+  end
+
+  # Unparseable is not past: a builder that cannot be dated is not one anybody may delete.
+  defp past?(created, now, max_age_ms) when is_binary(created) do
+    case DateTime.from_iso8601(created) do
+      {:ok, at, _offset} -> DateTime.diff(now, at, :millisecond) > max_age_ms
+      _bad -> false
+    end
+  end
+
+  defp past?(_created, _now, _max_age_ms), do: false
+
   @impl Provider
   def credential_fields, do: [%{key: "token", label: "API token"}]
 
@@ -265,6 +613,7 @@ defmodule Forge.Provider.Hetzner do
       created: image["created"],
       build: build_label(labels["forge-worker-build"]),
       protocol: protocol_label(labels["forge-worker-protocol"]),
+      version: version_label(labels["forge-worker-version"]),
       current: Map.has_key?(labels, "forge-worker-current")
     }
   end
@@ -291,6 +640,17 @@ defmodule Forge.Provider.Hetzner do
   end
 
   defp protocol_label(_value), do: nil
+
+  # **Only a version `Version.parse/1` can read**; anything else is no version, which is never
+  # newer than a release's (`Forge.WorkerImage.newer_in?/2`).
+  defp version_label(value) when is_binary(value) do
+    case Version.parse(value) do
+      {:ok, _version} -> value
+      :error -> nil
+    end
+  end
+
+  defp version_label(_value), do: nil
 
   @doc """
   What Hetzner's server status means to the platform.

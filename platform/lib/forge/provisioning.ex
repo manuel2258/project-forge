@@ -57,8 +57,14 @@ defmodule Forge.Provisioning do
   @spec delete_credential(User.t(), String.t()) :: :ok | {:error, :not_found}
   def delete_credential(%User{} = user, id) do
     case credential(user, id) do
-      nil -> {:error, :not_found}
-      credential -> with {:ok, _} <- Repo.delete(credential), do: :ok
+      nil ->
+        {:error, :not_found}
+
+      credential ->
+        # A build running in the account would leak its builder with the credential that could
+        # delete it.
+        Forge.ImageBuilds.discard_running(credential)
+        with {:ok, _} <- Repo.delete(credential), do: :ok
     end
   end
 

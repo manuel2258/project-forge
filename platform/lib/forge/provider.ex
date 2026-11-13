@@ -145,6 +145,10 @@ defmodule Forge.Provider do
           # (`docs/design/provisioning.md` § A snapshot that speaks the wrong protocol).
           optional(:build) => String.t() | nil,
           optional(:protocol) => non_neg_integer() | nil,
+          # The release version the snapshot was built from, where the driver has it. Nil is
+          # unknown, and an unknown version is never newer than a release's
+          # (`Forge.WorkerImage.newer_in?/2`).
+          optional(:version) => String.t() | nil,
           # Whether this is the snapshot a template naming `latest` resolves to. At most one of
           # an account's snapshots carries the mark; absent reads as false, so a driver that
           # marks nothing never offers one (`docs/design/provisioning.md` § Where a machine
@@ -155,11 +159,12 @@ defmodule Forge.Provider do
   @doc """
   The images this credential can make a machine from.
 
-  **Hetzner has no image upload**, so what this lists are snapshots the operator has already
-  made by hand — boot a rescue server, write the disk, snapshot it, throw the server away
-  (`docs/design/worker-tier.md` § Updating a worker). The platform offers what is there and
-  never makes one.
+  **Hetzner has no image upload**, so what this lists are snapshots that exist in the account:
+  made by hand (`bin/hetzner-image`) or by the platform itself, which builds the release's image
+  into an account on demand through the optional build callbacks below
+  (`docs/design/provisioning.md` § Putting the release's image into an account).
   """
+
   @callback images(map() | nil) :: {:ok, [image()]} | {:error, term()}
 
   @spec images(String.t(), map() | nil) :: {:ok, [image()]} | {:error, term()}
@@ -265,6 +270,118 @@ defmodule Forge.Provider do
   def shapes(provider, credential \\ nil) do
     with {:ok, driver} <- driver(provider), do: driver.shapes(credential)
   end
+
+  # -- building an image ----------------------------------------------------------------------
+
+  @typedoc """
+  What a build is given: the release's image and the checksum the platform was built knowing.
+  Nothing else — in particular no token of the provider's or of forge's and no platform address,
+  because a provider may show a builder's first-boot script to anyone who can see the account.
+  """
+  @type source :: %{
+          required(:build_id) => String.t(),
+          required(:repository) => String.t(),
+          required(:digest) => String.t(),
+          required(:raw_sha256) => String.t(),
+          required(:raw_size) => pos_integer()
+        }
+
+  @typedoc "What the finished snapshot is labelled with. `current` asks for the mark."
+  @type build_labels :: %{
+          required(:build) => String.t(),
+          required(:protocol) => non_neg_integer() | nil,
+          required(:version) => String.t(),
+          required(:current) => boolean()
+        }
+
+  @typedoc "A map the platform stores and hands back without reading it."
+  @type handle :: map()
+
+  @doc """
+  Starts a builder that will put the release's image into this credential's account. Asked again
+  with the same `build_id` after a restart, it finds the builder it made rather than making a
+  second.
+  """
+  @callback start_build(map() | nil, source()) :: {:ok, handle()} | {:error, term()}
+
+  @doc """
+  Where the build stands: `{:running, h}`, `{:ready, h}` (the builder has finished and is off),
+  `{:built, image_id}` (the snapshot exists, is marked as asked and the builder was deleted — a
+  mark or a delete that failed answers `{:running, h}` and is tried again), or
+  `{:failed, words}`.
+  """
+  @callback build_progress(map() | nil, handle()) ::
+              {:running, handle()}
+              | {:ready, handle()}
+              | {:built, String.t()}
+              | {:failed, String.t()}
+
+  @doc "Snapshots a finished builder with `labels`. Answers the handle to keep polling with."
+  @callback snapshot_build(map() | nil, handle(), build_labels()) ::
+              {:ok, handle()} | {:error, term()}
+
+  @doc """
+  Deletes this build's own builder. A builder already gone is success, and **an error is a builder
+  that may still exist** — the caller tries again. A build that never got a handle is discarded
+  with `%{"build_id" => id}` alone, the `source.build_id` it was started with, and the driver finds
+  the builder by what it named it; a driver whose handle carries more may use it.
+  """
+  @callback discard_build(map() | nil, handle()) :: :ok | {:error, term()}
+
+  @doc """
+  Deletes every builder in the account older than `max_age_ms`, **whoever made it**, and no other.
+  A younger builder may be another node's or another user's in the same project and is nobody's to
+  delete (`docs/design/provisioning.md` § Putting the release's image into an account).
+  """
+  @callback sweep_builders(map() | nil, pos_integer()) :: :ok | {:error, term()}
+
+  @optional_callbacks start_build: 2,
+                      build_progress: 2,
+                      snapshot_build: 3,
+                      discard_build: 2,
+                      sweep_builders: 2
+
+  @doc "Whether this provider can build an image into an account at all."
+  @spec builds?(String.t() | nil) :: boolean()
+  def builds?(provider) do
+    case driver(provider) do
+      {:ok, module} ->
+        Code.ensure_loaded?(module) and function_exported?(module, :start_build, 2)
+
+      {:error, _reason} ->
+        false
+    end
+  end
+
+  @spec start_build(String.t(), map() | nil, source()) :: {:ok, handle()} | {:error, term()}
+  def start_build(provider, credential, source),
+    do: with({:ok, driver} <- driver(provider), do: driver.start_build(credential, source))
+
+  @spec build_progress(String.t(), map() | nil, handle()) ::
+          {:running, handle()} | {:ready, handle()} | {:built, String.t()} | {:failed, String.t()}
+  def build_progress(provider, credential, handle) do
+    case driver(provider) do
+      {:ok, driver} -> driver.build_progress(credential, handle)
+      {:error, reason} -> {:failed, inspect(reason)}
+    end
+  end
+
+  @spec snapshot_build(String.t(), map() | nil, handle(), build_labels()) ::
+          {:ok, handle()} | {:error, term()}
+  def snapshot_build(provider, credential, handle, labels),
+    do:
+      with(
+        {:ok, driver} <- driver(provider),
+        do: driver.snapshot_build(credential, handle, labels)
+      )
+
+  @spec discard_build(String.t(), map() | nil, handle()) :: :ok | {:error, term()}
+  def discard_build(provider, credential, handle),
+    do: with({:ok, driver} <- driver(provider), do: driver.discard_build(credential, handle))
+
+  @spec sweep_builders(String.t(), map() | nil, pos_integer()) :: :ok | {:error, term()}
+  def sweep_builders(provider, credential, max_age_ms),
+    do: with({:ok, driver} <- driver(provider), do: driver.sweep_builders(credential, max_age_ms))
 
   @doc """
   The module that speaks for `provider`.

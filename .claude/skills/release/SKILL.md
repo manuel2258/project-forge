@@ -1,6 +1,6 @@
 ---
 name: release
-description: Cut a forge release from main without stopping to ask — decide the version bump, write the changelog section, bump VERSION, build and push the platform image with bin/release, and build the Hetzner worker snapshot when the worker changed. Run by the land skill after every landing.
+description: Cut a forge release from main without stopping to ask — decide the version bump, write the changelog section, bump VERSION, build and push the platform image and the worker image it is built knowing with bin/release. Run by the land skill after every landing.
 ---
 
 # release
@@ -16,8 +16,10 @@ tag used to enforce. (Releases up to 0.7.0 also carry a `vX.Y.Z` tag.)
 § Commit messages). Every search for the last release therefore carries both patterns, and
 dropping the old one would make every release after the first conventional one diff from 0.15.0.
 
-`bin/release` does the build and the push; this skill decides what goes into `VERSION` first and,
-when the worker changed, builds the Hetzner snapshot with `bin/hetzner-image`.
+`bin/release` does the build and the push of both images; this skill decides what goes into
+`VERSION` first. **It builds no Hetzner snapshot**: the platform builds one in each account that
+needs it, from the worker image this release publishes (`docs/design/provisioning.md` § Putting the
+release's image into an account), so no Hetzner token or ssh key is needed here.
 
 **It runs unattended.** The `land` skill runs it after every landing, and the human's request to
 land is the request to release: nothing below waits for a yes. It stops and reports only when
@@ -35,7 +37,7 @@ safe: every step is either re-runnable or leaves `main` in a state the next run 
 
 ## Setup
 
-Everything the release runs — `skopeo`, `hcloud`, the build — comes from the devshell. The only
+Everything the release runs — `skopeo`, `oras`, the build — comes from the devshell. The only
 thing installed by hand is Nix itself, and only on a machine that lacks it (a fresh cloud
 session):
 
@@ -70,23 +72,13 @@ devshell — `nix develop --command bash` for a shell, or prefix a command with
      No token, or a refused login: **stop before step 1** and report that the landing is on
      `main` and unreleased, and why. Never print the token.
 
-   - **Hetzner** (the snapshot, only if step 3 asks for one — check here anyway, so the answer is
-     known before the version commit). `bin/hetzner-image --check` asks everything the build will
-     need, and creates nothing: `HCLOUD_TOKEN` set and answered, `ssh` and the rest on `PATH` (the
-     devshell has them), and an ssh key in the project that ssh can use for rescue. In a cloud
-     session that key is `HETZNER_PRIVATE_KEY` — base64 of a private key with no passphrase — and
-     the script picks the project key with its fingerprint; elsewhere it is whatever ssh finds
-     (an agent, `~/.ssh`) and the project's first key. It never prints the private key:
-
-     ```
-     bin/hetzner-image --check
-     ```
-
-     Unset, refused, or no usable key (it says which): the release goes ahead without a snapshot; step 10 says the
-     snapshot was not built and why, and gives the command. That is a degraded release, not a
-     failed one — unless the verdict is **Required** (run step 3's check now to know), when the
-     new platform refuses every existing worker: then **stop before step 1**, because publishing `:latest` without a snapshot it can
-     talk to would strand every job on the node.
+   - **The worker image's package is public.** `bin/release` pushes the worker image to
+     `ghcr.io/manuel2258/forge-worker-image` before the platform image, and a builder server in
+     someone else's Hetzner account downloads it without credentials, so the package must be made
+     public once, by hand on GitHub (package settings → change visibility). Until then no account can
+     build and every job that needs a build waits with *this release's worker image is not published, or not
+     downloadable without a login*; that is a degraded release and not a failed one, and step 10 says so. It cannot be
+     checked from here with the release's token, so say it in the report the first time.
 
    - **Branch.** `bin/release` refuses anything but `main`. From a working branch:
      `git switch main && git merge --ff-only origin/main`. Remember the working branch for
@@ -127,7 +119,9 @@ devshell — `nix develop --command bash` for a shell, or prefix a command with
    git diff "$last"..HEAD -- core/priv/worker_protocol core/lib/forge_core/worker_protocol.ex
    ```
 
-3. **Decide whether a new Hetzner snapshot is needed.** A managed machine boots the snapshot its
+3. **Decide how much a new worker image matters.** Nothing is built for it here — each account
+   builds its own when a template naming `latest` next needs a machine — but the verdict tells the
+   operator what to expect. A managed machine boots the snapshot its
    template names and runs the worker release baked into it. What the platform checks at the join
    is the protocol (`docs/design/worker-channel.md` § Versions); what `/templates` compares is the
    build label. The build always changes with a release, because every `mix.exs` reads `VERSION`
@@ -182,19 +176,24 @@ devshell — `nix develop --command bash` for a shell, or prefix a command with
    (`git reset --hard origin/main`) and go back to step 1 — once. A second rejection means
    someone else is landing; stop and report.
 
-6. **Build and publish the platform image.**
+6. **Build and publish the worker image and the platform image.**
 
    ```
    bin/release
    ```
 
-   It refuses a dirty tree or a version the registry already holds, builds `.#platform-image`
-   and copies it to the registry with skopeo — no Docker daemon — as `:X.Y.Z`, then copies that
-   to `:latest` inside the registry, so both name one digest. The token comes from `GHCR_TOKEN`,
-   else `GITHUB_TOKEN`, else `gh auth token`. The build is long; run it in the background and
-   wait for it. If it fails, fix the cause and run it again: nothing reaches the registry before
-   the first copy, and a run that copied `:X.Y.Z` and stopped before `:latest` is finished by
-   running it again.
+   It refuses a dirty tree or a version the registry already holds, then builds
+   `.#worker-image-release` and pushes it with `oras` to `ghcr.io/manuel2258/forge-worker-image:X.Y.Z`
+   (refusing a tag that already holds a different digest, and checking the digest it reads back).
+   Only then does it build `.#platform-image`, which is built knowing that image's checksum, and copy
+   it to the registry with skopeo — no Docker daemon — as `:X.Y.Z`, then copy that to `:latest`
+   inside the registry, so both name one digest. The token comes from `GHCR_TOKEN`, else
+   `GITHUB_TOKEN`, else `gh auth token`. The build is long; run it in the background and wait for
+   it. If it fails, fix the cause and run it again: **a failed run can leave the worker image
+   published without the platform**, which is harmless — nothing refers to it until the platform
+   that knows its checksum is — and the next run finds it already there with the same digest and
+   goes on; a run that copied `:X.Y.Z` and stopped before `:latest` is finished by running it
+   again.
 
    **Behind a TLS-intercepting proxy** — a cloud session's — the build's fixed-output fetchers
    (the mix dependencies, some from git) need the proxy's CA, and they see only what Nix binds
@@ -211,25 +210,11 @@ devshell — `nix develop --command bash` for a shell, or prefix a command with
 
    A different digest is a failure: stop and report both.
 
-8. **Build the snapshot, when step 3 said Required or Recommended** and step 0 found Hetzner
-   usable. Not for **Not needed**. From this commit, so the snapshot is labelled with this
-   release's build, and after the image is published (for Required, the platform goes first):
-
-   ```
-   bin/hetzner-image --name forge-worker-X.Y.Z
-   ```
-
-   It creates a rescue server, writes the image, verifies it, snapshots and deletes the server —
-   a few minutes of one machine, then a snapshot costing cents a month. It is long: run it in the
-   background and wait. **Leave the working tree alone until it prints `worker build …`**: it
-   reads the tree once, at that evaluation, and step 9's branch switch under it would build and
-   label the previous commit. It cleans up its server on any exit; if it fails, check with
-   `hcloud server list` that no `forge-image-builder-*` is left, delete one that is, and report
-   the failure with the command to run again. Do not retry it unattended — a second run is a
-   second server.
-
-   It does not move any template onto the snapshot. That is the operator's, on `/templates`,
-   because it changes what their machines boot and spends their provider credential.
+8. **Nothing to build.** `bin/release` published the worker image at step 6, before the platform,
+   and the platform was built knowing its checksum. Accounts get their snapshot from the platform, on demand;
+   a template naming a fixed snapshot is the operator's, as before. If step 3 said **Required**,
+   the new platform refuses old snapshots, and the first job on `latest` in each account starts
+   a build (jobs wait with a reason meanwhile).
 
 9. **Back to the working branch**, if step 0 left one, onto the new `main`:
 
@@ -241,6 +226,6 @@ devshell — `nix develop --command bash` for a shell, or prefix a command with
 
 10. **Report**, in one message: the version and why that bump; the digest
     (`ghcr.io/manuel2258/forge@sha256:…`, what a deployment pins) and that `:latest` names it;
-    the Hetzner verdict and its reason, and either the snapshot's name, build and protocol as
-    `bin/hetzner-image` printed them — with the reminder to point the templates at it on
-    `/templates` — or why it was not built and the command to build it.
+    the worker image (`ghcr.io/manuel2258/forge-worker-image@sha256:…`, from `bin/release`'s
+    output), step 3's verdict and its reason, and, the first time, the reminder that its package
+    must be public.

@@ -9,7 +9,7 @@ defmodule Forge.FlowTest do
   import Forge.ForgeFixtures
   import Forge.GitFixtures
 
-  alias Forge.{Artifacts, Engine, Events, FakeWorker, Jobs, Projects, Queue, Tickets}
+  alias Forge.{Artifacts, Engine, Events, FakeWorker, Jobs, Queue, Tickets}
   alias Forge.Jobs.Job
 
   setup do
@@ -489,6 +489,64 @@ defmodule Forge.FlowTest do
 
     assert Forge.Jobs.Scheduler.tick() == 1
     assert Jobs.get!(job.id).status == :running
+  end
+
+  # A worker image being built in the template owner's account, or not published, are waits that
+  # nobody has a decision about (`docs/design/ui.md` § A job waiting for a machine): the first
+  # names the owner's templates page, the second names none, and neither is the template's failure.
+  describe "a job waiting for the release's worker image" do
+    setup %{project: project, user: user, worker: worker} do
+      Registry.unregister(Forge.Workers.Registry, worker.id)
+      :ok = Forge.Workers.destroy(worker)
+      Forge.Provider.Fake.watch()
+      on_exit(&Forge.Provider.Fake.allow/0)
+      Forge.ImageBuildsFixtures.put_release()
+
+      credential = Forge.ImageBuildsFixtures.credential_fixture(user)
+
+      {:ok, template} =
+        Forge.Provisioning.create_template(user, %{
+          name: "following",
+          provider: "fake",
+          memory: 64 * 1024 * 1024 * 1024,
+          cores: 4,
+          max_workers: 1,
+          image: "latest",
+          provider_credential_id: credential.id
+        })
+
+      {:ok, _} = Forge.Provisioning.assign(user, template.id, project.id)
+      {:ok, ticket} = Tickets.admit(project, %{title: "x"}, {:user, user.id})
+      start_supervised!(Forge.Jobs.Scheduler)
+
+      # Nothing marked, so there is no snapshot to make a machine from while the build runs.
+      Forge.Provider.Fake.listing([%{id: "snap", name: "snap", build: nil, protocol: nil}])
+      %{template: template, job: only_job(ticket)}
+    end
+
+    test "names the owner's templates page while a build runs", %{job: job, template: template} do
+      assert Forge.Jobs.Scheduler.tick() == 0
+
+      assert %{payload: %{"reason" => "image_building", "text" => text}} =
+               Jobs.current_wait(Jobs.get!(job.id))
+
+      assert text =~ "being built"
+      assert text =~ "templates page"
+      assert Jobs.get!(job.id).status == :pending
+      assert reload_template(template).failures == 0
+    end
+
+    test "names no page when the image is not published", %{job: job, template: template} do
+      Forge.ImageBuildsFixtures.put_release(%{}, false)
+      assert Forge.Jobs.Scheduler.tick() == 0
+
+      assert %{payload: %{"reason" => "image_unpublished", "text" => text}} =
+               Jobs.current_wait(Jobs.get!(job.id))
+
+      assert text =~ "not published"
+      refute text =~ "templates page"
+      assert reload_template(template).failures == 0
+    end
   end
 
   # The distinction `docs/design/provisioning.md` § The gate insists on, end to end. A job no

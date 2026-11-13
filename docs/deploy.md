@@ -560,6 +560,12 @@ its token stops working and its running jobs are requeued. The VM keeps running 
 
 ## Upgrading
 
+**Hetzner snapshots are built by the platform since 0.20.** A release publishes the worker image and
+each account's snapshot is built on demand when a template naming `latest` needs it
+(`design/provisioning.md` § Putting the release's image into an account); the entries below that
+say to build a snapshot with `bin/hetzner-image` still work for a template naming a fixed snapshot,
+and that script remains the tool for an unreleased build.
+
 **Restarting the platform does not stop the jobs running on its machines**
 (`design/worker-channel.md` § A platform restart). Each worker redials within seconds and its
 jobs run on. One that is not back within `worker_timeout_ms` — three minutes, counted from the

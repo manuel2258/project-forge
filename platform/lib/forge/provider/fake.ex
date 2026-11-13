@@ -183,11 +183,85 @@ defmodule Forge.Provider.Fake do
   @spec refuse_destroy(term()) :: :ok
   def refuse_destroy(reason), do: :persistent_term.put({__MODULE__, :refuse_destroy}, reason)
 
+  # -- building an image ----------------------------------------------------------------------
+
+  @impl Forge.Provider
+  def start_build(credential, source) do
+    notify({:provider_start_build, credential, source})
+
+    case :persistent_term.get({__MODULE__, :refuse_build}, nil) do
+      nil -> {:ok, %{"builder" => "builder-" <> source.build_id}}
+      reason -> {:error, reason}
+    end
+  end
+
+  # What a test arranged with `build_progress/1`, `:running` until then. After a snapshot the
+  # handle carries the image id and the answer is the snapshot, as a driver's would be.
+  @impl Forge.Provider
+  def build_progress(credential, handle) do
+    notify({:provider_build_progress, credential, handle})
+
+    case handle do
+      %{"image_id" => image_id} ->
+        {:built, image_id}
+
+      _unsnapshotted ->
+        case :persistent_term.get({__MODULE__, :build_progress}, :running) do
+          :running -> {:running, handle}
+          :ready -> {:ready, handle}
+          {:failed, words} -> {:failed, words}
+        end
+    end
+  end
+
+  @impl Forge.Provider
+  def snapshot_build(credential, handle, labels) do
+    notify({:provider_snapshot_build, credential, handle, labels})
+
+    case :persistent_term.get({__MODULE__, :refuse_snapshot}, nil) do
+      nil -> {:ok, Map.put(handle, "image_id", "built-" <> labels.build)}
+      reason -> {:error, reason}
+    end
+  end
+
+  @impl Forge.Provider
+  def discard_build(credential, handle) do
+    notify({:provider_discard_build, credential, handle})
+
+    case :persistent_term.get({__MODULE__, :refuse_discard}, nil) do
+      nil -> :ok
+      reason -> {:error, reason}
+    end
+  end
+
+  @impl Forge.Provider
+  def sweep_builders(credential, max_age_ms) do
+    notify({:provider_sweep_builders, credential, max_age_ms})
+    :ok
+  end
+
+  @doc "Makes the next `start_build/2` fail with `reason`."
+  @spec refuse_build(term()) :: :ok
+  def refuse_build(reason), do: :persistent_term.put({__MODULE__, :refuse_build}, reason)
+
+  @doc "Makes `discard_build/2` fail with `reason`: a builder that cannot be deleted."
+  @spec refuse_discard(term()) :: :ok
+  def refuse_discard(reason), do: :persistent_term.put({__MODULE__, :refuse_discard}, reason)
+
+  @doc "Makes the next `snapshot_build/3` fail with `reason`."
+  @spec refuse_snapshot(term()) :: :ok
+  def refuse_snapshot(reason), do: :persistent_term.put({__MODULE__, :refuse_snapshot}, reason)
+
+  @doc "What `build_progress/2` answers until `allow/0`: `:running`, `:ready` or `{:failed, words}`."
+  @spec build_progress(:running | :ready | {:failed, String.t()}) :: :ok
+  def build_progress(answer), do: :persistent_term.put({__MODULE__, :build_progress}, answer)
+
   @doc """
-  Stops refusing, all three kinds, stops requiring template fields and billing by the hour, holds
+  Stops refusing — creates, destroys, finds, images, builds, snapshots and discards — stops
+  requiring template fields and billing by the hour, answers build progress `:running` again, holds
   no unrecorded machine, and lists the default images again. Called on exit by anything that
-  called `refuse/1`, `refuse_destroy/1`, `refuse_find/1`, `refuse_images/1`, `holding_made/2`,
-  `requiring/1`, `billing/1`, `listing/1` or `during_create/1`.
+  called one of the `refuse_*` functions, `refuse/1`, `holding_made/2`, `requiring/1`,
+  `billing/1`, `listing/1`, `build_progress/1` or `during_create/1`.
   """
   @spec allow() :: :ok
   def allow do
@@ -200,6 +274,10 @@ defmodule Forge.Provider.Fake do
     :persistent_term.erase({__MODULE__, :billed_increment_ms})
     :persistent_term.erase({__MODULE__, :images})
     :persistent_term.erase({__MODULE__, :during_create})
+    :persistent_term.erase({__MODULE__, :refuse_build})
+    :persistent_term.erase({__MODULE__, :refuse_snapshot})
+    :persistent_term.erase({__MODULE__, :refuse_discard})
+    :persistent_term.erase({__MODULE__, :build_progress})
     :ok
   end
 

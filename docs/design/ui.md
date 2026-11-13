@@ -1426,6 +1426,22 @@ protocol it speaks, read from its provider labels (`provisioning.md` § A snapsh
 wrong protocol). A snapshot made before the labels existed reads *unlabelled*: it cannot be
 identified after the fact, and a date is not an identification.
 
+**A credential's row carries its image builds.** The platform builds the release's worker image
+into an account when a template naming `latest` needs it (`provisioning.md` § Putting the release's
+image into an account), so the row of the credential — its owner's only — holds the switch *build
+worker images automatically* (on for a new credential and every existing one, saved when flipped),
+a *Build now* button with what it costs beside it (a few minutes of a small machine on this
+account, no confirmation), and the account's last five builds, newest first: when it started, which
+worker build, what started it (a template by name, or *build now*), and how it stands — running
+since when, built, failed with the provider's or the builder's words, or abandoned at the time
+limit. *Build now* is offered only when it would do something: when the current build is already in
+the account or one is running it is not, and the row says which. On a node that does not know its
+own release build there is neither switch nor button, and the row says so. With no builds the row
+says what would fill it. The words are text, never markup, cut short on the row (`truncate`) with
+the whole in the log. The list is read from what is stored and the switch is saved when flipped, so
+a reconnect loses nothing; the row wraps like the rest of the page, and both controls stay reachable
+on a phone.
+
 ## A job waiting for a machine
 
 A pending job the scheduler could not place says why, in one sentence, where the job is looked at:
@@ -1438,7 +1454,10 @@ workers page; a template the platform would not spend from — its provider cred
 user's, or another provider's — or would not make a machine from, because its image speaks a worker
 protocol this platform does not accept, made no worker row, and its words are on the template, so
 those name the templates page. Both pages show the viewer's own rows only, so each sentence names whose
-page: the template owner's, who may not be the person reading it. It is drawn only while the job is
+page: the template owner's, who may not be the person reading it. **A job waiting for a worker image** being built in the provider account of whoever owns its
+template says so and names that owner's templates page, where the build is drawn; a release whose
+image is not published or not public says that and names no page, because nothing on the node fixes
+it. Both are quiet, like every wait: nobody has a decision to make. It is drawn only while the job is
 pending, and only the latest reason since the job last started; every change stays in the job's own
 event stream, where it is a line like any other.
 

@@ -112,6 +112,29 @@ config :forge, Forge.Workers,
   # Nix build, and then the pages draw no hint (docs/design/worker-tier.md § Updating a worker).
   current_build: System.get_env("FORGE_WORKER_BUILD")
 
+# The worker image this release published: the address of the repository and the exact checksum of
+# the image, fixed when the platform is built (`docs/design/provisioning.md` § Putting the release's
+# image into an account). `flake.nix` sets FORGE_WORKER_IMAGE_RELEASE to the `release.env` the image
+# was built with, and it is read here, at build time, and baked in — never fetched from where the
+# image is published, which is the point. Parsed with `String.split` because no dependency is
+# loaded when this file runs. Unset outside a Nix build: a development node has no release, and
+# never builds an image (`Forge.WorkerImage.release/0`).
+worker_image_release =
+  case System.get_env("FORGE_WORKER_IMAGE_RELEASE") do
+    nil ->
+      nil
+
+    path ->
+      path
+      |> File.read!()
+      |> String.split("\n", trim: true)
+      |> Enum.map(&String.split(&1, "=", parts: 2))
+      |> Enum.filter(&match?([_, _], &1))
+      |> Map.new(fn [key, value] -> {String.downcase(key), String.trim(value)} end)
+  end
+
+config :forge, Forge.WorkerImage, release: worker_image_release
+
 # Mailer for account emails (magic links, email-change confirmation). The local adapter is a
 # mailbox in memory: it is what development wants, and it is what a release keeps until
 # FORGE_SMTP_HOST names a relay — see runtime.exs § Mail.

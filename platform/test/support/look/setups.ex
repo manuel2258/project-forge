@@ -20,6 +20,7 @@ defmodule Forge.Look.Setups do
 
   @setups %{
     "ticket" => Forge.Look.Setups.Ticket,
+    "templates" => Forge.Look.Setups.Templates,
     "forge_release" => Forge.Look.Setups.ForgeRelease
   }
 

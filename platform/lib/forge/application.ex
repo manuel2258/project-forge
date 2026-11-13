@@ -73,7 +73,12 @@ defmodule Forge.Application do
   # rows no machine can join (`Forge.Jobs.recover/0`).
   defp scheduler do
     if Forge.Jobs.config(:run_jobs, true),
-      do: [{Task, &recover/0}, Forge.Jobs.Scheduler, Forge.MergeQueue.Runner],
+      do: [
+        {Task, &recover/0},
+        Forge.Jobs.Scheduler,
+        Forge.MergeQueue.Runner,
+        Forge.ImageBuilds.Runner
+      ],
       else: []
   end
 

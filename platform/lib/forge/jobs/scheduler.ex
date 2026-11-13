@@ -343,6 +343,26 @@ defmodule Forge.Jobs.Scheduler do
          "snapshot its template follows speaks #{has}. Build one and mark it, and the next " <>
          "pass will use it; nothing needs editing."}
 
+  # **A worker image being built in the account the template spends.** Not the template's failure
+  # and not a decision for anyone, so it is quiet like every wait (`docs/design/ui.md` § A job
+  # waiting for a machine). It names the templates page of whoever owns the template, where the
+  # build is drawn, and the reader may not be that person. The provider's name is the template's
+  # data and is the only thing here that says which kind of account it is.
+  defp waiting({:image_building, provider}),
+    do:
+      {"image_building",
+       "Waiting for a worker image: one is being built in the #{provider} account of whoever " <>
+         "owns the template it would be made from, and the templates page of that person shows " <>
+         "the build."}
+
+  # The release's image is not where the platform expects it, or is not public. Nothing on this
+  # node fixes that, so no page is named.
+  defp waiting(:image_unpublished),
+    do:
+      {"image_unpublished",
+       "Waiting for a worker image: this release's worker image is not published, or not " <>
+         "downloadable without a login, so none can be built yet."}
+
   # Only a chat reaches these three: anything else sticks its ticket instead (`stick/2`).
   defp waiting({:no_template, why} = refusal),
     do: {Atom.to_string(why), "Waiting for a template: " <> reason(refusal) <> "."}

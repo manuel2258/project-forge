@@ -891,14 +891,21 @@ defmodule ForgeWorker.Job.RunnerTest do
     test "is reported while it waits, with its stderr, and stopped at the limit", context do
       {:ok, result} =
         context
-        |> run("never_starts", start_notice_ms: 100, start_timeout_ms: 350, grace_ms: 200)
+        # The limit is generous because the assertion below needs a notice *before* it: on a loaded
+        # machine a 350 ms limit was reached before the first 100 ms notice was sent, and the only
+        # event was the one that gave up.
+        |> run("never_starts", start_notice_ms: 100, start_timeout_ms: 1_500, grace_ms: 200)
         |> Runner.await(5_000)
 
       assert result.outcome == :error
 
-      assert result.reason ==
-               "the harness had not started after 0s; stderr: copying path " <>
-                 "'/nix/store/abc-android-sdk' from 'https://cache.nixos.org'..."
+      tail =
+        Regex.escape(
+          "; stderr: copying path '/nix/store/abc-android-sdk' from 'https://cache.nixos.org'..."
+        )
+
+      assert result.reason =~
+               Regex.compile!("\\Athe harness had not started after \\ds" <> tail <> "\\z")
 
       starting = Enum.filter(events(), &(&1.type == "job.harness.starting"))
       assert [%{payload: %{gave_up: false, stderr: stderr}} | _] = starting
@@ -1368,11 +1375,23 @@ defmodule ForgeWorker.Job.RunnerTest do
       assert result.outcome == :converged
     end
 
-    defp lifecycle do
+    # Only this test's own mounts, as `mounts/1` below: `:archive_test_pid` is application-wide, so
+    # another async test's job that ends while it is set reports its unmount here too, which
+    # failed the exact-list assertion on `lifecycle/1` one run in several.
+    defp lifecycle(root) do
       receive do
-        {:slice_prepared, _} -> [:slice | lifecycle()]
-        {:mounted, _, _} -> [:mounted | lifecycle()]
-        {:unmounted, _} -> [:unmounted | lifecycle()]
+        {:slice_prepared, _} ->
+          [:slice | lifecycle(root)]
+
+        {:mounted, _, folder} ->
+          if String.starts_with?(folder, root <> "/"),
+            do: [:mounted | lifecycle(root)],
+            else: lifecycle(root)
+
+        {:unmounted, folder} ->
+          if String.starts_with?(folder, root <> "/"),
+            do: [:unmounted | lifecycle(root)],
+            else: lifecycle(root)
       after
         0 -> []
       end
@@ -1406,7 +1425,7 @@ defmodule ForgeWorker.Job.RunnerTest do
         )
 
       assert {:ok, _result} = Runner.await(pid, 5_000)
-      assert lifecycle() == [:slice, :unmounted, :mounted, :unmounted]
+      assert lifecycle(context.root) == [:slice, :unmounted, :mounted, :unmounted]
     end
 
     test "is not made for a job with no grant", context do

@@ -192,6 +192,8 @@ A NixOS image, built by the flake, that boots unchanged both locally and — aft
 - No Claude Code: the machine installs its own at first boot, into a path it owns, because the
   packaged one cannot be updated in place (§ Updating a worker). That is also why the image needs
   no `allowUnfreePredicate` where the platform module still does (`docs/deploy.md`).
+- Published by each release as a gzipped raw disk and built into a provider snapshot by the
+  platform, per account (§ Updating a worker).
 - The `forge_worker` release, started by a systemd unit that reads the worker id, token and
   platform address `forge-worker-config.service` found.
 - No project toolchain. The workload is a parameter: the environment comes from the project's own
@@ -908,6 +910,16 @@ provider it is worse than a ratio: Hetzner Cloud has no image upload, so a new i
 booting a rescue server, writing the disk, snapshotting it and throwing the server away — minutes
 of pipeline to deliver a few megabytes of BEAM code, for the component that changes most often
 while the tier is being built.
+
+**Who builds the snapshot is the platform, per account.** A release used to build the Hetzner
+snapshot itself, with the operator's token and an ssh key into a rescue server, which works for one
+account and for nobody else's. A release now **publishes** the image once (`worker-image-release`:
+the raw disk, gzipped, and `release.env` with its checksum, which the platform is built knowing),
+and the platform puts it into each account that needs it, by a builder server driven by the
+provider's API alone, with no ssh from the platform to anything (`provisioning.md` § Putting the
+release's image into an account). `bin/hetzner-image` remains the by-hand tool for an unreleased
+build. A new snapshot changes only machines made after it; running machines are still replaced, and
+the pulled `update` below stays unbuilt.
 
 So the release is separable from the image. `ExecStart` runs `/var/lib/forge/release`, a symlink
 rather than a store path, and an *indirect* GC root points at it so a release put there by hand

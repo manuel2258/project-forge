@@ -382,11 +382,16 @@ it.
 
 **Hetzner is the second driver, and two things about it are the design's rather than its own.**
 
-- **It is given an image, not asked to make one.** Hetzner Cloud has no image upload, so a
-  custom image means booting a rescue server, writing the disk, snapshotting it and throwing the
-  server away (`worker-tier.md` § Updating a worker). `bin/hetzner-image` is that procedure as
-  one command, and it deletes the rescue server whatever happened — a box left running is the
-  hourly leak the workers page exists to catch.
+- **It is asked to make one, from an image the release publishes.** Hetzner Cloud can neither
+  share a snapshot between projects nor accept image data (the Cloud API offers list, get, update,
+  delete, protect and create-from-server for images and nothing else), so every account needs a
+  snapshot built in that account. This note used to say the driver *"is given an image, not asked
+  to make one"*, and left the building to `bin/hetzner-image` run by hand with the operator's own
+  token; that stops scaling at the second account, which belongs to somebody else. The driver now
+  has optional build callbacks (§ Putting the release's image into an account), and
+  `bin/hetzner-image` stays as the by-hand tool for an unreleased build. A driver that cannot
+  build simply never does (`Provider.builds?/1`), and nothing above the driver learns that the
+  builder is a server, a stock image or a first-boot script.
 
   **A template names the image, and there is no node fallback.** It was one image per node,
   which is wrong the same way one `machine_size` was: two templates may want different images,
@@ -544,6 +549,129 @@ plus a special case. `worker-tier.md` § The provider driver calls the Hetzner i
 test of whether it worked"*; keeping `local` inside the same path means the test starts before
 Hetzner does.
 
+## Putting the release's image into an account
+
+A release **publishes** the worker image once, at an address a server in any Hetzner account can
+download from without credentials, and builds no snapshot. The platform puts it into each account
+that needs it, on that account's own credential, and the account's owner pays for the build as they
+pay for their machines. Provider credentials and templates are already per user (§ Whose account),
+and `identity.md` already lets any approved user put a machine they wholly control in front of
+their projects, so a build makes nothing newly reachable: it makes a snapshot in its owner's own
+account.
+
+**What the platform knows of its release.** `Forge.WorkerImage.release/0`: the worker build,
+the version, the protocol, the repository and the image's **sha256 and size, fixed when the platform
+is built** and read from the release's own `release.env` (`FORGE_WORKER_IMAGE_RELEASE`; the
+separate `FORGE_WORKER_BUILD`, which the workers and templates pages read, names the same build) — never fetched
+from where the image is published, so a swapped image is refused. A node that does not
+know them (a development node) has no release: it never builds and offers no *build now*.
+
+**A build is needed** when a template naming `latest` is about to make a machine, its credential
+has `build_images` on, the platform has a release, the driver can build, the account's snapshot
+listing does not **hold** this build, and holds no newer release. A build already running counts as
+needed, for a template naming `latest`. A template naming a fixed snapshot never causes one.
+
+**Held** is `WorkerImage.holds?/3`: the platform's snapshot of this build is in the account **and**
+`latest` points at it or at something a person chose — a marked snapshot that is not an older
+release (unlabelled, as `bin/hetzner-image` labels a build and a protocol and no version, or of this
+version or a later one). So `latest` keeps meaning *the marked snapshot* and **a snapshot marked by
+hand stays what `latest` uses until the account next lacks the platform's build** — the next
+release. What the mark is for in the rule: a build that ends after its snapshot was begun and before
+the mark was set (the time limit, a mark that kept failing) leaves an unmarked snapshot of the
+release, and with nothing else marked — a new account — counting it as present would leave `latest`
+with nothing to resolve to; so it is held only beside a mark that is somebody's choice, and
+otherwise the next need builds again. The same holds when the mark is an older release's: that is
+the platform's to move. The stray snapshot stays in the account, deleting old snapshots being out of
+this note's scope, and a mark that keeps failing makes a new snapshot at every time limit while jobs
+wait, which the template's failure count bounds.
+
+**One build per account per platform build at a time.** `worker_image_builds` holds a row per
+build, with a partial unique index on `(provider_credential_id, build) WHERE status = 'running'`;
+two jobs, or two templates on one credential, share the one row. Two credentials into one Hetzner
+project do not build again once the snapshot exists, because both see it; two that start at the
+same instant may make two identical snapshots, which is accepted.
+
+**The mark moves when the snapshot is available, not when it is begun.** A snapshot still being made
+is not one a machine can be created from, and `latest` would resolve to it for the minutes that
+takes. The driver sets the mark then, first on the new snapshot and then off the others, and **skips
+both if another snapshot already holds the mark with a newer release's version** — another node on
+the same project may have marked one since this build began. A build is not reported built until the
+mark is set and the builder deleted; either failing is tried again on the next poll.
+
+**A build labels its snapshot with what it began with.** The row keeps the build, version and
+protocol of the release it was started for, so a platform upgraded mid-build does not put the new
+protocol on the old worker; and a row that never began is not started by a platform whose build
+has since changed, and ends failed.
+
+**Only its own build, and never an older release.** An account that missed releases gets the
+platform's current build and none between. Snapshots carry `forge-worker-version` beside the build
+and the protocol; the platform builds into no account that already holds a **newer** version
+(compared as versions, so 0.10.0 is newer than 0.9.0), and does not move the mark there. A
+snapshot with no version label — made before this, or by hand — is never taken for newer.
+
+**The builder is driven by the provider's API alone.** A server named `forge-builder-<build_id>`,
+labelled `forge=image-builder`, from a stock image, with a first-boot script
+(`platform/priv/hetzner/image-builder.sh`) that fetches the published image, checks it against the
+checksum, writes it to the disk, reads it back and powers off. The platform waits for *off*,
+snapshots with the labels, and deletes the server. Nothing connects to it and it is never a worker:
+`list/1` and `find/2` ask for `forge=worker`, so no builder is listed, found, reconciled or
+destroyed as one, and it never appears on `/workers`. **The script holds the download address, the
+checksum and the size, and nothing else** — the provider shows a server's first-boot script in its
+console, so no token of the provider's or of forge's and no platform address reaches it.
+
+**Being off is the success signal, and only the script's last line can produce it from a builder
+that was running.** The script masks `poweroff` and the rest, sleeps for ever on any error, and
+powers the machine off by sysrq only after the written disk has been read back and matched. A
+builder that failed any step therefore stays on. **The platform counts *off* only after it has seen
+the builder *running*** (`seen_running` in the handle), because a server is also off before its
+first start and after a failed one, and snapshots only a builder that was seen running and is now
+off; one still on is never snapshotted. What it cannot tell is an owner who powers the builder off
+by hand from the console while it runs: that reads as success, and the snapshot is of a half-written
+disk. The remedy is the account's own — the builder is named `forge-builder-…` and labelled — and
+the cost is a template that fails on its first machine. The cost of a signal
+a failure cannot imitate is that a failure cannot carry its words: a refused checksum, a bad
+download or a write error all read as the build being **abandoned at the time limit**, and the
+entry says so with the likely causes. The platform's own check that the blob is downloadable under
+that digest, made before anything is paid for, catches the commonest.
+
+**A build has a time limit** (30 minutes). Past it the build is abandoned, its builder deleted, and
+it is a failure of the template that asked for it, counted as a failed create is (§ A template that
+cannot make a working machine is taken out of service). **Every end of a build asks for its builder
+to be deleted** — success, failure and the limit — and a builder that could not be deleted, or
+whose build was lost, is deleted by `sweep_builders/2` once past the limit, whoever made it: the
+sweep runs on each tick for every account that has a build running, so a leaked builder is caught
+by the next build in that account and not before. A build whose builder
+could not be deleted is not over: it stays running and is ended again each tick, which asks for the deletion again (for a build that never began, `begin` runs again too and finds its builder by name), until
+it takes or the limit ends the build. A build that never got a handle — the platform stopped
+between the request that made the builder and its answer — is discarded by its id, and the driver
+finds the builder by name. A platform restarted mid-build carries on the
+builds still running (`Runner.init/1`); a build abandoned at the limit is started again the next
+time one is needed. **A builder is never deleted merely because this node does not know it**: two
+nodes on one project, or two users' credentials into one, see each other's builders, and only one
+past the limit is nobody's.
+
+**While a build runs, machines are made from the marked snapshot** if this platform accepts its
+protocol (`image_refusal/1`). Only when there is none, or it speaks a refused protocol, do jobs
+wait, with a reason (`image_building`), which is a wait and not the template's failure. **The image
+not being published, or not downloadable, is also a wait** (`image_unpublished`), with its own
+reason that names no page, since nothing on the node fixes it.
+
+**Who may.** `build_images` is a switch on the provider credential, on by default and for every
+credential that exists when this landed; off, `latest` behaves as it did, following the mark and
+failing with *no snapshot carries the latest mark* when there is none. A credential's owner can
+also ask it to build now, whatever the switch says. A build already running — one started by hand,
+say — is waited for even with the switch off, because the snapshot it makes is the one the template
+will use. Both are read as the caller's own credential
+whatever id arrives (`Provisioning.credential/2`), so a node admin or a project member is refused
+and anyone else's id is not found. Who caused each build is recorded — the template that
+needed it, by name, or the user who pressed *build now* — and the entry shows the template's name or
+*Build now*; only the credential's owner can press it, and only on their own page, so the person is
+never someone else.
+
+**Not verified here.** No real Hetzner builder has run. The script and its sysrq sequence are
+tested against files, the Hetzner requests through the request seam, and the anonymous GHCR pull
+is written against the published OCI distribution API.
+
 ## Whose account
 
 **A provider credential is a thing a user owns**, which is `identity.md` § Credentials applied to
@@ -556,6 +684,9 @@ provider_credentials
   name
   provider     "hetzner" | "local" | ...
   secret       encrypted map, shape owned by the driver
+  build_images boolean, default true: build the release's worker image into this account
+               when a template naming `latest` needs it (§ Putting the release's image
+               into an account)
 ```
 
 **A separate table from `identity.md`'s `credential`, and the reason is the spend query.** That
@@ -738,6 +869,11 @@ the platform tires of this. On the node this was found on it ran for hours — f
 machines refusing `:no_image`, then as real Hetzner machines that booted, could not reach a
 platform on `localhost`, and were destroyed at the timeout. The second kind costs money every
 turn.
+
+**A failed or abandoned image build counts against the template that asked for it**, the way a
+failed create does (§ Putting the release's image into an account); the image not being published
+does not, nor does a build merely running, and a build started by hand has no template to count
+against.
 
 **`worker_templates` gains `failures` and `last_error`, and disabled is derived from them.**
 `disabled?` is `failures >= limit`, limit 3 and configurable; there is no third column saying so,

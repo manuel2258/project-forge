@@ -23,6 +23,10 @@ defmodule Forge.Provisioning.Credential do
     field :name, :string
     field :provider, :string
     field :secret, :string, redact: true
+    # Build the release's worker image into this account when a template naming `latest` needs
+    # it (`docs/design/provisioning.md` § Putting the release's image into an account). It is
+    # never cast: only `Forge.ImageBuilds.set_auto/3` flips it, as the owner.
+    field :build_images, :boolean, default: true
 
     timestamps(type: :utc_datetime)
   end

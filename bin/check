@@ -15,8 +15,8 @@ echo "==> shell"
 # judged to have run (`.forge/commands/check.sh`). It was the only shell here nothing linted.
 shellcheck -x bin/check bin/measure bin/release bin/worker-update bin/e2e-chat bin/hetzner-image bin/look bin/changelog-add \
   bin/lib/*.sh measure/lib/*.sh measure/workloads/*.sh .forge/commands/*.sh \
-  platform/priv/git-hooks/* worker/test/support/*.sh nix/worker-health/*.sh nix/worker-health/jobs/*.sh
-shfmt -d -i 2 -ci -sr bin measure .forge/commands platform/priv/git-hooks worker/test/support nix/worker-health
+  platform/priv/git-hooks/* platform/priv/hetzner/*.sh worker/test/support/*.sh nix/worker-health/*.sh nix/worker-health/jobs/*.sh
+shfmt -d -i 2 -ci -sr bin measure .forge/commands platform/priv/git-hooks platform/priv/hetzner worker/test/support nix/worker-health
 
 # Mix's caches live in ignored directories inside the checkout, so a ticket's next agent job
 # inherits them instead of reinstalling Hex and refetching the registry. This script owns them:

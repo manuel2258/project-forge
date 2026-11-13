@@ -12,7 +12,7 @@ defmodule Forge.Workers do
 
   alias Ecto.Multi
   alias Forge.Accounts.User
-  alias Forge.{Engine, Events, Projects, Provider, Provisioning, Repo}
+  alias Forge.{Engine, Events, ImageBuilds, Projects, Provider, Provisioning, Repo}
   alias Forge.Jobs.Job
   alias Forge.Provisioning.ProjectTemplate
   alias Forge.Workers.{Log, ProjectWorker, Worker}
@@ -1245,8 +1245,8 @@ defmodule Forge.Workers do
          :ok <- probed(template),
          {:ok, credential} <- spendable(template),
          {:ok, template} <- resolve(template, demand, credential),
-         :ok <- speaks(template),
-         :ok <- serves(template, demand),
+         :ok <- speaks(template, credential),
+         :ok <- serves(template, demand, credential),
          :ok <- probed(template) do
       make_in(slot, template, credential)
     end
@@ -1274,11 +1274,23 @@ defmodule Forge.Workers do
   # the very build its sentence asked for until somebody edited the template. Waiting, it is
   # offered again every pass and the first pass after the build makes the machine
   # (`docs/design/provisioning.md` § Where a machine comes from).
-  defp serves(template, demand) do
-    if Provisioning.speaks?(template, demand[:protocol]),
-      do: :ok,
-      else: {:error, {:image_too_old, demand[:protocol], template.image_protocol}}
+  #
+  # **And while a build of the release's image is running in the account, it is the building wait
+  # instead**: the snapshot refused is the one the build is about to replace, so the job waits for
+  # it with that reason (`docs/design/provisioning.md` § Putting the release's image into an
+  # account).
+  defp serves(template, demand, credential) do
+    cond do
+      Provisioning.speaks?(template, demand[:protocol]) -> :ok
+      building?(template, credential) -> {:error, {:image_building, template.provider}}
+      true -> {:error, {:image_too_old, demand[:protocol], template.image_protocol}}
+    end
   end
+
+  # Whether a build of the release's image is running in the account this template follows `latest`
+  # in. A template naming a snapshot never waits on a build.
+  defp building?(template, credential),
+    do: Provisioning.Template.latest?(template) and ImageBuilds.running?(credential)
 
   # **Resolved fresh at every create, and never cached across one.** The mark moves when an image
   # is built, which is outside the platform entirely, so the only moment the answer is certainly
@@ -1309,7 +1321,8 @@ defmodule Forge.Workers do
   defp ask(template, credential) do
     case Provider.images(template.provider, open_secret(credential)) do
       {:ok, images} ->
-        marked(template, Provisioning.current_image(images))
+        verdict = ImageBuilds.ensure(template, credential, images)
+        marked(template, Provisioning.current_image(images), verdict)
 
       {:error, reason} ->
         refuse_image(template, "its images could not be read: #{message(reason)}")
@@ -1320,9 +1333,36 @@ defmodule Forge.Workers do
   # finds nothing marked this one is refused rather than made from the old one: `latest` means
   # whichever snapshot carries the mark *now*, and a mark somebody removed is not an answer the
   # platform may invent.
-  defp marked(template, nil), do: refuse_image(template, "no snapshot carries the latest mark")
+  #
+  # **A build in the account changes what nothing marked, or a refused snapshot, means.** The
+  # marked snapshot is still used while one runs, if this platform accepts its protocol — a build
+  # delays nobody who has a snapshot that works (criterion 14). Only when there is none, or it
+  # speaks a refused protocol, does the job wait, with a reason that is not the template's failure:
+  # the snapshot that will serve it is on its way. The image not being published is a wait too.
+  defp marked(template, current, verdict) do
+    cond do
+      current != nil and accepted?(current) ->
+        {:ok, Provisioning.resolve_latest(template, current)}
 
-  defp marked(template, current), do: {:ok, Provisioning.resolve_latest(template, current)}
+      verdict == :building ->
+        {:error, {:image_building, template.provider}}
+
+      verdict == :unpublished ->
+        {:error, :image_unpublished}
+
+      current == nil ->
+        refuse_image(template, "no snapshot carries the latest mark")
+
+      true ->
+        {:ok, Provisioning.resolve_latest(template, current)}
+    end
+  end
+
+  # A snapshot with no protocol label is unknown, which is probed rather than refused.
+  defp accepted?(%{protocol: protocol}) when is_integer(protocol),
+    do: ForgeCore.WorkerProtocol.compatible?(protocol)
+
+  defp accepted?(_image), do: true
 
   # **A slot that has to be freed first is not made in, it is named.** The machine giving it up is
   # destroyed at the end of the pass (`sweep_idle/1`), not here, for two reasons the review of this
@@ -1350,10 +1390,15 @@ defmodule Forge.Workers do
   # (`docs/design/provisioning.md` § A snapshot that speaks the wrong protocol). Asked of the
   # range every time rather than stored, so upgrading the platform to one that accepts it is all
   # it takes to create from it again.
-  defp speaks(template) do
+  defp speaks(template, credential) do
     case Provisioning.image_refusal(template) do
-      nil -> :ok
-      message -> refuse_image(template, message)
+      nil ->
+        :ok
+
+      message ->
+        if building?(template, credential),
+          do: {:error, {:image_building, template.provider}},
+          else: refuse_image(template, message)
     end
   end
 

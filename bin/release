@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Publishes the platform image: one command, from a clean checkout of `main` to a version in the
+# Publishes the worker image and the platform image: one command, from a clean checkout of `main` to a version in the
 # registry that a deployment can pin by digest.
 #
 #   bin/release [--registry REF] [--dry-run]
 #
 # What it does, in order: refuse anything but a clean `main`, log in, refuse a version the
-# registry already holds, build `.#platform-image`, copy it to the registry as `<version>` and
-# then as `latest`, and print the digest. A run that copied the version and stopped before
+# registry already holds, build `.#worker-image-release` and push it as a one-layer OCI artifact
+# to the worker image repository (see below), build `.#platform-image`, copy it to the registry as
+# `<version>` and then as `latest`, and print the digest. A run that copied the version and stopped before
 # `latest` moved is finished by running it again.
 #
 # **`latest` is the version just pushed, copied inside the registry**, so it names the same digest
@@ -29,6 +30,16 @@
 # went on reading `VERSION` — so `--version 1.2.3` on a `0.1.1` tree pushed an image labelled
 # `0.1.1` to the registry tag `1.2.3`. That is the exact "two different images claim one version"
 # this file exists to prevent, reachable by a flag it offered.
+#
+# **The worker image goes first, and the platform is built knowing its checksum.** A Hetzner
+# snapshot cannot be shared between accounts, so each account builds its own from the image a
+# release publishes (`docs/design/provisioning.md` § Putting the release's image into an account).
+# The repository is written once, in `flake.nix`, and read back here from `release.env`, because
+# the platform has it baked in and the two must not differ. A tag that already holds a different
+# digest is refused: the checksum in the platform is the image's identity. `oras` pushes it,
+# because skopeo copies container images and cannot push a lone file as a blob. The package has to
+# be public for a builder in someone else's account to download it; GitHub offers no way to do
+# that from here, so it is done once by hand (the `release` skill says so).
 #
 # **No Docker daemon.** `nix build` writes a gzipped docker-archive tarball and `skopeo` copies it
 # straight to the registry; containers/image auto-decompresses a docker-archive, so the gzip
@@ -77,6 +88,8 @@ die() {
 
 command -v nix > /dev/null || die "nix is not on PATH; enter the devshell with \`nix develop\`"
 command -v skopeo > /dev/null || die "skopeo is not on PATH; enter the devshell with \`nix develop\`"
+command -v oras > /dev/null || die "oras is not on PATH; enter the devshell with \`nix develop\`"
+command -v jq > /dev/null || die "jq is not on PATH; enter the devshell with \`nix develop\`"
 
 version=$(cat VERSION)
 [ -n "$version" ] || die "VERSION is empty"
@@ -116,6 +129,7 @@ fi
 creds=()
 src_creds=()
 inspect_creds=()
+oras_creds=()
 if [ -n "$token" ]; then
   registry_host=${registry%%/*}
   user=${GHCR_USER:-$(echo "$registry" | cut -d/ -f2)}
@@ -129,6 +143,7 @@ if [ -n "$token" ]; then
   creds=(--dest-authfile "$auth_file")
   src_creds=(--src-authfile "$auth_file")
   inspect_creds=(--authfile "$auth_file")
+  oras_creds=(--registry-config "$auth_file")
 fi
 
 # What the registry holds under `$1`, or nothing when it holds no such tag. Any other failure — a
@@ -165,6 +180,45 @@ if [ -n "$published" ]; then
   exit 0
 fi
 
+# What `release.env` says of the worker image, by key.
+release_value() { sed -n "s/^$1=//p" "$release_dir/release.env"; }
+
+# The layer digest the registry holds under `$1`, or nothing when it holds no such tag; any other
+# failure stops the run, for the reason `digest_of` gives.
+layer_of() {
+  local out
+  if out=$(oras manifest fetch "${oras_creds[@]}" "$1" 2>&1); then
+    jq -r '.layers[0].digest' <<< "$out"
+  elif ! grep -qi 'not found\|manifest unknown\|name unknown' <<< "$out"; then
+    die "cannot ask the registry about $1: $out"
+  fi
+}
+
+say "building .#worker-image-release"
+release_dir=$(nix build .#worker-image-release --no-link --print-out-paths | tail -1)
+echo "    $release_dir"
+worker_repository=$(release_value REPOSITORY)
+worker_digest=$(release_value DIGEST)
+[ -n "$worker_repository" ] && [ -n "$worker_digest" ] || die "release.env names no repository or digest"
+[ "$(release_value VERSION)" = "$version" ] || die "release.env names another version than $version"
+
+held=$(layer_of "$worker_repository:$version")
+if [ -n "$held" ] && [ "$held" != "$worker_digest" ]; then
+  die "$worker_repository:$version holds $held, and this build is $worker_digest; bump VERSION to publish another build"
+fi
+
+if [ "$dry_run" = true ]; then
+  say "would push $worker_repository:$version ($worker_digest), then build .#platform-image"
+elif [ -z "$held" ]; then
+  say "pushing $worker_repository:$version"
+  (cd "$release_dir" && oras push "${oras_creds[@]}" "$worker_repository:$version" \
+    "forge-worker.raw.gz:application/vnd.forge.worker-image.v1.raw+gzip")
+  pushed=$(layer_of "$worker_repository:$version")
+  [ "$pushed" = "$worker_digest" ] || die "pushed $worker_digest and the registry holds $pushed"
+else
+  say "$worker_repository:$version is already published ($held)"
+fi
+
 say "building .#platform-image"
 archive=$(nix build .#platform-image --no-link --print-out-paths | tail -1)
 echo "    $archive"
@@ -187,3 +241,4 @@ skopeo --insecure-policy copy "${src_creds[@]}" "${creds[@]}" "$destination" "$l
 
 say "published"
 printf '    %s@%s\n' "$registry" "$(cat "$digest_file")"
+printf '    %s (layer %s), public once made so by hand on GitHub\n' "$worker_repository:$version" "$worker_digest"

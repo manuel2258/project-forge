@@ -11,8 +11,8 @@ and no merge commits.
 
 **Every landing is released.** Once the landed commit is on `main`, this goes straight on to the
 `release` skill, without asking: the human's request to land covers the release too. That skill
-decides the bump, publishes the platform image and builds a Hetzner snapshot when the worker
-changed, and stops to report only when something fails. If the release stops, the landing
+decides the bump, publishes the platform image and the worker image it is built knowing the
+checksum of, and stops to report only when something fails. If the release stops, the landing
 stands — it is on `main` either way.
 
 ## Preconditions

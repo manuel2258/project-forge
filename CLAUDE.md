@@ -274,11 +274,12 @@ and pushes. No pull requests, no merge commits.
 
 **A landing is released without a second question.** `land` goes on to the `release` skill
 (`.claude/skills/release/SKILL.md`), which decides the bump, publishes the platform image with
-`GITHUB_TOKEN`, and builds the Hetzner worker snapshot with `HCLOUD_TOKEN` and the ssh key in
-`HETZNER_PRIVATE_KEY` when the worker changed — checking every credential before it writes
-anything (`bin/hetzner-image --check` for the Hetzner ones), and stopping to report only when
-something fails. Pointing a template at a new snapshot stays the operator's, unless it names
-`latest` — each build marks the snapshot it made, and a template naming the mark follows it.
+`GITHUB_TOKEN`, and publishes the worker image the platform is built knowing the checksum of —
+checking every credential before it writes anything, and stopping to report only when something
+fails. A release builds no Hetzner snapshot and needs no Hetzner credential: the platform builds one in
+each account that needs it, on that account's own credential, the first time a template naming
+`latest` asks for a machine there (`docs/design/provisioning.md` § Putting the release's image into
+an account). The package holding the image has to be public, made so once by hand on GitHub.
 
 ## Rules
 
